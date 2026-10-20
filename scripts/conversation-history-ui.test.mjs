@@ -331,10 +331,10 @@ test("Planner details show the backend-selected cwd for every turn", { timeout: 
   } finally { await context.close(); }
 });
 
-test("completed topology reports backend run totals and cache percentage only after completion", { timeout: 30_000 }, async () => {
+test("completed topology reports task token totals and cache percentage only after completion", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
-  const emptyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 };
-  const totalUsage = { ...emptyUsage, input: 99_990_000, cacheRead: 899_910_000, totalTokens: 999_900_000 };
+  const emptyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0, consumedTokens: 0 };
+  const totalUsage = { ...emptyUsage, input: 99_990_000, cacheRead: 899_910_000, totalTokens: 999_900_000, consumedTokens: 99_990_000 };
   const metrics = { totalDurationSeconds: 1, planningDurationSeconds: 0, executionDurationSeconds: 1,
     assistantMessages: 1, tools: 0, toolErrors: 0, totalUsage, planningUsage: emptyUsage, executionUsage: totalUsage };
   try {
@@ -345,14 +345,14 @@ test("completed topology reports backend run totals and cache percentage only af
       window.audit.finish();
       // The current node is not the source of the conversation-wide total.
       window.audit.setExecutionMetrics({ durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0,
-        usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 200 } });
+        usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 200, consumedTokens: 200 } });
       window.audit.setRunSummary("running", metrics);
     }, metrics);
     const status = page.locator(".graph-bottom .approval-row > span");
     await status.waitFor();
     assert.doesNotMatch(await status.innerText(), /Tokens used|cached:/);
     await page.evaluate(metrics => window.audit.setRunSummary("completed", metrics), metrics);
-    await status.filter({ hasText: /Run completed - Tokens used: 999\.9M\s+cached:90%/ }).waitFor();
+    await status.filter({ hasText: /Run completed - Tokens used: 99\.99M\s+cached:90%/ }).waitFor();
     await page.setViewportSize({ width: 600, height: 900 });
     assert.equal(await page.locator(".graph-bottom").evaluate(element => element.scrollWidth > element.clientWidth), false,
       "the completed usage summary must fit or wrap inside the topology footer");
@@ -368,7 +368,7 @@ test("completed topology reports backend run totals and cache percentage only af
 });
 
 for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
-  test(`${mode}: session token usage follows backend metrics without retaining stale counts`, { timeout: 30_000 }, async () => {
+  test(`${mode}: session token usage derives task totals from backend metrics without retaining stale counts`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await newPage(route => route.fulfill({ json: {
       result: route.request().url().endsWith("/get_merger_prompt") ? { prompt: "Merge the completed work." } : {},
     } }));
@@ -378,7 +378,7 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
       if (mode !== "planner") await page.evaluate(() => { window.audit.startExecution(); window.audit.finish(); });
       await page.getByRole("button", { name: mode === "planner" ? "Planning session details" : "Workspace and session details", exact: true }).click();
       const details = page.locator(".workspace-details-body");
-      const labels = ["total tokens", "input", "output", "cache read", "cache write", "reasoning"];
+      const labels = ["total tokens", "input", "output", "cache read", "cache write", "reasoning", "provider total (incl. cache)"];
       for (const label of labels) await details.getByText(`${label}: —`, { exact: true }).waitFor();
       const update = usage => page.evaluate(({ mode, usage }) => {
         const metrics = { durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0, usage };
@@ -389,12 +389,12 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
         });
         else window.audit.setExecutionMetrics(usage ? metrics : null);
       }, { mode, usage });
-      await update({ totalTokens: 18_000, input: 12_000, output: 1_800, cacheRead: 4_000, cacheWrite: 200, reasoning: 600 });
-      for (const [index, value] of ["18k", "12k", "1.8k", "4k", "0.2k", "0.6k"].entries()) {
+      await update({ totalTokens: 18_000, input: 12_000, output: 1_800, cacheRead: 4_000, cacheWrite: 200, reasoning: 600, consumedTokens: 14_000 });
+      for (const [index, value] of ["14k", "12k", "1.8k", "4k", "0.2k", "0.6k", "18k"].entries()) {
         await details.getByText(`${labels[index]}: ${value}`, { exact: true }).waitFor();
       }
-      await update({ totalTokens: 1_234_567, input: 1_000_000, output: 200_000, cacheRead: 30_000, cacheWrite: 4_000, reasoning: 567 });
-      for (const [index, value] of ["1.23M", "1M", "200k", "30k", "4k", "0.57k"].entries()) {
+      await update({ totalTokens: 1_234_567, input: 1_000_000, output: 200_000, cacheRead: 30_000, cacheWrite: 4_000, reasoning: 567, consumedTokens: 1_204_000 });
+      for (const [index, value] of ["1.2M", "1M", "200k", "30k", "4k", "0.57k", "1.23M"].entries()) {
         await details.getByText(`${labels[index]}: ${value}`, { exact: true }).waitFor();
       }
       const positions = await details.locator("p").evaluateAll(elements => elements.map(element => {
@@ -402,7 +402,7 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
         return { text: element.textContent, top: rect.top, left: rect.left, right: rect.right };
       }));
       let previousTop = -Infinity;
-      for (const group of [["start time", "time took"], labels.slice(0, 3), labels.slice(3)]) {
+      for (const group of [["start time", "time took"], labels.slice(0, 3), labels.slice(3, 6), [labels[6]]]) {
         const fields = group.map(label => positions.find(item => item.text.startsWith(`${label}: `)));
         assert.ok(fields.every(Boolean), `missing session fields: ${group.join(", ")}`);
         assert.ok(fields[0].top > previousTop, "timing, totals and cache details occupy successive rows");
@@ -415,7 +415,7 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
       await page.setViewportSize({ width: 600, height: 900 });
       const overflows = await details.evaluate(element => element.scrollWidth > element.clientWidth);
       assert.equal(overflows, false, "narrow session panels wrap fields instead of overflowing horizontally");
-      await update({ totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 });
+      await update({ totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, consumedTokens: 0 });
       for (const label of labels) await details.getByText(`${label}: 0k`, { exact: true }).waitFor();
       await update(null);
       for (const label of labels) await details.getByText(`${label}: —`, { exact: true }).waitFor();

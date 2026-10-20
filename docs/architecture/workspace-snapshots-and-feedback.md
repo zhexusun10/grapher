@@ -1,6 +1,6 @@
 # Workspace directories and Git publication
 
-> **Scope:** Git-backed project inheritance, physical ownership, shadow repositories, feedback handoff and source-side merge mechanics.
+> **Scope:** Git-backed project inheritance, physical ownership, shadow repositories, feedback handoff and private publication composition/files-only delivery.
 > **Maintained with:** [workspace.rs](../../backend/src/workspace.rs), [native_copy.rs](../../backend/src/native_copy.rs), [runtime.rs](../../backend/src/runtime.rs), [graph_merge.rs](../../backend/src/graph_merge.rs), and the workspace/runtime tests.
 
 Grapher has one project-file version channel: **Git**. The host prepares snapshots and transfers commits; agents do not exchange commits or use Git as a conversation protocol. Collection rules below define which paths enter this channel; [managed environment evidence](native-environments.md) is separate.
@@ -64,13 +64,19 @@ workspace or a deeper subfolder selected.
 
 ## Shadow repository lifecycle
 
-An ordinary folder (no `.git`) uses a temporary external Git metadata
-repository under `<data>/shadow_repos/`. Detection, planning, approval and
-pre-dispatch Planner revisions are pure filesystem operations and never create
-it. The snapshot is materialized lazily by the first dispatched node worker,
-which force-collects the current source files once and records a
-`SourceSnapshotted` event plus durable cleanup ownership. Serial runs and
-standard Git repositories never create a shadow repository.
+Graph source snapshots and node results use a host-only Git database under
+`<data>/shadow_repos/`, including when the source has its own `.git`. Standard
+Git source capture imports the user's HEAD read-only, stages into a private
+index, and pins an internal snapshot without changing the source HEAD, refs or
+index. Identical source trees with the same parents reuse an immutable snapshot.
+
+For an ordinary folder (no `.git`), detection, initial planning, approval and
+pre-dispatch Planner revisions remain pure filesystem operations. Its database
+is materialized lazily by the first dispatched node worker, which force-collects
+the current source files and records `SourceSnapshotted` plus cleanup ownership.
+Serial does not create this database. Standard Git databases retain internal
+history for continuation and conversation-owned cleanup; the ordinary-folder
+reclamation rules below do not remove them.
 
 Materialization runs without holding the Runtime lock, so the UI keeps
 reporting a `source_materialize` activity while Git walks the project. A
@@ -129,13 +135,20 @@ It tries Linux FICLONE, macOS `clonefile` or Windows block cloning, then indepen
 
 ## Backend Git storage
 
-A node repository borrows the source object database through
-`.git/objects/info/alternates` when the source has no chained alternates or
-promisor packs. Otherwise Runtime fetches the pinned source/result commits into
-an independent object store.
+A node repository borrows the host-only source database through Git alternates
+when that database has no chained alternates or promisor packs; otherwise it
+fetches the pinned inputs. The host database imports user history independently,
+so node storage never writes objects or refs into the user's Git database.
 
-Source snapshots and node results are pinned as Grapher-owned refs in the source
-repository:
+Within a Run root, slot metadata lives in `.grapher-git/<slot>.git`, outside the
+model's cwd, without a `.git` entry in ordinary node workspaces. Host Git resolves
+it explicitly. Preparation and Merger repair temporarily expose Git only for
+that operation; short reentrant relocation leases serialize host discovery and
+moves, not model calls or Runtime events. Native file tools/Bash otherwise see
+project files, not discoverable internal history. This is not an additional
+security boundary on Windows.
+
+Source snapshots and node results are pinned in the host-only database:
 
 - `refs/grapher/heads/<commit>` pins snapshot heads;
 - `refs/grapher/runs/<run>/nodes/<node-id>` pins node results (legacy unscoped
@@ -143,9 +156,9 @@ repository:
 - inside a node repository, `refs/grapher/base` and
   `refs/grapher/parents/<node-id>` pin the prepared inputs.
 
-These refs are host storage, not an agent messaging protocol. Runtime fetches a
-node snapshot back into the source repository without touching the source
-working tree.
+These refs are host storage, not an agent messaging protocol. Runtime imports
+node snapshots only into that database, without touching the user's working
+tree, index, branch, refs or commit objects.
 
 ## Composition and conflicts
 
@@ -191,13 +204,45 @@ Session forks and history-edit rollback behavior belong to [Session continuity](
 
 ## Publication
 
-Publication is Git-only:
+Publication is Git-only, with internal composition separated from delivery:
 
-1. Source-side user changes are staged into a Git base using the same forced
-   collection rules.
-2. Terminal node commits are merged into that source repository.
-3. Git applies the complete project diff; no ordinary-file copy-back pass or ignore-based delivery filter exists.
-4. The merged source commit is the published project state.
+1. Capture the source branch identity (or detached HEAD), HEAD commit, real
+   index bytes and current project tree. Source changes use the same forced
+   collection rules, but their snapshot is internal. Staged changes under an
+   excluded scope remain staged and unpublished; they are not silently
+   unstaged or removed.
+2. Compose valid terminal heads and that source snapshot in a private,
+   Run-owned publication workspace. Normal merge ancestry and Merger repair stay
+   internal. Failed composition does not dirty the source or advance its branch.
+3. Deliver the composed project tree as ordinary file changes. Do **not**
+   fetch internal commits, create a `Grapher Work` commit, move the user's
+   branch, or replace the user's index. The source's real index bytes and
+   staged entries remain exactly as captured.
+4. The source must still match its captured branch, HEAD, index and project
+   tree before checkout. Apply the final tree under the source `index.lock`
+   lease, but use only a private checkout index; the user's index is never
+   rewritten. There is no ordinary-file copy-back pass or ignore-based delivery
+   filter.
+
+Immutable attempt journals beside the publication workspace retain inputs,
+branch identity, original index and the composed result across restarts. All
+earlier source inputs remain owned recovery heads when rebasing the same
+publication. Crashes after a partial checkout finish the original delivery
+rather than refreshing against the old input tree. The installed marker records
+the exact internal result; completed retries do not reapply files onto a newly
+selected branch. Foreign Git locks and unrelated source merges are not adopted
+or removed. Changed source files/index/HEAD fail closed; before checkout begins,
+a retry can merge a fresh source baseline into the retained composition without
+rerunning nodes. A partially applied checkout requires recovery rather than
+blindly absorbing source changes.
+
+Completion verifies internal input ancestry and delivery evidence, not node
+ancestry in the user's branch. Private bridge snapshots retain delivered node
+ancestry for later revisions without exposing it in user history. Every later
+publication (including additional post-task-review work) updates files only;
+neither earlier node results nor delivered files are committed to the user's
+repository. Ordinary folders retain the same private composition/retry
+behavior without adding `.git`.
 
 Phase transitions, completion checks, retained-head retries and failure handling belong to [Final publication](execution-model.md#final-publication).
 

@@ -355,7 +355,7 @@ try {
   const bodyEnd = floodPage.content.indexOf('ACCEPTANCE-END|flood|50000\n') + 'ACCEPTANCE-END|flood|50000\n'.length;
   assert.equal(md5(floodPage.content.slice(bodyStart, bodyEnd)), md5(expectedBody));
   assert.ok(floodPage.content.endsWith('\n── Final response ──\nACCEPTANCE_FINAL: complete worker response 完成🚀\n'));
-  assert.deepEqual(floodState.executions[0].metrics.usage, { input: 7, output: 3, reasoning: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10 });
+  assert.deepEqual(floodState.executions[0].metrics.usage, { input: 7, output: 3, reasoning: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10, consumedTokens: 10 });
   const exited = floodPage.content.split('\n').filter(line => line.startsWith('{') && line.includes('grapher_process_exited')).map(line => JSON.parse(line)).find(event => event.type === 'grapher_process_exited');
   assert.equal(floodState.executions[0].metrics.durationSeconds, exited.elapsedMs / 1000);
   assert.ok(floodState.executions[0].metrics.durationSeconds > 0);

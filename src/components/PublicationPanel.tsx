@@ -83,8 +83,8 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
     <p className="publication-target">{t("目标目录：")}<code>{publication.repository}</code></p>
     {publication.status !== "completed" && publication.status !== "failed" && <p>{t("节点执行已结束。正在写入最终结果，请等待回写完成后再修改目标目录。")}</p>}
     {publication.error && <p role="alert" className="publication-error">{localizeError(publication.error)}</p>}
-    {publication.status === "failed" && <p>{t("节点结果及合并现场已保留。处理本地改动或冲突后重试；已完成的提交会跳过，不重新运行图节点。")}</p>}
-    {publication.head && <p>{t("最终提交：")}<code>{publication.head}</code>{publication.completedAt ? ` · ${new Date(publication.completedAt).toLocaleString(locale)}` : ""}</p>}
+    {publication.status === "failed" && <p>{t("节点结果及合并现场已保留。处理本地改动或冲突后重试；已完成的回写会跳过，不重新运行图节点。")}</p>}
+    {publication.status === "completed" && <p>{t("回写完成。")}{publication.completedAt ? ` · ${new Date(publication.completedAt).toLocaleString(locale)}` : ""}</p>}
     {execution && <details className="publication-mergers" open={publication.status === "merging" || detailsOpen}
       onToggle={event => setDetailsOpen(event.currentTarget.open)}>
       <summary>merger · Execution Instance · {mergers.length}{t(" 次执行")}</summary>
@@ -94,7 +94,7 @@ export function PublicationPanel({ runId = "", publication, mergers, busy, onRet
       <p>{t("状态：")}{executionLabels[execution.status] ?? execution.status}{t(" · 会话：")}<code>{execution.sessionId}</code></p>
       <p>{t("工作目录：")}<code>{execution.worktree}</code></p>
       {(detailsOpen || publication.status === "merging") && <div className="publication-transcript"><ExecutionTranscript key={execution.id} runId={runId} execution={execution} /></div>}
-      <p>Before: <code>{execution.before || t("未快照")}</code> · After: <code>{execution.after === "" ? t("源目录直改（无快照）") : execution.after ?? t("待提交")}</code></p>
+      <p>Before: <code>{execution.before || t("未快照")}</code> · After: <code>{execution.after === "" ? t("源目录直改（无快照）") : execution.after ?? t("待内部快照")}</code></p>
     </details>}
   </section>;
 }

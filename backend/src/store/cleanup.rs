@@ -232,11 +232,9 @@ impl Store {
         excluded: &str,
         target: &Target,
     ) -> Result<bool, String> {
-        // A shadow snapshot is shared only while another Run still needs it:
-        // completed Runs already handed their result to the source or never had
-        // a publishable one, which is the same predicate the offline workspace
-        // GC applies. Deleting any Run therefore releases a snapshot that the
-        // last incomplete Run no longer needs.
+        // Both deletion and offline GC use the same lifetime predicate. A
+        // completed Git Graph still needs its private ancestry for continuation;
+        // only an ordinary folder can release it after successful delivery.
         if let Target::Shadow { root, name } = target {
             return self.shadow_repo_referenced_by(excluded, &root.join("shadow_repos").join(name));
         }
@@ -290,9 +288,9 @@ impl Store {
         Ok(false)
     }
 
-    /// Whether another incomplete Graph/unrouted Run shares this source binding
-    /// and may still need its shadow snapshot. Completed Runs have published;
-    /// explicitly routed Serial Runs never consume shadow snapshots.
+    /// Whether another Graph/unrouted Run needs this source database. Standard
+    /// Git retains private ancestry until its last conversation is deleted;
+    /// plain folders can release it after publication. Serial never consumes it.
     pub fn shadow_repo_needed_by_other_run(
         &self,
         excluded: &str,
@@ -302,8 +300,8 @@ impl Store {
         self.shadow_repo_referenced_by(excluded, &expected)
     }
 
-    /// Offline variant: does any live, non-completed Run map to this shadow
-    /// directory? Used by `--cleanup-workspaces` GC without a current Run.
+    /// Offline variant of the same source-database lifetime predicate, used by
+    /// `--cleanup-workspaces` GC without a current Run.
     pub(crate) fn shadow_repo_in_use(&self, shadow: &Path) -> Result<bool, String> {
         self.shadow_repo_referenced_by("", shadow)
     }
@@ -326,14 +324,18 @@ impl Store {
                 continue;
             };
             let source = Path::new(&config.repository);
-            if crate::workspace::shadow_repo_dir(source)
-                .ok()
-                .as_deref()
-                != Some(expected)
-            {
+            let resolved = crate::workspace::shadow_repo_dir(source).ok();
+            if resolved.as_deref() != Some(expected) {
+                // A missing binding cannot disprove recorded ownership. Don't
+                // discard recovery history merely because the source moved.
+                if resolved.is_none() && self.owned_cleanup_targets(&id)?.iter().any(|target| {
+                    matches!(target, Target::Shadow { root, name } if root.join("shadow_repos").join(name) == expected)
+                }) { return Ok(true); }
                 continue;
             }
-            if state.phase != "completed" {
+            let undelivered_result = state.published_head.is_none() && state.nodes.values().any(|node|
+                node.status == "completed" && node.head.as_deref().is_some_and(|head| !head.is_empty()));
+            if state.phase != "completed" || crate::workspace::is_standard_git(source) || undelivered_result {
                 return Ok(true);
             }
         }

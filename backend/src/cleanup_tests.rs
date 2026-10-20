@@ -136,6 +136,40 @@ fn deletion_removes_sessions_mergers_planning_and_planner_sessions_only_for_its_
     assert!(runtime.store.pending_cleanups().unwrap().is_empty());
 }
 
+#[cfg(feature = "fixture")]
+#[test]
+fn completed_git_graphs_keep_shared_private_history_until_the_last_conversation_is_deleted() {
+    let (_temp, source, mut runtime) = setup();
+    crate::workspace::git(&source, &["add", "-A"]).unwrap();
+    crate::workspace::git(&source, &["commit", "-q", "-m", "base"]).unwrap();
+    let source_head = crate::workspace::snapshot_repository(&source).unwrap();
+    let config = runtime.state.config.clone().unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        if !ids.is_empty() { runtime.create(graph(), config.clone()).unwrap(); }
+        runtime.set_route("graph").unwrap();
+        runtime.approve().unwrap();
+        runtime.emit(EventKind::PublicationStarted {
+            repository: source.to_string_lossy().into(), heads: vec![runtime.state.base.clone()],
+        }).unwrap();
+        runtime.emit(EventKind::PublicationCompleted { head: source_head.clone() }).unwrap();
+        ids.push(runtime.state.run_id.clone());
+    }
+    let shadow = crate::workspace::shadow_repo_dir(&source).unwrap();
+    let target = Target::Shadow { root: crate::workspace::data_root(), name: shadow.file_name().unwrap().to_string_lossy().into() };
+    assert!(runtime.store.shadow_repo_in_use(&shadow).unwrap(), "offline GC must retain completed Git Graph history");
+    assert!(runtime.store.cleanup_target_is_shared(&ids[1], &target).unwrap());
+    let moved = source.with_extension("moved");
+    fs::rename(&source, &moved).unwrap();
+    assert!(runtime.store.shadow_repo_in_use(&shadow).unwrap(), "recorded ownership must survive a missing source binding");
+    fs::rename(moved, &source).unwrap();
+    runtime.delete_run(&ids[0]).unwrap();
+    assert!(shadow.is_dir(), "deleting one completed conversation must not delete another's source history");
+    runtime.delete_run(&ids[1]).unwrap();
+    assert!(!shadow.exists());
+    assert!(source.join("user.txt").exists());
+}
+
 #[test]
 fn shared_node_sessions_survive_until_their_last_run_is_deleted() {
     let (_temp, _source, mut runtime) = setup();

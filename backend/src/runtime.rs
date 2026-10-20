@@ -684,8 +684,8 @@ impl Runtime {
         {
             return Ok(false);
         }
-        // Cheap discriminator first: a standard Git source owns its objects and
-        // never materializes a shadow snapshot.
+        // Only plain-folder databases use completion-time reclamation. Standard
+        // Git keeps host-only ancestry for continuation and owned Run cleanup.
         if workspace::shadow_repo_if_exists(repository)?.is_none() {
             return Ok(false);
         }
@@ -1164,7 +1164,7 @@ impl Runtime {
                             return Ok(Some(current.clone()));
                         }
                         if let Some(actual) = crate::path_safety::real_child_path(&root, path, false)? {
-                            if actual.join(".git").is_dir() {
+                            if workspace::has_private_git(&actual) {
                                 let mut selected = current.clone();
                                 selected.worktree = workspace::normalize_workspace_display_path(&actual);
                                 return Ok(Some(selected));
@@ -1221,7 +1221,7 @@ impl Runtime {
                 reserved = true;
                 continue;
             }
-            if !actual.join(".git").is_dir() {
+            if !workspace::has_private_git(&actual) {
                 return Err("Latest Planner workspace is not a private Git repository".into());
             }
             let mut selected = execution.clone();
@@ -1274,7 +1274,7 @@ impl Runtime {
                 let Some(actual) = crate::path_safety::real_child_path(&root, path, false)? else {
                     continue;
                 };
-                if !actual.join(".git").is_dir() {
+                if !workspace::has_private_git(&actual) {
                     continue;
                 }
                 let mut selected = owner.clone();
@@ -3093,7 +3093,7 @@ impl Runtime {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let name = entry.file_name();
-                if name == ".files" {
+                if name == ".files" || name == ".grapher-git" || name.to_string_lossy().starts_with("publication-") {
                     return None;
                 }
                 entry
@@ -3268,7 +3268,8 @@ impl Runtime {
                 continue;
             }
             let path = entry.path();
-            if entry.file_name() == ".files" {
+            if entry.file_name() == ".files" || entry.file_name() == ".grapher-git"
+                || entry.file_name().to_string_lossy().starts_with("publication-") {
                 continue;
             }
             let Some(path) = crate::path_safety::real_child_path(&canonical_root, &path, false)?
@@ -3276,9 +3277,11 @@ impl Runtime {
                 continue;
             };
             if !keep.contains(&path) {
-                fs::remove_dir_all(path).map_err(|error| error.to_string())?;
+                fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
+                crate::workspace::remove_private_git(&path)?;
             }
         }
+        crate::workspace::reclaim_orphan_git_metadata(&canonical_root)?;
         Ok(())
     }
 

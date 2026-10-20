@@ -334,12 +334,9 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
         if cwd.starts_with(&repository) || repository.starts_with(&cwd) {
             return Err("Graph workspace must not overlap the source directory".into());
         }
-        if !cwd.join(".git").is_dir()
-            || !cwd
-                .join(".git")
-                .canonicalize()
-                .map_err(|e| e.to_string())?
-                .starts_with(&cwd)
+        if !crate::workspace::has_private_git(&cwd)
+            || (cwd.join(".git").exists() && !cwd.join(".git").canonicalize()
+                .map_err(|e| e.to_string())?.starts_with(&cwd))
         {
             return Err("Graph requires a private Git repository".into());
         }
@@ -426,6 +423,7 @@ pub fn execution_command(
     if crate::path_identity::same_path(&source, &current) {
         return command(role, &source, &current);
     }
+    if role != PiRole::Merger { crate::workspace::hide_private_git(&current)?; }
     let worktree_root = current
         .parent()
         .and_then(Path::parent)
@@ -601,6 +599,17 @@ mod tests {
             .unwrap();
         assert!(STARTED.load(Ordering::SeqCst));
         assert!(schedule_runtime_prewarm(&STARTED, || panic!("already prepared")).is_none());
+    }
+
+    #[test]
+    fn source_binding_named_like_a_graph_slot_keeps_its_own_git_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join(".grapher-worktrees").join(uuid::Uuid::new_v4().to_string()).join("source");
+        fs::create_dir_all(&source).unwrap();
+        crate::workspace::git(&source, &["init", "-q"]).unwrap();
+        execution_command(PiRole::Planner, &source, &source, &temp.path().join("data"), &temp.path().join("session")).unwrap();
+        assert!(source.join(".git").is_dir(), "source metadata must never be hidden as node metadata");
+        assert!(crate::workspace::private_git_dir(&source).is_none());
     }
 
     #[test]

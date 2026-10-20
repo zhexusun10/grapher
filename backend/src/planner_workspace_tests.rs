@@ -8,7 +8,8 @@ fn setup(shadow: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>, Config) {
     fs::write(repo.join("base.txt"), "source").unwrap();
     if !shadow {
         crate::workspace::git(&repo, &["init", "-q"]).unwrap();
-        crate::workspace::snapshot_repository(&repo).unwrap();
+        crate::workspace::git(&repo, &["add", "-A"]).unwrap();
+        crate::workspace::git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
     }
     let script = temp.path().join("agent.mjs");
     fs::write(&script, r#"
@@ -309,7 +310,7 @@ fn planner_workspace_writes_survive_success_failure_and_reach_children() {
         complete(&mut runtime, job);
         runtime.jobs().unwrap();
         let heads = runtime.state.publication.as_ref().unwrap().heads.clone();
-        let head = crate::graph_merge::merge_graph_scoped(&repo, &heads, &[], || Err("unexpected conflict".into())).unwrap();
+        let head = crate::graph_merge::merge_graph_scoped(&repo, &heads, &[], |_| Err("unexpected conflict".into())).unwrap();
         runtime.emit(EventKind::PublicationCompleted { head }).unwrap();
         assert_eq!(fs::read_to_string(repo.join("planner.txt")).unwrap(), "Planner writes at the frontier");
     }
@@ -353,7 +354,7 @@ fn planner_workspace_returns_to_source_after_publication_reclaims_its_previous_c
         }
         runtime.jobs().unwrap();
         let heads = runtime.state.publication.as_ref().unwrap().heads.clone();
-        let head = crate::graph_merge::merge_graph_scoped(&repo, &heads, &[], || Err("unexpected conflict".into())).unwrap();
+        let head = crate::graph_merge::merge_graph_scoped(&repo, &heads, &[], |_| Err("unexpected conflict".into())).unwrap();
         runtime.emit(EventKind::PublicationCompleted { head }).unwrap();
         runtime.cleanup_worktrees().unwrap();
     }

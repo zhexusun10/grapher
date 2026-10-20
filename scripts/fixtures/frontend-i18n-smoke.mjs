@@ -97,9 +97,9 @@ try {
     if (name === "ApprovalModal") {
       // Verify the rendered disclosure, not a particular translation call or sentence.
       const copy = html.replace(/<[^>]*>/g, " ");
-      assert.match(copy, /\.gitignore/);
-      assert.match(copy, locale === "en" ? /force-stag/i : /强制暂存/);
-      assert.match(copy, locale === "en" ? /merged back/i : /合并回/);
+      assert.match(copy, locale === "en" ? /private source snapshot/i : /私有源快照/);
+      assert.match(copy, locale === "en" ? /does not stage, commit, move your branch, or replace your index/i : /不会暂存、提交或移动你的分支与索引/);
+      assert.match(copy, locale === "en" ? /without creating a commit/i : /不创建提交/);
       assert.match(copy, locale === "en" ? /Git\/Grapher internals are excluded/i : /Git\/Grapher 内部文件除外/);
     }
     if (name === "Sidebar") assert.ok(html.includes(t("暂无工作区")));

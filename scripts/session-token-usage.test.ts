@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SessionTokenUsage } from "../src/components/SessionTokenUsage.tsx";
 import type { TokenUsage } from "../src/types.ts";
-import { formatCacheHitRate, formatTokenCount } from "../src/utils/tokenUsage.ts";
+import { consumedTokenCount, formatCacheHitRate, formatTokenCount } from "../src/utils/tokenUsage.ts";
 import { translate } from "../src/i18n/index.ts";
 
 const usage: TokenUsage = {
@@ -12,13 +12,17 @@ const usage: TokenUsage = {
   reasoning: 600, totalTokens: 18_000,
 };
 const render = (value?: TokenUsage | null) => renderToStaticMarkup(createElement(SessionTokenUsage, { usage: value }));
-const counters = ["total tokens", "input", "output", "cache read", "cache write", "reasoning"];
+const counters = [
+  "total tokens", "input", "output", "cache read", "cache write", "reasoning",
+  "provider total (incl. cache)",
+];
 
-test("session details show backend token counts in k units without changing the source", () => {
+test("session details show task tokens plus the provider total without changing the source", () => {
   const html = render(usage);
   for (const [label, value] of [
-    ["total tokens", "18k"], ["input", "12k"], ["output", "1.8k"],
+    ["total tokens", "14k"], ["input", "12k"], ["output", "1.8k"],
     ["cache read", "4k"], ["cache write", "0.2k"], ["reasoning", "0.6k"],
+    ["provider total (incl. cache)", "18k"],
   ]) assert.ok(html.includes(`${label}: ${value}</p>`), html);
   assert.deepEqual(usage, { input: 12_000, output: 1_800, cacheRead: 4_000, cacheWrite: 200, reasoning: 600, totalTokens: 18_000 });
 });
@@ -31,13 +35,25 @@ test("token counts use only k or M, with at most two decimals and automatic prom
     [1_234_567, "1.23M"], [1_000_000_000, "1000M"],
   ] as const) {
     const html = render({ ...usage, totalTokens: count });
-    assert.ok(html.includes(`total tokens: ${expected}</p>`), `${count}: ${html}`);
+    assert.ok(html.includes(`provider total (incl. cache): ${expected}</p>`), `${count}: ${html}`);
   }
 });
 
-test("the provider total is not recomputed by double-counting reasoning or cache tokens", () => {
-  const html = render({ ...usage, totalTokens: 13_800 });
-  assert.ok(html.includes("total tokens: 13.8k</p>"));
+test("task total is uncached input plus cache writes plus output", () => {
+  const html = render(usage);
+  assert.ok(html.includes("total tokens: 14k</p>"));
+  assert.ok(html.includes("provider total (incl. cache): 18k</p>"));
+  assert.equal(consumedTokenCount({ ...usage, cacheRead: 999_999 }), 14_000);
+  assert.equal(consumedTokenCount({ ...usage, cacheWrite: 4_000 }), 17_800);
+});
+
+test("backend consumedTokens is preferred, with a fallback for legacy zeroes", () => {
+  const html = render({ ...usage, consumedTokens: 20_000 });
+  assert.ok(html.includes("total tokens: 20k</p>"), html);
+  assert.equal(consumedTokenCount({ ...usage, consumedTokens: 20_000 }), 20_000);
+  assert.equal(consumedTokenCount({ ...usage, consumedTokens: 0 }), 14_000);
+  assert.equal(consumedTokenCount({ ...usage, consumedTokens: Number.NaN }), 14_000);
+  assert.equal(consumedTokenCount({ ...usage, consumedTokens: 20_000, input: Number.NaN }), 20_000);
 });
 
 test("missing usage remains unknown rather than implying a zero-token session", () => {
@@ -52,18 +68,25 @@ test("reported zero counts remain visible as zero", () => {
   for (const label of counters) assert.ok(html.includes(`${label}: 0k</p>`), html);
 });
 
-test("legacy partial usage does not invent omitted totals or reasoning counts", () => {
+test("legacy partial usage keeps available input/output and leaves unknown totals unknown", () => {
   const html = render({ input: 1_200, output: 300 } as TokenUsage);
+  assert.ok(html.includes("total tokens: 1.5k</p>"));
   assert.ok(html.includes("input: 1.2k</p>"));
   assert.ok(html.includes("output: 0.3k</p>"));
-  for (const label of ["total tokens", "cache read", "cache write", "reasoning"]) {
+  for (const label of ["cache read", "cache write", "reasoning", "provider total (incl. cache)"]) {
     assert.ok(html.includes(`${label}: —</p>`), html);
   }
 });
 
 test("invalid counters never render NaN, infinity, negative or fractional token counts", () => {
   for (const value of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-    assert.ok(render({ ...usage, totalTokens: value }).includes("total tokens: —</p>"));
+    const html = render({ ...usage, totalTokens: value });
+    assert.ok(html.includes("total tokens: 14k</p>"), html);
+    assert.ok(html.includes("provider total (incl. cache): —</p>"), html);
+  }
+  for (const value of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, Number.MAX_SAFE_INTEGER]) {
+    assert.equal(consumedTokenCount({ ...usage, input: value, output: 1 }), undefined);
+    assert.equal(consumedTokenCount({ ...usage, cacheWrite: value }), undefined);
   }
 });
 
@@ -95,7 +118,7 @@ test("unknown or invalid cache counters never manufacture a percentage", () => {
   assert.equal(formatCacheHitRate({ ...usage, input: Number.MAX_SAFE_INTEGER, cacheRead: 1 }), "—");
 });
 
-test("completed run copy includes compact total tokens and cached percentage in both locales", () => {
+test("completed run copy includes compact task tokens and cached percentage in both locales", () => {
   const key = "运行已完成 - 本次消耗 Token:{0} Cached:{1}";
   const total = formatTokenCount(999_900_000);
   const cached = formatCacheHitRate({ ...usage, input: 100, cacheRead: 900, cacheWrite: 0 });

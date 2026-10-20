@@ -37,6 +37,21 @@ fn shell() -> String {
     }
 }
 
+#[test]
+fn tracked_scope_admission_uses_the_live_source_index_not_an_older_graph_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    workspace::git(&source, &["init", "-q"]).unwrap();
+    fs::write(source.join("base.txt"), "base").unwrap();
+    workspace::snapshot_repository(&source).unwrap();
+    workspace::snapshot_repository(&source).unwrap(); // materialize a private Graph index
+    fs::create_dir(source.join(".env")).unwrap();
+    fs::write(source.join(".env/user.txt"), "user-owned tracked data").unwrap();
+    workspace::git(&source, &["add", "-f", ".env/user.txt"]).unwrap();
+    assert!(policy().check_tracked(&source).unwrap_err().contains(".env/user.txt"));
+}
+
 pub(super) fn policy() -> EnvironmentConfig {
     let python = python();
     EnvironmentConfig {
@@ -114,7 +129,8 @@ pub(super) fn setup(graph: Graph, policy: EnvironmentConfig, body: &str) -> (Tem
         .unwrap();
     }
     workspace::git(&source, &["init", "-q"]).unwrap();
-    workspace::snapshot_repository(&source).unwrap();
+    workspace::git(&source, &["add", "-A"]).unwrap();
+    workspace::git(&source, &["commit", "-q", "-m", "base"]).unwrap();
     let script = temp.path().join("agent.mjs");
     let binding = native::host_path(&native::installation_root().join("engine/launch-binding.mjs"))
         .to_string_lossy()
@@ -481,7 +497,7 @@ fs.writeFileSync('.cache/runtime','cache should not fork E');
         &source,
         &publication.heads,
         &policy().exclusions(),
-        || Err("unexpected conflict".into()),
+        |_| Err("unexpected conflict".into()),
     )
     .unwrap();
     runtime

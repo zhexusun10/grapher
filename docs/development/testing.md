@@ -47,6 +47,34 @@ Choose a suite only when its scope is relevant. Invoke npm scripts with `npm run
 
 Native suites require the actual [platform boundary](../architecture/filesystem-isolation.md#platform-boundaries): Linux needs bubblewrap and permitted namespaces; macOS needs Seatbelt. Windows environment tests can use `GRAPHER_ENV_TEST_PARENT` for a short path. Harbor adapter checks have separate [Linux prerequisites](../benchmarks/harbor.md#adapter-tests).
 
+## Files-only publication acceptance
+
+For source snapshots, private node history, publication conflicts and restart
+recovery, run `--test files_only_publication`, `--test publication_recovery`,
+and the existing `graph_merge`, `publication`, `publication_state` and `shadow`
+integration targets. Scheduler/workspace regressions also belong to `--lib`.
+
+For a manual end-to-end acceptance (not a fixture engine or mocked API):
+
+```sh
+node scripts/cargo.mjs build --manifest-path backend/Cargo.toml --no-default-features --bin grapher
+node scripts/accept-files-only-publication.mjs
+```
+
+This launches a separately owned production backend on an unused port, pinned
+Pi, native Bash tools and real Git with an isolated deterministic local provider.
+It exercises Planner → approval → parallel branches/multiple terminals →
+publication, node fan-in repair, and failed publication → owned-backend restart →
+retry. It checks that source HEAD/index/object database are unchanged, node cwd
+history stays hidden, files are delivered without any new commit, and resume
+adds no duplicate delivery. Evidence repositories, snapshots, `report.json` and
+logs are retained at the printed temporary directory. It stops only its own
+child backend and never touches an existing service.
+
+Use an independent `CARGO_TARGET_DIR` if the normal executable is in use, and
+supply the same value to both commands. Requires native Git/Bash and the normal
+pinned Pi setup; Linux/macOS also require their production platform boundary.
+
 ## Specialized profiles and CI
 
 - Offline Conda/ML profiles are opt-in. Set only one of `GRAPHER_ENV_TEST_CONDA_MANIFEST` or `GRAPHER_ENV_TEST_ML_MANIFEST` for `test:environment`; [environment-native.test.ts](../../scripts/environment-native.test.ts) defines their inputs. The read-only [storage probe](../../backend/examples/environment_storage_probe.rs) is a separate diagnostic, not a default check.

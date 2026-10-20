@@ -1,6 +1,12 @@
 use grapher::{graph_merge, workspace};
+use grapher::graph_merge::{merge_graph_with_workspace, publication_workspace};
 use std::{fs, path::Path};
 use tempfile::TempDir;
+
+fn test_data() {
+    static ROOT: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| { let dir = TempDir::new().unwrap(); std::env::set_var("GRAPHER_DATA_DIR", dir.path()); dir });
+}
 
 fn branch(source: &Path, base: &str, path: &Path, file: &str, content: &str) -> String {
     workspace::prepare(source, path, base, &[]).unwrap();
@@ -17,37 +23,42 @@ fn branch(source: &Path, base: &str, path: &Path, file: &str, content: &str) -> 
 
 #[test]
 fn concurrent_source_edit_of_node_file_is_not_discarded_on_conflict_or_retry() {
+    test_data();
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     workspace::git(&source, &["init", "-q"]).unwrap();
     fs::write(source.join("shared.txt"), "BASE\n").unwrap();
+    workspace::git(&source, &["add", "-A"]).unwrap();
+    workspace::git(&source, &["commit", "-q", "-m", "base"]).unwrap();
     let base = workspace::snapshot_repository(&source).unwrap();
     let head = branch(&source, &base, &temp.path().join("node"), "shared.txt", "NODE\n");
     fs::write(source.join("shared.txt"), "USER\n").unwrap();
     let heads = [head];
-    let result = graph_merge::merge_graph(&source, &heads, || {
-        // Source work was committed before the node merge, not overwritten.
-        assert_eq!(workspace::git(&source, &["show", "HEAD:shared.txt"])?, "USER");
-        assert!(workspace::git(&source, &["diff", "--name-only", "--diff-filter=U"])?.contains("shared.txt"));
+    let result = merge_graph_with_workspace(&source, &heads, |private| {
+        // User work is captured privately, never committed into source first.
+        assert_eq!(workspace::git(private, &["show", "HEAD:shared.txt"])?, "USER");
+        assert!(workspace::git(private, &["diff", "--name-only", "--diff-filter=U"])?.contains("shared.txt"));
         Err("explicit conflict; keep for retry".into())
     });
     assert!(result.is_err());
     assert!(fs::read_to_string(source.join("shared.txt")).unwrap().contains("USER"));
-    graph_merge::merge_graph(&source, &heads, || {
-        fs::write(source.join("shared.txt"), "USER\nNODE\n").unwrap();
-        workspace::git(&source, &["add", "shared.txt"])?;
+    merge_graph_with_workspace(&source, &heads, |private| {
+        fs::write(private.join("shared.txt"), "USER\nNODE\n").unwrap();
+        workspace::git(private, &["add", "shared.txt"])?;
         Ok(())
     }).unwrap();
     assert_eq!(fs::read_to_string(source.join("shared.txt")).unwrap().replace("\r\n", "\n"), "USER\nNODE\n");
-    workspace::git(&source, &["merge-base", "--is-ancestor", &heads[0], "HEAD"]).unwrap();
-    assert!(workspace::git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+    assert!(workspace::git(&source, &["cat-file", "-e", &format!("{}^{{commit}}", heads[0])]).is_err());
+    assert_eq!(workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+    assert!(workspace::git(&source, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
+    assert!(!workspace::git(&source, &["status", "--porcelain"]).unwrap().is_empty());
 }
 
 #[test]
 fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollution() {
+    test_data();
     let temp = TempDir::new().unwrap();
-    std::env::set_var("GRAPHER_DATA_DIR", temp.path().join("runtime"));
     let source = temp.path().join("plain folder");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("shared.txt"), "original\n").unwrap();
@@ -119,15 +130,15 @@ fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollutio
         graph_merge::merge_graph(&source, &heads, || Err("interrupted merger".into())).is_err()
     );
     assert!(
-        !workspace::repository_git(&source, &["diff", "--name-only", "--diff-filter=U"])
+        !workspace::git(&publication_workspace(&source, &heads).unwrap(), &["diff", "--name-only", "--diff-filter=U"])
             .unwrap()
             .is_empty()
     );
     let mut resolutions = 0;
-    graph_merge::merge_graph(&source, &heads, || {
+    merge_graph_with_workspace(&source, &heads, |private| {
         resolutions += 1;
-        fs::write(source.join("shared.txt"), "left\nright\n").unwrap();
-        workspace::repository_git(&source, &["add", "shared.txt"])?;
+        fs::write(private.join("shared.txt"), "left\nright\n").unwrap();
+        workspace::git(private, &["add", "shared.txt"])?;
         Ok(()) // Host commits the pending merge, even on retry.
     })
     .unwrap();
@@ -170,9 +181,8 @@ fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollutio
         let script = temp.path().join("merger.sh");
         fs::write(&script, r#"set -eu
 cat >/dev/null
-test -n "$GIT_DIR"
-test "$GIT_WORK_TREE" = "$PWD"
-test ! -e .git
+test -e .git
+git rev-parse --verify MERGE_HEAD
 printf 'ours\ntheirs\n' > shared.txt
 git add shared.txt
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"resolved"}]}}'
@@ -191,9 +201,9 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         };
         let runtime_root = temp.path().join("runtime");
         let mut events = Vec::new();
-        graph_merge::merge_graph(&source, &[f, g], || {
+        merge_graph_with_workspace(&source, &[f, g], |private| {
             graph_merge::resolve_with_merger(
-                &source,
+                private,
                 "Combine results",
                 &config,
                 &runtime_root,
@@ -238,6 +248,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
 #[cfg(feature = "fixture")]
 #[test]
 fn publication_merger_conversation_continues_a_pending_merge() {
+    test_data();
     use grapher::model::{now, Config, EventKind, Execution};
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("publication repo");
@@ -249,14 +260,14 @@ fn publication_merger_conversation_continues_a_pending_merge() {
     let base = workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap();
     let left = branch(&source, &base, &temp.path().join("left"), "shared.txt", "left\n");
     let right = branch(&source, &base, &temp.path().join("right"), "shared.txt", "right\n");
-    // The source directory keeps a real conflict pending for the conversation.
-    assert!(graph_merge::merge_graph(&source, &[left, right], || {
+    // The private publication directory retains the pending conflict.
+    let heads = [left, right];
+    assert!(graph_merge::merge_graph(&source, &heads, || {
         Err("interrupted merger".into())
     })
     .is_err());
-    assert!(!workspace::repository_git(&source, &["diff", "--name-only", "--diff-filter=U"])
-        .unwrap()
-        .is_empty());
+    let private = publication_workspace(&source, &heads).unwrap();
+    assert!(!workspace::git(&private, &["diff", "--name-only", "--diff-filter=U"]).unwrap().is_empty());
 
     let script = temp.path().join("publication-continuation.sh");
     fs::write(
@@ -286,7 +297,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     let root = temp.path().join("runtime");
     let session_dir = root.join("mergers").join("publication-merger");
     fs::create_dir_all(&session_dir).unwrap();
-    let worktree = source.canonicalize().unwrap().to_string_lossy().into_owned();
+    let worktree = private.canonicalize().unwrap().to_string_lossy().into_owned();
     let previous = Execution {
         id: "publication-merger".into(),
         node: "merger".into(),
@@ -311,7 +322,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         attempt: 2,
         session_id: previous.session_id.clone(),
         worktree: worktree.clone(),
-        before: workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+        before: workspace::git(&private, &["rev-parse", "HEAD"]).unwrap(),
         workspace_lineage: vec![],
         after: None,
         input: None, result: None,
@@ -342,9 +353,9 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(events.iter().any(
         |e| matches!(e, EventKind::Output { execution_id, text } if execution_id == "continued-merger" && text.contains("resolved"))
     ));
-    assert!(workspace::repository_git(&source, &["diff", "--name-only", "--diff-filter=U"])
-        .unwrap()
-        .is_empty());
+    assert!(workspace::git(&private, &["diff", "--name-only", "--diff-filter=U"]).unwrap().is_empty());
+    assert_eq!(fs::read_to_string(source.join("shared.txt")).unwrap(), "base\n");
+    graph_merge::merge_graph(&source, &heads, || panic!("repair was already completed")).unwrap();
     assert!(workspace::repository_git(&source, &["status", "--porcelain"])
         .unwrap()
         .is_empty());

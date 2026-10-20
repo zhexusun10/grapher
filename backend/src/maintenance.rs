@@ -127,9 +127,9 @@ fn workspace_plan(root: &Path, store: &Store, parent: &Path) -> Result<Workspace
             }
         }
     }
-    // Temporary shadow Git metadata is reclaimable whenever no live,
-    // non-completed Run still maps to it. Skip entries that fail the shadow
-    // name validation or are symlinks.
+    // Apply the source-database lifetime contract, including completed Git
+    // Graphs whose private ancestry is still conversation-owned. Skip entries
+    // that fail shadow name validation or are symlinks.
     if let Ok(shadow_root) = real_child_path(root, &root.join("shadow_repos"), false) {
         if let Some(shadow_root) = shadow_root {
             for entry in fs::read_dir(&shadow_root).map_err(|error| error.to_string())? {

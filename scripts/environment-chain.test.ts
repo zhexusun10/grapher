@@ -246,7 +246,9 @@ test('default environment discovery binds one private venv across a parallel Gra
     // Environment scope stays in Runtime storage and out of source/Git.
     await assert.rejects(stat(join(source, '.venv')), /ENOENT/, 'the private venv is never copied to source');
     assert.doesNotMatch(git('ls-files'), /(^|\n)\.venv\//, '.venv stays outside published Git');
-    assert.equal(git('status', '--porcelain'), '', 'publication leaves a clean source tree');
+    assert.notEqual(git('status', '--porcelain'), '', 'files-only publication leaves delivered files uncommitted');
+    assert.ok(git('status', '--porcelain').includes('environment-probe.json'), 'delivered project files remain visible in the source worktree');
+    assert.equal(git('diff', '--cached', '--name-only'), '', 'publication preserves the user index');
     const manifest = JSON.parse(await readFile(join(data, 'environments', runId, 'files', 'versions', `${byNode.create.result.environmentRef}.json`), 'utf8'));
     assert.ok(Object.keys(manifest.entries).some((name: string) => name.startsWith('.venv/') && name.endsWith('grapher_probe.py')), 'E snapshot contains the private probe only inside .venv');
     assert.ok(manifest.parents.includes(byNode.create.input.environmentRef), 'E snapshot links the unbound input');
@@ -300,7 +302,7 @@ test('default environment discovery binds one private venv across a parallel Gra
     assert.equal(descriptor.schema, 2);
     assert.deepEqual(descriptor.entries.map((entry: any) => entry.name), ['left', 'right']);
     assert.equal(descriptor.defaultEntry, undefined, 'different environments have no guessed default');
-    assert.ok(descriptor.entries.every((entry: any) => entry.result.codeRef === git('rev-parse', 'HEAD')));
+    assert.ok(descriptor.entries.every((entry: any) => entry.result.codeRef === forked.publication.head));
     await assert.rejects(api('launch_result', { runId: fork.runId, args: [] }), /entryId/);
     const callsBeforeLaunch = modelCalls;
     const expectedProbe = JSON.parse(await readFile(join(source, 'environment-probe.json'), 'utf8'));

@@ -25,11 +25,13 @@ fn snapshot_commits_use_neutral_subject() {
     let repository = temp.path();
     workspace::git(repository, &["init", "-q"]).unwrap();
     fs::write(repository.join("tracked.txt"), "snapshot").unwrap();
-    workspace::snapshot_repository(repository).unwrap();
+    let head = workspace::snapshot_repository(repository).unwrap();
     assert_eq!(
-        workspace::git(repository, &["log", "-1", "--format=%s"]).unwrap(),
+        workspace::repository_git(repository, &["log", "-1", "--format=%s", &head]).unwrap(),
         "snapshot"
     );
+    assert!(workspace::git(repository, &["log", "-1", "--format=%s"]).is_err(),
+        "source snapshot must not create a user commit");
 }
 
 #[test]
@@ -55,8 +57,9 @@ fn git_line_ending_warnings_do_not_fail_snapshots() {
     fs::write(repository.join("input.txt"), "updated\nsecond\n").unwrap();
     let head = workspace::snapshot_repository(repository).unwrap();
     assert!(!head.is_empty());
-    assert_eq!(workspace::git(repository, &["show", "HEAD:input.txt"]).unwrap(), "updated\nsecond");
+    assert_eq!(workspace::repository_git(repository, &["show", &format!("{head}:input.txt")]).unwrap(), "updated\nsecond");
     assert_eq!(workspace::snapshot_repository(repository).unwrap(), head);
+    assert!(workspace::git(repository, &["rev-parse", "--verify", "HEAD"]).is_err());
 }
 
 #[test]
@@ -274,13 +277,13 @@ fn host_metadata_is_excluded_from_forced_snapshots_unless_already_tracked() {
     fs::write(repository.join(".DS_Store"), "tracked metadata updated").unwrap();
     fs::write(repository.join("keep.txt"), "keep updated").unwrap();
     let head = workspace::snapshot_repository(&repository).unwrap();
-    let tree = workspace::git(&repository, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
+    let tree = workspace::repository_git(&repository, &["ls-tree", "-r", "--name-only", &head]).unwrap();
     let names: Vec<&str> = tree.lines().collect();
 
     if cfg!(target_os = "macos") {
         assert!(names.contains(&".DS_Store"), "explicitly tracked metadata remains: {names:?}");
         assert_eq!(
-            workspace::git(&repository, &["show", "HEAD:.DS_Store"]).unwrap(),
+            workspace::repository_git(&repository, &["show", &format!("{head}:.DS_Store")]).unwrap(),
             "tracked metadata updated"
         );
         assert!(!names.contains(&"nested/.DS_Store"), "Finder metadata entered the snapshot: {names:?}");
@@ -376,6 +379,73 @@ fn git_snapshots_collect_gitignored_project_files_without_a_large_file_gate() {
     fs::write(repository.join("packages/data.bin"), vec![7; 2 * 1024 * 1024]).unwrap();
     workspace::snapshot_repository(&repository).unwrap();
 
-    let tracked = workspace::git(&repository, &["ls-files"]).unwrap();
+    let tracked = workspace::repository_git(&repository, &["ls-files"]).unwrap();
     assert!(tracked.lines().any(|name| name == "packages/data.bin"));
+}
+
+#[test]
+fn unborn_source_snapshot_is_internal_and_keeps_user_head_unborn() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("source");
+    fs::create_dir(&repository).unwrap();
+    workspace::git(&repository, &["init", "-q"]).unwrap();
+    fs::write(repository.join("tracked.txt"), "snapshot").unwrap();
+    let head = workspace::snapshot_repository(&repository).unwrap();
+    assert!(!head.is_empty());
+    assert!(workspace::git(&repository, &["rev-parse", "--verify", "HEAD"]).is_err());
+    assert_eq!(
+        workspace::repository_git(&repository, &["rev-parse", &format!("{head}^{{tree}}")]).unwrap(),
+        workspace::repository_git(&repository, &["rev-parse", "HEAD^{tree}"]).unwrap()
+    );
+    assert_eq!(
+        workspace::repository_git(&repository, &["show", &format!("{head}:tracked.txt")]).unwrap(),
+        "snapshot"
+    );
+}
+
+#[test]
+fn graph_snapshot_copies_local_filter_and_attribute_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("source");
+    fs::create_dir(&repository).unwrap();
+    workspace::git(&repository, &["init", "-q"]).unwrap();
+    workspace::git(&repository, &["config", "filter.demo.clean", "tr a-z A-Z"]).unwrap();
+    fs::create_dir_all(repository.join(".git/info")).unwrap();
+    fs::write(repository.join(".git/info/attributes"), "*.txt -text\n").unwrap();
+    fs::write(repository.join("tracked.txt"), "snapshot").unwrap();
+    workspace::snapshot_repository(&repository).unwrap();
+    assert_eq!(
+        workspace::repository_git(&repository, &["config", "--get", "filter.demo.clean"]).unwrap(),
+        "tr a-z A-Z"
+    );
+    let shadow = workspace::shadow_repo_dir(&repository).unwrap();
+    assert_eq!(
+        fs::read_to_string(shadow.join("info/attributes")).unwrap(),
+        "*.txt -text\n"
+    );
+}
+
+#[test]
+fn reclaimed_slots_remove_private_git_metadata_and_orphans() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = temp.path().join(".grapher-worktrees").join("run");
+    let slot = run.join("slot");
+    fs::create_dir_all(&slot).unwrap();
+    workspace::git(&slot, &["init", "-q"]).unwrap();
+    fs::write(slot.join("file.txt"), "content").unwrap();
+    workspace::hide_private_git(&slot).unwrap();
+    assert!(!slot.join(".git").exists());
+    assert!(workspace::private_git_dir(&slot).is_some());
+    workspace::remove_private_git(&slot).unwrap();
+    assert!(workspace::private_git_dir(&slot).is_none());
+
+    let orphan = run.join("orphan");
+    fs::create_dir_all(&orphan).unwrap();
+    workspace::git(&orphan, &["init", "-q"]).unwrap();
+    workspace::hide_private_git(&orphan).unwrap();
+    let metadata = workspace::private_git_dir(&orphan).unwrap();
+    fs::remove_dir_all(&orphan).unwrap();
+    assert!(metadata.is_dir());
+    workspace::reclaim_orphan_git_metadata(&run).unwrap();
+    assert!(!metadata.exists());
 }

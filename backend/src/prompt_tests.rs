@@ -1002,9 +1002,9 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             .count(),
         1
     );
-    assert!(crate::workspace::git(&repo, &["status", "--porcelain"])
-        .unwrap()
-        .is_empty());
+    assert_eq!(crate::workspace::git(&repo, &["rev-list", "--count", "HEAD"]).unwrap(), "1");
+    assert!(crate::workspace::git(&repo, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
+    assert!(!crate::workspace::git(&repo, &["status", "--porcelain"]).unwrap().is_empty());
     let trace = fs::read_to_string(temp.path().join("session-trace.txt")).unwrap();
     let lines: Vec<_> = trace.lines().collect();
     assert_eq!(lines.len(), 2, "{trace}");
@@ -2367,7 +2367,8 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
         fs::write(repository.join("tracked.txt"), "original").unwrap();
         if standard_git {
             crate::workspace::git(&repository, &["init", "-q"]).unwrap();
-            crate::workspace::snapshot_repository(&repository).unwrap();
+            crate::workspace::git(&repository, &["add", "-A"]).unwrap();
+            crate::workspace::git(&repository, &["commit", "-q", "-m", "base"]).unwrap();
         }
         let script = temp.path().join("failed-revision.sh");
         fs::write(&script, "cat >/dev/null\nprintf 'failed revision source' > tracked.txt\nprintf 'new file' > new.txt\nexit 1\n").unwrap();
@@ -2432,7 +2433,8 @@ fn planner_writes_source_immediately_and_nodes_inherit_the_approved_snapshot() {
             fs::write(repository.join("deleted.txt"), "delete me").unwrap();
             if standard_git {
                 crate::workspace::git(&repository, &["init", "-q"]).unwrap();
-                crate::workspace::snapshot_repository(&repository).unwrap();
+                crate::workspace::git(&repository, &["add", "-A"]).unwrap();
+                crate::workspace::git(&repository, &["commit", "-q", "-m", "base"]).unwrap();
             }
             let started = temp.path().join("started");
             let release = temp.path().join("release");
@@ -3405,6 +3407,7 @@ fn planning_metrics_parsing_and_persistence() {
     assert_eq!(metrics.usage.input, 200);
     assert_eq!(metrics.usage.output, 300);
     assert_eq!(metrics.usage.total_tokens, 500);
+    assert_eq!(metrics.usage.consumed_tokens, 500);
 
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
@@ -3543,6 +3546,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
     assert_eq!(exec_metrics.usage.input, 150);
     assert_eq!(exec_metrics.usage.output, 250);
     assert_eq!(exec_metrics.usage.total_tokens, 400);
+    assert_eq!(exec_metrics.usage.consumed_tokens, 410);
     assert_eq!(exec_metrics.model.as_deref(), Some("actual/provider/model"));
     assert_eq!(exec_metrics.thinking_level.as_deref(), Some("xhigh"));
 
@@ -3560,6 +3564,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
     assert_eq!(multi_metrics.duration_seconds, 2420.0);
     assert_eq!(multi_metrics.assistant_messages, 2);
     assert_eq!(multi_metrics.usage.total_tokens, 400);
+    assert_eq!(multi_metrics.usage.consumed_tokens, 400);
 
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
@@ -3640,6 +3645,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         .expect("Run metrics must be present");
     assert_eq!(run_m.execution_usage.total_tokens, 400);
     assert_eq!(run_m.total_usage.total_tokens, 400);
+    assert_eq!(run_m.total_usage.consumed_tokens, 410);
     assert_eq!(run_m.tools, 2);
 
     // Snapshot metadata projection should include metrics and runMetrics
@@ -3896,9 +3902,9 @@ fn completed_graph_is_published_by_driver() {
     let source = root.join("fixture-repository");
     assert!(source.join("first.md").exists());
     assert!(source.join("last.md").exists());
-    assert!(crate::workspace::git(&source, &["status", "--porcelain"])
-        .unwrap()
-        .is_empty());
+    assert_eq!(crate::workspace::git(&source, &["rev-list", "--count", "HEAD"]).unwrap(), "1");
+    assert!(crate::workspace::git(&source, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
+    assert!(crate::workspace::git(&source, &["status", "--porcelain"]).unwrap().contains("first.md"));
     drop(runtime);
     // The fixture streams output chunks, then Finished seals the transcript;
     // the redundant chunks must not accumulate in the event store.
@@ -4252,7 +4258,8 @@ fn saving_node_model_settings_targets_failed_and_unstarted_nodes_only_in_the_req
     fs::create_dir(&repository).unwrap();
     fs::write(repository.join("task.txt"), "source").unwrap();
     crate::workspace::git(&repository, &["init", "-q"]).unwrap();
-    crate::workspace::snapshot_repository(&repository).unwrap();
+    crate::workspace::git(&repository, &["add", "-A"]).unwrap();
+    crate::workspace::git(&repository, &["commit", "-q", "-m", "base"]).unwrap();
     let primary = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
         driving: AtomicBool::new(false),

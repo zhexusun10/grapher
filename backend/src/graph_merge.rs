@@ -10,6 +10,9 @@ use std::{
 };
 use uuid::Uuid;
 
+mod publication;
+pub use publication::publication_workspace;
+
 /// Git composition is the only Merger responsibility. Environment differences
 /// are handled by Runtime as reuse-or-unbound and never enter this prompt.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -40,7 +43,7 @@ fn finish_merge(repository: &Path, head: &str, exclusions: &[String]) -> Result<
         return Err("Merger left unresolved conflicts".into());
     }
     if pending(repository).is_some() {
-        workspace::stage_scoped(repository, exclusions)?;
+        workspace::stage_scoped_local(repository, exclusions)?;
         git(repository, &["commit", "--no-edit"])?;
     }
     git(repository, &["merge-base", "--is-ancestor", head, "HEAD"])
@@ -51,19 +54,30 @@ fn finish_merge(repository: &Path, head: &str, exclusions: &[String]) -> Result<
     Ok(())
 }
 
-/// Use the same Git merge semantics for a checkout and an external shadow repo.
-/// The user's source directory is authoritative: pending user edits are
-/// committed as the publication base, never rejected or discarded. Retrying
-/// may continue an existing merge only if its head belongs to this run.
+/// Deliver project files only, keeping every commit, snapshot and conflict
+/// repair private. The user's Git HEAD, index and object database stay unchanged.
+/// Use `merge_graph_with_workspace` when conflict repair needs the private cwd.
 pub fn merge_graph(
     repository: &Path,
     heads: &[String],
-    resolve: impl FnMut() -> Result<(), String>,
+    mut resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
+    merge_graph_scoped(repository, heads, &[], |_| resolve())
+}
+
+pub fn merge_graph_with_workspace(repository: &Path, heads: &[String], resolve: impl FnMut(&Path) -> Result<(), String>) -> Result<String, String> {
     merge_graph_scoped(repository, heads, &[], resolve)
 }
 
-pub(crate) fn merge_graph_scoped(repository: &Path, heads: &[String], exclusions: &[String], mut resolve: impl FnMut() -> Result<(), String>) -> Result<String, String> {
+pub(crate) fn merge_graph_scoped(repository: &Path, heads: &[String], exclusions: &[String], resolve: impl FnMut(&Path) -> Result<(), String>) -> Result<String, String> {
+    publication::publish(repository, heads, exclusions, None, resolve)
+}
+
+pub(crate) fn merge_graph_scoped_at(repository: &Path, heads: &[String], exclusions: &[String], path: &Path, resolve: impl FnMut(&Path) -> Result<(), String>) -> Result<String, String> {
+    publication::publish(repository, heads, exclusions, Some(path), resolve)
+}
+
+fn compose_graph_scoped(repository: &Path, heads: &[String], exclusions: &[String], mut resolve: impl FnMut() -> Result<(), String>) -> Result<String, String> {
     workspace::validate_binding(repository)?;
     if let Some(head) = pending(repository) {
         if !heads.contains(&head) {
@@ -79,7 +93,10 @@ pub(crate) fn merge_graph_scoped(repository: &Path, heads: &[String], exclusions
     // Commit pending user edits as the base before node results merge on top.
     // The user's work is always accepted; a real conflict with node results is
     // handled by the ordinary merge/Merger path below, not by refusing here.
-    workspace::snapshot_repository_scoped(repository, exclusions)?;
+    workspace::stage_scoped_local(repository, exclusions)?;
+    if !git(repository, &["diff", "--cached", "--name-only"])?.is_empty() {
+        git(repository, &["commit", "-m", workspace::SNAPSHOT_COMMIT_MESSAGE])?;
+    }
     // Complete a pending merge above before pruning, so publication retries
     // retain their original incoming commit even if it is now redundant.
     for head in &workspace::independent_heads(repository, heads)? {
@@ -133,6 +150,8 @@ pub(crate) fn resolve_with_merger_for_node(
 ) -> Result<(), String> {
     let canonical = repository.canonicalize().map_err(|e| e.to_string())?;
     let repository = canonical.as_path();
+    let _git_view = if crate::path_identity::same_path(repository, Path::new(&config.repository)) { None }
+        else { Some(workspace::MergerGitView::open(repository)?) };
     let id = Uuid::new_v4().to_string();
     let incoming = pending(repository).ok_or("No pending merge to resolve")?;
     let before_head = git(repository, &["rev-parse", "HEAD"])?;
@@ -252,8 +271,9 @@ pub(crate) fn resolve_with_merger_for_node(
 }
 
 /// Continue a settled publication Merger conversation. The new execution keeps
-/// the previous Pi session and workspace (the source directory) so the user can
-/// append follow-ups without a new Merger-specific system prompt; it does not
+/// previous Pi history and the selected workspace: private repair before
+/// delivery, source-direct afterward. No new Merger-specific system prompt is
+/// appended, and it does not
 /// re-enter the publication state machine.
 ///
 /// The caller has already emitted `MergerStarted` for `execution` under the Run
@@ -272,6 +292,8 @@ pub fn continue_merger_for_node(
         .canonicalize()
         .map_err(|e| e.to_string())?;
     let repository = canonical.as_path();
+    let _git_view = if crate::path_identity::same_path(repository, Path::new(&config.repository)) { None }
+        else { Some(workspace::MergerGitView::open(repository)?) };
     let id = execution.id.clone();
     // Continue Pi's session file in the original Merger directory. The native
     // process identity is the new execution so it stays steerable in its own right.
@@ -288,7 +310,10 @@ pub fn continue_merger_for_node(
     } else {
         workspace::shadow_repo_if_exists(repository)?
     };
-    let git_backed = standard_git || shadow.is_some();
+    let git_backed = !execution.before.is_empty() && (standard_git || shadow.is_some());
+    if !crate::path_identity::same_path(Path::new(&previous.worktree), repository) {
+        crate::session_branch::rebind_session_cwd_by_header(session_dir, &previous.session_id, repository)?;
+    }
     let environment = if standard_git {
         vec![("GRAPHER_NODE_EXECUTION_ID", id.clone())]
     } else if let Some(shadow) = &shadow {

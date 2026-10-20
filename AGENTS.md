@@ -12,5 +12,7 @@
 
 ## Verification
 
-- Review your own work for potential regressions and unintended side effects.
+- Verify with the targeted check only; never run full/aggregated suites (`test:backend`, `test:isolated`, `test:temporary`, `pi:upgrade-check`).
 - Commands, scope, and prerequisites live in [Testing](docs/development/testing.md).
+
+Once complete, review your own work for potential regressions and unintended side effects.

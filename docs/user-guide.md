@@ -18,7 +18,7 @@ More agents help only when work can progress independently. Repeatedly splitting
 **Approval starts execution; it is not a “no changes yet” checkpoint.**
 
 - Initial Planner commands run in your source project and can change files before approval. Rejecting a plan, stopping it or encountering a failure does **not** roll those writes back.
-- Git snapshots collect project files even when `.gitignore` matches them. Existing user changes can be staged and committed. Runtime internals and managed environment scopes are excluded; `.gitignore` is not a secret or artifact filter.
+- Git snapshots collect project files even when `.gitignore` matches them. Graph snapshots/history stay private and leave your branch and staging area unchanged. Final publication writes files only and creates no commit. Runtime internals and managed environment scopes are excluded; `.gitignore` is not a secret or artifact filter.
 - Bind an actual project directory, not your desktop. Keep large datasets and external resources outside the workspace; project bindings over 10 GB are rejected.
 - Use trusted projects, extensions and tools. Private workspaces are not credential vaults. **Windows has no per-node filesystem sandbox**; macOS/Linux have private-execution access restrictions, but these are not a general malicious-code guarantee.
 
@@ -50,7 +50,7 @@ Review nodes can send bounded feedback to their graph-defined target. The target
 | Provider credentials expired | Re-authenticate in Settings, then use **Continue** for the affected conversation. |
 | Other task/provider failure | Inspect the error and intervene on the node, or save changed Node Agent model/thinking settings for that conversation and then use **Continue**. |
 | Conflict while combining parent results | Inspect the node's Merger conversation and retained workspace. Retry the node to re-attempt preparation; publication retry does not fix this conflict. |
-| Final publication failed | Inspect the publication panel and any publication Merger, then retry publication. It reuses retained results rather than rerunning the graph. |
+| Final publication failed | Inspect the publication panel and any publication Merger, then retry publication. It reuses retained results rather than rerunning the graph. A changed branch is not silently written; interrupted-checkout recovery may require restoring the captured branch. Staged changes in excluded environment/runtime scopes stay staged and are not published; commit or unstage them explicitly. |
 
 Retained workspaces preserve partial work for recovery. Missing or changed recovery evidence may require explicit repair; Grapher does not silently reset it. Editing an old message branches conversation history: in Serial it does **not** rewind project files; Graph history edits retain Git rollback semantics.
 
@@ -58,9 +58,9 @@ Retained workspaces preserve partial work for recovery. Missing or changed recov
 
 **Graph is complete only after successful publication to your project.** Green task cards or a model's final answer are not delivery evidence.
 
-Publication combines valid terminal results with your source changes. Real Git conflicts invoke a Merger; repository/permission failures remain publication failures. Ordinary folders use temporary external Git metadata—Grapher does not add `.git` to your folder.
+Publication combines valid terminal results with your source changes in a private workspace. It writes files only: no commit is created, your branch/HEAD is not advanced, and your existing staging area is preserved. Ordinary Graph nodes do not expose internal Git history in their working directory. Real Git conflicts invoke a Merger privately; a failed composition leaves your source untouched and can be retried. Repository/permission failures remain publication failures. Ordinary folders use temporary external Git metadata—Grapher does not add `.git` to your folder.
 
-**Post-task Planner review** is enabled by default for new Graph Runs. After successful publication it invokes the existing Planner to inspect, report, wrap up or propose more work. With **Auto Approve**, new work can run without another approval click, leading to further iterations and model calls. These settings are captured when a Run is created; configure them before starting a new Run. An interrupted review is not silently repeated.
+**Post-task Planner review** is enabled by default for new Graph Runs. After successful publication it invokes the existing Planner to inspect, report, wrap up or propose more work. With **Auto Approve**, new work can run without another approval click, leading to further iterations and model calls; each additional publication again writes files without committing them. These settings are captured when a Run is created; configure them before starting a new Run. An interrupted review is not silently repeated.
 
 Native environment support is **experimental**. There is no user environment-mode selector; tasks use native tools and backend-verified bindings when available. Reuse is best-effort, not a promise of portable environments. Managed environments are not copied into source. Published result descriptors and launch/retry/cancel controls are not exposed in the interface; they remain available only through the local API.
 

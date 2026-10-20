@@ -27,7 +27,8 @@ fn setup(git: bool, graph: Graph) -> (TempDir, PathBuf, Runtime) {
     fs::write(source.join("deleted.txt"), "delete during planning").unwrap();
     if git {
         workspace::git(&source, &["init", "-q"]).unwrap();
-        workspace::snapshot_repository(&source).unwrap();
+        workspace::git(&source, &["add", "-A"]).unwrap();
+        workspace::git(&source, &["commit", "-q", "-m", "base"]).unwrap();
     } else {
         workspace::verify(&source).unwrap();
     }
@@ -680,7 +681,7 @@ fn parallel_snapshots_of_one_host_repository_do_not_race_ref_locks() {
         }).collect();
         for (i, worker) in workers.into_iter().enumerate() {
             let head = worker.join().unwrap().unwrap();
-            assert_eq!(workspace::git(&source, &["rev-parse", &format!("refs/grapher/runs/{run_id}/nodes/worker{i}")]).unwrap(), head);
+            assert_eq!(workspace::repository_git(&source, &["rev-parse", &format!("refs/grapher/runs/{run_id}/nodes/worker{i}")]).unwrap(), head);
         }
     });
 }
@@ -1347,7 +1348,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     assert!(path.join("a.txt").exists() && path.join("b.txt").exists() && path.join("c.txt").exists());
     let root = runtime.run_workspace_root();
     let worktree_count = fs::read_dir(root).unwrap().filter_map(Result::ok)
-        .filter(|entry| entry.file_name() != ".files" && entry.file_type().unwrap().is_dir()).count();
+        .filter(|entry| entry.file_name() != ".files" && entry.file_name() != ".grapher-git" && entry.file_type().unwrap().is_dir()).count();
     assert_eq!(worktree_count, 1, "linear dependencies should retain exactly one physical worktree");
 
     let old_session = runtime.latest_node_execution("a").unwrap().session_id.clone();
@@ -1417,7 +1418,7 @@ fn fanout_allocates_one_workspace_per_parallel_branch_and_fanin_reclaims_extras(
     let head = workspace::snapshot_node_for_run(path, &source, "join", Some(&runtime.state.run_id)).unwrap();
     runtime.finish(&join.execution, Ok((head, "completed".into()))).unwrap();
     let worktree_count = fs::read_dir(runtime.run_workspace_root()).unwrap().filter_map(Result::ok)
-        .filter(|entry| entry.file_name() != ".files" && entry.file_type().unwrap().is_dir()).count();
+        .filter(|entry| entry.file_name() != ".files" && entry.file_name() != ".grapher-git" && entry.file_type().unwrap().is_dir()).count();
     assert_eq!(worktree_count, 1, "after fan-in only its final workspace remains");
     assert_eq!(runtime.state.nodes["left"].head, runtime.state.nodes["join"].head);
     assert_eq!(runtime.state.nodes["right"].head, runtime.state.nodes["join"].head);
@@ -1472,7 +1473,8 @@ fn resolved_preparation_is_not_a_completed_node_execution() {
     let path = Path::new(&first.execution.worktree);
     workspace::prepare(&source, path, &first.execution.before, &[]).unwrap();
     fs::write(path.join("tracked.txt"), "human merged inputs").unwrap();
-    workspace::snapshot_repository(path).unwrap();
+    workspace::git(path, &["add", "-A"]).unwrap();
+    workspace::git(path, &["commit", "-q", "-m", "resolved"]).unwrap();
     runtime.emit(EventKind::Failed {
         node: "task".into(), execution_id: Some(first.execution.id.clone()),
         error: "Workspace composition blocked".into(), output_bytes: 0, metrics: None,
@@ -2649,11 +2651,12 @@ fn publish_single_node() -> (TempDir, PathBuf, Runtime, String) {
 #[test]
 fn resume_after_stopped_post_task_review_settles_instead_of_republishing() {
     let (_temp, source, mut runtime, task_head) = publish_single_node();
-    // The successful publication reclaimed the snapshot and worktrees, so the
-    // terminal commit only exists in the recorded state.
+    // Standard Git retains host-only history, never node commits in source.
+    // Unchanged terminal results still settle without publishing twice.
     runtime.cleanup_worktrees().unwrap();
     runtime.reclaim_shadow(&source).unwrap();
-    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_some());
+    assert!(workspace::git(&source, &["cat-file", "-e", &format!("{task_head}^{{commit}}")]).is_err());
 
     // A post-task review stopped by the user walks completed -> planning ->
     // paused; resuming returns the Run to running with unchanged results.
@@ -2841,10 +2844,15 @@ fn post_publication_revision_rebuilds_from_published_head_and_merges_new_termina
     let mut names: Vec<String> = jobs.iter().map(|job| job.execution.node.clone()).collect();
     names.sort();
     assert_eq!(names, vec!["extra".to_string(), "root".to_string()]);
+    let revision_base = runtime.latest_source_head().to_string();
+    assert_eq!(workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(), runtime.state.base);
+    assert_eq!(workspace::repository_git(&source, &["rev-parse", &format!("{revision_base}^{{tree}}")]).unwrap(),
+        workspace::repository_git(&source, &["rev-parse", &format!("{published}^{{tree}}")]).unwrap());
+    assert!(workspace::git(&source, &["cat-file", "-e", &format!("{published}^{{commit}}")]).is_err());
     for job in &jobs {
-        // New and invalidated work starts from the workspace users received,
-        // so its commit merges back cleanly instead of replaying the approval base.
-        assert_eq!(job.execution.before, published);
+        // The private bridge has the delivered tree plus internal ancestry,
+        // without adding any snapshot commit to the user's branch.
+        assert_eq!(job.execution.before, revision_base);
     }
     let root_position = jobs
         .iter()
@@ -2869,7 +2877,7 @@ fn post_publication_revision_rebuilds_from_published_head_and_merges_new_termina
         .unwrap();
     let child_job = runtime.jobs().unwrap().remove(0);
     assert_eq!(child_job.execution.node, "child");
-    assert_eq!(child_job.execution.before, published);
+    assert_eq!(child_job.execution.before, revision_base);
     let path = Path::new(&child_job.execution.worktree);
     workspace::prepare(
         &source,

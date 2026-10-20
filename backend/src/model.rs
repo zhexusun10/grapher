@@ -87,6 +87,33 @@ pub struct TokenUsage {
     pub reasoning: usize,
     #[serde(default)]
     pub total_tokens: usize,
+    /// New tokens consumed: uncached input + cache writes + output.
+    /// Cache reads are prompt re-reads and stay out of this counter.
+    #[serde(default)]
+    pub consumed_tokens: usize,
+}
+
+impl TokenUsage {
+    /// Older checkpoints predate `consumed_tokens`; derive it from the counters
+    /// when the stored value is still zero.
+    pub(crate) fn backfill_consumed_tokens(&mut self) {
+        if self.consumed_tokens == 0 {
+            self.consumed_tokens = self
+                .input
+                .saturating_add(self.cache_write)
+                .saturating_add(self.output);
+        }
+    }
+
+    fn effective_consumed_tokens(&self) -> usize {
+        if self.consumed_tokens > 0 {
+            self.consumed_tokens
+        } else {
+            self.input
+                .saturating_add(self.cache_write)
+                .saturating_add(self.output)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -906,6 +933,25 @@ pub struct Event {
     pub kind: EventKind,
 }
 
+impl Event {
+    fn planning_summary(&self) -> Option<&PlanningSummary> {
+        match &self.kind {
+            EventKind::PlanningStarted { planning, .. }
+            | EventKind::PlannerWorkspaceSelected { planning }
+            | EventKind::PlannerReviewStarted { planning }
+            | EventKind::PlannerReviewFinished { planning, .. }
+            | EventKind::PlannerTurnAborted { planning }
+            | EventKind::PlanningFailed { planning }
+            | EventKind::GraphRevised { planning, .. } => Some(planning),
+            EventKind::Created {
+                planning: Some(planning),
+                ..
+            } => Some(planning),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultExecution {
@@ -925,6 +971,8 @@ pub struct Publication {
     pub repository: String,
     pub heads: Vec<String>,
     pub status: String,
+    /// Internal result reference for reconstruction/diff; never a source commit
+    /// created by publication. Kept for event/API replay compatibility.
     pub head: Option<String>,
     pub error: Option<String>,
     pub started_at: u64,
@@ -943,6 +991,12 @@ pub struct Snapshot {
     pub planning_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning: Option<PlanningSummary>,
+    /// Every Planning turn that produced a summary, keyed by planning ID.
+    /// `planning` only retains the latest turn for display; Run metrics must
+    /// keep earlier turns (notably the background review that follows the
+    /// initial Planner turn). Rebuilt from `events` when loading a checkpoint.
+    #[serde(skip)]
+    pub planning_turns: BTreeMap<String, PlanningSummary>,
     pub graph: Graph,
     pub config: Option<Config>,
     /// Model/thinking selection saved for this conversation. Missing on Runs
@@ -967,7 +1021,8 @@ pub struct Snapshot {
     pub execution_stop_requests: Vec<String>,
     pub phase: String,
     pub base: String,
-    /// Last successfully published source HEAD, distinct from the graph's approval base.
+    /// Last delivered internal Git result, not the user's source HEAD. Files-only
+    /// publication leaves the user's branch/index unchanged.
     #[serde(default)]
     pub published_head: Option<String>,
     /// Terminal heads already merged into the published source. Settling and
@@ -1073,6 +1128,21 @@ pub fn parse_execution_metrics(
                                     usage.total_tokens +=
                                         u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0)
                                             as usize;
+                                    usage.consumed_tokens += u
+                                        .get("input")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0)
+                                        .saturating_add(
+                                            u.get("cacheWrite")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(0),
+                                        )
+                                        .saturating_add(
+                                            u.get("output")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(0),
+                                        )
+                                        as usize;
                                 }
                             }
                         }
@@ -1142,6 +1212,55 @@ fn merge_recorded_model(metrics: &mut ExecutionMetrics, previous: Option<&Execut
 }
 
 impl Snapshot {
+    fn record_planning_turn(&mut self, planning: &PlanningSummary) {
+        if !planning.planning_id.is_empty() {
+            self.planning_turns
+                .insert(planning.planning_id.clone(), planning.clone());
+        }
+    }
+
+    /// Rebuild the per-turn Planning history after replaying persisted events.
+    /// Checkpoints skip derived state, so events are the source of truth.
+    pub(crate) fn rebuild_planning_turns(&mut self) {
+        self.planning_turns.clear();
+        let summaries: Vec<PlanningSummary> = self
+            .events
+            .iter()
+            .filter_map(|event| event.planning_summary().cloned())
+            .collect();
+        for planning in &summaries {
+            self.record_planning_turn(planning);
+        }
+        if let Some(planning) = &self.planning {
+            if !planning.planning_id.is_empty() {
+                self.planning_turns
+                    .entry(planning.planning_id.clone())
+                    .or_insert_with(|| planning.clone());
+            }
+        }
+    }
+
+    /// Backfill the derived consumed-token counter on snapshots written before
+    /// the field existed. This keeps the API and UI consistent without a
+    /// database migration.
+    pub(crate) fn backfill_consumed_tokens(&mut self) {
+        for execution in self.executions.iter_mut().chain(self.mergers.iter_mut()) {
+            if let Some(metrics) = &mut execution.metrics {
+                metrics.usage.backfill_consumed_tokens();
+            }
+        }
+        if let Some(planning) = &mut self.planning {
+            for role in planning.roles.values_mut() {
+                role.usage.backfill_consumed_tokens();
+            }
+        }
+        for planning in self.planning_turns.values_mut() {
+            for role in planning.roles.values_mut() {
+                role.usage.backfill_consumed_tokens();
+            }
+        }
+    }
+
     /// Older checkpoints stored per-node overrides before Run-level model
     /// selections existed. Recover the conversation selection from them so the
     /// Settings projection and future nodes do not fall back to the creation
@@ -1281,14 +1400,30 @@ impl Snapshot {
     }
 
     pub fn compute_run_metrics(&self) -> RunMetrics {
+        // Pi reports uncached input, cache reads, and output per assistant
+        // message. Summing them yields processed-token volume across all model
+        // calls, not a unique-context size; cache reads repeat the prompt.
         let mut planning_duration = 0.0;
         let mut planning_messages = 0;
         let mut planning_tools = 0;
         let mut planning_tool_errors = 0;
         let mut planning_usage = TokenUsage::default();
 
+        let mut planning_turns: Vec<&PlanningSummary> =
+            self.planning_turns.values().collect();
         if let Some(planning) = &self.planning {
-            planning_duration = planning.total_planning_duration;
+            // Fall back to the displayed summary for snapshots that predate the
+            // per-turn map. Once the map is populated it is authoritative.
+            if !planning.planning_id.is_empty()
+                && !self.planning_turns.contains_key(&planning.planning_id)
+            {
+                planning_turns.push(planning);
+            } else if planning.planning_id.is_empty() && planning_turns.is_empty() {
+                planning_turns.push(planning);
+            }
+        }
+        for planning in planning_turns {
+            planning_duration += planning.total_planning_duration;
             for metrics in planning.roles.values() {
                 planning_messages += metrics.assistant_messages;
                 planning_tools += metrics.tools;
@@ -1299,6 +1434,7 @@ impl Snapshot {
                 planning_usage.cache_write += metrics.usage.cache_write;
                 planning_usage.reasoning += metrics.usage.reasoning;
                 planning_usage.total_tokens += metrics.usage.total_tokens;
+                planning_usage.consumed_tokens += metrics.usage.effective_consumed_tokens();
             }
         }
 
@@ -1320,6 +1456,7 @@ impl Snapshot {
                 exec_usage.cache_write += metrics.usage.cache_write;
                 exec_usage.reasoning += metrics.usage.reasoning;
                 exec_usage.total_tokens += metrics.usage.total_tokens;
+                exec_usage.consumed_tokens += metrics.usage.effective_consumed_tokens();
             }
         }
 
@@ -1348,6 +1485,7 @@ impl Snapshot {
                 cache_write: planning_usage.cache_write + exec_usage.cache_write,
                 reasoning: planning_usage.reasoning + exec_usage.reasoning,
                 total_tokens: planning_usage.total_tokens + exec_usage.total_tokens,
+                consumed_tokens: planning_usage.consumed_tokens + exec_usage.consumed_tokens,
             },
             planning_usage,
             execution_usage: exec_usage,
@@ -1424,6 +1562,9 @@ pub fn append_live_output(execution: &mut Execution, text: &str) {
 }
 
 pub fn apply(state: &mut Snapshot, event: &Event) {
+    if let Some(planning) = event.planning_summary() {
+        state.record_planning_turn(planning);
+    }
     match &event.kind {
         EventKind::PlanningStarted {
             goal,
@@ -2588,5 +2729,141 @@ mod metrics_tests {
         }
         assert_eq!(state.events.len(), 1);
         assert_eq!(state.run_metrics.unwrap().total_duration_seconds, 0.0);
+    }
+
+    fn planning_turn(id: &str, input: usize, messages: usize) -> PlanningSummary {
+        let mut summary = PlanningSummary {
+            planning_id: id.into(),
+            total_planning_duration: 1.0,
+            ..Default::default()
+        };
+        summary.roles.insert(
+            "planner".into(),
+            PlanningRoleMetrics {
+                assistant_messages: messages,
+                usage: TokenUsage {
+                    input,
+                    total_tokens: input,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        summary
+    }
+
+    #[test]
+    fn run_metrics_count_each_planning_turn() {
+        let mut state = Snapshot::default();
+        for (sequence, kind) in [
+            (
+                1,
+                EventKind::PlannerWorkspaceSelected {
+                    planning: planning_turn("initial", 0, 0),
+                },
+            ),
+            (
+                2,
+                EventKind::GraphRevised {
+                    graph: Graph::default(),
+                    planning_id: "initial".into(),
+                    planning: planning_turn("initial", 100, 2),
+                    invalidated: Vec::new(),
+                    source_head: None,
+                },
+            ),
+            (
+                3,
+                EventKind::PlannerReviewStarted {
+                    planning: planning_turn("review", 0, 0),
+                },
+            ),
+            (
+                4,
+                EventKind::PlannerReviewFinished {
+                    planning: planning_turn("review", 50, 1),
+                    approval_required: false,
+                },
+            ),
+        ] {
+            apply(
+                &mut state,
+                &Event {
+                    sequence,
+                    timestamp: sequence as u64 * 1000,
+                    kind,
+                },
+            );
+        }
+
+        let metrics = state.run_metrics.as_ref().unwrap();
+        assert_eq!(state.planning.as_ref().unwrap().planning_id, "review");
+        assert_eq!(metrics.planning_usage.input, 150);
+        assert_eq!(metrics.planning_usage.total_tokens, 150);
+        assert_eq!(metrics.planning_usage.consumed_tokens, 150);
+        assert_eq!(metrics.assistant_messages, 3);
+        assert_eq!(metrics.planning_duration_seconds, 2.0);
+
+        // Checkpoint replay reconstructs the same turn history from events.
+        let mut replayed = Snapshot::default();
+        for event in &state.events {
+            apply(&mut replayed, event);
+        }
+        assert_eq!(replayed.compute_run_metrics(), (*metrics).clone());
+
+        let mut loaded = state.clone();
+        loaded.planning_turns.clear();
+        loaded.rebuild_planning_turns();
+        assert_eq!(loaded.compute_run_metrics(), (*metrics).clone());
+    }
+
+    #[test]
+    fn legacy_usage_backfills_consumed_tokens_once() {
+        let mut usage = TokenUsage {
+            input: 100,
+            output: 50,
+            cache_write: 10,
+            ..Default::default()
+        };
+        usage.backfill_consumed_tokens();
+        assert_eq!(usage.consumed_tokens, 160);
+        usage.backfill_consumed_tokens();
+        assert_eq!(usage.consumed_tokens, 160);
+
+        let mut explicit = TokenUsage {
+            input: 100,
+            output: 50,
+            cache_write: 10,
+            consumed_tokens: 999,
+            ..Default::default()
+        };
+        explicit.backfill_consumed_tokens();
+        assert_eq!(explicit.consumed_tokens, 999);
+    }
+
+    #[test]
+    fn snapshot_backfills_legacy_planning_consumed_tokens() {
+        let mut state = Snapshot::default();
+        let mut summary = planning_turn("legacy", 0, 1);
+        summary.roles.get_mut("planner").unwrap().usage = TokenUsage {
+            input: 100,
+            output: 50,
+            cache_write: 10,
+            total_tokens: 200,
+            ..Default::default()
+        };
+        state.planning = Some(summary.clone());
+        state.planning_turns.insert("legacy".into(), summary);
+
+        state.backfill_consumed_tokens();
+
+        assert_eq!(
+            state.planning.as_ref().unwrap().roles["planner"].usage.consumed_tokens,
+            160
+        );
+        assert_eq!(
+            state.planning_turns["legacy"].roles["planner"].usage.consumed_tokens,
+            160
+        );
     }
 }

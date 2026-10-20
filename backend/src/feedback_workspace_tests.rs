@@ -122,8 +122,10 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
     assert_eq!(fs::read_to_string(source.join(".cache/source")).unwrap().trim(), "source cache");
     assert!(source.join(".cache/owner").is_file());
     assert!(source.join(".cache/review").is_file());
-    assert!(workspace::git(&source, &["ls-files"]).unwrap().contains(".cache/owner"));
-    assert!(workspace::git(&source, &["ls-files"]).unwrap().contains(".cache/review"));
+    assert!(workspace::repository_git(&source, &["ls-files"]).unwrap().contains(".cache/owner"));
+    assert!(workspace::repository_git(&source, &["ls-files"]).unwrap().contains(".cache/review"));
+    assert!(!workspace::git(&source, &["ls-files"]).unwrap().contains(".cache/owner"));
+    assert!(!workspace::git(&source, &["ls-files"]).unwrap().contains(".cache/review"));
     assert_eq!(runtime.state.feedback_counts["review->owner"], 1);
 }
 
@@ -419,6 +421,17 @@ fn modified_completed_workspace_blocks_feedback_handoff() {
 }
 
 #[cfg(feature = "fixture")]
+fn unrecorded_host_commit(original: &str) -> String {
+    // This fixture intentionally simulates host-side committed residue. Normal
+    // Graph agents cannot discover Git metadata from their project cwd.
+    original.replace("      echo fixed > owner.txt", r#"      echo residue > residue.txt
+      export GIT_DIR="../.grapher-git/$(basename "$PWD").git" GIT_WORK_TREE="$PWD"
+      git add -A
+      git -c user.name=residue -c user.email=residue@invalid commit -qm residue
+      exit 19"#)
+}
+
+#[cfg(feature = "fixture")]
 #[test]
 fn failed_feedback_repair_adopts_its_committed_residue_on_retry() {
     let (temp, _source, mut runtime) = configured(&["owner", "review"], 1);
@@ -433,8 +446,7 @@ fn failed_feedback_repair_adopts_its_committed_residue_on_retry() {
     // First repair attempt: commit residue, then fail without recording it.
     let script = temp.path().join("agent.sh");
     let original = fs::read_to_string(&script).unwrap();
-    fs::write(&script, original.replace("      echo fixed > owner.txt",
-        "      echo residue > residue.txt\n      git add -A\n      git -c user.name=residue -c user.email=residue@invalid commit -qm residue\n      exit 19")).unwrap();
+    fs::write(&script, unrecorded_host_commit(&original)).unwrap();
     let root = runtime.root.clone();
     let result = perform(&repair, &root, &[], |_| {}, |head| runtime.emit(EventKind::Prepared {
         execution_id: repair.execution.id.clone(), head,
@@ -482,8 +494,7 @@ fn adoption_survives_a_failed_attempt_without_a_persisted_session() {
     let pin_head = repair.feedback_workspace.as_ref().unwrap().head.clone();
     let script = temp.path().join("agent.sh");
     let original = fs::read_to_string(&script).unwrap();
-    fs::write(&script, original.replace("      echo fixed > owner.txt",
-        "      echo residue > residue.txt\n      git add -A\n      git -c user.name=residue -c user.email=residue@invalid commit -qm residue\n      exit 19")).unwrap();
+    fs::write(&script, unrecorded_host_commit(&original)).unwrap();
     let root = runtime.root.clone();
     let result = perform(&repair, &root, &[], |_| {}, |head| runtime.emit(EventKind::Prepared {
         execution_id: repair.execution.id.clone(), head,

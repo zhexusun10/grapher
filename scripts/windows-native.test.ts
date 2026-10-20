@@ -35,8 +35,9 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
   const toolRequests: string[] = [];
   const failures: unknown[] = [];
   const repositories = new Map<string, string>();
+  const initialHeads = new Map<string, string>();
   const config = (repository: string) => ({ repository, model: 'windows-test/native', thinkingLevel: 'off', maxParallel: 2, maxFeedback: 1, postTaskReview: false });
-  const git = (repository: string, ...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=NUL', '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: repository, encoding: 'utf8' }).trim();
+  const git = (repository: string, ...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=NUL', '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const modelServer = createServer(async (request, response) => {
     try {
       const chunks = [];
@@ -148,6 +149,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       await writeFile(join(repository, 'base.txt'), 'base');
       git(repository, 'init', '-q'); git(repository, 'add', '-A'); git(repository, 'commit', '-qm', 'base');
       repositories.set(label, repository);
+      initialHeads.set(label, git(repository, 'rev-parse', 'HEAD'));
     }
     progress('Starting two concurrent Planners (includes native runtime preparation)');
     const plans = await Promise.all(['WIN_ONE', 'WIN_TWO'].map(async label => {
@@ -175,7 +177,12 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       assert.equal(await readFile(join(plan.repository, 'a.txt'), 'utf8'), 'alpha');
       assert.equal(await readFile(join(plan.repository, 'b.txt'), 'utf8'), 'beta');
       assert.equal(await readFile(join(plan.repository, 'joined.txt'), 'utf8'), 'alpha-beta');
-      assert.equal(git(plan.repository, 'status', '--porcelain'), '');
+      assert.notEqual(git(plan.repository, 'status', '--porcelain'), '', 'files-only delivery leaves delivered files uncommitted');
+      assert.match(git(plan.repository, 'status', '--porcelain'), /planned\.txt/);
+      assert.match(git(plan.repository, 'status', '--porcelain'), /a\.txt/);
+      assert.match(git(plan.repository, 'status', '--porcelain'), /joined\.txt/);
+      assert.equal(git(plan.repository, 'rev-parse', 'HEAD'), initialHeads.get(plan.label));
+      assert.equal(git(plan.repository, 'for-each-ref', '--format=%(refname)', 'refs/grapher'), '');
       const executions = snapshot.executions;
       assert.equal(executions.length, 3);
       assert.equal(new Set(executions.map((execution: any) => execution.sessionId)).size, 3);
@@ -184,7 +191,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       assert.ok(alpha.startedAt <= beta.completedAt && beta.startedAt <= alpha.completedAt, 'Branches must overlap');
       for (const execution of executions) {
         assert.notEqual(execution.worktree, plan.repository);
-        git(plan.repository, 'merge-base', '--is-ancestor', execution.after, 'HEAD');
+        assert.throws(() => git(plan.repository, 'cat-file', '-e', `${execution.after}^{commit}`), 'node commits stay outside the user database');
       }
     }
     progress('Both Graph runs completed; inheritance and publication verified');

@@ -984,6 +984,21 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
                                 usage.total_tokens +=
                                     u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0)
                                         as usize;
+                                usage.consumed_tokens += u
+                                    .get("input")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0)
+                                    .saturating_add(
+                                        u.get("cacheWrite")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                    )
+                                    .saturating_add(
+                                        u.get("output")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0),
+                                    )
+                                    as usize;
                             }
                         }
                     }
@@ -2659,7 +2674,11 @@ fn drive(service: Arc<Service>) {
                         }
                         let result = crate::process_control::with_owner(&run_id, || {
                             let exclusions = service.runtime.lock().map_err(|e| e.to_string())?.exclusions()?;
-                            let head = crate::graph_merge::merge_graph_scoped(&repository, &publication.heads, &exclusions, || {
+                            let publication_path = crate::workspace::workspaces_parent(&root)
+                                .join(".grapher-worktrees").join(&run_id).join(
+                                    crate::graph_merge::publication_workspace(&repository, &publication.heads)?
+                                        .file_name().ok_or("Invalid publication workspace")?);
+                            let head = crate::graph_merge::merge_graph_scoped_at(&repository, &publication.heads, &exclusions, &publication_path, |publication_workspace| {
                                 let attempt = service
                                     .runtime
                                     .lock()
@@ -2669,7 +2688,7 @@ fn drive(service: Arc<Service>) {
                                     .len()
                                     + 1;
                                 crate::graph_merge::resolve_with_merger(
-                                    &repository,
+                                    publication_workspace,
                                     &query,
                                     &config,
                                     &root,
@@ -2703,7 +2722,7 @@ fn drive(service: Arc<Service>) {
                         match result {
                             Ok((head, descriptor)) => {
                                 eprintln!(
-                                    "[Grapher] [Publication] Completed! Published HEAD: {head}"
+                                    "[Grapher] [Publication] Files delivered; internal result: {head}"
                                 );
                                 if runtime.state.run_id != run_id
                                     || !matches!(runtime.state.phase.as_str(), "publishing" | "merging")
@@ -3138,7 +3157,7 @@ fn control(
             return Err("Enter a message for the merger".into());
         }
         let execution_id = execution_id.ok_or("Missing merger execution identity")?;
-        let (previous, config, session_dir) = {
+        let (previous, config, session_dir, target_worktree, source_direct) = {
             let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
             if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
                 return Err("Run changed while messaging the merger".into());
@@ -3164,35 +3183,40 @@ fn control(
             {
                 return Err("Wait for publication to finish before messaging the merger".into());
             }
-            if !std::path::Path::new(&previous.worktree).is_dir() {
+            let config = runtime.state.effective_config().ok_or("Missing config")?;
+            let source_direct = previous.node == "merger" && runtime.state.publication.as_ref()
+                .is_some_and(|publication| publication.status == "completed");
+            let target_worktree = if source_direct { config.repository.clone() } else { previous.worktree.clone() };
+            if !std::path::Path::new(&target_worktree).is_dir() {
                 return Err("Merger workspace is no longer available".into());
             }
-            if runtime.path_is_running(std::path::Path::new(&previous.worktree)) {
+            if runtime.path_is_running(std::path::Path::new(&target_worktree)) {
                 return Err("This workspace is currently in use; wait for it to finish".into());
             }
-            let config = runtime.state.effective_config().ok_or("Missing config")?;
-            // The model turn continues the previous Pi session in its original
-            // directory. The new execution owns the native identity so it stays
-            // steerable in its own right.
+            // Retain Pi history; a delivered publication returns to source,
+            // whereas failed repair stays private. The new native execution
+            // identity keeps the continued conversation steerable.
             let session_dir = if runtime.root.join("mergers").join(&previous.session_id).is_dir() {
                 runtime.root.join("mergers").join(&previous.session_id)
             } else {
                 runtime.root.join("mergers").join(&previous.id)
             };
-            (previous, config, session_dir)
+            (previous, config, session_dir, target_worktree, source_direct)
         };
         let id = Uuid::new_v4().to_string();
         // A successful publication may reclaim the temporary snapshot at any
         // moment, so a plain folder whose snapshot vanished resolves to no
         // `before` commit instead of failing the continuation request.
-        let before = merger_continuation_before(std::path::Path::new(&previous.worktree))?;
+        let before = if source_direct { String::new() } else {
+            merger_continuation_before(std::path::Path::new(&target_worktree))?
+        };
         let execution = Execution {
             id: id.clone(),
             node: previous.node.clone(),
             revision: previous.revision,
             attempt: previous.attempt + 1,
             session_id: previous.session_id.clone(),
-            worktree: previous.worktree.clone(),
+            worktree: target_worktree.clone(),
             before,
             workspace_lineage: previous.workspace_lineage.clone(),
             after: None,
@@ -3215,7 +3239,7 @@ fn control(
             {
                 return Err("Wait for publication to finish before messaging the merger".into());
             }
-            if runtime.path_is_running(std::path::Path::new(&previous.worktree)) {
+            if runtime.path_is_running(std::path::Path::new(&target_worktree)) {
                 return Err("This workspace is currently in use; wait for it to finish".into());
             }
             runtime.emit(EventKind::MergerStarted {

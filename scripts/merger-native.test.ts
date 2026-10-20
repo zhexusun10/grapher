@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve, toNamespacedPath } from 'node:path';
+import { basename, dirname, join, resolve, toNamespacedPath } from 'node:path';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -26,8 +26,8 @@ test('production Planner writes source directly; Merger repairs node and publica
   let diagnostics = '';
   const git = (repository: string, ...args: string[]) => execFileSync('git', [
     '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`,
-    '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args,
-  ], { cwd: repository, encoding: 'utf8' }).trim();
+    '-c', 'core.longpaths=true', '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args,
+  ], { cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   // Exercise Windows' canonical extended prefix through the real HTTP/CLI path.
   // The post-task Planner review is a Planning turn accepted by its own harness; this
   // deterministic local model must only answer the Merger/node turns under test, so
@@ -103,16 +103,12 @@ test('production Planner writes source directly; Merger repairs node and publica
           .slice(messages.findLastIndex((message: any) => message.role === 'user') + 1)
           .filter((message: any) => message.role === 'tool');
         if (continuation && turnResults.length === 0) {
-          // A Git-backed publication merger's follow-up commits its changes so
-          // the source directory stays clean for the next publication retry. An
-          // ordinary folder whose snapshot was reclaimed edits files directly.
-          tool = { name: 'bash', arguments: { command: scenario.plain
-            ? "printf 'continued\\n' > continued.txt"
-            : "printf 'continued\\n' > continued.txt && git add continued.txt && git -c user.name=Test -c user.email=test@localhost commit -qm continued",
-          } };
+          // After delivery the same conversation edits source directly, without
+          // manufacturing another visible commit or re-entering publication.
+          tool = { name: 'bash', arguments: { command: "printf 'continued\\n' > continued.txt" } };
         } else if (!scenario.fail && results.length === 0) {
-          // Absolute source aliases must select the conflicted private file for
-          // node Mergers, but remain source paths during publication.
+          // Absolute source aliases select the conflicted private file for both
+          // node and publication Mergers, never the user's source file.
           tool = { name: 'bash', arguments: { command:
             `test -n "$(git diff --name-only --diff-filter=U)" && git rev-parse --verify MERGE_HEAD && printf 'resolved\\n' > ${quote(join(scenario.repository, 'shared.txt'))} && git add shared.txt`,
           } };
@@ -123,7 +119,7 @@ test('production Planner writes source directly; Merger repairs node and publica
           : prompt.includes('VERIFY_PLANNER_REVISION') ? 'test "$(cat shared.txt)" = "planner revision" && test "$(cat revision.txt)" = latest && test "$(cat failed.txt)" = survived && test "$(cat verified.txt)" = verified && printf inherited > late.txt'
           : prompt.includes('VERIFY_PLANNER_SOURCE') ? 'test "$(cat shared.txt)" = "planner change" && printf verified > verified.txt'
           : 'test "$(cat shared.txt)" = resolved && printf verified > verified.txt';
-        tool = { name: 'bash', arguments: { command } };
+        tool = { name: 'bash', arguments: { command: `test ! -e .git && ! git log -1 >/dev/null 2>&1 && ${command}` } };
       }
       requests.push(`${label}:${role}:${tool?.name ?? 'completed'}`);
       const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: `call-${requests.length}`, type: 'function',
@@ -226,6 +222,7 @@ test('production Planner writes source directly; Merger repairs node and publica
       if (!plain) {
         git(repository, 'init', '-q'); git(repository, 'add', '-A'); git(repository, 'commit', '-qm', 'base');
       }
+      const originalHead = plain ? undefined : git(repository, 'rev-parse', 'HEAD');
       cases.set(label, { repository, kind, plain, fail });
       let initial;
       if (kind === 'planner') {
@@ -269,15 +266,16 @@ test('production Planner writes source directly; Merger repairs node and publica
         assert.equal(state.mergers.length, 1);
         assert.equal(merger.node, kind === 'node' ? 'merge:join' : 'merger');
         assert.equal(merger.status, fail ? 'failed' : 'completed');
-        if (kind === 'node') assert.notEqual(normalize(merger.worktree), normalize(repository));
-        else assert.equal(normalize(merger.worktree), normalize(repository));
+        assert.notEqual(normalize(merger.worktree), normalize(repository), 'all conflict repair stays private');
         const log = await api('get_execution_output', { runId: state.runId, executionId: merger.id, full: true });
         assert.ok(log.content.includes('Completed'));
       }
       if (fail) {
         assert.equal((await readFile(join(repository, 'shared.txt'), 'utf8')).trim(), 'base');
-        assert.ok(git(merger.worktree, 'diff', '--name-only', '--diff-filter=U'));
-        assert.ok(git(merger.worktree, 'rev-parse', '--verify', 'MERGE_HEAD'));
+        const privateGit = (...args: string[]) => git(merger.worktree, '--git-dir',
+          normalize(join(dirname(merger.worktree), '.grapher-git', `${basename(merger.worktree)}.git`)), '--work-tree', normalize(merger.worktree), ...args);
+        assert.ok(privateGit('diff', '--name-only', '--diff-filter=U'));
+        assert.ok(privateGit('rev-parse', '--verify', 'MERGE_HEAD'));
         assert.equal(state.publication, null);
       } else {
         assert.equal((await readFile(join(repository, 'shared.txt'), 'utf8')).trim(), kind === 'planner' ? 'planner change' : 'resolved');
@@ -296,15 +294,22 @@ test('production Planner writes source directly; Merger repairs node and publica
           const attempt = followUp.mergers.find((item: any) => item.id !== merger.id);
           assert.equal(attempt.node, 'merger');
           assert.equal(attempt.sessionId, merger.sessionId);
-          assert.equal(normalize(attempt.worktree), normalize(merger.worktree));
+          assert.equal(normalize(attempt.worktree), normalize(repository), 'settled publication follow-ups return to source');
           assert.equal(followUp.phase, 'completed', 'a follow-up must not re-enter publication');
           assert.equal(followUp.publication.status, 'completed');
           assert.equal(await readFile(join(repository, 'continued.txt'), 'utf8'), 'continued\n');
-          if (!plain) assert.equal(git(repository, 'status', '--porcelain'), '');
+          if (!plain) {
+            const status = git(repository, 'status', '--porcelain');
+            assert.match(status, /\?\? continued\.txt/);
+            assert.match(status, /shared\.txt|verified\.txt/);
+          }
         }
         if (!plain) {
-          assert.equal(git(repository, 'status', '--porcelain'), '');
-          for (const execution of state.executions) git(repository, 'merge-base', '--is-ancestor', execution.after, 'HEAD');
+          assert.equal(git(repository, 'rev-parse', 'HEAD'), originalHead);
+          assert.equal(git(repository, 'log', '--format=%s', `${originalHead}..HEAD`), '');
+          assert.equal(git(repository, 'for-each-ref', '--format=%(refname)', 'refs/grapher'), '');
+          for (const execution of state.executions) assert.throws(() => git(repository, 'cat-file', '-e', `${execution.after}^{commit}`));
+          assert.ok(git(repository, 'status', '--porcelain').includes('shared.txt') || git(repository, 'status', '--porcelain').includes('verified.txt'));
         } else {
           await assert.rejects(readFile(join(repository, '.git')), /ENOENT/);
         }
@@ -347,7 +352,7 @@ test('production Planner writes source directly; Merger repairs node and publica
         assert.equal(await readFile(join(repository, 'late.txt'), 'utf8'), 'inherited');
         assert.equal(await readFile(join(repository, 'failed.txt'), 'utf8'), 'survived');
         assert.ok(!requests.some(request => request.startsWith(`${label}:merger:`)), 'source-only revisions need no Merger');
-        if (!plain) assert.equal(git(repository, 'status', '--porcelain'), '');
+        if (!plain) assert.equal(git(repository, 'rev-parse', 'HEAD'), originalHead);
         else await assert.rejects(readFile(join(repository, '.git')), /ENOENT/);
       }
     }

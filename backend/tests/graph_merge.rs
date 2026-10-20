@@ -1,8 +1,8 @@
 use grapher::{
-    graph_merge::merge_graph,
+    graph_merge::{merge_graph, merge_graph_with_workspace, publication_workspace},
     workspace::{
         git, prepare, prepare_with_merger_expected, snapshot_node, snapshot_node_for_run,
-        snapshot_repository,
+        snapshot_repository, repository_git,
     },
 };
 use std::{
@@ -11,12 +11,28 @@ use std::{
 };
 use tempfile::TempDir;
 
+fn test_data() {
+    static ROOT: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| { let dir = TempDir::new().unwrap(); std::env::set_var("GRAPHER_DATA_DIR", dir.path()); dir });
+}
+
+fn assert_files_only(source: &Path, head: &str) {
+    assert_eq!(git(source, &["rev-parse", "HEAD"]).unwrap(), head);
+    assert!(git(source, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
+    assert!(!git(source, &["status", "--porcelain"]).unwrap().is_empty());
+}
+fn index_path(source: &Path) -> PathBuf {
+    PathBuf::from(git(source, &["rev-parse", "--path-format=absolute", "--git-path", "index"]).unwrap())
+}
 fn repository(base: &Path) -> (PathBuf, String) {
+    test_data();
     let path = base.join("source");
     fs::create_dir(&path).unwrap();
     git(&path, &["init"]).unwrap();
     fs::write(path.join("shared"), "base\n").unwrap();
-    (path.clone(), snapshot_repository(&path).unwrap())
+    git(&path, &["add", "-A"]).unwrap();
+    git(&path, &["commit", "-qm", "base"]).unwrap();
+    (path.clone(), git(&path, &["rev-parse", "HEAD"]).unwrap())
 }
 
 fn branch(source: &Path, base: &str, path: &Path, file: &str, content: &str) -> String {
@@ -56,7 +72,8 @@ fn private_planner_copies_dirty_and_ignored_files_without_modifying_source() {
         fs::read_to_string(private.join("untracked")).unwrap(),
         "new\n"
     );
-    assert!(private.join(".git").is_dir());
+    assert!(!private.join(".git").exists());
+    assert!(git(&private, &["rev-parse", "HEAD"]).is_ok());
     assert_eq!(git(&source, &["status", "--porcelain"]).unwrap(), before);
 }
 
@@ -72,7 +89,9 @@ fn private_planner_accepts_checked_out_gitlink_directories() {
     fs::create_dir(&submodule).unwrap();
     git(&submodule, &["init"]).unwrap();
     fs::write(submodule.join("entry.txt"), "submodule\n").unwrap();
-    let submodule_head = snapshot_repository(&submodule).unwrap();
+    git(&submodule, &["add", "-A"]).unwrap();
+    git(&submodule, &["commit", "-qm", "base"]).unwrap();
+    let submodule_head = git(&submodule, &["rev-parse", "HEAD"]).unwrap();
     git(
         &source,
         &[
@@ -95,8 +114,10 @@ fn private_planner_accepts_checked_out_gitlink_directories() {
 #[test]
 fn concurrent_planner_merges_preserve_source_on_conflict() {
     let temp = TempDir::new().unwrap();
-    let (source, _) = repository(temp.path());
+    let (source, initial) = repository(temp.path());
     let root = temp.path().join(".grapher-workspaces");
+    let before_index = fs::read(index_path(&source)).unwrap();
+    let before_objects = git(&source, &["cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)"]).unwrap();
     let first = root.join("b44201e4-2c8b-4c80-b1a1-3e660a83c7b1/a");
     let second = root.join("c55201e4-2c8b-4c80-b1a1-3e660a83c7b1/b");
     grapher::workspace::prepare_planner(&source, &first).unwrap();
@@ -129,14 +150,16 @@ fn concurrent_planner_merges_preserve_source_on_conflict() {
     .is_err());
     assert_eq!(fs::read(source.join("shared")).unwrap(), published);
     assert_eq!(fs::read(second.join("shared")).unwrap(), unpublished);
-    assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+    assert_eq!(fs::read(index_path(&source)).unwrap(), before_index);
+    assert_eq!(git(&source, &["cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)"]).unwrap(), before_objects);
+    assert_files_only(&source, &initial);
 }
 
 #[test]
 fn planner_merger_repairs_preview_and_any_late_source_conflict() {
     for late_conflict in [false, true] {
         let temp = TempDir::new().unwrap();
-        let (source, _) = repository(temp.path());
+        let (source, initial) = repository(temp.path());
         let run = "b44201e4-2c8b-4c80-b1a1-3e660a83c7b1";
         let root = temp.path().join(".grapher-workspaces").join(run);
         let planner = root.join("planner");
@@ -164,16 +187,15 @@ fn planner_merger_repairs_preview_and_any_late_source_conflict() {
                 Ok(())
             },
         ).unwrap();
-        assert_eq!(locations, if late_conflict {
-            vec![preview.clone(), source.clone()]
-        } else {
-            vec![preview.clone()]
-        });
+        assert_eq!(locations.first(), Some(&preview));
+        assert_eq!(locations.len(), if late_conflict { 2 } else { 1 });
+        assert!(locations.iter().all(|path| path != &source));
         assert_eq!(fs::read_to_string(source.join("shared")).unwrap().replace("\r\n", "\n"), "source + planner\n");
         for head in [Some(planner_head), Some(source_head), late_head].into_iter().flatten() {
-            git(&source, &["merge-base", "--is-ancestor", &head, "HEAD"]).unwrap();
+            assert!(git(&source, &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_err());
         }
-        assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+        assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), initial);
+        assert_files_only(&source, &initial);
     }
 }
 
@@ -188,7 +210,9 @@ fn failed_planner_merger_preserves_preview_without_dirtying_source() {
     grapher::workspace::prepare_planner(&source, &planner).unwrap();
     fs::write(planner.join("shared"), "planner\n").unwrap();
     fs::write(source.join("shared"), "source\n").unwrap();
-    let before = snapshot_repository(&source).unwrap();
+    snapshot_repository(&source).unwrap();
+    let before = git(&source, &["rev-parse", "HEAD"]).unwrap();
+    let before_status = git(&source, &["status", "--porcelain"]).unwrap();
     let error = grapher::workspace::publish_planner_with_merger(
         &source, &planner, &preview, run, run,
         |cwd| {
@@ -198,7 +222,7 @@ fn failed_planner_merger_preserves_preview_without_dirtying_source() {
     ).unwrap_err();
     assert!(error.contains("Merger unavailable"));
     assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), before);
-    assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+    assert_eq!(git(&source, &["status", "--porcelain"]).unwrap(), before_status);
     assert!(!git(&preview, &["diff", "--name-only", "--diff-filter=U"]).unwrap().is_empty());
 }
 
@@ -240,7 +264,7 @@ fn concurrent_runs_with_identical_node_names_keep_parent_commits_isolated() {
     fs::write(node_b.join("from-b"), "b").unwrap();
     let head_b = snapshot_node_for_run(&node_b, &source, "worker", Some(&run_b)).unwrap();
     assert_eq!(
-        git(
+        repository_git(
             &source,
             &[
                 "rev-parse",
@@ -251,7 +275,7 @@ fn concurrent_runs_with_identical_node_names_keep_parent_commits_isolated() {
         head_a
     );
     assert_eq!(
-        git(
+        repository_git(
             &source,
             &[
                 "rev-parse",
@@ -291,7 +315,11 @@ fn chained_source_alternates_fall_back_to_independent_fetch() {
     let base = snapshot_repository(&source).unwrap();
     let child = temp.path().join("child");
     prepare(&source, &child, &base, &[]).unwrap();
-    assert!(!child.join(".git/objects/info/alternates").exists());
+    // The host imports source history into an independent internal database;
+    // the node can safely borrow that database, not the chained user store.
+    let alternate = fs::read_to_string(child.join(".git/objects/info/alternates")).unwrap();
+    assert_eq!(Path::new(alternate.trim()).canonicalize().unwrap(),
+        grapher::workspace::shadow_repo_dir(&source).unwrap().join("objects").canonicalize().unwrap());
     assert_eq!(git(&child, &["rev-parse", "HEAD"]).unwrap(), base);
     assert_eq!(
         fs::read_to_string(child.join("shared"))
@@ -303,6 +331,7 @@ fn chained_source_alternates_fall_back_to_independent_fetch() {
 
 #[test]
 fn borrowed_objects_use_source_hash_format() {
+    test_data();
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
@@ -331,7 +360,7 @@ fn node_reuses_source_objects_without_copying_history() {
     let objects = fs::read_to_string(child.join(".git/objects/info/alternates")).unwrap();
     assert_eq!(
         Path::new(objects.trim()).canonicalize().unwrap(),
-        source.join(".git/objects").canonicalize().unwrap()
+        grapher::workspace::shadow_repo_dir(&source).unwrap().join("objects").canonicalize().unwrap()
     );
     assert_eq!(
         git(&child, &["rev-parse", "refs/grapher/parents/parent"]).unwrap(),
@@ -351,15 +380,19 @@ fn completed_heads_land_in_source_and_repeated_publication_is_idempotent() {
     let a = branch(&source, &base, &temp.path().join("a"), "a.txt", "a");
     let b = branch(&source, &base, &temp.path().join("b"), "b.txt", "b");
     let heads = [a, b];
-    merge_graph(&source, &heads, || panic!("No conflict expected")).unwrap();
-    for file in ["a.txt", "b.txt"] {
-        assert!(source.join(file).exists());
-    }
-    let published = git(&source, &["rev-parse", "HEAD"]).unwrap();
-    merge_graph(&source, &heads, || panic!("No conflict expected")).unwrap();
-    assert_eq!(published, git(&source, &["rev-parse", "HEAD"]).unwrap());
-    assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+    let index = PathBuf::from(git(&source, &["rev-parse", "--path-format=absolute", "--git-path", "index"]).unwrap());
+    let before_index = fs::read(&index).unwrap();
+    let published = merge_graph(&source, &heads, || panic!("No conflict expected")).unwrap();
+    for file in ["a.txt", "b.txt"] { assert!(source.join(file).exists()); }
+    assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+    assert_eq!(fs::read(&index).unwrap(), before_index);
+    assert_files_only(&source, &base);
+    assert!(repository_git(&source, &["cat-file", "-e", &format!("{published}^{{commit}}")]).is_ok());
+    assert!(git(&source, &["cat-file", "-e", &format!("{published}^{{commit}}")]).is_err());
+    assert_eq!(merge_graph(&source, &heads, || panic!("No conflict expected")).unwrap(), published);
+    assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
 }
+
 
 #[test]
 fn resolved_conflict_does_not_drop_remaining_heads() {
@@ -369,12 +402,12 @@ fn resolved_conflict_does_not_drop_remaining_heads() {
     let b = branch(&source, &base, &temp.path().join("b"), "shared", "second\n");
     let c = branch(&source, &base, &temp.path().join("c"), "last.txt", "last\n");
     let mut resolutions = 0;
-    merge_graph(&source, &[a, b, c.clone()], || {
+    let published = merge_graph_with_workspace(&source, &[a, b, c.clone()], |private| {
         resolutions += 1;
-        assert!(!git(&source, &["diff", "--name-only", "--diff-filter=U"])?.is_empty());
-        fs::write(source.join("shared"), "first\nsecond\n").unwrap();
-        git(&source, &["add", "shared"])?;
-        git(&source, &["commit", "--no-edit"])?;
+        assert!(!git(private, &["diff", "--name-only", "--diff-filter=U"])?.is_empty());
+        fs::write(private.join("shared"), "first\nsecond\n").unwrap();
+        git(private, &["add", "shared"])?;
+        git(private, &["commit", "--no-edit"])?;
         Ok(())
     })
     .unwrap();
@@ -391,7 +424,10 @@ fn resolved_conflict_does_not_drop_remaining_heads() {
             .replace("\r\n", "\n"),
         "last\n"
     );
-    git(&source, &["merge-base", "--is-ancestor", &c, "HEAD"]).unwrap();
+    assert!(repository_git(&source, &["cat-file", "-e", &format!("{published}^{{commit}}")]).is_ok());
+    assert!(git(&source, &["cat-file", "-e", &format!("{published}^{{commit}}")]).is_err());
+    assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+    assert_files_only(&source, &base);
 }
 
 #[test]
@@ -401,7 +437,7 @@ fn failed_resolver_preserves_conflict_and_user_edits_publish_before_merge() {
     let a = branch(&source, &base, &temp.path().join("a"), "shared", "first\n");
     let b = branch(&source, &base, &temp.path().join("b"), "shared", "second\n");
     fs::write(source.join("local"), "user changes").unwrap();
-    // Pending user work is committed as the publication base. It is not a merge
+    // Pending user work is captured privately and remains uncommitted. It is not a merge
     // conflict, so publication succeeds without launching the Merger.
     merge_graph(&source, &[a.clone()], || {
         panic!("User edits are not a merge conflict")
@@ -411,12 +447,14 @@ fn failed_resolver_preserves_conflict_and_user_edits_publish_before_merge() {
         fs::read_to_string(source.join("local")).unwrap(),
         "user changes"
     );
-    assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
-    assert!(merge_graph(&source, &[a, b], || Err("Resolver failed".into())).is_err());
-    assert!(!git(&source, &["diff", "--name-only", "--diff-filter=U"])
-        .unwrap()
-        .is_empty());
-    assert!(git(&source, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok());
+    assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+    let before_status = git(&source, &["status", "--porcelain"]).unwrap();
+    let heads = [a, b];
+    assert!(merge_graph(&source, &heads, || Err("Resolver failed".into())).is_err());
+    let private = publication_workspace(&source, &heads).unwrap();
+    assert!(!git(&private, &["diff", "--name-only", "--diff-filter=U"]).unwrap().is_empty());
+    assert!(git(&private, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok());
+    assert_eq!(git(&source, &["status", "--porcelain"]).unwrap(), before_status);
 }
 
 // Ancestor-first inputs used to create two merges (and could re-open conflicts
@@ -451,12 +489,14 @@ fn redundant_ancestors_do_not_create_extra_merges_in_either_order() {
                     ]
                 )
                 .unwrap(),
-                "1"
+                if path == &child { "1" } else { "0" }
             );
             assert_eq!(fs::read_to_string(path.join("a.txt")).unwrap(), "a");
             assert_eq!(fs::read_to_string(path.join("b.txt")).unwrap(), "b");
-            for head in &heads {
-                git(path, &["merge-base", "--is-ancestor", head, "HEAD"]).unwrap();
+            if path == &child {
+                for head in &heads { git(path, &["merge-base", "--is-ancestor", head, "HEAD"]).unwrap(); }
+            } else {
+                assert_files_only(path, &base);
             }
         }
     }
@@ -497,8 +537,10 @@ fn resolved_descendant_avoids_reopening_ancestor_conflicts() {
                 .replace("\r\n", "\n"),
             "combined\n"
         );
-        for head in &heads {
-            git(path, &["merge-base", "--is-ancestor", head, "HEAD"]).unwrap();
+        if path == &child {
+            for head in &heads { git(path, &["merge-base", "--is-ancestor", head, "HEAD"]).unwrap(); }
+        } else {
+            assert_files_only(path, &base);
         }
     }
 }
@@ -512,11 +554,8 @@ fn missing_parent_fails_before_partial_composition() {
     assert!(prepare(&source, &child, &base, &[a.clone(), "missing".into()]).is_err());
     assert_eq!(git(&child, &["rev-parse", "HEAD"]).unwrap(), base);
     assert!(!child.join("a.txt").exists());
-    assert!(merge_graph(&source, &[a, "missing".into()], || panic!(
-        "Invalid input is not a conflict"
-    ))
-    .is_err());
     assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+    assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
 }
 
 #[test]
@@ -533,20 +572,24 @@ fn retry_finishes_pending_merge_before_pruning_redundant_incoming() {
         "Interrupted".into()
     ))
     .is_err());
-    assert_eq!(git(&source, &["rev-parse", "MERGE_HEAD"]).unwrap(), b);
+    let first_private = publication_workspace(&source, &[a.clone(), b.clone()]).unwrap();
+    assert_eq!(git(&first_private, &["rev-parse", "MERGE_HEAD"]).unwrap(), b);
     let heads = vec![a, b, c];
     let mut resolutions = 0;
-    merge_graph(&source, &heads, || {
+    let published = merge_graph_with_workspace(&source, &heads, |private| {
         resolutions += 1;
-        fs::write(source.join("shared"), "combined\n").unwrap();
-        git(&source, &["add", "shared"])?;
+        fs::write(private.join("shared"), "combined\n").unwrap();
+        git(private, &["add", "shared"])?;
         Ok(())
     })
     .unwrap();
     assert_eq!(resolutions, 1);
     assert_eq!(fs::read_to_string(source.join("c.txt")).unwrap(), "c");
     for head in heads {
-        git(&source, &["merge-base", "--is-ancestor", &head, "HEAD"]).unwrap();
+        assert!(repository_git(&source, &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_ok());
+        assert!(git(&source, &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_err());
     }
-    assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
+    assert!(repository_git(&source, &["cat-file", "-e", &format!("{published}^{{commit}}")]).is_ok());
+    assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+    assert_files_only(&source, &base);
 }

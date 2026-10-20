@@ -14,7 +14,7 @@ This page owns managed state outside project Git. [Workspace allocation](workspa
 | D | `Domain`: platform, architecture, baseline, policy, and execution-contract identity. |
 | E / `environmentRef` | Immutable managed-environment filesystem snapshot, separate from project Git files. |
 | L / `launchRef` | Versioned `LaunchConfig`: business entry, PATH, variables, hooks, and verified binding metadata; inherited credentials are named, not stored as values. |
-| `codeRef` | Git reference for the recorded project-code state. |
+| `codeRef` | Host-only Git reference for the recorded project-code state. It is not written into the user's branch or object database. |
 
 [Domain, LaunchConfig, and CompositeResult](../../backend/src/environment.rs) define the stored shapes. E/L are evidence and launch inputs, not additional user-selectable modes.
 

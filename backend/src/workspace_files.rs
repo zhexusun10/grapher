@@ -617,7 +617,7 @@ impl Files {
         if desired.keys().any(|name| self.is_excluded(Path::new(name))) {
             return Err("Workspace file snapshot overlaps an excluded managed scope".into());
         }
-        let tracked = workspace::repository_git(workspace, &["ls-files", "-z", "--cached"])?;
+        let tracked = workspace::working_tree_git(workspace, &["ls-files", "-z", "--cached"])?;
         let tracked: BTreeSet<_> = tracked
             .split('\0')
             .filter(|name| !name.is_empty())

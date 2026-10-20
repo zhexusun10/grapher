@@ -30,7 +30,7 @@ import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTimeTookText, PlannerTimeTookText, formatSessionStartTime } from "../ExecutionTimeTook";
 import { SessionTokenUsage } from "../SessionTokenUsage";
-import { formatTokenCount, formatCacheHitRate } from "../../utils/tokenUsage";
+import { formatTokenCount, formatCacheHitRate, consumedTokenCount } from "../../utils/tokenUsage";
 import { ExecutionTranscript, ExecutionTranscriptPlaceholder } from "../ExecutionTranscript";
 import { activePlannerOutput } from "../PlanningActivity";
 import { plannerConversationEdits, plannerHistoryIds } from "../../lib/plannerOutput";
@@ -1984,8 +1984,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 >
                   <p>workspace: {execution?.worktree || config.repository || "preparing workspace…"}</p>
                   <p>session id: {execution?.sessionId || "waiting for initialization…"}</p>
-                  <p>commit before: {execution?.before || "not snapshotted"}</p>
-                  <p>commit after: {execution ? (execution.after === "" ? "direct modification (no snapshot)" : execution.after ?? "pending") : "pending"}</p>
+                  <p>internal commit before: {execution?.before || "not snapshotted"}</p>
+                  <p>internal commit after: {execution ? (execution.after === "" ? "direct modification (no snapshot)" : execution.after ?? "pending") : "pending"}</p>
                   {snapshotModelInfo && (
                     <>
                       <p>model: {snapshotModelInfo.model}</p>
@@ -2573,7 +2573,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   ? t("执行已暂停，点击继续可恢复")
                                   : t("执行已停止，点击继续恢复失败节点（不会追加消息）"))
                                   : graphPhase === "completed" ? t("运行已完成 - 本次消耗 Token:{0} Cached:{1}",
-                                    formatTokenCount(state.runMetrics?.totalUsage?.totalTokens),
+                                    // Task tokens exclude cache reads but include
+                                    // one-time cache writes; reasoning is inside
+                                    // output. The percentage is the prompt cache-hit rate.
+                                    formatTokenCount(consumedTokenCount(state.runMetrics?.totalUsage)),
                                     formatCacheHitRate(state.runMetrics?.totalUsage))
                                     : state.approved ? phaseText[graphPhase] ?? graphPhase : ""}
                     </span>

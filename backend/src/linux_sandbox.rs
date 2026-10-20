@@ -203,6 +203,10 @@ pub fn execution_command(
     if shadow.exists() {
         masks.push(canonical(&shadow)?);
     }
+    if crate::workspace::is_standard_git(&source) {
+        masks.push(canonical(Path::new(&crate::workspace::git(&source,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"])?))?);
+    }
     for common in [
         crate::workspace::repository_git(
             &source,

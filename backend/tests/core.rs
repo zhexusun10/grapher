@@ -1005,13 +1005,15 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     // Arbitrary labels are accepted but reach the ref namespace only as safe ids.
     let invalid_ref = format!("refs/grapher/nodes/{}", node_id("../invalid"));
     assert!(workspace::snapshot_node(&node_a, &repository, "../invalid").is_ok());
-    assert!(workspace::git(&repository, &["rev-parse", "--verify", &invalid_ref]).is_ok());
+    assert!(workspace::repository_git(&repository, &["rev-parse", "--verify", &invalid_ref]).is_ok());
+    assert!(workspace::git(&repository, &["rev-parse", "--verify", &invalid_ref]).is_err());
     let head_a = workspace::snapshot_node(&node_a, &repository, "nodeA").unwrap();
 
-    // 2. Verify Host has refs/grapher/nodes/nodeA pointing to head_a
+    // 2. Verify the host-only database has refs/grapher/nodes/nodeA pointing to head_a
     let host_ref_a =
-        workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeA"]).unwrap();
+        workspace::repository_git(&repository, &["rev-parse", "refs/grapher/nodes/nodeA"]).unwrap();
     assert_eq!(host_ref_a, head_a);
+    assert!(workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeA"]).is_err());
 
     // Verify .git/FETCH_HEAD does NOT exist in host repository (avoiding parallel race conditions)
     assert!(
@@ -1033,10 +1035,11 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     fs::write(node_b.join("b.txt"), "hello from node B\n").unwrap();
     let head_b = workspace::snapshot_node(&node_b, &repository, "nodeB").unwrap();
 
-    // 5. Verify Host has refs/grapher/nodes/nodeB pointing to head_b
+    // 5. Verify the host-only database has refs/grapher/nodes/nodeB pointing to head_b
     let host_ref_b =
-        workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeB"]).unwrap();
+        workspace::repository_git(&repository, &["rev-parse", "refs/grapher/nodes/nodeB"]).unwrap();
     assert_eq!(host_ref_b, head_b);
+    assert!(workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeB"]).is_err());
 }
 
 #[test]
@@ -1127,7 +1130,7 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
         Some(resolved_head.as_str())
     );
     assert_eq!(
-        workspace::git(
+        workspace::repository_git(
             &repository,
             &[
                 "rev-parse",
@@ -1137,6 +1140,7 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
         .unwrap(),
         resolved_head
     );
+    assert!(workspace::git(&repository, &["cat-file", "-e", &format!("{resolved_head}^{{commit}}")]).is_err());
 
     runtime.pause(false).unwrap();
     let retry = runtime.jobs().unwrap().remove(0);

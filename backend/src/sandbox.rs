@@ -185,10 +185,16 @@ fn write_profile(
     }
     // Source linked worktrees can keep all node snapshots in a shared Git
     // directory outside the source path. Protect that database as well.
-    if let Ok(common) = crate::workspace::repository_git(
-        &repository,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    ) {
+    let mut common_dirs = vec![crate::workspace::repository_git(
+        &repository, &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )];
+    if crate::workspace::is_standard_git(&repository) {
+        // Internal snapshots no longer live in the user's database. A linked
+        // source worktree's real external database still needs protection.
+        common_dirs.push(crate::workspace::git(&repository,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+    }
+    for common in common_dirs.into_iter().flatten() {
         let common = PathBuf::from(common).canonicalize().map_err(|e| e.to_string())?;
         if !common.starts_with(&repository) && !common.starts_with(&current) {
             append_git_dir_rule(&mut text, &common, borrowed_objects.as_deref())?;

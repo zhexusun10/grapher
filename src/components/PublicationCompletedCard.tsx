@@ -1,6 +1,6 @@
 import { t, locale } from "../i18n";
 import React, { useState, useMemo } from "react";
-import { CheckCircle2, FolderGit2, GitCommit, Clock, Copy, Check, GitMerge } from "lucide-react";
+import { CheckCircle2, FolderGit2, Clock, Copy, Check, GitMerge } from "lucide-react";
 import { motion } from "motion/react";
 import type { Snapshot, PlanRouteType, Execution } from "../types";
 import { ExecutionTranscript } from "./ExecutionTranscript";
@@ -16,18 +16,15 @@ interface PublicationCompletedCardProps {
 
 export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> = React.memo(({
   state,
-  routeType,
   repository,
   animateAppear = true,
 }) => {
   const [copiedRepo, setCopiedRepo] = useState(false);
-  const [copiedHead, setCopiedHead] = useState(false);
   const [mergerDetailsOpen, setMergerDetailsOpen] = useState(false);
   const [selectedMergerId, setSelectedMergerId] = useState("");
 
   const publication = state.publication;
   const targetRepo = publication?.repository || repository || state.config?.repository || "";
-  const head = publication?.head || (state.executions.find(e => e.after)?.after) || null;
   const completedAt = publication?.completedAt || (state.executions.find(e => e.completedAt)?.completedAt) || null;
 
   const mergers: Execution[] = useMemo(() => {
@@ -42,15 +39,6 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
       await navigator.clipboard.writeText(targetRepo);
       setCopiedRepo(true);
       setTimeout(() => setCopiedRepo(false), 2000);
-    } catch { }
-  };
-
-  const handleCopyHead = async () => {
-    if (!head) return;
-    try {
-      await navigator.clipboard.writeText(head);
-      setCopiedHead(true);
-      setTimeout(() => setCopiedHead(false), 2000);
     } catch { }
   };
 
@@ -90,29 +78,6 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
                   aria-label={t("复制工作区目录")}
                 >
                   {copiedRepo ? <Check size={12} /> : <Copy size={12} />}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {head && (
-            <div className="pub-card-row">
-              <span className="pub-card-label">
-                <GitCommit size={13} />
-                <span>{t("最终提交 HEAD")}</span>
-              </span>
-              <div className="pub-card-value-box">
-                <code className="pub-card-head" title={head}>
-                  {head.length > 12 ? `${head.slice(0, 10)}…` : head}
-                </code>
-                <button
-                  type="button"
-                  className={`pub-card-copy-btn ${copiedHead ? "copied" : ""}`}
-                  onClick={handleCopyHead}
-                  title={t("复制完整 Commit SHA")}
-                  aria-label={t("复制完整 Commit SHA")}
-                >
-                  {copiedHead ? <Check size={12} /> : <Copy size={12} />}
                 </button>
               </div>
             </div>
@@ -168,7 +133,7 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
                 <ExecutionTranscript key={activeMerger.id} runId={state.runId} execution={activeMerger} />
               </div>
               <p className="pub-card-merger-commits">
-                Before: <code>{activeMerger.before || t("未快照")}</code> · After: <code>{activeMerger.after === "" ? t("源目录直改（无快照）") : activeMerger.after ?? t("已提交")}</code>
+                Before: <code>{activeMerger.before || t("未快照")}</code> · After: <code>{activeMerger.after === "" ? t("源目录直改（无快照）") : activeMerger.after ?? t("内部快照")}</code>
               </p>
             </div>
           </details>

@@ -19,7 +19,8 @@ fn serial_run(kind: SourceKind) -> (TempDir, PathBuf, Runtime) {
     if !matches!(kind, SourceKind::Plain) {
         workspace::git(&source, &["init", "-q"]).unwrap();
         if matches!(kind, SourceKind::Git) {
-            workspace::snapshot_repository(&source).unwrap();
+            workspace::git(&source, &["add", "-A"]).unwrap();
+            workspace::git(&source, &["commit", "-q", "-m", "base"]).unwrap();
         }
         fs::write(source.join("tracked.txt"), "staged user work").unwrap();
         workspace::git(&source, &["add", "tracked.txt"]).unwrap();

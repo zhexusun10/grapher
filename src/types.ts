@@ -71,6 +71,8 @@ export interface TokenUsage {
   cacheWrite: number;
   reasoning: number;
   totalTokens: number;
+  /** Uncached input + cache writes + output; absent on legacy snapshots. */
+  consumedTokens?: number;
 }
 
 export interface PlanningRoleMetrics {

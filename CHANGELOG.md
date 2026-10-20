@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.6] - 2026-10-21
+
 ### Added
 
 - Session details now show backend-reported token usage for Planner, Serial/Graph node, and Merger turns: total, input, output, cache read/write, and reasoning tokens. Completed Graph runs also show run-level token totals and cache hit rate in the topology footer.
@@ -14,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Graph mode now keeps node, snapshot, and merge commits in a host-only Git database. Final publication writes files only: the source branch, HEAD, index, and object database stay unchanged, and no node commit enters the source directory.
 - Improved session-details readability with proportional typography, consistent row spacing, and wrapped multi-column timing and token fields.
 - Snapshot commits created while preparing multi-agent workspaces now use the neutral subject `snapshot` instead of `Grapher execution snapshot`.
 - Automatic Git maintenance is disabled during Grapher-owned snapshot commits and node ref imports so opportunistic repacking cannot stall node completion.
@@ -24,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Token counts now exclude prompt-cache reads from consumed tokens while including one-time cache writes, sum every Planner turn including post-task review, and show the provider total separately. This fixes inflated or incomplete token totals in session details and the completed-run footer.
 - Node Agent and Serial steer messages now stay with the execution they steered: they render above that execution's transcript instead of appearing as a separate later turn or below the response they produced.
 - ML environment result-descriptor generation no longer gates code publication. If environment evidence cannot produce a launchable descriptor, the Run still publishes code without one; stale descriptors are rejected, and live-writer safety is preserved.
 
@@ -167,7 +171,8 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
-[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.2.5...HEAD
+[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.2.6...HEAD
+[1.2.6]: https://github.com/zhexusun10/grapher/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.5
 [1.2.4]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.4
 [1.2.3]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.3

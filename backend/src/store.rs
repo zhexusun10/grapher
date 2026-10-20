@@ -705,6 +705,8 @@ impl Store {
                 state.events.push(event);
             }
         }
+        state.rebuild_planning_turns();
+        state.backfill_consumed_tokens();
         state.hydrate_legacy_model_config();
         for execution in state.executions.iter_mut().chain(state.mergers.iter_mut()) {
             execution.output_bytes = execution

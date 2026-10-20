@@ -422,7 +422,7 @@ impl EnvironmentConfig {
     }
 
     pub(crate) fn check_tracked(&self, path: &Path) -> Result<(), String> {
-        let tracked = workspace::repository_git(path, &["ls-files", "-z", "--cached"])?;
+        let tracked = workspace::working_tree_git(path, &["ls-files", "-z", "--cached"])?;
         for name in tracked.split('\0').filter(|s| !s.is_empty()) {
             if self.exclusions().iter().any(|scope| {
                 workspace::scope_contains(Path::new(name), Path::new(scope))

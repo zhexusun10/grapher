@@ -53,7 +53,7 @@ fn publish(runtime: &mut Runtime, source: &Path) -> ResultDescriptor {
     assert!(runtime.jobs().unwrap().is_empty());
     let publication = runtime.state.publication.clone().unwrap();
     let head = crate::graph_merge::merge_graph_scoped(source, &publication.heads,
-        &runtime.exclusions().unwrap(), || Err("unexpected Git conflict".into())).unwrap();
+        &runtime.exclusions().unwrap(), |_| Err("unexpected Git conflict".into())).unwrap();
     runtime.emit(EventKind::PublicationCompleted { head }).unwrap();
     assert_eq!(runtime.state.phase, "completed");
     runtime.result_descriptor().unwrap()
@@ -86,7 +86,7 @@ fn unavailable_result_descriptor_does_not_block_code_publication() {
         &source,
         &publication.heads,
         &runtime.exclusions().unwrap(),
-        || Err("unexpected Git conflict".into()),
+        |_| Err("unexpected Git conflict".into()),
     )
     .unwrap();
     runtime.emit(EventKind::PublicationCompleted { head }).unwrap();
