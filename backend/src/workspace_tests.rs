@@ -6,6 +6,33 @@ use std::{
 use tempfile::TempDir;
 
 #[test]
+fn host_git_disables_automatic_maintenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path();
+    workspace::git(repository, &["init", "-q"]).unwrap();
+    // A node result is complete before its ref import; an opportunistic repack
+    // must never keep the execution in Running after Pi has settled.
+    assert_eq!(workspace::git(repository, &["config", "--get", "gc.auto"]).unwrap(), "0");
+    assert_eq!(
+        workspace::git(repository, &["config", "--get", "maintenance.auto"]).unwrap(),
+        "false"
+    );
+}
+
+#[test]
+fn snapshot_commits_use_neutral_subject() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path();
+    workspace::git(repository, &["init", "-q"]).unwrap();
+    fs::write(repository.join("tracked.txt"), "snapshot").unwrap();
+    workspace::snapshot_repository(repository).unwrap();
+    assert_eq!(
+        workspace::git(repository, &["log", "-1", "--format=%s"]).unwrap(),
+        "snapshot"
+    );
+}
+
+#[test]
 fn git_line_ending_warnings_do_not_fail_snapshots() {
     let temp = tempfile::tempdir().unwrap();
     let repository = temp.path();

@@ -2,7 +2,7 @@ import { t } from "../i18n";
 import { invalidateTranscriptCaches } from "./transcriptCache";
 import { enableRuntimeEvents } from "./runtimeEvents";
 import { RequestTimeoutError, withRequestTimeout } from "./requestTimeout";
-import type { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, EnvironmentCapabilities, ResultDescriptor, RuntimeActivity } from "../types";
+import type { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
 
 const filesCache = new Map<string, string[]>();
 const skillsCache = new Map<string, SkillItem[]>();
@@ -12,17 +12,17 @@ const skillsRequests = new Map<string, number>();
 const historyRequests = new Map<string, Promise<Snapshot>>();
 const snapshotMutations = new Set([
   "save_graph", "save_config", "plan_goal", "control", "edit_planner", "edit_node",
-  "load_run", "reset_workspace", "clear_history", "delete_run", "delete_workspace", "launch_result", "cancel_result",
+  "load_run", "reset_workspace", "clear_history", "delete_run", "delete_workspace",
 ]);
 
-// Bound metadata/default-settings waits, not model streams, approvals, native
-// result execution or other long-running mutations. A client timeout never
-// claims that a server-side write was rolled back.
+// Bound metadata/default-settings waits, not model streams, approvals or other
+// long-running mutations. A client timeout never claims that a server-side
+// write was rolled back.
 const boundedCommands = new Set([
   "bootstrap", "history", "snapshot", "snapshot_if_changed", "save_config",
   "detect_repository", "repository_status", "get_planning", "list_plannings",
   "get_planning_snapshot", "get_execution_output", "get_planning_output",
-  "provider_auth", "pi_extensions", "list_skills", "list_files", "environment_capabilities",
+  "provider_auth", "pi_extensions", "list_skills", "list_files",
   "get_merger_prompt",
 ]);
 const metadataTimeoutMs = 15_000;
@@ -135,10 +135,6 @@ export const runtimeService = {
       return await request<Snapshot>("history", { runId });
     }
   },
-  environmentCapabilities: (signal?: AbortSignal) => request<EnvironmentCapabilities>("environment_capabilities", {}, signal),
-  resultDescriptor: (runId: string) => request<ResultDescriptor>("result_descriptor", { runId }),
-  launchResult: (runId: string, args: string[], entryId?: string) => request<{ output: string }>("launch_result", { runId, args, ...(entryId ? { entryId } : {}) }),
-  cancelResult: (runId: string) => request<{ requested: boolean }>("cancel_result", { runId }),
   compileGraph: (graph: Graph) => request<Plan>("compile_graph", { graph }),
   saveGraph: (graph: Graph, config: Config, runId?: string) => request<Snapshot>("save_graph", { graph, config, runId }),
   saveConfig: (config: Config, runId?: string) => request<Bootstrap>("save_config", { config, ...(runId ? { runId } : {}) }),

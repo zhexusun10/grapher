@@ -60,6 +60,42 @@ fn publish(runtime: &mut Runtime, source: &Path) -> ResultDescriptor {
 }
 
 #[test]
+fn publication_still_refuses_a_live_writer() {
+    let (_temp, _source, mut runtime) = setup(graph(&["A"], &[]), automatic(), "");
+    let job = runtime.jobs().unwrap().remove(0);
+    run_created(&mut runtime, &job, ".venv");
+    let input = runtime.state.nodes["A"].result.clone().unwrap();
+    runtime
+        .emit(EventKind::ResultExecutionStarted {
+            input,
+            args: Vec::new(),
+        })
+        .unwrap();
+    assert!(runtime.publication_live_writer().unwrap().is_some());
+}
+
+#[test]
+fn unavailable_result_descriptor_does_not_block_code_publication() {
+    let (_temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic(), "");
+    let job = runtime.jobs().unwrap().remove(0);
+    run_created(&mut runtime, &job, ".venv");
+    assert!(runtime.jobs().unwrap().is_empty());
+    fs::remove_file(Path::new(&job.execution.worktree).join(".venv/marker")).unwrap();
+    let publication = runtime.state.publication.clone().unwrap();
+    let head = crate::graph_merge::merge_graph_scoped(
+        &source,
+        &publication.heads,
+        &runtime.exclusions().unwrap(),
+        || Err("unexpected Git conflict".into()),
+    )
+    .unwrap();
+    runtime.emit(EventKind::PublicationCompleted { head }).unwrap();
+    assert_eq!(runtime.state.phase, "completed");
+    assert!(runtime.state.published_result.is_none());
+    assert!(runtime.result_descriptor().is_err());
+}
+
+#[test]
 fn best_effort_bound_fanout_is_parallel_and_custom_prefixes_never_enter_git() {
     let (_temp, source, mut runtime) = setup(
         graph(&["A", "B", "C", "D"], &[("A", "B", false), ("A", "C", false),

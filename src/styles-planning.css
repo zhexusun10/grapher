@@ -1093,7 +1093,10 @@
 }
 
 /* A new user turn starts a new request: give it more air from the previous
-   Planner reply. The tighter 8px above still applies to non-Planner rows. */
+   Planner reply. The tighter 8px above still applies to non-Planner rows.
+   Execution transcripts use the same rhythm for steers rendered inline; they
+   are not inside .planner-transcript, so they need the equivalent scope. */
+.virtualized-transcript-container.transcript-compact .chat-message-row.user.planner-user-turn,
 .planning-activity .chat-message-row.user,
 .planner-transcript .chat-message-row.user.planner-user-turn {
   margin-top: 48px;
@@ -1102,10 +1105,13 @@
 
 /* Follow-up turns rendered outside the Planner transcript (serial/node views
    and the live Planner fallback) keep the same 56px total air, counting the
-   shared column gap. */
+   shared column gap. Pending steers sit directly in an execution panel until
+   their inline row is parsed. */
+.serial-execution-panel>.chat-message-row.user.planner-follow-up,
 .chat-messages-stream>.chat-message-row.user.planner-follow-up,
 .serial-turns-container>.chat-message-row.user.planner-follow-up {
   margin-top: 44px;
+  margin-bottom: 8px;
 }
 
 /* Result cards stay at the very end of the conversation. During a new Planner

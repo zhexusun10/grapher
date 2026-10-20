@@ -29,6 +29,8 @@ import { resolveGraphPhase } from "../../lib/graphPhase";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTimeTookText, PlannerTimeTookText, formatSessionStartTime } from "../ExecutionTimeTook";
+import { SessionTokenUsage } from "../SessionTokenUsage";
+import { formatTokenCount, formatCacheHitRate } from "../../utils/tokenUsage";
 import { ExecutionTranscript, ExecutionTranscriptPlaceholder } from "../ExecutionTranscript";
 import { activePlannerOutput } from "../PlanningActivity";
 import { plannerConversationEdits, plannerHistoryIds } from "../../lib/plannerOutput";
@@ -43,7 +45,6 @@ import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
 import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
 import { computeExecutionLayers } from "../../hooks/useGraphElements";
 import { PublicationCompletedCard } from "../PublicationCompletedCard";
-import { EnvironmentResult } from "../EnvironmentResult";
 import { PlannerTranscript } from "../PlannerTranscript";
 import { resolveExecutionModelAndThinking, roleModelConfig } from "../../modelConfig";
 import { AnimatedUserTurn } from "../AnimatedUserTurn";
@@ -116,6 +117,16 @@ interface GraphWorkbenchProps {
   onConversationReady?: () => void;
 }
 
+function nodeInstructionText(text: string): string {
+  return text.replace(/^\[@[^\]]+\]\s*/, "").trim();
+}
+
+/** Inline transcript rows currently carry text only; attached files/images stay
+ * in the surrounding chat bubble so they cannot disappear while paging. */
+function canInlineSteerMessage(message: ChatMessage): boolean {
+  return !message.images?.length && !message.files?.length;
+}
+
 function ExecutionRecordHeader({ execution, expanded, onToggle, placeholder = false }: {
   execution: Execution;
   expanded: boolean;
@@ -151,6 +162,8 @@ function ExecutionRecordHeader({ execution, expanded, onToggle, placeholder = fa
 interface WorkspaceDetailsPanelProps {
   showWorking?: boolean;
   compacting?: boolean;
+  /** Overrides the generic Working label for a known lifecycle phase. */
+  workingLabel?: string;
   /** Defaults to the node wording; Planner turns may use different workspaces. */
   label?: string;
   summaryAction?: React.ReactNode;
@@ -164,6 +177,7 @@ interface WorkspaceDetailsPanelProps {
 const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
   showWorking,
   compacting,
+  workingLabel,
   label,
   summaryAction,
   additionalDetails,
@@ -180,7 +194,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
       {showWorking && (
         <div className="working-indicator" role="status" aria-live="polite">
           <span className="working-indicator-dot" />
-          {compacting ? "Compacting…" : "Working…"}
+          {compacting ? "Compacting…" : (workingLabel ?? "Working…")}
         </div>
       )}
       <div className="workspace-details-summary">
@@ -266,6 +280,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // Auto-compaction visibility per parsed execution transcript; the working
   // labels swap to "Compacting…" while the node's own session compresses.
   const [compactingAttempts, setCompactingAttempts] = useState<Record<string, boolean>>({});
+  // User turns the execution transcript has actually parsed. The outer steer
+  // bubble remains visible until then, so a consumed steer never disappears
+  // while Pi is still finishing the current tool call.
+  const [inlineUserTurns, setInlineUserTurns] = useState<Record<string, string[]>>({});
+  const handleInlineUserTurns = useCallback((execId: string, texts: string[]) => {
+    setInlineUserTurns(prev => {
+      const previous = prev[execId] ?? [];
+      return previous.length === texts.length && previous.every((text, index) => text === texts[index])
+        ? prev : { ...prev, [execId]: texts };
+    });
+  }, []);
   const [plannerHistoryCompacting, setPlannerHistoryCompacting] = useState(false);
   const handleAttemptCompacting = useCallback((execId: string, compacting: boolean) => {
     setCompactingAttempts((prev) => (!!prev[execId] === compacting ? prev : { ...prev, [execId]: compacting }));
@@ -275,6 +300,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     setCollapsedAttemptIds(new Set());
     setEditingTaskNode("");
     setTaskDraft("");
+    setInlineUserTurns({});
     onCancelEditMessage?.();
   }, [selected, state.runId]);
   useEffect(() => {
@@ -313,6 +339,27 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     ? selectedPublicationMerger
     : (isNodeMergerSelected ? selectedNodeMerger : undefined);
   const selectedMergerRunning = selectedMerger?.status === "running";
+  const renderSteerBubble = (steer: ChatMessage) => (
+    <div key={steer.id} className="chat-message-row user planner-follow-up">
+      <EditableUserBubble
+        text={nodeInstructionText(steer.text)}
+        images={steer.images}
+        files={steer.files}
+        editing={editingMessage?.id === steer.id}
+        draft={editPrefillText ?? ""}
+        onDraftChange={onEditPrefillTextChange ?? (() => { })}
+        onEdit={onEditMessage && (selectedMerger || steer.delivery !== "node_messaged")
+          ? () => { setEditingTaskNode(""); onEditMessage(steer) }
+          : undefined}
+        onCancel={() => onCancelEditMessage?.()}
+        onSend={(value) => onEditMessageSubmit ? onEditMessageSubmit(steer, value) : onSendMessage(value)}
+        disabled={locked}
+        versions={steer.versions}
+        currentVersionIndex={steer.currentVersionIndex}
+        onSwitchVersion={(idx) => onSwitchMessageVersion?.(steer, idx)}
+      />
+    </div>
+  );
 
   const [mergerPrompts, setMergerPrompts] = useState<Record<string, string>>({});
 
@@ -476,6 +523,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       id: string;
       isInitial: boolean;
       userMessage?: ChatMessage;
+      /** Steers delivered while this turn's execution was live. They belong
+       * above that execution's transcript, not in a turn of their own. */
+      steerMessages?: ChatMessage[];
       executions: Execution[];
     }> = [{
       id: `turn-0-${selectedNode.name}`,
@@ -488,6 +538,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const lastMessageByExecution = new Map(nodeMessages.filter(message => !message.delivery && message.executionId)
       .map(message => [message.executionId, message.id]));
     for (const message of nodeMessages) {
+      // A steer has no execution of its own: Pi consumes it inside the running
+      // session. Rendering it as a separate turn puts the user's message below
+      // the response it produced, so keep it with the execution it targets.
+      if (message.delivery === "steered" && message.executionId) {
+        const owner = turns.find(turn => turn.executions.some(exec => exec.id === message.executionId));
+        if (owner) {
+          (owner.steerMessages ??= []).push(message);
+          continue;
+        }
+      }
       const exact = message.executionId && lastMessageByExecution.get(message.executionId) === message.id
         ? attempts.find(item => item.id === message.executionId && !assigned.has(item.id))
         : undefined;
@@ -1266,6 +1326,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       id: string;
       userMessage: ChatMessage;
       isInitial: boolean;
+      /** Steers delivered while this turn's execution was live. Keep them above
+       * the transcript they steered instead of creating a later empty turn. */
+      steerMessages?: ChatMessage[];
       executions: Execution[];
     }> = [];
 
@@ -1281,7 +1344,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // optimistic messages and their waiting space now, not after that snapshot.
     if (!serialNode) {
       return messages.map((userMessage, index) => ({
-        id: userMessage.id, userMessage, isInitial: index === 0, executions: [] as Execution[],
+        id: userMessage.id, userMessage, isInitial: index === 0, executions: [] as Execution[], steerMessages: [] as ChatMessage[],
       }));
     }
     const latestEdit = [...state.events].reverse().find((event) =>
@@ -1341,6 +1404,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const lastMessageByExecution = new Map(followUps.filter(message => !message.delivery && message.executionId)
       .map(message => [message.executionId, message.id]));
     for (const msg of followUps) {
+      // A steer belongs to the execution that received it, so its response stays
+      // below the user bubble instead of appearing above a separate turn.
+      if (msg.delivery === "steered" && msg.executionId) {
+        const owner = turns.find(turn => turn.executions.some(execution => execution.id === msg.executionId));
+        if (owner) {
+          (owner.steerMessages ??= []).push(msg);
+          continue;
+        }
+      }
       const exact = msg.executionId && lastMessageByExecution.get(msg.executionId) === msg.id
         ? serialExecutions.find(execution => execution.id === msg.executionId && !assigned.has(execution.id)) : undefined;
       const next = exact ?? (!msg.delivery && !msg.executionId && !msg.pendingExecution
@@ -1400,9 +1472,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     nodes: state.nodes,
     executions: state.executions,
     mergers: state.mergers,
-    resultExecution: state.resultExecution,
   });
   const activityStatus = activityStatusText(activity);
+  // Publication has its own lifecycle label. Keep the node/merger panel from
+  // reporting a generic Working while the terminal result is being written.
+  const publicationWorkingLabel =
+    graphPhase === "merging" || state.publication?.status === "merging" ? "Merging…"
+      : graphPhase === "publishing" || state.publication?.status === "publishing" ? "Publishing…"
+        : selectedMerger?.node === "merger" && selectedMerger.status === "running" ? "Publishing…"
+          : undefined;
   const hasCompletedPublication = routeType === "graph" && (
     state.publication?.status === "completed" ||
     (state.phase === "completed" && state.publication?.status !== "failed" && state.publication?.status !== "publishing" && state.publication?.status !== "merging")
@@ -1837,6 +1915,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       )}
                       {turn.executions.map((exec) => {
                         const isExpanded = isAttemptExpanded(exec.id);
+                        const ownedSteers = (turn.steerMessages ?? []).filter(steer => steer.executionId === exec.id);
+                        const inlineSteerTexts = ownedSteers
+                          .filter(canInlineSteerMessage)
+                          .map(steer => nodeInstructionText(steer.text))
+                          .filter(Boolean);
+                        const renderedInline = new Set(inlineUserTurns[exec.id] ?? []);
+                        const pendingSteers = ownedSteers.filter(steer =>
+                          !canInlineSteerMessage(steer) || !isExpanded || !renderedInline.has(nodeInstructionText(steer.text)));
                         return (
                           <motion.div
                             key={exec.id}
@@ -1859,12 +1945,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   onUserResize={handleExpandableContentChange}
                                   onInitialOutputReady={handleExecutionOutputReady}
                                   onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
+                                  inlineUserTurnTexts={inlineSteerTexts}
+                                  onInlineUserTurnsChange={(texts) => handleInlineUserTurns(exec.id, texts)}
                                 />
                               </div>
                             )}
+                            {pendingSteers.map(renderSteerBubble)}
                           </motion.div>
                         );
                       })}
+                      {turn.steerMessages
+                        ?.filter(steer => !turn.executions.some(exec => exec.id === steer.executionId))
+                        .map(renderSteerBubble)}
                       {isWaitingExecution && (
                         <div className="serial-execution-panel" aria-hidden="true">
                           {showExecutionRecords && attempts.at(-1) && (
@@ -1883,6 +1975,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   key={`${state.runId}:${selectedNode.name}`}
                   showWorking={isSelectedNodeWorking}
                   compacting={isSelectedNodeCompacting}
+                  workingLabel={publicationWorkingLabel}
                   summaryAction={changesTrigger}
                   additionalDetails={changesPanel}
                   scrollContainerRef={chatScrollRef}
@@ -1899,8 +1992,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <p>thinking level: {snapshotModelInfo.thinkingLevel}</p>
                     </>
                   )}
-                  <p>start time: {formatSessionStartTime(execution?.startedAt)}</p>
-                  <p>time took: <ExecutionTimeTookText execution={execution} /></p>
+                  <div className="session-details-row">
+                    <p>start time: {formatSessionStartTime(execution?.startedAt)}</p>
+                    <p>time took: <ExecutionTimeTookText execution={execution} /></p>
+                  </div>
+                  <SessionTokenUsage usage={execution?.metrics?.usage} />
                 </WorkspaceDetailsPanel>
 
                 {selectedState?.error && (
@@ -2027,6 +2123,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               />
                             </motion.div>
                           )}
+                          {turn.steerMessages
+                            ?.filter(steer => !turn.executions.some(exec => exec.id === steer.executionId))
+                            .map(renderSteerBubble)}
 
                           {turn.isInitial && showRouteBadge && (
                             <motion.div
@@ -2041,6 +2140,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           )}
 
                           {turn.executions.map((exec) => {
+                            const ownedSteers = (turn.steerMessages ?? []).filter(steer => steer.executionId === exec.id);
+                            const inlineSteerTexts = ownedSteers
+                              .filter(canInlineSteerMessage)
+                              .map(steer => nodeInstructionText(steer.text))
+                              .filter(Boolean);
+                            const renderedInline = new Set(inlineUserTurns[exec.id] ?? []);
+                            const pendingSteers = ownedSteers.filter(steer =>
+                              !canInlineSteerMessage(steer) || !renderedInline.has(nodeInstructionText(steer.text)));
                             return (
                               <motion.div
                                 key={exec.id}
@@ -2057,8 +2164,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                     onUserResize={handleExpandableContentChange}
                                     onInitialOutputReady={handleExecutionOutputReady}
                                     onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
+                                    inlineUserTurnTexts={inlineSteerTexts}
+                                    onInlineUserTurnsChange={(texts) => handleInlineUserTurns(exec.id, texts)}
                                   />
                                 </div>
+                                {pendingSteers.map(renderSteerBubble)}
                               </motion.div>
                             );
                           })}
@@ -2077,6 +2187,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       key={`${state.runId}:serial`}
                       showWorking={isMainViewWorking}
                       compacting={isMainViewWorking && !!serialExecution?.id && !!compactingAttempts[serialExecution.id]}
+                      workingLabel={publicationWorkingLabel}
                       summaryAction={changesTrigger}
                       additionalDetails={changesPanel}
                       scrollContainerRef={chatScrollRef}
@@ -2091,8 +2202,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           <p>thinking level: {serialModelInfo.thinkingLevel}</p>
                         </>
                       )}
-                      <p>start time: {formatSessionStartTime(serialExecution?.startedAt)}</p>
-                      <p>time took: <ExecutionTimeTookText execution={serialExecution} /></p>
+                      <div className="session-details-row">
+                        <p>start time: {formatSessionStartTime(serialExecution?.startedAt)}</p>
+                        <p>time took: <ExecutionTimeTookText execution={serialExecution} /></p>
+                      </div>
+                      <SessionTokenUsage usage={serialExecution?.metrics?.usage} />
                     </WorkspaceDetailsPanel>
                     {serialNodeState?.error && (
                       <div className={`node-error${serialNodeState.status === "paused" ? " paused" : ""}`} style={{ marginTop: 12 }}>
@@ -2264,6 +2378,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     label={t("规划会话信息")}
                     showWorking={isMainViewWorking}
                     compacting={isMainViewCompacting}
+                    workingLabel={publicationWorkingLabel}
                     summaryAction={changesTrigger}
                     additionalDetails={changesPanel}
                     scrollContainerRef={chatScrollRef}
@@ -2271,20 +2386,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     onAfterToggle={handleWorkspaceDetailsAfterToggle}
                   >
                     <p>workspace: {plannerWorkspace || config.repository || "preparing workspace…"}</p>
-                    {plannerWorkspaces.length > 1 && (
-                      <details>
-                        <summary>workspace history</summary>
-                        {plannerWorkspaces.map(turn => (
-                          <p key={turn.planningId} title={turn.planningId}>
-                            {turn.planningId.slice(0, 8)}: {turn.worktree}
-                          </p>
-                        ))}
-                      </details>
-                    )}
                     <p>model: {plannerModelInfo.model}</p>
                     <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
-                    <p>start time: {formatSessionStartTime(plannerStartTime)}</p>
-                    <p>time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerStream?.startedAt} durationSeconds={plannerRole?.durationSeconds} /></p>
+                    <div className="session-details-row">
+                      <p>start time: {formatSessionStartTime(plannerStartTime)}</p>
+                      <p>time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerStream?.startedAt} durationSeconds={plannerRole?.durationSeconds} /></p>
+                    </div>
+                    <SessionTokenUsage usage={plannerRole?.usage} />
                   </WorkspaceDetailsPanel>
                 )}
               </div>
@@ -2435,14 +2543,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   onInit={centerGraph} onSelect={selectGraphNode} onLayout={synchronizeGraph} />
 
                 {state.graph.nodes.length > 0 && (
-                  <>
-                    <div className="graph-note">
-                      <span className="note-line" />{t("依赖前进")}<span className="note-line feedback" />{t("执行反馈")}</div>
-
-                    <div className="planner-off">
-                      <span />Planner {isPlanning ? t("规划中") : state.graph.nodes.length ? t("已离线") : t("未启动")}
-                    </div>
-                  </>
+                  <div className="graph-note">
+                    <span className="note-line" />{t("依赖前进")}<span className="note-line feedback" />{t("执行反馈")}</div>
                 )}
               </div>
 
@@ -2470,7 +2572,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                 : graphPhase === "paused" ? (state.paused
                                   ? t("执行已暂停，点击继续可恢复")
                                   : t("执行已停止，点击继续恢复失败节点（不会追加消息）"))
-                                  : graphPhase === "completed" ? t("运行已完成")
+                                  : graphPhase === "completed" ? t("运行已完成 - 本次消耗 Token:{0} Cached:{1}",
+                                    formatTokenCount(state.runMetrics?.totalUsage?.totalTokens),
+                                    formatCacheHitRate(state.runMetrics?.totalUsage))
                                     : state.approved ? phaseText[graphPhase] ?? graphPhase : ""}
                     </span>
                     <div>
@@ -2504,7 +2608,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       ) : null}
                     </div>
                   </div>
-                  <EnvironmentResult state={state} />
                 </div>
               )}
             </motion.div>

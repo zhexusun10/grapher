@@ -2650,11 +2650,14 @@ fn drive(service: Arc<Service>) {
                         let preflight = {
                             let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                             runtime.publication_environment_input()
-                        }.and_then(|input| {
-                            if let Some(job) = &input { job.validate()?; }
-                            Ok(input)
-                        });
-                        let result = preflight.and_then(|input| crate::process_control::with_owner(&run_id, || {
+                        };
+                        {
+                            let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                            if let Some(layout) = runtime.publication_live_writer()? {
+                                return Err(format!("Cannot publish over a live writer: {layout}"));
+                            }
+                        }
+                        let result = crate::process_control::with_owner(&run_id, || {
                             let exclusions = service.runtime.lock().map_err(|e| e.to_string())?.exclusions()?;
                             let head = crate::graph_merge::merge_graph_scoped(&repository, &publication.heads, &exclusions, || {
                                 let attempt = service
@@ -2680,9 +2683,22 @@ fn drive(service: Arc<Service>) {
                                     },
                                 )
                             })?;
-                            let descriptor = input.as_ref().map(|job| job.descriptor(&head)).transpose()?;
+                            let descriptor = match preflight {
+                                Ok(Some(job)) => match job.validate().and_then(|_| job.descriptor(&head)) {
+                                    Ok(descriptor) => Some(descriptor),
+                                    Err(error) => {
+                                        eprintln!("[Grapher] Result descriptor unavailable; publishing code without it: {error}");
+                                        None
+                                    }
+                                },
+                                Ok(None) => None,
+                                Err(error) => {
+                                    eprintln!("[Grapher] Environment preflight unavailable; publishing code without it: {error}");
+                                    None
+                                }
+                            };
                             Ok((head, descriptor))
-                        }));
+                        });
                         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                         match result {
                             Ok((head, descriptor)) => {

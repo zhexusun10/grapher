@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Session details now show backend-reported token usage for Planner, Serial/Graph node, and Merger turns: total, input, output, cache read/write, and reasoning tokens. Completed Graph runs also show run-level token totals and cache hit rate in the topology footer.
+- The workbench now displays explicit `Publishing…` and `Merging…` states while publication is in progress instead of a generic working label.
+
+### Changed
+
+- Improved session-details readability with proportional typography, consistent row spacing, and wrapped multi-column timing and token fields.
+- Snapshot commits created while preparing multi-agent workspaces now use the neutral subject `snapshot` instead of `Grapher execution snapshot`.
+- Automatic Git maintenance is disabled during Grapher-owned snapshot commits and node ref imports so opportunistic repacking cannot stall node completion.
+
+### Removed
+
+- Removed the frontend native-environment result panel and its unused frontend command wrappers/types. Environment admission, publication descriptors, and result execution remain backend/runtime concerns and are no longer exposed in the UI.
+
+### Fixed
+
+- Node Agent and Serial steer messages now stay with the execution they steered: they render above that execution's transcript instead of appearing as a separate later turn or below the response they produced.
+- ML environment result-descriptor generation no longer gates code publication. If environment evidence cannot produce a launchable descriptor, the Run still publishes code without one; stale descriptors are rejected, and live-writer safety is preserved.
+
 ## [1.2.5] - 2026-10-20
 
 ### Changed

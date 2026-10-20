@@ -121,7 +121,7 @@ export function normalizeModelThinkingLevels(config: Config, catalog?: ProviderC
         if (fallback && levels.includes(fallback)) level = fallback;
         else level = defaultRoleThinkingLevel(id, levels, model?.thinkingLevelFallbacks);
       }
-    } else if (id === "nodeAgent" && config.thinkingLevel && config.thinkingLevel !== "low") {
+    } else if ((id === "nodeAgent" || config.thinkingLevel === "off") && config.thinkingLevel && config.thinkingLevel !== "low") {
       level = config.thinkingLevel;
       if (levels?.length && !levels.includes(level)) {
         const fallback = model?.thinkingLevelFallbacks?.[level];

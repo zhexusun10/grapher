@@ -1095,6 +1095,14 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
             "user.name=Grapher",
             "-c",
             "user.email=runtime@grapher.local",
+            // Completion must not wait for an opportunistic repack. Importing
+            // a node ref otherwise triggers fetch's automatic maintenance and
+            // can hold the node in Running for minutes on a large repository.
+            // Maintenance remains an explicit operation, never a side effect.
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
         ])
         .args(cli_args)
         .current_dir(cwd)
@@ -2063,7 +2071,7 @@ pub(crate) fn snapshot_node_scoped(
     if !git(&canonical_path, &["diff", "--cached", "--name-only"])?.is_empty() {
         git(
             &canonical_path,
-            &["commit", "-m", "Grapher execution snapshot"],
+            &["commit", "-m", SNAPSHOT_COMMIT_MESSAGE],
         )?;
     }
     let head = git(&canonical_path, &["rev-parse", "HEAD"])?;
@@ -2111,6 +2119,8 @@ pub(crate) fn snapshot_node_scoped(
             "-q",
             "--no-tags",
             "--no-write-fetch-head",
+            // Ref import is part of node completion; never run maintenance here.
+            "--no-auto-gc",
             &path_url,
         ]);
         if !pinned {
@@ -2334,6 +2344,10 @@ fn stage_tracked_host_metadata(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Commit text for Grapher-owned snapshots. Keep it neutral: node agents read
+/// `git log`, while the recorded Grapher author still preserves provenance.
+pub(crate) const SNAPSHOT_COMMIT_MESSAGE: &str = "snapshot";
+
 pub(crate) fn stage_scoped(path: &Path, exclusions: &[String]) -> Result<(), String> {
     // Runtime deliberately overrides Git's ignore rules for project files:
     // every ordinary project file becomes part of the node/source Git snapshot.
@@ -2437,7 +2451,7 @@ pub(crate) fn snapshot_repository_scoped(
         }
         stage_scoped(path, exclusions)?;
         if !git(path, &["diff", "--cached", "--name-only"])?.is_empty() {
-            git(path, &["commit", "-m", "Grapher execution snapshot"])?;
+            git(path, &["commit", "-m", SNAPSHOT_COMMIT_MESSAGE])?;
         }
         git(path, &["rev-parse", "HEAD"])
     } else {
@@ -2474,7 +2488,7 @@ pub(crate) fn snapshot_repository_scoped(
             if status.trim().is_empty() {
                 commit.push("--allow-empty");
             }
-            commit.extend(["-m", "Grapher execution snapshot"]);
+            commit.extend(["-m", SNAPSHOT_COMMIT_MESSAGE]);
             git(&canonical, &commit)?;
         }
         git(&canonical, &["--git-dir", git_dir_str, "rev-parse", "HEAD"])

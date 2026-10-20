@@ -62,7 +62,7 @@ Publication combines valid terminal results with your source changes. Real Git c
 
 **Post-task Planner review** is enabled by default for new Graph Runs. After successful publication it invokes the existing Planner to inspect, report, wrap up or propose more work. With **Auto Approve**, new work can run without another approval click, leading to further iterations and model calls. These settings are captured when a Run is created; configure them before starting a new Run. An interrupted review is not silently repeated.
 
-Native environment support is **experimental**. There is no user environment-mode selector; tasks use native tools and backend-verified bindings when available. Reuse is best-effort, not a promise of portable environments. Managed environments are not copied into source. Published results may offer named business entries and launch/retry/cancel controls; selecting an entry is not selecting an environment policy.
+Native environment support is **experimental**. There is no user environment-mode selector; tasks use native tools and backend-verified bindings when available. Reuse is best-effort, not a promise of portable environments. Managed environments are not copied into source. Published result descriptors and launch/retry/cancel controls are not exposed in the interface; they remain available only through the local API.
 
 ## Data and removal
 

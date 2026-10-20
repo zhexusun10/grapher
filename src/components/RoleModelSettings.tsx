@@ -2,7 +2,7 @@ import { t } from "../i18n";
 import React, { useState } from "react";
 import type { Config, ThinkingLevel } from "../types";
 import type { ProviderCatalog } from "../services/providerAuth";
-import { defaultRoleThinkingLevel, modelRoles, normalizeModelThinkingLevels, roleModelConfig, updateRoleModelConfig } from "../modelConfig";
+import { modelRoles, normalizeModelThinkingLevels, roleModelConfig, updateRoleModelConfig } from "../modelConfig";
 
 const thinkingLabels: Record<ThinkingLevel, string> = {
   off: t("关闭"), minimal: t("最少 (minimal)"), low: t("低 (low)"),
@@ -62,11 +62,7 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
                 <select value={model} onChange={event => {
                   const value = event.target.value;
                   if (!value || availableModels.some(item => `${item.provider}/${item.id}` === value)) {
-                    setConfig(prev => {
-                      const targetModel = catalog?.models.find(item => `${item.provider}/${item.id}` === value);
-                      const defaultLevel = value ? defaultRoleThinkingLevel(role.id, targetModel?.thinkingLevels, targetModel?.thinkingLevelFallbacks) : undefined;
-                      return normalizeModelThinkingLevels(updateRoleModelConfig(prev, role.id, { model: value, thinkingLevel: defaultLevel }), catalog);
-                    });
+                    setConfig(prev => normalizeModelThinkingLevels(updateRoleModelConfig(prev, role.id, { model: value }), catalog));
                   }
                 }} className="provider-filter-select" disabled={busy || !catalog || availableModels.length === 0}>
                   <option value="">{role.id === "nodeAgent" ? t("请选择可用模型") : t("使用 Node Agent 默认模型")}</option>

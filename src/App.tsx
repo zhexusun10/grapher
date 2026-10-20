@@ -252,8 +252,7 @@ export default function App() {
   }, []);
   const hasActiveExecutions = state.executions.some(item => item.status === "running") ||
     (state.mergers ?? []).some(item => item.status === "running") ||
-    Object.values(state.nodes).some(item => item.status === "running" || item.status === "dirty") ||
-    state.resultExecution?.status === "running";
+    Object.values(state.nodes).some(item => item.status === "running" || item.status === "dirty");
 
   const [dataPath, setDataPath] = useState(() => {
     try {
@@ -469,8 +468,7 @@ export default function App() {
   const active = publishing || publicationFailed ||
     Object.values(state.nodes).some((node) => node.status === "running" || node.status === "dirty") ||
     state.executions.some((item) => item.status === "running") ||
-    (state.mergers ?? []).some((item) => item.status === "running") ||
-    state.resultExecution?.status === "running";
+    (state.mergers ?? []).some((item) => item.status === "running");
   // A recovered Planner turn must not lock the composer: the user may still
   // steer the live process or send a follow-up once the turn settles.
   const locked = busy || repositoryBlocked;

@@ -3,7 +3,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallba
 import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
 import { TranscriptItem } from "../types";
 import { closeThinkingItems } from "../services/thinkingTranscript";
-import { parseTranscriptChunkLines, type ParseTranscriptChunkState } from "../services/transcriptParser";
+import { parseTranscriptChunkLines, type ParseTranscriptChunkState, type TranscriptParseOptions } from "../services/transcriptParser";
 import { settleInterruptedItems } from "../services/transcriptSettle";
 import { Terminal } from "lucide-react";
 import { shareJson } from "../services/structuralSharing";
@@ -25,6 +25,9 @@ interface VirtualizedTranscriptProps {
   compact?: boolean;
   showUserTurns?: boolean;
   skipFirstUser?: boolean;
+  /** When set, only these normalized user texts render as transcript rows.
+   * Execution transcripts use it for steers without duplicating owned turns. */
+  userTurnTexts?: readonly string[];
   /** The source execution is terminal: unterminated live markers display as interrupted, not running. */
   settled?: boolean;
   onEditUser?: (text: string, replacement: string) => boolean | void | Promise<unknown>;
@@ -34,6 +37,9 @@ interface VirtualizedTranscriptProps {
    * compaction_start seen without its matching compaction_end), so
    * conversation chrome can swap its working label for a compacting one. */
   onCompactingChange?: (compacting: boolean) => void;
+  /** Reports the user turns actually present in the transcript. Steer bubbles
+   * outside the transcript stay visible until their inline copy is parsed. */
+  onInlineUserTurnsChange?: (texts: string[]) => void;
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -184,10 +190,12 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   compact = false,
   showUserTurns = false,
   skipFirstUser = false,
+  userTurnTexts,
   settled = false,
   onEditUser,
   onReachTop,
   onCompactingChange,
+  onInlineUserTurnsChange,
 }) => {
   const [editingUser, setEditingUser] = useState<string | null>(null);
   const [userDraft, setUserDraft] = useState("");
@@ -206,7 +214,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const byteOffsetRef = useRef(startOffset);
   const leadingFragmentRef = useRef(startOffset > 0);
   const inputStartRef = useRef(startOffset);
-  const parseOptionsRef = useRef(`${showUserTurns}:${skipFirstUser}`);
+  const userTurnTextsKey = userTurnTexts?.join("\u0000") ?? "";
+  const parseOptionsRef = useRef(`${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}`);
   const sharedViewport = inline || compact;
   const inTagThinkingRef = useRef<boolean>(false);
   const seenFirstUserRef = useRef(false);
@@ -230,6 +239,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const lastSegmentSourceRef = useRef("");
   const reportedCompactingRef = useRef<boolean | null>(null);
   const onCompactingChangeRef = useRef(onCompactingChange);
+  const onInlineUserTurnsChangeRef = useRef(onInlineUserTurnsChange);
 
   // Height cache for virtualization
   const itemHeightsRef = useRef<Map<string, number>>(new Map());
@@ -282,7 +292,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       return false;
     }
 
-    const parseOptions = `${showUserTurns}:${skipFirstUser}`;
+    const parseOptions = `${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}`;
     // Steady-state renders hand back the identical string; skip all scanning.
     if (rawOutput === lastRawOutputRef.current && parseOptions === parseOptionsRef.current &&
       startOffset === inputStartRef.current) return false;
@@ -295,7 +305,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       for (const source of states.keys()) if (!live.has(source)) states.delete(source);
       let changed = false;
       const combined: TranscriptItem[] = [];
-      const parseFresh = (segment: PlanningSegment, segmentOptions: { showUserTurns: boolean; skipFirstUser: boolean }) => {
+      const parseFresh = (segment: PlanningSegment, segmentOptions: TranscriptParseOptions) => {
         const state = freshSegmentState(segment);
         states.set(segment.source, state);
         const lastNewline = segment.text.lastIndexOf("\n");
@@ -311,11 +321,12 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         return state;
       };
       segments.forEach((segment, index) => {
-        const segmentOptions = {
+        const segmentOptions: TranscriptParseOptions = {
           showUserTurns,
           // Only the first revision can hold the goal turn the conversation
           // already renders, and only when its window reaches byte zero.
           skipFirstUser: showUserTurns && skipFirstUser && index === 0 && segment.startOffset === 0,
+          userTurnTexts,
         };
         const state = states.get(segment.source);
         const unchanged = !!state && segment.startOffset === state.startOffset && segment.text === state.text;
@@ -460,7 +471,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         prependedItems,
         pendingToolsRef.current,
         prependState,
-        { showUserTurns, skipFirstUser: skipFirstUser && startOffset === 0 },
+        { showUserTurns, skipFirstUser: skipFirstUser && startOffset === 0, userTurnTexts },
         currentTailItems,
       );
 
@@ -557,7 +568,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       currentItems,
       pendingTools,
       forwardState,
-      { showUserTurns, skipFirstUser },
+      { showUserTurns, skipFirstUser, userTurnTexts },
     );
 
     sourceRef.current = result.endSource;
@@ -602,7 +613,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     itemsRef.current = shareJson(previousItems, currentItems);
     lastRawOutputRef.current = rawOutput;
     return itemsRef.current !== previousItems;
-  }, [showUserTurns, skipFirstUser, startOffset, settled, inline]);
+  }, [showUserTurns, skipFirstUser, userTurnTextsKey, startOffset, settled, inline]);
 
   const computeCompacting = (): boolean => {
     if (segmentedRef.current) {
@@ -616,6 +627,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
   useEffect(() => {
     onCompactingChangeRef.current = onCompactingChange;
+    onInlineUserTurnsChangeRef.current = onInlineUserTurnsChange;
   });
 
   // Report after the parse commit, never during render: parents own state that
@@ -648,6 +660,13 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     return visible.filter(item => item.type !== "thinking" ||
       item.status === "running" || item.content?.trim());
   }, [parsedItems, settled]);
+  const inlineUserTurns = useMemo(() => items
+    .filter(item => item.role === "user")
+    .map(item => item.content || ""), [items]);
+  const inlineUserTurnsKey = inlineUserTurns.join("\u0000");
+  useEffect(() => {
+    if (showUserTurns) onInlineUserTurnsChangeRef.current?.(inlineUserTurns);
+  }, [inlineUserTurnsKey, showUserTurns]);
 
   const lastScrollTopRef = useRef(0);
   const prevItemsVersionRef = useRef(itemsVersion);

@@ -323,13 +323,105 @@ test("Planner details show the backend-selected cwd for every turn", { timeout: 
       await page.evaluate(path => window.audit.selectPlannerWorkspace(path), worktree);
       await details.getByText(`workspace: ${worktree}`, { exact: true }).waitFor();
     }
-    await details.locator("summary").click();
-    await details.getByText("turn-1: /worktrees/run/root", { exact: true }).waitFor();
-    await details.getByText("turn-2: /worktrees/run/right", { exact: true }).waitFor();
-    await details.getByText("turn-3: /mock", { exact: true }).waitFor();
+    assert.equal(await details.getByText("workspace history", { exact: true }).count(), 0);
+    assert.doesNotMatch(await details.innerText(), /\/worktrees\/run\/(?:root|right)/,
+      "planning details show the current workspace, not historical workspaces");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+test("completed topology reports backend run totals and cache percentage only after completion", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  const emptyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 };
+  const totalUsage = { ...emptyUsage, input: 99_990_000, cacheRead: 899_910_000, totalTokens: 999_900_000 };
+  const metrics = { totalDurationSeconds: 1, planningDurationSeconds: 0, executionDurationSeconds: 1,
+    assistantMessages: 1, tools: 0, toolErrors: 0, totalUsage, planningUsage: emptyUsage, executionUsage: totalUsage };
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=graph`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.setRunSummary);
+    await page.evaluate(metrics => {
+      window.audit.startExecution();
+      window.audit.finish();
+      // The current node is not the source of the conversation-wide total.
+      window.audit.setExecutionMetrics({ durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0,
+        usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 200 } });
+      window.audit.setRunSummary("running", metrics);
+    }, metrics);
+    const status = page.locator(".graph-bottom .approval-row > span");
+    await status.waitFor();
+    assert.doesNotMatch(await status.innerText(), /Tokens used|cached:/);
+    await page.evaluate(metrics => window.audit.setRunSummary("completed", metrics), metrics);
+    await status.filter({ hasText: /Run completed - Tokens used: 999\.9m\s+cached:90%/ }).waitFor();
+    await page.setViewportSize({ width: 600, height: 900 });
+    assert.equal(await page.locator(".graph-bottom").evaluate(element => element.scrollWidth > element.clientWidth), false,
+      "the completed usage summary must fit or wrap inside the topology footer");
+    await page.evaluate(metrics => window.audit.setRunSummary("completed", metrics), { ...metrics, totalUsage: emptyUsage });
+    await status.filter({ hasText: /Tokens used: 0k\s+cached:0%/ }).waitFor();
+    await page.evaluate(() => window.audit.setRunSummary("completed", null));
+    await status.filter({ hasText: /Tokens used: —\s+cached:—/ }).waitFor();
+    await page.evaluate(metrics => window.audit.setRunSummary("running", metrics), metrics);
+    await status.filter({ hasNotText: "Tokens used" }).waitFor();
+    assert.doesNotMatch(await status.innerText(), /cached:/);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
+  test(`${mode}: session token usage follows backend metrics without retaining stale counts`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await newPage(route => route.fulfill({ json: {
+      result: route.request().url().endsWith("/get_merger_prompt") ? { prompt: "Merge the completed work." } : {},
+    } }));
+    try {
+      await page.goto(`${origin}/__workspace-footer?mode=${mode}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.startExecution);
+      if (mode !== "planner") await page.evaluate(() => { window.audit.startExecution(); window.audit.finish(); });
+      await page.getByRole("button", { name: mode === "planner" ? "Planning session details" : "Workspace and session details", exact: true }).click();
+      const details = page.locator(".workspace-details-body");
+      const labels = ["total tokens", "input", "output", "cache read", "cache write", "reasoning"];
+      for (const label of labels) await details.getByText(`${label}: —`, { exact: true }).waitFor();
+      const update = usage => page.evaluate(({ mode, usage }) => {
+        const metrics = { durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0, usage };
+        if (mode === "planner") window.audit.setPlannerRoles({
+          // Other planning roles must not leak into the Planner's own counters.
+          partition: { ...metrics, model: "partition/model", usage: { ...usage, totalTokens: 999_999 } },
+          ...(usage ? { planner: { ...metrics, model: "planner/model" } } : {}),
+        });
+        else window.audit.setExecutionMetrics(usage ? metrics : null);
+      }, { mode, usage });
+      await update({ totalTokens: 18_000, input: 12_000, output: 1_800, cacheRead: 4_000, cacheWrite: 200, reasoning: 600 });
+      for (const [index, value] of ["18k", "12k", "1.8k", "4k", "0.2k", "0.6k"].entries()) {
+        await details.getByText(`${labels[index]}: ${value}`, { exact: true }).waitFor();
+      }
+      await update({ totalTokens: 1_234_567, input: 1_000_000, output: 200_000, cacheRead: 30_000, cacheWrite: 4_000, reasoning: 567 });
+      for (const [index, value] of ["1.23m", "1m", "200k", "30k", "4k", "0.57k"].entries()) {
+        await details.getByText(`${labels[index]}: ${value}`, { exact: true }).waitFor();
+      }
+      const positions = await details.locator("p").evaluateAll(elements => elements.map(element => {
+        const rect = element.getBoundingClientRect();
+        return { text: element.textContent, top: rect.top, left: rect.left, right: rect.right };
+      }));
+      let previousTop = -Infinity;
+      for (const group of [["start time", "time took"], labels.slice(0, 3), labels.slice(3)]) {
+        const fields = group.map(label => positions.find(item => item.text.startsWith(`${label}: `)));
+        assert.ok(fields.every(Boolean), `missing session fields: ${group.join(", ")}`);
+        assert.ok(fields[0].top > previousTop, "timing, totals and cache details occupy successive rows");
+        previousTop = fields[0].top;
+        for (let index = 1; index < fields.length; index++) {
+          assert.ok(Math.abs(fields[index].top - fields[0].top) <= 1, `${group.join(", ")} must share a row`);
+          assert.ok(fields[index].left > fields[index - 1].right, `${group[index]} must be to the right of ${group[index - 1]}`);
+        }
+      }
+      await page.setViewportSize({ width: 600, height: 900 });
+      const overflows = await details.evaluate(element => element.scrollWidth > element.clientWidth);
+      assert.equal(overflows, false, "narrow session panels wrap fields instead of overflowing horizontally");
+      await update({ totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 });
+      for (const label of labels) await details.getByText(`${label}: 0k`, { exact: true }).waitFor();
+      await update(null);
+      for (const label of labels) await details.getByText(`${label}: —`, { exact: true }).waitFor();
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
 
 for (const [mode, turn] of [
   ["serial", "provisional"], ["serial", "initial"], ["serial", "follow-up"], ["graph", "initial"], ["graph", "follow-up"],

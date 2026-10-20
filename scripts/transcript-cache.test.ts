@@ -173,6 +173,28 @@ const assistantEnd = (text: string) => JSON.stringify({
   type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] },
 }) + "\n";
 
+test("only requested user turns render inline without replaying the task turn", () => {
+  const output = [
+    { type: "message", id: "task", message: { role: "user", content: [{ type: "text", text: "2" }] } },
+    { type: "message", id: "a1", message: { role: "assistant", content: [{ type: "text", text: "exploring" }] } },
+    { type: "message", id: "steer", message: { role: "user", content: [{ type: "text", text: "你在尝试干嘛" }] } },
+    { type: "message", id: "a2", message: { role: "assistant", content: [{ type: "text", text: "answer" }] } },
+  ].map(event => JSON.stringify(event)).join("\n") + "\n";
+  const state: ParseTranscriptChunkState = {
+    source: "output", byteOffset: 0, leadingFragment: false,
+    inTagThinking: false, inFinalResponse: false, finalResponseSuppressed: false,
+    seenFirstUser: false, pendingUserStart: false, assistantStartIndex: 0,
+    userMessageStarts: new Set(), compacting: false,
+  };
+  const items = parseTranscriptChunkLines(output.slice(0, -1).split("\n"), [], new Map(), state,
+    { showUserTurns: true, skipFirstUser: false, userTurnTexts: ["你在尝试干嘛"] }).currentItems;
+  assert.deepEqual(items.map(item => [item.role, item.content]), [
+    ["assistant", "exploring"],
+    ["user", "你在尝试干嘛"],
+    ["assistant", "answer"],
+  ]);
+});
+
 test("prepending across a large agent_end removes only the final-response copy, not real repeated replies", () => {
   const answer = "集成节点已完成 PASS 🚀\n\n## 验证\n\n| 文件 | 结果 |\n|---|---|\n| a.py | 通过 |\n";
   // agent_end repeats the session and can exceed both the initial tail and an older page.

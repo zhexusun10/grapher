@@ -33,15 +33,22 @@ function finalResponseText(text: string): string {
 }
 
 /** Shared by incremental replay and transcript regression tests. */
+export interface TranscriptParseOptions {
+  showUserTurns: boolean;
+  skipFirstUser: boolean;
+  /** When set, only these normalized user texts become transcript rows. Node
+   * transcripts use it to render steers inline without replaying the task and
+   * continuation turns that the conversation chrome already owns. */
+  userTurnTexts?: readonly string[];
+}
+
+/** Shared by incremental replay and transcript regression tests. */
 export function parseTranscriptChunkLines(
   lines: string[],
   currentItems: TranscriptItem[],
   pendingTools: Map<string, TranscriptItem>,
   state: ParseTranscriptChunkState,
-  options: {
-    showUserTurns: boolean;
-    skipFirstUser: boolean;
-  },
+  options: TranscriptParseOptions,
   tailItems?: TranscriptItem[],
 ): { currentItems: TranscriptItem[]; endByteOffset: number; endSource: string } {
   let lineOffset = state.byteOffset;
@@ -160,6 +167,7 @@ export function parseTranscriptChunkLines(
       if (!options.showUserTurns) return;
       const text = stripPlannerContext(textContent(message.content)).trim();
       if (!text || (entryId && currentItems.some(item => item.id === `session_user_${entryId}`))) return;
+      if (options.userTurnTexts && !options.userTurnTexts.includes(text)) return;
       const first = !state.seenFirstUser;
       state.seenFirstUser = true;
       if (first && options.skipFirstUser) return;
@@ -212,6 +220,9 @@ export function parseTranscriptChunkLines(
       state.finalResponseSuppressed = false;
 
       if (options.showUserTurns && (event.type === "message_start" || event.type === "message_end") && event.message?.role === "user") {
+        const content = event.message.content;
+        const display = stripPlannerContext(textContent(content)).trim();
+        if (options.userTurnTexts && !options.userTurnTexts.includes(display)) continue;
         const messageId = event.message.id;
         if (event.type === "message_end") {
           if (state.pendingUserStart || (messageId && state.userMessageStarts.has(messageId))) {
@@ -225,9 +236,6 @@ export function parseTranscriptChunkLines(
         const first = !state.seenFirstUser;
         state.seenFirstUser = true;
         if (first && options.skipFirstUser) continue;
-        const content = event.message.content;
-        const text = textContent(content);
-        const display = stripPlannerContext(text).trim();
         if (display.trim()) currentItems.push({
           id: messageId ? `user_${messageId}` : rowId("user"),
           type: "text", role: "user", content: display, timestamp: Date.now(),

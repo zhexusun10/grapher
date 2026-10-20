@@ -176,6 +176,11 @@ workspace. Every entry uses the final published code commit and passes native
 integrity/startup checks. Validation and code preparation run outside the Run
 mutex; descriptor/completion events commit together after the publication worker
 identity/state check. Graph completion still requires successful publication.
+Descriptor construction is best-effort and does not itself gate code
+publication: if environment evidence cannot produce a descriptor, the Run still
+publishes without one. Live-writer and workspace-exclusion safety checks still
+apply. A descriptor whose code reference is not the current published head is
+rejected.
 
 Different terminal environments do not prevent publication. A default entry is
 available only when startup bindings and business-prefix bytes agree (private
@@ -193,8 +198,8 @@ business entries over the current project code.
 | `/api/launch_result` | `{"runId":"…","entryId":"train","args":["train.py","--smoke"]}` → native entry stdout, no model call (`entryId` optional with a unique default) |
 | `/api/cancel_result` | `{"runId":"…"}` → requests cancellation, not a claim of termination |
 
-The workbench displays/copies descriptors and exposes business arguments,
-launch/retry/cancel. Result arguments/references are durable evidence, not Agent
+The interface does not expose descriptors or result launch/retry/cancel controls;
+local API clients do. Result arguments/references are durable evidence, not Agent
 conversation messages. Success advances matching current aliases and requests
 **republishing**, not synthetic completion; failure preserves partial work.
 

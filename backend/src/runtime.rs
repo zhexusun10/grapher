@@ -327,8 +327,14 @@ impl Runtime {
             }
         }
         if let EventKind::PublicationCompleted { head } = &kind {
-            if let Some(descriptor) = self.publication_descriptor(head)? {
-                return self.emit_outputs(vec![EventKind::ResultPublished { descriptor }, kind]);
+            match self.publication_descriptor(head) {
+                Ok(Some(descriptor)) => {
+                    return self.emit_outputs(vec![EventKind::ResultPublished { descriptor }, kind])
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!(
+                    "[Grapher] Result descriptor unavailable; publishing code without it: {error}"
+                ),
             }
         }
         crate::cleanup::remember_event(&self.root, &self.store, &self.state, &kind)?;
@@ -3718,6 +3724,26 @@ impl Runtime {
         self.emit_outputs(events)
     }
 
+    /// Publication must never merge over a live writer, even when environment
+    /// metadata cannot produce a launchable descriptor.
+    pub(crate) fn publication_live_writer(&self) -> Result<Option<String>, String> {
+        self.require_current_file_contract()?;
+        if self.state.config.is_none() {
+            return Err("Missing config".into());
+        }
+        if self.environments()?.is_none() {
+            return Ok(None);
+        }
+        for (_, input) in self.terminal_results()? {
+            if let Some(layout) = input.layout.as_deref() {
+                if self.path_is_running(Path::new(layout)) {
+                    return Ok(Some(layout.into()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Metadata-only reservation. All native scans and code preparation can run
     /// outside the actor, including independent terminal result publication.
     pub(crate) fn publication_environment_input(&self) -> Result<Option<PublicationJob>, String> {
@@ -3751,6 +3777,14 @@ impl Runtime {
             .published_result
             .clone()
             .ok_or("No managed result has been published")?;
+        if self
+            .state
+            .published_head
+            .as_deref()
+            .is_some_and(|head| head != descriptor.result.code_ref)
+        {
+            return Err("Published result is stale; republish before using it".into());
+        }
         let results: Vec<_> = std::iter::once(&descriptor.result)
             .chain(descriptor.entries.iter().map(|entry| &entry.result)).collect();
         let store = self.environments()?.ok_or("No managed environment store")?;
@@ -3820,6 +3854,14 @@ impl Runtime {
             .clone()
             .ok_or("No managed result has been published")?
             .for_entry(entry)?;
+        if self
+            .state
+            .published_head
+            .as_deref()
+            .is_some_and(|head| head != descriptor.result.code_ref)
+        {
+            return Err("Published result is stale; republish before launching it".into());
+        }
         if retry && self.state.result_execution.as_ref().is_some_and(|execution|
             execution.input.layout.as_deref() != Some(&descriptor.workspace)) {
             return Err("Retry must use the failed business entry and its partial workspace".into());

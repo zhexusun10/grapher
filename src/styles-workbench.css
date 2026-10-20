@@ -1742,25 +1742,6 @@ button.session-label-toggle:focus-visible {
   margin-left: 8px;
 }
 
-.planner-off {
-  position: absolute;
-  bottom: 16px;
-  left: 50px;
-  font-size: 8px;
-  color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  pointer-events: none;
-}
-
-.planner-off>span:first-child {
-  width: 4px;
-  height: 4px;
-  background: var(--text-secondary);
-  border-radius: 50%;
-}
-
 .graph-bottom {
   padding: 14px 18px 16px;
   background: var(--bg-surface);
@@ -2134,8 +2115,10 @@ button.session-label-toggle:focus-visible {
 
 .workspace-details-body {
   padding-top: 6px;
-  font-size: 11px;
-  line-height: 1.5;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
 }
 
 .workspace-details-body> :first-child,
@@ -2146,9 +2129,22 @@ button.session-label-toggle:focus-visible {
 .workspace-details p {
   margin: 0;
   padding-top: 4px;
-  line-height: 1.5;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 10.5px;
+  line-height: inherit;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.workspace-details .session-details-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 20px;
+  padding-top: 4px;
+}
+
+.workspace-details .session-details-row > p {
+  max-width: 100%;
+  padding-top: 0;
 }
 
 .workspace-details .details-tip {

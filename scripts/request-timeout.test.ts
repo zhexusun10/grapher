@@ -56,7 +56,7 @@ test("timed-out history leaves the deduplication map and bootstrap does not retr
   } finally { globalThis.fetch = original; }
 });
 
-test("settings body stalls are bounded but native result execution is not given a UI time limit", async context => {
+test("settings body stalls are bounded", async context => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   const original = globalThis.fetch;
   try {
@@ -69,16 +69,5 @@ test("settings body stalls are bounded but native result execution is not given 
     const rejected = assert.rejects(settings, RequestTimeoutError);
     await Promise.resolve();
     context.mock.timers.tick(15_000); await rejected;
-    let release!: (value: Response) => void;
-    let signal: AbortSignal | null | undefined;
-    globalThis.fetch = async (_url, init) => {
-      signal = init?.signal;
-      return await new Promise<Response>(resolve => { release = resolve; });
-    };
-    const launch = runtimeService.launchResult("owned-test", []);
-    context.mock.timers.tick(600_000);
-    assert.ok(!signal?.aborted, "long native jobs are not aborted by metadata policy");
-    release(response({ output: "finished" }));
-    assert.deepEqual(await launch, { output: "finished" });
   } finally { globalThis.fetch = original; }
 });

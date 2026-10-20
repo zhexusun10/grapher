@@ -33,13 +33,12 @@ export function useSnapshotPolling(
   // Keep the latest held Run without resubscribing the poll effect mid-planning.
   const heldRunIdRef = useRef(heldRunId);
   heldRunIdRef.current = heldRunId;
-  const setBackendStatus = useCallback((status: { runId: string | null; phase: string | null } & Partial<Pick<Snapshot, "executions" | "mergers" | "nodes" | "resultExecution">> & { hasActiveExecutions?: boolean }) => {
+  const setBackendStatus = useCallback((status: { runId: string | null; phase: string | null } & Partial<Pick<Snapshot, "executions" | "mergers" | "nodes">> & { hasActiveExecutions?: boolean }) => {
     if (!status.runId || !status.phase) return;
     phases.current.set(status.runId, status.phase);
     const hasRunningWork = status.hasActiveExecutions ?? (
       [...(status.executions ?? []), ...(status.mergers ?? [])].some(item => item.status === "running") ||
-      Object.values(status.nodes ?? {}).some(item => item.status === "running" || item.status === "dirty") ||
-      status.resultExecution?.status === "running");
+      Object.values(status.nodes ?? {}).some(item => item.status === "running" || item.status === "dirty"));
     if (hasRunningWork) writerRuns.current.add(status.runId);
     else writerRuns.current.delete(status.runId);
     versions.current.delete(status.runId);
@@ -111,8 +110,7 @@ export function useSnapshotPolling(
             if (!snapshot?.runId) return;
             phases.current.set(snapshot.runId, snapshot.phase);
             const hasRunningWork = [...snapshot.executions, ...(snapshot.mergers ?? [])].some(item => item.status === "running") ||
-              Object.values(snapshot.nodes ?? {}).some(item => item.status === "running" || item.status === "dirty") ||
-              snapshot.resultExecution?.status === "running";
+              Object.values(snapshot.nodes ?? {}).some(item => item.status === "running" || item.status === "dirty");
             if (hasRunningWork) writerRuns.current.add(snapshot.runId);
             else writerRuns.current.delete(snapshot.runId);
             observeActivity(snapshot.runId, activity ?? []);
@@ -148,8 +146,7 @@ export function useSnapshotPolling(
           if (!snapshot?.runId) return;
           phases.current.set(snapshot.runId, snapshot.phase);
           const hasRunningWork = [...snapshot.executions, ...(snapshot.mergers ?? [])].some(item => item.status === "running") ||
-            Object.values(snapshot.nodes ?? {}).some(item => item.status === "running" || item.status === "dirty") ||
-            snapshot.resultExecution?.status === "running";
+            Object.values(snapshot.nodes ?? {}).some(item => item.status === "running" || item.status === "dirty");
           if (hasRunningWork) writerRuns.current.add(snapshot.runId);
           else writerRuns.current.delete(snapshot.runId);
           observeSnapshot(snapshot);

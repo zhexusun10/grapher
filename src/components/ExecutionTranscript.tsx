@@ -23,6 +23,10 @@ type Props = {
   onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
   onInitialOutputReady?: (executionId: string) => void;
   onCompactingChange?: (compacting: boolean) => void;
+  /** Render only these steer turns inline; the surrounding chat owns the task
+   * and continuation turns. */
+  inlineUserTurnTexts?: readonly string[];
+  onInlineUserTurnsChange?: (texts: string[]) => void;
 };
 
 export function ExecutionTranscript(props: Props) {
@@ -38,7 +42,7 @@ export function ExecutionTranscriptPlaceholder() {
   </div>;
 }
 
-function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onInitialOutputReady, onCompactingChange }: Props) {
+function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onInitialOutputReady, onCompactingChange, inlineUserTurnTexts, onInlineUserTurnsChange }: Props) {
   const cacheKey = `${runId}:${execution.id}`;
   const paged = execution.outputBytes !== undefined;
   const settled = execution.status !== "running";
@@ -53,6 +57,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
   const announcedRef = useRef(false);
   const lifetime = useTranscriptReader("execution", cacheKey);
   const notifyLoading = useStableCallback((loading: boolean) => onLoadingChange?.(loading));
+  const notifyInlineUserTurns = useStableCallback((texts: string[]) => onInlineUserTurnsChange?.(texts));
   const hasOlder = ready && Boolean(window?.start);
   const displayedText = paged ? (window ? renderTranscriptWindow(window) : "") : execution.output;
 
@@ -154,6 +159,9 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
     {settled && !ready && !error ? <div className="transcript-loading" role="status" aria-label={t("正在加载历史记录…")}>
       <Loader2 size={14} className="spin" aria-hidden="true" />
     </div> : <VirtualizedTranscript compact output={displayedText} startOffset={window?.start ?? 0} settled={settled}
+      showUserTurns={!!inlineUserTurnTexts?.length}
+      userTurnTexts={inlineUserTurnTexts}
+      onInlineUserTurnsChange={notifyInlineUserTurns}
       onReachTop={window?.start && !error ? () => { void loadOlder(); } : undefined}
       onUserResize={onUserResize}
       onCompactingChange={onCompactingChange}

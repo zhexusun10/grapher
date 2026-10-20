@@ -1184,7 +1184,7 @@ for (const approved of [false, true]) {
       if (!approved) { await waitFor(() => polls > 0); await page.waitForTimeout(100); await checkPlanning(); }
       gate.resolve();
       if (!approved) await bottom.getByRole("button", { name: "Approve", exact: true }).waitFor();
-      else await page.locator(".planner-off", { hasText: "Offline" }).waitFor();
+      else await page.locator(".workbench.historical-settled").waitFor();
       assert.deepEqual(errors, []);
     } finally { gate.resolve(); await context.close(); }
   });

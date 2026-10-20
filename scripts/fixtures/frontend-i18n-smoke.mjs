@@ -100,7 +100,7 @@ try {
       assert.match(copy, /\.gitignore/);
       assert.match(copy, locale === "en" ? /force-stag/i : /强制暂存/);
       assert.match(copy, locale === "en" ? /merged back/i : /合并回/);
-      assert.match(copy, locale === "en" ? /managed environment scopes.*excluded/i : /受管环境范围除外/);
+      assert.match(copy, locale === "en" ? /Git\/Grapher internals are excluded/i : /Git\/Grapher 内部文件除外/);
     }
     if (name === "Sidebar") assert.ok(html.includes(t("暂无工作区")));
     if (name === "GraphWorkbench") {
