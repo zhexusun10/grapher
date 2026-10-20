@@ -527,6 +527,8 @@ a,
 
 .sidebar.is-collapsed .sidebar-bottom-btn:hover {
   border-color: transparent;
+  /* Match the collapsed add buttons, which still get the global button dim. */
+  filter: brightness(0.96);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1158,6 +1160,12 @@ a,
   border-color: var(--border-subtle);
 }
 
+/* Sidebar cards are buttons; cancel the global hover brightness so their
+   hover treatment matches the div-based workspace cards. */
+.sidebar .run-item:hover {
+  filter: none;
+}
+
 .run-item.chosen {
   background: var(--brand-subtle);
   border-color: var(--brand-border);
@@ -1295,7 +1303,7 @@ a,
   gap: 10px;
   width: 100%;
   padding: 8px 10px;
-  border-radius: 7px;
+  border-radius: 8px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
@@ -1306,6 +1314,7 @@ a,
     background-color 0.15s ease,
     border-color 0.15s ease,
     color 0.15s ease,
+    box-shadow 0.15s ease,
     width var(--sidebar-width-duration) var(--sidebar-anim-ease),
     padding var(--sidebar-width-duration) var(--sidebar-anim-ease);
   text-align: left;
@@ -1317,10 +1326,15 @@ a,
   border-color: var(--border-subtle);
 }
 
+.sidebar .sidebar-bottom-btn:hover {
+  filter: none;
+}
+
 .sidebar-bottom-btn.active {
   background: var(--brand-subtle);
-  color: var(--brand-default);
+  color: var(--text-primary);
   border-color: var(--brand-border);
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.06);
 }
 
 .sidebar-bottom-btn:focus-visible {

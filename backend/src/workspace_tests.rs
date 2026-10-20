@@ -5,6 +5,117 @@ use std::{
 };
 use tempfile::TempDir;
 
+#[test]
+fn git_line_ending_warnings_do_not_fail_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path();
+    workspace::git(repository, &["init", "-q"]).unwrap();
+    workspace::git(repository, &["config", "core.autocrlf", "true"]).unwrap();
+    workspace::git(repository, &["config", "core.safecrlf", "warn"]).unwrap();
+    fs::write(repository.join(".gitattributes"), "*.txt text\n").unwrap();
+    fs::write(repository.join("input.txt"), "first\nsecond\n").unwrap();
+
+    // Confirm this repository really produces a successful add with warnings.
+    let mut command = std::process::Command::new("git");
+    crate::native::clear_git_environment(&mut command);
+    let output = command.args(["add", "--", "input.txt"])
+        .env("LC_ALL", "C")
+        .current_dir(repository).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("LF will be replaced by CRLF"), "{stderr}");
+
+    fs::write(repository.join("input.txt"), "updated\nsecond\n").unwrap();
+    let head = workspace::snapshot_repository(repository).unwrap();
+    assert!(!head.is_empty());
+    assert_eq!(workspace::git(repository, &["show", "HEAD:input.txt"]).unwrap(), "updated\nsecond");
+    assert_eq!(workspace::snapshot_repository(repository).unwrap(), head);
+}
+
+#[test]
+fn git_strict_line_ending_failure_is_not_treated_as_a_warning() {
+    let temp = tempfile::tempdir().unwrap();
+    workspace::git(temp.path(), &["init", "-q"]).unwrap();
+    workspace::git(temp.path(), &["config", "core.autocrlf", "true"]).unwrap();
+    workspace::git(temp.path(), &["config", "core.safecrlf", "true"]).unwrap();
+    fs::write(temp.path().join(".gitattributes"), "*.txt text\n.gitattributes -text\n").unwrap();
+    fs::write(temp.path().join("input.txt"), "first\nsecond\n").unwrap();
+    let error = workspace::snapshot_repository(temp.path()).unwrap_err();
+    assert!(error.contains("exit code: 128") || error.contains("exit status: 128"), "{error}");
+    assert!(error.contains("fatal:"), "{error}");
+    assert!(error.contains("input.txt"), "{error}");
+}
+
+#[test]
+fn git_failure_keeps_exit_status_command_directory_and_both_streams() {
+    let temp = tempfile::tempdir().unwrap();
+    let error = workspace::git(temp.path(), &[
+        "-c",
+        "alias.grapher-fail=!printf 'failure detail on stdout\\n'; printf 'warning: line endings\\n' >&2; exit 23",
+        "grapher-fail",
+    ]).unwrap_err();
+    assert!(error.contains("exit code: 23") || error.contains("exit status: 23"), "{error}");
+    assert!(error.contains("grapher-fail"), "{error}");
+    assert!(error.contains(&temp.path().display().to_string()), "{error}");
+    assert!(error.contains("stderr:\nwarning: line endings"), "{error}");
+    assert!(error.contains("stdout:\nfailure detail on stdout"), "{error}");
+}
+
+#[test]
+fn git_failure_without_output_still_explains_which_command_failed() {
+    let temp = tempfile::tempdir().unwrap();
+    let error = workspace::git(temp.path(), &[
+        "-c", "alias.grapher-fail=!exit 19", "grapher-fail",
+    ]).unwrap_err();
+    assert!(error.contains("exit code: 19") || error.contains("exit status: 19"), "{error}");
+    assert!(error.contains("grapher-fail"), "{error}");
+    assert!(error.contains(&temp.path().display().to_string()), "{error}");
+}
+
+#[cfg(windows)]
+#[test]
+fn git_crash_with_only_warnings_keeps_windows_exception_status() {
+    use std::os::windows::process::ExitStatusExt;
+    let output = std::process::Output {
+        status: std::process::ExitStatus::from_raw(0xC0000005),
+        stdout: Vec::new(),
+        stderr: b"warning: LF will be replaced by CRLF\n".to_vec(),
+    };
+    let error = workspace::git_command_failure(Path::new("C:/project"), &["add", "-f", "-A"], &output);
+    assert!(error.contains("0xC0000005"), "{error}");
+    assert!(error.contains("add"), "{error}");
+    assert!(error.contains("warning: LF will be replaced by CRLF"), "{error}");
+}
+
+#[cfg(windows)]
+#[test]
+fn git_control_c_exit_is_reported_as_console_interruption() {
+    use std::os::windows::process::ExitStatusExt;
+    let output = std::process::Output {
+        status: std::process::ExitStatus::from_raw(0xC000013A),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    let error = workspace::git_command_failure(Path::new("C:/project"), &["commit", "-m", "snapshot"], &output);
+    assert!(error.contains("0xC000013A"), "{error}");
+    assert!(error.contains("console control event"), "{error}");
+    assert!(error.contains("Ctrl+C/Ctrl+Break"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn git_killed_with_only_warnings_keeps_signal_status() {
+    use std::os::unix::process::ExitStatusExt;
+    let output = std::process::Output {
+        status: std::process::ExitStatus::from_raw(9),
+        stdout: Vec::new(),
+        stderr: b"warning: line endings\n".to_vec(),
+    };
+    let error = workspace::git_command_failure(Path::new("/project"), &["add", "-f", "-A"], &output);
+    assert!(error.contains(&output.status.to_string()), "{error}");
+    assert!(error.contains("warning: line endings"), "{error}");
+}
+
 fn source(temp: &TempDir) -> (PathBuf, String) {
     let repository = temp.path().join("source");
     fs::create_dir(&repository).unwrap();

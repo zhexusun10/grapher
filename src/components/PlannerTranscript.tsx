@@ -33,7 +33,9 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
       disabled={locked} />
   </AnimatedUserTurn>;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
-  if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}><span className="system-pill">{item.content}</span></div>;
+  if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}>
+    <span className={`system-pill${item.isError && item.role === "assistant" ? " conversation-error-message" : ""}`}>{item.content}</span>
+  </div>;
   if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={streaming} title="Chain of Thought"
     defaultExpanded={item.defaultExpanded ?? true} autoExpandWhileStreaming={true} expanded={expanded} onExpandedChange={expand}
     animateAppear={item.animateAppear ?? false} />;

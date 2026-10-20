@@ -522,7 +522,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const isSelectedNodeWorking = selectedMerger
     ? !!selectedMergerRunning || (!!pendingRequest && selectedMerger.status !== "completed" && selectedMerger.status !== "failed")
     : isNodeWorking(selectedState?.status, execution, pendingRequest, latestNodeMessage,
-        state.paused, selectedDependenciesCompleted, (selectedState?.pendingMessages?.length ?? 0) > 0);
+      state.paused, selectedDependenciesCompleted, (selectedState?.pendingMessages?.length ?? 0) > 0);
   const isSelectedNodeCompacting = isSelectedNodeWorking &&
     !!execution?.id && !!compactingAttempts[execution.id];
   const latestNodeTurn = nodeTurns.at(-1);
@@ -685,7 +685,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // and publication cards, only after history and its initial scroll have settled.
   const conversationRevealStyle: React.CSSProperties = {
     opacity: isConversationReady ? 1 : 0,
-    transition: isConversationReady && !reduceMotion ? "opacity 0.14s ease-out" : "none",
+    transition: isConversationReady && !reduceMotion ? "opacity 0.25s ease-out" : "none",
   };
   const activeConversationViewRef = useRef(conversationViewKey);
   const conversationGenerationRef = useRef(0);
@@ -1585,9 +1585,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     selectedNode && routeType === "graph"
       ? isSelectedNodeWorking
       : isMainViewWorking ||
-        graphPhase === "running" ||
-        graphPhase === "publishing" ||
-        graphPhase === "merging";
+      graphPhase === "running" ||
+      graphPhase === "publishing" ||
+      graphPhase === "merging";
 
   const { summary: workspaceChangesSummary } = useWorkspaceChanges({
     state,

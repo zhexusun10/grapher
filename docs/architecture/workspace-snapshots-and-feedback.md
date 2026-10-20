@@ -26,6 +26,11 @@ The collector does not query ignore status: additions, modifications and deletio
 
 On macOS, cleanliness/status checks also ignore untracked host metadata; browsing in Finder cannot alone block publication. Tracked metadata edits remain real changes.
 
+Host Git runs outside the backend console (Windows `CREATE_NO_WINDOW`, Unix
+separate process group), so service-level Ctrl+C/Ctrl+Break cannot abort a
+snapshot. Git success is decided by its exit status; failures retain the
+command, status, and captured output.
+
 ### Interpreter bytecode
 
 Every process Runtime launches for the Agent — source Planner/Node/Serial,

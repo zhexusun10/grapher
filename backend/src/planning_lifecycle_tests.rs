@@ -151,6 +151,46 @@ fn failed_planning_survives_cache_eviction_and_keeps_a_stable_id_on_commit() {
 }
 
 #[test]
+fn git_planning_failure_diagnostics_survive_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = service(temp.path());
+    let id = Uuid::new_v4().to_string();
+    let (directory, mut planning) = attempt(temp.path(), &id, false, false);
+    let error = crate::workspace::git(temp.path(), &[
+        "-c", "alias.grapher-fail=!printf 'warning: line endings\\n' >&2; exit 23", "grapher-fail",
+    ]).unwrap_err();
+    let child = service_for_run(&primary, &id, true).unwrap();
+    {
+        let mut runtime = child.runtime.lock().unwrap();
+        runtime.emit(EventKind::PlanningStarted {
+            goal: "Original goal".into(), config: config(temp.path()),
+            planning: planning.clone(), plan_type: Some("graph".into()),
+        }).unwrap();
+        planning.status = Some("failed".into());
+        planning.error = Some(error.clone());
+        write_planning_summary(&directory, &planning).unwrap();
+        runtime.emit(EventKind::PlanningFailed { planning: planning.clone() }).unwrap();
+    }
+    invalidate_service_cache(temp.path(), Some(&id));
+    drop(child);
+    drop(primary);
+
+    let restarted = service(temp.path());
+    recover_plannings(&restarted).unwrap();
+    let restored = history(id, &restarted).unwrap();
+    assert_eq!(restored.phase, "planning_failed");
+    assert!(!restored.approved);
+    assert!(restored.executions.is_empty());
+    assert_eq!(restored.planning.as_ref().unwrap().error.as_deref(), Some(error.as_str()));
+    assert_eq!(get_planning(planning.planning_id.clone(), &restarted).unwrap().error, Some(error.clone()));
+    let json = dispatch(&restarted, "get_planning_snapshot", serde_json::json!({
+        "planningId": planning.planning_id, "repository": temp.path().to_string_lossy(),
+    })).unwrap();
+    assert_eq!(json["planning"]["error"], error);
+    invalidate_service_cache(temp.path(), None);
+}
+
+#[test]
 fn committed_graph_wins_over_an_interrupted_summary_write() {
     let temp = tempfile::tempdir().unwrap();
     let primary = service(temp.path());

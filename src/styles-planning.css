@@ -1061,6 +1061,14 @@
   border-color: rgba(239, 68, 68, 0.2);
 }
 
+.chat-message-row.assistant > .node-error,
+.system-row.error .system-pill.conversation-error-message {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+}
+
 .transcript-message-bubble {
   background: transparent;
   border: none;

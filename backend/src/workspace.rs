@@ -1002,6 +1002,64 @@ fn git_cli_path_handles_windows_extended_paths() {
     );
 }
 
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+
+fn git_failure_cause(output: &std::process::Output) -> Option<&'static str> {
+    #[cfg(windows)]
+    if output.status.code().map(|code| code as u32) == Some(0xC000_013A) {
+        return Some("Git was interrupted by a console control event (Ctrl+C/Ctrl+Break) or another process termination request");
+    }
+    #[cfg(unix)]
+    if output.status.signal() == Some(libc::SIGINT) {
+        return Some("Git was interrupted by SIGINT (Ctrl+C)");
+    }
+    None
+}
+
+fn git_command_failure(cwd: &Path, args: &[&str], output: &std::process::Output) -> String {
+    let status = output.status.to_string();
+    #[cfg(windows)]
+    let status = match output.status.code() {
+        Some(code) => format!("{status}, Windows status 0x{:08X}", code as u32),
+        None => status,
+    };
+    // A terminated/crashed Git process can leave only warnings on stderr.
+    // Always retain its exit status and both streams, not just the warnings.
+    let mut message = format!(
+        "git {args:?} failed in {} ({status})",
+        cwd.display()
+    );
+    if let Some(cause) = git_failure_cause(output) {
+        message.push_str(&format!("\n{cause}."));
+    }
+    for (label, bytes) in [("stderr", &output.stderr), ("stdout", &output.stdout)] {
+        let text = String::from_utf8_lossy(bytes);
+        let text = text.trim();
+        if !text.is_empty() {
+            message.push_str(&format!("\n{label}:\n{text}"));
+        }
+    }
+    message
+}
+
+/// Host Git is a background utility, never an interactive console program.
+/// Keep it out of the backend's console so Ctrl+C/Ctrl+Break aimed at the
+/// service cannot abort a snapshot commit that is still writing Git metadata.
+fn configure_host_git(command: &mut Command) {
+    command.stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+}
+
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     if let Some(result) = git_read(cwd, args) {
         return result;
@@ -1023,6 +1081,7 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let hooks_path = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let hooks_config = format!("core.hooksPath={hooks_path}");
     let mut command = Command::new("git");
+    configure_host_git(&mut command);
     crate::native::clear_git_environment(&mut command);
     #[cfg(windows)]
     command.args(["-c", "core.longpaths=true"]);
@@ -1041,23 +1100,9 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("Cannot run git {args:?} in {}: {error}", cwd.display()))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let msg = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            format!(
-                "git failed with exit code {:?} in {:?}: git {:?}",
-                output.status.code(),
-                cwd,
-                args
-            )
-        };
-        return Err(msg);
+        return Err(git_command_failure(cwd, args, &output));
     }
     // NUL-delimited paths can legally start with whitespace. Never trim or
     // lossily decode them into a different filename.
@@ -2466,6 +2511,10 @@ pub fn snapshot_execution_for_run(
 #[cfg(test)]
 #[path = "workspace_tests.rs"]
 mod workspace_tests;
+
+#[cfg(all(test, windows))]
+#[path = "git_console_tests.rs"]
+mod git_console_tests;
 
 
 #[cfg(test)]

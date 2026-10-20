@@ -23,7 +23,9 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
   if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={item.status === "running"}
     title="Chain of Thought"
     defaultExpanded={item.defaultExpanded ?? (item.status === "running")} autoExpandWhileStreaming={true} expanded={expanded} onExpandedChange={expand} />;
-  if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}><span className="system-pill">{item.content}</span></div>;
+  if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}>
+    <span className={`system-pill${item.isError && item.role === "assistant" ? " conversation-error-message" : ""}`}>{item.content}</span>
+  </div>;
   if (item.role === "user") return <AnimatedUserTurn id={item.id} animateAppear={item.animateAppear}
     className="chat-message-row user planner-user-turn"><EditableUserBubble text={item.content || ""}
     editing={editing} draft={draft} onDraftChange={onDraftChange}
