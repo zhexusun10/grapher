@@ -80,7 +80,9 @@ test("application errors are localized without changing the Chinese version", ()
   const diagnostics: unknown[][] = [];
   try {
     console.warn = (...args) => { diagnostics.push(args); };
-    assert.doesNotMatch(localizeError("未预期的本地错误", "en"), han);
+    // Untranslated backend/native diagnostics keep their full detail instead of
+    // being replaced by an opaque English line; the console records the gap.
+    assert.equal(localizeError("未预期的本地错误", "en"), "未预期的本地错误");
     assert.ok(diagnostics.some(args => args.includes("未预期的本地错误")));
   } finally {
     console.warn = warn;
