@@ -128,6 +128,9 @@ impl Store {
                 }
             }
         }
+        // Live output folds usage into the running attempt's metrics, so the
+        // session totals must reflect it before the terminal event arrives.
+        state.run_metrics = Some(state.compute_run_metrics());
         self.execution_offsets.borrow_mut().extend(offsets);
         self.note_appended(state, count);
         Ok(())

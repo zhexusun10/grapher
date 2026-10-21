@@ -1417,7 +1417,7 @@ button.session-label-toggle:focus-visible {
   border-bottom: 1px solid var(--border-default);
   padding: 0 17px;
   flex-shrink: 0;
-  background: var(--bg-canvas);
+  background: var(--bg-surface);
 }
 
 .graph-toolbar .toolbar-left {
@@ -2165,6 +2165,7 @@ button.session-label-toggle:focus-visible {
   border-radius: 6px;
   padding: 10px 12px;
   margin: 8px 0;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -2173,6 +2174,45 @@ button.session-label-toggle:focus-visible {
   color: var(--text-secondary);
   background: var(--bg-canvas);
   border-color: var(--border-default);
+}
+
+.node-error-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.node-error-copy {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  margin-top: 0;
+  padding: 2px 8px;
+  font: inherit;
+  font-weight: 500;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  opacity: 0.75;
+  cursor: pointer;
+}
+
+.node-error-copy:hover {
+  opacity: 1;
+}
+
+.node-error-detail {
+  margin: 0;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-height: 360px;
+  overflow: auto;
 }
 
 .node-error button {

@@ -2261,7 +2261,7 @@ pub(crate) fn prepare_with_merger_expected_for_run(
     }
     git(
         path,
-        &["checkout", "-q", "-B", "grapher-node", "refs/grapher/base"],
+        &["checkout", "-q", "-f", "-B", "grapher-node", "refs/grapher/base"],
     )?;
     let mut resolved_heads = Vec::new();
     for parent in parents {
@@ -2332,7 +2332,9 @@ pub(crate) fn prepare_with_merger_expected_for_run(
             if git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok()
                 || !git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty()
                 || git(path, &["merge-base", "--is-ancestor", &incoming, "HEAD"]).is_err()
-                || !git(path, &["status", "--porcelain"])?.is_empty()
+                // Managed environment scopes stay untracked by design; only
+                // tracked changes mean the Merger left the merge unfinished.
+                || !git(path, &["status", "--porcelain", "--untracked-files=no"])?.is_empty()
             {
                 return Err(format!("Workspace composition blocked at {}. Merger did not finish a clean merge preserving the incoming parent; the worktree is preserved and retrying the node re-attempts composition.", path.display()));
             }
@@ -2777,7 +2779,26 @@ fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<
     let mut args = vec!["add".to_string(), "-f".to_string(), "-A".to_string(), "--".to_string(), ".".to_string()];
     args.extend(pathspecs);
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    if local { git(path, &args)?; } else { repository_git(path, &args)?; }
+    if local {
+        git(path, &args)?;
+        if !exclusions.is_empty() {
+            // Even when an agent staged a managed scope itself, a node snapshot
+            // must not carry it. Keep the live files and stage only their removal.
+            let mut unstage = vec![
+                "rm".to_string(),
+                "-r".to_string(),
+                "--cached".to_string(),
+                "--ignore-unmatch".to_string(),
+                "-q".to_string(),
+                "--".to_string(),
+            ];
+            unstage.extend(scope_pathspecs(exclusions));
+            let unstage = unstage.iter().map(String::as_str).collect::<Vec<_>>();
+            git(path, &unstage)?;
+        }
+    } else {
+        repository_git(path, &args)?;
+    }
     #[cfg(target_os = "macos")]
     stage_tracked_host_metadata_impl(path, local)?;
     Ok(())

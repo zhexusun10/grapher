@@ -175,13 +175,13 @@ test("trigger matches the session disclosure; totals stay out of it", { timeout:
     const colors = await panel.evaluate(element => {
       const tokens = getComputedStyle(document.documentElement);
       return { add: getComputedStyle(element.querySelector(".diff-stat-add")).color, del: getComputedStyle(element.querySelector(".diff-stat-del")).color,
-        success: tokens.getPropertyValue("--status-success").trim(), danger: tokens.getPropertyValue("--status-danger").trim() };
+        addToken: tokens.getPropertyValue("--status-success-strong").trim(), delToken: tokens.getPropertyValue("--status-danger-strong").trim() };
     });
     const normalize = hex => {
       const value = hex.replace("#", "");
       return `rgb(${parseInt(value.slice(0, 2), 16)}, ${parseInt(value.slice(2, 4), 16)}, ${parseInt(value.slice(4, 6), 16)})`;
     };
-    assert.deepEqual([colors.add, colors.del], [normalize(colors.success), normalize(colors.danger)]);
+    assert.deepEqual([colors.add, colors.del], [normalize(colors.addToken), normalize(colors.delToken)]);
     await trigger.click();
     await expectCollapsed(page, trigger);
     assert.deepEqual(errors, []);

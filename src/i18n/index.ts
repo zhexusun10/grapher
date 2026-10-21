@@ -197,8 +197,8 @@ export function localizeError(error: unknown, language: Locale = locale): string
       );
     }
   }
-  // Backend/native diagnostics may not have a UI translation. Keep the full
-  // original in the console rather than exposing untranslated Chinese in English UI.
+  // Backend/native diagnostics may not have a UI translation. Never hide the
+  // original failure behind a generic line: the detail is what lets the user act.
   console.warn("Untranslated application error:", message);
-  return annotateProviderError("The operation failed. Check the browser console for diagnostic details.", language);
+  return annotateProviderError(message, language);
 }

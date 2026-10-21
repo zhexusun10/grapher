@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 type FileWindows = BTreeMap<String, usize>;
 
 /// Context window Pi reports for `provider/model`, read from the model catalog
-/// the engine already ships. Session details compare the newest prompt against
-/// it; an unknown, local-only or overridden model simply has no denominator, so
-/// nothing is guessed from the model name.
+/// the engine ships plus the user's agent `models.json`. Session details compare
+/// the newest prompt against it; a model neither source knows simply has no
+/// capacity reading, so nothing is guessed from the model name.
 pub(crate) fn context_window(model: &str) -> Option<usize> {
     catalog().get(model).copied()
 }
@@ -22,8 +22,63 @@ fn catalog() -> &'static BTreeMap<String, usize> {
         for (name, windows) in load(&root.join("engine/model-data-local")) {
             files.insert(name, windows);
         }
-        flatten(files)
+        let mut windows = flatten(files);
+        // Pi's agent models.json carries user-defined providers and local model
+        // aliases that the shipped catalog cannot know. Load it last so an
+        // explicit user definition wins over a built-in model with the same id.
+        for path in agent_model_files() {
+            windows.extend(load_agent_models(&path));
+        }
+        windows
     })
+}
+
+fn agent_model_files() -> Vec<PathBuf> {
+    if let Some(directory) = crate::native::environment_path("PI_CODING_AGENT_DIR") {
+        return vec![directory.join("models.json")];
+    }
+    let Some(home) = crate::native::home_dir() else { return Vec::new() };
+    // `.pi` is Pi's upstream location; Grapher's private agent copy is created
+    // from it at startup and takes precedence when present.
+    vec![
+        home.join(".pi/agent/models.json"),
+        home.join(".grapher/pi-agent/models.json"),
+    ]
+}
+
+/// `models.json` stores providers as `{ providers: { id: { models: [...] } } }`.
+/// A model id may itself contain a slash (`cline-pass/...`), so the provider key
+/// is the prefix, not the first segment of the id.
+fn load_agent_models(path: &Path) -> BTreeMap<String, usize> {
+    let Ok(bytes) = std::fs::read(path) else { return BTreeMap::new() };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return BTreeMap::new() };
+    let Some(providers) = value.get("providers").and_then(|value| value.as_object()) else {
+        return BTreeMap::new();
+    };
+    let mut windows = BTreeMap::new();
+    for (provider_key, provider) in providers {
+        let Some(models) = provider.get("models").and_then(|models| models.as_array()) else {
+            continue;
+        };
+        for model in models {
+            let (Some(id), Some(window)) = (
+                model.get("id").and_then(|value| value.as_str()),
+                model.get("contextWindow").and_then(|value| value.as_u64()),
+            ) else {
+                continue;
+            };
+            let provider = model
+                .get("provider")
+                .and_then(|value| value.as_str())
+                .filter(|provider| !provider.is_empty())
+                .unwrap_or(provider_key);
+            if id.is_empty() || window == 0 {
+                continue;
+            }
+            windows.insert(format!("{provider}/{id}"), window as usize);
+        }
+    }
+    windows
 }
 
 fn flatten(files: BTreeMap<String, FileWindows>) -> BTreeMap<String, usize> {
@@ -135,6 +190,32 @@ mod tests {
         std::fs::write(data.join("sample.json"), payload.to_string()).unwrap();
         assert!(flatten(load(&data)).is_empty());
         assert!(load(&temp.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn custom_agent_models_supply_windows_the_shipped_catalog_cannot_know() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("models.json");
+        let payload = serde_json::json!({
+            "providers": {
+                "cline": {
+                    "models": [
+                        // The model id itself contains a slash; the provider key
+                        // must still be the prefix used by the configured model.
+                        { "id": "cline-pass/deepseek-v4.1-flash", "contextWindow": 500_000 },
+                        { "id": "explicit", "provider": "custom", "contextWindow": 128_000 },
+                        { "id": "no-window" },
+                        { "id": "zero", "contextWindow": 0 },
+                    ]
+                }
+            }
+        });
+        std::fs::write(&path, payload.to_string()).unwrap();
+        let windows = load_agent_models(&path);
+        assert_eq!(windows.get("cline/cline-pass/deepseek-v4.1-flash"), Some(&500_000));
+        assert_eq!(windows.get("custom/explicit"), Some(&128_000));
+        assert_eq!(windows.len(), 2);
+        assert!(load_agent_models(&temp.path().join("missing.json")).is_empty());
     }
 
     #[test]

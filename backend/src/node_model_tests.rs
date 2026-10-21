@@ -96,6 +96,13 @@ fn preparation_only_failure_is_resumable_without_a_conversation_turn() {
             metrics: None,
         })
         .unwrap();
+    // Composition failures also mark the node blocked after the failed attempt.
+    runtime
+        .emit(EventKind::Blocked {
+            node: failed.execution.node.clone(),
+            error: "Workspace composition blocked".into(),
+        })
+        .unwrap();
     runtime.jobs().unwrap();
     assert!(
         runtime.state.can_resume(),

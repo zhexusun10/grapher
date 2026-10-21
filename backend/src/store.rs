@@ -353,6 +353,7 @@ impl Store {
             {
                 crate::model::append_live_output(execution, &text);
             }
+            state.run_metrics = Some(state.compute_run_metrics());
         }
         if matches!(
             event.kind,

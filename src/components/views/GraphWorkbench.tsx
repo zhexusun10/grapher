@@ -128,6 +128,31 @@ function canInlineSteerMessage(message: ChatMessage): boolean {
   return !message.images?.length && !message.files?.length;
 }
 
+/** Node failures can carry multi-line backend/stderr detail; keep it readable
+ * and copyable instead of collapsing it into a single opaque line. */
+function NodeErrorPanel({ error, paused }: { error: string; paused?: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const detail = useMemo(() => localizeError(error), [error]);
+  const copy = useCallback(() => {
+    if (!navigator.clipboard) return;
+    void navigator.clipboard.writeText(detail).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {});
+  }, [detail]);
+  return (
+    <div className={`node-error${paused ? " paused" : ""}`} style={{ marginTop: 12 }}>
+      <div className="node-error-head">
+        <span>{t("执行失败")}</span>
+        <button type="button" className="node-error-copy" onClick={copy}>
+          {copied ? t("已复制") : t("复制错误")}
+        </button>
+      </div>
+      <pre className="node-error-detail">{detail}</pre>
+    </div>
+  );
+}
+
 function ExecutionRecordHeader({ execution, expanded, onToggle, placeholder = false }: {
   execution: Execution;
   expanded: boolean;
@@ -2068,13 +2093,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 >
                   <p>workspace: {execution?.worktree || config.repository || "preparing workspace…"}</p>
                   <p>session id: {execution?.sessionId || "waiting for initialization…"}</p>
-                  <p>internal commit before: {execution?.before || "not snapshotted"}</p>
-                  <p>internal commit after: {execution ? (execution.after === "" ? "direct modification (no snapshot)" : execution.after ?? "pending") : "pending"}</p>
+                  <p>commit before: {execution?.before || "not snapshotted"}</p>
+                  <p>commit after: {execution ? (execution.after === "" ? "direct modification (no snapshot)" : execution.after ?? "pending") : "pending"}</p>
                   {snapshotModelInfo && (
-                    <>
+                    <div className="session-details-row">
                       <p>model: {snapshotModelInfo.model}</p>
                       <p>thinking level: {snapshotModelInfo.thinkingLevel}</p>
-                    </>
+                    </div>
                   )}
                   <div className="session-details-row">
                     <p>start time: {formatSessionStartTime(executionSession.startedAt ?? execution?.startedAt)}</p>
@@ -2087,9 +2112,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </WorkspaceDetailsPanel>
 
                 {selectedState?.error && (
-                  <div className={`node-error${selectedState.status === "paused" ? " paused" : ""}`} style={{ marginTop: 12 }}>
-                    {localizeError(selectedState.error)}
-                  </div>
+                  <NodeErrorPanel error={selectedState.error} paused={selectedState.status === "paused"} />
                 )}
               </div>
             </div>
@@ -2098,7 +2121,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               type="button"
               className="scroll-to-bottom-btn"
               onClick={scrollToBottom}
-              title={t("回到底部最新输出")}
             >
               <ArrowDown size={14} />
               <span>{t("最新")}</span>
@@ -2284,10 +2306,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <p>workspace: {serialExecution?.worktree || config.repository || repoInfo?.name || "preparing workspace…"}</p>
                       <p>session id: {serialExecution?.sessionId || "waiting for initialization…"}</p>
                       {serialModelInfo && (
-                        <>
+                        <div className="session-details-row">
                           <p>model: {serialModelInfo.model}</p>
                           <p>thinking level: {serialModelInfo.thinkingLevel}</p>
-                        </>
+                        </div>
                       )}
                       <div className="session-details-row">
                         <p>start time: {formatSessionStartTime(serialSession.startedAt ?? serialExecution?.startedAt)}</p>
@@ -2299,9 +2321,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       )}
                     </WorkspaceDetailsPanel>
                     {serialNodeState?.error && (
-                      <div className={`node-error${serialNodeState.status === "paused" ? " paused" : ""}`} style={{ marginTop: 12 }}>
-                        {localizeError(serialNodeState.error)}
-                      </div>
+                      <NodeErrorPanel error={serialNodeState.error} paused={serialNodeState.status === "paused"} />
                     )}
                   </div>
                 ) : (
@@ -2476,8 +2496,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     onAfterToggle={handleWorkspaceDetailsAfterToggle}
                   >
                     <p>workspace: {plannerWorkspace || config.repository || "preparing workspace…"}</p>
-                    <p>model: {plannerModelInfo.model}</p>
-                    <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
+                    <div className="session-details-row">
+                      <p>model: {plannerModelInfo.model}</p>
+                      <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
+                    </div>
                     <div className="session-details-row">
                       <p>start time: {formatSessionStartTime(plannerStartTime)}</p>
                       <p>time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerLiveTurnStart} durationSeconds={plannerRole?.durationSeconds} priorDurationSeconds={plannerSession.priorDurationSeconds} /></p>
@@ -2529,7 +2551,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               type="button"
               className="scroll-to-bottom-btn"
               onClick={scrollToBottom}
-              title={t("回到底部最新输出")}
             >
               <ArrowDown size={14} />
               <span>{t("最新")}</span>

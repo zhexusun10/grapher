@@ -37,9 +37,9 @@
   color: #475569;
 }
 .changed-file-icon { flex-shrink: 0; }
-.changed-file-item[data-status="added"] .changed-file-icon-chip { background: #ecfdf5; color: #047857; }
+.changed-file-item[data-status="added"] .changed-file-icon-chip { background: var(--status-success-subtle); color: var(--status-success-strong); }
 .changed-file-item[data-status="modified"] .changed-file-icon-chip { background: #eff6ff; color: #1d4ed8; }
-.changed-file-item[data-status="deleted"] .changed-file-icon-chip { background: #fef2f2; color: #b91c1c; }
+.changed-file-item[data-status="deleted"] .changed-file-icon-chip { background: var(--status-danger-subtle); color: var(--status-danger-strong); }
 .changed-file-item[data-status="renamed"] .changed-file-icon-chip { background: #f5f3ff; color: #6d28d9; }
 .changed-file-path { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .change-diff-stats {
@@ -51,7 +51,7 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.diff-stat-add { color: var(--status-success); }
-.diff-stat-del { color: var(--status-danger); }
+.diff-stat-add { color: var(--status-success-strong); }
+.diff-stat-del { color: var(--status-danger-strong); }
 .changes-panel-empty { padding-top: 4px; color: var(--text-secondary); }
 

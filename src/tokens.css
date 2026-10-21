@@ -33,11 +33,13 @@
   --status-danger-subtle: #FEF2F2;
   --status-danger-border: #FECACA;
   --status-danger-text: #991B1B;
+  --status-danger-strong: #B91C1C;
 
   /* 成功与告警扩展状态 */
   --status-success: #10B981;
   --status-success-subtle: #ECFDF5;
   --status-success-border: #A7F3D0;
+  --status-success-strong: #047857;
   --status-warning: #F59E0B;
   --status-warning-subtle: #FFFBEB;
 

@@ -378,7 +378,7 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
       if (mode !== "planner") await page.evaluate(() => { window.audit.startExecution(); window.audit.finish(); });
       await page.getByRole("button", { name: mode === "planner" ? "Planning session details" : "Workspace and session details", exact: true }).click();
       const details = page.locator(".workspace-details-body");
-      const labels = ["total tokens", "input", "output", "cache read", "cache write", "reasoning", "context window"];
+      const labels = ["cumulative tokens", "input", "output", "cache read", "cache write", "reasoning", "context window", "current context"];
       for (const label of labels) await details.getByText(`${label}: —`, { exact: true }).waitFor();
       const update = (usage, context) => page.evaluate(({ mode, usage, context }) => {
         const metrics = {
@@ -393,23 +393,24 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
         else window.audit.setExecutionMetrics(usage || context ? metrics : null);
       }, { mode, usage, context });
       // Legacy Planner summaries without a session id have no model window.
-      const windowSuffix = mode === "planner" ? "" : " / 100k";
-      const percent = mode === "planner" ? "" : " (8%)";
+      const contextWindow = mode === "planner" ? "—" : "100k";
+      const contextPercent = mode === "planner" ? "" : " (8%)";
       await update({ totalTokens: 18_000, input: 12_000, output: 1_800, cacheRead: 4_000, cacheWrite: 200, reasoning: 600, consumedTokens: 14_000 }, { tokens: 8_000, peak: 8_000 });
-      for (const [index, value] of ["14k", "12k", "1.8k", "4k", "0.2k", "0.6k", `8k${windowSuffix}${percent}`].entries()) {
+      for (const [index, value] of ["14k", "12k", "1.8k", "4k", "0.2k", "0.6k", contextWindow, `8k${contextPercent}`].entries()) {
         await details.getByText(`${labels[index]}: ${value}`, { exact: true }).waitFor();
       }
       // The provider total mixes cached re-reads and is no longer shown.
       assert.equal(await details.getByText(/provider total/).count(), 0);
       const heavy = { totalTokens: 1_234_567, input: 1_000_000, output: 200_000, cacheRead: 30_000, cacheWrite: 4_000, reasoning: 567, consumedTokens: 1_204_000 };
       await update(heavy, { tokens: 40_000, peak: 40_000 });
-      for (const [index, value] of ["1.2M", "1M", "200k", "30k", "4k", "0.57k", mode === "planner" ? "40k" : "40k / 100k (40%)"].entries()) {
+      for (const [index, value] of ["1.2M", "1M", "200k", "30k", "4k", "0.57k", contextWindow, mode === "planner" ? "40k" : "40k (40%)"].entries()) {
         await details.getByText(`${labels[index]}: ${value}`, { exact: true }).waitFor();
       }
       // After compaction only the smaller current prompt is shown; the
       // session's high-water mark is not part of the panel.
       await update(heavy, { tokens: 40_000, peak: 90_000 });
-      await details.getByText(`context window: ${mode === "planner" ? "40k" : "40k / 100k (40%)"}`, { exact: true }).waitFor();
+      await details.getByText(`context window: ${contextWindow}`, { exact: true }).waitFor();
+      await details.getByText(`current context: ${mode === "planner" ? "40k" : "40k (40%)"}`, { exact: true }).waitFor();
       assert.equal(await details.getByText(/^peak:/).count(), 0);
       await update(heavy, { tokens: 40_000, peak: 40_000 });
       const positions = await details.locator("p").evaluateAll(elements => elements.map(element => {
@@ -417,7 +418,7 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
         return { text: element.textContent, top: rect.top, left: rect.left, right: rect.right };
       }));
       let previousTop = -Infinity;
-      for (const group of [["start time", "time took"], labels.slice(0, 3), labels.slice(3, 6), [labels[6]]]) {
+      for (const group of [["start time", "time took"], labels.slice(0, 3), labels.slice(3, 6), labels.slice(6)]) {
         const fields = group.map(label => positions.find(item => item.text.startsWith(`${label}: `)));
         assert.ok(fields.every(Boolean), `missing session fields: ${group.join(", ")}`);
         assert.ok(fields[0].top > previousTop, "timing, totals and cache details occupy successive rows");
@@ -434,6 +435,7 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
       for (const label of labels.slice(0, 6)) await details.getByText(`${label}: 0k`, { exact: true }).waitFor();
       // No context counters means unknown, not a zero-token prompt.
       await details.getByText("context window: —", { exact: true }).waitFor();
+      await details.getByText("current context: —", { exact: true }).waitFor();
       await update(null);
       for (const label of labels) await details.getByText(`${label}: —`, { exact: true }).waitFor();
       assert.deepEqual(errors, []);
@@ -462,9 +464,9 @@ test("a resumed session keeps earlier attempts in the session token totals", { t
     await page.getByRole("button", { name: "Workspace and session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
     for (const text of [
-      "total tokens: 17.2k", "input: 15k", "output: 2k", "cache read: 19k",
+      "cumulative tokens: 17.2k", "input: 15k", "output: 2k", "cache read: 19k",
       // Context follows the newest turn of the resumed session, not the sum.
-      "context window: 19k / 100k (19%)",
+      "context window: 100k", "current context: 19k (19%)",
     ]) await details.getByText(text, { exact: true }).waitFor();
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
@@ -535,7 +537,7 @@ test("a Planner turn recorded before session tracking keeps its usage", { timeou
     });
     await page.getByRole("button", { name: "Planning session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
-    await details.getByText("total tokens: 8k", { exact: true }).waitFor();
+    await details.getByText("cumulative tokens: 8k", { exact: true }).waitFor();
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -561,16 +563,16 @@ test("an older attempt shows usage only through that attempt", { timeout: 30_000
     await page.getByRole("button", { name: "Workspace and session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
     // The newest attempt keeps the whole resumed session's total.
-    await details.getByText("total tokens: 3.3k", { exact: true }).waitFor();
+    await details.getByText("cumulative tokens: 3.3k", { exact: true }).waitFor();
     // Selecting the first attempt must not inherit the later attempt's usage.
     await page.evaluate(() => window.audit.selectMerger("previous"));
-    await details.getByText("total tokens: 1.1k", { exact: true }).waitFor();
-    assert.equal(await details.getByText("total tokens: 3.3k", { exact: true }).count(), 0);
+    await details.getByText("cumulative tokens: 1.1k", { exact: true }).waitFor();
+    assert.equal(await details.getByText("cumulative tokens: 3.3k", { exact: true }).count(), 0);
     // A missing attempt usage makes the prefix unknowable; show no token row
     // rather than a partial or whole-session total.
     await page.evaluate(() => window.audit.setExecutionMetrics(null, "previous"));
     await page.waitForTimeout(100);
-    assert.equal(await details.getByText(/total tokens:/).count(), 0);
+    assert.equal(await details.getByText(/cumulative tokens:/).count(), 0);
     assert.equal(await details.getByText(/^input:/).count(), 0);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }

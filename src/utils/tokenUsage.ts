@@ -72,17 +72,26 @@ export function attemptSessionContext(
   return { tokens: tokens ?? 0, peak: Math.max(tokens ?? 0, peak ?? 0) };
 }
 
+const knownCount = (value?: number): value is number =>
+  value != null && Number.isSafeInteger(value) && value > 0;
+
+/** The model's context window for the turn, when the catalog knows it. */
+export function formatContextWindow(context?: SessionContext | null): string {
+  const windowTokens = context?.window;
+  return knownCount(windowTokens) ? formatTokenCount(windowTokens) : "—";
+}
+
 /**
- * Context the session held on its newest turn against the model's window. The
- * cumulative totals cannot answer this: every turn re-reads the same prefix.
- * A prompt of zero or a missing reading is unknown, never a rendered zero: an
- * assistant turn always reads a non-empty context.
+ * The entire retained conversation prompt the session's newest model call read
+ * (after any compaction), not a per-turn delta. Cumulative totals cannot answer
+ * this: every call re-reads the same growing prefix. A prompt of zero or a
+ * missing reading is unknown, never a rendered zero.
  */
-export function formatContextUsage(context?: SessionContext | null): string {
+export function formatContextUsed(context?: SessionContext | null): string {
   const tokens = context?.tokens;
-  if (tokens == null || !Number.isSafeInteger(tokens) || tokens <= 0) return "—";
+  if (!knownCount(tokens)) return "—";
   const used = formatTokenCount(tokens);
   const windowTokens = context?.window;
-  if (windowTokens == null || !Number.isSafeInteger(windowTokens) || windowTokens <= 0) return used;
-  return `${used} / ${formatTokenCount(windowTokens)} (${Math.round(tokens / windowTokens * 100)}%)`;
+  if (!knownCount(windowTokens)) return used;
+  return `${used} (${Math.round(tokens / windowTokens * 100)}%)`;
 }

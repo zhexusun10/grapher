@@ -2003,7 +2003,9 @@ impl Runtime {
             .cloned()
             .ok_or("No workspace to resolve")?;
         let path = Path::new(&execution.worktree);
-        if !workspace::git(path, &["status", "--porcelain"])?.is_empty()
+        // Managed environment scopes are untracked by design; ignore them when
+        // checking whether the user finished committing the resolution.
+        if !workspace::git(path, &["status", "--porcelain", "--untracked-files=no"])?.is_empty()
             || workspace::git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok()
         {
             return Err("Resolve all conflicts and commit the merge in this worktree first".into());
@@ -2334,7 +2336,12 @@ impl Runtime {
             });
             let failed_before_session = self.state.nodes[&node.name].human_instruction
                 && resume.is_some_and(|previous| previous.status == "failed" && session_missing(previous));
-            let initial_recovery = stopped_recovery || failed_before_session;
+            // A preparation-only failure never had a conversation to resume, so
+            // dispatching it must not validate or rebind a missing session.
+            let preparation_recovery = self.state.config.as_ref()
+                .and_then(|config| config.environment.as_ref()).is_some()
+                && resume.is_some_and(|previous| self.state.execution_is_preparation_only(previous));
+            let initial_recovery = stopped_recovery || failed_before_session || preparation_recovery;
             let continuation = continuation && !initial_recovery;
             let preserved_workspace = resume
                 .filter(|previous| {
@@ -4299,6 +4306,15 @@ fn perform_with_merger_inner(
         None
     };
     let mut selected_environment = job.environment_input.clone();
+    // A failed slot may still carry an environment scope that an older Merger
+    // committed by mistake. Untrack it (keeping the live files) before any
+    // discovery or tracked-file validation so a retry can reuse the composed
+    // head instead of failing before recomposition.
+    if let Some(policy) = &job.config.environment {
+        if workspace::has_private_git(path) {
+            workspace::unstage_scoped(path, &policy.exclusions())?;
+        }
+    }
     if job.history_edit {
         if let (Some(policy), Some(input), Some(previous)) = (
             &job.config.environment,
@@ -4637,6 +4653,10 @@ fn perform_with_merger_inner(
     };
     if !source_tree {
         workspace::verify_prepared_ancestor(path, &before)?;
+        // The agent may have staged a managed scope itself. Untrack it before
+        // post-turn environment validation and the snapshot; the live files stay
+        // in the workspace and the snapshot commit records the removal.
+        workspace::unstage_scoped(path, &exclusions)?;
     }
     let environment_result_input =
         if let (Some(store), Some(input)) = (&environments, &environment_input) {

@@ -1484,6 +1484,41 @@ impl Snapshot {
     /// `Prepared` (for example a workspace/environment preparation conflict).
     /// There is no conversation to intervene in, so Continue is their recovery
     /// path; provider/model failures after preparation keep their own recovery.
+    /// A failed attempt that never reached `Prepared` and produced no output:
+    /// a workspace/environment preparation failure, not a model turn. A session
+    /// that could not be opened/resumed is the same situation: no conversation
+    /// exists, so a retry must start a fresh one.
+    pub fn execution_is_preparation_only(&self, execution: &Execution) -> bool {
+        if execution.status != "failed" || execution.output_bytes != 0 {
+            return false;
+        }
+        // The node error is cleared when recovery is queued, so read the durable
+        // Failed evidence instead of the current node projection.
+        let session_start = self
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::Failed {
+                    execution_id: Some(id),
+                    error,
+                    ..
+                } if id == &execution.id => Some(error.as_str()),
+                _ => None,
+            })
+            .is_some_and(|error| {
+                error.starts_with("Cannot resume node session")
+                    || error.starts_with("Cannot open node session")
+            });
+        if session_start {
+            return true;
+        }
+        !self.events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::Prepared { execution_id, .. } if execution_id == &execution.id
+        ))
+    }
+
     pub fn preparation_failed_nodes(&self) -> Vec<String> {
         if self
             .config
@@ -1496,21 +1531,14 @@ impl Snapshot {
         self.nodes
             .iter()
             .filter_map(|(name, node)| {
-                if node.status != "failed" {
+                if !matches!(node.status.as_str(), "failed" | "blocked") {
                     return None;
                 }
                 let latest = self.executions.iter().rev().find(|execution| {
                     execution.node == *name
                         && !self.superseded_execution_ids.contains(&execution.id)
                 })?;
-                if latest.status != "failed" || latest.output_bytes != 0 {
-                    return None;
-                }
-                let prepared = self.events.iter().any(|event| matches!(
-                    &event.kind,
-                    EventKind::Prepared { execution_id, .. } if execution_id == &latest.id
-                ));
-                (!prepared).then(|| name.clone())
+                self.execution_is_preparation_only(latest).then(|| name.clone())
             })
             .collect()
     }
@@ -1720,9 +1748,117 @@ pub fn now() -> u64 {
         .as_millis() as u64
 }
 
+/// Fold one streamed chunk into the running attempt's metrics.
+///
+/// Pi reports usage on `message_end`; folding those records as they arrive
+/// lets session details show live totals. The terminal event reparses the whole
+/// log and replaces these values, so this projection never becomes
+/// authoritative. Engine output is line-delimited, so a partial record simply
+/// fails to parse and is ignored.
+fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
+    let metrics = execution.metrics.get_or_insert_with(ExecutionMetrics::default);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("[stderr]") {
+            continue;
+        }
+        // Avoid reparsing large tool payloads that cannot move token counters.
+        if !trimmed.contains("\"message_start\"")
+            && !trimmed.contains("\"message_end\"")
+            && !trimmed.contains("\"model_change\"")
+            && !trimmed.contains("\"thinking_level_change\"")
+            && !trimmed.contains("\"tool_execution_start\"")
+            && !trimmed.contains("\"tool_execution_end\"")
+        {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        match value.get("type").and_then(|kind| kind.as_str()).unwrap_or_default() {
+            "message_start" | "message_end" => {
+                let Some(message) = value.get("message") else {
+                    continue;
+                };
+                if message.get("role").and_then(|role| role.as_str()) != Some("assistant") {
+                    continue;
+                }
+                if let Some(model) = message
+                    .get("model")
+                    .and_then(|model| model.as_str())
+                    .filter(|model| !model.is_empty())
+                {
+                    metrics.model = Some(message
+                        .get("provider")
+                        .and_then(|provider| provider.as_str())
+                        .filter(|provider| !provider.is_empty())
+                        .map_or_else(|| model.to_string(), |provider| format!("{provider}/{model}")));
+                }
+                if let Some(level) = message
+                    .get("thinkingLevel")
+                    .and_then(|level| level.as_str())
+                    .filter(|level| !level.is_empty())
+                {
+                    metrics.thinking_level = Some(level.to_string());
+                }
+                if value.get("type").and_then(|kind| kind.as_str()) != Some("message_end") {
+                    continue;
+                }
+                metrics.assistant_messages += 1;
+                if let Some(usage) = message.get("usage") {
+                    let turn = TokenUsage::from_message_usage(usage);
+                    // Context is the latest prompt, not a sum across turns.
+                    let prompt = turn.context_tokens();
+                    if prompt > 0 {
+                        metrics.context_tokens = prompt;
+                        metrics.context_peak = metrics.context_peak.max(prompt);
+                    }
+                    metrics.usage.accumulate(&turn);
+                }
+            }
+            "model_change" => {
+                if let Some(model) = value
+                    .get("modelId")
+                    .and_then(|model| model.as_str())
+                    .filter(|model| !model.is_empty())
+                {
+                    metrics.model = Some(value
+                        .get("provider")
+                        .and_then(|provider| provider.as_str())
+                        .filter(|provider| !provider.is_empty())
+                        .map_or_else(|| model.to_string(), |provider| format!("{provider}/{model}")));
+                }
+            }
+            "thinking_level_change" => {
+                if let Some(level) = value
+                    .get("thinkingLevel")
+                    .and_then(|level| level.as_str())
+                    .filter(|level| !level.is_empty())
+                {
+                    metrics.thinking_level = Some(level.to_string());
+                }
+            }
+            "tool_execution_start" => metrics.tools += 1,
+            "tool_execution_end" => {
+                if value.get("isError").and_then(|flag| flag.as_bool()).unwrap_or(false)
+                    || value
+                        .get("result")
+                        .and_then(|result| result.get("isError"))
+                        .and_then(|flag| flag.as_bool())
+                        .unwrap_or(false)
+                {
+                    metrics.tool_errors += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn append_live_output(execution: &mut Execution, text: &str) {
     execution.output.push_str(text);
     execution.output_bytes = execution.output.len();
+    accumulate_live_metrics(execution, text);
     if execution.pid.is_none() {
         // The lifecycle record may itself span multiple output messages.
         if let Some(line) = execution.output.split_once('\n').map(|(line, _)| line) {
@@ -2220,6 +2356,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             {
                 append_live_output(execution, text);
             }
+            state.run_metrics = Some(state.compute_run_metrics());
             // Streaming logs are not business events and must not accumulate
             // a second, unbounded copy in state.events.
             return;
@@ -2847,6 +2984,58 @@ mod metrics_tests {
         assert_eq!(metrics.usage.cache_read, 2_960);
         assert_eq!(metrics.usage.total_tokens, 3_572);
         assert_eq!(metrics.usage.consumed_tokens, 612);
+    }
+
+    #[test]
+    fn live_output_updates_session_usage_before_the_terminal_event() {
+        let mut state = Snapshot::default();
+        let mut execution = session_execution("live", "session-a", 0, 0, (0, 0));
+        execution.status = "running".into();
+        execution.metrics = None;
+        state.executions.push(execution);
+
+        let lines = [
+            "{\"type\":\"message_start\",\"message\":{\"role\":\"assistant\",\"provider\":\"p\",\"model\":\"m\",\"thinkingLevel\":\"high\"}}\n",
+            "{\"type\":\"tool_execution_start\",\"toolName\":\"read\"}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":100,\"cacheRead\":900,\"cacheWrite\":50,\"output\":10,\"totalTokens\":1060}}}\n",
+            // A later turn accumulates usage while context follows its prompt.
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":10,\"cacheRead\":1990,\"output\":5,\"totalTokens\":2005}}}\n",
+        ];
+        for (index, text) in lines.into_iter().enumerate() {
+            apply(
+                &mut state,
+                &Event {
+                    sequence: index as i64 + 1,
+                    timestamp: (index as u64 + 1) * 1_000,
+                    kind: EventKind::Output {
+                        execution_id: "live".into(),
+                        text: text.into(),
+                    },
+                },
+            );
+        }
+
+        let metrics = state.executions[0].metrics.as_ref().unwrap();
+        assert_eq!(metrics.model.as_deref(), Some("p/m"));
+        assert_eq!(metrics.thinking_level.as_deref(), Some("high"));
+        assert_eq!(metrics.assistant_messages, 2);
+        assert_eq!(metrics.tools, 1);
+        assert_eq!(metrics.usage.input, 110);
+        assert_eq!(metrics.usage.cache_read, 2_890);
+        assert_eq!(metrics.usage.cache_write, 50);
+        assert_eq!(metrics.usage.output, 15);
+        assert_eq!(metrics.usage.consumed_tokens, 175);
+        assert_eq!(metrics.context_tokens, 2_000);
+        assert_eq!(metrics.context_peak, 2_000);
+
+        // Session details read these buckets while the terminal event is absent.
+        let run = state.run_metrics.as_ref().expect("live metrics must refresh Run totals");
+        assert_eq!(run.session_usage["session-a"].input, 110);
+        assert_eq!(run.session_usage["session-a"].consumed_tokens, 175);
+        assert_eq!(run.session_context["session-a"].tokens, 2_000);
+        assert_eq!(run.total_usage.consumed_tokens, 175);
+        // Streaming chunks still must not become business history.
+        assert!(state.events.is_empty());
     }
 
     #[test]

@@ -1173,6 +1173,38 @@ fn manual_node_pause_is_replayable_and_does_not_disguise_an_unrelated_failure() 
 }
 
 #[test]
+fn running_output_exposes_live_session_metrics_before_completion() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    let execution_id = job.execution.id.clone();
+    let session_id = job.execution.session_id.clone();
+    runtime.emit_outputs(vec![
+        EventKind::Output {
+            execution_id: execution_id.clone(),
+            text: "{\"type\":\"message_start\",\"message\":{\"role\":\"assistant\",\"provider\":\"p\",\"model\":\"m\"}}\n".into(),
+        },
+        EventKind::Output {
+            execution_id: execution_id.clone(),
+            text: "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":100,\"cacheRead\":900,\"output\":10,\"totalTokens\":1010}}}\n".into(),
+        },
+    ]).unwrap();
+
+    let execution = runtime.state.executions.iter().find(|item| item.id == execution_id).unwrap();
+    assert_eq!(execution.status, "running");
+    let metrics = execution.metrics.as_ref().expect("live metrics appear before Finished");
+    assert_eq!(metrics.model.as_deref(), Some("p/m"));
+    assert_eq!(metrics.usage.input, 100);
+    assert_eq!(metrics.usage.consumed_tokens, 110);
+    assert_eq!(metrics.context_tokens, 1_000);
+
+    let run = runtime.state.run_metrics.as_ref().expect("Run totals refresh with live output");
+    assert_eq!(run.session_usage[&session_id].input, 100);
+    assert_eq!(run.session_usage[&session_id].consumed_tokens, 110);
+    assert_eq!(run.session_context[&session_id].tokens, 1_000);
+}
+
+#[test]
 fn explicit_pause_wins_a_completion_race_without_publishing_a_result() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();

@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { SessionTokenUsage } from "../src/components/SessionTokenUsage.tsx";
 import { addTokenUsage, executionSessionUsageThrough, plannerLegacyUsage, plannerSessionUsageThrough } from "../src/services/sessionMetrics.ts";
 import type { Execution, PlanningSummary, SessionContext, TokenUsage } from "../src/types.ts";
-import { attemptSessionContext, consumedTokenCount, formatCacheHitRate, formatContextUsage, formatTokenCount, sessionContext, sessionTokenUsage } from "../src/utils/tokenUsage.ts";
+import { attemptSessionContext, consumedTokenCount, formatCacheHitRate, formatContextUsed, formatContextWindow, formatTokenCount, sessionContext, sessionTokenUsage } from "../src/utils/tokenUsage.ts";
 import { translate } from "../src/i18n/index.ts";
 
 const usage: TokenUsage = {
@@ -15,16 +15,16 @@ const usage: TokenUsage = {
 const render = (value?: TokenUsage | null, context?: SessionContext | null) =>
   renderToStaticMarkup(createElement(SessionTokenUsage, { usage: value, context }));
 const counters = [
-  "total tokens", "input", "output", "cache read", "cache write", "reasoning",
-  "context window",
+  "cumulative tokens", "input", "output", "cache read", "cache write", "reasoning",
+  "context window", "current context",
 ];
 
-test("session details show session tokens and context window without a provider total", () => {
+test("session details show cumulative tokens and current context without a provider total", () => {
   const html = render(usage, { tokens: 8_000, peak: 9_000, window: 100_000 });
   for (const [label, value] of [
-    ["total tokens", "14k"], ["input", "12k"], ["output", "1.8k"],
+    ["cumulative tokens", "14k"], ["input", "12k"], ["output", "1.8k"],
     ["cache read", "4k"], ["cache write", "0.2k"], ["reasoning", "0.6k"],
-    ["context window", "8k / 100k (8%)"],
+    ["context window", "100k"], ["current context", "8k (8%)"],
   ]) assert.ok(html.includes(`${label}: ${value}</p>`), html);
   // The high-water mark is recorded for diagnostics, not shown beside the window.
   assert.ok(!html.includes("peak:"), html);
@@ -36,11 +36,12 @@ test("session details show session tokens and context window without a provider 
 test("a compacted prompt never renders a peak or a zero context", () => {
   // After compaction the newest prompt shrank; only the current reading shows.
   const html = render(usage, { tokens: 8_000, peak: 40_000, window: 100_000 });
-  assert.ok(html.includes("context window: 8k / 100k (8%)</p>"), html);
+  assert.ok(html.includes("context window: 100k</p>"), html);
+  assert.ok(html.includes("current context: 8k (8%)</p>"), html);
   assert.ok(!html.includes("peak:"), html);
   // A zero or missing prompt is unknown, never "0k".
   for (const context of [{ tokens: 0, peak: 40_000 }, { tokens: 0, peak: 0 }, undefined]) {
-    assert.ok(render(usage, context).includes("context window: —</p>"), JSON.stringify(context));
+    assert.ok(render(usage, context).includes("current context: —</p>"), JSON.stringify(context));
   }
 });
 
@@ -52,34 +53,39 @@ test("token counts use only k or M, with at most two decimals and automatic prom
     [1_234_567, "1.23M"], [1_000_000_000, "1000M"],
   ] as const) assert.equal(formatTokenCount(count), expected);
   const html = render(usage, { tokens: 1_234_567, peak: 1_234_567, window: 2_000_000 });
-  assert.ok(html.includes("context window: 1.23M / 2M (62%)</p>"), html);
+  assert.ok(html.includes("context window: 2M</p>"), html);
+  assert.ok(html.includes("current context: 1.23M (62%)</p>"), html);
 });
 
-test("context compares the newest prompt against the model window", () => {
-  assert.equal(formatContextUsage({ tokens: 87_323, peak: 87_323, window: 922_000 }), "87.32k / 922k (9%)");
-  assert.equal(formatContextUsage({ tokens: 87_323, peak: 87_323 }), "87.32k");
-  assert.equal(formatContextUsage({ tokens: 922_000, peak: 922_000, window: 922_000 }), "922k / 922k (100%)");
-  assert.equal(formatContextUsage({ tokens: 0, peak: 0, window: 922_000 }), "—");
-  // An unknown or nonsensical window drops the denominator, never the reading.
+test("context window is the model capacity and current context is the full latest prompt", () => {
+  assert.equal(formatContextWindow({ tokens: 87_323, peak: 87_323, window: 922_000 }), "922k");
+  assert.equal(formatContextUsed({ tokens: 87_323, peak: 87_323, window: 922_000 }), "87.32k (9%)");
+  assert.equal(formatContextUsed({ tokens: 922_000, peak: 922_000, window: 922_000 }), "922k (100%)");
+  assert.equal(formatContextUsed({ tokens: 0, peak: 0, window: 922_000 }), "—");
+  // An unknown or nonsensical window keeps the reading but omits its share.
+  assert.equal(formatContextWindow({ tokens: 5_000, peak: 5_000 }), "—");
+  assert.equal(formatContextUsed({ tokens: 5_000, peak: 5_000 }), "5k");
   for (const window of [null, undefined, 0, -1, Number.NaN, 1.5]) {
-    assert.equal(formatContextUsage({ tokens: 5_000, peak: 5_000, window: window as number }), "5k");
+    assert.equal(formatContextWindow({ tokens: 5_000, peak: 5_000, window: window as number }), "—");
+    assert.equal(formatContextUsed({ tokens: 5_000, peak: 5_000, window: window as number }), "5k");
   }
   for (const tokens of [undefined, Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
-    assert.equal(formatContextUsage({ tokens: tokens as number, peak: 0, window: 100_000 }), "—");
+    assert.equal(formatContextUsed({ tokens: tokens as number, peak: 0, window: 100_000 }), "—");
   }
-  assert.equal(formatContextUsage(undefined), "—");
+  assert.equal(formatContextWindow(undefined), "—");
+  assert.equal(formatContextUsed(undefined), "—");
 });
 
 test("task total is uncached input plus cache writes plus output", () => {
   const html = render(usage);
-  assert.ok(html.includes("total tokens: 14k</p>"));
+  assert.ok(html.includes("cumulative tokens: 14k</p>"));
   assert.equal(consumedTokenCount({ ...usage, cacheRead: 999_999 }), 14_000);
   assert.equal(consumedTokenCount({ ...usage, cacheWrite: 4_000 }), 17_800);
 });
 
 test("backend consumedTokens is preferred, with a fallback for legacy zeroes", () => {
   const html = render({ ...usage, consumedTokens: 20_000 });
-  assert.ok(html.includes("total tokens: 20k</p>"), html);
+  assert.ok(html.includes("cumulative tokens: 20k</p>"), html);
   assert.equal(consumedTokenCount({ ...usage, consumedTokens: 20_000 }), 20_000);
   assert.equal(consumedTokenCount({ ...usage, consumedTokens: 0 }), 14_000);
   assert.equal(consumedTokenCount({ ...usage, consumedTokens: Number.NaN }), 14_000);
@@ -96,15 +102,16 @@ test("missing usage remains unknown rather than implying a zero-token session", 
 test("reported zero counts remain visible as zero", () => {
   const html = render({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 }, { tokens: 0, peak: 0, window: 100_000 });
   for (const label of counters.slice(0, 6)) assert.ok(html.includes(`${label}: 0k</p>`), html);
-  assert.ok(html.includes("context window: —</p>"), html);
+  assert.ok(html.includes("context window: 100k</p>"), html);
+  assert.ok(html.includes("current context: —</p>"), html);
 });
 
 test("legacy partial usage keeps available input/output and leaves unknown totals unknown", () => {
   const html = render({ input: 1_200, output: 300 } as TokenUsage);
-  assert.ok(html.includes("total tokens: 1.5k</p>"));
+  assert.ok(html.includes("cumulative tokens: 1.5k</p>"));
   assert.ok(html.includes("input: 1.2k</p>"));
   assert.ok(html.includes("output: 0.3k</p>"));
-  for (const label of ["cache read", "cache write", "reasoning", "context window"]) {
+  for (const label of ["cache read", "cache write", "reasoning", "context window", "current context"]) {
     assert.ok(html.includes(`${label}: —</p>`), html);
   }
 });
@@ -112,7 +119,7 @@ test("legacy partial usage keeps available input/output and leaves unknown total
 test("invalid counters never render NaN, infinity, negative or fractional token counts", () => {
   for (const value of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     const html = render({ ...usage, totalTokens: value });
-    assert.ok(html.includes("total tokens: 14k</p>"), html);
+    assert.ok(html.includes("cumulative tokens: 14k</p>"), html);
   }
   for (const value of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5, Number.MAX_SAFE_INTEGER]) {
     assert.equal(consumedTokenCount({ ...usage, input: value, output: 1 }), undefined);
@@ -120,7 +127,7 @@ test("invalid counters never render NaN, infinity, negative or fractional token 
   }
 });
 
-test("cached percentage measures cache reads against all input, not output or total tokens", () => {
+test("cached percentage measures cache reads against all input, not output or cumulative tokens", () => {
   const cached: TokenUsage = { input: 100, cacheRead: 900, cacheWrite: 0, output: 2_000, reasoning: 500, totalTokens: 3_000 };
   assert.equal(formatCacheHitRate(cached), "90%");
   assert.equal(formatCacheHitRate({ ...cached, output: 100_000, reasoning: 10_000, totalTokens: 101_000 }), "90%");
@@ -156,10 +163,11 @@ test("session details show the whole session, so a resumed turn keeps prior usag
   const sessionUsage = { "session-a": resumed, "session-b": forked };
 
   const html = render(sessionTokenUsage(sessionUsage, "session-a"), sessionContext({ "session-a": { tokens: 9_000, peak: 9_000, window: 200_000 } }, "session-a"));
-  assert.ok(html.includes("total tokens: 17.5k</p>"), html);
+  assert.ok(html.includes("cumulative tokens: 17.5k</p>"), html);
   assert.ok(html.includes("input: 15k</p>"), html);
   assert.ok(html.includes("output: 2.3k</p>"), html);
-  assert.ok(html.includes("context window: 9k / 200k (5%)</p>"), html);
+  assert.ok(html.includes("context window: 200k</p>"), html);
+  assert.ok(html.includes("current context: 9k (5%)</p>"), html);
   assert.equal(sessionTokenUsage(sessionUsage, "session-b"), forked);
 });
 
@@ -283,9 +291,10 @@ test("an unknowable usage prefix hides token rows but keeps a known context", ()
   const html = renderToStaticMarkup(createElement(SessionTokenUsage, {
     context: { tokens: 8_000, peak: 9_000 }, showTokens: false,
   }));
-  assert.ok(html.includes("context window: 8k</p>"), html);
+  assert.ok(html.includes("context window: —</p>"), html);
+  assert.ok(html.includes("current context: 8k</p>"), html);
   assert.ok(!html.includes("peak:"), html);
-  assert.ok(!html.includes("total tokens:"), html);
+  assert.ok(!html.includes("cumulative tokens:"), html);
   assert.ok(!html.includes("cache read:"), html);
   // Nothing known at all means the section does not reserve blank rows.
   assert.equal(renderToStaticMarkup(createElement(SessionTokenUsage, { showTokens: false })), "");
