@@ -358,8 +358,12 @@ fn admission_rejects_cross_domain_and_unverified_capabilities() {
             assert!(safe_relative(name).is_err());
         }
         let mut changed = policy();
-        changed.caches = vec![".ENV/cache".into()];
+        changed.caches = vec![".ENV".into()];
         assert!(changed.validate().is_err());
+        // A cache nested inside a scope is a carve-out and is accepted.
+        let mut nested = policy();
+        nested.caches = vec![".ENV/cache".into()];
+        nested.validate().unwrap();
     }
 }
 

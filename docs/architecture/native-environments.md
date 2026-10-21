@@ -138,7 +138,16 @@ existing exploration/creation behavior and permissions.
 Scopes support basic files/directories, Unix modes/Windows readonly and supported
 links. Special files, escaping directory links and nested Runtime/Git metadata
 are rejected; managed Unix trees also reject hardlinks and special permission
-bits. Ownership, ACLs, xattrs/capabilities, sparse layout, ADS and general hardlink
+bits. An unreadable or unresolvable link (for example a Windows reparse point
+whose target no longer resolves, such as Chrome's `INetCache\Content.IE5`) is
+skipped with a log instead of failing the whole snapshot: it has no content to
+inherit, the live entry is left untouched, and the rest of the scope still
+snapshots. A cache may be a top-level path or a subtree carved out of a scope:
+anything at or below a cache path is excluded from the snapshot and left
+untouched in the live view. The automatic policy excludes the machine-local
+Windows/browser caches under the redirected `.agent-home` (for example
+`AppData/Local`, which holds `INetCache`, `D3DSCache` and browser profiles) plus
+`.runtime-cache`. A cache may not equal or contain a scope. Ownership, ACLs, xattrs/capabilities, sparse layout, ADS and general hardlink
 topology are not preserved by the basic snapshot contract.
 
 Physical copying uses the shared [native copy primitive](workspace-snapshots-and-feedback.md#physical-copy-primitive); it does not add environment relocation or logical-path guarantees.

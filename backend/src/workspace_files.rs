@@ -54,6 +54,7 @@ pub(crate) struct Files {
     directory: PathBuf,
     excluded_data: PathBuf,
     scopes: Option<Vec<PathBuf>>,
+    caches: Vec<PathBuf>,
 }
 
 fn excluded(path: &Path) -> bool {
@@ -61,6 +62,17 @@ fn excluded(path: &Path) -> bool {
         Component::Normal(name) => crate::path_identity::is_runtime_metadata_name(name),
         _ => false,
     })
+}
+
+/// Compare a workspace-relative path against configured cache paths with one
+/// separator style and, on Windows, one case so `INetCache`/`inetcache` match.
+fn cache_key(value: &Path) -> String {
+    let text = value.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text
+    }
 }
 
 fn relative(value: &str) -> Result<&Path, String> {
@@ -106,7 +118,11 @@ fn mode(metadata: &fs::Metadata) -> u32 {
 }
 
 impl Files {
-    pub(crate) fn environment(directory: &Path, scopes: &[String]) -> Result<Self, String> {
+    pub(crate) fn environment(
+        directory: &Path,
+        scopes: &[String],
+        caches: &[String],
+    ) -> Result<Self, String> {
         fs::create_dir_all(directory).map_err(|e| e.to_string())?;
         for name in ["versions", "blobs"] {
             real_child_path(directory, &directory.join(name), false)?;
@@ -116,11 +132,26 @@ impl Files {
             directory: directory.to_path_buf(),
             excluded_data: directory.to_path_buf(),
             scopes: Some(scopes.iter().map(PathBuf::from).collect()),
+            caches: caches.iter().map(PathBuf::from).collect(),
         })
     }
 
     fn is_excluded(&self, path: &Path) -> bool {
-        excluded(path)
+        excluded(path) || self.is_cache(path)
+    }
+
+    /// A cache may be a top-level scope or a subtree inside one (for example
+    /// the browser caches under the redirected `.agent-home`). Anything at or
+    /// below a cache path is left out of the snapshot untouched.
+    fn is_cache(&self, path: &Path) -> bool {
+        let name = cache_key(path);
+        self.caches.iter().any(|cache| {
+            let cache = cache_key(cache);
+            name == cache
+                || name
+                    .strip_prefix(cache.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
     }
 
     fn save_version(&self, version: &str, mut value: Version) -> Result<(), String> {
@@ -339,10 +370,28 @@ impl Files {
         let name = path_name(name)?;
         relative(&name)?;
         let entry = if metadata.file_type().is_symlink() {
-            let target = fs::read_link(path).map_err(|error| error.to_string())?;
-            let resolved = path.canonicalize().map_err(|error| {
-                format!("Cannot inherit broken link {}: {error}", path.display())
-            })?;
+            let Ok(target) = fs::read_link(path) else {
+                // Some Windows reparse points expose no readable link target.
+                // There is no content to inherit, so pass the live entry through
+                // untouched instead of failing the whole environment snapshot.
+                eprintln!(
+                    "Skipping unreadable environment link (not inherited): {}",
+                    path.display()
+                );
+                return Ok(());
+            };
+            let Ok(resolved) = path.canonicalize() else {
+                // The system cannot resolve the target: a broken junction, a
+                // link cycle, or inaccessible target (for example Chrome's
+                // INetCache\Content.IE5 junction, whose malformed print name
+                // makes Windows report path-not-found). Pass the live entry
+                // through untouched instead of failing the snapshot.
+                eprintln!(
+                    "Skipping unresolvable environment link (not inherited): {}",
+                    path.display()
+                );
+                return Ok(());
+            };
             if let Ok(local) = resolved.strip_prefix(root) {
                 let local = path_name(local)?;
                 relative(&local)?;

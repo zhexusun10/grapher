@@ -109,13 +109,23 @@ const [git,shell]=process.argv.slice(1);
 const probe=(exe,args)=>({path:exe,sha256:crypto.createHash('sha256').update(fs.readFileSync(exe)).digest('hex'),output:cp.execFileSync(exe,args,{encoding:'utf8',timeout:30000}).trim()});
 const tools=[];for(const directory of process.env.PATH.split(path.delimiter)){for(const name of process.platform==='win32'?['python.exe','python3.exe','conda.exe']:['python3','python','conda']){const file=path.join(directory,name);if(fs.existsSync(file)&&fs.statSync(file).isFile())tools.push({path:file,sha256:crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')});}}
 console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(process.versions)']),git:probe(git,['--version']),shell:probe(shell,['--noprofile','--norc','--version']),tools}));"#;
+    let mut caches = vec![".runtime-cache".to_string()];
+    if cfg!(windows) {
+        // The redirected HOME/USERPROFILE collects Windows and browser local
+        // caches here (INetCache, D3DSCache, Chrome/Edge profiles, crash dumps).
+        // They are machine-local and must not enter environment snapshots.
+        caches.push(".agent-home/AppData/Local".to_string());
+    } else {
+        caches.push(".agent-home/.cache".to_string());
+        caches.push(".agent-home/.npm".to_string());
+    }
     let config = EnvironmentConfig {
         mode: "native-workspace".into(),
         platform: environment::platform().into(),
         arch: std::env::consts::ARCH.into(),
         // These are ownership/exclusion boundaries, not pre-created environments.
         scopes: vec![".venv".into(), ".environments".into(), ".agent-home".into()],
-        caches: vec![".runtime-cache".into()],
+        caches,
         layout: "fixed".into(),
         launch: LaunchConfig {
             entry: text(&shell),

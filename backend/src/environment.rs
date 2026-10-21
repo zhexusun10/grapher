@@ -358,19 +358,38 @@ impl EnvironmentConfig {
             || !self.authority.is_empty()) {
             return Err("Best-effort inheritance requires an empty-start discovery policy".into());
         }
-        let paths = self.exclusions();
-        for (i, path) in paths.iter().enumerate() {
+        for (i, path) in self.scopes.iter().enumerate() {
             safe_relative(path)?;
-            if paths[..i].iter().any(|other| {
+            if self.scopes[..i].iter().any(|other| {
                 workspace::scope_contains(Path::new(path), Path::new(other))
                     || workspace::scope_contains(Path::new(other), Path::new(path))
             }) {
-                return Err(format!("Overlapping environment/cache scopes: {path}"));
+                return Err(format!("Overlapping environment scopes: {path}"));
+            }
+        }
+        for (i, path) in self.caches.iter().enumerate() {
+            safe_relative(path)?;
+            if self.caches[..i].iter().any(|other| {
+                workspace::scope_contains(Path::new(path), Path::new(other))
+                    || workspace::scope_contains(Path::new(other), Path::new(path))
+            }) {
+                return Err(format!("Overlapping environment caches: {path}"));
+            }
+            for scope in &self.scopes {
+                let inside = workspace::scope_contains(Path::new(path), Path::new(scope));
+                let contains = workspace::scope_contains(Path::new(scope), Path::new(path));
+                // A cache may carve a subtree out of a scope. It must not equal a
+                // scope or contain one, which would make that scope unreachable.
+                if (inside || contains) && !(inside && !contains) {
+                    return Err(format!(
+                        "Environment cache must be nested inside a managed scope, not overlap it: {path}"
+                    ));
+                }
             }
         }
         if let Some(path) = &self.launch_file {
             safe_relative(path)?;
-            if paths.iter().any(|scope| {
+            if self.exclusions().iter().any(|scope| {
                 workspace::scope_contains(Path::new(path), Path::new(scope))
                     || workspace::scope_contains(Path::new(scope), Path::new(path))
             }) {
@@ -491,7 +510,7 @@ impl Environments {
             fs::create_dir_all(directory.join(name)).map_err(|e| e.to_string())?;
         }
         real_child_path(data, &directory, false)?;
-        let files = Files::environment(&directory.join("files"), &config.scopes)?;
+        let files = Files::environment(&directory.join("files"), &config.scopes, &config.caches)?;
         Ok(Self {
             files,
             directory,
@@ -885,7 +904,7 @@ impl Environments {
             .into_iter()
             .filter(|scope| !self.config.caches.contains(scope))
             .collect();
-        Files::environment(&self.directory.join("files"), &scopes)
+        Files::environment(&self.directory.join("files"), &scopes, &self.config.caches)
     }
 
     fn capture_scoped(&self, path: &Path, parent: &str, reference: &str) -> Result<String, String> {
