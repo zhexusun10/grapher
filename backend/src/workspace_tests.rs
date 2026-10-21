@@ -506,3 +506,24 @@ fn deleted_run_refs_and_orphan_heads_are_pruned_with_objects() {
     assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "cat-file", "-e", &format!("{orphan}^{{commit}}")]).is_err());
     assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "cat-file", "-e", &format!("{kept}^{{commit}}")]).is_ok());
 }
+
+#[test]
+fn tracked_managed_scope_is_detected_and_removed_from_the_index() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    fs::create_dir(&repository).unwrap();
+    workspace::git(&repository, &["init", "-q"]).unwrap();
+    workspace::git(&repository, &["config", "user.email", "graph@test"]).unwrap();
+    workspace::git(&repository, &["config", "user.name", "Graph"]).unwrap();
+    fs::create_dir_all(repository.join(".agent-home/AppData")).unwrap();
+    fs::write(repository.join(".agent-home/AppData/config.json"), "junk").unwrap();
+    fs::write(repository.join("app.txt"), "code").unwrap();
+    workspace::git(&repository, &["add", "-A"]).unwrap();
+    workspace::git(&repository, &["commit", "-qm", "base"]).unwrap();
+
+    let exclusions = vec![".agent-home".to_string()];
+    assert!(workspace::has_tracked_scoped(&repository, &exclusions).unwrap());
+    workspace::unstage_scoped(&repository, &exclusions).unwrap();
+    assert!(!workspace::has_tracked_scoped(&repository, &exclusions).unwrap());
+    assert!(repository.join(".agent-home/AppData/config.json").is_file());
+}

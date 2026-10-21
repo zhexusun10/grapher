@@ -19,7 +19,7 @@ jobs:
   planner-source:
     name: Planner source / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Native/environment/Merger step budgets total 61 minutes. Leave headroom
+    # Native/environment/Merger step budgets total 65 minutes. Leave headroom
     # for dependency setup, cold Rust builds, fixtures and post-job cleanup.
     timeout-minutes: 90
     strategy:
@@ -73,7 +73,7 @@ jobs:
         timeout-minutes: 45
         run: npm run test:environment
       - name: Verify production Planner revisions, dependency composition and Merger (local model)
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: npm run test:merger
       - name: Run the full backend library test suite on Windows
         if: runner.os == 'Windows'

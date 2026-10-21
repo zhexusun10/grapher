@@ -2699,6 +2699,52 @@ pub(crate) fn stage_scoped_local(path: &Path, exclusions: &[String]) -> Result<(
     stage_scoped_impl(path, exclusions, true)
 }
 
+/// Remove managed environment/cache scopes from the index without touching the
+/// working tree. A Merger that staged one itself must not leak it into the merge
+/// commit, while the live files stay available to the environment.
+pub(crate) fn unstage_scoped(path: &Path, exclusions: &[String]) -> Result<(), String> {
+    if exclusions.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec![
+        "rm".to_string(),
+        "-r".to_string(),
+        "--cached".to_string(),
+        "--ignore-unmatch".to_string(),
+        "-q".to_string(),
+        "--".to_string(),
+    ];
+    args.extend(scope_pathspecs(exclusions));
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git(path, &args)?;
+    Ok(())
+}
+
+/// Whether the index currently tracks a managed environment/cache scope.
+pub(crate) fn has_tracked_scoped(path: &Path, exclusions: &[String]) -> Result<bool, String> {
+    if exclusions.is_empty() {
+        return Ok(false);
+    }
+    let mut args = vec!["ls-files".to_string(), "-z".to_string(), "--".to_string()];
+    args.extend(scope_pathspecs(exclusions));
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    Ok(!git(path, &args)?.trim_matches('\0').is_empty())
+}
+
+fn scope_pathspecs(exclusions: &[String]) -> Vec<String> {
+    exclusions
+        .iter()
+        .map(|scope| {
+            let scope = scope.replace('\\', "/");
+            if cfg!(windows) {
+                format!(":(literal,icase){scope}")
+            } else {
+                format!(":(literal){scope}")
+            }
+        })
+        .collect()
+}
+
 fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<(), String> {
     // Runtime deliberately overrides Git's ignore rules for project files:
     // every ordinary project file becomes part of the node/source Git snapshot.

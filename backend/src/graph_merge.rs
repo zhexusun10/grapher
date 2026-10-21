@@ -44,7 +44,17 @@ fn finish_merge(repository: &Path, head: &str, exclusions: &[String]) -> Result<
     }
     if pending(repository).is_some() {
         workspace::stage_scoped_local(repository, exclusions)?;
+        // A Merger may have staged a managed environment/cache scope itself;
+        // never let a runtime-owned path enter the merge commit.
+        workspace::unstage_scoped(repository, exclusions)?;
         git(repository, &["commit", "--no-edit"])?;
+    } else if git(repository, &["diff", "--cached", "--name-only"])?.is_empty()
+        && workspace::has_tracked_scoped(repository, exclusions)?
+    {
+        // A Merger that committed the merge itself still must not carry a
+        // managed scope. Amend its commit; the live files stay in place.
+        workspace::unstage_scoped(repository, exclusions)?;
+        git(repository, &["commit", "--amend", "--no-edit"])?;
     }
     git(repository, &["merge-base", "--is-ancestor", head, "HEAD"])
         .map_err(|_| "Merger did not preserve the incoming commit".to_string())?;
@@ -244,7 +254,16 @@ pub(crate) fn resolve_with_merger_for_node(
         if let Some(error) = output_error {
             return Err(format!("Cannot persist merger output: {error}"));
         }
-        finish_merge(repository, &incoming, &[])
+        // Node composition must exclude the managed environment/cache scopes
+        // exactly like publication does; otherwise Grapher's own staging would
+        // commit `.agent-home`/`.venv` and the next preparation would reject the
+        // merge as a tracked-file conflict.
+        let exclusions = config
+            .environment
+            .as_ref()
+            .map(|environment| environment.exclusions())
+            .unwrap_or_default();
+        finish_merge(repository, &incoming, &exclusions)
     });
     match &result {
         Ok(()) => {
@@ -440,6 +459,91 @@ mod tests {
         assert!(!prompt.contains("environment reconciliation"));
     }
 
+    #[test]
+    fn finish_merge_never_commits_a_managed_environment_scope() {
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| crate::workspace::git(&repo, args).unwrap();
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "graph@test"]);
+        git(&["config", "user.name", "Graph"]);
+        fs::write(repo.join("f.txt"), "base\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-qb", "incoming"]);
+        fs::write(repo.join("f.txt"), "incoming\n").unwrap();
+        git(&["commit", "-qam", "incoming"]);
+        let incoming = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-B", "main", &base]);
+        fs::write(repo.join("f.txt"), "main\n").unwrap();
+        git(&["commit", "-qam", "main"]);
+        // The Merger resolves the conflict and (incorrectly) stages a scope.
+        fs::create_dir_all(repo.join(".agent-home/AppData")).unwrap();
+        fs::write(repo.join(".agent-home/AppData/config.json"), "junk\n").unwrap();
+        let _ = crate::workspace::git(&repo, &["merge", "--no-edit", "--no-ff", &incoming]);
+        fs::write(repo.join("f.txt"), "resolved\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["add", "-f", ".agent-home"]);
+        assert!(git(&["diff", "--cached", "--name-only"]).contains(".agent-home"));
 
+        super::finish_merge(&repo, &incoming, &[".agent-home".to_string()]).unwrap();
 
+        let tree = git(&["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(
+            !tree.contains(".agent-home"),
+            "merge commit carried a managed scope: {tree}"
+        );
+        assert!(repo.join(".agent-home/AppData/config.json").is_file());
+    }
+
+    #[test]
+    fn finish_merge_amends_a_merger_commit_that_carried_a_managed_scope() {
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| crate::workspace::git(&repo, args).unwrap();
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "graph@test"]);
+        git(&["config", "user.name", "Graph"]);
+        fs::write(repo.join("f.txt"), "base\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-qb", "incoming"]);
+        fs::write(repo.join("f.txt"), "incoming\n").unwrap();
+        git(&["commit", "-qam", "incoming"]);
+        let incoming = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-B", "main", &base]);
+        fs::write(repo.join("f.txt"), "main\n").unwrap();
+        git(&["commit", "-qam", "main"]);
+        fs::create_dir_all(repo.join(".agent-home/AppData")).unwrap();
+        fs::write(repo.join(".agent-home/AppData/config.json"), "junk\n").unwrap();
+        let _ = crate::workspace::git(&repo, &["merge", "--no-edit", "--no-ff", &incoming]);
+        fs::write(repo.join("f.txt"), "resolved\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["add", "-f", ".agent-home"]);
+        // A Merger that commits the merge itself leaves no MERGE_HEAD behind.
+        git(&["commit", "--no-edit"]);
+        assert!(git(&["ls-tree", "-r", "--name-only", "HEAD"]).contains(".agent-home"));
+        assert!(crate::workspace::git(&repo, &["rev-parse", "--verify", "-q", "MERGE_HEAD"]).is_err());
+
+        super::finish_merge(&repo, &incoming, &[".agent-home".to_string()]).unwrap();
+
+        let tree = git(&["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(
+            !tree.contains(".agent-home"),
+            "amended commit carried a managed scope: {tree}"
+        );
+        assert!(repo.join(".agent-home/AppData/config.json").is_file());
+        let parents = git(&["rev-list", "--parents", "-n", "1", "HEAD"]);
+        assert_eq!(
+            parents.split_whitespace().count(),
+            3,
+            "amended merge must keep both parents: {parents}"
+        );
+    }
 }

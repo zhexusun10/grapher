@@ -69,6 +69,48 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
 }
 
 #[test]
+fn preparation_only_failure_is_resumable_without_a_conversation_turn() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let failed = runtime.jobs().unwrap().remove(0);
+    // A managed policy is what distinguishes preparation failures from plain
+    // provider failures. The recovery hint only checks that one is configured.
+    runtime.state.config.as_mut().unwrap().environment = Some(
+        serde_json::from_value(serde_json::json!({
+            "mode": "native-workspace",
+            "platform": "test",
+            "arch": "test",
+            "scopes": [".agent-home"],
+            "layout": "fixed",
+            "launch": {"entry": "/bin/sh", "path": [], "shell": "/bin/sh"},
+            "baseline": ["/bin/sh"]
+        }))
+        .unwrap(),
+    );
+    runtime
+        .emit(EventKind::Failed {
+            node: failed.execution.node.clone(),
+            execution_id: Some(failed.execution.id.clone()),
+            error: "Managed environment/cache conflicts with tracked file: .agent-home/x".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    runtime.jobs().unwrap();
+    assert!(
+        runtime.state.can_resume(),
+        "a preparation failure has no conversation to intervene in"
+    );
+    assert_eq!(
+        crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"],
+        true
+    );
+
+    runtime.pause(false).unwrap();
+    assert_eq!(runtime.state.nodes["task"].status, "waiting");
+}
+
+#[test]
 fn newly_added_nodes_use_this_conversations_saved_settings() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();

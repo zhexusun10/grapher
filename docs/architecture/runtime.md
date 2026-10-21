@@ -75,6 +75,11 @@ workspace and session slot receive the node task and the follow-up turn instead
 of failing with `Cannot resume node session`. Retrying or editing a message from
 such an attempt also skips the missing JSONL branch: an edited opening turn
 replaces the node task, and an edited follow-up is appended to it.
+A managed-environment node that failed during preparation (before `Prepared`,
+with no conversation) is also Continue-recoverable: the recovery hint is
+`canResume`, and Continue re-dispatches it as a fresh attempt instead of
+resuming a missing session. Provider/model failures that reached preparation
+keep their separate model/credential recovery paths.
 A node conversation's Stop interrupts only that node; global
 Stop/cancel also cancels planning. Internal scheduling-only pauses used to drain
 an affected branch for a Planner revision still let active calls finish.

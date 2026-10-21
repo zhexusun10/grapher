@@ -1629,6 +1629,7 @@ impl Runtime {
         let mut roots = self.state.interrupted_nodes();
         roots.extend(self.state.model_retry_nodes());
         roots.extend(self.state.credential_retry_nodes());
+        roots.extend(self.state.preparation_failed_nodes());
         roots.sort();
         roots.dedup();
         if roots.is_empty() {
@@ -4519,7 +4520,10 @@ fn perform_with_merger_inner(
                 .is_ok()
         })
         && workspace::repository_status(path, &exclusions).is_ok_and(|status| status.is_empty())
-        && workspace::git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err();
+        && workspace::git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err()
+        // A head that still tracks a managed scope (an older Merger could commit
+        // it) must be recomposed from the clean base instead of inherited.
+        && workspace::has_tracked_scoped(path, &exclusions).is_ok_and(|tracked| !tracked);
     let before = if let Some(head) = preserved_head {
         head
     } else if let Some(adopted) = &adopted_feedback_head {

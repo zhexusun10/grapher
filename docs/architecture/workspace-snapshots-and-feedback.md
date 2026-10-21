@@ -167,7 +167,7 @@ merged using normal Git semantics. A conflict in any tracked path—including a
 path that the source project's `.gitignore` would normally ignore—is a Git
 conflict and follows the existing Merger flow.
 
-A successful Merger must stage the resolution and commit a clean result preserving incoming parents. Conversation controls, blocked-node retry and publication-Merger distinctions belong to [Merger lifecycle](execution-model.md#parent-composition-conflicts).
+A successful Merger must stage the resolution and commit a clean result preserving incoming parents. Composition and publication pass the managed environment/cache scopes as staging exclusions, and merge completion removes any accidentally staged scope from the index, so a Merger cannot commit `.agent-home`, `.venv` or `.environments` into the branch; the live files stay in the workspace for the environment. Conversation controls, blocked-node retry and publication-Merger distinctions belong to [Merger lifecycle](execution-model.md#parent-composition-conflicts).
 
 A completed workspace that is modified after completion fails the feedback
 handoff cleanliness check. The result must first be represented by a new

@@ -1480,12 +1480,48 @@ impl Snapshot {
         }).collect()
     }
 
+    /// Failed managed-environment nodes whose latest attempt never reached
+    /// `Prepared` (for example a workspace/environment preparation conflict).
+    /// There is no conversation to intervene in, so Continue is their recovery
+    /// path; provider/model failures after preparation keep their own recovery.
+    pub fn preparation_failed_nodes(&self) -> Vec<String> {
+        if self
+            .config
+            .as_ref()
+            .and_then(|config| config.environment.as_ref())
+            .is_none()
+        {
+            return Vec::new();
+        }
+        self.nodes
+            .iter()
+            .filter_map(|(name, node)| {
+                if node.status != "failed" {
+                    return None;
+                }
+                let latest = self.executions.iter().rev().find(|execution| {
+                    execution.node == *name
+                        && !self.superseded_execution_ids.contains(&execution.id)
+                })?;
+                if latest.status != "failed" || latest.output_bytes != 0 {
+                    return None;
+                }
+                let prepared = self.events.iter().any(|event| matches!(
+                    &event.kind,
+                    EventKind::Prepared { execution_id, .. } if execution_id == &latest.id
+                ));
+                (!prepared).then(|| name.clone())
+            })
+            .collect()
+    }
+
     /// Backend-owned recovery hint; neither a retry nor a completion claim.
     pub fn can_resume(&self) -> bool {
         self.recovery_is_idle()
             && (!self.interrupted_nodes().is_empty()
                 || !self.model_retry_nodes().is_empty()
-                || !self.credential_retry_nodes().is_empty())
+                || !self.credential_retry_nodes().is_empty()
+                || !self.preparation_failed_nodes().is_empty())
     }
 
     pub fn is_node_user_paused(&self, node: &str) -> bool {

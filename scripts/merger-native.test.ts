@@ -15,7 +15,9 @@ const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const normalize = (value: string) => value.replace(/^\\\\\?\\/, '').replaceAll('\\', '/');
 const delay = (ms: number) => new Promise(completed => setTimeout(completed, ms));
 
-test('production Planner writes source directly; Merger repairs node and publication conflicts', { timeout: 300000 }, async () => {
+// Real Pi processes make the Windows production path roughly twice as slow
+// as local runs; keep headroom so host load is not reported as a hang.
+test('production Planner writes source directly; Merger repairs node and publication conflicts', { timeout: 600000 }, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-merger-')));
   const agent = join(directory, 'agent');
   const data = join(directory, 'data');
