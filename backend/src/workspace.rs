@@ -493,7 +493,12 @@ pub(crate) fn private_git_dir(path: &Path) -> Option<PathBuf> {
 
 pub(crate) fn has_private_git(path: &Path) -> bool {
     let Ok(_lease) = SlotGitGuard::acquire(path) else { return false; };
-    path.join(".git").is_dir() || private_git_dir(path).is_some()
+    // Hidden slot metadata can outlive the slot directory when the physical
+    // workspace is removed (a reclaim that missed it, or a caller deleting the
+    // slot directly). A missing slot has no index or working tree to run Git
+    // against, so it must not report private Git: callers would otherwise spawn
+    // Git in a non-existent directory instead of rebuilding the slot.
+    path.is_dir() && (path.join(".git").is_dir() || private_git_dir(path).is_some())
 }
 
 pub(crate) fn hide_private_git(path: &Path) -> Result<(), String> {
