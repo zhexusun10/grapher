@@ -235,7 +235,7 @@ impl Store {
         // Both deletion and offline GC use the same lifetime predicate. A
         // completed Git Graph still needs its private ancestry for continuation;
         // only an ordinary folder can release it after successful delivery.
-        if let Target::Shadow { root, name } = target {
+        if let Target::Shadow { root, name, .. } = target {
             return self.shadow_repo_referenced_by(excluded, &root.join("shadow_repos").join(name));
         }
         let payload = serde_json::to_string(target).map_err(|error| error.to_string())?;
@@ -269,7 +269,7 @@ impl Store {
                     params![excluded, kind, id, prefix], |row| row.get(0)).map_err(|error| error.to_string());
             }
         }
-        if let Target::Shadow { root, name } = target {
+        if let Target::Shadow { root, name, .. } = target {
             let expected = root.join("shadow_repos").join(name);
             for id in self.runs()?.into_iter().filter(|id| id != excluded) {
                 let state = self.load(&id)?;
@@ -329,7 +329,7 @@ impl Store {
                 // A missing binding cannot disprove recorded ownership. Don't
                 // discard recovery history merely because the source moved.
                 if resolved.is_none() && self.owned_cleanup_targets(&id)?.iter().any(|target| {
-                    matches!(target, Target::Shadow { root, name } if root.join("shadow_repos").join(name) == expected)
+                    matches!(target, Target::Shadow { root, name, .. } if root.join("shadow_repos").join(name) == expected)
                 }) { return Ok(true); }
                 continue;
             }

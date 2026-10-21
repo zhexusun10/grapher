@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Deleting a Graph conversation now removes its run-scoped internal Git refs, orphaned commit heads, and unreachable objects while preserving refs for other live Runs sharing the same source database.
+
 ## [1.2.6] - 2026-10-21
 
 ### Added

@@ -138,6 +138,7 @@ fn workspace_plan(root: &Path, store: &Store, parent: &Path) -> Result<Workspace
                 let target = crate::cleanup::Target::Shadow {
                     root: root.to_path_buf(),
                     name,
+                    source: None,
                 };
                 let Ok(Some(path)) = target.resolve(root, "offline-gc") else {
                     continue;

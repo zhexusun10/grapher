@@ -742,6 +742,7 @@ impl Runtime {
             &BTreeSet::from([crate::cleanup::Target::Shadow {
                 root: workspace::data_root(),
                 name,
+                source: Some(repository.canonicalize().unwrap_or_else(|_| repository.to_path_buf())),
             }]),
         )?;
         if head != self.latest_source_head() {

@@ -156,7 +156,7 @@ fn completed_git_graphs_keep_shared_private_history_until_the_last_conversation_
         ids.push(runtime.state.run_id.clone());
     }
     let shadow = crate::workspace::shadow_repo_dir(&source).unwrap();
-    let target = Target::Shadow { root: crate::workspace::data_root(), name: shadow.file_name().unwrap().to_string_lossy().into() };
+    let target = Target::Shadow { root: crate::workspace::data_root(), name: shadow.file_name().unwrap().to_string_lossy().into(), source: None };
     assert!(runtime.store.shadow_repo_in_use(&shadow).unwrap(), "offline GC must retain completed Git Graph history");
     assert!(runtime.store.cleanup_target_is_shared(&ids[1], &target).unwrap());
     let moved = source.with_extension("moved");

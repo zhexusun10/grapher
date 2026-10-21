@@ -585,6 +585,71 @@ pub(crate) fn reclaim_orphan_git_metadata(run_root: &Path) -> Result<(), String>
     Ok(())
 }
 
+
+/// Remove refs owned by a deleted Run and reclaim objects that are no longer
+/// reachable from any remaining Grapher ref. Shared source databases keep
+/// their other Run refs, source snapshots and published results intact.
+pub(crate) fn prune_shadow_run_refs(shadow: &Path, run_id: &str, protected: &std::collections::BTreeSet<String>, reclaim_objects: bool) -> Result<(), String> {
+    uuid::Uuid::parse_str(run_id).map_err(|_| "Invalid Run ID for shadow cleanup")?;
+    let metadata = match fs::symlink_metadata(shadow) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("Refusing linked or non-directory shadow repository: {}", shadow.display()));
+    }
+    let shadow_text = shadow.to_str().ok_or("Invalid shadow path")?;
+    let prefix = format!("refs/grapher/runs/{run_id}/");
+    let run_refs = git(shadow, &["--git-dir", shadow_text, "for-each-ref", "--format=%(refname)", &prefix])?;
+    let mut transaction = String::new();
+    for reference in run_refs.lines().filter(|line| !line.is_empty()) {
+        transaction.push_str(&format!("delete {reference}\n"));
+    }
+    let mut changed = !transaction.is_empty();
+    if changed {
+        git_bytes(shadow, &["--git-dir", shadow_text, "update-ref", "--stdin"], None, Some(transaction.as_bytes()))?;
+    }
+
+    // Node result commits are also pinned under refs/grapher/heads/<commit>.
+    // Keep a head only while a non-head ref (another Run, a source input or a
+    // published result) still points at the same object.
+    let refs = git(shadow, &["--git-dir", shadow_text, "for-each-ref", "--format=%(refname) %(objectname)"])?;
+    let mut referenced = std::collections::BTreeSet::new();
+    let mut heads = Vec::new();
+    for line in refs.lines() {
+        let Some((reference, object)) = line.split_once(' ') else { continue };
+        if reference.starts_with("refs/grapher/heads/") {
+            heads.push((reference.to_string(), object.to_string()));
+        } else {
+            referenced.insert(object.to_string());
+        }
+    }
+    let mut head_transaction = String::new();
+    for (reference, object) in heads {
+        if !referenced.contains(&object) && !protected.contains(&object) {
+            head_transaction.push_str(&format!("delete {reference}\n"));
+        }
+    }
+    if !head_transaction.is_empty() {
+        changed = true;
+        git_bytes(shadow, &["--git-dir", shadow_text, "update-ref", "--stdin"], None, Some(head_transaction.as_bytes()))?;
+    }
+    if changed && reclaim_objects {
+        // Refuse to prune when another live Run references a commit that is no
+        // longer pinned by any ref; a missing pin is recovery evidence, not a
+        // reason to delete it.
+        let remaining = git(shadow, &["--git-dir", shadow_text, "for-each-ref", "--format=%(objectname)"])?;
+        let remaining: std::collections::BTreeSet<&str> = remaining.lines().collect();
+        if protected.iter().all(|object| remaining.contains(object.as_str())) {
+            // Reflogs can keep otherwise unreachable objects alive; expire them
+            // before pruning. The host ref lock serializes this with Grapher Git.
+            git(shadow, &["--git-dir", shadow_text, "reflog", "expire", "--expire=now", "--all"])?;
+            git(shadow, &["--git-dir", shadow_text, "gc", "--prune=now", "--quiet"])?;
+        }
+    }
+    Ok(())
+}
 /// Only conflict repair gets a discoverable Git view, and only for that turn.
 pub(crate) struct MergerGitView { path: PathBuf, lock: Arc<SlotGitLock> }
 impl MergerGitView {

@@ -29,6 +29,10 @@ pub enum Target {
     Shadow {
         root: PathBuf,
         name: String,
+        /// Source binding owned when this target was recorded. Used to serialize
+        /// live ref/object reclamation with Grapher Git work on that source.
+        #[serde(default)]
+        source: Option<PathBuf>,
     },
 }
 
@@ -106,7 +110,7 @@ impl Target {
                 }
                 (parent.clone(), child)
             }
-            Self::Shadow { root, name } => {
+            Self::Shadow { root, name, .. } => {
                 let valid = name
                     .strip_suffix(".git")
                     .and_then(|name| name.rsplit_once('_'))
@@ -190,6 +194,7 @@ pub(crate) fn configuration_targets(
                 .ok_or("Invalid shadow directory")?
                 .to_string_lossy()
                 .into_owned(),
+            source: Some(source.clone()),
         });
     }
     Ok(targets)
@@ -455,6 +460,62 @@ pub(crate) fn validate(root: &Path, run_id: &str, manifest: &Manifest) -> Result
     Ok(())
 }
 
+
+/// Commits that another live Run may still resolve while its node results are
+/// prepared. They keep their `refs/grapher/heads/*` pins during a deleted Run's
+/// object reclamation even if no current ref points at them yet.
+fn protected_shadow_objects(store: &Store, excluded: &str) -> Result<BTreeSet<String>, String> {
+    let mut protected = BTreeSet::new();
+    for id in store.runs()? {
+        if id == excluded {
+            continue;
+        }
+        let state: Snapshot = store.load(&id)?;
+        let mut add = |head: &str| {
+            if !head.is_empty() {
+                protected.insert(head.to_string());
+            }
+        };
+        add(&state.base);
+        if let Some(head) = &state.published_head {
+            add(head);
+        }
+        for head in &state.published_heads {
+            add(head);
+        }
+        for node in state.nodes.values() {
+            if let Some(head) = &node.head {
+                add(head);
+            }
+            if let Some(input) = &node.feedback_workspace {
+                for source in input.sources() {
+                    add(&source.head);
+                }
+            }
+        }
+        for execution in state.executions.iter().chain(state.mergers.iter()) {
+            add(&execution.before);
+            if let Some(head) = &execution.after {
+                add(head);
+            }
+        }
+        for event in &state.events {
+            match &event.kind {
+                EventKind::Approved { base } => add(base),
+                EventKind::SourceSnapshotted { head }
+                | EventKind::PublicationCompleted { head }
+                | EventKind::Prepared { head, .. }
+                | EventKind::WorkspaceResolved { head, .. } => add(head),
+                EventKind::GraphRevised {
+                    source_head: Some(head),
+                    ..
+                } => add(head),
+                _ => {}
+            }
+        }
+    }
+    Ok(protected)
+}
 /// Caller must hold the Run's runtime mutex for workspace-only tasks. The
 /// sequence check cancels stale cleanup once a follow-up/revision changes it.
 pub(crate) fn execute(root: &Path, store: &Store, task: &Task) -> Result<(), String> {
@@ -502,9 +563,31 @@ pub(crate) fn execute(root: &Path, store: &Store, task: &Task) -> Result<(), Str
     // Revalidate the entire plan on EVERY retry, before the first removal.
     validate(root, &task.run_id, &manifest)?;
     manifest.protected_sources.extend(store.cleanup_sources()?);
+    let deleting = task.manifest.sequence.is_none();
+    let protected = if deleting {
+        protected_shadow_objects(store, &task.run_id)?
+    } else {
+        BTreeSet::new()
+    };
     let mut paths = Vec::new();
     for target in &manifest.targets {
-        if store.cleanup_target_is_shared(&task.run_id, target)? {
+        let shared = store.cleanup_target_is_shared(&task.run_id, target)?;
+        if shared && deleting {
+            if let Target::Shadow { source, .. } = target {
+                if let Some(path) = target.resolve(root, &task.run_id)? {
+                    if let Some(source) = source {
+                        let lock = crate::workspace::host_ref_lock(source)?;
+                        let _guard = lock.lock().map_err(|error| error.to_string())?;
+                        crate::workspace::prune_shadow_run_refs(&path, &task.run_id, &protected, true)?;
+                    } else {
+                        // Legacy ownership lacks the source lock. Refs are safe
+                        // to remove; object GC waits for an offline cleanup.
+                        crate::workspace::prune_shadow_run_refs(&path, &task.run_id, &protected, false)?;
+                    }
+                }
+            }
+        }
+        if shared {
             continue;
         }
         if let Some(path) = target.resolve(root, &task.run_id)? {

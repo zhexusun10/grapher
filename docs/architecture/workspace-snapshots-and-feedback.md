@@ -252,7 +252,7 @@ Managed environment scopes/caches are excluded from project Git collection and s
 
 ## Cleanup and reproducibility
 
-Git commits and refs provide project-file reconstruction after snapshotting, independent of physical slot identity. This does not reproduce model output, requirement interpretation or code quality, and is not a [filesystem access boundary](filesystem-isolation.md).
+Git commits and refs provide project-file reconstruction after snapshotting, independent of physical slot identity. Deleting a Graph conversation removes its run-scoped refs and orphaned internal heads, then prunes unreachable objects while retaining refs and protected heads of other live Runs; the shared source database is removed with its last conversation. This does not reproduce model output, requirement interpretation or code quality, and is not a [filesystem access boundary](filesystem-isolation.md).
 
 Slots may be reclaimed only after ownership/recovery requirements end. Data/cache deletion belongs to [Storage and cleanup](storage.md); managed evidence retention belongs to [Native environments](native-environments.md#current-state-historical-evidence-and-ownership).
 

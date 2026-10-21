@@ -469,3 +469,40 @@ fn recreated_slot_ignores_metadata_from_a_deleted_workspace() {
     assert_eq!(fs::read_to_string(slot.join("keep.txt")).unwrap(), "base");
     assert!(workspace::git(&slot, &["rev-parse", "HEAD"]).is_ok());
 }
+
+#[test]
+fn deleted_run_refs_and_orphan_heads_are_pruned_with_objects() {
+    let temp = tempfile::tempdir().unwrap();
+    let shadow = temp.path().join("shadow.git");
+    fs::create_dir(&shadow).unwrap();
+    workspace::git(&shadow, &["init", "--bare", "-q"]).unwrap();
+    let shadow_text = shadow.to_str().unwrap();
+    let run = uuid::Uuid::new_v4().to_string();
+    let blob = String::from_utf8(workspace::git_bytes(
+        &shadow,
+        &["--git-dir", shadow_text, "hash-object", "-w", "--stdin"],
+        None,
+        Some(b"content\n"),
+    ).unwrap()).unwrap().trim().to_string();
+    let tree = String::from_utf8(workspace::git_bytes(
+        &shadow,
+        &["--git-dir", shadow_text, "mktree"],
+        None,
+        Some(format!("100644 blob {blob}\tfile\n").as_bytes()),
+    ).unwrap()).unwrap().trim().to_string();
+    let kept = workspace::git(&shadow, &["--git-dir", shadow_text, "commit-tree", &tree, "-m", "kept"]).unwrap();
+    let orphan = workspace::git(&shadow, &["--git-dir", shadow_text, "commit-tree", &tree, "-m", "orphan"]).unwrap();
+    let run_ref = format!("refs/grapher/runs/{run}/nodes/node");
+    workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &run_ref, &orphan]).unwrap();
+    workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &format!("refs/grapher/heads/{orphan}"), &orphan]).unwrap();
+    workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &format!("refs/grapher/heads/{kept}"), &kept]).unwrap();
+    workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", "refs/grapher/published/result", &kept]).unwrap();
+
+    workspace::prune_shadow_run_refs(&shadow, &run, &std::collections::BTreeSet::new(), true).unwrap();
+
+    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &run_ref]).is_err());
+    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &format!("refs/grapher/heads/{orphan}")]).is_err());
+    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &format!("refs/grapher/heads/{kept}")]).is_ok());
+    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "cat-file", "-e", &format!("{orphan}^{{commit}}")]).is_err());
+    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "cat-file", "-e", &format!("{kept}^{{commit}}")]).is_ok());
+}
