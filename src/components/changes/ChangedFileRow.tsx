@@ -23,7 +23,8 @@ export const ChangedFileRow = React.memo(function ChangedFileRow({ item }: Chang
           : <Icon size={11} strokeWidth={2.6} className="changed-file-icon" />}
       </span>
       <span className="changed-file-path">{path}</span>
-      <ChangeDiffStats additions={item.additions} deletions={item.deletions} />
+      {/* Deleted files have no surviving lines to count, so the row omits stats. */}
+      {item.status !== "deleted" && <ChangeDiffStats additions={item.additions} deletions={item.deletions} />}
     </div>
   </div>;
 });

@@ -134,6 +134,8 @@ test("full paths and backend counts update live; switching scope keeps one entry
     await expect(trigger.locator(".change-diff-stats")).toHaveCount(0);
     const buttonStats = panel.locator('[data-file-path="src/components/Button.tsx"] .diff-stat-add');
     await expect(buttonStats).toHaveText("+2");
+    // Deleted files carry no line counts: the row omits the stats block entirely.
+    await expect(panel.locator('[data-file-path="src/legacy.ts"] .change-diff-stats')).toHaveCount(0);
     await page.evaluate(() => window.changesAudit.update());
     await page.evaluate(() => window.changesAudit.settle());
     await expect(trigger).toHaveAttribute("aria-expanded", "true");
