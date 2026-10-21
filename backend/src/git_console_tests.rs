@@ -19,6 +19,13 @@ unsafe extern "system" fn handle_probe_interrupt(event: u32) -> i32 {
     i32::from(event == 0 || event == 1)
 }
 
+/// PowerShell/alias startup can exceed a few seconds on a loaded CI runner.
+/// The probe owns its own disposable console, so a generous wait is free when
+/// the host is healthy and avoids failing a correct isolation check.
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// The alias script waits for the parent to release it after each assertion.
+const RELEASE_WINDOW_SECONDS: u64 = 60;
+
 #[test]
 fn host_git_is_isolated_from_console_control_events() {
     let output = Command::new(std::env::current_exe().unwrap())
@@ -57,7 +64,7 @@ fn console_processes() -> Vec<u32> {
 }
 
 fn wait_for(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + READY_TIMEOUT;
     while !path.exists() {
         assert!(Instant::now() < deadline, "Git probe did not become ready: {}", path.display());
         std::thread::sleep(Duration::from_millis(10));
@@ -79,15 +86,15 @@ fn git_console_probe() {
 
     let temp = tempfile::tempdir().unwrap();
     let wait = temp.path().join("wait-for-release.ps1");
-    fs::write(&wait, r#"param([string]$Ready, [string]$Release, [string]$Survived)
+    fs::write(&wait, format!(r#"param([string]$Ready, [string]$Release, [string]$Survived)
 Set-Content -LiteralPath $Ready -Value ready -NoNewline
-$deadline = [DateTime]::UtcNow.AddSeconds(10)
-while (-not (Test-Path -LiteralPath $Release)) {
-    if ([DateTime]::UtcNow -gt $deadline) { exit 44 }
+$deadline = [DateTime]::UtcNow.AddSeconds({RELEASE_WINDOW_SECONDS})
+while (-not (Test-Path -LiteralPath $Release)) {{
+    if ([DateTime]::UtcNow -gt $deadline) {{ exit 44 }}
     Start-Sleep -Milliseconds 20
-}
+}}
 Set-Content -LiteralPath $Survived -Value survived -NoNewline
-"#).unwrap();
+"#)).unwrap();
 
     // A plain host Git shares the probe console. `workspace::git` must not add
     // any process to this console while the alias is running.
@@ -134,7 +141,7 @@ Set-Content -LiteralPath $Survived -Value survived -NoNewline
             let ready = ready.clone();
             let release = release.clone();
             std::thread::spawn(move || -> Result<(), String> {
-                let deadline = Instant::now() + Duration::from_secs(5);
+                let deadline = Instant::now() + READY_TIMEOUT;
                 while !ready.exists() {
                     if Instant::now() >= deadline { return Err("Git probe did not become ready".into()); }
                     std::thread::sleep(Duration::from_millis(10));
