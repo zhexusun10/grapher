@@ -924,6 +924,7 @@ fn save_config_projection(
 }
 
 pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetrics {
+    let mut session_id = None;
     let mut session_start = None;
     let mut last_event = None;
     let mut duration_seconds = 0.0;
@@ -931,6 +932,8 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
     let mut tools = 0;
     let mut tool_errors = 0;
     let mut usage = TokenUsage::default();
+    let mut context_tokens = 0;
+    let mut context_peak = 0;
 
     for line in log.lines() {
         let trimmed = line.trim();
@@ -963,42 +966,31 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
                         duration_seconds += elapsed / 1000.0;
                     }
                 }
+                // Every role process reports the Pi session it appends to, so a
+                // resumed Planner turn stays in the same session bucket.
+                "grapher_process_started" => {
+                    if let Some(id) = value
+                        .get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .filter(|id| !id.is_empty())
+                    {
+                        session_id = Some(id.to_string());
+                    }
+                }
                 "message_end" => {
                     if let Some(msg) = value.get("message") {
                         if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
                             assistant_messages += 1;
                             if let Some(u) = msg.get("usage") {
-                                usage.input +=
-                                    u.get("input").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                usage.output +=
-                                    u.get("output").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                usage.cache_read +=
-                                    u.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        as usize;
-                                usage.cache_write +=
-                                    u.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        as usize;
-                                usage.reasoning +=
-                                    u.get("reasoning").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        as usize;
-                                usage.total_tokens +=
-                                    u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                                        as usize;
-                                usage.consumed_tokens += u
-                                    .get("input")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    .saturating_add(
-                                        u.get("cacheWrite")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0),
-                                    )
-                                    .saturating_add(
-                                        u.get("output")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0),
-                                    )
-                                    as usize;
+                                let message = TokenUsage::from_message_usage(u);
+                                // An aborted turn reports usage without a prompt; keep
+                                // the last turn that actually read a context.
+                                let prompt = message.context_tokens();
+                                if prompt > 0 {
+                                    context_tokens = prompt;
+                                    context_peak = context_peak.max(prompt);
+                                }
+                                usage.accumulate(&message);
                             }
                         }
                     }
@@ -1030,6 +1022,7 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
     }
     PlanningRoleMetrics {
         model: model.to_string(),
+        session_id,
         session_start,
         last_event,
         duration_seconds,
@@ -1037,6 +1030,8 @@ pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetric
         tools,
         tool_errors,
         usage,
+        context_tokens,
+        context_peak,
     }
 }
 
@@ -4137,6 +4132,37 @@ fn get_execution_output(
             exec.metrics = Some(parse_execution_metrics(&page.content, exec.started_at, exec.completed_at.unwrap_or_else(now)));
             state.run_metrics = Some(state.compute_run_metrics());
             runtime.touch();
+        }
+    }
+    // Metrics written before context counters existed only carry totals, and a
+    // finished session's context is its newest prompt: at the end of the log.
+    // Recover it from whichever page reaches that end instead of re-reading
+    // whole historical logs during load.
+    if status != "running" && page.complete {
+        let stale = |metrics: &Option<ExecutionMetrics>| metrics.as_ref()
+            .is_some_and(|metrics| metrics.context_tokens == 0 && metrics.assistant_messages > 0);
+        if runtime.state.executions.iter().chain(&runtime.state.mergers)
+            .any(|e| e.id == execution_id && stale(&e.metrics)) {
+            let mut recovered = crate::model::parse_context_from_tail(&page.content);
+            if recovered == 0 {
+                // A long failed tail can exceed the delivered page. Look back one
+                // bounded window instead of charging a full log to every read.
+                const BACKFILL_WINDOW: usize = 1024 * 1024;
+                recovered = runtime.store
+                    .execution_log_tail_page(&run_id, &execution_id, page.total_bytes, BACKFILL_WINDOW)
+                    .map(|wide| crate::model::parse_context_from_tail(&wide.content))
+                    .unwrap_or(0);
+            }
+            if recovered > 0 {
+                let state = &mut runtime.state;
+                let target = state.executions.iter_mut().chain(state.mergers.iter_mut())
+                    .find(|e| e.id == execution_id && stale(&e.metrics));
+                if let Some(metrics) = target.and_then(|e| e.metrics.as_mut()) {
+                    metrics.context_tokens = recovered;
+                    state.run_metrics = Some(state.compute_run_metrics());
+                    runtime.touch();
+                }
+            }
         }
     }
     Ok(serde_json::json!({ "runId":run_id, "executionId":execution_id,

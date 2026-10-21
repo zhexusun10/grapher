@@ -138,3 +138,74 @@ test("a terminal transcript read that raced the writer does not hide the turn un
     assert.deepEqual(session.errors, []);
   } finally { await session.close(); }
 });
+
+test("a steer whose durable window starts at that turn stays visible after the reply", { timeout: 45_000 }, async () => {
+  const config = { repository: "/mock/steer-window", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const planned = { ...empty, runId: "steer-window-run", config, planType: "graph", phase: "running", approved: true, planningId: "new-plan",
+    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
+    events: [{ type: "created", sequence: 1, planning_id: "new-plan", timestamp: 1,
+      planning: { planningId: "new-plan", status: "success", roles: {}, createdAt: 1 } }] };
+  // The loaded window begins at the steer: the header turn is not part of it.
+  const outputs = { "new-plan": line({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "STEER DURING REPLY" }] } }) + assistant("NEW ANSWER MARKER") };
+  let release;
+  const steerSeen = new Promise(resolve => { release = resolve; });
+  onPlanStream = (_body, res) => {
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    res.write(`event: run_started\ndata: ${JSON.stringify({ runId: planned.runId })}\n\n`);
+    res.write(`event: planner\ndata: ${JSON.stringify({ event: { type: "message_start", message: { role: "assistant", content: [] } } })}\n\n`);
+    res.write(`event: planner\ndata: ${JSON.stringify({ event: { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "NEW ANSWER MARKER" } } })}\n\n`);
+    void steerSeen.then(() => {
+      res.write(`event: planner\ndata: ${JSON.stringify({ event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "NEW ANSWER MARKER" }] } } })}\n\n`);
+      res.write(`event: complete\ndata: ${JSON.stringify({ snapshot: planned })}\n\n`);
+      res.end();
+    });
+  };
+  const { context, page, errors } = await newPage(route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    if (command === "plan_goal_stream") return route.continue();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: planned, runs: [planned.runId], repositoryInfo: { path: config.repository, name: "Steer window", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = planned; break;
+      case "snapshot_if_changed": result = { version: "steer-window", snapshot: planned }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_planning_output": {
+        const content = outputs[body.planningId] ?? "";
+        const bytes = Buffer.byteLength(content), from = body.offset ?? 0;
+        result = { planningId: body.planningId, role: "planner", content: content.slice(from),
+          startOffset: from, nextOffset: bytes, totalBytes: bytes, complete: true, running: false };
+        break;
+      }
+      case "get_execution_output": result = { runId: body.runId, executionId: body.executionId, content: "",
+        startOffset: body.offset ?? 0, nextOffset: 0, totalBytes: 0, complete: true, status: "completed" }; break;
+      case "control": result = planned; if (body.action === "steer_planner") release(); break;
+      default: result = {};
+    }
+    return route.fulfill({ json: { result } });
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="steer-window-run"]').click();
+    const input = page.locator(".pane-bottom-chat textarea");
+    await input.fill("FOLLOW-UP");
+    await input.press("Enter");
+    await page.locator(".chat-bubble-user", { hasText: "FOLLOW-UP" }).waitFor();
+    await page.waitForTimeout(300);
+    await input.fill("STEER DURING REPLY");
+    await input.press("Enter");
+    // The live stream and the saved replay can overlap for a frame.
+    await page.getByText("NEW ANSWER MARKER", { exact: true }).first().waitFor();
+    await page.waitForTimeout(1200);
+    assert.equal(await page.locator(".chat-bubble-user", { hasText: "STEER DURING REPLY" }).count(), 1,
+      "the steer must not be suppressed as if its turn were the conversation header");
+    assert.equal(await page.locator(".chat-bubble-user", { hasText: "FOLLOW-UP" }).count(), 1);
+    assert.deepEqual(errors, []);
+  } finally { onPlanStream = undefined; await context.close(); }
+});

@@ -337,13 +337,56 @@ fn terminate_inner(inner: &ProcessTreeInner) -> std::io::Result<()> {
     result
 }
 
+/// An in-boundary writer may finish on its own within this window; the node
+/// remains `running` while it does. A leaked, long-lived helper (for example a
+/// browser launched in the background) is terminated after the grace, so the run
+/// cannot be wedged forever.
+pub const HANDOFF_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+/// Post-termination confirmation window; SIGKILL delivery is asynchronous.
+const POST_TERMINATE_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+/// Observe-only check used by tests and callers that already terminated, and
+/// the historical natural-drain window preserved for native commands.
+pub(crate) const OBSERVE_DRAIN: std::time::Duration = std::time::Duration::from_millis(500);
+
 impl ProcessTree {
-    /// A successful model response is not a process-drain barrier. Managed
-    /// snapshots must fail while descendants remain in the lifecycle boundary.
+    /// Observe-only drain check with the default handoff budget.
+    ///
+    /// A successful model response is not a process-drain barrier: callers that
+    /// already own termination use this to confirm the lifecycle boundary is
+    /// empty. Production handoff uses [`Self::drain_for_handoff`] instead, so a
+    /// completed turn is not failed while a killable descendant is still alive.
     pub fn ensure_drained(&self) -> Result<(), String> {
+        self.drain(OBSERVE_DRAIN)
+    }
+
+    /// Wait for the lifecycle boundary to drain on its own, then terminate and
+    /// confirm it is empty before a managed snapshot/handoff.
+    ///
+    /// The caller keeps the node `running` during `grace`, so a short-lived
+    /// helper can flush and exit instead of being killed mid-work. Only a
+    /// leftover still alive after that window is terminated, followed by a
+    /// bounded drain confirmation. A descendant that escaped the boundary is
+    /// still refused, so sealing never proceeds over a writer this process
+    /// cannot account for.
+    pub fn drain_for_handoff(&self, grace: std::time::Duration) -> Result<(), String> {
+        if self.drain(grace).is_ok() {
+            return Ok(());
+        }
+        // Still alive after the grace: the boundary is ours to clear. Keep the
+        // fact observable so a repeated agent-side leak can be diagnosed.
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "Managed handoff: background writer(s) did not drain within {grace:?}; terminating the process boundary"
+        );
+        self.terminate();
+        self.drain(POST_TERMINATE_DRAIN)
+    }
+
+    fn drain(&self, budget: std::time::Duration) -> Result<(), String> {
         // Keep polling even after terminate(): SIGKILL delivery is asynchronous,
         // and handoff must still wait for descendants that have not exited.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let deadline = std::time::Instant::now() + budget;
         loop {
             #[cfg(windows)]
             let active = unsafe {
@@ -864,6 +907,72 @@ const ready=setInterval(()=>{if(fs.existsSync(marker)){clearInterval(ready);clea
             .unwrap_err()
             .contains("background writers have not drained"));
         tree.terminate();
+    }
+
+    #[test]
+    fn handoff_without_grace_kills_an_in_boundary_writer_before_sealing() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("writer-pid");
+        let writer = "require('node:fs').writeFileSync(process.argv[1],String(process.pid)); setTimeout(()=>{},90_000)";
+        // Unlike the detached refusal case above, this writer stays inside the
+        // owned Unix process group / Windows Job, so a completed turn must be
+        // drained by terminating it instead of being failed.
+        let parent = r#"const fs=require('node:fs'),{spawn}=require('node:child_process');
+const [writer,marker]=process.argv.slice(1);
+const child=spawn(process.execPath,['-e',writer,marker],{stdio:'ignore',detached:process.platform==='win32'});
+child.once('error',()=>process.exit(1)); child.unref();
+const deadline=setTimeout(()=>process.exit(2),5000);
+const ready=setInterval(()=>{if(fs.existsSync(marker)){clearInterval(ready);clearTimeout(deadline)}},10);"#;
+        let mut command = Command::new(crate::native::trusted_node().unwrap());
+        command.args(["-e", parent, writer]).arg(&marker);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_command(&mut command);
+        let mut child = command.spawn().unwrap();
+        let tree = track(&child).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(
+            marker.is_file(),
+            "the writer must actually start before the parent exits"
+        );
+        tree.drain_for_handoff(std::time::Duration::ZERO)
+            .expect("an in-boundary writer must be killed and drained before handoff");
+    }
+
+    #[test]
+    fn handoff_grace_lets_an_in_boundary_writer_finish_on_its_own() {
+        let temp = tempfile::tempdir().unwrap();
+        let started = temp.path().join("started");
+        let done = temp.path().join("done");
+        let writer = r#"const fs=require('node:fs');fs.writeFileSync(process.argv[1],'started');setTimeout(()=>fs.writeFileSync(process.argv[2],'done'),300)"#;
+        let parent = r#"const fs=require('node:fs'),{spawn}=require('node:child_process');
+const [writer,started,done]=process.argv.slice(1);
+const child=spawn(process.execPath,['-e',writer,started,done],{stdio:'ignore',detached:process.platform==='win32'});
+child.once('error',()=>process.exit(1)); child.unref();
+const deadline=setTimeout(()=>process.exit(2),5000);
+const ready=setInterval(()=>{if(fs.existsSync(started)){clearInterval(ready);clearTimeout(deadline)}},10);"#;
+        let mut command = Command::new(crate::native::trusted_node().unwrap());
+        command.args(["-e", parent, writer]).arg(&started).arg(&done);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_command(&mut command);
+        let mut child = command.spawn().unwrap();
+        let tree = track(&child).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(
+            started.is_file(),
+            "the writer must actually start before the parent exits"
+        );
+        tree.drain_for_handoff(std::time::Duration::from_secs(5))
+            .expect("the writer must drain within the grace");
+        assert!(
+            done.is_file(),
+            "the writer must finish on its own instead of being killed"
+        );
     }
 
     #[test]

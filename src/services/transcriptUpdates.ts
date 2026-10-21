@@ -7,7 +7,10 @@ export function appendItemDelta(
   if (!delta) return previous;
   const next = previous.slice();
   const last = previous.at(-1);
-  if (last && last.type === type && (type === "thinking" ? last.status === "running" : true)) {
+  // A user turn is authored text: assistant deltas must start a new row instead
+  // of growing the steer bubble they were queued behind.
+  if (last && last.type === type && last.role !== "user" &&
+      (type === "thinking" ? last.status === "running" : true)) {
     next[next.length - 1] = { ...last, content: (last.content || "") + delta,
       ...(type === "thinking" ? { status: running ? "running" : "success" } : {}) };
   } else {

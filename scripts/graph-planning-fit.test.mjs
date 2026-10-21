@@ -37,7 +37,7 @@ test("actual App: node results render before Planner completion; edges rearrange
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
   const goal = "Build a live topology";
   const runId = "live-graph";
-  let snapshot = empty, textTimer;
+  let snapshot = empty, textTimer, allowSnapshotPoll = true;
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "no-preference" });
   await context.addInitScript(config => {
     localStorage.setItem("grapher_language_v1", "en");
@@ -52,7 +52,7 @@ test("actual App: node results render before Planner completion; edges rearrange
     switch (command) {
       case "bootstrap": result = { config, snapshot: empty, runs: [], repositoryInfo: { path: config.repository, name: "Live graph", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
       case "snapshot": case "history": result = snapshot; break;
-      case "snapshot_if_changed": result = { version: snapshot.phase, snapshot: snapshot.runId ? snapshot : null }; break;
+      case "snapshot_if_changed": result = { version: snapshot.phase, snapshot: allowSnapshotPoll && snapshot.runId ? snapshot : null }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
       case "list_files": result = { files: [] }; break;
@@ -169,6 +169,49 @@ test("actual App: node results render before Planner completion; edges rearrange
     snapshot = { ...snapshot, graph: { ...snapshot.graph, edges: [] },
       plan: { executionBatches: [["a", "b", "c"]], roots: ["a", "b", "c"], terminals: ["a", "b", "c"], warnings: [] } };
     planningResponse.end(`event: complete\ndata: ${JSON.stringify({ snapshot })}\n\n`);
+    await assertFitted(page, [["a", "b", "c"]]);
+
+    // A revision of an approved graph that is not executing must preview its
+    // cards while the Planner stream is still open. Holding the whole approved
+    // graph until completion hides accepted node edits for the entire turn.
+    snapshot = { ...snapshot, approved: true, phase: "completed" };
+    await page.waitForFunction(() => {
+      const labels = [...document.querySelectorAll("button")].map(button => button.textContent?.trim());
+      return labels.includes("Pause") && !labels.includes("Approve");
+    });
+    // Only the explicit post-failure read may restore the graph; a durable poll
+    // with an unchanged version must not be able to mask a lingering preview.
+    allowSnapshotPoll = false;
+    planningResponse = undefined;
+    await followUp.fill("Add a verification node"); await followUp.press("Enter");
+    for (let i = 0; !planningResponse && i < 100; i++) await page.waitForTimeout(20);
+    assert.ok(planningResponse, "approved revision stream started");
+    send("run_started", { runId });
+    tool("add-d", "node", { nodes: { name: "d", task: "Task d" } },
+      { nodes: ["a", "b", "c", "d"], edges: [] });
+    await assertFitted(page, [["a", "b", "c", "d"]]);
+    assert.equal(planningResponse.writableEnded, false, "approved revision previews before Planner completion");
+    // Work can start after the turn's snapshot: once the run is live, further
+    // tool results must not replace the committed topology.
+    snapshot = { ...snapshot, phase: "running",
+      nodes: { ...snapshot.nodes, a: { ...snapshot.nodes.a, status: "running" } } };
+    const livePoll = page.waitForResponse(async response => {
+      if (!response.url().endsWith("/snapshot_if_changed")) return false;
+      try { return !!(await response.json()).result?.snapshot; } catch { return false; }
+    });
+    allowSnapshotPoll = true;
+    await livePoll;
+    await page.waitForTimeout(100);
+    allowSnapshotPoll = false;
+    tool("add-e", "node", { nodes: { name: "e", task: "Task e" } },
+      { nodes: ["a", "b", "c", "e"], edges: [] });
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator('.react-flow__node[data-id="e"]').count(), 0,
+      "a revision must not preview over work that started after it began");
+    // A failed approved revision never commits: replace the preview with the
+    // durable graph instead of leaving it until an unrelated snapshot changes.
+    planningResponse.end(`event: error\ndata: ${JSON.stringify({ error: "Revision rejected" })}\n\n`);
+    await page.waitForFunction(() => !document.querySelector('.react-flow__node[data-id="d"]'));
     await assertFitted(page, [["a", "b", "c"]]);
     assert.deepEqual(errors, []);
   } finally {

@@ -80,6 +80,20 @@ test("session JSONL toolCall and toolResult records replay as tool cards", () =>
   assert.doesNotMatch(html, /\{"type":"message"/);
 });
 
+test("session JSONL empty thinking parts keep an explanatory card", () => {
+  const output = line({ type: "message", id: "assistant-empty-thinking", message: { role: "assistant", content: [
+    { type: "thinking", thinking: "", thinkingSignature: "PRIVATE_SIGNATURE_MUST_NOT_APPEAR" },
+    { type: "text", text: "VISIBLE_ANSWER" },
+  ] } });
+  const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output, inline: true }));
+  assert.equal(cardCount(html), 1);
+  assert.match(html, /thinking-card settled collapsed/);
+  assert.match(html, /VISIBLE_ANSWER/);
+  assert.doesNotMatch(html, /PRIVATE_SIGNATURE_MUST_NOT_APPEAR/);
+  const opened = renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: false, expanded: true }));
+  assert.ok(opened.includes(t("此次思考未输出可见内容")), "the empty session block explains itself when opened");
+});
+
 test("bundled web_search calls render a dedicated card with query and URL details", () => {
   const output = line({ type: "message", id: "assistant-search", message: { role: "assistant", content: [
     { type: "toolCall", id: "web-query", name: "web_search", arguments: { query: "rust async\nruntime" } },
@@ -427,28 +441,34 @@ test("closing a turn settles all pending cards, including cards before a tool", 
   assert.ok(items.every(item => item.status === "running"));
 });
 
-test("settled empty blocks render no misleading card while pending blocks still show progress", () => {
+test("settled empty blocks keep their card and explain the missing text while pending blocks still show progress", () => {
   for (const content of ["", " \n\t"]) {
     const html = renderToStaticMarkup(createElement(ThinkingCard, { content, isStreaming: false }));
-    assert.equal(html, "");
+    assert.match(html, /thinking-card settled expanded/);
+    assert.ok(html.includes(t("此次思考未输出可见内容")), "empty settled reasoning explains itself in the active locale");
+    assert.doesNotMatch(html, /thinking-shimmer/);
   }
   // By default (auto-expand on), a pending block auto-expands and displays shimmer progress.
   const running = renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: true }));
   assert.match(running, /thinking-card streaming expanded/);
   assert.ok(running.includes(t("思考中...")), "pending reasoning shows progress in the active locale");
   assert.match(running, /thinking-shimmer/);
-  assert.doesNotMatch(running, /thinking-empty/);
+  assert.doesNotMatch(running, /thinking-no-output/);
 
-  // When auto-expand is disabled, the pending card stays collapsed without mounting the shimmer body.
+  // When auto-expand is disabled, cards stay collapsed without mounting their body.
   withFoldedCot(() => {
     const collapsed = renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: true }));
     assert.match(collapsed, /thinking-card streaming collapsed/);
     assert.ok(collapsed.includes(t("思考中...")));
-    assert.doesNotMatch(collapsed, /thinking-shimmer|thinking-empty/);
+    assert.doesNotMatch(collapsed, /thinking-shimmer|thinking-no-output/);
+
+    const settled = renderToStaticMarkup(createElement(ThinkingCard, { content: "", isStreaming: false }));
+    assert.match(settled, /thinking-card settled collapsed/);
+    assert.doesNotMatch(settled, /thinking-card-body|thinking-shimmer|thinking-no-output/);
   });
 });
 
-test("history replay retains streamed thinking, recovers end-only text, and hides truly empty blocks", () => {
+test("history replay retains streamed thinking, recovers end-only text, and keeps empty blocks", () => {
   const html = render([
     start(),
     update("thinking_start", 0),
@@ -464,8 +484,8 @@ test("history replay retains streamed thinking, recovers end-only text, and hide
       { type: "thinking", thinking: "Normalized summary" },
     ]),
   ]);
-  assert.equal(cardCount(html), 2);
-  assert.match(html, /thinking-card settled collapsed/);
+  assert.equal(cardCount(html), 3);
+  assert.equal((html.match(/thinking-card settled collapsed/g) || []).length, 3);
   assert.doesNotMatch(html, /thinking-status completed/);
   assert.doesNotMatch(html, /thinking-card-body/);
   assert.doesNotMatch(html, /thinking-empty|thinking-shimmer|Normalized summary|PRIVATE_SIGNATURE_MUST_NOT_APPEAR/);
@@ -485,11 +505,12 @@ test("message_end backfills the empty card and separate turns retain repeated su
   assert.doesNotMatch(html, /thinking-empty|thinking-shimmer/);
 });
 
-test("process exit hides an unfinished empty block but preserves captured thinking", () => {
+test("process exit keeps an unfinished empty block visible and preserves captured thinking", () => {
   const exited = { type: "grapher_process_exited", success: false };
   const empty = render([start(), update("thinking_start", 0), exited]);
-  assert.equal(cardCount(empty), 0);
-  assert.doesNotMatch(empty, /thinking-empty|thinking-shimmer/);
+  assert.equal(cardCount(empty), 1);
+  assert.match(empty, /thinking-card settled collapsed/);
+  assert.doesNotMatch(empty, /thinking-card-body|thinking-shimmer|thinking-empty/);
   const captured = render([start(), update("thinking_delta", 0, { delta: "Captured before exit" }), exited]);
   assert.equal(cardCount(captured), 1);
   assert.doesNotMatch(captured, /thinking-card-body|Captured before exit/);

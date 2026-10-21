@@ -57,49 +57,61 @@ function useTimeTookClock(running: boolean, startedAt?: number | null, attemptId
   return now;
 }
 
-export function ExecutionTimeTookText({ execution }: { execution?: Execution | null }) {
+export function ExecutionTimeTookText({ execution, priorDurationSeconds }: {
+  execution?: Execution | null;
+  /** Active seconds of this Pi session's earlier attempts. */
+  priorDurationSeconds?: number | null;
+}) {
   const running = execution?.status === "running" && execution?.completedAt == null;
   const now = useTimeTookClock(running, execution?.startedAt, execution?.id);
+  const priorMs = Math.max(0, (priorDurationSeconds ?? 0) * 1000);
 
   const durationMs = calculateExecutionDurationMs(execution, now);
   if (durationMs == null) {
-    return <span>-</span>;
+    return priorMs > 0 ? <span>{formatTimeTookDuration(priorMs)}</span> : <span>-</span>;
   }
 
-  return <span>{formatTimeTookDuration(durationMs)}</span>;
+  return <span>{formatTimeTookDuration(priorMs + durationMs)}</span>;
 }
 
 export function calculatePlannerDurationMs({
   isPlanning,
   startedAt,
   durationSeconds,
+  priorDurationSeconds,
   now = Date.now(),
 }: {
   isPlanning?: boolean;
   startedAt?: number | null;
   durationSeconds?: number | null;
+  /** Completed turns of the same Planner session, excluding this one. */
+  priorDurationSeconds?: number | null;
   now?: number;
 }): number | null {
+  const priorMs = Math.max(0, Math.round((priorDurationSeconds ?? 0) * 1000));
   if (isPlanning) {
     if (startedAt && startedAt > 0) {
-      return Math.max(0, now - startedAt);
+      return priorMs + Math.max(0, now - startedAt);
     }
-    return 0;
+    return priorMs;
   }
   if (durationSeconds != null && !isNaN(durationSeconds) && durationSeconds >= 0) {
-    return Math.max(0, Math.round(durationSeconds * 1000));
+    return priorMs + Math.max(0, Math.round(durationSeconds * 1000));
   }
-  return null;
+  return priorMs > 0 ? priorMs : null;
 }
 
 export function PlannerTimeTookText({
   isPlanning,
   startedAt,
   durationSeconds,
+  priorDurationSeconds,
 }: {
   isPlanning?: boolean;
   startedAt?: number | null;
   durationSeconds?: number | null;
+  /** Completed turns of the same Planner session, excluding this one. */
+  priorDurationSeconds?: number | null;
 }) {
   const running = Boolean(isPlanning);
   const now = useTimeTookClock(running, startedAt);
@@ -122,6 +134,7 @@ export function PlannerTimeTookText({
     isPlanning,
     startedAt: effectiveStartedAt,
     durationSeconds,
+    priorDurationSeconds,
     now,
   });
 

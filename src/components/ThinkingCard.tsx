@@ -37,6 +37,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
   }) => {
     const rawContent = (item ? item.content : directContent) || "";
     const isStreaming = item ? item.status === "running" : Boolean(directStreaming);
+    const hasVisibleContent = Boolean(rawContent.trim());
     const smoothContent = useSmoothStreamText(rawContent, isStreaming);
     // Markdown parsing is O(content) per delta. Defer the render so streamed
     // answer text and scrolling stay responsive, and superseded intermediate
@@ -46,7 +47,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     // reasoning cards open. A collapsed card never mounts its Markdown body.
     const autoExpandCot = useAutoExpandCot();
 
-    // If user explicitly collapses/expands, respect their choice; otherwise auto-expand while streaming
+    // If the user explicitly collapses/expands, respect their choice; otherwise auto-expand while streaming.
     const [userToggled, setUserToggled] = useState<boolean | null>(null);
     const [isCopied, setIsCopied] = useState(false);
     const cardRef = useRef<HTMLDivElement>(null);
@@ -111,10 +112,8 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
 
     const animateAppear = useCardAppear(item?.id, isStreaming, item?.timestamp, directAnimateAppear ?? item?.animateAppear);
 
-    // An empty provider block says nothing about the other thinking already received.
-    // Keep its item for possible backfill, but do not render a misleading completion card.
-    if (!isStreaming && !rawContent.trim()) return null;
-
+    // A provider block can settle without visible text (private or encrypted
+    // reasoning). Keep its card and say so instead of making the card vanish.
     return (
       <div ref={cardRef} className={`thinking-card ${isStreaming ? "streaming" : "settled"} ${isExpanded ? "expanded" : "collapsed"}${animateAppear ? " appear-active" : ""} ${className}`.trim()}>
         <div
@@ -179,7 +178,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
             className="thinking-card-body"
             onScroll={handleScroll}
           >
-            {renderedContent.trim() ? (
+            {hasVisibleContent ? (
               <div className="thinking-content-container">
                 <MarkdownRenderer
                   content={renderedContent}
@@ -188,11 +187,13 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
                   className="thinking-markdown"
                 />
               </div>
-            ) : (
+            ) : isStreaming ? (
               <div className="thinking-shimmer">
                 <span className="shimmer-line" />
                 <span className="thinking-shimmer-text">{t("模型正在生成分析与推演逻辑...")}</span>
               </div>
+            ) : (
+              <div className="thinking-no-output">{t("此次思考未输出可见内容")}</div>
             )}
           </div>
         )}</CollapsibleCardBody>

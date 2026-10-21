@@ -32,6 +32,7 @@ import { resetPresentedCardIds } from "./services/cardAnimations";
 
 import { TaskNode } from "./components/graph/TaskNode";
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
+import { plannerEdgeEdits, plannerNodeEdits } from "./lib/plannerGraphEdits";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
@@ -469,6 +470,10 @@ export default function App() {
     Object.values(state.nodes).some((node) => node.status === "running" || node.status === "dirty") ||
     state.executions.some((item) => item.status === "running") ||
     (state.mergers ?? []).some((item) => item.status === "running");
+  const liveWorkRef = useRef(false);
+  // A Planner turn can outlive its starting snapshot: a tool result must not
+  // replace the committed topology if execution resumed while it streamed.
+  liveWorkRef.current = active || state.phase === "running";
   // A recovered Planner turn must not lock the composer: the user may still
   // steer the live process or send a follow-up once the turn settles.
   const locked = busy || repositoryBlocked;
@@ -1499,13 +1504,20 @@ export default function App() {
       return { accepted: false, completion: Promise.resolve(false) };
     }
 
+    const planningGeneration = foregroundGeneration.current;
+
     if (!revisionRunId || forceFresh) {
       resetPresentedCardIds();
     }
 
     const isContinuing = !forceFresh && Boolean(revisionRunId || (routeType === "graph" && state.graph.nodes.length > 0 && state.runId));
     const effectiveRevisionRunId = !forceFresh ? (revisionRunId || (isContinuing ? state.runId : undefined)) : undefined;
-    const liveRevision = isContinuing && state.approved;
+    // Draft edits are provisional until the backend atomically commits the
+    // revision, but holding every approved revision hides accepted node edits
+    // for the whole Planner turn. Only a graph whose scheduler is still active
+    // (or has live work) must keep showing the committed topology; an idle
+    // approved graph may preview.
+    const liveRevision = isContinuing && state.approved && (active || state.phase === "running");
     const effectiveMode = mode || (isContinuing ? "graph" : planMode);
     const targetRepo = config.repository;
     if (!targetRepo) {
@@ -1651,6 +1663,10 @@ export default function App() {
     setEditingMessage(null);
     setEditPrefillText("");
     setError("");
+
+    // A failed approved revision only needs to restore the committed graph
+    // when the browser actually replaced it with a provisional preview.
+    let previewApplied = false;
 
     const completion = run(async () => {
       let abortController: AbortController | null = null;
@@ -2028,90 +2044,70 @@ export default function App() {
               if (pEvent.toolCallId) pendingToolArgsRef.current.delete(pEvent.toolCallId);
               const args = pEvent.args || savedArgs;
 
-              if (!isErr && !liveRevision) {
+              // A resume can start work after this turn began; the live ref
+              // keeps running revision topology authoritative even then. A new
+              // plan has no committed revision to protect.
+              const revisionBecameActive = isContinuing && state.approved && liveWorkRef.current;
+              if (!isErr && !liveRevision && !revisionBecameActive) {
                 // 工具调用通过（执行成功）：增量将节点与连线同步至 graph，触发卡片入场动效与边连线动效
                 if (pEvent.toolName === "node") {
-                  // 新建（非替换、非删除）的节点标记一个短入场动画窗口。
-                  const addedNodeNames = (Array.isArray(args.nodes) ? args.nodes : (args.name ? [args] : []))
-                    .filter((n: any) => n && n.name && !n.delete &&
-                      !state.graph.nodes.some((item) => item.name === n.name))
-                    .map((n: any) => n.name as string);
-                  setState((prev) => {
-                    let nextNodes = [...prev.graph.nodes];
-                    let nextEdges = [...prev.graph.edges];
-                    if (Array.isArray(args.nodes) || Array.isArray(args.edges)) {
-                      if (Array.isArray(args.nodes)) {
-                        for (const n of args.nodes) {
-                          if (!n || !n.name) continue;
-                          nextNodes = nextNodes.filter((item) => item.name !== n.name);
-                          if (n.delete) {
-                            nextEdges = nextEdges.filter((e) => e.from !== n.name && e.to !== n.name);
-                          } else {
-                            nextNodes.push({ name: n.name, task: n.task || "" });
-                          }
+                  const edits = plannerNodeEdits(args);
+                  if (edits.length > 0) {
+                    previewApplied = true;
+                    // 新建（非替换、非删除）的节点标记一个短入场动画窗口。
+                    const existing = new Set(state.graph.nodes.map((item) => item.name));
+                    const addedNodeNames = edits
+                      .filter((edit) => !edit.delete && !existing.has(edit.name))
+                      .map((edit) => edit.name);
+                    setState((prev) => {
+                      let nextNodes = [...prev.graph.nodes];
+                      let nextEdges = [...prev.graph.edges];
+                      for (const edit of edits) {
+                        nextNodes = nextNodes.filter((item) => item.name !== edit.name);
+                        if (edit.delete) {
+                          nextEdges = nextEdges.filter((e) => e.from !== edit.name && e.to !== edit.name);
+                        } else {
+                          nextNodes.push({ name: edit.name, task: edit.task });
                         }
                       }
-                      if (Array.isArray(args.edges)) {
-                        for (const e of args.edges) {
-                          if (!e || !e.from || !e.to) continue;
-                          nextEdges = nextEdges.filter((item) => item.from !== e.from || item.to !== e.to);
-                          if (!e.delete) {
-                            nextEdges.push({
-                              from: e.from,
-                              to: e.to,
-                              feedback: Boolean(e.feedback),
-                            });
-                          }
-                        }
-                      }
-                    } else if (args.name) {
-                      nextNodes = nextNodes.filter((item) => item.name !== args.name);
-                      if (args.delete) {
-                        nextEdges = nextEdges.filter((e) => e.from !== args.name && e.to !== args.name);
-                      } else {
-                        nextNodes.push({ name: args.name, task: args.task || "" });
-                      }
+                      return {
+                        ...prev,
+                        graph: {
+                          ...prev.graph,
+                          nodes: nextNodes,
+                          edges: nextEdges,
+                        },
+                        // The committed plan predates this draft. Lay out the
+                        // preview from its current edges until Rust commits it.
+                        plan: null,
+                      };
+                    });
+                    if (addedNodeNames.length > 0) {
+                      setRecentlyAddedNodeNames((prev) => new Set([...prev, ...addedNodeNames]));
+                      setTimeout(() => {
+                        setRecentlyAddedNodeNames((prev) => {
+                          const next = new Set(prev);
+                          for (const name of addedNodeNames) next.delete(name);
+                          return next;
+                        });
+                      }, 1200);
                     }
-                    return {
-                      ...prev,
-                      graph: {
-                        ...prev.graph,
-                        nodes: nextNodes,
-                        edges: nextEdges,
-                      },
-                      // The committed plan predates this draft. Lay out the
-                      // preview from its current edges until Rust commits it.
-                      plan: null,
-                    };
-                  });
-                  if (addedNodeNames.length > 0) {
-                    setRecentlyAddedNodeNames((prev) => new Set([...prev, ...addedNodeNames]));
-                    setTimeout(() => {
-                      setRecentlyAddedNodeNames((prev) => {
-                        const next = new Set(prev);
-                        for (const name of addedNodeNames) next.delete(name);
-                        return next;
-                      });
-                    }, 1200);
                   }
                 } else if (pEvent.toolName === "edge") {
-                  const rawEdgeList = Array.isArray(args.edges)
-                    ? args.edges
-                    : (args.from && args.to ? [args] : []);
-                  if (rawEdgeList.length > 0) {
-                    const addedIds: string[] = [];
+                  const edits = plannerEdgeEdits(args);
+                  if (edits.length > 0) {
+                    previewApplied = true;
+                    const addedIds = edits.filter((edit) => !edit.delete).map((edit) => graphEdgeId(edit));
                     setState((prev) => {
                       let nextEdges = [...prev.graph.edges];
-                      for (const e of rawEdgeList) {
-                        if (!e || !e.from || !e.to) continue;
-                        nextEdges = nextEdges.filter((item) => item.from !== e.from || item.to !== e.to);
-                        if (!e.delete) {
+                      for (const edit of edits) {
+                        nextEdges = nextEdges.filter((item) => item.from !== edit.from || item.to !== edit.to);
+                        if (!edit.delete) {
                           nextEdges.push({
-                            from: e.from,
-                            to: e.to,
-                            feedback: Boolean(e.feedback),
+                            from: edit.from,
+                            to: edit.to,
+                            feedback: edit.feedback,
                           });
-                          addedIds.push(graphEdgeId(e));
                         }
                       }
                       return {
@@ -2141,6 +2137,7 @@ export default function App() {
                   if (resText) {
                     const parsed = JSON.parse(resText);
                     if (parsed?.plan?.executionBatches) {
+                      previewApplied = true;
                       setState((prev) => ({
                         ...prev,
                         plan: parsed.plan,
@@ -2272,6 +2269,20 @@ export default function App() {
       }));
     } catch (err: any) {
       if (!planningRecovery.current(scope)) return;
+      // A failed or aborted approved revision never commits. Drop the local
+      // draft preview immediately instead of leaving it until a later snapshot
+      // happens to change versions.
+      const restoreCommittedGraph = async () => {
+        if (!previewApplied || !isContinuing || !state.approved) return;
+        const runId = effectiveRevisionRunId || state.runId;
+        if (!runId || runId.startsWith("pending-")) return;
+        try {
+          const durable = await runtimeService.snapshotForRun(runId);
+          if (planningRecovery.current(scope)) applyForegroundSnapshot(durable, planningGeneration);
+        } catch {
+          // The durable snapshot poll remains the fallback.
+        }
+      };
       if (provisionalRunId && !startedRunId) {
         setGoal(targetGoal);
         setLandingGoal(targetGoal);
@@ -2282,11 +2293,13 @@ export default function App() {
         String(err?.message || err).includes("AbortError") ||
         String(err?.message || err).includes("The user aborted a request");
       if (isAbort) {
+        void restoreCommittedGraph();
         if (!routeConfirmed && effectiveMode === "auto") setRouteType(deduceRouteType(state));
         return;
       }
       const errorMsg = String(err?.message || err);
       setError(errorMsg);
+      void restoreCommittedGraph();
       if (!routeConfirmed && effectiveMode === "auto") setRouteType(deduceRouteType(state));
       // Keep the failed first-message conversation mounted: wiping the whole
       // snapshot here remounts the landing view over the workspace (page flash)

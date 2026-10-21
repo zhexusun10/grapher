@@ -17,6 +17,9 @@ interface ExecutionMetrics {
   tools: number;
   toolErrors: number;
   usage: TokenUsage;
+  /** Prompt size of the last assistant message, and its high-water mark. */
+  contextTokens?: number;
+  contextPeak?: number;
   /** Actual model/thinking this Execution's Pi session selected. */
   model?: string;
   thinkingLevel?: string;
@@ -32,6 +35,18 @@ interface RunMetrics {
   totalUsage: TokenUsage;
   planningUsage: TokenUsage;
   executionUsage: TokenUsage;
+  /** Context the session held on its newest turn, keyed by session ID. */
+  sessionContext?: Record<string, SessionContext>;
+  /** Cumulative usage per Pi session, keyed by session ID. */
+  sessionUsage?: Record<string, TokenUsage>;
+}
+
+/** Context is a per-turn snapshot: `peak` is its high-water mark. */
+export interface SessionContext {
+  tokens: number;
+  peak: number;
+  /** Window of the model that turn used, when the backend knows it. */
+  window?: number;
 }
 
 export type FileChangeStatus = "added" | "modified" | "deleted" | "renamed";
@@ -77,6 +92,8 @@ export interface TokenUsage {
 
 export interface PlanningRoleMetrics {
   model: string;
+  /** Pi session this role process wrote to; the Planner keeps one per Run. */
+  sessionId?: string;
   sessionStart?: string;
   lastEvent?: string;
   durationSeconds: number;
@@ -84,6 +101,9 @@ export interface PlanningRoleMetrics {
   tools: number;
   toolErrors: number;
   usage: TokenUsage;
+  /** Prompt size of this turn's last assistant message, and its peak. */
+  contextTokens?: number;
+  contextPeak?: number;
 }
 
 export interface PlanningSummary {

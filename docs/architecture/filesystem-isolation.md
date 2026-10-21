@@ -101,6 +101,14 @@ Unix uses process groups; Windows attaches suspended children to kill-on-close J
 
 Tests cover specific descendant writers and interruption cases. They do not establish a universal barrier against detached descendants, arbitrary third-party services, shared host state, or every crash scenario.
 
+Before a managed snapshot/handoff the owning process first waits a bounded grace
+for its lifecycle boundary to drain on its own, so a short-lived helper can
+finish while the node stays `running`. Only a writer still alive after that
+window is terminated, followed by a bounded drain confirmation; a completed turn
+is therefore not failed while a killable descendant is still alive. Only a
+descendant that escaped the boundary still refuses the seal. The observe-only
+drain check used by tests does not terminate.
+
 Pinned Pi's Unix Bash launches in a detached session. Background processes left
 in that session are outside Rust's original owner process group and are not
 covered by its process-group drain check. Linux's private PID namespace may

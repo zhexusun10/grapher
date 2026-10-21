@@ -30,14 +30,15 @@ import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTimeTookText, PlannerTimeTookText, formatSessionStartTime } from "../ExecutionTimeTook";
 import { SessionTokenUsage } from "../SessionTokenUsage";
-import { formatTokenCount, formatCacheHitRate, consumedTokenCount } from "../../utils/tokenUsage";
+import { formatTokenCount, formatCacheHitRate, consumedTokenCount, attemptSessionContext, sessionContext, sessionTokenUsage } from "../../utils/tokenUsage";
 import { ExecutionTranscript, ExecutionTranscriptPlaceholder } from "../ExecutionTranscript";
 import { activePlannerOutput } from "../PlanningActivity";
 import { plannerConversationEdits, plannerHistoryIds } from "../../lib/plannerOutput";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
 import { HISTORY_PREPEND_EVENT } from "../../services/transcriptScroll";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
-import { plannerUserTurns, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
+import { plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
+import { executionSessionTiming, executionSessionUsageThrough, mergePlannerTurns, plannerLegacyUsage, plannerSessionTiming, plannerSessionUsageThrough, plannerTurnSummaries, addTokenUsage } from "../../services/sessionMetrics";
 import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
@@ -494,6 +495,26 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     return activeNodeExecutions(state, selectedNode.name).sort((a, b) => a.startedAt - b.startedAt);
   }, [selectedNode?.name, publicationMergerSelected, isNodeMergerSelected, nodeMergerTarget, state.executions, state.supersededExecutionIds, state.mergers]);
   const execution: Execution | undefined = selectedMerger ?? attempts.find((item) => item.id === attemptId) ?? attempts[attempts.length - 1];
+  // Session details describe the Pi session, not one attempt: follow-ups and
+  // retries resume the same session file, so its clock accumulates too.
+  const allExecutions = useMemo(() => [...state.executions, ...(state.mergers ?? [])], [state.executions, state.mergers]);
+  const executionSession = useMemo(() => executionSessionTiming(allExecutions, execution), [allExecutions, execution]);
+  // The backend reports one total per session; an older attempt instead shows
+  // only the usage accumulated through that attempt. A partial prefix would be
+  // misleading, so token details are omitted when any usage is missing.
+  const executionUsageThrough = useMemo(() => executionSessionUsageThrough(allExecutions, execution),
+    [allExecutions, execution]);
+  const executionUsage = executionUsageThrough.latest
+    // The backend's session total is authoritative; a complete per-attempt
+    // prefix covers snapshots that predate it.
+    ? (sessionTokenUsage(state.runMetrics?.sessionUsage, execution?.sessionId)
+      ?? (executionUsageThrough.complete ? executionUsageThrough.usage : undefined))
+    : executionUsageThrough.usage;
+  const executionContext = executionUsageThrough.latest
+    ? (sessionContext(state.runMetrics?.sessionContext, execution?.sessionId)
+      ?? attemptSessionContext(execution?.metrics))
+    : attemptSessionContext(execution?.metrics);
+  const showExecutionTokenUsage = !execution || executionUsageThrough.latest || executionUsageThrough.complete;
   const isMerger = publicationMergerSelected || isNodeMergerSelected;
   // Before the first execution, the task at the top is the newest information.
   // Count superseded executions too: an edited node is not a never-run node.
@@ -647,11 +668,53 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       thinkingLevel: configured.thinkingLevel || "low",
     };
   })();
-  // Keep the start time aligned with whichever clock `time took` uses: the live
-  // turn while planning, the settled Planner session afterwards.
-  const plannerStartTime = isPlanning
-    ? (plannerStream?.startedAt ?? plannerRole?.sessionStart)
-    : (plannerRole?.sessionStart ?? plannerStream?.startedAt);
+  // Summaries persisted before contexts were recorded still show their turn.
+  const plannerContext = sessionContext(state.runMetrics?.sessionContext, plannerRole?.sessionId)
+    ?? (plannerRole?.contextTokens ? { tokens: plannerRole.contextTokens, peak: plannerRole.contextPeak ?? 0 } : undefined);
+  // Keep the session's first start aligned with the accumulated `time took`:
+  // Planner follow-ups resume one Pi session instead of starting a new clock.
+  const plannerTurnHistory = useMemo(() => mergePlannerTurns(
+    plannerTurnSummaries(state.events), [failedPlanning, state.planning]),
+    [state.events, failedPlanning, state.planning]);
+  const displayedPlannerTurnId = state.planning?.planningId ?? failedPlanning?.planningId;
+  const plannerSession = useMemo(() => plannerSessionTiming(plannerTurnHistory, {
+    // While a turn streams (owned or recovered), its clock is live and every
+    // completed turn is prior; after it settles the displayed turn owns its
+    // own duration again.
+    latestId: isPlanning ? null : displayedPlannerTurnId,
+    fallbackStartedAt: plannerStream?.startedAt,
+  }), [plannerTurnHistory, isPlanning, displayedPlannerTurnId, plannerStream?.startedAt]);
+  const plannerStartTime = plannerSession.startedAt
+    ?? (isPlanning ? plannerStream?.startedAt : plannerRole?.sessionStart);
+  // The live clock starts with this turn, not with the whole session; a
+  // recovered turn has no browser stream start, so fall back to its durable
+  // creation time instead of restarting from zero on reload.
+  const displayedPlannerTurn = plannerTurnHistory.find(turn => turn.planningId === displayedPlannerTurnId)
+    ?? plannerTurnHistory.at(-1);
+  const plannerLiveTurnStart = plannerStream?.startedAt
+    ?? displayedPlannerTurn?.createdAt
+    ?? (plannerRole?.sessionStart ? Number(plannerRole.sessionStart) : undefined);
+  const plannerUsageThrough = useMemo(
+    () => plannerSessionUsageThrough(plannerTurnHistory, displayedPlannerTurnId),
+    [plannerTurnHistory, displayedPlannerTurnId]);
+  // Turns recorded before session IDs existed cannot appear in the backend's
+  // per-session bucket, yet the displayed conversation still contains them.
+  const plannerBackendUsage = plannerUsageThrough.latest
+    ? sessionTokenUsage(state.runMetrics?.sessionUsage, plannerRole?.sessionId)
+    : undefined;
+  const plannerLegacy = useMemo(
+    () => plannerBackendUsage ? plannerLegacyUsage(plannerTurnHistory, displayedPlannerTurnId) : undefined,
+    [plannerBackendUsage, plannerTurnHistory, displayedPlannerTurnId]);
+  const plannerUsage = plannerUsageThrough.latest
+    ? (plannerBackendUsage
+      ? (plannerLegacy ? addTokenUsage(plannerBackendUsage, plannerLegacy) : plannerBackendUsage)
+      : ((plannerUsageThrough.complete ? plannerUsageThrough.usage : undefined)
+        ?? plannerRole?.usage))
+    : plannerUsageThrough.usage;
+  const displayedPlannerContext = plannerUsageThrough.latest
+    ? plannerContext
+    : attemptSessionContext(plannerRole);
+  const showPlannerTokenUsage = plannerUsageThrough.latest || plannerUsageThrough.complete;
   // The panel also carries the planner's working indicator, so it must exist
   // for the whole live-planning window, before the summary reaches a snapshot.
   const showPlannerDetails = routeType !== "serial";
@@ -683,12 +746,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // canonical bubble instead of rendering it twice.
     return withoutLiveFirstTurn(items, plannerMessages[0]?.id);
   }, [plannerStream.items, plannerMessages]);
-  const persistedUserTurns = useMemo(() => {
+  const persistedTurnHistory = useMemo(() => {
     if (plannerMessages.length <= 1) return [];
-    const turns = plannerUserTurns(activePlannerOutput(savedPlannerOutput, plannerEdits));
-    if (turns[0] === plannerMessages[0]?.text.trim()) turns.shift();
-    return turns;
-  }, [savedPlannerOutput, plannerEdits, plannerMessages]);
+    return plannerUserTurns(activePlannerOutput(savedPlannerOutput, plannerEdits));
+  }, [savedPlannerOutput, plannerEdits, plannerMessages.length]);
+  // Only hide an optimistic turn when the transcript really replays that turn.
+  // A partial window that starts at a steer keeps the header out of history, so
+  // skipping its first row would drop the user's message instead of a duplicate.
+  const skipFirstPersistedTurn = skipsFirstPersistedTurn(persistedTurnHistory, plannerMessages[0]?.text);
+  const persistedUserTurns = useMemo(() => skipFirstPersistedTurn
+    ? persistedTurnHistory.slice(1) : persistedTurnHistory,
+    [persistedTurnHistory, skipFirstPersistedTurn]);
   const remainingPersistedTurns = new Map<string, number>();
   for (const text of persistedUserTurns) {
     remainingPersistedTurns.set(text, (remainingPersistedTurns.get(text) ?? 0) + 1);
@@ -720,6 +788,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const useSavedPlanner = savedPlannerIds.length > 0 &&
     (!showLivePlanner || readySavedPlannerKey === savedPlannerKey || Boolean(plannerStream.isContinuation));
   const renderLivePlanner = showLivePlanner && (isPlanning || !useSavedPlanner);
+  // A saved transcript only replaces optimistic user turns while it actually
+  // renders user rows; hiding a message the transcript suppresses would lose it.
+  const savedPlannerShowsUserTurns = !isPlanning || backgroundReview || !!recoveredPlanningId
+    || Boolean(plannerStream.isContinuation);
   // A new user turn or any live Planner token makes the committed result cards
   // stale for the moment. Hide them until this turn settles, including while a
   // detached stream is recovered from durable output.
@@ -1309,6 +1381,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       .sort((a, b) => a.startedAt - b.startedAt);
   }, [serialNode?.name, state.executions, state.supersededExecutionIds]);
   const serialExecution: Execution | undefined = serialExecutions[serialExecutions.length - 1];
+  const serialSession = useMemo(() => executionSessionTiming(allExecutions, serialExecution), [allExecutions, serialExecution]);
+  const serialUsageThrough = useMemo(() => executionSessionUsageThrough(allExecutions, serialExecution),
+    [allExecutions, serialExecution]);
+  const serialUsage = serialUsageThrough.latest
+    ? (sessionTokenUsage(state.runMetrics?.sessionUsage, serialExecution?.sessionId)
+      ?? (serialUsageThrough.complete ? serialUsageThrough.usage : undefined))
+    : serialUsageThrough.usage;
+  const serialContext = serialUsageThrough.latest
+    ? (sessionContext(state.runMetrics?.sessionContext, serialExecution?.sessionId)
+      ?? attemptSessionContext(serialExecution?.metrics))
+    : attemptSessionContext(serialExecution?.metrics);
+  const showSerialTokenUsage = !serialExecution || serialUsageThrough.latest || serialUsageThrough.complete;
   const serialModelInfo = useMemo(() => {
     if (!serialExecution) return null;
     return resolveExecutionModelAndThinking(
@@ -1993,10 +2077,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     </>
                   )}
                   <div className="session-details-row">
-                    <p>start time: {formatSessionStartTime(execution?.startedAt)}</p>
-                    <p>time took: <ExecutionTimeTookText execution={execution} /></p>
+                    <p>start time: {formatSessionStartTime(executionSession.startedAt ?? execution?.startedAt)}</p>
+                    <p>time took: <ExecutionTimeTookText execution={execution} priorDurationSeconds={executionSession.priorDurationSeconds} /></p>
                   </div>
-                  <SessionTokenUsage usage={execution?.metrics?.usage} />
+                  {(showExecutionTokenUsage || executionContext) && (
+                    <SessionTokenUsage usage={executionUsage} context={executionContext}
+                      showTokens={showExecutionTokenUsage} />
+                  )}
                 </WorkspaceDetailsPanel>
 
                 {selectedState?.error && (
@@ -2203,10 +2290,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         </>
                       )}
                       <div className="session-details-row">
-                        <p>start time: {formatSessionStartTime(serialExecution?.startedAt)}</p>
-                        <p>time took: <ExecutionTimeTookText execution={serialExecution} /></p>
+                        <p>start time: {formatSessionStartTime(serialSession.startedAt ?? serialExecution?.startedAt)}</p>
+                        <p>time took: <ExecutionTimeTookText execution={serialExecution} priorDurationSeconds={serialSession.priorDurationSeconds} /></p>
                       </div>
-                      <SessionTokenUsage usage={serialExecution?.metrics?.usage} />
+                      {(showSerialTokenUsage || serialContext) && (
+                        <SessionTokenUsage usage={serialUsage} context={serialContext}
+                          showTokens={showSerialTokenUsage} />
+                      )}
                     </WorkspaceDetailsPanel>
                     {serialNodeState?.error && (
                       <div className={`node-error${serialNodeState.status === "paused" ? " paused" : ""}`} style={{ marginTop: 12 }}>
@@ -2277,8 +2367,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           key={savedPlannerKey}
                           runId={transcriptRunId}
                           planningIds={savedPlannerIds}
-                          showUserTurns={!isPlanning || backgroundReview || !!recoveredPlanningId || Boolean(plannerStream.isContinuation)}
-                          skipFirstUser={plannerMessages.length > 0}
+                          showUserTurns={savedPlannerShowsUserTurns}
+                          skipFirstUser={plannerMessages.length > 0 && skipFirstPersistedTurn}
                           running={isPlanning || !!recoveredPlanningId}
                           onCompactingChange={setPlannerHistoryCompacting}
                           onReady={() => {
@@ -2305,7 +2395,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         item.role === "user" && item.id === msg.id)) return false;
                       // Keep an acknowledged steer visible across navigation
                       // until its completed turn actually appears in JSONL.
-                      if (useSavedPlanner) {
+                      if (useSavedPlanner && savedPlannerShowsUserTurns) {
                         const text = msg.text.trim();
                         const count = remainingPersistedTurns.get(text) ?? 0;
                         if (count > 0) {
@@ -2390,9 +2480,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
                     <div className="session-details-row">
                       <p>start time: {formatSessionStartTime(plannerStartTime)}</p>
-                      <p>time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerStream?.startedAt} durationSeconds={plannerRole?.durationSeconds} /></p>
+                      <p>time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerLiveTurnStart} durationSeconds={plannerRole?.durationSeconds} priorDurationSeconds={plannerSession.priorDurationSeconds} /></p>
                     </div>
-                    <SessionTokenUsage usage={plannerRole?.usage} />
+                    {(showPlannerTokenUsage || displayedPlannerContext) && (
+                      <SessionTokenUsage usage={plannerUsage} context={displayedPlannerContext}
+                        showTokens={showPlannerTokenUsage} />
+                    )}
                   </WorkspaceDetailsPanel>
                 )}
               </div>

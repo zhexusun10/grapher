@@ -15,6 +15,7 @@ pub mod graph_merge;
 pub mod linux_sandbox;
 pub mod maintenance;
 pub mod model;
+mod model_window;
 pub mod native;
 mod native_copy;
 mod native_runtime_storage;

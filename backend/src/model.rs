@@ -94,6 +94,29 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
+    /// Read one assistant message's reported counters. Provider totals are not
+    /// assumed additive: Pi reports each category separately.
+    pub(crate) fn from_message_usage(u: &serde_json::Value) -> TokenUsage {
+        let count = |key: &str| u.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        TokenUsage {
+            input: count("input"),
+            output: count("output"),
+            cache_read: count("cacheRead"),
+            cache_write: count("cacheWrite"),
+            reasoning: count("reasoning"),
+            total_tokens: count("totalTokens"),
+            consumed_tokens: 0,
+        }
+    }
+
+    /// Prompt size of one turn: everything the model had to read. This is the
+    /// context the session held, not a value that can be summed across turns.
+    pub(crate) fn context_tokens(&self) -> usize {
+        self.input
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
+
     /// Older checkpoints predate `consumed_tokens`; derive it from the counters
     /// when the stored value is still zero.
     pub(crate) fn backfill_consumed_tokens(&mut self) {
@@ -114,12 +137,29 @@ impl TokenUsage {
                 .saturating_add(self.output)
         }
     }
+
+    /// Fold another reporting window into this running total.
+    pub(crate) fn accumulate(&mut self, other: &TokenUsage) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+        self.consumed_tokens = self
+            .consumed_tokens
+            .saturating_add(other.effective_consumed_tokens());
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanningRoleMetrics {
     pub model: String,
+    /// Pi session this role's process wrote to. A resumed Planner turn keeps
+    /// the Run's single Planner conversation, so usage groups by this ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_start: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +169,12 @@ pub struct PlanningRoleMetrics {
     pub tools: usize,
     pub tool_errors: usize,
     pub usage: TokenUsage,
+    /// Prompt size on this turn's last assistant message, and the largest one
+    /// seen. Context is a snapshot, so it never accumulates like `usage`.
+    #[serde(default)]
+    pub context_tokens: usize,
+    #[serde(default)]
+    pub context_peak: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -338,6 +384,15 @@ pub struct ExecutionMetrics {
     pub tool_errors: usize,
     #[serde(default)]
     pub usage: TokenUsage,
+    /// Prompt size of the last assistant message: the context this Execution's
+    /// Pi session held on its newest turn. Unlike `usage` it is a snapshot, not
+    /// a sum, so cache re-reads of older turns are not counted again.
+    #[serde(default)]
+    pub context_tokens: usize,
+    /// Largest prompt size seen in this Execution. It exceeds `context_tokens`
+    /// once Pi compacted the context.
+    #[serde(default)]
+    pub context_peak: usize,
     /// Actual model/thinking selected by this Execution's Pi session. Kept
     /// separately from mutable Node Agent settings so session details never
     /// claim that a finished run used the model newly configured for a retry.
@@ -359,6 +414,55 @@ pub struct RunMetrics {
     pub total_usage: TokenUsage,
     pub planning_usage: TokenUsage,
     pub execution_usage: TokenUsage,
+    /// Context the session's newest turn had to read, plus its high-water mark.
+    /// Context is a per-turn snapshot; summing turns would count cached prompt
+    /// re-reads and overstate the window a session actually occupied.
+    #[serde(default)]
+    pub session_context: BTreeMap<String, SessionContext>,
+    /// Cumulative usage per Pi session. A follow-up, retry or Planner turn
+    /// resumes its session file, so the session's tokens keep accumulating
+    /// across Executions and turns instead of restarting on every attempt.
+    #[serde(default)]
+    pub session_usage: BTreeMap<String, TokenUsage>,
+}
+
+/// Context a Pi session held, in tokens, as the newest turn saw it.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContext {
+    #[serde(default)]
+    pub tokens: usize,
+    #[serde(default)]
+    pub peak: usize,
+    /// Window of the model that turn used, when the catalog knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<usize>,
+}
+
+/// Newer turns describe the session's current context; older ones only raise
+/// the peak. `stamp` orders turns so a resumed session keeps the latest value.
+fn record_session_context(
+    contexts: &mut BTreeMap<String, SessionContext>,
+    stamps: &mut BTreeMap<String, u64>,
+    session_id: &str,
+    tokens: usize,
+    peak: usize,
+    stamp: u64,
+    model: Option<&str>,
+) {
+    // Older checkpoints carry no context counters; do not invent a zero entry.
+    if tokens == 0 && peak == 0 {
+        return;
+    }
+    let entry = contexts.entry(session_id.to_string()).or_default();
+    entry.peak = entry.peak.max(peak).max(tokens);
+    // Missing values come from older checkpoints; never leak them over a
+    // recorded context from a previous turn of the same session.
+    if tokens > 0 && stamp >= stamps.get(session_id).copied().unwrap_or(0) {
+        entry.tokens = tokens;
+        entry.window = model.and_then(crate::model_window::context_window);
+        stamps.insert(session_id.to_string(), stamp);
+    }
 }
 
 /// One actual Execution Instance; its serialized event schema remains stable.
@@ -1057,6 +1161,8 @@ pub fn parse_execution_metrics(
     let mut tools = 0;
     let mut tool_errors = 0;
     let mut usage = TokenUsage::default();
+    let mut context_tokens = 0;
+    let mut context_peak = 0;
     let mut model = None;
     let mut thinking_level = None;
     // Pi's stream only emits `model_change`/`thinking_level_change` when the
@@ -1110,39 +1216,17 @@ pub fn parse_execution_metrics(
                             if value.get("type").and_then(|v| v.as_str()) == Some("message_end") {
                                 assistant_messages += 1;
                                 if let Some(u) = msg.get("usage") {
-                                    usage.input +=
-                                        u.get("input").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as usize;
-                                    usage.output +=
-                                        u.get("output").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as usize;
-                                    usage.cache_read +=
-                                        u.get("cacheRead").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as usize;
-                                    usage.cache_write +=
-                                        u.get("cacheWrite").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as usize;
-                                    usage.reasoning +=
-                                        u.get("reasoning").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as usize;
-                                    usage.total_tokens +=
-                                        u.get("totalTokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as usize;
-                                    usage.consumed_tokens += u
-                                        .get("input")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        .saturating_add(
-                                            u.get("cacheWrite")
-                                                .and_then(|v| v.as_u64())
-                                                .unwrap_or(0),
-                                        )
-                                        .saturating_add(
-                                            u.get("output")
-                                                .and_then(|v| v.as_u64())
-                                                .unwrap_or(0),
-                                        )
-                                        as usize;
+                                    let message = TokenUsage::from_message_usage(u);
+                                    // Each turn re-reads the session's prefix, so this
+                                    // snapshot is the context size; `usage` accumulates.
+                                    // A failed or aborted turn can report usage without
+                                    // a prompt, and must not reset a known context.
+                                    let prompt = message.context_tokens();
+                                    if prompt > 0 {
+                                        context_tokens = prompt;
+                                        context_peak = context_peak.max(prompt);
+                                    }
+                                    usage.accumulate(&message);
                                 }
                             }
                         }
@@ -1193,9 +1277,38 @@ pub fn parse_execution_metrics(
         tools,
         tool_errors,
         usage,
+        context_tokens,
+        context_peak,
         model: model.or(observed_model),
         thinking_level: thinking_level.or(observed_thinking),
     }
+}
+
+/// Last prompt a log actually read. Checkpoints written before context counters
+/// existed only carry totals, and recovery needs the log tail alone: the newest
+/// turn sits at the end, not the whole historical transcript.
+pub fn parse_context_from_tail(output: &str) -> usize {
+    for line in output.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("[stderr]") {
+            continue;
+        }
+        // A tail fragment may begin mid-record; unparsable lines are skipped.
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else { continue };
+        if value.get("type").and_then(|value| value.as_str()) != Some("message_end") {
+            continue;
+        }
+        let Some(msg) = value.get("message") else { continue };
+        if msg.get("role").and_then(|value| value.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(usage) = msg.get("usage") else { continue };
+        let prompt = TokenUsage::from_message_usage(usage).context_tokens();
+        if prompt > 0 {
+            return prompt;
+        }
+    }
+    0
 }
 
 /// Completion replaces the pre-launch model placeholder with parsed live
@@ -1408,6 +1521,11 @@ impl Snapshot {
         let mut planning_tools = 0;
         let mut planning_tool_errors = 0;
         let mut planning_usage = TokenUsage::default();
+        // Sessions group by the Pi conversation file: a follow-up, retry or
+        // Planner turn resumes one, so its tokens belong to the same session.
+        let mut session_usage: BTreeMap<String, TokenUsage> = BTreeMap::new();
+        let mut session_context: BTreeMap<String, SessionContext> = BTreeMap::new();
+        let mut context_stamps: BTreeMap<String, u64> = BTreeMap::new();
 
         let mut planning_turns: Vec<&PlanningSummary> =
             self.planning_turns.values().collect();
@@ -1428,13 +1546,27 @@ impl Snapshot {
                 planning_messages += metrics.assistant_messages;
                 planning_tools += metrics.tools;
                 planning_tool_errors += metrics.tool_errors;
-                planning_usage.input += metrics.usage.input;
-                planning_usage.output += metrics.usage.output;
-                planning_usage.cache_read += metrics.usage.cache_read;
-                planning_usage.cache_write += metrics.usage.cache_write;
-                planning_usage.reasoning += metrics.usage.reasoning;
-                planning_usage.total_tokens += metrics.usage.total_tokens;
-                planning_usage.consumed_tokens += metrics.usage.effective_consumed_tokens();
+                planning_usage.accumulate(&metrics.usage);
+                if let Some(session_id) = metrics.session_id.as_deref() {
+                    session_usage
+                        .entry(session_id.to_string())
+                        .or_default()
+                        .accumulate(&metrics.usage);
+                    let stamp = metrics
+                        .last_event
+                        .as_deref()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    record_session_context(
+                        &mut session_context,
+                        &mut context_stamps,
+                        session_id,
+                        metrics.context_tokens,
+                        metrics.context_peak,
+                        stamp,
+                        Some(metrics.model.as_str()),
+                    );
+                }
             }
         }
 
@@ -1450,13 +1582,22 @@ impl Snapshot {
                 exec_messages += metrics.assistant_messages;
                 exec_tools += metrics.tools;
                 exec_tool_errors += metrics.tool_errors;
-                exec_usage.input += metrics.usage.input;
-                exec_usage.output += metrics.usage.output;
-                exec_usage.cache_read += metrics.usage.cache_read;
-                exec_usage.cache_write += metrics.usage.cache_write;
-                exec_usage.reasoning += metrics.usage.reasoning;
-                exec_usage.total_tokens += metrics.usage.total_tokens;
-                exec_usage.consumed_tokens += metrics.usage.effective_consumed_tokens();
+                exec_usage.accumulate(&metrics.usage);
+                if !exec.session_id.is_empty() {
+                    session_usage
+                        .entry(exec.session_id.clone())
+                        .or_default()
+                        .accumulate(&metrics.usage);
+                    record_session_context(
+                        &mut session_context,
+                        &mut context_stamps,
+                        &exec.session_id,
+                        metrics.context_tokens,
+                        metrics.context_peak,
+                        exec.completed_at.unwrap_or(exec.started_at),
+                        metrics.model.as_deref(),
+                    );
+                }
             }
         }
 
@@ -1471,6 +1612,9 @@ impl Snapshot {
                 planning_duration + exec_duration
             };
 
+        let mut total_usage = planning_usage.clone();
+        total_usage.accumulate(&exec_usage);
+
         RunMetrics {
             total_duration_seconds: wall_clock_duration,
             planning_duration_seconds: planning_duration,
@@ -1478,17 +1622,11 @@ impl Snapshot {
             assistant_messages: planning_messages + exec_messages,
             tools: planning_tools + exec_tools,
             tool_errors: planning_tool_errors + exec_tool_errors,
-            total_usage: TokenUsage {
-                input: planning_usage.input + exec_usage.input,
-                output: planning_usage.output + exec_usage.output,
-                cache_read: planning_usage.cache_read + exec_usage.cache_read,
-                cache_write: planning_usage.cache_write + exec_usage.cache_write,
-                reasoning: planning_usage.reasoning + exec_usage.reasoning,
-                total_tokens: planning_usage.total_tokens + exec_usage.total_tokens,
-                consumed_tokens: planning_usage.consumed_tokens + exec_usage.consumed_tokens,
-            },
+            total_usage,
             planning_usage,
             execution_usage: exec_usage,
+            session_context,
+            session_usage,
         }
     }
 }
@@ -2654,6 +2792,43 @@ mod metrics_tests {
     use super::*;
 
     #[test]
+    fn execution_metrics_track_the_prompt_size_of_the_newest_turn() {
+        let output = concat!(
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":100,\"cacheRead\":900,\"output\":50,\"totalTokens\":1050}}}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":40,\"cacheRead\":1960,\"output\":10,\"totalTokens\":2010}}}\n",
+            // Pi compacted the context, so the newest prompt is smaller again.
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":400,\"cacheRead\":100,\"output\":5,\"totalTokens\":505}}}\n",
+            // A failed turn reports usage without a prompt; it must not reset
+            // the session's context to zero.
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":0,\"output\":7,\"totalTokens\":7}}}\n",
+        );
+        let metrics = parse_execution_metrics(output, 0, 0);
+        assert_eq!(metrics.context_tokens, 500);
+        assert_eq!(metrics.context_peak, 2_000);
+
+        // Totals stay additive: they count cache re-reads the context cannot.
+        assert_eq!(metrics.usage.input, 540);
+        assert_eq!(metrics.usage.cache_read, 2_960);
+        assert_eq!(metrics.usage.total_tokens, 3_572);
+        assert_eq!(metrics.usage.consumed_tokens, 612);
+    }
+
+    #[test]
+    fn the_log_tail_reports_the_newest_prompt_for_legacy_metrics() {
+        // A tail fragment may begin mid-record; that line is simply skipped.
+        let tail = concat!(
+            "{\"type\":\"tool_execution_end\",\"isError\",\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":40,\"cacheRead\":1960,\"output\":10}}}",
+            "\n{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":0,\"output\":3}}}",
+            "\n{\"type\":\"grapher_process_exited\",\"elapsedMs\":10}",
+            "\n[stderr] prefer the last real prompt\n",
+        );
+        assert_eq!(parse_context_from_tail(tail), 2_000);
+        assert_eq!(parse_context_from_tail(""), 0);
+        assert_eq!(parse_context_from_tail("not json\n{}"), 0);
+    }
+
+    #[test]
     fn legacy_configs_disable_planner_file_tools_by_default() {
         let legacy: Config = serde_json::from_value(serde_json::json!({
             "repository": "repo", "model": "provider/model", "maxParallel": 1
@@ -2815,6 +2990,139 @@ mod metrics_tests {
         loaded.planning_turns.clear();
         loaded.rebuild_planning_turns();
         assert_eq!(loaded.compute_run_metrics(), (*metrics).clone());
+    }
+
+    fn session_execution(
+        id: &str,
+        session_id: &str,
+        input: usize,
+        output: usize,
+        context: (usize, usize),
+    ) -> Execution {
+        Execution {
+            id: id.into(),
+            node: "node".into(),
+            revision: 1,
+            attempt: 1,
+            session_id: session_id.into(),
+            worktree: String::new(),
+            before: String::new(),
+            workspace_lineage: Vec::new(),
+            after: None,
+            input: None,
+            result: None,
+            status: "completed".into(),
+            output: String::new(),
+            output_bytes: 0,
+            pid: None,
+            started_at: 0,
+            completed_at: None,
+            metrics: Some(ExecutionMetrics {
+                usage: TokenUsage {
+                    input,
+                    output,
+                    total_tokens: input + output,
+                    ..Default::default()
+                },
+                context_tokens: context.0,
+                context_peak: context.1,
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn session_planning_turn(
+        id: &str,
+        session_id: &str,
+        input: usize,
+        stamp: u64,
+    ) -> PlanningSummary {
+        let mut summary = planning_turn(id, input, 1);
+        let role = summary.roles.get_mut("planner").unwrap();
+        role.session_id = Some(session_id.into());
+        role.last_event = Some(stamp.to_string());
+        role.context_tokens = input;
+        role.context_peak = input;
+        summary
+    }
+
+    #[test]
+    fn session_usage_accumulates_across_a_resumed_session() {
+        let mut state = Snapshot::default();
+        // A follow-up resumes the same Pi session; an edit forks a new one.
+        state.executions = vec![
+            session_execution("first", "session-a", 100, 10, (900, 900)),
+            session_execution("follow-up", "session-a", 200, 20, (2_500, 2_500)),
+            session_execution("forked", "session-b", 300, 30, (700, 700)),
+        ];
+        for (id, input, stamp) in [("initial", 40, 1_000), ("review", 60, 2_000)] {
+            state.planning_turns.insert(
+                id.into(),
+                session_planning_turn(id, "planner-session", input, stamp),
+            );
+        }
+
+        let metrics = state.compute_run_metrics();
+        assert_eq!(metrics.session_usage.len(), 3, "{:?}", metrics.session_usage);
+
+        let resumed = &metrics.session_usage["session-a"];
+        assert_eq!(resumed.input, 300);
+        assert_eq!(resumed.output, 30);
+        assert_eq!(resumed.total_tokens, 330);
+        assert_eq!(resumed.consumed_tokens, 330);
+
+        let forked = &metrics.session_usage["session-b"];
+        assert_eq!(forked.input, 300);
+        assert_eq!(forked.total_tokens, 330);
+
+        // One Planner conversation is resumed across turns, so both turns land
+        // in the same session bucket.
+        let planner = &metrics.session_usage["planner-session"];
+        assert_eq!(planner.input, 100);
+        assert_eq!(planner.consumed_tokens, 100);
+
+        // Per-session buckets still add up to the Run totals.
+        assert_eq!(metrics.total_usage.input, 700);
+        assert_eq!(
+            metrics
+                .session_usage
+                .values()
+                .map(|usage| usage.total_tokens)
+                .sum::<usize>(),
+            metrics.total_usage.total_tokens
+        );
+
+        // Context is a per-turn snapshot: the resumed session reports its last
+        // turn, not the sum of every prompt it re-read.
+        assert_eq!(metrics.session_context.len(), 3, "{:?}", metrics.session_context);
+        assert_eq!(metrics.session_context["session-a"].tokens, 2_500);
+        assert_eq!(metrics.session_context["session-a"].peak, 2_500);
+        assert_eq!(metrics.session_context["session-b"].tokens, 700);
+        // The Planner conversation keeps one session across turns.
+        assert_eq!(metrics.session_context["planner-session"].tokens, 60);
+        assert_eq!(metrics.session_context["planner-session"].peak, 60);
+    }
+
+    #[test]
+    fn session_context_keeps_the_newer_turn_after_a_compaction() {
+        let mut state = Snapshot::default();
+        let mut first = session_execution("first", "session-a", 100, 10, (40_000, 40_000));
+        first.started_at = 1_000;
+        first.completed_at = Some(2_000);
+        let mut compacted = session_execution("compacted", "session-a", 100, 10, (12_000, 40_000));
+        compacted.started_at = 3_000;
+        compacted.completed_at = Some(4_000);
+        // A legacy attempt without context must not erase recorded sessions.
+        let mut legacy = session_execution("legacy", "session-a", 50, 5, (0, 0));
+        legacy.started_at = 5_000;
+        legacy.completed_at = Some(6_000);
+        state.executions = vec![compacted, first, legacy];
+
+        let context = &state.compute_run_metrics().session_context["session-a"];
+        assert_eq!(context.tokens, 12_000);
+        assert_eq!(context.peak, 40_000);
+        // No recorded model means no window, never a guessed one.
+        assert_eq!(context.window, None);
     }
 
     #[test]

@@ -367,3 +367,18 @@ test("a failed push channel wakes suspended pollers and recreates a dead stream"
     FakeEventSource.instances = [];
   }
 });
+
+test("assistant stream deltas never grow a user steer row", () => {
+  const steer: TranscriptItem = { id: "steer", type: "text", role: "user", content: "STEER", timestamp: 1 };
+  const next = appendItemDelta([steer], "text", "ASSISTANT REPLY");
+  assert.equal(next.length, 2);
+  assert.equal(next[0], steer);
+  assert.equal(next[1].role, "assistant");
+  assert.equal(next[1].content, "ASSISTANT REPLY");
+  // A thinking card queued before the same steer is not treated as the text tail.
+  const thinking = { id: "think", type: "thinking" as const, role: "assistant" as const, content: "thought", status: "running" as const, timestamp: 2 };
+  const afterThinking = appendItemDelta([thinking, steer], "text", "reply");
+  assert.equal(afterThinking[1], steer);
+  assert.equal(afterThinking.at(-1)?.role, "assistant");
+  assert.notEqual(afterThinking.at(-1)?.id, thinking.id);
+});

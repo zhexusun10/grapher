@@ -234,6 +234,7 @@ export const en: Record<string, string> = {
   "({0} 字符)": "({0} characters)",
   "复制思维链内容": "Copy reasoning",
   "模型正在生成分析与推演逻辑...": "The model is generating analysis and reasoning...",
+  "此次思考未输出可见内容": "This reasoning produced no visible content.",
   "执行系统终端命令": "Run a terminal command",
   "读取工作区文件": "Read a workspace file",
   "写入或创建文件": "Write or create a file",

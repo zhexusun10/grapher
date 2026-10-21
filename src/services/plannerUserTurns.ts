@@ -28,3 +28,17 @@ export function plannerUserTurns(output: string): string[] {
   }
   return turns;
 }
+
+/** Prompt attachments travel as XML ahead of the user's text; editing a saved
+ * turn can persist them even though the header shows only the clean text. */
+function withoutAttachmentPrefix(text: string): string {
+  return text.replace(/^(?:<file name="[^"]+">[\s\S]*?<\/file>\s*)+/, "").trim();
+}
+
+/** The transcript suppresses its first user row only when that row is the
+ * conversation header rendered above it. A partial window whose first row is
+ * a later steer must stay visible; hiding it would drop the user's message. */
+export function skipsFirstPersistedTurn(turns: readonly string[], firstTurnText?: string): boolean {
+  if (!turns.length || !firstTurnText) return false;
+  return withoutAttachmentPrefix(turns[0]) === withoutAttachmentPrefix(firstTurnText);
+}

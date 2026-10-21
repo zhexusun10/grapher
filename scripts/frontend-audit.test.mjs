@@ -1777,7 +1777,7 @@ test("late node sends and edits cannot overwrite another workspace or its compos
   } finally { sendGate.resolve(); editGate.resolve(); await context.close(); }
 });
 
-test("thinking cards hide empty blocks and backfill text in place in live and replay views", { timeout: 30_000 }, async () => {
+test("thinking cards keep empty blocks with an explanation and backfill text in place in live and replay views", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("thinking", undefined, "reduce", true);
   const append = event => page.evaluate(event => window.audit.append(event), event);
   const update = (type, contentIndex, extra = {}) => append({
@@ -1790,9 +1790,16 @@ test("thinking cards hide empty blocks and backfill text in place in live and re
     for (const view of views) await view.locator(".thinking-shimmer").waitFor();
     const ids = await Promise.all(views.map(view => view.locator("[data-transcript-id]").first().getAttribute("data-transcript-id")));
     await update("thinking_end", 0, { content: "" });
-    for (const view of views) {
-      await view.locator(".thinking-card").waitFor({ state: "detached" });
+    for (const [index, view] of views.entries()) {
+      const card = view.locator(".thinking-card").first();
+      await card.waitFor();
+      assert.match(await card.getAttribute("class"), /settled/);
       assert.equal(await view.locator(".thinking-shimmer, .thinking-empty").count(), 0);
+      // The empty block keeps its card and explains the missing text when opened.
+      if (!(await card.locator(".thinking-card-body").count()))
+        await card.locator(".thinking-card-header").click();
+      await card.locator(".thinking-card-body", { hasText: "This reasoning produced no visible content." }).waitFor();
+      if (index === 1) await card.locator(".thinking-card-header").click();
     }
     await update("thinking_start", 1);
     for (const view of views) {
@@ -1810,21 +1817,27 @@ test("thinking cards hide empty blocks and backfill text in place in live and re
     ] } });
     for (let i = 0; i < views.length; i++) {
       const view = views[i];
-      await view.locator(".thinking-card-body", { hasText: "Backfilled first summary" }).waitFor();
       assert.equal(await view.locator(".thinking-card").count(), 3);
       assert.equal(await view.locator(".thinking-card.settled").count(), 3);
       assert.equal(await view.locator(".thinking-shimmer, .thinking-empty").count(), 0);
       assert.equal(await view.locator("[data-transcript-id]").first().getAttribute("data-transcript-id"), ids[i]);
-      assert.ok((await view.innerText()).includes("End-only summary 中文🚀"));
-      assert.ok((await view.innerText()).includes("Normalized final summary"));
+      for (const [index, text] of ["Backfilled first summary", "End-only summary 中文🚀", "Normalized final summary"].entries()) {
+        const card = view.locator(".thinking-card").nth(index);
+        if (!(await card.locator(".thinking-card-body").count()))
+          await card.locator(".thinking-card-header").click();
+        await card.locator(".thinking-card-body", { hasText: text }).waitFor();
+      }
     }
     await append({ type: "message_start", message: { role: "assistant", content: [] } });
     await update("thinking_start", 0);
     await update("thinking_end", 0, { content: "End-only summary 中文🚀" });
     for (const view of views) {
-      await view.locator(".thinking-card").nth(3).waitFor();
-      assert.equal(await view.locator(".thinking-card-body", { hasText: "End-only summary 中文🚀" }).count(), 2);
+      const card = view.locator(".thinking-card").nth(3);
+      await card.waitFor();
       assert.equal(await view.locator(".thinking-shimmer").count(), 0);
+      if (!(await card.locator(".thinking-card-body").count()))
+        await card.locator(".thinking-card-header").click();
+      await card.locator(".thinking-card-body", { hasText: "End-only summary 中文🚀" }).waitFor();
     }
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
@@ -1887,11 +1900,17 @@ test("completed thinking stays visible and copyable through empty or replacement
     await update("thinking_end", { content: "" });
     for (const view of views) {
       await view.locator(".thinking-shimmer").waitFor({ state: "detached" });
-      assert.equal(await view.locator(".thinking-card").count(), 2);
+      const empty = view.locator(".thinking-card").nth(2);
+      await empty.waitFor();
+      assert.match(await empty.getAttribute("class"), /settled/);
       assert.equal(await view.locator(".thinking-empty").count(), 0);
+      assert.equal(await view.locator(".thinking-card").count(), 3);
+      if (!(await empty.locator(".thinking-card-body").count()))
+        await empty.locator(".thinking-card-header").click();
+      await empty.locator(".thinking-card-body", { hasText: "This reasoning produced no visible content." }).waitFor();
       for (const data of turns) assert.ok((await view.innerText()).includes(data.seed + data.delta));
     }
-    assert.equal(await views[1].locator("[data-transcript-id]").count(), 2, "empty history blocks reserve no rows");
+    assert.equal(await views[1].locator("[data-transcript-id]").count(), 3, "empty history blocks keep their row");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

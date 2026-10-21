@@ -174,3 +174,86 @@ test("calculatePlannerDurationMs returns 0 when isPlanning is true without start
   assert.equal(formatToolDuration(ms!), "0.0s");
 });
 
+
+test("session time accumulates across a resumed execution session", async () => {
+  const { executionSessionTiming } = await import("../src/services/sessionMetrics.ts");
+  const first = createMockExecution({ id: "first", sessionId: "session-a", startedAt: 1_000, completedAt: 5_000,
+    metrics: { durationSeconds: 3.5, assistantMessages: 1, tools: 0, toolErrors: 0,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 } } });
+  const followUp = createMockExecution({ id: "follow-up", sessionId: "session-a", startedAt: 10_000, completedAt: null,
+    status: "running", metrics: null });
+  const forked = createMockExecution({ id: "forked", sessionId: "session-b", startedAt: 20_000, completedAt: 25_000 });
+  const timing = executionSessionTiming([first, followUp, forked], followUp);
+  // The follow-up resumes the first attempt's session, not a fresh clock.
+  assert.equal(timing.startedAt, 1_000);
+  assert.equal(timing.priorDurationSeconds, 3.5);
+  // A forked session only carries its own attempts.
+  const forkTiming = executionSessionTiming([first, followUp, forked], forked);
+  assert.equal(forkTiming.startedAt, 20_000);
+  assert.equal(forkTiming.priorDurationSeconds, 0);
+});
+
+test("Planner time took adds earlier turns of the same Planner session", async () => {
+  const { plannerSessionTiming, plannerTurnSummaries, mergePlannerTurns } = await import("../src/services/sessionMetrics.ts");
+  const role = (sessionId: string | undefined, sessionStart: number | undefined, durationSeconds: number) => ({
+    model: "planner/model", sessionId, sessionStart: sessionStart === undefined ? undefined : String(sessionStart),
+    durationSeconds, assistantMessages: 1, tools: 0, toolErrors: 0,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+  });
+  const turn = (planningId: string, planner: ReturnType<typeof role>, createdAt: number) => ({
+    planningId, roles: { planner }, totalPlanningDuration: planner.durationSeconds, modelDuration: planner.durationSeconds, createdAt,
+  });
+  const first = turn("turn-1", role("planner-session", 1_000, 60), 1_000);
+  const second = turn("turn-2", role("planner-session", 90_000, 30), 90_000);
+  const abandoned = turn("turn-old", role("old-session", 500, 5), 500);
+  const timing = plannerSessionTiming([abandoned, first, second]);
+  assert.equal(timing.startedAt, 1_000);
+  // The latest turn's own 30s is displayed separately; the earlier 60s is prior.
+  assert.equal(timing.priorDurationSeconds, 60);
+  // A different Pi session (an edited branch) does not inherit the old start.
+  const branchTiming = plannerSessionTiming([first, abandoned, turn("turn-3", role("new-session", 200_000, 10), 200_000)]);
+  assert.equal(branchTiming.startedAt, 200_000);
+  assert.equal(branchTiming.priorDurationSeconds, 0);
+  // Legacy turns without session IDs stay in the same conversation.
+  const legacyTiming = plannerSessionTiming([turn("legacy", role(undefined, 5_000, 20), 5_000), second]);
+  assert.equal(legacyTiming.startedAt, 5_000);
+  assert.equal(legacyTiming.priorDurationSeconds, 20);
+  // A recovered attempt can be recorded after later turns; the displayed turn
+  // still owns its own duration while every other session turn is prior.
+  const recovered = turn("recovered", role("planner-session", 150_000, 10), 10_000);
+  const recoveredTiming = plannerSessionTiming([first, second, recovered], { latestId: "recovered" });
+  assert.equal(recoveredTiming.startedAt, 1_000);
+  assert.equal(recoveredTiming.priorDurationSeconds, 90);
+  // A new live turn is not recorded yet: its clock is separate and every
+  // completed turn of the session remains prior.
+  const liveTiming = plannerSessionTiming([first, second], { latestId: null, fallbackStartedAt: 200_000 });
+  assert.equal(liveTiming.startedAt, 1_000);
+  assert.equal(liveTiming.priorDurationSeconds, 90);
+
+  const summaries = plannerTurnSummaries([
+    { type: "planner_workspace_selected", planning: { ...first, roles: { planner: role("planner-session", undefined, 0) } } },
+    { type: "created", planning: first },
+    { type: "graph_revised", planning: second },
+  ] as any);
+  assert.deepEqual(summaries.map(item => item.planningId), ["turn-1", "turn-2"]);
+  assert.equal(summaries[0].roles.planner.durationSeconds, 60, "the committed summary replaces its running placeholder");
+  // A stale running copy must not erase a settled turn's session timing.
+  const merged = mergePlannerTurns(summaries, [{ ...first, roles: {} }]);
+  assert.equal(merged[0].roles.planner.durationSeconds, 60);
+  // A recovered older attempt appended after later turns must not become the
+  // "newest" element that usage prefixes treat as the displayed turn.
+  const recoveredMerge = mergePlannerTurns([second], [abandoned]);
+  assert.deepEqual(recoveredMerge.map(item => item.planningId), ["turn-old", "turn-2"]);
+});
+
+test("Planner session levels keep prior turns while the next turn streams live", () => {
+  // Earlier turns contribute their completed 60s; the live turn adds its elapsed.
+  const live = calculatePlannerDurationMs({ isPlanning: true, startedAt: 100_000, priorDurationSeconds: 60, now: 103_500 });
+  assert.equal(live, 63_500);
+  // A settled total adds the displayed turn's own duration.
+  const settled = calculatePlannerDurationMs({ isPlanning: false, durationSeconds: 30, priorDurationSeconds: 60 });
+  assert.equal(settled, 90_000);
+  // Prior-only data still shows the accumulated session after a restart.
+  const priorOnly = calculatePlannerDurationMs({ isPlanning: false, durationSeconds: null, priorDurationSeconds: 60 });
+  assert.equal(priorOnly, 60_000);
+});

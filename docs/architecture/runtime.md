@@ -11,12 +11,18 @@ Graph shape and validation belong to [Graph compilation](overview.md#graph-compi
 
 During foreground planning, the graph pane opens on an accepted (successful)
 `node`/`edge` tool result, not on a pending or failed call.
-Successful tool results update the unapproved draft preview before the Planner's
-text stream ends. Cards appear centered as soon as they are measured; edge edits
-animate the layout while the viewport follows its center. Draft edits invalidate
-old displayed execution batches, and durable polling must not restore them over
-the live preview. This visualization does not approve, dispatch, or complete any
-work; approved revisions still commit atomically in Rust. Browser regressions:
+Successful tool results update the Planner's draft preview before the Planner's
+text stream ends, including the single-edit and JSON-string argument shapes the
+tools tolerate and a revision of an approved graph that is not executing. An
+actively executing graph keeps showing the committed topology until the revision
+commits, so provisional edits never pass for running work. Cards appear centered
+as soon as they are measured; edge edits animate the layout while the viewport
+follows its center. Draft edits invalidate old displayed execution batches, and
+durable polling must not restore them over the live preview. A failed or aborted
+approved revision restores the committed topology instead of leaving a preview
+that never commits. This visualization does not approve, dispatch, or complete
+any work; approved revisions still commit atomically in Rust. Browser
+regressions:
 [Planner streaming and auto-fit](../../scripts/graph-planning-fit.test.mjs).
 
 ## Node states

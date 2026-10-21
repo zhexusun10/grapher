@@ -653,13 +653,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const itemsVersion = itemsVersionRef.current;
 
   const parsedItems = itemsRef.current;
-  // Retain empty blocks in the parser for later backfill, but exclude them from
-  // layout so virtualized history does not reserve space for invisible cards.
-  const items = useMemo(() => {
-    const visible = settled ? settleInterruptedItems(parsedItems) : parsedItems;
-    return visible.filter(item => item.type !== "thinking" ||
-      item.status === "running" || item.content?.trim());
-  }, [parsedItems, settled]);
+  // Empty thinking blocks keep their card so a settled COT without visible
+  // text explains itself instead of disappearing from the transcript.
+  const items = useMemo(() => (settled ? settleInterruptedItems(parsedItems) : parsedItems),
+    [parsedItems, settled]);
   const inlineUserTurns = useMemo(() => items
     .filter(item => item.role === "user")
     .map(item => item.content || ""), [items]);

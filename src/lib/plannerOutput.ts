@@ -4,6 +4,14 @@ import { stripPlannerContext } from "../services/plannerText";
 
 export type PlannerEvent = { type?: string; planning_id?: string; old_instruction?: string; planning?: { planningId?: string; createdAt?: number } | null };
 
+/** Planner attempts whose durable output belongs to the Run conversation.
+ *
+ * Session metrics reuse this set and add progress events, because they also
+ * time a turn before it reaches one of these settled/committed records. */
+export const PLANNER_TURN_EVENTS: ReadonlySet<string> = new Set([
+  "created", "graph_revised", "planner_review_started", "planner_turn_aborted",
+]);
+
 /**
  * Planning attempts whose durable output belongs to the Run conversation, in
  * conversation order. Committed turns arrive as `created`/`graph_revised`,
@@ -16,8 +24,7 @@ export function plannerTurnIds(events: ReadonlyArray<PlannerEvent>): string[] {
   const turns: Array<{ id: string; createdAt: number; index: number }> = [];
   const seen = new Set<string>();
   for (const [index, event] of events.entries()) {
-    if (event.type !== "created" && event.type !== "graph_revised"
-      && event.type !== "planner_review_started" && event.type !== "planner_turn_aborted") continue;
+    if (!event.type || !PLANNER_TURN_EVENTS.has(event.type)) continue;
     const id = event.planning_id || event.planning?.planningId;
     if (!id || seen.has(id)) continue;
     seen.add(id);

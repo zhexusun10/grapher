@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A completed node turn is no longer failed when a background helper the agent left running (for example a browser crashpad handler) is still inside the owned process boundary. Managed handoff now keeps the node `running` for a bounded grace so that helper can finish on its own, then terminates whatever remains and confirms the boundary is empty before sealing; only a descendant that escaped the boundary still refuses the seal.
+- Session details now report the whole Pi session's token usage. Follow-ups, retries, and resumed Planner turns continue one session, so its counters accumulate instead of restarting with each attempt. Selecting an older attempt shows only the usage accumulated through that attempt, and omits token details when that prefix cannot be determined. Planner turns recorded before session tracking are attributed to the displayed conversation.
+- Session details now show `context window`: the prompt the session's newest turn read, compared with the model's context window, instead of the summed provider total, which added cached prompt re-reads and could not be compared with the window. A failed or aborted turn no longer resets that reading to zero, and metrics recorded before this change recover it from the stored log tail instead of showing it as unknown.
 - Deleting a Graph conversation now removes its run-scoped internal Git refs, orphaned commit heads, and unreachable objects while preserving refs for other live Runs sharing the same source database.
+- Planner `node`/`edge` edits now render in the topology immediately while revising an approved graph that is not executing, instead of waiting for the Planner turn to finish. Accepted single-edit and JSON-string edit shapes also preview immediately, and runs with active work still keep the committed topology until the revision commits. A failed revision restores the committed topology.
+- Planner and Node session details now report the Pi session's first start time and accumulated `time took`; follow-ups, retries, and resumed Planner turns no longer reset the clock to the newest attempt.
+- Planner steers no longer disappear after the reply when the durable transcript window starts at that steer, and streamed assistant text no longer grows an optimistic user/steer bubble.
+- Settled reasoning blocks that produced no visible text now keep their card and explain the missing content in live and replayed transcripts instead of disappearing without a trace.
 
 ## [1.2.6] - 2026-10-21
 

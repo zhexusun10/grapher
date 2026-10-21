@@ -1470,7 +1470,18 @@ fn run_pi_with_timeout(
         .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe
             && (status.success() || settled_response)
             && !final_text.trim().is_empty());
-    if managed { process_tree.ensure_drained()?; }
+    // Let a short-lived background helper finish on its own while the node stays
+    // `running`; terminate only what is still alive after the grace. A timed-out,
+    // rejected, or failed turn has no complete work left to wait for.
+    let drain_grace = if timed_out
+        || agent_error.is_some()
+        || (!status.success() && !settled_response)
+    {
+        std::time::Duration::ZERO
+    } else {
+        process_control::HANDOFF_DRAIN_GRACE
+    };
+    if managed { process_tree.drain_for_handoff(drain_grace)?; }
     // ProcessGuard clears the process group. Detached descendants are not
     // guaranteed to be covered; tasks must finish background work before returning.
     on_output(format!(

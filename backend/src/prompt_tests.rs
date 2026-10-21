@@ -3390,7 +3390,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
 
 #[test]
 fn planning_metrics_parsing_and_persistence() {
-    let sample_log = r#"{"type":"grapher_process_started","timestamp":1726300000000}
+    let sample_log = r#"{"type":"grapher_process_started","sessionId":"planner-session","timestamp":1726300000000}
 {"type":"tool_execution_start","toolName":"bash"}
 {"type":"tool_execution_end","toolName":"bash","isError":true}
 {"type":"tool_execution_start","toolName":"read"}
@@ -3400,6 +3400,8 @@ fn planning_metrics_parsing_and_persistence() {
 "#;
     let metrics = parse_planning_role_metrics("test-model", sample_log);
     assert_eq!(metrics.model, "test-model");
+    // A resumed Planner turn reports the conversation it appends to.
+    assert_eq!(metrics.session_id.as_deref(), Some("planner-session"));
     assert_eq!(metrics.assistant_messages, 1);
     assert_eq!(metrics.tools, 2);
     assert_eq!(metrics.tool_errors, 1);
@@ -3408,6 +3410,9 @@ fn planning_metrics_parsing_and_persistence() {
     assert_eq!(metrics.usage.output, 300);
     assert_eq!(metrics.usage.total_tokens, 500);
     assert_eq!(metrics.usage.consumed_tokens, 500);
+    // Context is the prompt Pi read on the turn, not the provider total.
+    assert_eq!(metrics.context_tokens, 250);
+    assert_eq!(metrics.context_peak, 250);
 
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();

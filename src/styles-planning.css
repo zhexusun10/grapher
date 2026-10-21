@@ -389,6 +389,13 @@
   font-style: italic;
 }
 
+.thinking-no-output {
+  padding: 6px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-style: italic;
+}
+
 .thinking-content-container {
   display: block;
   position: relative;

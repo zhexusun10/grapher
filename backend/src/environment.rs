@@ -1283,7 +1283,7 @@ pub(crate) fn controlled_output_with_limits(
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
-    tree.ensure_drained()?;
+    tree.drain_for_handoff(crate::process_control::OBSERVE_DRAIN)?;
     let output = stdout
         .recv_timeout(std::time::Duration::from_secs(2))
         .map_err(|_| "Native stdout handles have not drained")??;

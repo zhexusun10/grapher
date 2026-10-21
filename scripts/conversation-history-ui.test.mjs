@@ -378,25 +378,40 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
       if (mode !== "planner") await page.evaluate(() => { window.audit.startExecution(); window.audit.finish(); });
       await page.getByRole("button", { name: mode === "planner" ? "Planning session details" : "Workspace and session details", exact: true }).click();
       const details = page.locator(".workspace-details-body");
-      const labels = ["total tokens", "input", "output", "cache read", "cache write", "reasoning", "provider total (incl. cache)"];
+      const labels = ["total tokens", "input", "output", "cache read", "cache write", "reasoning", "context window"];
       for (const label of labels) await details.getByText(`${label}: —`, { exact: true }).waitFor();
-      const update = usage => page.evaluate(({ mode, usage }) => {
-        const metrics = { durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0, usage };
+      const update = (usage, context) => page.evaluate(({ mode, usage, context }) => {
+        const metrics = {
+          durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0, usage,
+          ...(context ? { contextTokens: context.tokens, contextPeak: context.peak } : {}),
+        };
         if (mode === "planner") window.audit.setPlannerRoles({
           // Other planning roles must not leak into the Planner's own counters.
           partition: { ...metrics, model: "partition/model", usage: { ...usage, totalTokens: 999_999 } },
           ...(usage ? { planner: { ...metrics, model: "planner/model" } } : {}),
         });
-        else window.audit.setExecutionMetrics(usage ? metrics : null);
-      }, { mode, usage });
-      await update({ totalTokens: 18_000, input: 12_000, output: 1_800, cacheRead: 4_000, cacheWrite: 200, reasoning: 600, consumedTokens: 14_000 });
-      for (const [index, value] of ["14k", "12k", "1.8k", "4k", "0.2k", "0.6k", "18k"].entries()) {
+        else window.audit.setExecutionMetrics(usage || context ? metrics : null);
+      }, { mode, usage, context });
+      // Legacy Planner summaries without a session id have no model window.
+      const windowSuffix = mode === "planner" ? "" : " / 100k";
+      const percent = mode === "planner" ? "" : " (8%)";
+      await update({ totalTokens: 18_000, input: 12_000, output: 1_800, cacheRead: 4_000, cacheWrite: 200, reasoning: 600, consumedTokens: 14_000 }, { tokens: 8_000, peak: 8_000 });
+      for (const [index, value] of ["14k", "12k", "1.8k", "4k", "0.2k", "0.6k", `8k${windowSuffix}${percent}`].entries()) {
         await details.getByText(`${labels[index]}: ${value}`, { exact: true }).waitFor();
       }
-      await update({ totalTokens: 1_234_567, input: 1_000_000, output: 200_000, cacheRead: 30_000, cacheWrite: 4_000, reasoning: 567, consumedTokens: 1_204_000 });
-      for (const [index, value] of ["1.2M", "1M", "200k", "30k", "4k", "0.57k", "1.23M"].entries()) {
+      // The provider total mixes cached re-reads and is no longer shown.
+      assert.equal(await details.getByText(/provider total/).count(), 0);
+      const heavy = { totalTokens: 1_234_567, input: 1_000_000, output: 200_000, cacheRead: 30_000, cacheWrite: 4_000, reasoning: 567, consumedTokens: 1_204_000 };
+      await update(heavy, { tokens: 40_000, peak: 40_000 });
+      for (const [index, value] of ["1.2M", "1M", "200k", "30k", "4k", "0.57k", mode === "planner" ? "40k" : "40k / 100k (40%)"].entries()) {
         await details.getByText(`${labels[index]}: ${value}`, { exact: true }).waitFor();
       }
+      // After compaction only the smaller current prompt is shown; the
+      // session's high-water mark is not part of the panel.
+      await update(heavy, { tokens: 40_000, peak: 90_000 });
+      await details.getByText(`context window: ${mode === "planner" ? "40k" : "40k / 100k (40%)"}`, { exact: true }).waitFor();
+      assert.equal(await details.getByText(/^peak:/).count(), 0);
+      await update(heavy, { tokens: 40_000, peak: 40_000 });
       const positions = await details.locator("p").evaluateAll(elements => elements.map(element => {
         const rect = element.getBoundingClientRect();
         return { text: element.textContent, top: rect.top, left: rect.left, right: rect.right };
@@ -416,13 +431,174 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
       const overflows = await details.evaluate(element => element.scrollWidth > element.clientWidth);
       assert.equal(overflows, false, "narrow session panels wrap fields instead of overflowing horizontally");
       await update({ totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, consumedTokens: 0 });
-      for (const label of labels) await details.getByText(`${label}: 0k`, { exact: true }).waitFor();
+      for (const label of labels.slice(0, 6)) await details.getByText(`${label}: 0k`, { exact: true }).waitFor();
+      // No context counters means unknown, not a zero-token prompt.
+      await details.getByText("context window: —", { exact: true }).waitFor();
       await update(null);
       for (const label of labels) await details.getByText(`${label}: —`, { exact: true }).waitFor();
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });
 }
+
+test("a resumed session keeps earlier attempts in the session token totals", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=serial&turn=follow-up`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.startExecution);
+    await page.evaluate(() => { window.audit.startExecution(); window.audit.finish(); });
+    await page.evaluate(() => {
+      const metrics = (usage, contextTokens) => ({ durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0, usage,
+        contextTokens, contextPeak: contextTokens });
+      // A follow-up resumes the first attempt's Pi session, so the panel shows
+      // the session total rather than only the latest attempt's delta.
+      window.audit.setExecutionMetrics(metrics({
+        input: 12_000, output: 1_800, cacheRead: 4_000, cacheWrite: 200, reasoning: 600, totalTokens: 18_000, consumedTokens: 14_000,
+      }, 18_000), "previous");
+      window.audit.setExecutionMetrics(metrics({
+        input: 3_000, output: 200, cacheRead: 15_000, cacheWrite: 0, reasoning: 40, totalTokens: 18_200, consumedTokens: 3_200,
+      }, 19_000));
+    });
+    await page.getByRole("button", { name: "Workspace and session details", exact: true }).click();
+    const details = page.locator(".workspace-details-body");
+    for (const text of [
+      "total tokens: 17.2k", "input: 15k", "output: 2k", "cache read: 19k",
+      // Context follows the newest turn of the resumed session, not the sum.
+      "context window: 19k / 100k (19%)",
+    ]) await details.getByText(text, { exact: true }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+const sessionStamp = ms => {
+  const date = new Date(ms), pad = part => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
+
+test("the Planner session keeps its first start and accumulates time took across turns", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.selectPlannerWorkspace);
+    // A follow-up Planner turn resumes the same Pi session.
+    await page.evaluate(() => window.audit.selectPlannerWorkspace("/mock/next"));
+    const firstStart = new Date(2026, 9, 21, 14, 55, 45).getTime();
+    const secondStart = new Date(2026, 9, 21, 15, 5, 0).getTime();
+    await page.evaluate(({ firstStart, secondStart }) => {
+      const role = (sessionId, sessionStart, durationSeconds) => ({
+        model: "planner/model", sessionId, sessionStart: String(sessionStart), durationSeconds,
+        assistantMessages: 1, tools: 0, toolErrors: 0,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 },
+      });
+      window.audit.setPlannerRoles({ planner: role("planner-session", firstStart, 60) }, 0);
+      window.audit.setPlannerRoles({ planner: role("planner-session", secondStart, 30) }, 1);
+    }, { firstStart, secondStart });
+    await page.getByRole("button", { name: "Planning session details", exact: true }).click();
+    const details = page.locator(".workspace-details-body");
+    await details.getByText(`start time: ${sessionStamp(firstStart)}`, { exact: true }).waitFor();
+    await details.getByText("time took: 1m 30s", { exact: true }).waitFor();
+    // An edited Planner conversation forks the Pi session: the new branch does
+    // not inherit the abandoned branch's clock.
+    await page.evaluate(({ secondStart }) => {
+      const role = (sessionId, sessionStart, durationSeconds) => ({
+        model: "planner/model", sessionId, sessionStart: String(sessionStart), durationSeconds,
+        assistantMessages: 1, tools: 0, toolErrors: 0,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 },
+      });
+      window.audit.setPlannerRoles({ planner: role("old-session", secondStart + 60_000, 5) }, 0);
+      window.audit.setPlannerRoles({ planner: role("planner-session", secondStart, 30) }, 1);
+    }, { secondStart });
+    await details.getByText(`start time: ${sessionStamp(secondStart)}`, { exact: true }).waitFor();
+    await details.getByText("time took: 30s", { exact: true }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a Planner turn recorded before session tracking keeps its usage", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.selectPlannerWorkspace);
+    // The second turn creates a backend session bucket; the first predates
+    // session IDs, so only the panel can add its usage back.
+    await page.evaluate(() => window.audit.selectPlannerWorkspace("/mock/next"));
+    await page.evaluate(() => {
+      const usage = input => ({ input, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+        totalTokens: input, consumedTokens: input });
+      const role = (sessionId, input) => ({
+        model: "planner/model", sessionId, durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0,
+        usage: usage(input),
+      });
+      window.audit.setPlannerRoles({ planner: role(undefined, 5_000) }, 0);
+      window.audit.setPlannerRoles({ planner: role("planner-session", 3_000) }, 1);
+    });
+    await page.getByRole("button", { name: "Planning session details", exact: true }).click();
+    const details = page.locator(".workspace-details-body");
+    await details.getByText("total tokens: 8k", { exact: true }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("an older attempt shows usage only through that attempt", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: {
+    result: route.request().url().endsWith("/get_merger_prompt") ? { prompt: "Merge the completed work." } : {},
+  } }));
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=merger&turn=follow-up`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.selectMerger);
+    await page.evaluate(() => { window.audit.startExecution(); window.audit.finish(); });
+    await page.evaluate(() => {
+      const usage = (input, output) => ({ input, output, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+        totalTokens: input + output, consumedTokens: input + output });
+      const metrics = value => ({ durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0, usage: value });
+      // The follow-up resumes the first Merger's session.
+      window.audit.setExecutionTiming("previous", 1_000, 2_000);
+      window.audit.setExecutionTiming("current", 10_000, 11_000);
+      window.audit.setExecutionMetrics(metrics(usage(1_000, 100)), "previous");
+      window.audit.setExecutionMetrics(metrics(usage(2_000, 200)), "current");
+    });
+    await page.getByRole("button", { name: "Workspace and session details", exact: true }).click();
+    const details = page.locator(".workspace-details-body");
+    // The newest attempt keeps the whole resumed session's total.
+    await details.getByText("total tokens: 3.3k", { exact: true }).waitFor();
+    // Selecting the first attempt must not inherit the later attempt's usage.
+    await page.evaluate(() => window.audit.selectMerger("previous"));
+    await details.getByText("total tokens: 1.1k", { exact: true }).waitFor();
+    assert.equal(await details.getByText("total tokens: 3.3k", { exact: true }).count(), 0);
+    // A missing attempt usage makes the prefix unknowable; show no token row
+    // rather than a partial or whole-session total.
+    await page.evaluate(() => window.audit.setExecutionMetrics(null, "previous"));
+    await page.waitForTimeout(100);
+    assert.equal(await details.getByText(/total tokens:/).count(), 0);
+    assert.equal(await details.getByText(/^input:/).count(), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a resumed node session keeps its first start and accumulates time took", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=serial&turn=follow-up`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.startExecution);
+    await page.evaluate(() => window.audit.startExecution());
+    const firstStart = new Date(2026, 9, 21, 14, 55, 45).getTime();
+    const secondStart = new Date(2026, 9, 21, 15, 5, 0).getTime();
+    await page.evaluate(({ firstStart, secondStart }) => {
+      const metrics = durationSeconds => ({ durationSeconds, assistantMessages: 1, tools: 0, toolErrors: 0,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 } });
+      window.audit.setExecutionTiming("previous", firstStart, firstStart + 60_000);
+      window.audit.setExecutionTiming("current", secondStart, secondStart + 30_000);
+      window.audit.setExecutionMetrics(metrics(60), "previous");
+      window.audit.setExecutionMetrics(metrics(30), "current");
+    }, { firstStart, secondStart });
+    await page.getByRole("button", { name: "Workspace and session details", exact: true }).click();
+    const details = page.locator(".workspace-details-body");
+    await details.getByText(`start time: ${sessionStamp(firstStart)}`, { exact: true }).waitFor();
+    await details.getByText("time took: 1m 30s", { exact: true }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 for (const [mode, turn] of [
   ["serial", "provisional"], ["serial", "initial"], ["serial", "follow-up"], ["graph", "initial"], ["graph", "follow-up"],

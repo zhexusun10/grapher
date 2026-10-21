@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { stripPlannerContext } from "../src/services/plannerText.ts";
-import { plannerUserTurns, withoutLiveFirstTurn } from "../src/services/plannerUserTurns.ts";
+import { plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../src/services/plannerUserTurns.ts";
 
 test("Planner status context is not shown as conversation text", () => {
   assert.equal(stripPlannerContext("Current graph node status:\n- worker: completed\n继续优化"), "继续优化");
@@ -102,3 +102,16 @@ test("persisted user turns are not duplicated in follow-up message list during l
   assert.deepEqual(visibleFollowUps, []);
 });
 
+
+test("a partial transcript window keeps a later steer when the header is absent", () => {
+  assert.equal(skipsFirstPersistedTurn(["Initial goal", "Steer"], "Initial goal"), true);
+  // A window that starts at a steer must not suppress that steer as if it were
+  // the conversation header already rendered above the transcript.
+  assert.equal(skipsFirstPersistedTurn(["Steer"], "Initial goal"), false);
+  assert.equal(skipsFirstPersistedTurn(["Steer"], undefined), false);
+  assert.equal(skipsFirstPersistedTurn([], "Initial goal"), false);
+  // Editing a saved turn can persist the prompt's attachment XML even though
+  // the conversation header shows only the clean text.
+  assert.equal(skipsFirstPersistedTurn(['<file name="a.txt">content</file>Initial goal'], "Initial goal"), true);
+  assert.equal(skipsFirstPersistedTurn(['<file name="a.txt">content</file>Steer'], "Initial goal"), false);
+});

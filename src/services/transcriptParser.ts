@@ -185,8 +185,11 @@ export function parseTranscriptChunkLines(
     for (const part of message.content) {
       if (part?.type === "toolCall") {
         addToolCall(part.id, part.name || "tool", part.arguments || {}, "running", !!part.argsTruncated);
-      } else if (part?.type === "thinking" && part.thinking?.trim()) {
-        currentItems.push({ id: rowId("think"), type: "thinking", role: "assistant", content: part.thinking, status: "success", timestamp: Date.now() });
+      } else if (part?.type === "thinking") {
+        // Keep blocks whose text was private or encrypted: their card explains
+        // that this reasoning produced no visible content.
+        currentItems.push({ id: rowId("think"), type: "thinking", role: "assistant",
+          content: typeof part.thinking === "string" ? part.thinking : "", status: "success", timestamp: Date.now() });
       } else if (part?.type === "text" && typeof part.text === "string" && part.text) {
         currentItems.push({ id: rowId("text"), type: "text", role: "assistant", content: part.text, timestamp: Date.now() });
       }

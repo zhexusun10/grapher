@@ -1245,34 +1245,60 @@ fn persisted_path(root: &Path, run_id: &str) -> Option<PathBuf> {
     safe_run_id(run_id).then(|| root.join("file-changes").join(run_id).join("changes.json"))
 }
 
+/// Overlay freshly derived summaries over a durable sidecar. Executions the
+/// current session did not touch keep their persisted summary, so a restart
+/// that only replayed part of the run cannot drop the rest.
+fn merge_persisted_executions(
+    mut persisted: PersistedRunChanges,
+    per_execution: BTreeMap<String, Vec<FileChangeSummary>>,
+) -> PersistedRunChanges {
+    for (execution_id, parts) in per_execution {
+        // Cache entries are newer, so they merge over the persisted summary.
+        let merged = match persisted.executions.remove(&execution_id) {
+            Some(existing) => {
+                let mut all = vec![existing];
+                all.extend(parts);
+                merge_summaries(&all, false)
+            }
+            None => merge_summaries(&parts, false),
+        };
+        persisted.executions.insert(execution_id, merged);
+    }
+    persisted
+}
+
 /// Counts are tiny (paths, status and two integers), so a sidecar per Run
 /// removes the cold-start log replay without touching the event schema.
 pub fn persist_run(root: &Path, run_id: &str) -> Result<(), String> {
     let Some(path) = persisted_path(root, run_id) else {
         return Ok(());
     };
-    let mut persisted = PersistedRunChanges { version: 1, ..Default::default() };
+    // Seed from the durable sidecar before overlaying this session's cache. A
+    // restarted process only replays the executions the live view happens to
+    // warm, so writing the in-memory cache alone would silently drop every
+    // earlier terminal summary that was never re-derived in this session.
+    let mut persisted = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<PersistedRunChanges>(&text).ok())
+        .unwrap_or_default();
+    persisted.version = 1;
     {
         let Ok(guard) = cache().lock() else { return Ok(()); };
-        let mut per_execution: BTreeMap<String, Vec<&FileChangeSummary>> = BTreeMap::new();
+        let mut per_execution: BTreeMap<String, Vec<FileChangeSummary>> = BTreeMap::new();
         for ((run, execution_id), summary) in guard.log_changes.iter().chain(guard.git_changes.iter()) {
             if run == run_id {
-                per_execution.entry(execution_id.clone()).or_default().push(summary);
+                per_execution.entry(execution_id.clone()).or_default().push(summary.clone());
             }
         }
-        for (execution_id, parts) in per_execution {
-            let merged = merge_summaries(
-                &parts.into_iter().cloned().collect::<Vec<_>>(),
-                false,
-            );
-            persisted.executions.insert(execution_id, merged);
-        }
+        persisted = merge_persisted_executions(persisted, per_execution);
         for ((run, planning_id), summary) in &guard.planning_changes {
             if run == run_id {
                 persisted.planning.insert(planning_id.clone(), summary.clone());
             }
         }
-        persisted.publication = guard.publication_changes.get(run_id).cloned();
+        if let Some(publication) = guard.publication_changes.get(run_id) {
+            persisted.publication = Some(publication.clone());
+        }
     }
     if persisted.executions.is_empty()
         && persisted.planning.is_empty()
@@ -1572,7 +1598,7 @@ mod tests {
         assert!(path.is_file(), "counts are persisted next to runtime data");
         assert!(std::fs::metadata(&path).unwrap().len() < 4096, "summary stays tiny");
 
-        clear_all();
+        invalidate_run(run);
         hydrate_run(root, run);
         let state = Snapshot { run_id: run.into(), ..Default::default() };
         let execution = Execution {
@@ -1588,6 +1614,39 @@ mod tests {
         assert_eq!(summary.files[0].path, "src/a.ts");
         assert_eq!(summary.files[0].additions, 1);
         invalidate_run(run);
+    }
+
+    #[test]
+    fn persisting_over_a_sidecar_keeps_untouched_executions() {
+        let summary = |path: &str| {
+            FileChangeSummary::from_files(
+                vec![FileChangeItem {
+                    path: path.into(),
+                    old_path: None,
+                    status: "added".into(),
+                    additions: 1,
+                    deletions: 0,
+                    is_running: false,
+                    nodes: vec!["worker".into()],
+                    execution_ids: vec![],
+                    source: Some("git".into()),
+                }],
+                false,
+                None,
+            )
+        };
+        let mut persisted = PersistedRunChanges { version: 1, ..Default::default() };
+        persisted.executions.insert("exec-old".into(), summary("src/old.ts"));
+
+        // The current session only derived a different execution. The earlier
+        // terminal summary must survive the overlay.
+        let mut per_execution = BTreeMap::new();
+        per_execution.insert("exec-new".to_string(), vec![summary("src/new.ts")]);
+        let merged = merge_persisted_executions(persisted, per_execution);
+
+        assert!(merged.executions.contains_key("exec-old"));
+        assert!(merged.executions.contains_key("exec-new"));
+        assert_eq!(merged.executions["exec-old"].files[0].path, "src/old.ts");
     }
 
     #[test]
