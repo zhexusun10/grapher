@@ -3140,7 +3140,7 @@ fn is_host_metadata_name(relative: &str) -> bool {
 /// macOS host bookkeeping is not project output. Windows keeps its existing
 /// collection strategy because its metadata files are not part of this policy.
 /// Tracked metadata remains in the snapshot: the caller re-adds exact paths.
-fn is_host_metadata(relative: &str) -> bool {
+pub(crate) fn is_host_metadata(relative: &str) -> bool {
     cfg!(target_os = "macos") && is_host_metadata_name(relative)
 }
 

@@ -1014,6 +1014,21 @@ pub(crate) fn stage_project(path: &Path, metadata: &Path) -> Result<(), String> 
             "--show-object-format=storage",
         ],
     )?;
+    // macOS host bookkeeping is not project output. Forced collection above sees
+    // every file, so drop newly discovered metadata while keeping paths the user
+    // already tracks. Other hosts keep collecting it as ordinary project data.
+    if cfg!(target_os = "macos") {
+        let tracked_repository = git2::Repository::open(metadata).map_err(|e| e.to_string())?;
+        let tracked: std::collections::BTreeSet<Vec<u8>> = tracked_repository
+            .index()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|entry| entry.path)
+            .collect();
+        entries.retain(|name, _| {
+            !workspace::is_host_metadata(name) || tracked.contains(name.as_bytes())
+        });
+    }
     if format == "sha256" {
         return stage_sha256(path, metadata, entries);
     }
@@ -1894,6 +1909,19 @@ pub(crate) fn prepare(
                     *extra = wanted_extra;
                 }
                 (Entry::Link { extra, .. }, Entry::Link { extra: wanted, .. }) => *extra = wanted,
+                (
+                    Entry::Special { mode, extra, .. },
+                    Entry::Special {
+                        mode: wanted_mode,
+                        extra: wanted_extra,
+                        ..
+                    },
+                ) => {
+                    // Keep the selected special entry's type/device; only its
+                    // recorded metadata (mode, streams) is composed here.
+                    *mode = wanted_mode;
+                    *extra = wanted_extra;
+                }
                 _ => return Err("Project entry type changed during metadata composition".into()),
             }
         }
