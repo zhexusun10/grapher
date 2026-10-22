@@ -31,6 +31,7 @@ fn concurrent_source_edit_of_node_file_is_not_discarded_on_conflict_or_retry() {
     fs::write(source.join("shared.txt"), "BASE\n").unwrap();
     workspace::git(&source, &["add", "-A"]).unwrap();
     workspace::git(&source, &["commit", "-q", "-m", "base"]).unwrap();
+    let source_head = workspace::git(&source, &["rev-parse", "HEAD"]).unwrap();
     let base = workspace::snapshot_repository(&source).unwrap();
     let head = branch(&source, &base, &temp.path().join("node"), "shared.txt", "NODE\n");
     fs::write(source.join("shared.txt"), "USER\n").unwrap();
@@ -50,7 +51,9 @@ fn concurrent_source_edit_of_node_file_is_not_discarded_on_conflict_or_retry() {
     }).unwrap();
     assert_eq!(fs::read_to_string(source.join("shared.txt")).unwrap().replace("\r\n", "\n"), "USER\nNODE\n");
     assert!(workspace::git(&source, &["cat-file", "-e", &format!("{}^{{commit}}", heads[0])]).is_err());
-    assert_eq!(workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+    // Publication is files-only: the user's HEAD never moves. `base` is the
+    // internal captured snapshot, so compare against the captured user HEAD.
+    assert_eq!(workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(), source_head);
     assert!(workspace::git(&source, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
     assert!(!workspace::git(&source, &["status", "--porcelain"]).unwrap().is_empty());
 }

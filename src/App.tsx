@@ -432,7 +432,6 @@ export default function App() {
     }
   }, [state.runId, state.config?.repository]);
 
-  // 每个运行的消息按发送顺序显示；修改旧消息也作为新的跟进指令追加。
   const [sessionEntries, setSessionEntries] = useState<ChatMessage[]>([]);
   // Keep optimistic turns scoped to their Run while navigating away. Planner
   // steer turns may not have reached the durable JSONL when the user goes home.
@@ -614,8 +613,6 @@ export default function App() {
     const mergerNodeName = isNodeMerger ? `merge:${nodeMergerTarget}` : (selected === publicationMergerCardId ? "merger" : undefined);
     const targetNodeName = mergerNodeName || selectedNode?.name ||
       (routeType === "serial" ? state.graph.nodes[0]?.name : undefined);
-    // A selected merger card owns the composer only while its native process is
-    // alive; a settled merger is read-only history.
     const selectedMerger = (isNodeMerger || selected === publicationMergerCardId)
       ? ((state.mergers ?? []).find(item => item.id === selectedMergerId && item.node === mergerNodeName)
           ?? (state.mergers ?? []).filter(item => item.node === mergerNodeName).at(-1))
@@ -992,10 +989,6 @@ export default function App() {
         return result;
       };
 
-      // Histories validate one by one. Merge each batch into the cached index
-      // instead of replacing it with the partial set; warm-cached cards stay
-      // mounted, so their entrance animation does not replay when the remaining
-      // histories resolve.
       const schedulePublish = () => {
         if (publishScheduled) return;
         publishScheduled = true;

@@ -1846,11 +1846,6 @@ fn plan_goal_internal_with_started(
                     },
                     "graph" => {
                         // The planning gate prevents new dispatch/publication.
-                        // While node work is unfinished, the newest recorded
-                        // workspace is mandatory: start immediately even if its
-                        // node/Merger writer is active rather than waiting or
-                        // retreating to source. Otherwise only source exists
-                        // for this turn and no workspace switch is offered.
                         let (selected, planner_context_required) = if revision_run_id.is_some() && !background_review {
                             check_planning_cancelled(&owner)?;
                             let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
@@ -2187,9 +2182,7 @@ fn plan_goal_internal_with_started(
                 };
                 let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                 check_planning_cancelled(&owner)?;
-                if let Some(execution_id) = &planner_execution_id {
-                    capture_planner_workspace_when_idle(&mut runtime, execution_id)?;
-                }
+                capture_planner_turn_workspaces(&mut runtime, &planning_id, planner_execution_id.as_deref())?;
                 if let Some(ref run_id) = revision_run_id {
                     if runtime.state.run_id != *run_id {
                         return Err("Run changed during graph revision".into());
@@ -2310,7 +2303,7 @@ fn plan_goal_internal_with_started(
                             let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                             if runtime.state.approved && revision_run_id.as_deref() == Some(&runtime.state.run_id) {
                                 let capture = if let Some(id) = &planner_execution_id {
-                                    capture_planner_workspace_when_idle(&mut runtime, id)
+                                    capture_planner_turn_workspaces(&mut runtime, &planning_id, Some(id))
                                 } else { runtime.capture_planner_source() };
                                 if let Err(error) = capture {
                                     if !runtime.state.paused { let _ = runtime.pause(true); }
@@ -2473,7 +2466,7 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
                 // and pause rather than silently scheduling stale inputs on error.
                 if interrupted {
                     if let Some(id) = &summary.workspace_execution_id {
-                        if let Err(error) = recovered.capture_planner_workspace(id) {
+                        if let Err(error) = capture_planner_turn_workspaces(&mut recovered, &summary.planning_id, Some(id)) {
                             recovered.pause(true)?;
                             summary.error = Some(format!("{}; workspace recovery failed: {error}", summary.error.as_deref().unwrap_or("Planner interrupted")));
                             write_planning_summary(&directory, &summary)?;
@@ -2513,6 +2506,27 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
             }
         }
     }
+    Ok(())
+}
+
+// Selection events are the durable list of every borrowed slot, not just the
+// final cwd. Capture after the entire Planner process tree has drained so a
+// background Bash writer in a previous slot cannot escape the checkpoint.
+fn capture_planner_turn_workspaces(runtime: &mut Runtime, planning_id: &str, fallback: Option<&str>) -> Result<(), String> {
+    let mut executions = Vec::new();
+    for event in &runtime.state.events {
+        if let EventKind::PlannerWorkspaceSelected { planning } = &event.kind {
+            if planning.planning_id == planning_id {
+                if let Some(id) = &planning.workspace_execution_id {
+                    if !executions.contains(id) { executions.push(id.clone()); }
+                }
+            }
+        }
+    }
+    if let Some(id) = fallback {
+        if !executions.iter().any(|existing| existing == id) { executions.push(id.to_string()); }
+    }
+    for id in executions { capture_planner_workspace_when_idle(runtime, &id)?; }
     Ok(())
 }
 

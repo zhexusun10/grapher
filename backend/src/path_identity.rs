@@ -175,7 +175,6 @@ pub(crate) fn lexical_key(path: &Path) -> String {
 }
 
 /// Compare the same directory/file even when the spelling differs.
-/// Compare the same directory/file even when the spelling differs.
 pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;

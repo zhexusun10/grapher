@@ -80,6 +80,18 @@ test('an explicit leased CUDA UUID overrides hook/device visibility before facto
   });
 });
 
+test('activation hooks and Bash option rewriting retain external runtime paths', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-state-binding-'));
+  try {
+    const launch = base();
+    launch.variables = { HOME: directory, USERPROFILE: directory, XDG_CACHE_HOME: join(directory, 'cache'), npm_config_cache: join(directory, 'npm') };
+    launch.hook = 'export HOME=.; export USERPROFILE=.; export XDG_CACHE_HOME=.; export npm_config_cache=.';
+    const result = run(launch, "const explicit=managedBashOptions({env:{HOME:'in-project',npm_config_cache:'in-project'}}).env; const implicit=managedBashOptions({}).env; console.log(JSON.stringify({home:process.env.HOME,cache:process.env.XDG_CACHE_HOME,explicit:explicit.HOME,npm:explicit.npm_config_cache,implicit:implicit.HOME}))");
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { home: directory, cache: join(directory, 'cache'), explicit: directory, npm: join(directory, 'npm'), implicit: directory });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('unmanaged compatibility process has no binding or additional PATH processing', () => {
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', `import {applyLaunchBinding,managedBashOptions} from ${JSON.stringify(module)}; applyLaunchBinding(); console.log(JSON.stringify(managedBashOptions({env:{PATH:'legacy'}})))`], {
     encoding: 'utf8', env: { ...process.env, GRAPHER_LAUNCH_BINDING: '' }, timeout: 15000,

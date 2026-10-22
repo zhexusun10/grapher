@@ -14,7 +14,7 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LaunchConfig {
-    /// An explicit native executable, usually {workspace}/.venv/.../python.
+    /// An explicit native executable, bound to the project or external state root.
     pub entry: String,
     /// Complete business PATH, not additions to an inherited host PATH.
     pub path: Vec<String>,
@@ -44,7 +44,6 @@ pub struct EnvironmentConfig {
     pub mode: String,
     pub platform: String,
     pub arch: String,
-    /// Project-relative opaque persistent trees, frozen by native admission.
     pub scopes: Vec<String>,
     #[serde(default)]
     pub caches: Vec<String>,
@@ -283,10 +282,10 @@ impl LaunchConfig {
         }
         for path in self.path.iter().chain(std::iter::once(&self.entry)) {
             if path.contains('\0')
-                || !(Path::new(path).is_absolute() || path.starts_with("{workspace}/"))
+                || !(Path::new(path).is_absolute() || path.starts_with("{workspace}/") || path.starts_with("{state}/"))
             {
                 return Err(format!(
-                    "Launch path must be absolute or workspace-bound: {path}"
+                    "Launch path must be absolute, workspace-bound or state-bound: {path}"
                 ));
             }
         }
@@ -312,9 +311,19 @@ impl LaunchConfig {
         Ok(())
     }
 
+    pub(crate) fn state_bound(&self) -> bool {
+        self.variables.values().chain(&self.path).chain(std::iter::once(&self.entry))
+            .any(|value| value.contains("{state}"))
+    }
+
     pub(crate) fn expanded(&self, path: &Path) -> Self {
         let root = native::host_path(path).to_string_lossy().replace('\\', "/");
-        let expand = |v: &str| v.replace("{workspace}", &root);
+        let state = crate::workspace_state::process_root(path).ok()
+            .map(|path| native::host_path(&path).to_string_lossy().replace('\\', "/"));
+        let expand = |v: &str| {
+            let value = v.replace("{workspace}", &root);
+            state.as_ref().map_or_else(|| value.clone(), |state| value.replace("{state}", state))
+        };
         Self {
             entry: expand(&self.entry),
             path: self.path.iter().map(|v| expand(v)).collect(),
@@ -437,10 +446,14 @@ impl EnvironmentConfig {
     }
 
     pub(crate) fn exclusions(&self) -> Vec<String> {
-        self.scopes.iter().chain(&self.caches).cloned().collect()
+        if self.launch.state_bound() { Vec::new() }
+        else { self.scopes.iter().chain(&self.caches).cloned().collect() }
     }
 
     pub(crate) fn check_tracked(&self, path: &Path) -> Result<(), String> {
+        // External scopes are not project-relative exclusions. In particular a
+        // source-owned .venv/.agent-home is ordinary project data, even tracked.
+        if self.launch.state_bound() { return Ok(()); }
         let tracked = workspace::working_tree_git(path, &["ls-files", "-z", "--cached"])?;
         for name in tracked.split('\0').filter(|s| !s.is_empty()) {
             if self.exclusions().iter().any(|scope| {
@@ -501,6 +514,8 @@ fn persist(path: &Path, bytes: &[u8]) -> Result<(), String> {
 impl Environments {
     pub(crate) fn new(data: &Path, run: &str, config: &EnvironmentConfig) -> Result<Self, String> {
         config.validate()?;
+        #[cfg(not(any(test, feature = "fixture")))]
+        if !config.launch.state_bound() { return Err("Unsupported workspace contract: native process state must use the external {state} root; create a new Run".into()); }
         Uuid::parse_str(run).map_err(|_| "Invalid environment Run ID")?;
         fs::create_dir_all(data).map_err(|e| e.to_string())?;
         let directory = data.join("environments").join(run);
@@ -510,12 +525,26 @@ impl Environments {
             fs::create_dir_all(directory.join(name)).map_err(|e| e.to_string())?;
         }
         real_child_path(data, &directory, false)?;
-        let files = Files::environment(&directory.join("files"), &config.scopes, &config.caches)?;
+        let files = Files::environment(&directory.join("files"), &config.scopes, &config.caches)?
+            .with_project_index(!config.launch.state_bound());
         Ok(Self {
             files,
             directory,
             config: config.clone(),
         })
+    }
+
+    pub(crate) fn state_root(&self, path: &Path) -> Result<PathBuf, String> {
+        if self.config.launch.state_bound() { crate::workspace_state::prepare(path) }
+        else { Ok(path.to_path_buf()) }
+    }
+
+    pub(crate) fn verify_view(&self, path: &Path, launch: &str, version: &str) -> Result<(), String> {
+        self.scoped_files(launch)?.verify(&self.state_root(path)?, version, "")
+    }
+
+    pub(crate) fn validate_launch(&self, path: &Path, launch: &LaunchConfig) -> Result<(), String> {
+        crate::environment_discovery::validate_launch(&self.state_root(path)?, launch, !self.config.best_effort)
     }
 
     pub(crate) fn launch(&self, config: &LaunchConfig) -> Result<String, String> {
@@ -552,8 +581,8 @@ impl Environments {
         let mut probe = self.config.launch.clone();
         probe
             .variables
-            .retain(|_, value| !value.contains("{workspace}"));
-        probe.path.retain(|value| !value.contains("{workspace}"));
+            .retain(|_, value| !value.contains("{workspace}") && !value.contains("{state}"));
+        probe.path.retain(|value| !value.contains("{workspace}") && !value.contains("{state}"));
         clean_command(&mut command, &probe, None)?;
         command.env("PYTHONDONTWRITEBYTECODE", "1");
         let output = controlled_output(command)?;
@@ -579,7 +608,7 @@ impl Environments {
             arch: std::env::consts::ARCH.into(),
             baseline: digest(&bytes)?,
             policy: digest(&serde_json::to_vec(&self.config).map_err(|e| e.to_string())?)?,
-            contract: "native-workspace-v1".into(),
+            contract: if self.config.launch.state_bound() { "native-workspace-v4" } else { "native-workspace-v1" }.into(),
         })
     }
 
@@ -611,7 +640,7 @@ impl Environments {
     pub(crate) fn validate_result_metadata(&self, result: &CompositeResult) -> Result<(), String> {
         if result.domain.platform != platform()
             || result.domain.arch != std::env::consts::ARCH
-            || result.domain.contract != "native-workspace-v1"
+            || result.domain.contract != if self.config.launch.state_bound() { "native-workspace-v4" } else { "native-workspace-v1" }
             || result.domain.policy
                 != digest(&serde_json::to_vec(&self.config).map_err(|e| e.to_string())?)?
         {
@@ -753,6 +782,7 @@ impl Environments {
         preserve_failed: bool,
         history_edit: bool,
     ) -> Result<CompositeResult, String> {
+        let project_guard = if self.config.launch.state_bound() { Some(crate::workspace_view::preparation_guard(path)?) } else { None };
         self.validate_result_metadata(selected)?;
         if self.baseline()? != selected.domain {
             return Err("Native baseline/domain changed; refusing unsafe environment reuse".into());
@@ -770,15 +800,16 @@ impl Environments {
         let same_view = selected.layout.as_deref()
             .is_some_and(|original| crate::path_identity::same_path(Path::new(original), Path::new(&layout)));
         let scoped = self.scoped_files(&selected.launch_ref)?;
+        let state = self.state_root(path)?;
         let unbound_best_effort = self.config.best_effort
             && selected.layout.is_none()
             && self.load_launch(&selected.launch_ref)?.environment.is_none();
         if !unbound_best_effort && same_view && !history_edit && !preserve_failed {
-            scoped.verify(path, &selected.environment_ref, "")?;
+            scoped.verify(&state, &selected.environment_ref, "")?;
         } else if !preserve_failed && !unbound_best_effort {
             // Materialization itself validates every stored byte before touching
             // the view; do not repeat the same multi-GiB scan beforehand.
-            scoped.materialize(path, &[selected.environment_ref.clone()], None, false)?;
+            scoped.materialize(&state, &[selected.environment_ref.clone()], None, false)?;
         } else {
             scoped.validate(&[selected.environment_ref.clone()])?;
         }
@@ -812,8 +843,11 @@ impl Environments {
                 .unwrap_or(120);
             controlled_output_with_timeout(command, Some(std::time::Duration::from_secs(timeout)))?;
         }
-        for cache in &self.config.caches {
-            fs::create_dir_all(path.join(cache)).map_err(|e| e.to_string())?;
+        // Cache leaves are created by their actual consumer, outside project Git.
+        if let Some(expected) = project_guard {
+            if crate::workspace_view::preparation_guard(path)? != expected {
+                return Err("Native environment preparation modified the project view; no agent may see runtime-injected files".into());
+            }
         }
         self.finalize_input(path, selected, generation, head, resources)
     }
@@ -832,7 +866,7 @@ impl Environments {
     ) -> Result<CompositeResult, String> {
         let launch = self.configured_launch(path, &selected.launch_ref)?;
         if self.config.discovery {
-            crate::environment_discovery::validate_launch(path, &launch, !self.config.best_effort)?;
+            self.validate_launch(path, &launch)?;
         }
         let expanded = launch.expanded(path);
         if Path::new(&expanded.entry).parent() != expanded.path.first().map(Path::new) {
@@ -884,7 +918,12 @@ impl Environments {
     }
 
     pub(crate) fn exclusions(&self, reference: &str) -> Result<Vec<String>, String> {
-        let mut paths = self.config.exclusions();
+        if self.config.launch.state_bound() { self.load_launch(reference)?; return Ok(Vec::new()); }
+        self.scope_paths(reference)
+    }
+
+    fn scope_paths(&self, reference: &str) -> Result<Vec<String>, String> {
+        let mut paths: Vec<_> = self.config.scopes.iter().chain(&self.config.caches).cloned().collect();
         if let Some(binding) = self.load_launch(reference)?.environment {
             if !paths.iter().any(|scope| {
                 workspace::scope_contains(Path::new(&binding.prefix), Path::new(scope))
@@ -900,17 +939,18 @@ impl Environments {
 
     pub(crate) fn scoped_files(&self, reference: &str) -> Result<Files, String> {
         let scopes: Vec<_> = self
-            .exclusions(reference)?
+            .scope_paths(reference)?
             .into_iter()
             .filter(|scope| !self.config.caches.contains(scope))
             .collect();
-        Files::environment(&self.directory.join("files"), &scopes, &self.config.caches)
+        Ok(Files::environment(&self.directory.join("files"), &scopes, &self.config.caches)?
+            .with_project_index(!self.config.launch.state_bound()))
     }
 
     fn capture_scoped(&self, path: &Path, parent: &str, reference: &str) -> Result<String, String> {
         let files = self.scoped_files(reference)?;
         let version = Uuid::new_v4().to_string();
-        files.capture(path, &version, "", &[parent.into()])?;
+        files.capture(&self.state_root(path)?, &version, "", &[parent.into()])?;
         if files.same_contents(parent, &version)? {
             Ok(parent.into())
         } else {
@@ -927,8 +967,9 @@ impl Environments {
         if !self.config.discovery {
             return Ok(input.clone());
         }
+        let state = self.state_root(path)?;
         let launch = crate::environment_discovery::resolve_for_policy(
-            path,
+            &state,
             &self.load_launch(&input.launch_ref)?,
             session,
             &input.generation,
@@ -1341,6 +1382,18 @@ pub(crate) fn bind_command(
     // Rebinding L (also for proofs) must not rescan every environment byte.
     store.validate_result_metadata(input)?;
     let launch = store.load_launch(&input.launch_ref)?.expanded(path);
+    if config.launch.state_bound() {
+        let state = store.state_root(path)?;
+        for key in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "npm_config_cache", "PIP_CACHE_DIR", "CONDA_ENVS_PATH", "CONDA_PKGS_DIRS"] {
+            if let Some(value) = launch.variables.get(key) {
+                let paths: Vec<_> = if matches!(key, "CONDA_ENVS_PATH" | "CONDA_PKGS_DIRS") { std::env::split_paths(value).collect() } else { vec![PathBuf::from(value)] };
+                for value in paths {
+                    if !value.is_absolute() || !workspace::scope_contains(&value, &state) { return Err(format!("Runtime variable {key} leaves its external owned state root")); }
+                    real_child_path(&state, &value, false)?;
+                }
+            }
+        }
+    }
     let global_agent = crate::native::environment_path("GRAPHER_GLOBAL_PI_AGENT_DIR")
         .or_else(|| crate::native::home_dir().map(|home| home.join(".pi/agent")));
     if let Some(directory) = global_agent {
@@ -1358,7 +1411,7 @@ pub(crate) fn bind_command(
     }
     if config.discovery {
         let context = crate::environment_discovery::context(
-            path,
+            &store.state_root(path)?,
             &input.generation,
             &launch,
             session,

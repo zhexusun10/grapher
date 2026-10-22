@@ -29,8 +29,6 @@ RUN test -n "${GRAPHER_COMMIT}" \
     && test "$(backend/target/release/grapher --build-identity)" = "${GRAPHER_COMMIT}" \
     && test -z "$(git status --porcelain --untracked-files=normal)"
 
-# Pi's find/grep tools otherwise try to download binaries during timed trials.
-# Debian bookworm's fd 8.6 lacks the --no-require-git flag used by pinned Pi.
 # These checksums bind both supported image architectures to fixed upstream tools.
 RUN set -eu; \
     case "$(uname -m)" in \

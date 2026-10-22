@@ -47,11 +47,10 @@ pub fn write_graph_profile(
     worktree_root: &Path,
     current: &Path,
 ) -> Result<PathBuf, String> {
-    write_profile(path, repository, worktree_root, current, None)
+    write_profile(path, repository, worktree_root, current, None, &[])
 }
 
-/// Production adds session/data and engine boundaries. The current session is
-/// the only writable exception when runtime data lives inside the source tree.
+/// Production adds session/data and engine boundaries.
 pub fn write_execution_profile(
     path: &Path,
     repository: &Path,
@@ -61,13 +60,14 @@ pub fn write_execution_profile(
     session: &Path,
     engine: &Path,
 ) -> Result<PathBuf, String> {
-    write_profile(
-        path,
-        repository,
-        worktree_root,
-        current,
-        Some((data, session, engine)),
-    )
+    write_execution_profile_scoped(path, repository, worktree_root, current, data, session, engine, &[])
+}
+
+pub(crate) fn write_execution_profile_scoped(
+    path: &Path, repository: &Path, worktree_root: &Path, current: &Path,
+    data: &Path, session: &Path, engine: &Path, workspaces: &[PathBuf],
+) -> Result<PathBuf, String> {
+    write_profile(path, repository, worktree_root, current, Some((data, session, engine)), workspaces)
 }
 
 fn write_profile(
@@ -76,6 +76,7 @@ fn write_profile(
     worktree_root: &Path,
     current: &Path,
     execution: Option<(&Path, &Path, &Path)>,
+    workspaces: &[PathBuf],
 ) -> Result<PathBuf, String> {
     if !supported() {
         return Err("Graph sandbox requires /usr/bin/sandbox-exec on macOS".into());
@@ -145,16 +146,37 @@ fn write_profile(
                 quote(&repository)?, quote(objects.parent().ok_or("Invalid object path")?)?)
         } else { read_source_rule.clone() }
     } else { read_source_rule.clone() };
+    let state = crate::workspace_state::process_root(&current).ok().filter(|path| path.is_dir())
+        .map(|path| canonical_exception(&worktree_root, &path)).transpose()?;
+    let mut exceptions = state.into_iter().collect::<Vec<_>>();
+    for workspace in workspaces {
+        let target = canonical_exception(&worktree_root, workspace)?;
+        if target.parent() != current.parent() { return Err("Planner sandbox exception leaves the current Run".into()); }
+        crate::workspace_view::validate_ready(&target, &repository)?;
+        exceptions.push(canonical_exception(&worktree_root, &crate::workspace_state::prepare(&target)?)?);
+        exceptions.push(target);
+    }
+    exceptions.sort();
+    exceptions.dedup();
+    let state_exception = exceptions.iter().map(|path| quote(path).map(|path| format!(" (require-not (subpath {path}))"))).collect::<Result<Vec<_>, _>>()?.concat();
+    let mut state_ancestors = String::new();
+    for exception in &exceptions {
+        let mut parent = exception.parent();
+        while let Some(path) = parent.filter(|path| path.starts_with(&worktree_root)) {
+            state_ancestors.push_str(&format!(" (require-not (literal {}))", quote(path)?));
+            parent = path.parent();
+        }
+    }
     let mut text = format!(
         "(version 1)\n(allow default)\n\
          (deny file-read-data {read_source_rule})\n\
          (deny file-read-metadata {metadata_rule})\n\
          (deny file-write* {source_rule})\n\
          (deny file-read-data file-write*\n\
-           (require-all (subpath {root}) (require-not (subpath {current}))))\n\
+           (require-all (subpath {root}) (require-not (subpath {current})){state_exception}))\n\
          (deny file-read-metadata\n\
-           (require-all (subpath {root}) (require-not (subpath {current}))\n\
-             (require-not (literal {root})) (require-not (literal {run}))))\n",
+           (require-all (subpath {root}) (require-not (subpath {current})){state_exception}\n\
+             (require-not (literal {root})) (require-not (literal {run})){state_ancestors}))\n",
         root = quote(&worktree_root)?,
         current = quote(&current)?,
         run = quote(current.parent().ok_or("Invalid execution path")?)?,

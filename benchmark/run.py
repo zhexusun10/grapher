@@ -185,9 +185,9 @@ def retain_trace(data_dir, logs):
 def observed_trace_usage(logs):
     """Count completed Pi assistant replies, including when a run times out.
 
-    Backend runMetrics only settles finished nodes. Keep these independent,
-    explicitly partial observations for auditing; never substitute them for a
-    successful run's official metrics or imply an in-flight reply was billed 0.
+    Keep these independent, explicitly partial observations for auditing; never
+    substitute them for a successful run's official metrics or imply an in-flight
+    reply was billed 0.
     """
     keys = ("input", "output", "cacheRead", "cacheWrite", "reasoning", "totalTokens")
     usage = dict.fromkeys(keys, 0)
@@ -259,8 +259,6 @@ def main(argv=None):
         # provider/model for the Partitioner, Planner, nodes or merger.
         env.update({key: args.model for key in ROLE_MODELS})
         with (logs / "backend.log").open("w", encoding="utf-8") as output:
-            # Do not source an arbitrary task's .env via Grapher's backend
-            # load_env_file(); Pi itself still works in the task repository.
             process = subprocess.Popen([args.binary], cwd=data_dir, env=env,
                                        stdout=output, stderr=subprocess.STDOUT,
                                        start_new_session=(os.name == "posix"),

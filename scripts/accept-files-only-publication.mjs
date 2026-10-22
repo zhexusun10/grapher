@@ -47,7 +47,7 @@ const model = createServer(async (request, response) => {
       else if (!results.length) tool = { name: 'bash', arguments: { command:
         'test -n "$(git diff --name-only --diff-filter=U)" && printf "left\\nright\\n" > shared.txt && git add -f shared.txt' } };
     } else if (!results.length) {
-      const noHistory = 'test ! -e .git && ! git log -1 >/dev/null 2>&1 && ';
+      const projectView = 'test -d .git && test -z "$(git for-each-ref --format="%(refname)" refs/grapher/)" && test "$(git branch --show-current)" != grapher-node && ';
       const command = text.includes('WRITE_ALPHA') ? 'printf alpha > alpha.txt'
         : text.includes('WRITE_BETA') ? 'printf beta > beta.txt'
         : text.includes('WRITE_TAIL') ? 'printf tail > tail.txt'
@@ -57,7 +57,7 @@ const model = createServer(async (request, response) => {
         : text.includes('VERIFY_MERGED') ? 'test "$(wc -l < shared.txt)" = 2 && printf verified > verified.txt'
         : undefined;
       assert.ok(command, `unknown task: ${text}`);
-      tool = { name: 'bash', arguments: { command: noHistory + command } };
+      tool = { name: 'bash', arguments: { command: projectView + command } };
     }
     calls.push({ label, role: planner ? 'planner' : merger ? 'merger' : 'node', tool: tool?.name || null });
     const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: `call-${calls.length}`, type: 'function', function: { name: tool.name, arguments: JSON.stringify(tool.arguments) } }] }

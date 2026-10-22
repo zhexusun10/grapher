@@ -205,6 +205,14 @@ test('refreshed catalog exposes reviewed API changes and does not resurrect reti
     // shrank; the plain Ling models and `opencode-go/step-5-preview` remain.
     ['openrouter', 'inclusionai/ling-3.0-flash-sante'],
     ['opencode', 'step-5-preview-free'],
+    // Retired while moving to the Pi 1.4.0 snapshot: Copilot dropped `gpt-5.4`
+    // (its default is now `gpt-6.1-sol`), Codex dropped the models that always
+    // fail for ChatGPT accounts, and the older `chat-latest` aliases are gone.
+    ['github-copilot', 'gpt-5.4'],
+    ['openai-codex', 'gpt-5.5'],
+    ['openai-codex', 'gpt-5.3-codex-spark'],
+    ['azure', 'gpt-5.2-chat-latest'],
+    ['openai', 'gpt-5.3-chat-latest'],
   ]) {
     assert.equal(runtime.getModel(provider, id), undefined, `${provider}/${id}: saved selections need replacement`);
   }
@@ -216,4 +224,10 @@ test('refreshed catalog exposes reviewed API changes and does not resurrect reti
   // OpenRouter router models report a negative placeholder price; the snapshot must use 0, not -$1,000,000.
   assert.deepEqual(runtime.getModel('openrouter', 'openrouter/auto')?.cost,
     { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  // Pi 1.4.0 replaces Copilot's retired default, adds MiniMax-M3.1-Flash with
+  // thinking levels through `max`, and gives Grok 4.3 the `xhigh` level.
+  assert.equal(runtime.getModel('github-copilot', 'gpt-6.1-sol')?.api, 'openai-responses');
+  const miniMax = runtime.getModel('minimax', 'MiniMax-M3.1-Flash');
+  assert.deepEqual(getModelThinkingCapabilities(miniMax!).thinkingLevels, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.ok(getModelThinkingCapabilities(runtime.getModel('xai', 'grok-4.3')!).thinkingLevels.includes('xhigh'));
 });

@@ -16,11 +16,9 @@ const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const delay = (ms: number) => new Promise(completed => setTimeout(completed, ms));
 const safeRm = async (target: string) => {
-  // Forty linearly backed-off retries can spend 205 seconds on one busy path.
   await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
 };
 
-// Leave time inside CI's five-minute step for cancellation and cleanup.
 test('production Windows Planner/Graph: concurrent runs, dependencies, publication, cancellation and crash recovery', { skip: !windows, timeout: 240000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'grapher-windows-'));
   const agent = join(directory, 'agent');

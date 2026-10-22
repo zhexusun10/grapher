@@ -191,7 +191,7 @@ pub(super) fn publish(repository: &Path, heads: &[String], exclusions: &[String]
         }
     }
     if !inputs.contains(&input) { inputs.push(input.clone()); }
-    let result = compose_graph_scoped(&path, &inputs, exclusions, || resolve(&path))?;
+    let result = compose_graph_scoped(&path, repository, &inputs, exclusions, || resolve(&path))?;
     for head in heads { git(&path, &["merge-base", "--is-ancestor", head, &result])?; }
     let metadata = workspace::private_git_dir(&path);
     let url = workspace::git_file_url(metadata.as_deref().unwrap_or(&path))?;
@@ -232,9 +232,21 @@ fn select_attempt(repository: &Path, root: &Path, standard: bool, exclusions: &[
 }
 
 fn private_index_git(repository: &Path, index: &Path, args: &[&str]) -> Result<String, String> {
-    let shadow = workspace::shadow_repo_dir(repository)?;
-    let mut command = vec!["--git-dir", shadow.to_str().ok_or("Invalid internal Git path")?,
-        "--work-tree", repository.to_str().ok_or("Invalid project path")?];
+    // Do not run source clean/smudge/EOL filters while delivering recorded
+    // physical bytes, and do not mutate the shared snapshot repo's attributes.
+    let metadata = index.parent().ok_or("Missing checkout journal")?.join("raw-checkout.git");
+    let metadata_text = metadata.to_str().ok_or("Invalid checkout Git path")?;
+    let worktree = repository.to_str().ok_or("Invalid project path")?;
+    if !metadata.join("HEAD").is_file() {
+        fs::create_dir_all(&metadata).map_err(|e| e.to_string())?;
+        let format = repository_git(repository, &["rev-parse", "--show-object-format=storage"])?;
+        git(repository, &["--git-dir", metadata_text, "--work-tree", worktree, "init", "-q", &format!("--object-format={format}")])?;
+        let objects = repository_git(repository, &["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
+        let objects = crate::native::host_path(Path::new(&objects)).to_string_lossy().replace('\\', "/");
+        fs::write(metadata.join("objects/info/alternates"), format!("{objects}\n")).map_err(|e| e.to_string())?;
+        workspace::raw_checkout_attributes(&metadata)?;
+    }
+    let mut command = vec!["--git-dir", metadata_text, "--work-tree", worktree];
     command.extend_from_slice(args);
     let bytes = workspace::git_bytes(repository, &command, Some(index), None)?;
     String::from_utf8(bytes).map_err(|e| e.to_string())
@@ -324,6 +336,7 @@ mod tests {
         fs::write(source.join("base.txt"), "base").unwrap();
         git(&source, &["add", "-A"]).unwrap();
         git(&source, &["commit", "-q", "-m", "base"]).unwrap();
+        let source_head = git(&source, &["rev-parse", "HEAD"]).unwrap();
         let base = workspace::snapshot_repository(&source).unwrap();
         let node = temp.path().join("node");
         workspace::prepare(&source, &node, &base, &[]).unwrap();
@@ -334,7 +347,7 @@ mod tests {
         crate::path_safety::directory_link(&source, &path);
         assert!(publish(&source, &[head], &[], Some(&path), |_| panic!()).is_err());
         assert!(!source.join("result.txt").exists());
-        assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+        assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), source_head);
         crate::path_safety::remove_directory_link(&path);
     }
 

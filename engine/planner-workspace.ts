@@ -1,11 +1,13 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { createWorkspacePaths } from './workspace-paths.mjs';
+import { rebindWorkspaceEnvironment } from './launch-binding.mjs';
 
 type WorkspaceTarget = {
   requestedNode: string;
   actualNode: string;
   executionId: string;
   workspace: string;
+  runtimeEnvironment?: Record<string, string>;
   redirected?: boolean;
 };
 
@@ -56,6 +58,13 @@ export function switchPlannerWorkspace(requestedNode: string): WorkspaceTarget {
   const target = currentTargets[requestedNode];
   if (!target) throw new Error(`No current workspace is available for node '${requestedNode}'`);
   const workspace = realpathSync.native(target.workspace);
+  if (process.env.GRAPHER_EXECUTION_KIND === 'graph' && workspace !== state.workspace) {
+    // Native launch grants cover these exact backend targets. Both the process
+    // cwd (extensions/subprocesses) and managed Bash state follow the new slot.
+    rebindWorkspaceEnvironment(target.runtimeEnvironment, workspace);
+  } else {
+    process.chdir(workspace);
+  }
   targets = new Map(Object.entries(currentTargets));
   state = { ...state, workspace, paths: createWorkspacePaths(workspace, state.project, state.alias, workspaceRoots(targets)) };
   for (const listener of listeners) listener(state, target);

@@ -1,9 +1,3 @@
-/** Remove protocol context that Grapher prepends to Planner user turns.
- *
- * Planner follow-ups for an existing graph include a status block so the model
- * can make an informed revision. That block is transport context, not part of
- * the user's conversation, and must not leak into the Planner transcript.
- */
 export function stripPlannerContext(text: string): string {
   let value = text.replace(/^User query:\s*\r?\n\r?\n?/, "");
   const lines = value.split(/\r?\n/);

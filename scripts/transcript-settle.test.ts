@@ -15,8 +15,6 @@ const render = (events: unknown[], settled?: boolean) => renderToStaticMarkup(cr
   output: events.map(line).join(""), inline: true, settled,
 }));
 
-// An interrupted execution's log ends mid-tool-call: the start/update records
-// exist but no result was ever written (the backend stopped at 22:12:38).
 const interruptedTool = [
   start(),
   update("thinking_delta", 0, { delta: "explore the scores" }),

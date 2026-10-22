@@ -53,6 +53,8 @@ fn mount_boundaries(
     engine: &Path,
     installation: &Path,
     borrowed_objects: Option<&Path>,
+    state: Option<&Path>,
+    additional: &[PathBuf],
 ) -> Result<(), String> {
     masks.sort_by(|a, b| {
         a.components()
@@ -70,7 +72,7 @@ fn mount_boundaries(
     for (index, mask) in masks.iter().enumerate() {
         let empty = staging.join(index.to_string());
         fs::create_dir_all(&empty).map_err(|e| e.to_string())?;
-        for path in masks.iter().map(PathBuf::as_path).chain([current, session]).chain(borrowed_objects) {
+        for path in masks.iter().map(PathBuf::as_path).chain([current, session]).chain(borrowed_objects).chain(state).chain(additional.iter().map(PathBuf::as_path)) {
             if let Ok(relative) = path.strip_prefix(mask) {
                 fs::create_dir_all(empty.join(relative)).map_err(|e| e.to_string())?;
             }
@@ -80,6 +82,8 @@ fn mount_boundaries(
     if let Some(objects) = borrowed_objects {
         command.arg("--ro-bind").arg(objects).arg(objects);
     }
+    if let Some(state) = state { command.arg("--bind").arg(state).arg(state); }
+    for path in additional { command.arg("--bind").arg(path).arg(path); }
     command
         .arg("--bind")
         .arg(current)
@@ -124,6 +128,8 @@ fn probe() -> Result<(), String> {
             &engine,
             &installation,
             None,
+            None,
+            &[],
         )?;
         command.args(["--", "/bin/sh", "-c",
             ": <>/dev/null && test ! -e \"$1/secret\" && ! (echo bad > \"$1/secret\") 2>/dev/null && ! (echo bad > \"$4/code\") 2>/dev/null && echo ok > \"$2/write\" && echo ok > \"$3/write\"",
@@ -150,8 +156,6 @@ fn probe() -> Result<(), String> {
     result
 }
 
-/// Node inherits task tools/network but cannot see source, sibling repos,
-/// backend data (other than its session) or external source Git metadata.
 pub fn execution_command(
     source: &Path,
     root: &Path,
@@ -161,10 +165,26 @@ pub fn execution_command(
     engine: &Path,
     pi_dir: &Path,
 ) -> Result<Command, String> {
+    execution_command_scoped(source, root, current, data, session, engine, pi_dir, &[])
+}
+
+pub(crate) fn execution_command_scoped(
+    source: &Path, root: &Path, current: &Path, data: &Path, session: &Path,
+    engine: &Path, pi_dir: &Path, workspaces: &[PathBuf],
+) -> Result<Command, String> {
     require_supported()?;
     let source = canonical(source)?;
     let root = canonical(root)?;
     let current = canonical(current)?;
+    let state = canonical(&crate::workspace_state::prepare(&current)?)?;
+    let mut additional = Vec::new();
+    for workspace in workspaces {
+        let target = canonical(workspace)?;
+        if target.parent() != current.parent() { return Err("Linux Planner exception leaves the current Run".into()); }
+        crate::workspace_view::validate_ready(&target, &source)?;
+        additional.push(canonical(&crate::workspace_state::prepare(&target)?)?);
+        additional.push(target);
+    }
     let data = canonical(data)?;
     let session = canonical(session)?;
     let engine = canonical(engine)?;
@@ -227,9 +247,9 @@ pub fn execution_command(
     });
     for mask in &masks {
         if mask == Path::new("/")
-            || [&current, &session, &engine, &pi_dir].iter().any(|needed| {
+            || [&current, &session, &engine, &pi_dir, &state].iter().any(|needed| {
                 needed.starts_with(mask)
-                    && !(mask == &root && *needed == &current)
+                    && !(mask == &root && (*needed == &current || *needed == &state))
                     && !(mask == &data && *needed == &session)
                     && !(mask == &source && *needed == &session && session.starts_with(&source))
             })
@@ -256,6 +276,8 @@ pub fn execution_command(
         &engine,
         &installation,
         borrowed_objects.as_deref(),
+        Some(&state),
+        &additional,
     )?;
     command
         .arg("--")
@@ -276,6 +298,56 @@ pub fn execution_command(
 mod tests {
     use super::*;
 
+    fn prepare_view(source: &Path, current: &Path) {
+        if !source.join(".git").exists() {
+            fs::create_dir_all(source).unwrap();
+            crate::workspace::git(source, &["init", "-q"]).unwrap();
+        }
+        let base = crate::workspace::snapshot_repository(source).unwrap();
+        crate::workspace::prepare(source, current, &base, &[]).unwrap();
+    }
+
+    /// White-box launch fixture for sources that are too large to snapshot in a
+    /// platform-boundary test. Real preparation is covered by workspace_view tests.
+    fn bind_manual_project(source: &Path, current: &Path) {
+        fs::create_dir_all(current).unwrap();
+        let slot = current
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let id = git2::Oid::hash_object(git2::ObjectType::Blob, slot.as_bytes()).unwrap();
+        let metadata = current
+            .parent()
+            .unwrap()
+            .join(".grapher-git")
+            .join(format!("{}.git", &id.to_string()[..16]));
+        fs::create_dir_all(&metadata).unwrap();
+        fs::write(metadata.join("workspace-layout-v4"), b"project-git-separated-v4\n").unwrap();
+        crate::workspace::git(current, &["init", "-q"]).unwrap();
+        crate::workspace::git(
+            current,
+            &[
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "project",
+            ],
+        )
+        .unwrap();
+        let head = crate::workspace::git(current, &["rev-parse", "HEAD"]).unwrap();
+        let root = crate::workspace_state::root(current).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("project-view"),
+            crate::path_identity::path_key(source),
+        )
+        .unwrap();
+        fs::write(root.join("project-ready"), head).unwrap();
+        crate::workspace_state::prepare(current).unwrap();
+    }
+
     #[test]
     fn retains_container_device_nodes() {
         let command = base_command();
@@ -286,23 +358,24 @@ mod tests {
     }
 
     #[test]
-    fn session_inside_masked_source_remains_writable() {
+    fn external_session_remains_writable_while_source_is_masked() {
         require_supported().expect("Linux Graph requires bwrap in CI");
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
         let source = base.join("source");
         let root = base.join(".grapher-worktrees");
         let current = root.join("run/node");
-        let data = source.join(".grapher");
+        let data = base.join("runtime");
         let session = data.join("sessions/node");
         let engine = base.join("engine");
         let pi_dir = base.join("pi-agent");
-        for path in [&source, &current, &session, &engine, &pi_dir] {
+        for path in [&session, &engine, &pi_dir] {
             fs::create_dir_all(path).unwrap();
         }
+        fs::create_dir_all(&source).unwrap();
         crate::workspace::git(&source, &["init", "-q"]).unwrap();
-        crate::workspace::git(&current, &["init", "-q"]).unwrap();
         fs::write(source.join("secret"), "protected").unwrap();
+        prepare_view(&source, &current);
         let command =
             execution_command(&source, &root, &current, &data, &session, &engine, &pi_dir).unwrap();
         let args = command
@@ -328,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn node_workspace_hides_git_and_source_objects_under_isolation() {
+    fn node_workspace_exposes_project_git_but_hides_source_objects() {
         require_supported().expect("Linux Graph requires bwrap in CI");
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
@@ -344,8 +417,7 @@ mod tests {
         }
         crate::workspace::git(&source, &["init", "-q"]).unwrap();
         fs::write(source.join("file"), "original\n").unwrap();
-        let base_head = crate::workspace::snapshot_repository(&source).unwrap();
-        crate::workspace::prepare(&source, &current, &base_head, &[]).unwrap();
+        prepare_view(&source, &current);
         fs::write(current.join("file"), "edited\n").unwrap();
         let command = execution_command(&source, &root, &current, &data, &session, &engine, &pi_dir).unwrap();
         let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
@@ -353,7 +425,7 @@ mod tests {
         let output = Command::new(BWRAP)
             .args(&args[..args.len() - 2])
             .args(["/bin/sh", "-c",
-                "set -e; test ! -e .git; ! git rev-parse --git-dir >/dev/null 2>&1; test ! -e \"$1/file\"; ! (echo bad > \"$2/forbidden\") 2>/dev/null; echo isolated > local.txt; test -f local.txt",
+                "set -e; test -d .git; test -z \"$(git for-each-ref --format=%(refname) refs/grapher/)\"; test ! -e \"$1/file\"; ! (echo bad > \"$2/forbidden\") 2>/dev/null; echo isolated > local.txt; test -f local.txt",
                 "probe"])
             .args([&source, &objects])
             .current_dir(&current)
@@ -379,15 +451,14 @@ mod tests {
         for path in [&source, &session, &engine, &pi_dir] { fs::create_dir_all(path).unwrap(); }
         crate::workspace::git(&source, &["init", "-q", "--separate-git-dir", common.to_str().unwrap()]).unwrap();
         fs::write(source.join("file"), "original\n").unwrap();
-        let base_head = crate::workspace::snapshot_repository(&source).unwrap();
-        crate::workspace::prepare(&source, &current, &base_head, &[]).unwrap();
+        prepare_view(&source, &current);
         fs::write(current.join("file"), "edited\n").unwrap();
         let command = execution_command(&source, &root, &current, &data, &session, &engine, &pi_dir).unwrap();
         let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
         let output = Command::new(BWRAP)
             .args(&args[..args.len() - 2])
             .args(["/bin/sh", "-c",
-                "set -e; test ! -e .git; test ! -e \"$1/file\"; test ! -e \"$2/HEAD\"; ! (echo bad > \"$2/objects/forbidden\") 2>/dev/null; echo isolated > local.txt; test -f local.txt",
+                "set -e; test -e .git; test -z \"$(git for-each-ref --format=%(refname) refs/grapher/)\"; test ! -e \"$1/file\"; test ! -e \"$2/HEAD\"; ! (echo bad > \"$2/objects/forbidden\") 2>/dev/null; echo isolated > local.txt; test -f local.txt",
                 "probe"])
             .args([&source, &common])
             .current_dir(&current).output().unwrap();
@@ -416,8 +487,8 @@ mod tests {
             &["init", "-q", "--separate-git-dir", common.to_str().unwrap()],
         )
         .unwrap();
-        crate::workspace::git(&current, &["init", "-q"]).unwrap();
         fs::write(common.join("protected"), "original").unwrap();
+        prepare_view(&source, &current);
         let command =
             execution_command(&source, &root, &current, &data, &session, &engine, &pi_dir).unwrap();
         let args = command
@@ -457,7 +528,7 @@ mod tests {
         for path in [&current, &session, &engine, &pi_dir] {
             fs::create_dir_all(path).unwrap();
         }
-        crate::workspace::git(&current, &["init", "-q"]).unwrap();
+        bind_manual_project(&source, &current);
         let command =
             execution_command(&source, &root, &current, &data, &session, &engine, &pi_dir).unwrap();
         let args = command
@@ -507,7 +578,7 @@ mod tests {
             fs::write(path.join("marker"), "original").unwrap();
         }
         crate::workspace::git(&source, &["init", "-q"]).unwrap();
-        crate::workspace::git(&current, &["init", "-q"]).unwrap();
+        prepare_view(&source, &current);
         #[cfg(unix)]
         std::os::unix::fs::symlink(&source, outside.join("source-link")).unwrap();
         let command =

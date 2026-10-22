@@ -92,6 +92,17 @@ pub(super) fn policy() -> EnvironmentConfig {
     }
 }
 
+/// State-bound variant of [`policy`] for fixtures that exercise the current
+/// external process-state contract. `GTEST_STATE` is the `{state}` root the
+/// agent must use instead of writing `.env`/`.cache` into the project tree.
+#[cfg(feature = "fixture")]
+pub(super) fn state_policy() -> EnvironmentConfig {
+    let mut config = policy();
+    config.launch.variables.insert("HOME".into(), "{state}/.agent-home".into());
+    config.launch.variables.insert("GTEST_STATE".into(), "{state}".into());
+    config
+}
+
 #[cfg(feature = "fixture")]
 pub(super) fn graph(names: &[&str], edges: &[(&str, &str, bool)]) -> Graph {
     Graph {
@@ -135,7 +146,7 @@ pub(super) fn setup(graph: Graph, policy: EnvironmentConfig, body: &str) -> (Tem
     let binding = native::host_path(&native::installation_root().join("engine/launch-binding.mjs"))
         .to_string_lossy()
         .replace('\\', "/");
-    fs::write(&script, format!("import {{applyLaunchBinding}} from {}; import fs from 'node:fs'; applyLaunchBinding();\nlet task=''; for await (const chunk of process.stdin) task+=chunk; const name=process.env.GRAPHER_NODE_NAME;\nfs.mkdirSync('.env',{{recursive:true}}); let response='Completed';\n{body}\nconsole.log(JSON.stringify({{type:'message_end',message:{{role:'assistant',content:[{{type:'text',text:response}}]}}}}));", serde_json::to_string(&format!("file:///{binding}")).unwrap())).unwrap();
+    fs::write(&script, format!("import {{applyLaunchBinding}} from {}; import fs from 'node:fs'; applyLaunchBinding();\nlet task=''; for await (const chunk of process.stdin) task+=chunk; const name=process.env.GRAPHER_NODE_NAME;\nconst envRoot=process.env.GTEST_STATE?process.env.GTEST_STATE+'/.env':'.env'; fs.mkdirSync(envRoot,{{recursive:true}}); if(process.env.GTEST_STATE) fs.mkdirSync(process.env.GTEST_STATE+'/.cache',{{recursive:true}}); let response='Completed';\n{body}\nconsole.log(JSON.stringify({{type:'message_end',message:{{role:'assistant',content:[{{type:'text',text:response}}]}}}}));", serde_json::to_string(&format!("file:///{binding}")).unwrap())).unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": source, "model": "local/test", "maxParallel": 4, "maxFeedback": 1,
         "engine": "pi", "piCommand": native::trusted_node().unwrap(), "piArgs": [script], "environment": policy,
@@ -430,15 +441,16 @@ fn opaque_versions_are_immutable_and_corruption_fails_before_materialization() {
 fn native_chain_and_ancestor_followup_advance_current_el_not_history() {
     let (_temp, source, mut runtime) = setup(
         graph(&["A", "B", "C"], &[("A", "B", false), ("B", "C", false)]),
-        policy(),
+        state_policy(),
         r#"
-const previous=fs.existsSync('.env/version')?fs.readFileSync('.env/version','utf8'):'';
-if(name==='A' && !previous) fs.writeFileSync('.env/version','1');
-else if(name==='B'){ if(previous!=='1') throw Error('wrong B environment'); fs.writeFileSync('.env/version','2'); }
-else if(name==='C'){ if(previous!=='2') throw Error('wrong C environment'); fs.writeFileSync('.env/version','3'); fs.mkdirSync('ordinary',{recursive:true}); fs.writeFileSync('ordinary/result','C artifact'); }
+const env=process.env.GTEST_STATE+'/.env/version';
+const previous=fs.existsSync(env)?fs.readFileSync(env,'utf8'):'';
+if(name==='A' && !previous) fs.writeFileSync(env,'1');
+else if(name==='B'){ if(previous!=='1') throw Error('wrong B environment'); fs.writeFileSync(env,'2'); }
+else if(name==='C'){ if(previous!=='2') throw Error('wrong C environment'); fs.writeFileSync(env,'3'); fs.mkdirSync('ordinary',{recursive:true}); fs.writeFileSync('ordinary/result','C artifact'); }
 else if(task.includes('rebuild after C')) { if(previous!=='4') throw Error('rebuild restored historical environment'); }
-else { if(previous!=='3') throw Error('ancestor restored old environment'); fs.writeFileSync('.env/version','4'); }
-fs.writeFileSync('.cache/runtime','cache should not fork E');
+else { if(previous!=='3') throw Error('ancestor restored old environment'); fs.writeFileSync(env,'4'); }
+fs.writeFileSync(process.env.GTEST_STATE+'/.cache/runtime','cache should not fork E');
 "#,
     );
     let a = runtime.jobs().unwrap().remove(0);
@@ -500,7 +512,7 @@ fs.writeFileSync('.cache/runtime','cache should not fork E');
     let head = crate::graph_merge::merge_graph_scoped(
         &source,
         &publication.heads,
-        &policy().exclusions(),
+        &runtime.exclusions().unwrap(),
         |_| Err("unexpected conflict".into()),
     )
     .unwrap();
@@ -525,10 +537,12 @@ fs.writeFileSync('.cache/runtime','cache should not fork E');
     let rebuilt = runtime.jobs().unwrap().remove(0);
     assert_eq!(rebuilt.execution.worktree, a.execution.worktree);
     run(&mut runtime, &rebuilt);
-    assert_eq!(
-        fs::read_to_string(Path::new(&rebuilt.execution.worktree).join(".env/version")).unwrap(),
-        "4"
-    );
+    let rebuilt_policy = runtime.state.config.as_ref().unwrap().environment.clone().unwrap();
+    let rebuilt_state = Environments::new(&runtime.root, &runtime.state.run_id, &rebuilt_policy)
+        .unwrap()
+        .state_root(Path::new(&rebuilt.execution.worktree))
+        .unwrap();
+    assert_eq!(fs::read_to_string(rebuilt_state.join(".env/version")).unwrap(), "4");
 }
 
 
@@ -560,11 +574,11 @@ fn fixed_fanout_blocks_only_missing_path_capability_not_global_parallelism() {
 fn cache_does_not_fork_environment_but_unknown_persistent_write_does() {
     let (_temp, _source, mut runtime) = setup(
         graph(&["A", "B", "C"], &[("A", "B", false), ("B", "C", false)]),
-        policy(),
+        state_policy(),
         r#"
-if(name==='A') fs.writeFileSync('.env/package','dependency');
-if(name==='B') fs.writeFileSync('.cache/bytecode','ephemeral');
-if(name==='C') fs.writeFileSync('.env/unknown-config','must retain');
+if(name==='A') fs.writeFileSync(process.env.GTEST_STATE+'/.env/package','dependency');
+if(name==='B') fs.writeFileSync(process.env.GTEST_STATE+'/.cache/bytecode','ephemeral');
+if(name==='C') fs.writeFileSync(process.env.GTEST_STATE+'/.env/unknown-config','must retain');
 "#,
     );
     let a = runtime.jobs().unwrap().remove(0);
@@ -684,10 +698,10 @@ fn manifest_metadata_corruption_fails_before_overwriting_a_live_view() {
 #[cfg(feature = "fixture")]
 #[test]
 fn failed_native_initialization_retains_selection_and_partial_work_for_retry() {
-    let mut config = policy();
+    let mut config = state_policy();
     config.initialize = vec![native::trusted_node().unwrap().to_string_lossy().into(), "-e".into(),
-        "const fs=require('fs'); fs.mkdirSync('.env',{recursive:true}); if(!fs.existsSync('.env/partial-init')){fs.writeFileSync('.env/partial-init','partial');process.exit(7)}; if(fs.readFileSync('.env/partial-init','utf8')!=='partial')process.exit(8);".into()];
-    let (_temp, _source, mut runtime) = setup(graph(&["A"], &[]), config.clone(), "if(fs.readFileSync('.env/partial-init','utf8')!=='partial')throw Error('initializer partial lost');");
+        "const fs=require('fs'); const p=process.env.GTEST_STATE+'/.env/partial-init'; fs.mkdirSync(process.env.GTEST_STATE+'/.env',{recursive:true}); if(!fs.existsSync(p)){fs.writeFileSync(p,'partial');process.exit(7)}; if(fs.readFileSync(p,'utf8')!=='partial')process.exit(8);".into()];
+    let (_temp, _source, mut runtime) = setup(graph(&["A"], &[]), config.clone(), "if(fs.readFileSync(process.env.GTEST_STATE+'/.env/partial-init','utf8')!=='partial')throw Error('initializer partial lost');");
     let first = runtime.jobs().unwrap().remove(0);
     let root = runtime.root.clone();
     let result = perform(
@@ -777,10 +791,10 @@ else if(process.env.CURRENT_L!=='explicit') throw Error('downstream launch not b
 fn feedback_pins_el_and_forks_only_the_owners_history() {
     let (_temp, _source, mut runtime) = setup(
         graph(&["A", "B"], &[("A", "B", false), ("B", "A", true)]),
-        policy(),
+        state_policy(),
         r#"
-if(name==='A') { const repair=fs.existsSync('.env/version'); if(repair && fs.readFileSync('.env/version','utf8')!=='2')throw Error('feedback lost E2'); fs.writeFileSync('.env/version',repair?'3':'1'); }
-else { const version=fs.readFileSync('.env/version','utf8'); if(version==='1'){fs.writeFileSync('.env/version','2');response='Review proof.\n<FEEDBACK>';} else {if(version!=='3')throw Error('repair environment not inherited');response='<ACCEPT>';}}
+if(name==='A') { const repair=fs.existsSync(process.env.GTEST_STATE+'/.env/version'); if(repair && fs.readFileSync(process.env.GTEST_STATE+'/.env/version','utf8')!=='2')throw Error('feedback lost E2'); fs.writeFileSync(process.env.GTEST_STATE+'/.env/version',repair?'3':'1'); }
+else { const version=fs.readFileSync(process.env.GTEST_STATE+'/.env/version','utf8'); if(version==='1'){fs.writeFileSync(process.env.GTEST_STATE+'/.env/version','2');response='Review proof.\n<FEEDBACK>';} else {if(version!=='3')throw Error('repair environment not inherited');response='<ACCEPT>';}}
 "#,
     );
     let history = |runtime: &Runtime, job: &Job, text: &str| {

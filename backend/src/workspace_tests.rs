@@ -63,17 +63,18 @@ fn git_line_ending_warnings_do_not_fail_snapshots() {
 }
 
 #[test]
-fn git_strict_line_ending_failure_is_not_treated_as_a_warning() {
+fn raw_workspace_capture_preserves_bytes_without_running_line_ending_filters() {
     let temp = tempfile::tempdir().unwrap();
     workspace::git(temp.path(), &["init", "-q"]).unwrap();
     workspace::git(temp.path(), &["config", "core.autocrlf", "true"]).unwrap();
     workspace::git(temp.path(), &["config", "core.safecrlf", "true"]).unwrap();
     fs::write(temp.path().join(".gitattributes"), "*.txt text\n.gitattributes -text\n").unwrap();
     fs::write(temp.path().join("input.txt"), "first\nsecond\n").unwrap();
-    let error = workspace::snapshot_repository(temp.path()).unwrap_err();
-    assert!(error.contains("exit code: 128") || error.contains("exit status: 128"), "{error}");
-    assert!(error.contains("fatal:"), "{error}");
-    assert!(error.contains("input.txt"), "{error}");
+    let head = workspace::snapshot_repository(temp.path()).unwrap();
+    let blob = workspace::repository_git(temp.path(), &["rev-parse", &format!("{head}:input.txt")]).unwrap();
+    let metadata = workspace::shadow_repo_dir(temp.path()).unwrap();
+    assert_eq!(workspace::git_bytes(temp.path(), &["--git-dir", metadata.to_str().unwrap(), "cat-file", "blob", &blob], None, None).unwrap(), b"first\nsecond\n");
+    assert!(workspace::project_git(temp.path(), &["rev-parse", "--verify", "HEAD"]).is_err());
 }
 
 #[test]

@@ -244,7 +244,7 @@ fn shared_git_metadata_outside_source_is_protected() {
 }
 
 #[test]
-fn standalone_workspace_hides_git_inside_sandbox_while_protecting_source() {
+fn standalone_workspace_exposes_project_git_while_protecting_source() {
     use grapher::workspace;
     let temp = TempDir::new().unwrap();
     let base = temp.path().canonicalize().unwrap();
@@ -259,18 +259,16 @@ fn standalone_workspace_hides_git_inside_sandbox_while_protecting_source() {
     workspace::git(&source, &["commit", "-m", "init"]).unwrap();
     let head = workspace::git(&source, &["rev-parse", "HEAD"]).unwrap();
 
-    // Prepare a standalone workspace. Its Git metadata must stay host-only.
     workspace::prepare(&source, &current, &head, &[]).unwrap();
-    assert!(!current.join(".git").exists());
+    assert!(current.join(".git").is_dir());
 
     let profile = base.join("profile.sb");
     sandbox::write_graph_profile(&profile, &source, &root, &current).unwrap();
 
-    // Inside the sandbox the node can edit project files but cannot discover Git.
     let isolated = run(
         &profile,
         &current,
-        "set -e; test ! -e .git; ! git rev-parse --git-dir >/dev/null 2>&1; echo isolated > local.txt; test -f local.txt",
+        "set -e; test -d .git; test -z \"$(git for-each-ref --format=%(refname) refs/grapher/)\"; echo isolated > local.txt; test -f local.txt",
         &[],
     );
     assert!(

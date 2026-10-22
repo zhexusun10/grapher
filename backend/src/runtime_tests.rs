@@ -1380,7 +1380,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     assert!(path.join("a.txt").exists() && path.join("b.txt").exists() && path.join("c.txt").exists());
     let root = runtime.run_workspace_root();
     let worktree_count = fs::read_dir(root).unwrap().filter_map(Result::ok)
-        .filter(|entry| entry.file_name() != ".files" && entry.file_name() != ".grapher-git" && entry.file_type().unwrap().is_dir()).count();
+        .filter(|entry| entry.file_name() != ".files" && entry.file_name() != ".grapher-git" && entry.file_name() != ".grapher-state" && entry.file_type().unwrap().is_dir()).count();
     assert_eq!(worktree_count, 1, "linear dependencies should retain exactly one physical worktree");
 
     let old_session = runtime.latest_node_execution("a").unwrap().session_id.clone();
@@ -1450,7 +1450,7 @@ fn fanout_allocates_one_workspace_per_parallel_branch_and_fanin_reclaims_extras(
     let head = workspace::snapshot_node_for_run(path, &source, "join", Some(&runtime.state.run_id)).unwrap();
     runtime.finish(&join.execution, Ok((head, "completed".into()))).unwrap();
     let worktree_count = fs::read_dir(runtime.run_workspace_root()).unwrap().filter_map(Result::ok)
-        .filter(|entry| entry.file_name() != ".files" && entry.file_name() != ".grapher-git" && entry.file_type().unwrap().is_dir()).count();
+        .filter(|entry| entry.file_name() != ".files" && entry.file_name() != ".grapher-git" && entry.file_name() != ".grapher-state" && entry.file_type().unwrap().is_dir()).count();
     assert_eq!(worktree_count, 1, "after fan-in only its final workspace remains");
     assert_eq!(runtime.state.nodes["left"].head, runtime.state.nodes["join"].head);
     assert_eq!(runtime.state.nodes["right"].head, runtime.state.nodes["join"].head);

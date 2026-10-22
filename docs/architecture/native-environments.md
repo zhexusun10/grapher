@@ -10,7 +10,8 @@ This page owns managed state outside project Git. [Workspace allocation](workspa
 
 | Term | Meaning |
 | --- | --- |
-| W | Current physical workspace directory; ownership follows Runtime's allocator, not a permanent node identity. |
+| W | Current physical project directory; ownership follows Runtime's allocator, not a permanent node identity. |
+| S | External process-state root for a current slot: `<run>/.grapher-state/<slot-digest>/process/`, never inside W. |
 | D | `Domain`: platform, architecture, baseline, policy, and execution-contract identity. |
 | E / `environmentRef` | Immutable managed-environment filesystem snapshot, separate from project Git files. |
 | L / `launchRef` | Versioned `LaunchConfig`: business entry, PATH, variables, hooks, and verified binding metadata; inherited credentials are named, not stored as values. |
@@ -31,8 +32,12 @@ and not a user environment choice:
   (`automatic-lazy`), irrespective of language or ML declarations. No venv,
   package installation or environment import occurs at admission. Trusted native
   Node/Git/Bash and available bootstrap tool hashes are frozen; private HOME and
-  excluded caches are ownership boundaries, not precreated environments. A
-  project that never needs an environment can complete and launch results while
+  excluded caches are ownership boundaries, not precreated environments. New
+  automatic policies use `{state}` (S), not `{workspace}` (W), for HOME, cache and
+  provisioned prefixes. `native-workspace-v4` is the production contract; older
+  workspace contracts are not execution inputs. Start a new Run rather than
+  migrating/relocating an old workspace. No SQLite/data migration, service stop
+  or destructive legacy cleanup is implied. A project that never needs an environment can complete and launch results while
   remaining unbound. Serial/shadow projects retain their source-native contract.
 - Ordinary business tasks may create, install into, activate and switch between
   whatever native Python/Conda environments their Bash process can access.
@@ -118,6 +123,16 @@ Environment evidence participates in [feedback generation/drain checks](runtime.
 
 ## Branches, metadata and storage
 
+Private Planner switching rebinds the process cwd and the backend-provided
+HOME/cache/project-Git environment together; direct filesystem APIs and Bash do
+not keep using the previous slot. Planner uses host tools, not another node's
+activation hook. Every visited slot is recovered from durable selection events
+and captured after the Planner process tree drains (or by a still-running node's
+own completion). `PlannerWorkspaceSnapshotted` advances code and E/L atomically,
+including state-only writes, under a distinct writer generation. Its optional
+composite result preserves replay of older code-only events. Only the final cwd
+is a UI selection; it is not the inventory of state needing capture.
+
 A verified fixed-layout environment is reused only at the current physical
 workspace. When environment reuse is not possible, Runtime leaves the current workspace's
 business environment paths untouched and starts the Node with an unbound launch.
@@ -145,9 +160,14 @@ inherit, the live entry is left untouched, and the rest of the scope still
 snapshots. A cache may be a top-level path or a subtree carved out of a scope:
 anything at or below a cache path is excluded from the snapshot and left
 untouched in the live view. The automatic policy excludes the machine-local
-Windows/browser caches under the redirected `.agent-home` (for example
-`AppData/Local`, which holds `INetCache`, `D3DSCache` and browser profiles) plus
-`.runtime-cache`. A cache may not equal or contain a scope. Ownership, ACLs, xattrs/capabilities, sparse layout, ADS and general hardlink
+Windows/browser caches under S's redirected `.agent-home` (for example
+`AppData/Local`, which holds `INetCache`, `D3DSCache` and browser profiles), npm
+caches, and `.runtime-cache`. Environment capture/materialization is relative to
+S and does not inspect a project Git index. S's `.project-git` / `.git-config`
+metadata is not an environment scope and cannot be adopted by discovery.
+Genuine project `.venv`, `.agent-home` and same-named files remain in W; external
+state ownership never excludes or moves them by name. Environment preparation is
+checked not to inject entries or change project files. A cache may not equal or contain a scope. Ownership, ACLs, xattrs/capabilities, sparse layout, ADS and general hardlink
 topology are not preserved by the basic snapshot contract.
 
 Physical copying uses the shared [native copy primitive](workspace-snapshots-and-feedback.md#physical-copy-primitive); it does not add environment relocation or logical-path guarantees.

@@ -76,8 +76,6 @@ function msysPath(value) {
   return result;
 }
 
-// A per-agent namespace. Never create a shared /workspace symlink: concurrent
-// agents must map the same visible path to different checkouts.
 function shellWords(text) {
   const words = [];
   for (let i = 0; i < text.length;) {

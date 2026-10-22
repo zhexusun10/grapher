@@ -16,7 +16,6 @@ const metrics = (scrollTop: number, scrollHeight: number, clientHeight: number):
 test("distanceFromBottom measures the remaining scroll range", () => {
   assert.equal(distanceFromBottom(metrics(0, 1000, 200)), 800);
   assert.equal(distanceFromBottom(metrics(800, 1000, 200)), 0);
-  // Over-scroll (row remeasurement) must not go negative and look like the top.
   assert.equal(distanceFromBottom(metrics(850, 1000, 200)), -50);
 });
 

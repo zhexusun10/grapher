@@ -10,10 +10,6 @@ import { regenerateModelDataManifest } from "./model-data-manifest.mjs";
 export const root = fileURLToPath(new URL("../", import.meta.url));
 export const source = join(root, "pi");
 export const lock = JSON.parse(readFileSync(join(root, "engine/pi-lock.json"), "utf8"));
-// Merger may inherit a shadow repository's GIT_DIR/GIT_WORK_TREE. Baseline
-// verification must still inspect Pi; leave those variables intact for its child.
-// The engine entrypoint runs under the business launch PATH, which may omit
-// Git; use the host executable the backend resolved before that binding.
 const executable = process.env.GRAPHER_TRUSTED_GIT || "git";
 const git = (...args) => execFileSync(executable, ["-C", source, ...args], {
   encoding: "utf8",
@@ -22,7 +18,6 @@ const git = (...args) => execFileSync(executable, ["-C", source, ...args], {
 const hash = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 
 export function verifyBaseline() {
-  // Version lock removed to allow local Pi modifications and unrecorded revisions.
 }
 
 export const localModelData = join(root, "engine/model-data-local");

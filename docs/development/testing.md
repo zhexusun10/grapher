@@ -52,7 +52,14 @@ Native suites require the actual [platform boundary](../architecture/filesystem-
 For source snapshots, private node history, publication conflicts and restart
 recovery, run `--test files_only_publication`, `--test publication_recovery`,
 and the existing `graph_merge`, `publication`, `publication_state` and `shadow`
-integration targets. Scheduler/workspace regressions also belong to `--lib`.
+integration targets. Select only the target relevant to the change, not this
+entire list. The source-equivalence oracle is `--lib workspace_view::tests`
+(hardlink/symlink, named-pipe and symbolic-`.git` cases are Unix-only and do not
+run on Windows). Planner state/switch/recovery checks are
+`--lib planner_workspace_tests` (fixture),
+`--lib native::tests::planner_switch_keeps_exact` (native), and
+`npx tsx --test scripts/planner-workspace-runtime.test.ts`. Scheduler/workspace
+regressions also belong to `--lib`.
 
 For a manual end-to-end acceptance (not a fixture engine or mocked API):
 
@@ -66,7 +73,7 @@ Pi, native Bash tools and real Git with an isolated deterministic local provider
 It exercises Planner → approval → parallel branches/multiple terminals →
 publication, node fan-in repair, and failed publication → owned-backend restart →
 retry. It checks that source HEAD/index/object database are unchanged, node cwd
-history stays hidden, files are delivered without any new commit, and resume
+retains genuine project Git but not graph history, files are delivered without any new commit, and resume
 adds no duplicate delivery. Evidence repositories, snapshots, `report.json` and
 logs are retained at the printed temporary directory. It stops only its own
 child backend and never touches an existing service.

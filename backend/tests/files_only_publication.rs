@@ -40,20 +40,22 @@ fn assert_delivery(source: &Path, base: &str, head: &str, internal: &[String]) {
 }
 
 #[test]
-fn node_cwd_hides_internal_history_but_host_can_snapshot_and_reuse_the_slot() {
+fn node_cwd_exposes_source_git_but_keeps_host_snapshots_independent() {
     let (temp, source, _) = source();
     let base = workspace::snapshot_repository(&source).unwrap();
     let slot = temp.path().join(".grapher-worktrees").join(uuid::Uuid::new_v4().to_string()).join("node");
     let a = node(&source, &slot, &base, &[], "a.txt", "a");
-    assert!(!slot.join(".git").exists());
-    assert!(!std::process::Command::new("git").args(["log", "-1"]).current_dir(&slot).output().unwrap().status.success());
+    assert!(slot.join(".git").is_dir());
+    let output = std::process::Command::new("git").args(["log", "--all", "--format=%s"]).current_dir(&slot).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "initial");
     workspace::prepare(&source, &slot, &a, &[]).unwrap();
-    assert!(!slot.join(".git").exists());
+    assert!(slot.join(".git").is_dir());
     assert_eq!(git(&slot, &["rev-parse", "HEAD"]), a);
 }
 
 #[test]
-fn a_node_created_repository_is_rejected_without_importing_its_commit() {
+fn explicit_node_commits_are_project_history_without_source_or_graph_bookkeeping_leaks() {
     let (temp, source, base) = source();
     let slot = temp.path().join(".grapher-worktrees").join(uuid::Uuid::new_v4().to_string()).join("node");
     workspace::prepare(&source, &slot, &base, &[]).unwrap();
@@ -69,8 +71,12 @@ fn a_node_created_repository_is_rejected_without_importing_its_commit() {
     raw_git(&["add", "unaccepted.txt"]);
     raw_git(&["commit", "-qm", "node-local"]);
     let unexpected = raw_git(&["rev-parse", "HEAD"]);
-    assert!(workspace::snapshot_node(&slot, &source, "node").unwrap_err().contains("unexpected Git metadata"));
-    assert!(slot.join(".git").is_dir(), "preserve the failed node's residue for inspection");
+    let result = workspace::snapshot_node(&slot, &source, "node").unwrap();
+    assert!(slot.join(".git").is_dir());
+    assert_eq!(raw_git(&["rev-parse", "HEAD"]), unexpected);
+    assert!(raw_git(&["for-each-ref", "--format=%(refname)", "refs/grapher"]).is_empty());
+    let output = std::process::Command::new("git").args(["cat-file", "-e", &result]).current_dir(&slot).output().unwrap();
+    assert!(!output.status.success(), "internal snapshot must not enter visible Git");
     assert!(workspace::repository_git(&source, &["cat-file", "-e", &format!("{unexpected}^{{commit}}")]).is_err());
     assert!(workspace::git(&source, &["cat-file", "-e", &format!("{unexpected}^{{commit}}")]).is_err());
     let other = temp.path().join("other");
@@ -81,7 +87,7 @@ fn a_node_created_repository_is_rejected_without_importing_its_commit() {
 }
 
 #[test]
-fn fanout_host_readers_do_not_lose_git_discovery_during_metadata_relocation() {
+fn fanout_host_readers_and_visible_git_remain_independent_during_reprepare() {
     let (temp, source, _) = source();
     let base = workspace::snapshot_repository(&source).unwrap();
     let slot = temp.path().join(".grapher-worktrees").join(uuid::Uuid::new_v4().to_string()).join("node");
@@ -90,7 +96,10 @@ fn fanout_host_readers_do_not_lose_git_discovery_during_metadata_relocation() {
         scope.spawn(|| { for _ in 0..12 { workspace::prepare(&source, &slot, &base, &[]).unwrap(); } });
         scope.spawn(|| { for _ in 0..40 { assert!(git(&slot, &["ls-files"]).contains("shared.txt")); } });
     });
-    assert!(!slot.join(".git").exists());
+    assert!(slot.join(".git").is_dir());
+    let output = std::process::Command::new("git").args(["log", "--all", "--format=%s"]).current_dir(&slot).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "initial");
 }
 
 #[test]

@@ -382,8 +382,11 @@ fn historical_edit_does_not_restore_project_files_from_the_original_execution() 
     runtime.edit_node_message("owner", &owner.execution.id, &owner.task, "rewritten owner", None).unwrap();
     let script = temp.path().join("agent.sh");
     fs::write(script, "cat >/dev/null\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\"}]}}'\n").unwrap();
+    // `Prepared` records the actual prepared head on the stored execution, so
+    // compare the edit against that, not the original Job object.
+    let owner_before = runtime.state.executions.iter().find(|e| e.id == owner.execution.id).unwrap().before.clone();
     let edited = runtime.jobs().unwrap().remove(0);
-    assert_eq!(edited.execution.before, owner.execution.before);
+    assert_eq!(edited.execution.before, owner_before);
     execute(&mut runtime, &edited);
     assert_eq!(runtime.state.nodes["owner"].status, "completed");
     assert_eq!(runtime.state.nodes["review"].status, "dirty");
@@ -417,15 +420,20 @@ fn modified_completed_workspace_blocks_feedback_handoff() {
     fs::write(Path::new(&review.execution.worktree).join(".cache/review"), "late mutation").unwrap();
     let repair = runtime.jobs().unwrap().remove(0);
     let result = perform(&repair, &runtime.root, &[], |_| {}, |_| panic!("must not start model"));
-    assert!(result.unwrap_err().contains("Feedback workspace changed after completion"));
+    let error = result.unwrap_err();
+    // A late mutation is refused either by the completed project-view check or
+    // by the feedback handoff check; both are correct.
+    assert!(
+        error.contains("Feedback workspace changed after completion")
+            || error.contains("changed outside its recorded execution"),
+        "{error}"
+    );
 }
 
 #[cfg(feature = "fixture")]
 fn unrecorded_host_commit(original: &str) -> String {
-    // This fixture intentionally simulates host-side committed residue. Normal
-    // Graph agents cannot discover Git metadata from their project cwd.
     original.replace("      echo fixed > owner.txt", r#"      echo residue > residue.txt
-      export GIT_DIR="../.grapher-git/$(basename "$PWD").git" GIT_WORK_TREE="$PWD"
+      export GIT_DIR="../.grapher-git/$(printf %s "$(basename "$PWD")" | git hash-object --stdin | cut -c1-16).git" GIT_WORK_TREE="$PWD"
       git add -A
       git -c user.name=residue -c user.email=residue@invalid commit -qm residue
       exit 19"#)

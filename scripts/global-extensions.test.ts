@@ -166,9 +166,6 @@ test('execution path guidance directly follows existing prompts without a blank 
           assert.equal(forced.forceSystemPrompt, expected, `${role}/${kind}: forced prompt spacing`);
           assert.equal(forced.appendSystemPrompt, 'Unchanged addendum.');
         }
-        // Pi 1.2.0 fires before_agent_start for runs started by an idle
-        // custom message too, without a `prompt` field. The addendum must not
-        // depend on the user-message variant of the event union.
         const custom = { appendSystemPrompt: 'Base.', forceSystemPrompt: undefined };
         assert.equal(await hook({ messageType: 'custom', message: { role: 'custom' }, systemPromptOptions: custom }), undefined);
         assert.equal(custom.appendSystemPrompt, `Base.\n${guideline}`, `${role}/${kind}: custom-message run spacing`);

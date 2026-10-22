@@ -70,7 +70,6 @@ try {
   const edge = (edit: Record<string, unknown>) => call("edge", { edges: [edit] });
   const feedbackWarning = (from: string, to: string, nodes: string[]) =>
     `If <FEEDBACK> from ${from} to ${to} is applied, the target and dependency descendants will be invalidated: ${nodes.join(", ")}. Completed results must be recomputed; ${to} continues from its own conversation history. Nodes outside this set are unaffected.`;
-  // Regression: run 72feb3ad repeatedly supplied both single and batch fields.
   // Verify the actual provider schema, then exercise nullable wire arguments
   // through Pi's validator and the real compiler (not direct execute alone).
   for (const name of ["node", "edge"]) {
@@ -589,7 +588,6 @@ fn main() {
       assert.equal(input.command, command, "Caller parameters remain unchanged");
       assert.equal(result.details?.exitCode, 0);
     }
-    // Pi 1.0 returns nonzero exits as error results; only timeout/abort throws.
     for (const [command, exitCode] of [["exit 17", 17], ["set -e; false; printf unreachable", 1]] as const) {
       const result = await bash.execute(`${mode}-failure-${exitCode}`, { command }, undefined, undefined, context);
       assert.equal(result.isError, true);

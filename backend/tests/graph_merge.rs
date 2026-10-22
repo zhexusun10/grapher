@@ -72,7 +72,7 @@ fn private_planner_copies_dirty_and_ignored_files_without_modifying_source() {
         fs::read_to_string(private.join("untracked")).unwrap(),
         "new\n"
     );
-    assert!(!private.join(".git").exists());
+    assert!(private.join(".git").is_dir());
     assert!(git(&private, &["rev-parse", "HEAD"]).is_ok());
     assert_eq!(git(&source, &["status", "--porcelain"]).unwrap(), before);
 }
@@ -229,7 +229,10 @@ fn failed_planner_merger_preserves_preview_without_dirtying_source() {
 #[test]
 fn concurrent_graph_preparation_never_uses_another_runs_base() {
     let temp = TempDir::new().unwrap();
-    let (source, base_a) = repository(temp.path());
+    let (source, _) = repository(temp.path());
+    // Production pins a captured snapshot, not a live user HEAD. Capture the
+    // clean base before the source working tree changes.
+    let base_a = snapshot_repository(&source).unwrap();
     fs::write(source.join("shared"), "newer\n").unwrap();
     let base_b = snapshot_repository(&source).unwrap();
     let first = temp.path().join("first");
@@ -315,8 +318,6 @@ fn chained_source_alternates_fall_back_to_independent_fetch() {
     let base = snapshot_repository(&source).unwrap();
     let child = temp.path().join("child");
     prepare(&source, &child, &base, &[]).unwrap();
-    // The host imports source history into an independent internal database;
-    // the node can safely borrow that database, not the chained user store.
     let alternate = fs::read_to_string(child.join(".git/objects/info/alternates")).unwrap();
     assert_eq!(Path::new(alternate.trim()).canonicalize().unwrap(),
         grapher::workspace::shadow_repo_dir(&source).unwrap().join("objects").canonicalize().unwrap());
@@ -464,7 +465,8 @@ fn failed_resolver_preserves_conflict_and_user_edits_publish_before_merge() {
 fn redundant_ancestors_do_not_create_extra_merges_in_either_order() {
     for reverse in [false, true] {
         let temp = TempDir::new().unwrap();
-        let (source, base) = repository(temp.path());
+        let (source, source_head) = repository(temp.path());
+        let base = snapshot_repository(&source).unwrap();
         let a = branch(&source, &base, &temp.path().join("a"), "a.txt", "a");
         let b_path = temp.path().join("b");
         prepare(&source, &b_path, &base, &[a.clone()]).unwrap();
@@ -478,6 +480,9 @@ fn redundant_ancestors_do_not_create_extra_merges_in_either_order() {
         prepare(&source, &child, &base, &heads).unwrap();
         merge_graph(&source, &heads, || panic!("No conflict expected")).unwrap();
         for path in [&child, &source] {
+            // The child's graph Git knows the internal base; the source keeps its
+            // own project history and must simply stay unchanged.
+            let from = if path == &child { &base } else { &source_head };
             assert_eq!(
                 git(
                     path,
@@ -485,7 +490,7 @@ fn redundant_ancestors_do_not_create_extra_merges_in_either_order() {
                         "rev-list",
                         "--first-parent",
                         "--count",
-                        &format!("{base}..HEAD")
+                        &format!("{from}..HEAD")
                     ]
                 )
                 .unwrap(),
@@ -496,7 +501,7 @@ fn redundant_ancestors_do_not_create_extra_merges_in_either_order() {
             if path == &child {
                 for head in &heads { git(path, &["merge-base", "--is-ancestor", head, "HEAD"]).unwrap(); }
             } else {
-                assert_files_only(path, &base);
+                assert_files_only(path, &source_head);
             }
         }
     }
@@ -548,13 +553,14 @@ fn resolved_descendant_avoids_reopening_ancestor_conflicts() {
 #[test]
 fn missing_parent_fails_before_partial_composition() {
     let temp = TempDir::new().unwrap();
-    let (source, base) = repository(temp.path());
+    let (source, source_head) = repository(temp.path());
+    let base = snapshot_repository(&source).unwrap();
     let a = branch(&source, &base, &temp.path().join("a"), "a.txt", "a");
     let child = temp.path().join("child");
     assert!(prepare(&source, &child, &base, &[a.clone(), "missing".into()]).is_err());
     assert_eq!(git(&child, &["rev-parse", "HEAD"]).unwrap(), base);
     assert!(!child.join("a.txt").exists());
-    assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), base);
+    assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), source_head);
     assert!(git(&source, &["status", "--porcelain"]).unwrap().is_empty());
 }
 

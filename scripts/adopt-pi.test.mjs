@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { validateGeneratedModelData } from '../pi/packages/ai/scripts/model-data.ts';
 import { candidateLock } from './adopt-pi.mjs';
+import { resolveBuildOrder } from './build-pi.mjs';
 import { lock, restoreModelData, root, source } from './pi-baseline.mjs';
+import { corePackages } from './pi-dependencies.mjs';
 
 function stagedPackage(t, dataDir) {
   const directory = mkdtempSync(join(tmpdir(), 'grapher-pi-model-data-'));
@@ -80,4 +82,43 @@ test('local model-data overlay overrides the baseline and keeps upstream validat
     `${name} must come from the overlay, not the committed baseline`);
   // The merged catalog (baseline plus local API tweaks) passes upstream validation.
   validateGeneratedModelData(directory);
+});
+
+test('Pi package builds follow workspace dependency order', t => {
+  // Upstream's root build script builds chord before pi-telemetry even though
+  // chord depends on it; a clean offline build must order packages itself.
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-pi-build-order-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const internal = (name) => `@earendil-works/${name}`;
+  const dependencies = {
+    chord: ['telemetry'],
+    tui: [],
+    telemetry: [],
+    codemode: [],
+    mcp: [],
+    ai: ['telemetry'],
+    durable: ['chord', 'ai', 'codemode', 'telemetry'],
+    agent: ['ai'],
+    'coding-agent': ['agent', 'ai', 'codemode', 'mcp', 'tui'],
+  };
+  for (const name of corePackages) {
+    mkdirSync(join(directory, 'packages', name), { recursive: true });
+    const spec = { name: internal(name), version: '1.0.0' };
+    if (dependencies[name]?.length) {
+      spec.dependencies = Object.fromEntries(dependencies[name].map(dependency => [internal(dependency), '1.0.0']));
+    }
+    writeFileSync(join(directory, 'packages', name, 'package.json'), JSON.stringify(spec));
+  }
+  const order = resolveBuildOrder(directory);
+  assert.deepEqual([...order].sort(), [...corePackages].sort(), 'every reviewed package builds exactly once');
+  for (const [name, required] of Object.entries(dependencies)) {
+    for (const dependency of required) {
+      assert.ok(order.indexOf(dependency) < order.indexOf(name), `${dependency} must build before ${name}`);
+    }
+  }
+  assert.equal(order.at(-1), 'coding-agent', 'the CLI bundle builds last');
+  // A cycle must fail loudly instead of silently picking an order.
+  writeFileSync(join(directory, 'packages', 'telemetry', 'package.json'),
+    JSON.stringify({ name: internal('telemetry'), dependencies: { [internal('chord')]: '1.0.0' } }));
+  assert.throws(() => resolveBuildOrder(directory), /dependency cycle/);
 });

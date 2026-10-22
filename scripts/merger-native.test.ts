@@ -6,6 +6,7 @@ import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, toNamespacedPath } from 'node:path';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -13,6 +14,12 @@ import type { AddressInfo } from 'node:net';
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const normalize = (value: string) => value.replace(/^\\\\\?\\/, '').replaceAll('\\', '/');
+// Backend slots name their host-only graph Git after a digest of the slot label.
+const privateGitDirectory = (worktree: string) => {
+  const name = basename(worktree);
+  const digest = createHash('sha1').update(`blob ${Buffer.byteLength(name)}\0${name}`).digest('hex');
+  return join(dirname(worktree), '.grapher-git', `${digest.slice(0, 16)}.git`);
+};
 const delay = (ms: number) => new Promise(completed => setTimeout(completed, ms));
 
 // Real Pi processes make the Windows production path roughly twice as slow
@@ -51,7 +58,9 @@ test('production Planner writes source directly; Merger repairs node and publica
       const userInstruction = typeof userTurn.content === 'string' ? userTurn.content
         : userTurn.content.map((part: any) => part.text ?? '').join('');
       const continuation = userInstruction.includes('CONTINUE_PUBLICATION');
-      const merger = prompt.includes('Resolve the current Git merge conflicts.') || continuation;
+      const merger = prompt.includes('Resolve the current Git merge conflicts.')
+        || prompt.includes('Resolve the conflicting project files in this workspace.')
+        || continuation;
       const results = messages.filter((message: any) => message.role === 'tool');
       assert.ok(results.every((result: any) => !JSON.stringify(result.content).includes('exited with code')),
         `Tool failed for ${label}: ${JSON.stringify(results)}`);
@@ -93,11 +102,11 @@ test('production Planner writes source directly; Merger repairs node and publica
           assert.ok(!system.includes('CONTINUE_PUBLICATION'), 'the follow-up belongs only in the user message');
           assert.equal(userInstruction, `${label} CONTINUE_PUBLICATION`, 'send the user instruction unchanged');
         } else {
-          assert.ok(system.includes('git add -f -- <paths>'), 'initial repair must force-stage ignored project paths');
-          assert.ok(system.includes('Do not stage Git/Grapher internals or managed environment/cache scopes'), 'force-staging must preserve internal/environment exclusions');
-          assert.ok(system.includes('Preserve valid changes. Do not modify unrelated files.'), 'initial Merger instructions must be appended');
-          assert.ok(system.includes('Do not discard the incoming commit.'));
-          assert.ok(system.includes(`Do not stage Git/Grapher internals or managed environment/cache scopes.\\n${pathGuideline}`), 'path convention must directly follow the initial addendum without a blank line');
+          assert.ok(system.includes('git add -f -- <paths>'), 'initial repair must stage resolved project paths');
+          assert.ok(system.includes('internal composition commits are not part of it'), 'project Git must not expose graph history');
+          assert.ok(system.includes('Do not invent a merge or snapshot commit.'));
+          assert.ok(system.includes('If the source has no .git, resolve the files directly without initializing Git.'));
+          assert.ok(system.includes(`preserves the composition parents.\\n${pathGuideline}`), 'path convention must directly follow the initial addendum without a blank line');
         }
         // A continued session carries the original turn's tool results, so
         // count results after the latest user message for this turn.
@@ -110,18 +119,26 @@ test('production Planner writes source directly; Merger repairs node and publica
           tool = { name: 'bash', arguments: { command: "printf 'continued\\n' > continued.txt" } };
         } else if (!scenario.fail && results.length === 0) {
           // Absolute source aliases select the conflicted private file for both
-          // node and publication Mergers, never the user's source file.
+          // node and publication Mergers, never the user's source file. The
+          // graph merge is host-only; the visible project Git carries the
+          // conflict index entries, not graph MERGE_HEAD/refs.
+          const visible = scenario.plain
+            ? 'test ! -e .git && '
+            : 'test -n "$(git diff --name-only --diff-filter=U)" && test -z "$(git rev-parse --verify -q MERGE_HEAD)" && test -z "$(git for-each-ref --format=\"%(refname)\" refs/grapher/)" && ';
           tool = { name: 'bash', arguments: { command:
-            `test -n "$(git diff --name-only --diff-filter=U)" && git rev-parse --verify MERGE_HEAD && printf 'resolved\\n' > ${quote(join(scenario.repository, 'shared.txt'))} && git add shared.txt`,
+            `${visible}printf 'resolved\\n' > ${quote(join(scenario.repository, 'shared.txt'))}${scenario.plain ? '' : ' && git add -f shared.txt'}`,
           } };
         }
       } else if (results.length === 0) {
+        const projectView = scenario.plain
+          ? 'test ! -e .git && '
+          : 'test -d .git && test -z "$(git for-each-ref --format=\"%(refname)\" refs/grapher/)" && test "$(git branch --show-current)" != grapher-node && ';
         const command = prompt.includes('WRITE_LEFT') ? "printf 'left\\n' > shared.txt"
           : prompt.includes('WRITE_RIGHT') ? "printf 'right\\n' > shared.txt"
           : prompt.includes('VERIFY_PLANNER_REVISION') ? 'test "$(cat shared.txt)" = "planner revision" && test "$(cat revision.txt)" = latest && test "$(cat failed.txt)" = survived && test "$(cat verified.txt)" = verified && printf inherited > late.txt'
           : prompt.includes('VERIFY_PLANNER_SOURCE') ? 'test "$(cat shared.txt)" = "planner change" && printf verified > verified.txt'
           : 'test "$(cat shared.txt)" = resolved && printf verified > verified.txt';
-        tool = { name: 'bash', arguments: { command: `test ! -e .git && ! git log -1 >/dev/null 2>&1 && ${command}` } };
+        tool = { name: 'bash', arguments: { command: `${projectView}${command}` } };
       }
       requests.push(`${label}:${role}:${tool?.name ?? 'completed'}`);
       const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: `call-${requests.length}`, type: 'function',
@@ -275,7 +292,7 @@ test('production Planner writes source directly; Merger repairs node and publica
       if (fail) {
         assert.equal((await readFile(join(repository, 'shared.txt'), 'utf8')).trim(), 'base');
         const privateGit = (...args: string[]) => git(merger.worktree, '--git-dir',
-          normalize(join(dirname(merger.worktree), '.grapher-git', `${basename(merger.worktree)}.git`)), '--work-tree', normalize(merger.worktree), ...args);
+          normalize(privateGitDirectory(merger.worktree)), '--work-tree', normalize(merger.worktree), ...args);
         assert.ok(privateGit('diff', '--name-only', '--diff-filter=U'));
         assert.ok(privateGit('rev-parse', '--verify', 'MERGE_HEAD'));
         assert.equal(state.publication, null);

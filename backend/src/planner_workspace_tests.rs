@@ -1,7 +1,12 @@
 use super::*;
 use crate::runtime::Job;
+use std::path::Path;
 
 fn setup(shadow: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>, Config) {
+    setup_with_environment(shadow, false)
+}
+
+fn setup_with_environment(shadow: bool, managed: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>, Config) {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("source");
     fs::create_dir(&repo).unwrap();
@@ -66,10 +71,11 @@ if (process.env.GRAPHER_MODE === 'planner' && actionText === 'move-left') {
 const finalText = 'done';
 console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:finalText}]}}));
 "#).unwrap();
-    let config: Config = serde_json::from_value(serde_json::json!({
+    let mut config: Config = serde_json::from_value(serde_json::json!({
         "repository": repo, "engine": "pi", "piCommand": "node", "piArgs": [script],
         "model": "mock/workspace", "maxParallel": 2, "postTaskReview": false,
     })).unwrap();
+    if managed { config.environment = crate::environment_automatic::resolve(&repo, false).unwrap().0; }
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime.create(Graph {
         original_goal: "frontier".into(),
@@ -105,6 +111,35 @@ fn turn(service: &Arc<Service>, config: &Config) -> Result<Snapshot, (String, Op
     let run = service.runtime.lock().unwrap().state.run_id.clone();
     plan_goal_internal("additional information".into(), config.clone(), Some("graph"), None,
         Some(run), service, |_| {}, |_| {}, |_| {})
+}
+
+#[test]
+fn planner_external_state_only_write_is_sealed_and_replayed_atomically_with_code() {
+    let (temp, _repo, service, _) = setup_with_environment(false, true);
+    let mut runtime = service.runtime.lock().unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    let execution = complete(&mut runtime, job);
+    let before = execution.result.as_ref().unwrap();
+    let state = crate::workspace_state::process_root(Path::new(&execution.worktree)).unwrap();
+    fs::create_dir_all(state.join(".agent-home")).unwrap();
+    fs::write(state.join(".agent-home/planner-setting"), "retained").unwrap();
+    runtime.capture_planner_workspace(&execution.id).unwrap();
+    let result = runtime.state.executions.iter().find(|e| e.id == execution.id).unwrap().result.clone().unwrap();
+    assert_eq!(result.code_ref, before.code_ref, "state-only changes do not invent code changes");
+    assert_ne!(result.environment_ref, before.environment_ref);
+    assert_ne!(result.generation, execution.id, "Planner is not another node attempt");
+    let event = runtime.state.events.iter().rev().find(|event| matches!(event.kind, EventKind::PlannerWorkspaceSnapshotted { .. })).unwrap();
+    let mut legacy = serde_json::to_value(&event.kind).unwrap();
+    legacy.as_object_mut().unwrap().remove("result");
+    assert!(serde_json::from_value::<EventKind>(legacy).is_ok(), "legacy events stay readable");
+    let run = runtime.state.run_id.clone();
+    let loaded = runtime.store.load(&run).unwrap();
+    assert_eq!(loaded.executions.iter().find(|e| e.id == execution.id).unwrap().result.as_ref(), Some(&result));
+    assert_eq!(loaded.nodes["root"].result.as_ref(), Some(&result));
+    drop(runtime);
+    drop(service);
+    let recovered = Runtime::open(&temp.path().join("runtime")).unwrap();
+    assert_eq!(recovered.state.executions.iter().find(|e| e.id == execution.id).unwrap().result.as_ref(), Some(&result));
 }
 
 #[test]
@@ -375,6 +410,46 @@ fn planner_workspace_returns_to_source_after_publication_reclaims_its_previous_c
     let later = complete(&mut runtime, job);
     fs::remove_dir_all(later.worktree).unwrap();
     assert!(runtime.planner_workspace().unwrap_err().contains("missing"));
+}
+
+#[test]
+fn interrupted_planner_recovers_all_visited_slots_including_external_state() {
+    let (temp, _repo, service, _) = setup_with_environment(false, true);
+    let mut runtime = service.runtime.lock().unwrap();
+    let root = runtime.jobs().unwrap().remove(0);
+    complete(&mut runtime, root);
+    let jobs = runtime.jobs().unwrap();
+    assert_eq!(jobs.len(), 2);
+    let executions: Vec<_> = jobs.into_iter().map(|job| complete(&mut runtime, job)).collect();
+    let id = Uuid::new_v4().to_string();
+    let attempt = temp.path().join("runtime/planning").join(&id);
+    fs::create_dir_all(&attempt).unwrap();
+    let run = runtime.state.run_id.clone();
+    for execution in &executions {
+        let summary = PlanningSummary { planning_id: id.clone(), status: Some("running".into()),
+            worktree: Some(execution.worktree.clone()), workspace_execution_id: Some(execution.id.clone()),
+            ..Default::default() };
+        runtime.emit(EventKind::PlannerWorkspaceSelected { planning: summary.clone() }).unwrap();
+        write_planning_summary(&attempt, &summary).unwrap();
+        fs::write(Path::new(&execution.worktree).join("planner-retained"), &execution.node).unwrap();
+        let state = crate::workspace_state::process_root(Path::new(&execution.worktree)).unwrap();
+        fs::create_dir_all(state.join(".agent-home")).unwrap();
+        fs::write(state.join(".agent-home/planner-retained"), &execution.node).unwrap();
+    }
+    fs::write(attempt.join("request.json"), serde_json::to_vec(&serde_json::json!({
+        "revisionRunId": run, "runId": run,
+    })).unwrap()).unwrap();
+    drop(runtime);
+    recover_plannings(&service).unwrap();
+    recover_plannings(&service).unwrap();
+    let runtime = service.runtime.lock().unwrap();
+    for original in executions {
+        let updated = runtime.state.executions.iter().find(|e| e.id == original.id).unwrap();
+        assert_ne!(updated.after, original.after);
+        assert_ne!(updated.result.as_ref().unwrap().environment_ref, original.result.unwrap().environment_ref);
+    }
+    assert_eq!(runtime.state.events.iter().filter(|e| matches!(e.kind, EventKind::PlannerWorkspaceSnapshotted { .. })).count(), 2);
+    assert_eq!(runtime.state.events.iter().filter(|e| matches!(e.kind, EventKind::PlannerTurnAborted { .. })).count(), 1);
 }
 
 #[test]

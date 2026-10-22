@@ -34,6 +34,14 @@ pub mod store;
 pub mod workspace;
 mod workspace_cleanup;
 mod workspace_files;
+mod workspace_state;
+mod workspace_view;
+mod workspace_metadata;
+mod workspace_git_index;
+mod workspace_links;
+mod workspace_symlinks;
+#[cfg(test)]
+mod workspace_cleanliness_tests;
 
 /// Process-wide disposable data root for tests. Fixtures that create or
 /// materialize shadow Git metadata must call this first so no test writes into

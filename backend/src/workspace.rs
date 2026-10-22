@@ -42,9 +42,6 @@ pub(crate) fn host_index_lock(repository: &Path) -> Result<Arc<Mutex<()>>, Strin
     host_lock(&HOST_INDEX_LOCKS, repository)
 }
 
-// Metadata can temporarily move back into a slot for native conflict repair.
-// Serialize host Git discovery with that move, including fan-out readers. This
-// small reentrant lease lets preparation/Merger call host Git on the same thread.
 #[derive(Default)]
 struct SlotGitLock {
     owner: Mutex<(Option<std::thread::ThreadId>, usize)>,
@@ -54,12 +51,18 @@ struct SlotGitLock {
 struct SlotGitGuard(Arc<SlotGitLock>);
 impl SlotGitGuard {
     fn acquire(path: &Path) -> Result<Self, String> {
-        static LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<SlotGitLock>>>> = OnceLock::new();
+        static LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<SlotGitLock>>>> =
+            OnceLock::new();
         let key = PathBuf::from(crate::path_identity::path_key(path));
         let lock = {
-            let mut locks = LOCKS.get_or_init(Default::default).lock().map_err(|e| e.to_string())?;
+            let mut locks = LOCKS
+                .get_or_init(Default::default)
+                .lock()
+                .map_err(|e| e.to_string())?;
             locks.retain(|_, weak| weak.strong_count() > 0);
-            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) { lock } else {
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
                 let lock = Arc::new(SlotGitLock::default());
                 locks.insert(key, Arc::downgrade(&lock));
                 lock
@@ -80,7 +83,10 @@ impl Drop for SlotGitGuard {
     fn drop(&mut self) {
         if let Ok(mut owner) = self.0.owner.lock() {
             owner.1 -= 1;
-            if owner.1 == 0 { owner.0 = None; self.0.changed.notify_all(); }
+            if owner.1 == 0 {
+                owner.0 = None;
+                self.0.changed.notify_all();
+            }
         }
     }
 }
@@ -106,20 +112,19 @@ pub struct PickResult {
 }
 
 pub fn data_root() -> PathBuf {
-    let path = crate::native::environment_path("GRAPHER_DATA_DIR")
-        .unwrap_or_else(|| {
-            // Unit tests must never write shadow/workspace data into the
-            // checkout; integration fixtures call `ensure_test_data_root()`
-            // explicitly because this library is compiled without `cfg(test)`.
-            #[cfg(test)]
-            {
-                crate::ensure_test_data_root()
-            }
-            #[cfg(not(test))]
-            {
-                crate::native::installation_root().join(".grapher")
-            }
-        });
+    let path = crate::native::environment_path("GRAPHER_DATA_DIR").unwrap_or_else(|| {
+        // Unit tests must never write shadow/workspace data into the
+        // checkout; integration fixtures call `ensure_test_data_root()`
+        // explicitly because this library is compiled without `cfg(test)`.
+        #[cfg(test)]
+        {
+            crate::ensure_test_data_root()
+        }
+        #[cfg(not(test))]
+        {
+            crate::native::installation_root().join(".grapher")
+        }
+    });
     let path = if path.is_relative() {
         std::env::current_dir()
             .map(|cwd| cwd.join(&path))
@@ -177,12 +182,11 @@ pub(crate) fn host_cache_root() -> PathBuf {
 
 pub fn cache_root() -> PathBuf {
     absolute_cache_path(
-        crate::native::environment_path("GRAPHER_CACHE_DIR")
-            .unwrap_or_else(|| {
-                default_cache_root(std::env::consts::OS, |name| {
-                    std::env::var_os(name).map(PathBuf::from)
-                })
-            }),
+        crate::native::environment_path("GRAPHER_CACHE_DIR").unwrap_or_else(|| {
+            default_cache_root(std::env::consts::OS, |name| {
+                std::env::var_os(name).map(PathBuf::from)
+            })
+        }),
     )
 }
 
@@ -196,16 +200,15 @@ pub(crate) fn native_runtime_parent() -> PathBuf {
 
 pub(crate) fn workspaces_parent(data: &Path) -> PathBuf {
     absolute_cache_path(
-        crate::native::environment_path("GRAPHER_WORKSPACE_PARENT")
-            .unwrap_or_else(|| {
-                // Fixture/unit-test checkouts are disposable with their test data. Real
-                // execution must stay outside both source and protected session data.
-                if cfg!(any(test, feature = "fixture")) {
-                    data.join("workspaces")
-                } else {
-                    cache_root().join("workspaces")
-                }
-            }),
+        crate::native::environment_path("GRAPHER_WORKSPACE_PARENT").unwrap_or_else(|| {
+            // Fixture/unit-test checkouts are disposable with their test data. Real
+            // execution must stay outside both source and protected session data.
+            if cfg!(any(test, feature = "fixture")) {
+                data.join("workspaces")
+            } else {
+                cache_root().join("workspaces")
+            }
+        }),
     )
 }
 
@@ -274,7 +277,11 @@ mod workspace_guard_tests {
             "windows",
             env
         ));
-        assert!(!is_desktop_workspace(&home.join("DesktopX"), "windows", env));
+        assert!(!is_desktop_workspace(
+            &home.join("DesktopX"),
+            "windows",
+            env
+        ));
         assert!(!is_desktop_workspace(
             &home.join("Desktop").join("project"),
             "windows",
@@ -472,8 +479,8 @@ fn prohibited_workspace_reason(candidate: &Path) -> Option<String> {
     None
 }
 
-/// Host-only metadata for a physical Graph slot. No .git marker is left in
-/// the model's cwd, so ordinary node/Planner Git cannot discover runtime history.
+/// Host-only graph metadata for a physical slot. Its .git, when present,
+/// belongs to the independent native project view, never this graph database.
 fn private_slot_layout(path: &Path) -> bool {
     path.parent()
         .and_then(Path::parent)
@@ -482,17 +489,30 @@ fn private_slot_layout(path: &Path) -> bool {
         .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
 }
 
+fn graph_metadata_name(slot: &str) -> Result<String, String> {
+    let id = git2::Oid::hash_object(git2::ObjectType::Blob, slot.as_bytes())
+        .map_err(|error| error.to_string())?
+        .to_string();
+    Ok(format!("{}.git", &id[..16]))
+}
+
 pub(crate) fn private_git_dir(path: &Path) -> Option<PathBuf> {
-    if !private_slot_layout(path) { return None; }
+    if !private_slot_layout(path) {
+        return None;
+    }
     let run = path.parent()?;
     let name = path.file_name()?.to_str()?;
-    let metadata = run.join(".grapher-git").join(format!("{name}.git"));
-    fs::symlink_metadata(&metadata).ok().filter(|m| m.is_dir() && !m.file_type().is_symlink())?;
+    let metadata = run.join(".grapher-git").join(graph_metadata_name(name).ok()?);
+    fs::symlink_metadata(&metadata)
+        .ok()
+        .filter(|m| m.is_dir() && !m.file_type().is_symlink())?;
     Some(metadata)
 }
 
 pub(crate) fn has_private_git(path: &Path) -> bool {
-    let Ok(_lease) = SlotGitGuard::acquire(path) else { return false; };
+    let Ok(_lease) = SlotGitGuard::acquire(path) else {
+        return false;
+    };
     // Hidden slot metadata can outlive the slot directory when the physical
     // workspace is removed (a reclaim that missed it, or a caller deleting the
     // slot directly). A missing slot has no index or working tree to run Git
@@ -502,23 +522,80 @@ pub(crate) fn has_private_git(path: &Path) -> bool {
 }
 
 pub(crate) fn hide_private_git(path: &Path) -> Result<(), String> {
+    if crate::workspace_view::is_bound(path) {
+        return Ok(());
+    }
+    #[cfg(not(any(test, feature = "fixture")))]
+    if private_slot_layout(path) {
+        if path.join(".git").exists() {
+            return Err(
+                "Unsupported workspace layout; create a new Run instead of relocating project Git"
+                    .into(),
+            );
+        }
+        return Ok(());
+    }
     let lease = SlotGitGuard::acquire(path)?;
-    if lease.0.views.load(std::sync::atomic::Ordering::SeqCst) > 0 { return Ok(()); }
-    let Some(run) = path.parent() else { return Ok(()); };
-    if !run.parent().and_then(Path::file_name).is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces") {
+    if lease.0.views.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        return Ok(());
+    }
+    let Some(run) = path.parent() else {
+        return Ok(());
+    };
+    if !run
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
+    {
         return Ok(());
     }
     let visible = path.join(".git");
     if visible.is_dir() {
         let parent = run.join(".grapher-git");
-        if fs::symlink_metadata(&parent).is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir()) {
+        if fs::symlink_metadata(&parent)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
+        {
             return Err("Refusing linked Graph Git metadata directory".into());
         }
         fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
-        let metadata = parent.join(format!("{}.git", path.file_name().ok_or("Invalid slot")?.to_string_lossy()));
-        if metadata.exists() { return Err("Graph slot has conflicting Git metadata".into()); }
+        let metadata = parent.join(graph_metadata_name(
+            &path.file_name().ok_or("Invalid slot")?.to_string_lossy(),
+        )?);
+        if metadata.exists() {
+            return Err("Graph slot has conflicting Git metadata".into());
+        }
         fs::rename(visible, metadata).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+fn allocate_private_git(path: &Path) -> Result<(), String> {
+    if !private_slot_layout(path) {
+        return Ok(());
+    }
+    if path.join(".git").exists() && !crate::workspace_view::is_bound(path) {
+        return Err(
+            "Unsupported workspace layout; create a new Run (existing workspace retained)".into(),
+        );
+    }
+    let run = path.parent().ok_or("Missing slot owner")?;
+    let target = run
+        .join(".grapher-git")
+        .join(graph_metadata_name(
+            path.file_name().ok_or("Missing slot")?.to_str().ok_or("Non-UTF-8 slot")?,
+        )?);
+    crate::path_safety::real_child_path(run, &target, false)?;
+    if target.join("HEAD").exists() && !target.join("workspace-layout-v4").is_file() {
+        return Err(
+            "Unsupported slot metadata; create a new Run (existing workspace retained)".into(),
+        );
+    }
+    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    fs::write(
+        target.join("workspace-layout-v4"),
+        b"project-git-separated-v4\n",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -526,31 +603,48 @@ pub(crate) fn hide_private_git(path: &Path) -> Result<(), String> {
 /// directory itself is removed by the caller; this keeps its object database
 /// from accumulating after the physical workspace is released.
 pub(crate) fn remove_private_git(path: &Path) -> Result<(), String> {
-    let Some(run) = path.parent() else { return Ok(()) };
-    let Some(root) = run.parent() else { return Ok(()) };
-    if !root.file_name().and_then(|name| name.to_str())
+    let Some(run) = path.parent() else {
+        return Ok(());
+    };
+    let Some(root) = run.parent() else {
+        return Ok(());
+    };
+    if !root
+        .file_name()
+        .and_then(|name| name.to_str())
         .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
     {
         return Ok(());
     }
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else { return Ok(()) };
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
     let metadata_root = run.join(".grapher-git");
-    let metadata = metadata_root.join(format!("{name}.git"));
+    let metadata = metadata_root.join(graph_metadata_name(name)?);
     match fs::symlink_metadata(&metadata) {
         Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(format!("Refusing linked Graph Git metadata: {}", metadata.display()));
+            return Err(format!(
+                "Refusing linked Graph Git metadata: {}",
+                metadata.display()
+            ));
         }
         Ok(meta) if meta.is_dir() => {
             fs::remove_dir_all(&metadata).map_err(|error| error.to_string())?;
         }
         Ok(_) => {
-            return Err(format!("Graph Git metadata is not a directory: {}", metadata.display()));
+            return Err(format!(
+                "Graph Git metadata is not a directory: {}",
+                metadata.display()
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.to_string()),
     }
     // Best effort: leave no empty metadata directory behind.
-    if fs::read_dir(&metadata_root).ok().is_some_and(|mut entries| entries.next().is_none()) {
+    if fs::read_dir(&metadata_root)
+        .ok()
+        .is_some_and(|mut entries| entries.next().is_none())
+    {
         let _ = fs::remove_dir(&metadata_root);
     }
     Ok(())
@@ -560,27 +654,54 @@ pub(crate) fn remove_private_git(path: &Path) -> Result<(), String> {
 /// gone. This is a migration and crash-recovery sweep, not a live-slot sweep.
 pub(crate) fn reclaim_orphan_git_metadata(run_root: &Path) -> Result<(), String> {
     let metadata_root = run_root.join(".grapher-git");
-    let Ok(meta) = fs::symlink_metadata(&metadata_root) else { return Ok(()) };
+    let Ok(meta) = fs::symlink_metadata(&metadata_root) else {
+        return Ok(());
+    };
     if meta.file_type().is_symlink() || !meta.is_dir() {
-        return Err(format!("Refusing linked Graph Git metadata directory: {}", metadata_root.display()));
+        return Err(format!(
+            "Refusing linked Graph Git metadata directory: {}",
+            metadata_root.display()
+        ));
+    }
+    // Slot metadata names are digests, so map each live slot to its expected
+    // metadata name rather than guessing a slot from the digest. Legacy
+    // `<slot>.git` metadata beside a live slot is retained untouched; only a
+    // removed slot's metadata is reclaimed.
+    let mut live = std::collections::BTreeSet::new();
+    for entry in fs::read_dir(run_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Ok(metadata) = graph_metadata_name(name) {
+                    live.insert(metadata);
+                }
+                live.insert(format!("{name}.git"));
+            }
+        }
     }
     let mut remaining = false;
     for entry in fs::read_dir(&metadata_root).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(slot) = name.strip_suffix(".git") else { remaining = true; continue; };
-        if slot.is_empty() || slot.contains('/') || slot.contains('\\') {
+        let Some(slot) = name.strip_suffix(".git") else {
             remaining = true;
             continue;
-        }
-        if run_root.join(slot).exists() {
+        };
+        if slot.is_empty()
+            || slot.contains('/')
+            || slot.contains('\\')
+            || live.contains(&name)
+        {
             remaining = true;
             continue;
         }
         let path = entry.path();
         let meta = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
         if meta.file_type().is_symlink() || !meta.is_dir() {
-            return Err(format!("Refusing linked Graph Git metadata: {}", path.display()));
+            return Err(format!(
+                "Refusing linked Graph Git metadata: {}",
+                path.display()
+            ));
         }
         fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
     }
@@ -590,11 +711,15 @@ pub(crate) fn reclaim_orphan_git_metadata(run_root: &Path) -> Result<(), String>
     Ok(())
 }
 
-
 /// Remove refs owned by a deleted Run and reclaim objects that are no longer
 /// reachable from any remaining Grapher ref. Shared source databases keep
 /// their other Run refs, source snapshots and published results intact.
-pub(crate) fn prune_shadow_run_refs(shadow: &Path, run_id: &str, protected: &std::collections::BTreeSet<String>, reclaim_objects: bool) -> Result<(), String> {
+pub(crate) fn prune_shadow_run_refs(
+    shadow: &Path,
+    run_id: &str,
+    protected: &std::collections::BTreeSet<String>,
+    reclaim_objects: bool,
+) -> Result<(), String> {
     uuid::Uuid::parse_str(run_id).map_err(|_| "Invalid Run ID for shadow cleanup")?;
     let metadata = match fs::symlink_metadata(shadow) {
         Ok(metadata) => metadata,
@@ -602,28 +727,55 @@ pub(crate) fn prune_shadow_run_refs(shadow: &Path, run_id: &str, protected: &std
         Err(error) => return Err(error.to_string()),
     };
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(format!("Refusing linked or non-directory shadow repository: {}", shadow.display()));
+        return Err(format!(
+            "Refusing linked or non-directory shadow repository: {}",
+            shadow.display()
+        ));
     }
     let shadow_text = shadow.to_str().ok_or("Invalid shadow path")?;
     let prefix = format!("refs/grapher/runs/{run_id}/");
-    let run_refs = git(shadow, &["--git-dir", shadow_text, "for-each-ref", "--format=%(refname)", &prefix])?;
+    let run_refs = git(
+        shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "for-each-ref",
+            "--format=%(refname)",
+            &prefix,
+        ],
+    )?;
     let mut transaction = String::new();
     for reference in run_refs.lines().filter(|line| !line.is_empty()) {
         transaction.push_str(&format!("delete {reference}\n"));
     }
     let mut changed = !transaction.is_empty();
     if changed {
-        git_bytes(shadow, &["--git-dir", shadow_text, "update-ref", "--stdin"], None, Some(transaction.as_bytes()))?;
+        git_bytes(
+            shadow,
+            &["--git-dir", shadow_text, "update-ref", "--stdin"],
+            None,
+            Some(transaction.as_bytes()),
+        )?;
     }
 
     // Node result commits are also pinned under refs/grapher/heads/<commit>.
     // Keep a head only while a non-head ref (another Run, a source input or a
     // published result) still points at the same object.
-    let refs = git(shadow, &["--git-dir", shadow_text, "for-each-ref", "--format=%(refname) %(objectname)"])?;
+    let refs = git(
+        shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+        ],
+    )?;
     let mut referenced = std::collections::BTreeSet::new();
     let mut heads = Vec::new();
     for line in refs.lines() {
-        let Some((reference, object)) = line.split_once(' ') else { continue };
+        let Some((reference, object)) = line.split_once(' ') else {
+            continue;
+        };
         if reference.starts_with("refs/grapher/heads/") {
             heads.push((reference.to_string(), object.to_string()));
         } else {
@@ -638,33 +790,72 @@ pub(crate) fn prune_shadow_run_refs(shadow: &Path, run_id: &str, protected: &std
     }
     if !head_transaction.is_empty() {
         changed = true;
-        git_bytes(shadow, &["--git-dir", shadow_text, "update-ref", "--stdin"], None, Some(head_transaction.as_bytes()))?;
+        git_bytes(
+            shadow,
+            &["--git-dir", shadow_text, "update-ref", "--stdin"],
+            None,
+            Some(head_transaction.as_bytes()),
+        )?;
     }
     if changed && reclaim_objects {
         // Refuse to prune when another live Run references a commit that is no
         // longer pinned by any ref; a missing pin is recovery evidence, not a
         // reason to delete it.
-        let remaining = git(shadow, &["--git-dir", shadow_text, "for-each-ref", "--format=%(objectname)"])?;
+        let remaining = git(
+            shadow,
+            &[
+                "--git-dir",
+                shadow_text,
+                "for-each-ref",
+                "--format=%(objectname)",
+            ],
+        )?;
         let remaining: std::collections::BTreeSet<&str> = remaining.lines().collect();
-        if protected.iter().all(|object| remaining.contains(object.as_str())) {
+        if protected
+            .iter()
+            .all(|object| remaining.contains(object.as_str()))
+        {
             // Reflogs can keep otherwise unreachable objects alive; expire them
             // before pruning. The host ref lock serializes this with Grapher Git.
-            git(shadow, &["--git-dir", shadow_text, "reflog", "expire", "--expire=now", "--all"])?;
-            git(shadow, &["--git-dir", shadow_text, "gc", "--prune=now", "--quiet"])?;
+            git(
+                shadow,
+                &[
+                    "--git-dir",
+                    shadow_text,
+                    "reflog",
+                    "expire",
+                    "--expire=now",
+                    "--all",
+                ],
+            )?;
+            git(
+                shadow,
+                &["--git-dir", shadow_text, "gc", "--prune=now", "--quiet"],
+            )?;
         }
     }
     Ok(())
 }
-/// Only conflict repair gets a discoverable Git view, and only for that turn.
-pub(crate) struct MergerGitView { path: PathBuf, lock: Arc<SlotGitLock> }
+pub(crate) struct MergerGitView {
+    path: PathBuf,
+    lock: Arc<SlotGitLock>,
+}
 impl MergerGitView {
     pub(crate) fn open(path: &Path) -> Result<Self, String> {
         let lease = SlotGitGuard::acquire(path)?;
         if let Some(metadata) = private_git_dir(path) {
-            fs::rename(metadata, path.join(".git")).map_err(|e| e.to_string())?;
+            if !crate::workspace_view::is_bound(path) {
+                return Err(format!("Legacy/internal Git at {} is not an agent project view; prepare a complete view before launch", metadata.display()));
+            }
         }
-        lease.0.views.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(Self { path: path.to_path_buf(), lock: lease.0.clone() })
+        lease
+            .0
+            .views
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Self {
+            path: path.to_path_buf(),
+            lock: lease.0.clone(),
+        })
     }
 }
 impl Drop for MergerGitView {
@@ -673,8 +864,12 @@ impl Drop for MergerGitView {
         // runtime events: another actor may hold Runtime's mutex while reading
         // Git. Only discovery and the short rename itself are serialized.
         if let Ok(_lease) = SlotGitGuard::acquire(&self.path) {
-            self.lock.views.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            if let Err(error) = hide_private_git(&self.path) { eprintln!("Cannot hide Graph Git metadata: {error}"); }
+            self.lock
+                .views
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            if let Err(error) = hide_private_git(&self.path) {
+                eprintln!("Cannot hide Graph Git metadata: {error}");
+            }
         }
     }
 }
@@ -773,7 +968,8 @@ mod shadow_safety_tests {
     }
 }
 
-const MISSING_SHADOW_ERROR: &str = "临时 Git 快照不存在或已回收：快照在首次派发节点时建立，发布成功后删除。请开启新对话后重试。";
+const MISSING_SHADOW_ERROR: &str =
+    "临时 Git 快照不存在或已回收：快照在首次派发节点时建立，发布成功后删除。请开启新对话后重试。";
 
 const STALE_SHADOW_ERROR: &str = "临时 Git 快照不存在：图运行的快照在首次派发节点时建立，并在发布成功后回收。请开启新对话后重试。";
 
@@ -791,15 +987,16 @@ fn missing_shadow_error(target: &Path) -> String {
     format!("{STALE_SHADOW_ERROR}（工作区：{}）", target.display())
 }
 
-/// Metadata-only initialization of the external shadow repository. Creates the
-/// Git directory when needed but never stages or commits, so a caller that
-/// needs a usable `HEAD` must do so explicitly.
 fn copy_shadow_git_settings(source: &Path, shadow: &Path) -> Result<(), String> {
     let shadow_text = shadow.to_str().ok_or("Invalid shadow path")?;
-    // Core conversion settings decide which bytes enter the snapshot. Copy the
-    // effective local values so staging in the private repository matches the
-    // user's checkout (notably autocrlf/eol/filemode differences).
-    for key in ["core.autocrlf", "core.eol", "core.filemode", "core.symlinks", "core.ignorecase", "core.safecrlf"] {
+    for key in [
+        "core.autocrlf",
+        "core.eol",
+        "core.filemode",
+        "core.symlinks",
+        "core.ignorecase",
+        "core.safecrlf",
+    ] {
         if let Ok(value) = git(source, &["config", "--local", "--get", key]) {
             git(source, &["--git-dir", shadow_text, "config", key, &value])?;
         }
@@ -807,16 +1004,34 @@ fn copy_shadow_git_settings(source: &Path, shadow: &Path) -> Result<(), String> 
     // Local filter drivers are needed when .gitattributes refers to a filter
     // that is not defined in the global/system config. Only filter.* keys are
     // copied; remotes, credentials and other local settings stay out.
-    if let Ok(entries) = git(source, &["config", "--local", "--null", "--get-regexp", "^filter\\."]) {
+    if let Ok(entries) = git(
+        source,
+        &["config", "--local", "--null", "--get-regexp", "^filter\\."],
+    ) {
         for entry in entries.split('\0').filter(|entry| !entry.is_empty()) {
-            let Some((key, value)) = entry.split_once('\n') else { continue };
-            if !key.starts_with("filter.") { continue; }
-            git(source, &["--git-dir", shadow_text, "config", "--add", key, value])?;
+            let Some((key, value)) = entry.split_once('\n') else {
+                continue;
+            };
+            if !key.starts_with("filter.") {
+                continue;
+            }
+            git(
+                source,
+                &["--git-dir", shadow_text, "config", "--add", key, value],
+            )?;
         }
     }
     // .git/info/attributes is local (not a project file) and can alter text
     // conversion or filters. Mirror it into the private repository.
-    if let Ok(info) = git(source, &["rev-parse", "--path-format=absolute", "--git-path", "info/attributes"]) {
+    if let Ok(info) = git(
+        source,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/attributes",
+        ],
+    ) {
         let info = PathBuf::from(info);
         if info.is_file() {
             let destination = shadow.join("info");
@@ -844,10 +1059,24 @@ fn ensure_shadow_metadata(target: &Path) -> Result<PathBuf, String> {
         let git_dir_str = shadow_dir.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical_target.to_str().ok_or("Invalid target path")?;
         let format = if is_standard_git(&canonical_target) {
-            git(&canonical_target, &["rev-parse", "--show-object-format=storage"])?
-        } else { "sha1".into() };
-        git(&canonical_target, &["--git-dir", git_dir_str, "--work-tree", work_tree_str,
-            "init", &format!("--object-format={format}")])?;
+            git(
+                &canonical_target,
+                &["rev-parse", "--show-object-format=storage"],
+            )?
+        } else {
+            "sha1".into()
+        };
+        git(
+            &canonical_target,
+            &[
+                "--git-dir",
+                git_dir_str,
+                "--work-tree",
+                work_tree_str,
+                "init",
+                &format!("--object-format={format}"),
+            ],
+        )?;
         if is_standard_git(&canonical_target) {
             copy_shadow_git_settings(&canonical_target, &shadow_dir)?;
         }
@@ -870,7 +1099,18 @@ fn ensure_graph_metadata(target: &Path) -> Result<PathBuf, String> {
         if let Ok(head) = git(target, &["rev-parse", "HEAD"]) {
             if repository_git(target, &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_err() {
                 let url = git_file_url(target)?;
-                repository_git(target, &["fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-auto-gc", &url, &head])?;
+                repository_git(
+                    target,
+                    &[
+                        "fetch",
+                        "-q",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        "--no-auto-gc",
+                        &url,
+                        &head,
+                    ],
+                )?;
             }
         }
     }
@@ -880,14 +1120,32 @@ fn ensure_graph_metadata(target: &Path) -> Result<PathBuf, String> {
 fn bridge_plain_snapshot(target: &Path) -> Result<String, String> {
     let head = repository_git(target, &["rev-parse", "HEAD"])?;
     if let (Ok(published), Ok(composed)) = (
-        repository_git(target, &["rev-parse", "--verify", "refs/grapher/published/source"]),
-        repository_git(target, &["rev-parse", "--verify", "refs/grapher/published/composed"]),
+        repository_git(
+            target,
+            &["rev-parse", "--verify", "refs/grapher/published/source"],
+        ),
+        repository_git(
+            target,
+            &["rev-parse", "--verify", "refs/grapher/published/composed"],
+        ),
     ) {
         if repository_git(target, &["merge-base", "--is-ancestor", &published, &head]).is_ok()
             && repository_git(target, &["merge-base", "--is-ancestor", &composed, &head]).is_err()
         {
             let tree = repository_git(target, &["rev-parse", &format!("{head}^{{tree}}")])?;
-            let bridge = repository_git(target, &["commit-tree", &tree, "-p", &head, "-p", &composed, "-m", SNAPSHOT_COMMIT_MESSAGE])?;
+            let bridge = repository_git(
+                target,
+                &[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &head,
+                    "-p",
+                    &composed,
+                    "-m",
+                    SNAPSHOT_COMMIT_MESSAGE,
+                ],
+            )?;
             repository_git(target, &["update-ref", "HEAD", &bridge])?;
             return Ok(bridge);
         }
@@ -922,7 +1180,16 @@ pub fn materialize_shadow_repo(target: &Path, exclusions: &[String]) -> Result<S
             fs::remove_file(&lock).map_err(|error| error.to_string())?;
         }
     }
-    stage_scoped(&canonical, exclusions)?;
+    let identity = if exclusions.is_empty() {
+        Some(crate::workspace_view::source_identity(&canonical)?)
+    } else {
+        None
+    };
+    if identity.is_some() {
+        crate::workspace_view::stage_project(&canonical, &shadow)?;
+    } else {
+        stage_scoped(&canonical, exclusions)?;
+    }
     let lock = host_ref_lock(&canonical)?;
     let _guard = lock.lock().map_err(|e| e.to_string())?;
     let staged = git(
@@ -937,26 +1204,28 @@ pub fn materialize_shadow_repo(target: &Path, exclusions: &[String]) -> Result<S
             "--name-only",
         ],
     )?;
-    let mut commit = vec![
-        "--git-dir",
-        git_dir,
-        "--work-tree",
-        work_tree,
-        "commit",
-    ];
+    let mut commit = vec!["--git-dir", git_dir, "--work-tree", work_tree, "commit"];
     if staged.trim().is_empty() {
         if head_exists {
             // Nothing changed and a usable HEAD already exists; reuse it instead
             // of adding a redundant empty commit (idempotent re-materialization
             // for crash recovery and shared sources).
-            return bridge_plain_snapshot(&canonical);
+            let head = bridge_plain_snapshot(&canonical)?;
+            if let Some(identity) = &identity {
+                crate::workspace_view::capture_source(&canonical, &head, identity)?;
+            }
+            return Ok(head);
         }
         // First collection of an empty directory: still create a HEAD.
         commit.push("--allow-empty");
     }
     commit.extend(["-m", "Grapher source snapshot"]);
     git(&canonical, &commit)?;
-    bridge_plain_snapshot(&canonical)
+    let head = bridge_plain_snapshot(&canonical)?;
+    if let Some(identity) = &identity {
+        crate::workspace_view::capture_source(&canonical, &head, identity)?;
+    }
+    Ok(head)
 }
 
 pub fn remove_shadow_repo(target: &Path) -> Result<(), String> {
@@ -1192,13 +1461,20 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
     if !supported {
         return None;
     }
+    // A visible project .git and the backend graph repository are independent.
+    // Never let this optimization accidentally inspect the agent's HEAD/index.
+    if private_git_dir(cwd).is_some() {
+        return None;
+    }
     let repo = git2::Repository::open(cwd).ok()?;
     // Git status/diff invoked from a subdirectory are scoped to that path;
     // libgit2 reports repository-wide results unless a pathspec is supplied.
     if matches!(
         args,
         ["status", "--porcelain"] | ["diff", "--name-only", "--diff-filter=U"]
-    ) && !repo.workdir().and_then(|dir| dir.canonicalize().ok())
+    ) && !repo
+        .workdir()
+        .and_then(|dir| dir.canonicalize().ok())
         .is_some_and(|workdir| crate::path_identity::same_path(&workdir, &cwd))
     {
         return None;
@@ -1365,10 +1641,7 @@ fn git_command_failure(cwd: &Path, args: &[&str], output: &std::process::Output)
     };
     // A terminated/crashed Git process can leave only warnings on stderr.
     // Always retain its exit status and both streams, not just the warnings.
-    let mut message = format!(
-        "git {args:?} failed in {} ({status})",
-        cwd.display()
-    );
+    let mut message = format!("git {args:?} failed in {} ({status})", cwd.display());
     if let Some(cause) = git_failure_cause(output) {
         message.push_str(&format!("\n{cause}."));
     }
@@ -1391,6 +1664,9 @@ fn configure_host_git(command: &mut Command) {
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+                                             // Internal evidence/pack paths can exceed MAX_PATH even for a short
+                                             // project. This is a host-plumbing option, never a project config edit.
+        command.args(["-c", "core.longpaths=true"]);
     }
     #[cfg(unix)]
     {
@@ -1401,7 +1677,10 @@ fn configure_host_git(command: &mut Command) {
 
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let _lease = SlotGitGuard::acquire(cwd)?;
-    if private_git_dir(cwd).is_some() && cwd.join(".git").exists() {
+    if private_git_dir(cwd).is_some()
+        && cwd.join(".git").exists()
+        && !crate::workspace_view::is_bound(cwd)
+    {
         return Err("Graph node created unexpected Git metadata".into());
     }
     if let Some(result) = git_read(cwd, args) {
@@ -1415,17 +1694,61 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// Binary-safe plumbing with an optional private index and stdin. Never inherit
-/// the service's Git environment, and never let a pipe full of input deadlock
-/// a child whose stdout is also a pipe.
-pub(crate) fn git_bytes(cwd: &Path, args: &[&str], index: Option<&Path>, input: Option<&[u8]>) -> Result<Vec<u8>, String> {
+pub(crate) fn project_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let bytes = project_git_bytes(cwd, args, None)?;
+    let text = String::from_utf8(bytes).map_err(|_| "Non-UTF-8 project Git output")?;
+    Ok(if args.contains(&"-z") || args.contains(&"--null") {
+        text
+    } else {
+        text.trim_end_matches(['\r', '\n']).into()
+    })
+}
+
+pub(crate) fn project_git_bytes(
+    cwd: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    run_git_bytes(cwd, args, None, input, true)
+}
+
+pub(crate) fn git_bytes(
+    cwd: &Path,
+    args: &[&str],
+    index: Option<&Path>,
+    input: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    run_git_bytes(cwd, args, index, input, false)
+}
+
+fn run_git_bytes(
+    cwd: &Path,
+    args: &[&str],
+    index: Option<&Path>,
+    input: Option<&[u8]>,
+    project_view: bool,
+) -> Result<Vec<u8>, String> {
     let _lease = SlotGitGuard::acquire(cwd)?;
-    let metadata = private_git_dir(cwd);
+    let metadata = if project_view {
+        None
+    } else {
+        private_git_dir(cwd)
+    };
     let mut command_args = Vec::new();
-    if !args.contains(&"--git-dir") {
+    let explicit_git_dir = args
+        .first()
+        .is_some_and(|arg| *arg == "--git-dir" || arg.starts_with("--git-dir="));
+    if !explicit_git_dir {
         if let Some(metadata) = &metadata {
-            if cwd.join(".git").exists() { return Err("Graph node created unexpected Git metadata".into()); }
-            command_args.extend(["--git-dir", metadata.to_str().ok_or("Invalid private Git path")?, "--work-tree", cwd.to_str().ok_or("Invalid workspace path")?]);
+            if cwd.join(".git").exists() && !crate::workspace_view::is_bound(cwd) {
+                return Err("Graph node created unexpected Git metadata".into());
+            }
+            command_args.extend([
+                "--git-dir",
+                metadata.to_str().ok_or("Invalid private Git path")?,
+                "--work-tree",
+                cwd.to_str().ok_or("Invalid workspace path")?,
+            ]);
         }
     }
     command_args.extend_from_slice(args);
@@ -1451,10 +1774,36 @@ pub(crate) fn git_bytes(cwd: &Path, args: &[&str], index: Option<&Path>, input: 
     let mut command = Command::new("git");
     configure_host_git(&mut command);
     crate::native::clear_git_environment(&mut command);
+    if let Some(owner) = project_view
+        .then(|| crate::workspace_view::owner(cwd))
+        .flatten()
+    {
+        let state = crate::workspace_state::process_root(owner)?;
+        command
+            .env("HOME", crate::native::host_path(&state.join(".agent-home")))
+            .env(
+                "USERPROFILE",
+                crate::native::host_path(&state.join(".agent-home")),
+            )
+            .env(
+                "XDG_CONFIG_HOME",
+                crate::native::host_path(&state.join(".agent-home/.config")),
+            )
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                crate::native::host_path(&state.join(".git-config/global")),
+            )
+            .env(
+                "GIT_CEILING_DIRECTORIES",
+                crate::native::host_path(owner.parent().ok_or("Missing project parent")?),
+            );
+    }
     #[cfg(windows)]
-    command.args(["-c", "core.longpaths=true"]);
-    command
-        .args([
+    if !project_view {
+        command.args(["-c", "core.longpaths=true"]);
+    }
+    if !project_view {
+        command.args([
             "-c",
             hooks_config.as_str(),
             "-c",
@@ -1471,14 +1820,22 @@ pub(crate) fn git_bytes(cwd: &Path, args: &[&str], index: Option<&Path>, input: 
             "gc.auto=0",
             "-c",
             "maintenance.auto=false",
-        ])
+        ]);
+    }
+    command
         .args(cli_args)
         .current_dir(cwd)
-        .env("GIT_TERMINAL_PROMPT", "0");
-    if let Some(index) = index { command.env("GIT_INDEX_FILE", crate::native::host_path(index)); }
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", crate::native::host_path(index));
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    if input.is_some() { command.stdin(Stdio::piped()); }
-    let mut child = command.spawn()
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("Cannot run git {args:?} in {}: {error}", cwd.display()))?;
     let (output, input_result) = std::thread::scope(|scope| {
         let writer = input.map(|bytes| {
@@ -1486,7 +1843,11 @@ pub(crate) fn git_bytes(cwd: &Path, args: &[&str], index: Option<&Path>, input: 
             scope.spawn(move || stdin.write_all(bytes))
         });
         let output = child.wait_with_output().map_err(|e| e.to_string())?;
-        let input_result = if let Some(writer) = writer { writer.join().map_err(|_| "Git input writer panicked")? } else { Ok(()) };
+        let input_result = if let Some(writer) = writer {
+            writer.join().map_err(|_| "Git input writer panicked")?
+        } else {
+            Ok(())
+        };
         Ok::<_, String>((output, input_result))
     })?;
     if !output.status.success() {
@@ -1527,6 +1888,9 @@ pub fn check_shadow_base(repository: &Path, expected_head: &str) -> Result<(), S
 /// Run Git against either a normal checkout or the existing external shadow
 /// repository. Publication must never create/rebaseline a shadow repository.
 pub fn repository_git(repository: &Path, args: &[&str]) -> Result<String, String> {
+    if private_git_dir(repository).is_some() {
+        return git(repository, args);
+    }
     let repository = repository.canonicalize().map_err(|e| e.to_string())?;
     let shadow = match shadow_repo_if_exists(&repository) {
         Ok(Some(shadow)) => shadow,
@@ -1548,8 +1912,11 @@ pub fn repository_git(repository: &Path, args: &[&str]) -> Result<String, String
 /// Graph snapshot that may predate newly staged user files. Private node slots
 /// still resolve through host Git, and plain folders use their shadow index.
 pub(crate) fn working_tree_git(repository: &Path, args: &[&str]) -> Result<String, String> {
-    if is_standard_git(repository) { git(repository, args) }
-    else { repository_git(repository, args) }
+    if is_standard_git(repository) {
+        git(repository, args)
+    } else {
+        repository_git(repository, args)
+    }
 }
 
 /// Read-only validation of the original binding. Never search, rebind, create a
@@ -1641,7 +2008,10 @@ fn copy_planner_symlink(
         )
     })?;
     if !scope_contains(&resolved, &context.repository)
-        || data_root().canonicalize().ok().is_some_and(|data| scope_contains(&resolved, &data))
+        || data_root()
+            .canonicalize()
+            .ok()
+            .is_some_and(|data| scope_contains(&resolved, &data))
         || resolved
             .strip_prefix(&context.repository)
             .unwrap()
@@ -1712,8 +2082,9 @@ fn copy_planner_files(
             let meta = fs::symlink_metadata(&original).map_err(|e| e.to_string())?;
             if original == excluded_data
                 || (meta.is_dir()
-                    && original.canonicalize().ok().is_some_and(|original|
-                        crate::path_identity::same_path(&original, excluded_data)))
+                    && original.canonicalize().ok().is_some_and(|original| {
+                        crate::path_identity::same_path(&original, excluded_data)
+                    }))
             {
                 continue;
             }
@@ -1870,13 +2241,14 @@ mod planner_symlink_tests {
     }
 }
 
-/// Current Partitioner/Planner sessions run in source; these helpers remain for
-/// legacy checkout/publication compatibility tests.
 /// Snapshot the source into a private Planner checkout. The source lock is held
 /// only while taking this copy, never while Pi is running. Include ordinary
 /// project files, but never Git internals or Grapher data.
 pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
-    let base = verify(repository)?;
+    // The Planner copies the live project, including dirty and ignored files.
+    // Capture that complete source explicitly instead of passing a raw user
+    // HEAD that a dirty working tree could silently replace.
+    let base = snapshot_repository(repository)?;
     prepare(repository, path, &base, &[])?;
     #[cfg(not(windows))]
     let mut copy_context = PlannerCopy;
@@ -2115,6 +2487,24 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         uuid::Uuid::parse_str(id).map_err(|_| "Invalid Run ID for parent snapshot")?;
     }
     let canonical_repo = canonical_workspace_path(repository)?;
+    // Public prepare callers may supply a user HEAD rather than a previously
+    // captured internal input. Bind the live source exactly as it is now,
+    // including uncommitted, untracked and ignored entries: the source folder
+    // is the truth and its Git status is not our concern. Never re-read the
+    // live source when a recorded view already exists (retry/fork/recovery);
+    // a frozen base is opt-in through `snapshot_repository`, which production
+    // takes once during planning.
+    let captured_base = if !crate::workspace_view::has_record(&canonical_repo, base)
+        && project_git(&canonical_repo, &["rev-parse", "HEAD"])
+            .ok()
+            .as_deref()
+            == Some(base)
+    {
+        Some(snapshot_repository(&canonical_repo)?)
+    } else {
+        None
+    };
+    let base = captured_base.as_deref().unwrap_or(base);
     // A new destination is allowed to be absent; existing paths (including
     // dangling symlinks) must resolve successfully before comparing identity.
     let destination_exists = path.try_exists().map_err(|error| error.to_string())?;
@@ -2123,7 +2513,8 @@ pub(crate) fn prepare_with_merger_expected_for_run(
     } else {
         None
     };
-    if canonical_path.as_ref()
+    if canonical_path
+        .as_ref()
         .is_some_and(|path| crate::path_identity::same_path(path, &canonical_repo))
     {
         if is_standard_git(repository) {
@@ -2160,7 +2551,8 @@ pub(crate) fn prepare_with_merger_expected_for_run(
     let source_git_path = if is_standard_git(&canonical_repo) {
         ensure_graph_metadata(&canonical_repo)?
     } else {
-        shadow_repo_if_exists(&canonical_repo)?.ok_or_else(|| missing_shadow_error(&canonical_repo))?
+        shadow_repo_if_exists(&canonical_repo)?
+            .ok_or_else(|| missing_shadow_error(&canonical_repo))?
     };
     let pin = format!("refs/grapher/heads/{base}");
     repository_git(&canonical_repo, &["update-ref", &pin, base])?;
@@ -2176,9 +2568,8 @@ pub(crate) fn prepare_with_merger_expected_for_run(
             source_git_path.to_str().ok_or("Invalid shadow path")?,
         ]
     };
-    // Re-preparation is host work. Expose metadata only for allocation and
-    // composition; the completed slot is hidden again before a node starts.
-    let _view = MergerGitView::open(path)?;
+    // Graph metadata is never an agent .git, including during composition.
+    allocate_private_git(path)?;
     let source_git = |args: &[&str]| -> Result<String, String> {
         let mut command = source_args.clone();
         command.extend_from_slice(args);
@@ -2206,6 +2597,10 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         }
         _ => return Err(format!("Unsupported Git object format: {object_format}")),
     }
+    // Internal trees contain physical project bytes, not clean-filter output.
+    // This applies only to graph Git; the visible project keeps its own rules.
+    let graph_metadata = private_git_dir(path).unwrap_or_else(|| path.join(".git"));
+    raw_checkout_attributes(&graph_metadata)?;
     // Native agent Bash/Git must also handle the deeper AppData checkouts.
     #[cfg(windows)]
     git(path, &["config", "core.longpaths", "true"])?;
@@ -2257,7 +2652,9 @@ pub(crate) fn prepare_with_merger_expected_for_run(
             .ok_or("Invalid Git object path")?
             .to_string();
         fs::write(
-            path.join(".git/objects/info/alternates"),
+            private_git_dir(path)
+                .unwrap_or_else(|| path.join(".git"))
+                .join("objects/info/alternates"),
             format!("{objects_for_git}\n"),
         )
         .map_err(|e| e.to_string())?;
@@ -2266,7 +2663,14 @@ pub(crate) fn prepare_with_merger_expected_for_run(
     }
     git(
         path,
-        &["checkout", "-q", "-f", "-B", "grapher-node", "refs/grapher/base"],
+        &[
+            "checkout",
+            "-q",
+            "-f",
+            "-B",
+            "grapher-node",
+            "refs/grapher/base",
+        ],
     )?;
     let mut resolved_heads = Vec::new();
     for parent in parents {
@@ -2345,7 +2749,16 @@ pub(crate) fn prepare_with_merger_expected_for_run(
             }
         }
     }
-    git(path, &["rev-parse", "HEAD"])
+    let head = git(path, &["rev-parse", "HEAD"])?;
+    if private_slot_layout(path) {
+        let mut views = resolved_heads;
+        if head != base_head && crate::workspace_view::has_record(&canonical_repo, &head) {
+            views.push(head.clone());
+        }
+        crate::workspace_view::prepare(&canonical_repo, path, &base_head, &views)?;
+        return crate::workspace_view::seal_prepared(path, &canonical_repo);
+    }
+    Ok(head)
 }
 
 /// Keep only commits not contained in another input, preserving input order.
@@ -2423,11 +2836,34 @@ pub(crate) fn snapshot_node_scoped(
     if !git(&canonical_path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
         return Err("Unresolved merge conflicts remain".into());
     }
-    stage_scoped_local(&canonical_path, exclusions)?;
-    if !git(&canonical_path, &["diff", "--cached", "--name-only"])?.is_empty() {
+    let view_identity = crate::workspace_view::node_identity(&canonical_path, &canonical_repo)?;
+    if view_identity.is_some() {
+        crate::workspace_view::reject_undeliverable_special_changes(
+            &canonical_path,
+            &canonical_repo,
+        )?;
+    }
+    if exclusions.is_empty() && view_identity.is_some() {
+        crate::workspace_view::stage_project(
+            &canonical_path,
+            &private_git_dir(&canonical_path).unwrap_or_else(|| canonical_path.join(".git")),
+        )?;
+    } else {
+        stage_scoped_local(&canonical_path, exclusions)?;
+    }
+    let current = git(&canonical_path, &["rev-parse", "HEAD"])?;
+    let changed_view = view_identity.as_ref().is_some_and(|identity| {
+        !crate::workspace_view::record_matches(&canonical_repo, &current, identity)
+    });
+    let rebind_view = changed_view;
+    if rebind_view || !git(&canonical_path, &["diff", "--cached", "--name-only"])?.is_empty() {
+        let message = view_identity
+            .as_ref()
+            .map(|id| format!("snapshot\n\nworkspace-view:{id}"))
+            .unwrap_or_else(|| SNAPSHOT_COMMIT_MESSAGE.into());
         git(
             &canonical_path,
-            &["commit", "-m", SNAPSHOT_COMMIT_MESSAGE],
+            &["commit", "--allow-empty", "-m", &message],
         )?;
     }
     let head = git(&canonical_path, &["rev-parse", "HEAD"])?;
@@ -2436,7 +2872,11 @@ pub(crate) fn snapshot_node_scoped(
         &["update-ref", "refs/heads/grapher-node", &head],
     )?;
 
-    let path_url = git_file_url(private_git_dir(&canonical_path).as_deref().unwrap_or(&canonical_path))?;
+    let path_url = git_file_url(
+        private_git_dir(&canonical_path)
+            .as_deref()
+            .unwrap_or(&canonical_path),
+    )?;
     let head_ref = format!("refs/grapher/heads/{head}");
     let head_refspec = format!("+refs/heads/grapher-node:{head_ref}");
     // The label stays human-readable; only the ref uses the safe id.
@@ -2447,12 +2887,22 @@ pub(crate) fn snapshot_node_scoped(
         format!("refs/grapher/nodes/{node_id}")
     };
     let node_refspec = format!("+refs/heads/grapher-node:{node_ref}");
-    let shadow = if is_standard_git(&canonical_repo) { Some(ensure_graph_metadata(&canonical_repo)?) }
-        else { shadow_repo_if_exists(&canonical_repo)? };
-    let source_args = shadow.as_ref().map(|shadow| vec![
-        "--git-dir".to_string(), shadow.to_string_lossy().into_owned(),
-        "--work-tree".to_string(), canonical_repo.to_string_lossy().into_owned(),
-    ]).unwrap_or_default();
+    let shadow = if is_standard_git(&canonical_repo) {
+        Some(ensure_graph_metadata(&canonical_repo)?)
+    } else {
+        shadow_repo_if_exists(&canonical_repo)?
+    };
+    let source_args = shadow
+        .as_ref()
+        .map(|shadow| {
+            vec![
+                "--git-dir".to_string(),
+                shadow.to_string_lossy().into_owned(),
+                "--work-tree".to_string(),
+                canonical_repo.to_string_lossy().into_owned(),
+            ]
+        })
+        .unwrap_or_default();
     // Serialize host ref writes for this repository, not node execution or
     // writes to other repositories. Git's packed-refs lock can outlive a
     // short retry window even when each worker writes a different node ref.
@@ -2476,7 +2926,10 @@ pub(crate) fn snapshot_node_scoped(
         }
         args.push(&node_refspec);
         match git(&canonical_repo, &args) {
-            Ok(_) => return Ok(head),
+            Ok(_) => {
+                crate::workspace_view::capture_node(&canonical_path, &canonical_repo, &head)?;
+                return Ok(head);
+            }
             Err(error) if attempt == 3 => return Err(error),
             Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
         }
@@ -2540,6 +2993,23 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
     // preserved separately and is intentionally not part of Graph collection.
     let args = scoped_args(&["status", "--porcelain", "-z"], exclusions);
     let raw = repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+    if crate::workspace_view::is_bound(path) {
+        let ignored = git(
+            path,
+            &[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ],
+        )?;
+        let mut status = raw;
+        for name in ignored.split('\0').filter(|s| !s.is_empty()) {
+            status.push_str(&format!("!! {name}\0"));
+        }
+        return Ok(status);
+    }
     let mut status = filtered_status(raw, path, exclusions);
     if !cfg!(target_os = "macos") {
         let args = scoped_args(
@@ -2582,8 +3052,7 @@ fn status_path_excluded(
     root.zip(data).is_some_and(|(root, data)| {
         data.strip_prefix(root).ok().is_some_and(|relative| {
             let relative = relative.to_string_lossy().replace('\\', "/");
-            !relative.is_empty()
-                && (name == relative || name.starts_with(&format!("{relative}/")))
+            !relative.is_empty() && (name == relative || name.starts_with(&format!("{relative}/")))
         })
     })
 }
@@ -2613,7 +3082,9 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
             if macos && (code == "??" || code == "!!") {
                 continue;
             }
-            if code == "!!" && status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions) {
+            if code == "!!"
+                && status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions)
+            {
                 continue;
             }
         } else if code == "!!" {
@@ -2634,14 +3105,15 @@ fn ignored_host_metadata(raw: &str, root: &Path, exclusions: &[String]) -> Strin
     let root = root.canonicalize().ok();
     let data = data_root().canonicalize().ok();
     raw.split('\0')
-        .filter(|path| !path.is_empty()
-            && is_host_metadata_name(path)
-            && !status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions))
+        .filter(|path| {
+            !path.is_empty()
+                && is_host_metadata_name(path)
+                && !status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions)
+        })
         .map(|path| format!("!! {path}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
-
 
 /// Host bookkeeping that macOS filters from dirty reports; other hosts still
 /// force-collect it as ordinary project data.
@@ -2650,7 +3122,6 @@ fn is_host_metadata_name(relative: &str) -> bool {
     let name = relative.rsplit('/').next().unwrap_or(relative);
     name == ".DS_Store" || name.starts_with("._")
 }
-
 
 /// macOS host bookkeeping is not project output. Windows keeps its existing
 /// collection strategy because its metadata files are not part of this policy.
@@ -2673,7 +3144,13 @@ fn host_metadata_exclusions() -> Vec<String> {
 fn stage_tracked_host_metadata_impl(path: &Path, local: bool) -> Result<(), String> {
     // The exclusion above also hides metadata the user explicitly tracked.
     // Re-stage only paths already in the index, never newly discovered files.
-    let run = |args: &[&str]| if local { git(path, args) } else { repository_git(path, args) };
+    let run = |args: &[&str]| {
+        if local {
+            git(path, args)
+        } else {
+            repository_git(path, args)
+        }
+    };
     let tracked = run(&[
         "ls-files",
         "-z",
@@ -2683,7 +3160,10 @@ fn stage_tracked_host_metadata_impl(path: &Path, local: bool) -> Result<(), Stri
         "._*",
         "**/._*",
     ])?;
-    let tracked: Vec<&str> = tracked.split('\0').filter(|name| !name.is_empty()).collect();
+    let tracked: Vec<&str> = tracked
+        .split('\0')
+        .filter(|name| !name.is_empty())
+        .collect();
     for chunk in tracked.chunks(100) {
         let mut args = vec!["add", "-f", "-A", "--"];
         args.extend(chunk.iter().copied());
@@ -2695,6 +3175,15 @@ fn stage_tracked_host_metadata_impl(path: &Path, local: bool) -> Result<(), Stri
 /// Internal snapshot label. All Graph commits stay private; delivery never
 /// creates a commit in the user's repository.
 pub(crate) const SNAPSHOT_COMMIT_MESSAGE: &str = "snapshot";
+
+pub(crate) fn raw_checkout_attributes(metadata: &Path) -> Result<(), String> {
+    fs::create_dir_all(metadata.join("info")).map_err(|e| e.to_string())?;
+    fs::write(
+        metadata.join("info/attributes"),
+        b"* -text -filter -ident -working-tree-encoding\n",
+    )
+    .map_err(|e| e.to_string())
+}
 
 pub(crate) fn stage_scoped(path: &Path, exclusions: &[String]) -> Result<(), String> {
     stage_scoped_impl(path, exclusions, false)
@@ -2753,6 +3242,12 @@ fn scope_pathspecs(exclusions: &[String]) -> Vec<String> {
 }
 
 fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<(), String> {
+    if crate::workspace_view::is_bound(path) && exclusions.is_empty() {
+        return crate::workspace_view::stage_project(
+            path,
+            &private_git_dir(path).ok_or("Missing graph Git")?,
+        );
+    }
     // Runtime deliberately overrides Git's ignore rules for project files:
     // every ordinary project file becomes part of the node/source Git snapshot.
     // Only Grapher internals, Runtime data, managed environment scopes and
@@ -2781,7 +3276,13 @@ fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<
             format!(":(exclude,literal){scope}")
         }
     }));
-    let mut args = vec!["add".to_string(), "-f".to_string(), "-A".to_string(), "--".to_string(), ".".to_string()];
+    let mut args = vec![
+        "add".to_string(),
+        "-f".to_string(),
+        "-A".to_string(),
+        "--".to_string(),
+        ".".to_string(),
+    ];
     args.extend(pathspecs);
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     if local {
@@ -2844,7 +3345,9 @@ pub(crate) fn copy_ordinary_files(
                 .iter()
                 .any(|scope| scope_contains(relative, Path::new(scope)))
             || runtime_data.as_ref().is_some_and(|data| {
-                data != &source && data.starts_with(&source) && source.join(relative).starts_with(data)
+                data != &source
+                    && data.starts_with(&source)
+                    && source.join(relative).starts_with(data)
             })
     })
 }
@@ -2900,6 +3403,11 @@ pub(crate) fn snapshot_repository_scoped(
         }
         let index_lock = host_index_lock(path)?;
         let _index_guard = index_lock.lock().map_err(|e| e.to_string())?;
+        let identity = if exclusions.is_empty() {
+            Some(crate::workspace_view::source_identity(path)?)
+        } else {
+            None
+        };
         let head = git(path, &["rev-parse", "HEAD"]).ok();
         let shadow = {
             let lock = host_ref_lock(path)?;
@@ -2910,8 +3418,20 @@ pub(crate) fn snapshot_repository_scoped(
         if let Some(head) = head.as_deref() {
             if repository_git(path, &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_err() {
                 let url = git_file_url(private_git_dir(path).as_deref().unwrap_or(path))?;
-                git(path, &["--git-dir", shadow_text, "fetch", "-q", "--no-tags",
-                    "--no-write-fetch-head", "--no-auto-gc", &url, head])?;
+                git(
+                    path,
+                    &[
+                        "--git-dir",
+                        shadow_text,
+                        "fetch",
+                        "-q",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        "--no-auto-gc",
+                        &url,
+                        head,
+                    ],
+                )?;
             }
             // Read/write only the private index. The user's index and branch are
             // untouched, even when their staged content differs from the worktree.
@@ -2922,36 +3442,96 @@ pub(crate) fn snapshot_repository_scoped(
             // repository.
             repository_git(path, &["read-tree", "--empty"])?;
         }
-        stage_scoped(path, exclusions)?;
+        if identity.is_some() {
+            crate::workspace_view::stage_project(path, &shadow)?;
+        } else {
+            stage_scoped(path, exclusions)?;
+        }
         let tree = repository_git(path, &["write-tree"])?;
         let original = match head.as_deref() {
-            Some(head) => Some(repository_git(path, &["rev-parse", &format!("{head}^{{tree}}")])?),
+            Some(head) => Some(repository_git(
+                path,
+                &["rev-parse", &format!("{head}^{{tree}}")],
+            )?),
             None => None,
         };
         let lock = host_ref_lock(path)?;
         let _guard = lock.lock().map_err(|e| e.to_string())?;
-        let published = repository_git(path, &["rev-parse", "--verify", "refs/grapher/published/source"]).ok();
-        let composed = repository_git(path, &["rev-parse", "--verify", "refs/grapher/published/composed"]).ok();
-        let bridge = head.as_deref().zip(published.as_deref()).zip(composed.as_deref()).and_then(|((head, published), composed)| {
-            repository_git(path, &["merge-base", "--is-ancestor", published, head]).is_ok().then_some(composed)
-        });
-        let input_ref = format!("refs/grapher/inputs/{}-{}-{}", head.as_deref().unwrap_or("unborn"), tree, bridge.unwrap_or("source"));
-        let snapshot = if let Ok(existing) = repository_git(path, &["rev-parse", "--verify", &input_ref]) {
-            existing
-        } else {
-            let snapshot = match (head.as_deref(), bridge) {
-                // Carry delivered node ancestry only in the internal history,
-                // so later revisions don't reapply already published changes.
-                (Some(head), Some(composed)) => repository_git(path, &["commit-tree", &tree, "-p", head, "-p", composed, "-m", SNAPSHOT_COMMIT_MESSAGE])?,
-                (Some(head), None) if original.as_deref() == Some(tree.as_str()) => head.to_string(),
-                (Some(head), None) => repository_git(path, &["commit-tree", &tree, "-p", head, "-m", SNAPSHOT_COMMIT_MESSAGE])?,
-                (None, _) => repository_git(path, &["commit-tree", &tree, "-m", SNAPSHOT_COMMIT_MESSAGE])?,
+        let published = repository_git(
+            path,
+            &["rev-parse", "--verify", "refs/grapher/published/source"],
+        )
+        .ok();
+        let composed = repository_git(
+            path,
+            &["rev-parse", "--verify", "refs/grapher/published/composed"],
+        )
+        .ok();
+        let bridge = head
+            .as_deref()
+            .zip(published.as_deref())
+            .zip(composed.as_deref())
+            .and_then(|((head, published), composed)| {
+                repository_git(path, &["merge-base", "--is-ancestor", published, head])
+                    .is_ok()
+                    .then_some(composed)
+            });
+        let input_ref = format!(
+            "refs/grapher/inputs/{}-{}-{}-{}",
+            head.as_deref().unwrap_or("unborn"),
+            tree,
+            bridge.unwrap_or("source"),
+            identity.as_deref().unwrap_or("legacy")
+        );
+        let message = identity
+            .as_ref()
+            .map(|identity| format!("snapshot\n\nworkspace-view:{identity}"))
+            .unwrap_or_else(|| SNAPSHOT_COMMIT_MESSAGE.into());
+        let snapshot =
+            if let Ok(existing) = repository_git(path, &["rev-parse", "--verify", &input_ref]) {
+                existing
+            } else {
+                let snapshot = match (head.as_deref(), bridge) {
+                    // Carry delivered node ancestry only in the internal history,
+                    // so later revisions don't reapply already published changes.
+                    (Some(head), Some(composed)) => repository_git(
+                        path,
+                        &[
+                            "commit-tree",
+                            &tree,
+                            "-p",
+                            head,
+                            "-p",
+                            composed,
+                            "-m",
+                            &message,
+                        ],
+                    )?,
+                    (Some(head), None)
+                        if identity.is_none() && original.as_deref() == Some(tree.as_str()) =>
+                    {
+                        head.to_string()
+                    }
+                    (Some(head), None) => {
+                        repository_git(path, &["commit-tree", &tree, "-p", head, "-m", &message])?
+                    }
+                    (None, _) => repository_git(path, &["commit-tree", &tree, "-m", &message])?,
+                };
+                repository_git(path, &["update-ref", &input_ref, &snapshot])?;
+                snapshot
             };
-            repository_git(path, &["update-ref", &input_ref, &snapshot])?;
-            snapshot
-        };
         repository_git(path, &["update-ref", "HEAD", &snapshot])?;
-        repository_git(path, &["update-ref", &format!("refs/grapher/heads/{snapshot}"), &snapshot])?;
+        repository_git(
+            path,
+            &[
+                "update-ref",
+                &format!("refs/grapher/heads/{snapshot}"),
+                &snapshot,
+            ],
+        )?;
+        if let Some(identity) = identity {
+            crate::workspace_view::capture_source(path, &snapshot, &identity)?;
+        }
         Ok(snapshot)
     } else {
         let canonical = path.canonicalize().map_err(|error| error.to_string())?;
@@ -2964,7 +3544,16 @@ pub(crate) fn snapshot_repository_scoped(
         };
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical.to_str().ok_or("Invalid target path")?;
-        stage_scoped(&canonical, exclusions)?;
+        let identity = if exclusions.is_empty() {
+            Some(crate::workspace_view::source_identity(&canonical)?)
+        } else {
+            None
+        };
+        if identity.is_some() {
+            crate::workspace_view::stage_project(&canonical, &shadow)?;
+        } else {
+            stage_scoped(&canonical, exclusions)?;
+        }
         let status = git(
             &canonical,
             &[
@@ -2998,7 +3587,11 @@ pub(crate) fn snapshot_repository_scoped(
             commit.extend(["-m", SNAPSHOT_COMMIT_MESSAGE]);
             git(&canonical, &commit)?;
         }
-        bridge_plain_snapshot(&canonical)
+        let head = bridge_plain_snapshot(&canonical)?;
+        if let Some(identity) = &identity {
+            crate::workspace_view::capture_source(&canonical, &head, identity)?;
+        }
+        Ok(head)
     }
 }
 
@@ -3037,7 +3630,6 @@ mod workspace_tests;
 #[path = "git_console_tests.rs"]
 mod git_console_tests;
 
-
 #[cfg(test)]
 mod status_filter_tests {
     use super::*;
@@ -3051,7 +3643,8 @@ mod status_filter_tests {
             "!! managed/._cache\0",
             "?? ._new\0",
             " M .DS_Store\0",
-        ).to_string();
+        )
+        .to_string();
         let root = Path::new("/nonexistent-grapher-status-root");
         let exclusions = vec!["managed".to_string()];
 
@@ -3093,7 +3686,13 @@ mod status_filter_tests {
         fs::write(repository.join("nested/keep.txt"), "keep").unwrap();
         let raw = repository_git(
             &repository,
-            &["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+            &[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ],
         )
         .unwrap();
         let result = ignored_host_metadata(&raw, &repository, &[]);

@@ -32,8 +32,8 @@ pub(crate) fn merger_prompt(query: &str, _conflicts: MergerConflicts) -> String 
 
 const MERGER_GIT_INSTRUCTIONS: &str = "Resolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit.\nProject snapshots include project files ignored by .gitignore. Stage resolved or changed project paths with git add -f -- <paths>, even when they match .gitignore. Do not stage Git/Grapher internals or managed environment/cache scopes.";
 
-/// Git conflict repair is a single Merger execution; environment differences
-/// never create a Merger session.
+const PROJECT_MERGER_INSTRUCTIONS: &str = "Resolve the conflicting project files in this workspace. Preserve valid changes and do not modify unrelated files. The project Git view matches the source; internal composition commits are not part of it. If .git is present, stage each resolved path with git add -f -- <paths> and verify there are no unmerged index entries. Do not invent a merge or snapshot commit. If the source has no .git, resolve the files directly without initializing Git. The backend records the resolved project files and preserves the composition parents.";
+
 fn pending(repository: &Path) -> Option<String> {
     git(repository, &["rev-parse", "--verify", "MERGE_HEAD"]).ok()
 }
@@ -64,6 +64,12 @@ fn finish_merge(repository: &Path, head: &str, exclusions: &[String]) -> Result<
     Ok(())
 }
 
+pub(crate) fn finish_project_resolution(repository: &Path, exclusions: &[String]) -> Result<(), String> {
+    crate::workspace_view::accept_resolution(repository, true)?;
+    if let Some(incoming) = pending(repository) { finish_merge(repository, &incoming, exclusions)?; }
+    Ok(())
+}
+
 /// Deliver project files only, keeping every commit, snapshot and conflict
 /// repair private. The user's Git HEAD, index and object database stay unchanged.
 /// Use `merge_graph_with_workspace` when conflict repair needs the private cwd.
@@ -87,8 +93,11 @@ pub(crate) fn merge_graph_scoped_at(repository: &Path, heads: &[String], exclusi
     publication::publish(repository, heads, exclusions, Some(path), resolve)
 }
 
-fn compose_graph_scoped(repository: &Path, heads: &[String], exclusions: &[String], mut resolve: impl FnMut() -> Result<(), String>) -> Result<String, String> {
+fn compose_graph_scoped(repository: &Path, source: &Path, heads: &[String], exclusions: &[String], mut resolve: impl FnMut() -> Result<(), String>) -> Result<String, String> {
     workspace::validate_binding(repository)?;
+    if crate::workspace_view::is_bound(repository) {
+        for head in heads { git(repository, &["update-ref", &format!("refs/grapher/parents/{head}"), head])?; }
+    }
     if let Some(head) = pending(repository) {
         if !heads.contains(&head) {
             return Err(
@@ -122,6 +131,14 @@ fn compose_graph_scoped(repository: &Path, heads: &[String], exclusions: &[Strin
             resolve()?;
         }
         finish_merge(repository, head, exclusions)?;
+    }
+    if crate::workspace_view::is_bound(repository) {
+        let base = git(repository, &["rev-parse", "refs/grapher/base"])?;
+        let current = git(repository, &["rev-parse", "HEAD"])?;
+        let mut inputs = heads.to_vec();
+        if crate::workspace_view::has_record(source, &current) { inputs.push(current); }
+        crate::workspace_view::prepare(source, repository, &base, &inputs)?;
+        return crate::workspace_view::seal_prepared(repository, source);
     }
     git(repository, &["rev-parse", "HEAD"])
 }
@@ -160,12 +177,17 @@ pub(crate) fn resolve_with_merger_for_node(
 ) -> Result<(), String> {
     let canonical = repository.canonicalize().map_err(|e| e.to_string())?;
     let repository = canonical.as_path();
+    if !crate::path_identity::same_path(repository, Path::new(&config.repository)) {
+        crate::workspace_view::prepare_conflicts(Path::new(&config.repository), repository)?;
+    }
     let _git_view = if crate::path_identity::same_path(repository, Path::new(&config.repository)) { None }
         else { Some(workspace::MergerGitView::open(repository)?) };
     let id = Uuid::new_v4().to_string();
     let incoming = pending(repository).ok_or("No pending merge to resolve")?;
     let before_head = git(repository, &["rev-parse", "HEAD"])?;
-    let prompt = merger_prompt(query, conflicts);
+    let prompt = if crate::workspace_view::is_bound(repository) {
+        merger_prompt(query, conflicts).replace(MERGER_GIT_INSTRUCTIONS, PROJECT_MERGER_INSTRUCTIONS)
+    } else { merger_prompt(query, conflicts) };
     let directory = root.join("mergers").join(&id);
     // Commit ownership before allocation; even a failed mkdir/open belongs to
     // this Run and can be reclaimed when the conversation is deleted.
@@ -199,21 +221,17 @@ pub(crate) fn resolve_with_merger_for_node(
             return Err(error);
         }
     };
-    // Make native Git commands work in a plain folder without adding a .git
-    // entry there. This environment is scoped to the merger process tree;
-    // stock Git/Bash must receive host paths, not Windows device prefixes.
-    let environment_vars: Vec<(&str, String)> = if workspace::is_standard_git(repository) {
-        Vec::new()
-    } else {
+    // A bound project view keeps its composition merge (MERGE_HEAD and the
+    // unmerged index) in the graph Git; the visible project `.git` mirrors only
+    // the conflicted index. Point the Merger's own Git at the graph metadata so
+    // its `git` commands see MERGE_HEAD and can resolve the merge.
+    let environment_vars: Vec<(&str, String)> = if let Some(metadata) = workspace::private_git_dir(repository) {
         vec![
-            (
-                "GIT_DIR",
-                crate::native::host_path(&workspace::shadow_repo_dir(repository)?)
-                    .to_string_lossy()
-                    .into(),
-            ),
+            ("GIT_DIR", crate::native::host_path(&metadata).to_string_lossy().into()),
             ("GIT_WORK_TREE", crate::native::host_path(repository).to_string_lossy().into()),
         ]
+    } else {
+        Vec::new()
     };
     let mut output_error = None;
     let merger_model_cfg = PiModelConfig::resolve(PiRole::Merger, config);
@@ -263,7 +281,10 @@ pub(crate) fn resolve_with_merger_for_node(
             .as_ref()
             .map(|environment| environment.exclusions())
             .unwrap_or_default();
-        finish_merge(repository, &incoming, &exclusions)
+        crate::workspace_view::import_resolution(repository)?;
+        finish_merge(repository, &incoming, &exclusions)?;
+        if crate::workspace_view::is_bound(repository) { crate::workspace_view::seal_prepared(repository, Path::new(&config.repository))?; }
+        Ok(())
     });
     match &result {
         Ok(()) => {
@@ -333,22 +354,16 @@ pub fn continue_merger_for_node(
     if !crate::path_identity::same_path(Path::new(&previous.worktree), repository) {
         crate::session_branch::rebind_session_cwd_by_header(session_dir, &previous.session_id, repository)?;
     }
-    let environment = if standard_git {
-        vec![("GRAPHER_NODE_EXECUTION_ID", id.clone())]
-    } else if let Some(shadow) = &shadow {
-        vec![
-            (
-                "GIT_DIR",
-                crate::native::host_path(shadow)
-                    .to_string_lossy()
-                    .into(),
-            ),
-            ("GIT_WORK_TREE", crate::native::host_path(repository).to_string_lossy().into()),
-            ("GRAPHER_NODE_EXECUTION_ID", id.clone()),
-        ]
-    } else {
-        vec![("GRAPHER_NODE_EXECUTION_ID", id.clone())]
-    };
+    // A bound project view keeps its composition merge (MERGE_HEAD and the
+    // unmerged index) in the graph Git, exactly like the initial Merger. Point
+    // the continued Merger's own Git at the graph metadata so `git add` stages
+    // the resolution there; the visible project `.git` is only a mirror.
+    let mut environment: Vec<(&str, String)> = Vec::new();
+    if let Some(metadata) = workspace::private_git_dir(repository) {
+        environment.push(("GIT_DIR", crate::native::host_path(&metadata).to_string_lossy().into()));
+        environment.push(("GIT_WORK_TREE", crate::native::host_path(repository).to_string_lossy().into()));
+    }
+    environment.push(("GRAPHER_NODE_EXECUTION_ID", id.clone()));
     let mut output_error = None;
     let merger_model_cfg = PiModelConfig::resolve(PiRole::Merger, config);
     let merger_config = merger_model_cfg.effective_config(config);
@@ -389,12 +404,15 @@ pub fn continue_merger_for_node(
             return Ok(());
         }
         let exclusions = config.environment.as_ref().map(|e| e.exclusions()).unwrap_or_default();
+        crate::workspace_view::import_resolution(repository)?;
         if let Some(head) = pending(repository) {
             // The user asked the Merger to continue an unresolved merge.
             if !git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
                 return Err("Merger left unresolved conflicts".into());
             }
             finish_merge(repository, &head, &exclusions)
+        } else if crate::workspace_view::is_bound(repository) {
+            workspace::snapshot_node_scoped(repository, Path::new(&config.repository), &execution.node, None, &exclusions).map(|_| ())
         } else if !workspace::repository_status(repository, &exclusions)?.is_empty() {
             Err("Merger left uncommitted changes; commit or discard them".into())
         } else {

@@ -757,7 +757,17 @@ impl Runtime {
             })?;
         }
         job.expected_source_head = head.to_string();
-        job.execution.before = head.to_string();
+        // A history edit or feedback repair pins its own base (the anchor or the
+        // feedback source). The freshly collected source snapshot must not
+        // replace that pinned base; only a source-based dispatch adopts `head`.
+        let pinned = self
+            .state
+            .nodes
+            .get(&job.execution.node)
+            .is_some_and(|node| node.edit_execution_id.is_some() || node.feedback_workspace.is_some());
+        if !pinned {
+            job.execution.before = head.to_string();
+        }
         Ok(())
     }
 
@@ -1108,11 +1118,6 @@ impl Runtime {
             .transpose()
     }
 
-    /// Called while the planning gate prevents dispatch/publication. The
-    /// newest recorded workspace is always selected, even when its node/Merger
-    /// writer is still active: a follow-up must start immediately instead of
-    /// waiting or falling back to an older/source directory. Allocation names
-    /// aren't ownership: linear handoff reuses directories.
     pub(crate) fn planner_workspace(&self) -> Result<Option<Execution>, String> {
         let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
         // Retained published slots can be older than subsequent source edits.
@@ -1303,11 +1308,16 @@ impl Runtime {
                 continue;
             }
             let Some(resolution) = self.planner_workspace_for_node(&node.name)? else { continue; };
+            let path = Path::new(&resolution.execution.worktree);
+            let runtime_environment = if crate::workspace_view::is_bound(path) {
+                Some(crate::native::workspace_environment(path)?)
+            } else { None };
             targets.insert(node.name.clone(), serde_json::json!({
                 "requestedNode": node.name,
                 "actualNode": resolution.execution.node,
                 "executionId": resolution.execution.id,
                 "workspace": resolution.execution.worktree,
+                "runtimeEnvironment": runtime_environment,
                 "redirected": resolution.redirected_from.is_some(),
             }));
         }
@@ -1315,8 +1325,10 @@ impl Runtime {
     }
 
     pub(crate) fn capture_planner_workspace(&mut self, execution_id: &str) -> Result<(), String> {
-        let execution = self.state.executions.iter().find(|e| e.id == execution_id)
+        let selected = self.state.executions.iter().find(|e| e.id == execution_id)
             .cloned().ok_or("Planner workspace execution is missing")?;
+        let execution = self.planner_workspace_owner(&selected).cloned()
+            .ok_or("Planner workspace no longer has a recorded physical owner")?;
         let path = Path::new(&execution.worktree);
         if self.path_is_running(path) { return Err("Planner workspace still has an active writer".into()); }
         let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
@@ -1327,11 +1339,26 @@ impl Runtime {
         workspace::verify_prepared_ancestor(path, expected)?;
         let head = workspace::snapshot_node_scoped(path, &repository, &execution.node,
             Some(&self.state.run_id), &self.exclusions()?)?;
-        if head != expected {
+        let mut result = None;
+        let mut environment_changed = false;
+        if let (Some(store), Some(previous)) = (self.environments()?, execution.result.as_ref().or(execution.input.as_ref())) {
+            if store.load_launch(&previous.launch_ref)?.state_bound() {
+                // Planner is a separate writer, not another attempt/session of
+                // this node. Advance E/L together with code in one replay event.
+                let input = crate::environment::CompositeResult {
+                    generation: Uuid::new_v4().to_string(),
+                    ..previous.clone()
+                };
+                let sealed = store.seal(path, &input, &head, vec![])?;
+                environment_changed = sealed.environment_ref != previous.environment_ref || sealed.launch_ref != previous.launch_ref;
+                result = Some(sealed);
+            }
+        }
+        if head != expected || environment_changed {
             let invalidated = downstream(&self.state.graph, &execution.node).into_iter()
                 .filter(|name| name != &execution.node && !execution.workspace_lineage.contains(name))
                 .collect();
-            self.emit(EventKind::PlannerWorkspaceSnapshotted { execution_id: execution.id, head, invalidated })?;
+            self.emit(EventKind::PlannerWorkspaceSnapshotted { execution_id: execution.id, head, result, invalidated })?;
         }
         Ok(())
     }
@@ -2003,6 +2030,9 @@ impl Runtime {
             .cloned()
             .ok_or("No workspace to resolve")?;
         let path = Path::new(&execution.worktree);
+        if crate::workspace_view::is_bound(path) {
+            crate::graph_merge::finish_project_resolution(path, &self.exclusions()?)?;
+        }
         // Managed environment scopes are untracked by design; ignore them when
         // checking whether the user finished committing the resolution.
         if !workspace::git(path, &["status", "--porcelain", "--untracked-files=no"])?.is_empty()
@@ -3108,7 +3138,7 @@ impl Runtime {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let name = entry.file_name();
-                if name == ".files" || name == ".grapher-git" || name.to_string_lossy().starts_with("publication-") {
+                if name == ".files" || name == ".grapher-git" || name == ".grapher-state" || name.to_string_lossy().starts_with("publication-") {
                     return None;
                 }
                 entry
@@ -3283,7 +3313,7 @@ impl Runtime {
                 continue;
             }
             let path = entry.path();
-            if entry.file_name() == ".files" || entry.file_name() == ".grapher-git"
+            if entry.file_name() == ".files" || entry.file_name() == ".grapher-git" || entry.file_name() == ".grapher-state"
                 || entry.file_name().to_string_lossy().starts_with("publication-") {
                 continue;
             }
@@ -3294,6 +3324,7 @@ impl Runtime {
             if !keep.contains(&path) {
                 fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
                 crate::workspace::remove_private_git(&path)?;
+                crate::workspace_state::reclaim(&path)?;
             }
         }
         crate::workspace::reclaim_orphan_git_metadata(&canonical_root)?;
@@ -4009,7 +4040,14 @@ impl PublicationJob {
             let exclusions = self.store.exclusions(&selected.launch_ref)?;
             let present = path.is_dir();
             if present {
-                self.store.scoped_files(&selected.launch_ref)?.verify(path, &selected.environment_ref, "")?;
+                // The descriptor materializes the publication head into the
+                // entry workspace. On a re-publish the workspace already holds
+                // that head, so verify against it instead of the entry's
+                // original node code.
+                let current = workspace::git(path, &["rev-parse", "HEAD"])?;
+                let expected = if current == selected.code_ref { selected.code_ref.as_str() } else { head };
+                crate::workspace_view::verify_result(path, &self.repository, expected)?;
+                self.store.verify_view(path, &selected.launch_ref, &selected.environment_ref)?;
                 if !workspace::repository_status(path, &exclusions)?.is_empty() {
                     return Err("Published code view changed outside its writer lease".into());
                 }
@@ -4022,9 +4060,12 @@ impl PublicationJob {
                 // Reconstruct a missing successful fixed view at its original path.
                 self.store.prepare(path, selected, &Uuid::new_v4().to_string(), &code, vec![], false, true)?;
             }
-            let result = crate::environment::CompositeResult { code_ref: code, resource_refs: vec![], ..selected.clone() };
-            self.store.scoped_files(&result.launch_ref)?.verify(path, &result.environment_ref, "")?;
-            crate::environment_discovery::validate_launch(path, &self.store.load_launch(&result.launch_ref)?, !self.independent)?;
+            // Every independent entry delivers the same published project code;
+            // only its environment/launch differs. Keep the publication head as
+            // the code reference so the entries agree with `published_head`.
+            let result = crate::environment::CompositeResult { code_ref: head.to_string(), resource_refs: vec![], ..selected.clone() };
+            self.store.verify_view(path, &result.launch_ref, &result.environment_ref)?;
+            self.store.validate_launch(path, &self.store.load_launch(&result.launch_ref)?)?;
             entries.push(crate::environment::ResultEntry {
                 name: name.clone(), workspace: path.to_string_lossy().into(), result,
             });
@@ -4108,15 +4149,14 @@ pub(crate) fn perform_result(
                     return Err("Failed native result partial view is missing; refusing a silent reset to the published result".into());
                 }
                 if present && !job.retry {
+                    crate::workspace_view::verify_result(path, &repository, &job.descriptor.result.code_ref)?;
                     if workspace::git(path, &["rev-parse", "HEAD"])?
                         != job.descriptor.result.code_ref
                         || !workspace::repository_status(path, &exclusions)?.is_empty()
                     {
                         return Err("Published code view changed outside its writer lease".into());
                     }
-                    store
-                        .scoped_files(&job.descriptor.result.launch_ref)?
-                        .verify(path, &job.descriptor.result.environment_ref, "")?;
+                    store.verify_view(path, &job.descriptor.result.launch_ref, &job.descriptor.result.environment_ref)?;
                 }
                 control.check()?;
                 store.record_selected(
@@ -4276,6 +4316,10 @@ fn perform_with_merger_inner(
     if !source_tree && crate::path_identity::same_path(path, &repository) {
         return Err("Graph workspace resolves to the source directory; an isolated workspace is required".into());
     }
+    #[cfg(not(feature = "fixture"))]
+    if !source_tree && job.config.environment.as_ref().is_some_and(|policy| !policy.launch.state_bound()) {
+        return Err("Legacy in-project native state requires explicit migration/reconstruction before another agent launch; the original workspace is retained".into());
+    }
     let reused = path.is_dir();
     // Validate before any checkout, copying or native-environment preparation.
     // An interrupted writer's dirty files belong to that execution, not to an
@@ -4305,6 +4349,11 @@ fn perform_with_merger_inner(
     } else {
         None
     };
+    if reused && preserved_head.is_none() && !job.history_edit && !job.feedback_repair_retry
+        && crate::workspace_view::is_bound(path) {
+        let current = workspace::git(path, &["rev-parse", "HEAD"])?;
+        crate::workspace_view::verify_result(path, &repository, &current)?;
+    }
     let mut selected_environment = job.environment_input.clone();
     // A failed slot may still carry an environment scope that an older Merger
     // committed by mistake. Untrack it (keeping the live files) before any
@@ -4368,7 +4417,7 @@ fn perform_with_merger_inner(
             && reused && !job.preserve_failed_environment
         {
             if let Some(previous) = &job.environment_previous {
-                store.scoped_files(&previous.launch_ref)?.verify(path, &previous.environment_ref, "")?;
+                store.verify_view(path, &previous.launch_ref, &previous.environment_ref)?;
             }
         }
     }
@@ -4378,9 +4427,7 @@ fn perform_with_merger_inner(
             store.validate_result(input)?;
         }
         if job.feedback_workspace.as_ref().is_some_and(|input| input.additional_sources.is_empty()) {
-            store
-                .scoped_files(&input.launch_ref)?
-                .verify(path, &input.environment_ref, "")?;
+            store.verify_view(path, &input.launch_ref, &input.environment_ref)?;
         }
     }
     let mut adopted_feedback_head: Option<String> = None;
@@ -4401,7 +4448,8 @@ fn perform_with_merger_inner(
             }
             let feedback_head = workspace::git(source_path, &["rev-parse", "HEAD"])?;
             let feedback_status = workspace::repository_status(source_path, &source_exclusions)?;
-            if feedback_head != source.head || !feedback_status.is_empty() {
+            if feedback_head != source.head || !feedback_status.is_empty()
+                || crate::workspace_view::verify_result(source_path, &repository, &source.head).is_err() {
                 // A single-source handoff executes the target in the sender's
                 // directory, so a failed attempt of this very node can leave
                 // residue there: its unrecorded after-snapshot commit or
@@ -4573,7 +4621,7 @@ fn perform_with_merger_inner(
             },
         )?
     };
-    if !reused {
+    if !reused && !crate::workspace_view::is_bound(path) {
         if let Some(source) = &job.copy_from_workspace {
             workspace::copy_ordinary_files(
                 Path::new(source),

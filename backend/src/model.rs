@@ -716,6 +716,8 @@ pub enum EventKind {
     PlannerWorkspaceSnapshotted {
         execution_id: String,
         head: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<crate::environment::CompositeResult>,
         invalidated: Vec<String>,
     },
     /// Planner requested an old node's workspace, but its physical slot is
@@ -1895,18 +1897,20 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::PlannerReworkNoteInjected => {}
         EventKind::PlannerWorkspaceRedirected { .. } => {}
-        EventKind::PlannerWorkspaceSnapshotted { execution_id, head, invalidated } => {
+        EventKind::PlannerWorkspaceSnapshotted { execution_id, head, result, invalidated } => {
             if let Some(execution) = state.executions.iter_mut().find(|e| e.id == *execution_id) {
                 let old_head = execution.after.clone();
                 execution.after = Some(head.clone());
-                if let Some(result) = &mut execution.result { result.code_ref = head.clone(); }
+                if let Some(result) = result { execution.result = Some(result.clone()); }
+                else if let Some(result) = &mut execution.result { result.code_ref = head.clone(); }
                 let mut lineage = execution.workspace_lineage.clone();
                 lineage.push(execution.node.clone());
                 for name in lineage {
                     if let Some(node) = state.nodes.get_mut(&name) {
                         if node.status == "completed" && node.head == old_head {
                             node.head = Some(head.clone());
-                            if let Some(result) = &mut node.result { result.code_ref = head.clone(); }
+                            if let Some(result) = result { node.result = Some(result.clone()); }
+                            else if let Some(result) = &mut node.result { result.code_ref = head.clone(); }
                         }
                     }
                 }

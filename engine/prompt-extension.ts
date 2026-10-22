@@ -86,7 +86,6 @@ export default function (pi: ExtensionAPI) {
   }
   if (!partition && (paths || !planner)) {
     pi.on('before_agent_start', async event => {
-      // Pi 1.0 projects forceSystemPrompt after context_with_system handlers.
       // Returning systemPrompt here would overwrite pi-trim's request-time edits.
       // Keep ordinary prompts structured so the upstream extension can trim them.
       const options = event.systemPromptOptions;
@@ -131,7 +130,7 @@ export default function (pi: ExtensionAPI) {
   const launch = managedLaunch();
   const localOps = createLocalBashOperations(launch ? { shellPath: launch.shell } : undefined);
   const baseBashTool = createBashToolDefinition(cwd);
-  if (launch) {
+  if (launch || process.env.GRAPHER_EXECUTION_KIND === 'graph') {
     pi.on('user_bash', async () => ({ operations: {
       exec: (command, workingDirectory, options) => localOps.exec(managedBashCommand(activePaths ? activePaths.command(command) : command),
         activePaths?.root || workingDirectory, managedBashOptions(options)),

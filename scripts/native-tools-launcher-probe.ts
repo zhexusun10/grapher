@@ -3,7 +3,7 @@
 // actual staged production modules, not a replacement execution backend.
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, isAbsolute } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 
@@ -37,6 +37,13 @@ export default async function () {
       assert.equal(tmpdir(), process.argv[sessionIndex + 1]);
     }
     writeFileSync(join(process.argv[sessionIndex + 1], 'probe-session-write'), label);
+    assert.equal(process.env.GIT_DIR, undefined);
+    assert.equal(process.env.GIT_WORK_TREE, undefined);
+    const home = relative(cwd, process.env.HOME!);
+    assert.ok(home.startsWith('..') || isAbsolute(home), 'Runtime HOME must be physically outside the project');
+    assert.equal(text(await call('bash', { command: 'git rev-parse --is-inside-work-tree' })).trim(), 'true');
+    assert.equal(text(await call('bash', { command: 'test -z "$(git for-each-ref --format="%(refname)" refs/grapher/)" && printf source-refs-only' })).trim(), 'source-refs-only');
+    assert.ok(!readFileSync(join(cwd, '.git/HEAD'), 'utf8').includes('grapher-node'));
     await call('write', { path: visible, content: `first-${label}` });
     await call('edit', { path: visible, edits: [{ oldText: `first-${label}`, newText: `final-${label}` }] });
     assert.equal(text(await call('read', { path: visible })), `final-${label}`);

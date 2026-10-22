@@ -1,5 +1,3 @@
-// Pi loads one agent directory. Grapher has two: merge their global definitions
-// before applying Pi 1.0.1 project overrides, using upstream validation throughout.
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { CONFIG_DIR_NAME, loadMcpConfig, mcpNamespace, validateMcpServerConfig,

@@ -115,6 +115,7 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
         // caches here (INetCache, D3DSCache, Chrome/Edge profiles, crash dumps).
         // They are machine-local and must not enter environment snapshots.
         caches.push(".agent-home/AppData/Local".to_string());
+        caches.push(".agent-home/npm-cache".to_string());
     } else {
         caches.push(".agent-home/.cache".to_string());
         caches.push(".agent-home/.npm".to_string());
@@ -132,8 +133,17 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
             shell: text(&shell),
             path,
             variables: BTreeMap::from([
-                ("HOME".into(), "{workspace}/.agent-home".into()),
-                ("USERPROFILE".into(), "{workspace}/.agent-home".into()),
+                ("HOME".into(), "{state}/.agent-home".into()),
+                ("USERPROFILE".into(), "{state}/.agent-home".into()),
+                ("APPDATA".into(), "{state}/.agent-home/AppData/Roaming".into()),
+                ("LOCALAPPDATA".into(), "{state}/.agent-home/AppData/Local".into()),
+                ("XDG_CONFIG_HOME".into(), "{state}/.agent-home/.config".into()),
+                ("XDG_DATA_HOME".into(), "{state}/.agent-home/.local/share".into()),
+                ("XDG_CACHE_HOME".into(), "{state}/.runtime-cache/xdg".into()),
+                ("npm_config_cache".into(), "{state}/.runtime-cache/npm".into()),
+                ("PIP_CACHE_DIR".into(), "{state}/.runtime-cache/pip".into()),
+                ("CONDA_ENVS_PATH".into(), "{state}/.environments".into()),
+                ("CONDA_PKGS_DIRS".into(), "{state}/.runtime-cache/conda".into()),
                 ("PYTHONUTF8".into(), "1".into()),
                 ("PYTHONIOENCODING".into(), "utf-8".into()),
                 ("CONDA_ALWAYS_COPY".into(), "true".into()),

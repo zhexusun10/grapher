@@ -107,7 +107,6 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       onExpandedChange?.(nextExpanded, cardRef.current ?? undefined);
     };
 
-    // Calculate approximate token/char stats
     const charCount = rawContent.trim() ? (isStreaming && smoothContent ? smoothContent : rawContent).length : 0;
 
     const animateAppear = useCardAppear(item?.id, isStreaming, item?.timestamp, directAnimateAppear ?? item?.animateAppear);

@@ -55,6 +55,7 @@ pub(crate) struct Files {
     excluded_data: PathBuf,
     scopes: Option<Vec<PathBuf>>,
     caches: Vec<PathBuf>,
+    project_index: bool,
 }
 
 fn excluded(path: &Path) -> bool {
@@ -133,7 +134,13 @@ impl Files {
             excluded_data: directory.to_path_buf(),
             scopes: Some(scopes.iter().map(PathBuf::from).collect()),
             caches: caches.iter().map(PathBuf::from).collect(),
+            project_index: true,
         })
+    }
+
+    pub(crate) fn with_project_index(mut self, enabled: bool) -> Self {
+        self.project_index = enabled;
+        self
     }
 
     fn is_excluded(&self, path: &Path) -> bool {
@@ -666,7 +673,9 @@ impl Files {
         if desired.keys().any(|name| self.is_excluded(Path::new(name))) {
             return Err("Workspace file snapshot overlaps an excluded managed scope".into());
         }
-        let tracked = workspace::working_tree_git(workspace, &["ls-files", "-z", "--cached"])?;
+        let tracked = if self.project_index {
+            workspace::working_tree_git(workspace, &["ls-files", "-z", "--cached"])?
+        } else { String::new() };
         let tracked: BTreeSet<_> = tracked
             .split('\0')
             .filter(|name| !name.is_empty())

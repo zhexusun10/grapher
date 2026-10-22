@@ -36,6 +36,39 @@ export function verifyBuildScripts(directory) {
   }
 }
 
+// Upstream's root build order is not dependency-safe: chord depends on
+// pi-telemetry, so typechecking chord first resolves a stale telemetry copy or
+// fails outright. Order Grapher's per-package builds by workspace dependencies.
+export function resolveBuildOrder(directory) {
+  const packages = new Map(corePackages.map(name => {
+    const pkg = JSON.parse(readFileSync(join(directory, 'packages', name, 'package.json'), 'utf8'));
+    return [pkg.name, {
+      name,
+      dependencies: Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies }).filter(dependency => dependency.startsWith('@earendil-works/')),
+    }];
+  }));
+  for (const entry of packages.values()) {
+    const unknown = entry.dependencies.filter(dependency => !packages.has(dependency));
+    // A new Pi workspace package must be reviewed into corePackages, not
+    // silently skipped until typechecking fails on its missing dist folder.
+    if (unknown.length) throw new Error(`Review unreviewed Pi workspace dependency in ${entry.name}: ${unknown.join(', ')}`);
+  }
+  const order = [];
+  const built = new Set();
+  const visiting = new Set();
+  const visit = name => {
+    if (built.has(name)) return;
+    if (visiting.has(name)) throw new Error(`Pi workspace dependency cycle at ${name}`);
+    visiting.add(name);
+    for (const dependency of packages.get(name).dependencies) visit(dependency);
+    visiting.delete(name);
+    built.add(name);
+    order.push(packages.get(name).name);
+  };
+  for (const name of packages.keys()) visit(name);
+  return order;
+}
+
 export function copyPiAssets(directory) {
   const ai = join(directory, 'packages/ai');
   rmSync(join(ai, 'dist/providers/data'), { recursive: true, force: true });
@@ -71,7 +104,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     rmSync(join(source, 'node_modules/.grapher-pi-build.json'), { force: true });
     // Don't let deleted outputs from the previous Pi revision survive rebuilding.
     for (const name of corePackages) rmSync(join(source, 'packages', name, 'dist'), { recursive: true, force: true });
-    for (const name of corePackages) {
+    for (const name of resolveBuildOrder(source)) {
       console.log(`Building Pi ${name}...`);
       run(join(source, 'packages', name), join(source, 'node_modules/typescript/bin/tsc'), '-p', 'tsconfig.build.json');
       if (name === 'ai') cpSync(join(source, 'packages/ai/src/providers/data'), join(source, 'packages/ai/dist/providers/data'), { recursive: true });

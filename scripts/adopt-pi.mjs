@@ -49,7 +49,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const lock = candidateLock(sha);
     execFileSync(command, [...prefix, '--prefix', source, 'run', 'check:model-data'], { stdio: 'inherit' });
     const target = join(root, 'engine/model-data');
-    // A partially copied catalog can never pass baseline verification.
     mkdirSync(target, { recursive: true });
     for (const name of readdirSync(target)) {
       if (!(name in lock.modelData)) rmSync(join(target, name));

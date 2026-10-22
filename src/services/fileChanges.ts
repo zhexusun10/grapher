@@ -1,10 +1,5 @@
 import type { FileChangeItem, FileChangeStatus, FileChangeSummary } from "../types";
 
-/**
- * File changes are projected by the backend, which compares real Git snapshots
- * (`before..after`, `base..publication.head`) and parses tool events only for
- * line counts. The browser never computes diffs or line counts itself.
- */
 export const emptyFileChangeSummary: FileChangeSummary = {
   files: [],
   totalFiles: 0,

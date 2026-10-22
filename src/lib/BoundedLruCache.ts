@@ -1,4 +1,3 @@
-// Byte-budgeted Map with normal Map iteration and mutation semantics.
 export function utf8Bytes(text: string): number {
   let bytes = 0;
   for (let i = 0; i < text.length; i++) {

@@ -1,11 +1,11 @@
 //! Deterministic Runtime contracts with actual native venvs and tool receipts.
 //! No added Agent instructions, package downloads or paid providers.
 use super::*;
-use super::tests::{graph, policy, run, setup};
+use super::tests::{graph, policy, run, setup, state_policy};
 use crate::{model::*, runtime::{perform, perform_result, Job, Runtime}};
 
 fn automatic() -> EnvironmentConfig {
-    let mut config = policy();
+    let mut config = state_policy();
     config.discovery = true;
     config.best_effort = true;
     config.allow_descendant = true;
@@ -18,6 +18,10 @@ fn store(runtime: &Runtime) -> Environments {
         runtime.state.config.as_ref().unwrap().environment.as_ref().unwrap()).unwrap()
 }
 
+fn state_of(runtime: &Runtime, worktree: &str) -> PathBuf {
+    store(runtime).state_root(Path::new(worktree)).unwrap()
+}
+
 // Exercise the native adapter at the owning writer's Prepared boundary. The
 // fixture Agent does only its existing business task; Rust creates/observes E.
 fn run_created(runtime: &mut Runtime, job: &Job, prefix: &str) {
@@ -28,18 +32,20 @@ fn run_created(runtime: &mut Runtime, job: &Job, prefix: &str) {
         let input = env.load_record_metadata(&job.execution.id, "before")?;
         let launch = env.load_launch(&input.launch_ref)?.expanded(Path::new(&job.execution.worktree));
         let session = root.join("sessions").join(&job.execution.id);
+        let state = env.state_root(Path::new(&job.execution.worktree))?;
         let context = crate::environment_discovery::context(
-            Path::new(&job.execution.worktree), &job.execution.id, &launch, &session, true,
+            &state, &job.execution.id, &launch, &session, true,
         )?;
-        assert!(!Path::new(&job.execution.worktree).join(prefix).exists(), "unportable input must not be copied");
+        let venv = state.join(prefix);
+        assert!(!venv.exists(), "unportable input must not be copied");
         let bootstrap = automatic().launch.entry;
         let code = crate::environment_discovery::tool(vec![
             context.to_string_lossy().into(), "python".into(), bootstrap,
             "-m".into(), "venv".into(), "--without-pip".into(),
-            Path::new(&job.execution.worktree).join(prefix).to_string_lossy().into(),
+            venv.to_string_lossy().into(),
         ])?;
         if code != 0 { return Err(format!("native venv creation failed: {code}")); }
-        fs::write(Path::new(&job.execution.worktree).join(prefix).join("marker"), &job.execution.node)
+        fs::write(venv.join("marker"), &job.execution.node)
             .map_err(|e| e.to_string())?;
         Ok(())
     });
@@ -54,7 +60,14 @@ fn publish(runtime: &mut Runtime, source: &Path) -> ResultDescriptor {
     let publication = runtime.state.publication.clone().unwrap();
     let head = crate::graph_merge::merge_graph_scoped(source, &publication.heads,
         &runtime.exclusions().unwrap(), |_| Err("unexpected Git conflict".into())).unwrap();
-    runtime.emit(EventKind::PublicationCompleted { head }).unwrap();
+    let job = runtime.publication_environment_input().unwrap().unwrap();
+    job.validate().unwrap();
+    let descriptor = job.descriptor(&head).unwrap();
+    // The descriptor seals the composed publication; use its code reference as
+    // the published head so the result and the head describe the same commit.
+    let published_head = descriptor.result.code_ref.clone();
+    runtime.emit(EventKind::ResultPublished { descriptor }).unwrap();
+    runtime.emit(EventKind::PublicationCompleted { head: published_head }).unwrap();
     assert_eq!(runtime.state.phase, "completed");
     runtime.result_descriptor().unwrap()
 }
@@ -80,7 +93,7 @@ fn unavailable_result_descriptor_does_not_block_code_publication() {
     let job = runtime.jobs().unwrap().remove(0);
     run_created(&mut runtime, &job, ".venv");
     assert!(runtime.jobs().unwrap().is_empty());
-    fs::remove_file(Path::new(&job.execution.worktree).join(".venv/marker")).unwrap();
+    fs::remove_file(state_of(&runtime, &job.execution.worktree).join(".venv/marker")).unwrap();
     let publication = runtime.state.publication.clone().unwrap();
     let head = crate::graph_merge::merge_graph_scoped(
         &source,
@@ -100,7 +113,7 @@ fn best_effort_bound_fanout_is_parallel_and_custom_prefixes_never_enter_git() {
     let (_temp, source, mut runtime) = setup(
         graph(&["A", "B", "C", "D"], &[("A", "B", false), ("A", "C", false),
             ("B", "D", false), ("C", "D", false)]), automatic(),
-        "if(name==='C') { if(fs.existsSync('business-env')) throw Error('fixed environment was copied'); }\nif(name==='B') fs.writeFileSync('business-env/marker','B');\nif(name==='D' && fs.readFileSync('business-env/marker','utf8')!=='B') throw Error('local input was not inherited');\nfs.mkdirSync('reports',{recursive:true});fs.writeFileSync('reports/'+name+'.txt',name);",
+        "const state=process.env.GTEST_STATE; if(name==='C') { if(fs.existsSync(state+'/business-env')) throw Error('fixed environment was copied'); }\nif(name==='B') fs.writeFileSync(state+'/business-env/marker','B');\nif(name==='D' && fs.readFileSync(state+'/business-env/marker','utf8')!=='B') throw Error('local input was not inherited');\nfs.mkdirSync('reports',{recursive:true});fs.writeFileSync('reports/'+name+'.txt',name);",
     );
     let a = runtime.jobs().unwrap().remove(0);
     run_created(&mut runtime, &a, "business-env");
@@ -156,12 +169,12 @@ fn best_effort_independent_terminal_environments_publish_and_launch_named_entrie
         assert_eq!(entry.result.code_ref, runtime.state.published_head.clone().unwrap());
         assert!(Path::new(&entry.workspace).join("reports/A.txt").is_file());
         assert!(Path::new(&entry.workspace).join("reports/B.txt").is_file());
-        assert_eq!(fs::read_to_string(Path::new(&entry.workspace).join(".venv/marker")).unwrap(), entry.name);
+        assert_eq!(fs::read_to_string(state_of(&runtime, &entry.workspace).join(".venv/marker")).unwrap(), entry.name);
     }
     assert!(runtime.start_result(&[]).err().unwrap().contains("entryId"));
     assert!(runtime.state.result_execution.is_none());
     assert!(descriptor.for_entry(Some("unknown")).is_err());
-    let args = vec!["-c".into(), "import pathlib; print(pathlib.Path('.venv/marker').read_text())".into()];
+    let args = vec!["-c".into(), "import os,pathlib; print(pathlib.Path(os.environ['GTEST_STATE'],'.venv/marker').read_text())".into()];
     let (job, control) = runtime.start_result_entry(&args, Some("B")).unwrap();
     let outcome = perform_result(&job, &control, |input| runtime.emit(EventKind::ResultExecutionPrepared { input }));
     let output = runtime.finish_result(&job, &control, outcome).unwrap();
@@ -175,7 +188,7 @@ fn best_effort_independent_terminal_environments_publish_and_launch_named_entrie
 #[test]
 fn best_effort_home_changes_do_not_require_environment_agreement_or_a_default_choice() {
     let (_temp, source, mut runtime) = setup(graph(&["A", "B"], &[]), automatic(),
-        "fs.mkdirSync('.agent-home',{recursive:true});fs.writeFileSync('.agent-home/writer',name);");
+        "fs.mkdirSync(process.env.HOME,{recursive:true});fs.writeFileSync(process.env.HOME+'/writer',name);");
     for job in runtime.jobs().unwrap() { run(&mut runtime, &job); }
     let descriptor = publish(&mut runtime, &source);
     assert_ne!(descriptor.entries[0].result.environment_ref, descriptor.entries[1].result.environment_ref);
@@ -197,7 +210,7 @@ fn best_effort_ignored_input_corruption_fails_before_a_writer_or_reset() {
     fs::write(runtime.root.join("environments").join(&runtime.state.run_id).join("files/blobs").join(blob), "X").unwrap();
     let result = perform(&c, &runtime.root, &[], |_| panic!("Agent must not run"), |_| panic!("view must not prepare"));
     assert!(result.unwrap_err().contains("Damaged workspace file blob"));
-    assert_eq!(fs::read_to_string(Path::new(&c.execution.worktree).join(".venv/marker")).unwrap(), "A");
+    assert_eq!(fs::read_to_string(state_of(&runtime, &c.execution.worktree).join(".venv/marker")).unwrap(), "A");
 }
 
 #[test]
@@ -205,7 +218,7 @@ fn best_effort_failed_entry_cannot_switch_to_another_terminal_on_retry() {
     let (_temp, source, mut runtime) = setup(graph(&["A", "B"], &[]), automatic(), "");
     for job in runtime.jobs().unwrap() { run_created(&mut runtime, &job, ".venv"); }
     publish(&mut runtime, &source);
-    let args = vec!["-c".into(), "import pathlib; pathlib.Path('.venv/partial').write_text('kept'); raise SystemExit(1)".into()];
+    let args = vec!["-c".into(), "import os,pathlib; pathlib.Path(os.environ['GTEST_STATE'],'.venv/partial').write_text('kept'); raise SystemExit(1)".into()];
     let (job, control) = runtime.start_result_entry(&args, Some("B")).unwrap();
     let outcome = perform_result(&job, &control, |input| runtime.emit(EventKind::ResultExecutionPrepared { input }));
     assert!(runtime.finish_result(&job, &control, outcome).is_err());
@@ -213,7 +226,7 @@ fn best_effort_failed_entry_cannot_switch_to_another_terminal_on_retry() {
     let generation = runtime.state.result_execution.as_ref().unwrap().input.generation.clone();
     assert!(runtime.start_result_entry(&[], Some("A")).err().unwrap().contains("partial workspace"));
     assert_eq!(runtime.state.result_execution.as_ref().unwrap().input.generation, generation);
-    let args = vec!["-c".into(), "import pathlib; print(pathlib.Path('.venv/partial').read_text())".into()];
+    let args = vec!["-c".into(), "import os,pathlib; print(pathlib.Path(os.environ['GTEST_STATE'],'.venv/partial').read_text())".into()];
     let (job, control) = runtime.start_result_entry(&args, Some("B")).unwrap();
     let outcome = perform_result(&job, &control, |input| runtime.emit(EventKind::ResultExecutionPrepared { input }));
     assert_eq!(runtime.finish_result(&job, &control, outcome).unwrap().trim(), "kept");
@@ -253,7 +266,7 @@ fn best_effort_serialized_roots_keep_independent_terminal_slots() {
 fn best_effort_reused_path_preserves_business_environment_when_binding_is_unavailable() {
     let (_temp, source, mut runtime) = setup(
         graph(&["A", "B", "C", "D"], &[("A", "C", false), ("B", "D", false)]), automatic(),
-        "if(name==='C' && (!fs.existsSync('business-env') || !fs.existsSync('.venv'))) throw Error('Runtime cleaned a business environment');",
+        "const state=process.env.GTEST_STATE; if(name==='C' && (!fs.existsSync(state+'/business-env') || !fs.existsSync(state+'/.venv'))) throw Error('Runtime cleaned a business environment');",
     );
     runtime.state.config.as_mut().unwrap().max_parallel = 1;
     let a = runtime.jobs().unwrap().remove(0);
@@ -263,8 +276,9 @@ fn best_effort_reused_path_preserves_business_environment_when_binding_is_unavai
     run_created(&mut runtime, &b, ".venv");
     let c = runtime.jobs().unwrap().remove(0);
     assert_eq!(c.execution.worktree, b.execution.worktree);
-    assert!(Path::new(&c.execution.worktree).join("business-env").exists(), "Runtime must preserve the business environment");
-    assert!(Path::new(&c.execution.worktree).join(".venv").exists(), "Runtime must preserve the current workspace environment");
+    let c_state = state_of(&runtime, &c.execution.worktree);
+    assert!(c_state.join("business-env").exists(), "Runtime must preserve the business environment");
+    assert!(c_state.join(".venv").exists(), "Runtime must preserve the current workspace environment");
     run(&mut runtime, &c);
     let d = runtime.jobs().unwrap().remove(0);
     assert_ne!(d.execution.worktree, c.execution.worktree, "C's terminal slot must stay pinned");

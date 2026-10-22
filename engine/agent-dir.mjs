@@ -27,7 +27,7 @@ export function reuseManagedTools(directory, upstreamDirectory) {
 }
 
 // Provider/Auth, local login and native executions use the same dedicated
-// upstream-owned configuration directory. HOME itself stays the host HOME.
+// upstream-owned configuration directory.
 export function configureAgentDir() {
   let directory = toHostInput(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.grapher', 'pi-agent'));
   if (directory === '~' || /^~[\\/]/.test(directory)) directory = homedir() + directory.slice(1);

@@ -770,12 +770,20 @@ fn run_pi_with_timeout(
     // Production always runs the pinned, Grapher-owned entrypoint. Persisted
     // legacy command fields cannot select a different engine implementation.
     #[cfg(not(feature = "fixture"))]
-    let mut command = crate::native::execution_command(
+    let planner_workspaces = if request.role == PiRole::Planner {
+        let targets = request.environment.iter().find(|(key, _)| *key == "GRAPHER_PLANNER_WORKSPACES")
+            .map(|(_, value)| serde_json::from_str::<serde_json::Value>(value)).transpose().map_err(|e| e.to_string())?;
+        targets.as_ref().and_then(serde_json::Value::as_object).into_iter().flat_map(|targets| targets.values())
+            .filter_map(|target| target.get("workspace").and_then(serde_json::Value::as_str).map(PathBuf::from)).collect::<Vec<_>>()
+    } else { Vec::new() };
+    #[cfg(not(feature = "fixture"))]
+    let mut command = crate::native::execution_command_scoped(
         request.role,
         Path::new(&config.repository),
         request.cwd,
         &crate::workspace::data_root(),
         request.session_dir,
+        &planner_workspaces,
     )?;
     // Process substitution is exclusively a test capability.
     #[cfg(feature = "fixture")]
@@ -928,6 +936,12 @@ fn run_pi_with_timeout(
     crate::native::clear_git_environment(&mut command);
     for (key, value) in &request.environment {
         command.env(key, value);
+    }
+    #[cfg(not(feature = "fixture"))]
+    if !crate::path_identity::same_path(request.cwd, Path::new(&config.repository)) {
+        // Git environment cleanup above must not erase the external project
+        // configuration binding or let a caller restore in-project runtime HOME.
+        crate::native::bind_workspace_state(&mut command, request.cwd)?;
     }
     // Runtime-owned bytecode policy. Applied after caller-supplied bindings so a
     // project/launch variable cannot re-enable interpreter caches inside the

@@ -120,7 +120,7 @@ fn owned(root: &Path, prefix: &Path) -> Result<String, String> {
     let name = text(relative);
     environment::safe_relative(&name)?;
     real_child_path(&root, &root.join(relative), false)?;
-    if [".runtime-cache", ".agent-home", ".pi"]
+    if [".runtime-cache", ".agent-home", ".pi", ".project-git", ".git-config"]
         .iter()
         .any(|scope| workspace::scope_contains(Path::new(&name), Path::new(scope)))
     {
@@ -391,7 +391,7 @@ fn launch_environment_differs(
 fn unbound_launch(launch: &LaunchConfig, scopes: &[String]) -> Result<LaunchConfig, String> {
     let mut next = launch.clone();
     next.entry = next.shell.clone();
-    next.path.retain(|path| !path.starts_with("{workspace}/"));
+    next.path.retain(|path| !path.starts_with("{workspace}/") && !path.starts_with("{state}/"));
     next.hook = None;
     next.environment = None;
     next.variables.remove("VIRTUAL_ENV");
@@ -928,7 +928,7 @@ pub(crate) fn resolve_for_policy(
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()
                 .replace('\\', "/");
-            if [".git", ".runtime-cache", ".agent-home", ".pi"]
+            if [".git", ".runtime-cache", ".agent-home", ".pi", ".project-git", ".git-config"]
                 .iter()
                 .any(|scope| workspace::scope_contains(Path::new(&relative), Path::new(scope)))
             {
@@ -977,14 +977,15 @@ pub(crate) fn resolve_for_policy(
             Err(_) if best_effort => return unbound_launch(&next, &[]),
             Err(error) => return Err(error),
         };
-        let entry = interpreter(Path::new(&format!("{{workspace}}/{prefix}")), &kind);
+        let token = if launch.state_bound() { "{state}" } else { "{workspace}" };
+        let entry = interpreter(Path::new(&format!("{token}/{prefix}")), &kind);
         let bin = text(
             entry
                 .parent()
                 .ok_or("Missing environment entry directory")?,
         );
         next.entry = text(&entry);
-        next.path.retain(|p| !p.starts_with("{workspace}/"));
+        next.path.retain(|p| !p.starts_with("{workspace}/") && !p.starts_with("{state}/"));
         next.path.insert(0, bin);
         next.variables.remove("VIRTUAL_ENV");
         next.variables.remove("CONDA_PREFIX");
@@ -998,20 +999,20 @@ pub(crate) fn resolve_for_policy(
             next.hook = Some(format!(
                 "eval \"$({} shell.bash hook)\" && conda activate {}",
                 quoted(&tool),
-                quoted(&format!("{{workspace}}/{prefix}"))
+                quoted(&format!("{token}/{prefix}"))
             ));
             if cfg!(windows) {
                 next.path
-                    .insert(1, format!("{{workspace}}/{prefix}/Scripts"));
+                    .insert(1, format!("{token}/{prefix}/Scripts"));
                 next.path
-                    .insert(2, format!("{{workspace}}/{prefix}/Library/bin"));
+                    .insert(2, format!("{token}/{prefix}/Library/bin"));
             }
             next.variables
-                .insert("CONDA_PREFIX".into(), format!("{{workspace}}/{prefix}"));
+                .insert("CONDA_PREFIX".into(), format!("{token}/{prefix}"));
         } else {
             next.hook = None;
             next.variables
-                .insert("VIRTUAL_ENV".into(), format!("{{workspace}}/{prefix}"));
+                .insert("VIRTUAL_ENV".into(), format!("{token}/{prefix}"));
         }
         next.environment = Some(binding);
         next.managed_scopes.push(prefix);

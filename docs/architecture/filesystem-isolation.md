@@ -35,13 +35,33 @@ The mount layout exposes the current private repository/session, masks source an
 
 An outer Docker/Harbor container is **not** a substitute for these per-execution boundaries. See [Harbor requirements](../benchmarks/harbor.md#linux-task-environment).
 
-On macOS/Linux, a workspace using Git alternates also has read access to the bound source's Git object database. Source working files and unrelated refs remain restricted, but object-store access can expose historical file contents and other stored snapshots. This is not a history-confidentiality boundary. The object database is protected from writes by private executions; see [workspace storage](workspace-snapshots-and-feedback.md#backend-git-storage).
+New agent views have independent project Git and never borrow a graph-object
+alternate. Backend graph Git may still use alternates, but those control paths
+are not agent write allowances. Unix profiles expose the current project's files, session and exact external
+process-state root. A switching Planner additionally receives only the explicit
+same-Run workspace/state targets authorized by the backend at launch, not all
+siblings or the whole cache/run parent. Changing cwd cannot raise OS privileges. Source history intentionally present in project Git is
+not confidential; see [workspace storage](workspace-snapshots-and-feedback.md#backend-git-storage).
 
 ### Windows
 
 Private workspaces run stock Node, pinned Pi, and Git for Windows Bash with the host user's permissions. There is **no VM, per-node filesystem sandbox, custom isolation driver, or patched Node/MSYS binary**.
 
-Processes may access the source, siblings, other sessions, engine files, HOME, and credentials where the host user can. Separate parallel workspaces, exclusive directory handoff, and private Git metadata organize edits and inherited snapshots, not access rights.
+Processes may access the source, siblings, other sessions, engine files, HOME, and credentials where the host user can. Separate parallel workspaces, exclusive directory handoff, independent project
+Git and external graph/process state organize edits and inherited snapshots,
+not access rights. Moving HOME or caches outside the project does not make those
+paths inaccessible to the host user.
+
+## Project-view launch gate
+
+Every private native role needs recorded source-equivalent preparation, not just
+a directory containing some `.git`. Source-native roles do not add runtime/session
+data to the project either. A layout that places runtime data inside the source
+is refused with an external-data-root diagnostic; existing records are not moved
+or deleted. Missing/corrupt view evidence and unsupported source features fail
+before agent launch, rather than switching to the live source or filtering tool
+output. The precise project/Git contract and capability gaps belong to
+[Agent project views](workspace-snapshots-and-feedback.md#agent-project-views).
 
 ## Path convention
 

@@ -5,9 +5,64 @@
 
 Grapher has one project-file version channel: **Git**. The host prepares snapshots and transfers commits; agents do not exchange commits or use Git as a conversation protocol. Collection rules below define which paths enter this channel; [managed environment evidence](native-environments.md) is separate.
 
+## Agent project views
+
+Private native launches require a complete, source-bound project view before any
+agent starts. Project entries/bytes and metadata are preserved recursively,
+including native ignored/untracked files and empty directories. Source-owned
+runtime-like names are not an exclusion policy. Process HOME/cache/environment
+state is external to the project; its contract belongs to
+[Native environments](native-environments.md).
+
+The agent's project Git is independent of graph Git: it retains the source's
+current branch or detached/unborn HEAD, user refs/history and initial index
+state. Explicit task commits and staged changes are inherited as project work;
+internal capture/completion commits never enter the visible repository. A linked
+source gets a privately rebound gitfile; a plain folder remains without `.git`.
+Normal file tools, Bash and direct filesystem/Git APIs use the same real view,
+not filtered listings. Workspace/tool path adaptation still applies.
+
+Immutable `agent-views/<codeRef>/` records under the source shadow store retain
+project Git and supplemental directory/permission/link/ACL/xattr/ADS evidence.
+Project bytes remain Git blobs. Metadata-only work advances an internal code/view
+reference as well; it is not silently dropped when the Git tree is unchanged.
+Preparation compares the complete physical result before recording readiness;
+legacy/missing/corrupt evidence and unsupported layouts fail rather than exposing
+an incomplete workspace. The current format records project hardlink topology,
+including external link counts using private control-owned witnesses. Forks do
+not share writable inodes with source or siblings. Native symlinks and Windows
+junctions are reconstructed, not flattened; absolute project-local targets are
+rebound to the private root, and a source `.git` directory link is rebound to
+slot-owned metadata. Named pipes and (where the native filesystem/privilege
+allows) device nodes are recreated with their recorded type and mode. Nested
+repositories/submodules retain independent native Git and index evidence;
+submodule gitfiles bind outside the project to slot-owned metadata. Borrowed
+source objects are imported for genuine project refs/reflogs/index only, with no
+retained alternates into a mixed object store.
+
+Linux user inode flags are captured/restored with native ioctl (subject to real
+filesystem privileges); macOS ACLs/flags and Windows ACLs/ADS retain their native
+checks. Windows EFS encryption state is recreated for the private entry; a
+destination volume without EFS fails the preparation explicitly rather than
+silently writing plaintext.
+
+Files-only publication is Git-based, so task changes to special entries (new,
+deleted or retyped named pipes/devices) are refused at snapshot time instead of
+being silently omitted from delivery. Unsupported reparse providers, live Unix
+sockets, implicit-ancestor Git and path-dependent Git includes still have
+explicit capability gaps. Refusals are not full feature/platform acceptance. Only
+the new workspace contract is supported in production; no legacy workspace
+relocation/migration is performed.
+
 ## Git collection
 
-Every source/node Git snapshot uses a forced Git add equivalent to:
+New source/project-view snapshots collect raw physical bytes without running
+clean/smudge/EOL filters. Native `.gitignore` is not a collection boundary, and
+`.grapher*` project names are preserved. The graph index is separate from the
+user's staged/unstaged distinctions. Publication uses a private raw-checkout
+repository so conversion cannot silently change the delivered bytes.
+
+The retained legacy/scoped collector uses a forced Git add equivalent to:
 
 ```text
 git add -f -A
@@ -140,13 +195,20 @@ when that database has no chained alternates or promisor packs; otherwise it
 fetches the pinned inputs. The host database imports user history independently,
 so node storage never writes objects or refs into the user's Git database.
 
-Within a Run root, slot metadata lives in `.grapher-git/<slot>.git`, outside the
-model's cwd, without a `.git` entry in ordinary node workspaces. Host Git resolves
-it explicitly. Preparation and Merger repair temporarily expose Git only for
-that operation; short reentrant relocation leases serialize host discovery and
-moves, not model calls or Runtime events. Native file tools/Bash otherwise see
-project files, not discoverable internal history. This is not an additional
-security boundary on Windows.
+Within a Run root, graph metadata lives in `.grapher-git/<slot-digest>.git`, outside the
+model's cwd. Slot and metadata directory names are digests rather than the
+full slot label, leaving Windows path budget for Git config/index lock files
+and external state under deep user paths. Host Git resolves that database explicitly even when the agent has
+a normal `.git` of its own. Graph metadata is never relocated into a new agent
+view, including for Merger repair. Project Git borrows no graph alternates: only
+actual project objects/index entries may cross into it. Source gitfiles bind to
+independent project metadata under that slot's external process root.
+
+Slots also own `.grapher-state/<slot-digest>/process/` beside, not inside, their project.
+The existing Run cleanup ownership covers those roots. Slot scans must not treat
+the state container as another workspace; reclamation follows released writer,
+feedback, result and recovery dependencies. None of this is an additional Windows
+filesystem security boundary.
 
 Source snapshots and node results are pinned in the host-only database:
 
@@ -167,7 +229,14 @@ merged using normal Git semantics. A conflict in any tracked path—including a
 path that the source project's `.gitignore` would normally ignore—is a Git
 conflict and follows the existing Merger flow.
 
-A successful Merger must stage the resolution and commit a clean result preserving incoming parents. Composition and publication pass the managed environment/cache scopes as staging exclusions, and merge completion removes any accidentally staged scope from the index, so a Merger cannot commit `.agent-home`, `.venv` or `.environments` into the branch; the live files stay in the workspace for the environment. Conversation controls, blocked-node retry and publication-Merger distinctions belong to [Merger lifecycle](execution-model.md#parent-composition-conflicts).
+A successful Merger stages resolutions in the independent project index; the
+backend imports resolved project bytes and commits the graph merge preserving its
+incoming parents. The visible repository never receives internal `MERGE_HEAD`
+commits or graph refs. For a plain source there is no Git environment override:
+the Merger edits files directly, and unchanged conflicts without explicit
+resolution evidence refuse completion. Manual `resolved` acknowledgement is an
+explicit user decision. A successful graph result must be clean and preserve
+incoming parents. Composition and publication pass the managed environment/cache scopes as staging exclusions, and merge completion removes any accidentally staged scope from the index, so a Merger cannot commit `.agent-home`, `.venv` or `.environments` into the branch; the live files stay in the workspace for the environment. Conversation controls, blocked-node retry and publication-Merger distinctions belong to [Merger lifecycle](execution-model.md#parent-composition-conflicts).
 
 A completed workspace that is modified after completion fails the feedback
 handoff cleanliness check. The result must first be represented by a new

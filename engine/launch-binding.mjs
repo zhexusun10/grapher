@@ -9,7 +9,26 @@ import { samePath } from './path-identity.mjs';
 let active;
 let activePath;
 let deviceEnvironment = {};
+const runtimePathKey = key => /^(HOME|USERPROFILE|APPDATA|LOCALAPPDATA|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR|npm_config_cache|PIP_CACHE_DIR|CONDA_ENVS_PATH|CONDA_PKGS_DIRS)$/i.test(key);
+const workspaceBindingKey = key => runtimePathKey(key) || /^(GIT_CONFIG_GLOBAL|GIT_CEILING_DIRECTORIES)$/i.test(key);
+let runtimeEnvironment = process.env.GRAPHER_EXECUTION_KIND === 'graph'
+  ? Object.fromEntries(Object.entries(process.env).filter(([key]) => workspaceBindingKey(key))) : {};
 export function managedLaunch() { return active; }
+
+// Values come from the backend's current physical-slot target, not a frontend
+// environment choice. Planner uses host tools rather than a node's activation L.
+export function rebindWorkspaceEnvironment(bindings, workspace) {
+  if (!bindings || typeof bindings !== 'object' || Array.isArray(bindings)
+      || !bindings.HOME || !bindings.GIT_CONFIG_GLOBAL || !bindings.GIT_CEILING_DIRECTORIES
+      || Object.entries(bindings).some(([key, value]) => !workspaceBindingKey(key)
+        || typeof value !== 'string' || value.includes('\0') || !isAbsolute(value))) {
+    throw new Error('Invalid backend workspace runtime binding');
+  }
+  if (active) throw new Error('Managed business launch requires its own full backend rebind');
+  if (workspace) process.chdir(workspace);
+  Object.assign(runtimeEnvironment, bindings);
+  Object.assign(process.env, bindings);
+}
 
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 function bindBashPath(path) {
@@ -63,6 +82,12 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
     process.env[key] = value;
   }
   for (const [key, value] of Object.entries(launch.variables)) process.env[key] = value;
+  runtimeEnvironment = Object.fromEntries(Object.entries(launch.variables).filter(([key]) => runtimePathKey(key)));
+  if (process.env.GRAPHER_EXECUTION_KIND === 'graph') {
+    for (const [key, value] of Object.entries(process.env)) {
+      if (runtimePathKey(key) || /^(GIT_CONFIG_GLOBAL|GIT_CEILING_DIRECTORIES)$/i.test(key)) runtimeEnvironment[key] = value;
+    }
+  }
   const device = process.env.GRAPHER_ACCELERATOR_BINDING && JSON.parse(process.env.GRAPHER_ACCELERATOR_BINDING);
   deviceEnvironment = {};
   if (device) {
@@ -100,7 +125,9 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
       !samePath(process.env.PATH?.split(delimiter)[0] || '', dirname(launch.entry))) {
     throw new Error('Declared default entry/PATH is unavailable or changed by the hook; no fallback');
   }
-  Object.assign(process.env, deviceEnvironment);
+  // Activation may alter business variables, not the runtime's external HOME,
+  // cache/temp or project-Git bindings. Reapply them before any factory/tool.
+  Object.assign(process.env, runtimeEnvironment, deviceEnvironment);
   process.env.PYTHONDONTWRITEBYTECODE = '1';
   activePath = process.env.PATH;
   active = Object.freeze(launch);
@@ -108,15 +135,14 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
 
 // Pi prepends its managed search-bin directory in getShellEnv(). For managed
 // business execution, preserve the configured PATH after that second processing.
-// read/write/edit/search remain in the same cwd; only Bash launch is overridden.
 export function managedBashOptions(options) {
-  if (!active) return options;
+  if (!active && !Object.keys(runtimeEnvironment).length) return options;
   // The bash tool supplies the full shell environment; Pi's user_bash path may
   // omit it entirely. Keep the same Runtime bytecode policy in both cases.
-  const env = { ...options.env };
+  const env = { ...(options.env ?? process.env) };
   env.PYTHONDONTWRITEBYTECODE = '1';
-  for (const key of Object.keys(env)) if (/^(PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|CDPATH|OLDPWD|GLOBIGNORE)$/i.test(key)) delete env[key];
-  env.PATH = activePath;
-  Object.assign(env, deviceEnvironment);
+  for (const key of Object.keys(env)) if (/^(BASH_ENV|ENV|SHELLOPTS|BASHOPTS|CDPATH|OLDPWD|GLOBIGNORE)$/i.test(key) || active && /^PATH$/i.test(key)) delete env[key];
+  if (active) env.PATH = activePath;
+  Object.assign(env, runtimeEnvironment, deviceEnvironment);
   return { ...options, env };
 }

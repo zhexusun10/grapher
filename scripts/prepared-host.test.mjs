@@ -134,7 +134,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         ...(role === 'node' ? { GRAPHER_NODE_NAME: 'task', GRAPHER_CONTINUE_INTERRUPTED: 'false' } : {}),
         GRAPHER_COMPILER_PATH: join(target, `debug/grapher${process.platform === 'win32' ? '.exe' : ''}`),
         GRAPHER_TRUSTED_GIT: process.env.GRAPHER_TRUSTED_GIT ?? 'git',
-        PI_MODEL: null, PI_SESSION_ID: null,
+        PI_MODEL: null, PI_SESSION_ID: null, GIT_CEILING_DIRECTORIES: null, GIT_CONFIG_PARAMETERS: null,
       } };
       if (role === 'planner') plannerBinding = binding;
       const bindStarted = performance.now();
