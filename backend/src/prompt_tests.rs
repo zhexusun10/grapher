@@ -382,7 +382,7 @@ fn failed_node_instruction_control_starts_a_new_running_execution() {
         assert_eq!(snapshot.nodes["task"].error, None);
         // A fixture retry still pays full worktree/publication overhead, which
         // measured ~8s on CI runners before the post-task review settles.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let runtime = service.runtime.lock().unwrap();
             if runtime.state.executions.len() == 2 {

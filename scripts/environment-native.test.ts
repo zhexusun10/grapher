@@ -188,7 +188,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     await writeFile(join(source, 'pyproject.toml'), '[build-system]\nrequires=[]\nbuild-backend="editable_backend"\nbackend-path=["."]\n');
     await mkdir(join(source, '.pi/extensions'), { recursive: true });
     await copyFile(join(root, 'scripts/fixtures/environment-native.mjs'), join(source, '.pi/extensions/background-probe.ts'));
-    await writeFile(join(source, '.pi/extensions/launch-probe.ts'), `import {execFileSync} from 'node:child_process'; import {writeFileSync} from 'node:fs'; export default function(){ const proof=execFileSync('python',['-c','import sys,json,os; print(json.dumps({"prefix":sys.prefix,"cwd":os.getcwd()}))'],{encoding:'utf8'}); writeFileSync('.runtime-cache/extension.json',proof); }`);
+    await writeFile(join(source, '.pi/extensions/launch-probe.ts'), `import {execFileSync} from 'node:child_process'; import {mkdirSync,writeFileSync} from 'node:fs'; export default function(){ const proof=execFileSync('python',['-c','import sys,json,os; print(json.dumps({"prefix":sys.prefix,"cwd":os.getcwd()}))'],{encoding:'utf8'}); mkdirSync('.runtime-cache',{recursive:true}); writeFileSync('.runtime-cache/extension.json',proof); }`);
     const git = (...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'), '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: source, encoding: 'utf8' }).trim();
     git('init', '-q'); git('add', '-A'); git('commit', '-qm', 'baseline');
     await new Promise<void>(completed => modelServer.listen(0, '127.0.0.1', completed));

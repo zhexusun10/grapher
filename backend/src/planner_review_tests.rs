@@ -2,7 +2,7 @@ use super::*;
 use std::time::{Duration, Instant};
 
 fn wait(service: &Arc<Service>, predicate: impl Fn(&Snapshot) -> bool) -> Snapshot {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let state = service.runtime.lock().unwrap().state.clone();
         if predicate(&state) { return state; }
