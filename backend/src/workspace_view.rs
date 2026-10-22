@@ -1195,7 +1195,18 @@ pub(crate) fn capture_source(source: &Path, head: &str, identity: &str) -> Resul
         );
     }
     save(&pending, &view)?;
-    fs::rename(pending, target).map_err(|e| e.to_string())
+    if let Err(error) = fs::rename(&pending, &target) {
+        // A concurrent writer may have published the same immutable record first.
+        if target.exists() && load(&target).ok().as_ref() == Some(&view) {
+            let _ = fs::remove_dir_all(&pending);
+        } else {
+            return Err(format!(
+                "Cannot publish project-view record {}: {error}",
+                target.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn binding(path: &Path) -> Result<PathBuf, String> {
@@ -2218,7 +2229,17 @@ pub(crate) fn capture_node(path: &Path, source: &Path, head: &str) -> Result<(),
         copy_project_repositories(path, &pending, &view)?;
     }
     save(&pending, &view)?;
-    fs::rename(pending, target).map_err(|e| e.to_string())?;
+    if let Err(error) = fs::rename(&pending, &target) {
+        // A concurrent writer may have published the same immutable record first.
+        if target.exists() && load(&target).ok().as_ref() == Some(&view) {
+            let _ = fs::remove_dir_all(&pending);
+        } else {
+            return Err(format!(
+                "Cannot publish project-view record {}: {error}",
+                target.display()
+            ));
+        }
+    }
     if is_bound(path) {
         mark_ready(path)?;
     }

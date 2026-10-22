@@ -2855,7 +2855,13 @@ pub(crate) fn snapshot_node_scoped(
     let changed_view = view_identity.as_ref().is_some_and(|identity| {
         !crate::workspace_view::record_matches(&canonical_repo, &current, identity)
     });
-    let rebind_view = changed_view;
+    // A head that already exists without a view record (an explicit human or
+    // agent commit) is captured below instead of being given a redundant
+    // snapshot commit. This keeps `runtime.resolved` importing the user's
+    // commit as the node result. Only a head whose recorded view disagrees
+    // needs a new binding commit.
+    let rebind_view = changed_view
+        && crate::workspace_view::has_record(&canonical_repo, &current);
     if rebind_view || !git(&canonical_path, &["diff", "--cached", "--name-only"])?.is_empty() {
         let message = view_identity
             .as_ref()

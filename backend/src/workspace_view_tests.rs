@@ -555,7 +555,7 @@ fn source_alternates_are_imported_without_borrowed_dangling_snapshot_objects() {
 #[test]
 fn named_pipes_are_reconstructed_and_deleted_by_task_state_without_blocking() {
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);
     let fifo = source.join("events");
