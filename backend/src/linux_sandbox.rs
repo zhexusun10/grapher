@@ -425,7 +425,7 @@ mod tests {
         let output = Command::new(BWRAP)
             .args(&args[..args.len() - 2])
             .args(["/bin/sh", "-c",
-                "set -e; test -d .git; test -z \"$(git for-each-ref --format=%(refname) refs/grapher/)\"; test ! -e \"$1/file\"; ! (echo bad > \"$2/forbidden\") 2>/dev/null; echo isolated > local.txt; test -f local.txt",
+                "set -e; test -d .git; test -z \"$(git for-each-ref '--format=%(refname)' refs/grapher/)\"; test ! -e \"$1/file\"; ! (echo bad > \"$2/forbidden\") 2>/dev/null; echo isolated > local.txt; test -f local.txt",
                 "probe"])
             .args([&source, &objects])
             .current_dir(&current)
@@ -458,7 +458,7 @@ mod tests {
         let output = Command::new(BWRAP)
             .args(&args[..args.len() - 2])
             .args(["/bin/sh", "-c",
-                "set -e; test -e .git; test -z \"$(git for-each-ref --format=%(refname) refs/grapher/)\"; test ! -e \"$1/file\"; test ! -e \"$2/HEAD\"; ! (echo bad > \"$2/objects/forbidden\") 2>/dev/null; echo isolated > local.txt; test -f local.txt",
+                "set -e; test -e .git; test -z \"$(git for-each-ref '--format=%(refname)' refs/grapher/)\"; test ! -e \"$1/file\"; test ! -e \"$2/HEAD\"; ! (echo bad > \"$2/objects/forbidden\") 2>/dev/null; echo isolated > local.txt; test -f local.txt",
                 "probe"])
             .args([&source, &common])
             .current_dir(&current).output().unwrap();
