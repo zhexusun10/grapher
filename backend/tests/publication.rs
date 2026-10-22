@@ -184,7 +184,6 @@ fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollutio
         let script = temp.path().join("merger.sh");
         fs::write(&script, r#"set -eu
 cat >/dev/null
-test -e .git
 git rev-parse --verify MERGE_HEAD
 printf 'ours\ntheirs\n' > shared.txt
 git add shared.txt

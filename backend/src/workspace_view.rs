@@ -1017,16 +1017,21 @@ pub(crate) fn stage_project(path: &Path, metadata: &Path) -> Result<(), String> 
     // macOS host bookkeeping is not project output. Forced collection above sees
     // every file, so drop newly discovered metadata while keeping paths the user
     // already tracks. Other hosts keep collecting it as ordinary project data.
+    // Read tracked paths through the Git CLI: libgit2 cannot open SHA-256 repos.
     if cfg!(target_os = "macos") {
-        let tracked_repository = git2::Repository::open(metadata).map_err(|e| e.to_string())?;
-        let tracked: std::collections::BTreeSet<Vec<u8>> = tracked_repository
-            .index()
-            .map_err(|e| e.to_string())?
-            .iter()
-            .map(|entry| entry.path)
-            .collect();
+        let tracked = workspace::git(
+            path,
+            &[
+                "--git-dir",
+                metadata.to_str().ok_or("Invalid graph Git")?,
+                "ls-files",
+                "-z",
+            ],
+        )?;
+        let tracked: std::collections::BTreeSet<&str> =
+            tracked.split('\0').filter(|name| !name.is_empty()).collect();
         entries.retain(|name, _| {
-            !workspace::is_host_metadata(name) || tracked.contains(name.as_bytes())
+            !workspace::is_host_metadata(name) || tracked.contains(name.as_str())
         });
     }
     if format == "sha256" {
