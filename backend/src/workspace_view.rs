@@ -118,7 +118,7 @@ fn scan(
     entries: &mut BTreeMap<String, Entry>,
     git: bool,
 ) -> Result<(), String> {
-    scan_scoped(root, relative, entries, git, root)
+    scan_scoped(root, relative, entries, git, root, &[])
 }
 fn scan_scoped(
     root: &Path,
@@ -126,11 +126,21 @@ fn scan_scoped(
     entries: &mut BTreeMap<String, Entry>,
     git: bool,
     owner: &Path,
+    exclusions: &[String],
 ) -> Result<(), String> {
     for item in fs::read_dir(root.join(relative)).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
         let path = relative.join(item.file_name());
         if !git && item.file_name() == ".git" {
+            continue;
+        }
+        // Excluded scopes (managed environments/caches) are not part of the
+        // project view, so a scoped capture never inspects their contents.
+        if !git
+            && exclusions
+                .iter()
+                .any(|scope| workspace::scope_contains(&path, Path::new(scope)))
+        {
             continue;
         }
         // Lock files are volatile Git storage, not the source's repository
@@ -164,7 +174,7 @@ fn scan_scoped(
                 extra,
             }
         } else if metadata.is_dir() {
-            scan_scoped(root, &path, entries, git, owner)?;
+            scan_scoped(root, &path, entries, git, owner, exclusions)?;
             Entry::Directory {
                 mode: mode(&metadata),
                 extra,
@@ -307,16 +317,16 @@ fn remove_entry(entry: &Entry, path: &Path) -> Result<(), String> {
     }
 }
 fn inspect(source: &Path) -> Result<View, String> {
-    inspect_scoped(source, source)
+    inspect_scoped(source, source, &[])
 }
-fn inspect_scoped(source: &Path, owner: &Path) -> Result<View, String> {
+fn inspect_scoped(source: &Path, owner: &Path, exclusions: &[String]) -> Result<View, String> {
     let source = source.canonicalize().map_err(|e| e.to_string())?;
     let data = workspace::data_root();
     if data.exists() && workspace::scope_contains(&data, &source) {
         return Err("Runtime data is inside the source project; configure an external GRAPHER_DATA_DIR before preparing an equivalent workspace".into());
     }
     let mut entries = BTreeMap::new();
-    scan_scoped(&source, Path::new(""), &mut entries, false, owner)?;
+    scan_scoped(&source, Path::new(""), &mut entries, false, owner, exclusions)?;
     let mut repositories = BTreeMap::new();
     for (relative, entry) in &entries {
         if !matches!(entry, Entry::Directory { .. })
@@ -332,7 +342,7 @@ fn inspect_scoped(source: &Path, owner: &Path) -> Result<View, String> {
         }
         repositories.insert(
             relative.clone(),
-            inspect_scoped(&source.join(relative), owner)?,
+            inspect_scoped(&source.join(relative), owner, exclusions)?,
         );
     }
     let hardlinks = capture_links(&source, &entries)?;
@@ -1167,14 +1177,37 @@ pub(crate) fn has_record(source: &Path, head: &str) -> bool {
 }
 
 pub(crate) fn source_identity(source: &Path) -> Result<String, String> {
-    let bytes = serde_json::to_vec(&inspect(source)?).map_err(|e| e.to_string())?;
+    source_identity_scoped(source, &[])
+}
+fn source_identity_scoped(source: &Path, exclusions: &[String]) -> Result<String, String> {
+    let bytes =
+        serde_json::to_vec(&inspect_scoped(source, source, exclusions)?).map_err(|e| e.to_string())?;
     Ok(git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
         .map_err(|e| e.to_string())?
         .to_string())
 }
 pub(crate) fn capture_source(source: &Path, head: &str, identity: &str) -> Result<(), String> {
-    let view = inspect(source)?;
-    if source_identity(source)? != identity {
+    capture_source_view(source, head, identity, &[])
+}
+/// Capture a source view that omits managed environment/cache scopes, so a
+/// scoped snapshot (files-only publication) still has reconstructable evidence
+/// without inspecting excluded contents.
+pub(crate) fn capture_source_scoped(
+    source: &Path,
+    head: &str,
+    exclusions: &[String],
+) -> Result<(), String> {
+    let identity = source_identity_scoped(source, exclusions)?;
+    capture_source_view(source, head, &identity, exclusions)
+}
+fn capture_source_view(
+    source: &Path,
+    head: &str,
+    identity: &str,
+    exclusions: &[String],
+) -> Result<(), String> {
+    let view = inspect_scoped(source, source, exclusions)?;
+    if source_identity_scoped(source, exclusions)? != identity {
         return Err("Source changed while capturing its workspace; retry preparation".into());
     }
     let target = record_path(source, head)?;
@@ -1188,7 +1221,7 @@ pub(crate) fn capture_source(source: &Path, head: &str, identity: &str) -> Resul
     let pending = target.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&pending).map_err(|e| e.to_string())?;
     copy_project_repositories(source, &pending, &view)?;
-    if inspect(source)? != view {
+    if inspect_scoped(source, source, exclusions)? != view {
         return Err(
             "Source changed while copying project Git; original data retained, retry preparation"
                 .into(),
@@ -1586,6 +1619,13 @@ pub(crate) fn prepare(
     let mut inputs = Vec::new();
     for head in parents {
         let record = record_path(source, head)?;
+        // A parent whose evidence was reclaimed (for example a stale snapshot
+        // commit that only existed in a deleted shadow) has no project view to
+        // compose and must not block the rebaseline; the base already carries
+        // its published content.
+        if !record.join("view.json").is_file() {
+            continue;
+        }
         inputs.push((record.clone(), load(&record)?));
     }
     let (record, view) = inputs
@@ -2068,7 +2108,7 @@ fn nested_repository_views(project: &Path) -> Result<BTreeMap<String, View>, Str
                 continue;
             }
             if fs::symlink_metadata(absolute.join(".git")).is_ok() {
-                views.insert(name(&path)?, inspect_scoped(&absolute, project)?);
+                views.insert(name(&path)?, inspect_scoped(&absolute, project, &[])?);
             } else {
                 visit(project, &path, views)?;
             }
@@ -2171,7 +2211,9 @@ pub(crate) fn seal_prepared(path: &Path, source: &Path) -> Result<String, String
 }
 
 pub(crate) fn verify_result(path: &Path, source: &Path, head: &str) -> Result<(), String> {
-    if !is_bound(path) {
+    if !is_bound(path) || !has_record(source, head) {
+        // Without recorded evidence there is nothing to compare against; a
+        // stale or reclaimed head must not block a rebaseline.
         return Ok(());
     }
     let (current, _) = node_view(path, source)?.ok_or("Missing current project view")?;

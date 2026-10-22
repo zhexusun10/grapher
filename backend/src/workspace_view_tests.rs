@@ -17,6 +17,13 @@ fn source(temp: &tempfile::TempDir) -> PathBuf {
     workspace::git(&root, &["commit", "-qm", "project history"]).unwrap();
     root
 }
+// Repositories created outside `source` are committed to directly, so they need
+// an explicit author identity: CI runners have no global Git identity.
+fn configure_author(repo: &Path) {
+    workspace::project_git(repo, &["config", "user.name", "Project Author"]).unwrap();
+    workspace::project_git(repo, &["config", "user.email", "project@example.invalid"]).unwrap();
+    workspace::project_git(repo, &["config", "core.autocrlf", "false"]).unwrap();
+}
 fn slot(temp: &tempfile::TempDir, name: &str) -> PathBuf {
     temp.path()
         .join(".grapher-worktrees")
@@ -666,6 +673,7 @@ fn nested_repositories_keep_native_history_and_staging_without_graph_objects() {
     let nested = source.join("nested");
     fs::create_dir(&nested).unwrap();
     workspace::project_git(&nested, &["init", "-q"]).unwrap();
+    configure_author(&nested);
     fs::write(nested.join("business"), "base").unwrap();
     workspace::project_git(&nested, &["add", "business"]).unwrap();
     workspace::project_git(&nested, &["commit", "-qm", "nested history"]).unwrap();
@@ -708,6 +716,7 @@ fn submodules_rebind_gitfiles_and_preserve_dirty_project_contents() {
     let seed = temp.path().join("dependency");
     fs::create_dir(&seed).unwrap();
     workspace::project_git(&seed, &["init", "-q"]).unwrap();
+    configure_author(&seed);
     fs::write(seed.join("business"), "dependency").unwrap();
     workspace::project_git(&seed, &["add", "business"]).unwrap();
     workspace::project_git(&seed, &["commit", "-qm", "dependency history"]).unwrap();
@@ -750,6 +759,7 @@ fn submodules_rebind_gitfiles_and_preserve_dirty_project_contents() {
     assert!(workspace::project_git(&target, &["submodule", "status"])
         .unwrap()
         .contains("modules/dependency"));
+    configure_author(&child);
     fs::write(child.join("business"), "private dependency task").unwrap();
     workspace::project_git(&child, &["add", "business"]).unwrap();
     workspace::project_git(&child, &["commit", "-qm", "dependency task commit"]).unwrap();

@@ -1211,8 +1211,12 @@ pub fn materialize_shadow_repo(target: &Path, exclusions: &[String]) -> Result<S
             // of adding a redundant empty commit (idempotent re-materialization
             // for crash recovery and shared sources).
             let head = bridge_plain_snapshot(&canonical)?;
-            if let Some(identity) = &identity {
-                crate::workspace_view::capture_source(&canonical, &head, identity)?;
+            if !crate::workspace_view::has_record(&canonical, &head) {
+                if let Some(identity) = &identity {
+                    crate::workspace_view::capture_source(&canonical, &head, identity)?;
+                } else {
+                    crate::workspace_view::capture_source_scoped(&canonical, &head, exclusions)?;
+                }
             }
             return Ok(head);
         }
@@ -1222,8 +1226,12 @@ pub fn materialize_shadow_repo(target: &Path, exclusions: &[String]) -> Result<S
     commit.extend(["-m", "Grapher source snapshot"]);
     git(&canonical, &commit)?;
     let head = bridge_plain_snapshot(&canonical)?;
-    if let Some(identity) = &identity {
-        crate::workspace_view::capture_source(&canonical, &head, identity)?;
+    if !crate::workspace_view::has_record(&canonical, &head) {
+        if let Some(identity) = &identity {
+            crate::workspace_view::capture_source(&canonical, &head, identity)?;
+        } else {
+            crate::workspace_view::capture_source_scoped(&canonical, &head, exclusions)?;
+        }
     }
     Ok(head)
 }
@@ -3513,9 +3521,7 @@ pub(crate) fn snapshot_repository_scoped(
                             &message,
                         ],
                     )?,
-                    (Some(head), None)
-                        if identity.is_none() && original.as_deref() == Some(tree.as_str()) =>
-                    {
+                    (Some(head), None) if original.as_deref() == Some(tree.as_str()) => {
                         head.to_string()
                     }
                     (Some(head), None) => {
@@ -3535,8 +3541,14 @@ pub(crate) fn snapshot_repository_scoped(
                 &snapshot,
             ],
         )?;
-        if let Some(identity) = identity {
-            crate::workspace_view::capture_source(path, &snapshot, &identity)?;
+        if !crate::workspace_view::has_record(path, &snapshot) {
+            if let Some(identity) = identity {
+                crate::workspace_view::capture_source(path, &snapshot, &identity)?;
+            } else {
+                // A scoped snapshot (managed environment/cache scopes excluded)
+                // still needs reconstructable evidence for its base.
+                crate::workspace_view::capture_source_scoped(path, &snapshot, exclusions)?;
+            }
         }
         Ok(snapshot)
     } else {
@@ -3594,8 +3606,12 @@ pub(crate) fn snapshot_repository_scoped(
             git(&canonical, &commit)?;
         }
         let head = bridge_plain_snapshot(&canonical)?;
-        if let Some(identity) = &identity {
-            crate::workspace_view::capture_source(&canonical, &head, identity)?;
+        if !crate::workspace_view::has_record(&canonical, &head) {
+            if let Some(identity) = &identity {
+                crate::workspace_view::capture_source(&canonical, &head, identity)?;
+            } else {
+                crate::workspace_view::capture_source_scoped(&canonical, &head, exclusions)?;
+            }
         }
         Ok(head)
     }
