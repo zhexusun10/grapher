@@ -560,7 +560,7 @@ fn source_alternates_are_imported_without_borrowed_dangling_snapshot_objects() {
 
 #[cfg(unix)]
 #[test]
-fn named_pipes_are_reconstructed_and_deleted_by_task_state_without_blocking() {
+fn named_pipes_are_reconstructed_and_survive_forks() {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     let temp = tempfile::tempdir().unwrap();
@@ -582,10 +582,13 @@ fn named_pipes_are_reconstructed_and_deleted_by_task_state_without_blocking() {
         .file_type()
         .is_fifo());
     fs::remove_file(target.join("events")).unwrap();
-    let deleted = workspace::snapshot_node(&target, &source, "fifo-delete").unwrap();
-    let removed = slot(&temp, "fifo-removed");
-    workspace::prepare(&source, &removed, &deleted, &[]).unwrap();
-    assert!(fs::symlink_metadata(removed.join("events")).is_err());
+    // Files-only publication cannot deliver the removal of a special entry, so
+    // the task result is refused explicitly instead of silently dropping it.
+    let error = workspace::snapshot_node(&target, &source, "fifo-delete").unwrap_err();
+    assert!(
+        error.contains("files-only publication cannot deliver"),
+        "{error}"
+    );
     assert!(fs::symlink_metadata(fork.join("events"))
         .unwrap()
         .file_type()
