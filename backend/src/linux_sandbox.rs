@@ -52,9 +52,10 @@ fn mount_boundaries(
     session: &Path,
     engine: &Path,
     installation: &Path,
-    borrowed_objects: Option<&Path>,
+    borrowed_objects: &[PathBuf],
     state: Option<&Path>,
     additional: &[PathBuf],
+    extra_binds: &[PathBuf],
 ) -> Result<(), String> {
     masks.sort_by(|a, b| {
         a.components()
@@ -72,18 +73,21 @@ fn mount_boundaries(
     for (index, mask) in masks.iter().enumerate() {
         let empty = staging.join(index.to_string());
         fs::create_dir_all(&empty).map_err(|e| e.to_string())?;
-        for path in masks.iter().map(PathBuf::as_path).chain([current, session]).chain(borrowed_objects).chain(state).chain(additional.iter().map(PathBuf::as_path)) {
+        for path in masks.iter().map(PathBuf::as_path).chain([current, session]).chain(borrowed_objects.iter().map(PathBuf::as_path)).chain(state).chain(additional.iter().map(PathBuf::as_path)).chain(extra_binds.iter().map(PathBuf::as_path)) {
             if let Ok(relative) = path.strip_prefix(mask) {
                 fs::create_dir_all(empty.join(relative)).map_err(|e| e.to_string())?;
             }
         }
         command.arg("--ro-bind").arg(&empty).arg(mask);
     }
-    if let Some(objects) = borrowed_objects {
+    for objects in borrowed_objects {
         command.arg("--ro-bind").arg(objects).arg(objects);
     }
     if let Some(state) = state { command.arg("--bind").arg(state).arg(state); }
     for path in additional { command.arg("--bind").arg(path).arg(path); }
+    // The Merger's own Git targets the graph metadata, which is a sibling of
+    // the masked workspace root; expose exactly that repository to it.
+    for path in extra_binds { command.arg("--bind").arg(path).arg(path); }
     command
         .arg("--bind")
         .arg(current)
@@ -127,8 +131,9 @@ fn probe() -> Result<(), String> {
             &session,
             &engine,
             &installation,
+            &[],
             None,
-            None,
+            &[],
             &[],
         )?;
         command.args(["--", "/bin/sh", "-c",
@@ -165,12 +170,12 @@ pub fn execution_command(
     engine: &Path,
     pi_dir: &Path,
 ) -> Result<Command, String> {
-    execution_command_scoped(source, root, current, data, session, engine, pi_dir, &[])
+    execution_command_scoped(source, root, current, data, session, engine, pi_dir, &[], &[])
 }
 
 pub(crate) fn execution_command_scoped(
     source: &Path, root: &Path, current: &Path, data: &Path, session: &Path,
-    engine: &Path, pi_dir: &Path, workspaces: &[PathBuf],
+    engine: &Path, pi_dir: &Path, workspaces: &[PathBuf], extra_binds: &[PathBuf],
 ) -> Result<Command, String> {
     require_supported()?;
     let source = canonical(source)?;
@@ -184,6 +189,16 @@ pub(crate) fn execution_command_scoped(
         crate::workspace_view::validate_ready(&target, &source)?;
         additional.push(canonical(&crate::workspace_state::prepare(&target)?)?);
         additional.push(target);
+    }
+    let mut extra = Vec::new();
+    for path in extra_binds {
+        let target = canonical(path)?;
+        // Only a Grapher-owned repository beside the Run root may be bound;
+        // never the root itself, the source, or an arbitrary path.
+        if target == root || !target.starts_with(&root) {
+            return Err("Merger Git metadata leaves the current Run".into());
+        }
+        extra.push(target);
     }
     let data = canonical(data)?;
     let session = canonical(session)?;
@@ -257,16 +272,25 @@ pub(crate) fn execution_command_scoped(
             return Err("Git or runtime directory overlaps the Linux Graph sandbox".into());
         }
     }
-    let borrowed_objects = if let Ok(alternate) = fs::read_to_string(current.join(".git/objects/info/alternates")) {
-        let expected = crate::workspace::repository_git(
-            &source, &["rev-parse", "--path-format=absolute", "--git-path", "objects"]
-        )?;
-        let objects = canonical(Path::new(alternate.trim()))?;
-        if objects != canonical(Path::new(&expected))? {
-            return Err("Untrusted Graph object alternate".into());
+    // A visible project view may borrow the source object store through an
+    // alternate, and the Merger's graph Git borrows it as well. Bind exactly the
+    // validated source object store read-only so both can resolve objects.
+    let expected_objects = canonical(Path::new(&crate::workspace::repository_git(
+        &source, &["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+    )?))?;
+    let mut borrowed_objects = Vec::new();
+    for alternate in std::iter::once(current.join(".git/objects/info/alternates"))
+        .chain(extra.iter().map(|path| path.join("objects/info/alternates")))
+    {
+        if let Ok(value) = fs::read_to_string(&alternate) {
+            let objects = canonical(Path::new(value.trim()))?;
+            if objects != expected_objects {
+                return Err("Untrusted Graph object alternate".into());
+            }
+            borrowed_objects.push(objects);
         }
-        Some(objects)
-    } else { None };
+    }
+    borrowed_objects.dedup();
     let mut command = base_command();
     mount_boundaries(
         &mut command,
@@ -275,9 +299,10 @@ pub(crate) fn execution_command_scoped(
         &session,
         &engine,
         &installation,
-        borrowed_objects.as_deref(),
+        &borrowed_objects,
         Some(&state),
         &additional,
+        &extra,
     )?;
     command
         .arg("--")

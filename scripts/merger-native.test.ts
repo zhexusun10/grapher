@@ -220,7 +220,7 @@ test('production Planner writes source directly; Merger repairs node and publica
     const until = async (check: () => Promise<any>) => {
       const start = Date.now();
       while (Date.now() - start < 180000) {
-        assert.deepEqual(errors, []);
+        assert.deepEqual(errors, [], diagnostics);
         if (backend?.exitCode !== null) throw new Error(`Backend exited: ${diagnostics}`);
         const result = await check();
         if (result) return result;

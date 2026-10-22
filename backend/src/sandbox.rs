@@ -47,7 +47,7 @@ pub fn write_graph_profile(
     worktree_root: &Path,
     current: &Path,
 ) -> Result<PathBuf, String> {
-    write_profile(path, repository, worktree_root, current, None, &[])
+    write_profile(path, repository, worktree_root, current, None, &[], &[])
 }
 
 /// Production adds session/data and engine boundaries.
@@ -60,14 +60,15 @@ pub fn write_execution_profile(
     session: &Path,
     engine: &Path,
 ) -> Result<PathBuf, String> {
-    write_execution_profile_scoped(path, repository, worktree_root, current, data, session, engine, &[])
+    write_execution_profile_scoped(path, repository, worktree_root, current, data, session, engine, &[], &[])
 }
 
 pub(crate) fn write_execution_profile_scoped(
     path: &Path, repository: &Path, worktree_root: &Path, current: &Path,
     data: &Path, session: &Path, engine: &Path, workspaces: &[PathBuf],
+    extra_exceptions: &[PathBuf],
 ) -> Result<PathBuf, String> {
-    write_profile(path, repository, worktree_root, current, Some((data, session, engine)), workspaces)
+    write_profile(path, repository, worktree_root, current, Some((data, session, engine)), workspaces, extra_exceptions)
 }
 
 fn write_profile(
@@ -77,6 +78,7 @@ fn write_profile(
     current: &Path,
     execution: Option<(&Path, &Path, &Path)>,
     workspaces: &[PathBuf],
+    extra_exceptions: &[PathBuf],
 ) -> Result<PathBuf, String> {
     if !supported() {
         return Err("Graph sandbox requires /usr/bin/sandbox-exec on macOS".into());
@@ -91,6 +93,12 @@ fn write_profile(
     {
         return Err("Invalid or overlapping Graph sandbox paths".into());
     }
+    // The Merger's own graph Git is a legitimate exception, not a hidden
+    // database to protect. Later deny rules must not re-deny it.
+    let extra_resolved = extra_exceptions
+        .iter()
+        .map(|path| canonical_exception(&worktree_root, path))
+        .collect::<Result<Vec<_>, _>>()?;
     let extra = execution
         .map(|(data, session, engine)| -> Result<_, String> {
             Ok((
@@ -117,14 +125,23 @@ fn write_profile(
     }
     // Only a Grapher-created alternate pointing at the bound repository's
     // actual object database may be read. Never trust an arbitrary alternate
-    // path written by an agent when generating a profile.
+    // path written by an agent when generating a profile. The Merger's graph
+    // Git borrows the same object store through its own alternate.
     let borrowed_objects = (|| -> Option<PathBuf> {
-        let alternate = fs::read_to_string(current.join(".git/objects/info/alternates")).ok()?;
-        let alternate = PathBuf::from(alternate.trim()).canonicalize().ok()?;
         let expected = crate::workspace::repository_git(
             &repository, &["rev-parse", "--path-format=absolute", "--git-path", "objects"]
         ).ok()?;
-        (alternate == PathBuf::from(expected).canonicalize().ok()?).then_some(alternate)
+        let expected = PathBuf::from(expected).canonicalize().ok()?;
+        for alternate in std::iter::once(current.join(".git/objects/info/alternates"))
+            .chain(extra_exceptions.iter().map(|path| path.join("objects/info/alternates")))
+        {
+            if let Ok(value) = fs::read_to_string(&alternate) {
+                if let Ok(objects) = PathBuf::from(value.trim()).canonicalize() {
+                    if objects == expected { return Some(objects); }
+                }
+            }
+        }
+        None
     })();
     let source_rule = if let Some((_, session, _)) = &extra {
         format!(
@@ -155,6 +172,11 @@ fn write_profile(
         crate::workspace_view::validate_ready(&target, &repository)?;
         exceptions.push(canonical_exception(&worktree_root, &crate::workspace_state::prepare(&target)?)?);
         exceptions.push(target);
+    }
+    // The Merger's hidden graph Git lives beside the masked worktrees root and
+    // must stay readable and writable so it can resolve the composition merge.
+    for exception in &extra_resolved {
+        exceptions.push(exception.clone());
     }
     exceptions.sort();
     exceptions.dedup();
@@ -218,7 +240,10 @@ fn write_profile(
     }
     for common in common_dirs.into_iter().flatten() {
         let common = PathBuf::from(common).canonicalize().map_err(|e| e.to_string())?;
-        if !common.starts_with(&repository) && !common.starts_with(&current) {
+        if !common.starts_with(&repository)
+            && !common.starts_with(&current)
+            && !extra_resolved.contains(&common)
+        {
             append_git_dir_rule(&mut text, &common, borrowed_objects.as_deref())?;
         }
     }
@@ -232,7 +257,7 @@ fn write_profile(
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         ) {
             let common = PathBuf::from(common).canonicalize().map_err(|e| e.to_string())?;
-            if !common.starts_with(&current) {
+            if !common.starts_with(&current) && !extra_resolved.contains(&common) {
                 text.push_str(&format!(
                     "(deny file-read* file-write* (subpath {}))\n",
                     quote(&common)?

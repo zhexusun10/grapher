@@ -518,6 +518,15 @@ pub(crate) fn execution_command_scoped(
     let engine = prepared_runtime()?;
     crate::path_identity::ensure_windows_path(&engine, "Native engine")?;
     crate::path_identity::ensure_windows_path(session, "Execution session")?;
+    // A bound project view keeps its composition merge (MERGE_HEAD and the
+    // unmerged index) in the hidden graph Git; the Merger is the only role that
+    // targets it (through GIT_DIR). Expose exactly that repository to the
+    // platform sandbox without opening graph history to node/Planner agents.
+    let merger_git: Vec<PathBuf> = if role == PiRole::Merger {
+        crate::workspace::private_git_dir(&current).into_iter().collect()
+    } else {
+        Vec::new()
+    };
     #[cfg(target_os = "macos")]
     {
         let profile = session.join("execution-instance.sb");
@@ -530,6 +539,7 @@ pub(crate) fn execution_command_scoped(
             session,
             &engine,
             &allowances,
+            &merger_git,
         )?;
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command
@@ -550,6 +560,7 @@ pub(crate) fn execution_command_scoped(
     #[cfg(target_os = "windows")]
     {
         let _ = data;
+        let _ = &merger_git;
         let mut command = unsandboxed_command(&engine, &current)?;
         bind_process_paths(&mut command, session);
         bind_workspace_state(&mut command, &current)?;
@@ -567,6 +578,7 @@ pub(crate) fn execution_command_scoped(
             &engine,
             &pi_dir,
             &allowances,
+            &merger_git,
         )?;
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
@@ -576,7 +588,7 @@ pub(crate) fn execution_command_scoped(
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        let _ = (source, worktree_root, data, session, engine);
+        let _ = (&merger_git, source, worktree_root, data, session, engine);
         Err(
             "Native Graph execution is not available without a validated host filesystem sandbox"
                 .into(),
