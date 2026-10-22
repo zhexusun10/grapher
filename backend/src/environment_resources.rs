@@ -250,7 +250,21 @@ mod tests {
         );
         drop(held);
         drop(a_lease);
-        acquire_ids(root.path(), &[a, b]).unwrap();
+        // `flock` is per open file description and `fork` shares it, so a
+        // concurrently forked child (any test that spawns a process) can still
+        // hold the inherited description for a moment after this process drops
+        // it. Require the leases to be released, but allow that brief window: a
+        // real fd leak never releases, so it still fails.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match acquire_ids(root.path(), &[a.clone(), b.clone()]) {
+                Ok(_reacquired) => break,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("Device leases were not released: {error}"),
+            }
+        }
     }
     #[test]
     fn lease_subprocess() {
