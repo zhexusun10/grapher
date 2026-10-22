@@ -120,11 +120,12 @@ test('production Planner writes source directly; Merger repairs node and publica
         } else if (!scenario.fail && results.length === 0) {
           // Absolute source aliases select the conflicted private file for both
           // node and publication Mergers, never the user's source file. The
-          // graph merge is host-only; the visible project Git carries the
-          // conflict index entries, not graph MERGE_HEAD/refs.
+          // Merger's Git targets the graph metadata, which carries the pending
+          // merge (MERGE_HEAD) and the unmerged index; the visible project Git
+          // is only a mirror of that conflicted index.
           const visible = scenario.plain
             ? 'test ! -e .git && '
-            : 'test -n "$(git diff --name-only --diff-filter=U)" && test -z "$(git rev-parse --verify -q MERGE_HEAD)" && test -z "$(git for-each-ref --format=\"%(refname)\" refs/grapher/)" && ';
+            : 'test -n "$(git diff --name-only --diff-filter=U)" && test -n "$(git rev-parse --verify -q MERGE_HEAD)" && ';
           tool = { name: 'bash', arguments: { command:
             `${visible}printf 'resolved\\n' > ${quote(join(scenario.repository, 'shared.txt'))}${scenario.plain ? '' : ' && git add -f shared.txt'}`,
           } };
