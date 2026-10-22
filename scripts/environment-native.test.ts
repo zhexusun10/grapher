@@ -7,7 +7,7 @@ import { createReadStream } from 'node:fs';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, copyFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve, dirname, delimiter } from 'node:path';
+import { join, resolve, dirname, basename, delimiter } from 'node:path';
 import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
@@ -16,6 +16,12 @@ import { venvCreationCommand } from './fixtures/environment-native.mjs';
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const delay = (ms: number) => new Promise(completed => setTimeout(completed, ms));
+// A managed slot keeps its external state under {state}; the directory name is
+// the first 16 hex digits of the Git blob hash of the slot name.
+const slotDigest = (worktree: string) => {
+  const name = basename(worktree);
+  return createHash('sha1').update(`blob ${Buffer.byteLength(name)}\0${name}`).digest('hex').slice(0, 16);
+};
 const code = (value: string) => `import json,sys,os\nVALUE=${JSON.stringify(value)}\ndef main():\n print(json.dumps({'value':VALUE,'cwd':os.getcwd(),'prefix':sys.prefix,'python':sys.executable}))\n`;
 async function fileHash(path: string): Promise<string> {
   const digest = createHash('sha256'); for await (const chunk of createReadStream(path)) digest.update(chunk); return digest.digest('hex');
@@ -52,6 +58,16 @@ test('native managed environment: install once, real Pi tools, editable/launcher
   const condaManifestPath = process.env.GRAPHER_ENV_TEST_CONDA_MANIFEST;
   assert.ok(!(mlManifestPath && condaManifestPath), 'Do not mix lazy Conda and legacy ML profiles');
   const conda = condaManifestPath ? JSON.parse(await readFile(condaManifestPath, 'utf8')) : undefined;
+  // The automatic (non-ML/Conda) profile keeps its managed venv under {state};
+  // the ML/Conda profiles pin it to the workspace.
+  const venvPath = (worktree: string) => ml || conda
+    ? join(worktree, '.venv')
+    : join(dirname(worktree), '.grapher-state', slotDigest(worktree), 'process', '.venv');
+  // The declared runtime cache is workspace-relative for ML/Conda and {state}-
+  // relative for the automatic profile.
+  const cachePath = (worktree: string) => ml || conda
+    ? join(worktree, '.runtime-cache')
+    : join(dirname(worktree), '.grapher-state', slotDigest(worktree), 'process', '.runtime-cache');
   const condaPackages: string[] = [];
   if (conda) {
     const toolRoot = resolve(dirname(condaManifestPath!));
@@ -126,6 +142,11 @@ test('native managed environment: install once, real Pi tools, editable/launcher
         assert.doesNotMatch(output, /Native environment observation refused|Traceback|command not found|No such file or directory|AssertionError|exited with code [1-9]/i, `native tool failed: ${output.slice(-12000)}`);
       }
       const step = tools.length;
+      // Managed state lives under {state}; HOME is {state}/.agent-home for the
+      // automatic profile and {workspace}/.agent-home for ML/Conda, so its
+      // parent names the selected venv in both cases.
+      const venv = '"$(dirname "$HOME")/.venv"';
+      const venvActivate = `${venv}/${process.platform === 'win32' ? 'Scripts' : 'bin'}/activate`;
       // The extension writer starts at most once per conversation: whatever the
       // runtime replays after an interruption, the fixture answers instead of
       // starting a second writer.
@@ -143,12 +164,12 @@ test('native managed environment: install once, real Pi tools, editable/launcher
       let tool: { name: string; arguments: any } | undefined;
       if (step === 0) {
         let command: string;
-        const activate = ml ? '' : conda ? 'eval "$(conda shell.bash hook)" && conda activate "$PWD/.venv" && ' : `source '${process.platform === 'win32' ? '.venv/Scripts/activate' : '.venv/bin/activate'}' && `;
-        const create = ml ? '' : conda ? `eval "$(conda shell.bash hook)" && conda create --prefix .venv --offline --yes --copy ${condaPackages.map(quote).join(' ')} && ` : venvCreationCommand(python) + ' && ';
-        if (prompt.includes('RETRY_BACKGROUND') || prompt.includes('B_AFTER_RETRY')) command = 'python -c ' + quote("import pathlib; assert pathlib.Path('.venv/background-partial').read_text()=='partial'; print('RETRY_KEPT_CREATED_ENV')");
+        const activate = ml ? '' : conda ? `eval "$(conda shell.bash hook)" && conda activate ${venv} && ` : `source ${venvActivate} && `;
+        const create = ml ? '' : conda ? `eval "$(conda shell.bash hook)" && conda create --prefix ${venv} --offline --yes --copy ${condaPackages.map(quote).join(' ')} && ` : venvCreationCommand(python, venv) + ' && ';
+        if (prompt.includes('RETRY_BACKGROUND') || prompt.includes('B_AFTER_RETRY')) command = 'python -c ' + quote("import pathlib,os; assert (pathlib.Path(os.environ['HOME']).parent/'.venv/background-partial').read_text()=='partial'; print('RETRY_KEPT_CREATED_ENV')");
         else if (prompt.includes('NO_ENVIRONMENT')) command = 'node -e ' + quote("require('node:fs').writeFileSync('.env','ORDINARY=1'); require('node:fs').writeFileSync('environment.yml','name: declaration-only\\n'); console.log('NO_ENVIRONMENT_NEEDED')");
         else if (prompt.includes('BACKGROUND_WRITER')) command = create + activate + 'python -c ' + quote("import sys; print('BACKGROUND_ENV_CREATED',sys.executable)");
-        else if (prompt.includes('A_CREATE')) command = create + activate + 'python -m pip install --no-index --no-build-isolation -e . && pip --version && python -c ' + quote("import sys,pathlib,os; assert sys.prefix == str(pathlib.Path.cwd()/'.venv'); assert not os.environ.get('PYTHONHOME'); assert 'outer-poison' not in os.environ.get('PATH',''); print(sys.executable)");
+        else if (prompt.includes('A_CREATE')) command = create + activate + 'python -m pip install --no-index --no-build-isolation -e . && pip --version && python -c ' + quote("import sys,pathlib,os; assert sys.prefix == str(pathlib.Path(os.environ['HOME']).parent/'.venv'); assert not os.environ.get('PYTHONHOME'); assert 'outer-poison' not in os.environ.get('PATH',''); print(sys.executable)");
         else if (prompt.includes('B_USE')) command = 'envcheck && python -c ' + quote("import sysconfig,pathlib; pathlib.Path(sysconfig.get_paths()['purelib'],'native_dependency.py').write_text('VERSION=2\\n')");
         else if (prompt.includes('C_USE')) command = 'envcheck && python -c ' + quote("import native_dependency,pathlib,json,sys; assert native_dependency.VERSION==2; pathlib.Path('reports').mkdir(exist_ok=True); pathlib.Path('reports/C.json').write_text(json.dumps({'version':2,'prefix':sys.prefix}))");
         else if (prompt.includes('FOLLOWUP_2')) command = 'envcheck && python -c ' + quote("import native_dependency,pathlib; assert native_dependency.VERSION==3; assert pathlib.Path('reports/C.json').exists(); print('CURRENT_VIEW_RESTORED')");
@@ -164,7 +185,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
         const value = prompt.includes('C_USE') ? 'C' : prompt.includes('B_USE') ? 'B' : 'A';
         tool = { name: 'write', arguments: { path: join(source, 'ml_probe.py'), content: code(value) } };
       } else if (step === 2 && /A_CREATE|B_USE|C_USE/.test(prompt)) {
-        const activate = !ml && prompt.includes('A_CREATE') ? conda ? 'eval "$(conda shell.bash hook)" && conda activate "$PWD/.venv" && ' : `source '${process.platform === 'win32' ? '.venv/Scripts/activate' : '.venv/bin/activate'}' && ` : '';
+        const activate = !ml && prompt.includes('A_CREATE') ? conda ? `eval "$(conda shell.bash hook)" && conda activate ${venv} && ` : `source ${venvActivate} && ` : '';
         tool = { name: 'bash', arguments: { command: activate + 'envcheck && python -c ' + quote("import ml_probe; ml_probe.main()") } };
       } else if (step === 3 && prompt.includes('C_USE')) {
         tool = { name: 'read', arguments: { path: join(source, 'reports/C.json') } };
@@ -188,7 +209,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     await writeFile(join(source, 'pyproject.toml'), '[build-system]\nrequires=[]\nbuild-backend="editable_backend"\nbackend-path=["."]\n');
     await mkdir(join(source, '.pi/extensions'), { recursive: true });
     await copyFile(join(root, 'scripts/fixtures/environment-native.mjs'), join(source, '.pi/extensions/background-probe.ts'));
-    await writeFile(join(source, '.pi/extensions/launch-probe.ts'), `import {execFileSync} from 'node:child_process'; import {mkdirSync,writeFileSync} from 'node:fs'; export default function(){ const proof=execFileSync('python',['-c','import sys,json,os; print(json.dumps({"prefix":sys.prefix,"cwd":os.getcwd()}))'],{encoding:'utf8'}); mkdirSync('.runtime-cache',{recursive:true}); writeFileSync('.runtime-cache/extension.json',proof); }`);
+    await writeFile(join(source, '.pi/extensions/launch-probe.ts'), `import {execFileSync} from 'node:child_process'; import {mkdirSync,writeFileSync} from 'node:fs'; import {join} from 'node:path'; export default function(){ const proof=execFileSync('python',['-c','import sys,json,os; print(json.dumps({"prefix":sys.prefix,"cwd":os.getcwd()}))'],{encoding:'utf8'}); const cache=join(process.env.HOME,'..','.runtime-cache'); mkdirSync(cache,{recursive:true}); writeFileSync(join(cache,'extension.json'),proof); }`);
     const git = (...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'), '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: source, encoding: 'utf8' }).trim();
     git('init', '-q'); git('add', '-A'); git('commit', '-qm', 'baseline');
     await new Promise<void>(completed => modelServer.listen(0, '127.0.0.1', completed));
@@ -297,8 +318,8 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     assert.equal((await readFile(join(source, 'ml_probe.py'), 'utf8')).replaceAll('\r\n', '\n'), code('C'));
     assert.equal(JSON.parse(await readFile(join(source, 'reports/C.json'), 'utf8')).version, 2);
     await assert.rejects(readFile(join(source, '.venv/pyvenv.cfg')), /ENOENT/);
-    const proof = JSON.parse(await readFile(join(workspace, '.runtime-cache/extension.json'), 'utf8'));
-    assert.equal(proof.cwd, workspace); assert.equal(proof.prefix, join(workspace, '.venv'));
+    const proof = JSON.parse(await readFile(join(cachePath(workspace), 'extension.json'), 'utf8'));
+    assert.equal(proof.cwd, workspace); assert.equal(proof.prefix, venvPath(workspace));
     if (ml) {
       for (const execution of initial.executions) {
         const proof = JSON.parse(await readFile(join(data, 'environments', runId, 'proofs', execution.result.generation, 'accelerator.json'), 'utf8'));
@@ -331,7 +352,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     await api('control', { runId, action: 'intervene', node: 'A', instruction: 'FOLLOWUP_2' });
     const rebuilt = await settled(); assert.equal(rebuilt.executions.at(-1).worktree, workspace);
     const restoredFollowupWallMs = Date.now() - restoreStarted;
-    const workingEnvironmentBytes = await bytes(join(workspace, '.venv')) + await bytes(join(workspace, '.agent-home'));
+    const workingEnvironmentBytes = await bytes(venvPath(workspace)) + await bytes(join(dirname(venvPath(workspace)), '.agent-home'));
     const retainedEnvironmentBytes = await bytes(join(data, 'environments', runId));
     const stateBeforeCancel = rebuilt.nodes.C.result;
     const cancelDelay = ml ? 121_000 : 0;
@@ -367,7 +388,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
       return ['completed', 'needs_attention', 'publication_failed'].includes(state.phase) && state;
     }, 'background writer boundary');
     // A settled result must stop the 90-second writer instead of waiting it out.
-    const settledHeartbeat = join(backgroundSettled.executions[0].worktree, '.venv/background-partial-heartbeat');
+    const settledHeartbeat = join(venvPath(backgroundSettled.executions[0].worktree), 'background-partial-heartbeat');
     let heartbeat = '';
     const heartbeatDeadline = Date.now() + 10_000;
     while (Date.now() < heartbeatDeadline) {
@@ -391,7 +412,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     await until(async () => heldBackground, 'background model hold');
     const active = await api('snapshot', { runId: background.runId });
     const stopped = { worktree: active.executions[0].worktree, input: active.executions[0].input };
-    const ticking = join(stopped.worktree, '.venv/background-partial-heartbeat');
+    const ticking = join(venvPath(stopped.worktree), 'background-partial-heartbeat');
     const live = await readFile(ticking, 'utf8');
     await delay(500);
     assert.notEqual(await readFile(ticking, 'utf8'), live, 'the cancellation fixture must have a live writer');
@@ -402,7 +423,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
       const state = await api('snapshot', { runId: background.runId });
       return !state.nodes.writer.result && state.executions.every((execution: any) => execution.status !== 'running') && state;
     }, 'stopped writer keeps its partial environment');
-    assert.equal(await readFile(join(stopped.worktree, '.venv/background-partial'), 'utf8'), 'partial');
+    assert.equal(await readFile(join(venvPath(stopped.worktree), 'background-partial'), 'utf8'), 'partial');
     // Continue requeues the interrupted turn on the retained workspace. A
     // continuation that cannot answer its own turn falls back to an explicit
     // retry of the same node, which must rediscover the created environment.
@@ -424,7 +445,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     assert.deepEqual(writerExecutions[0].input, stopped.input, 'Stopped input evidence stays immutable');
     const retried = writerExecutions.at(-1);
     assert.equal(retried.worktree, stopped.worktree, 'the created environment is reused, not rebuilt');
-    assert.equal(await readFile(join(stopped.worktree, '.venv/background-partial'), 'utf8'), 'partial');
+    assert.equal(await readFile(join(venvPath(stopped.worktree), 'background-partial'), 'utf8'), 'partial');
     // The retried upstream returns its blocked dependency descendant to
     // `waiting`, so the recovered writer must not claim that node's result.
     const recovered = await until(async () => {
@@ -458,7 +479,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
       assert.equal(result.launchRef, input.launchRef, 'Declarations and .env do not change L');
       const launch = JSON.parse(await readFile(join(data, 'environments', empty.runId, 'launches', `${result.launchRef}.json`), 'utf8'));
       assert.equal(launch.environment, undefined);
-      await assert.rejects(stat(join(completed.executions[0].worktree, '.venv')), /ENOENT/);
+      await assert.rejects(stat(venvPath(completed.executions[0].worktree)), /ENOENT/);
       const calls = modelCalls;
       const executed = await api('launch_result', { runId: empty.runId, args: ['-c', 'node -p ' + quote('"EMPTY_NATIVE_RESULT"')] });
       assert.match(executed.output, /EMPTY_NATIVE_RESULT/); assert.equal(modelCalls, calls);

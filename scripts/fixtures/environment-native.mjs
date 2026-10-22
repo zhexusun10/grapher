@@ -5,17 +5,17 @@ import { dirname, join } from 'node:path';
 
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
 
-export function venvCreationCommand(python) {
+export function venvCreationCommand(python, prefix = '.venv') {
   const directory = dirname(python).replaceAll('\\', '/');
   const bin = process.platform === 'win32'
     ? `"$(/usr/bin/cygpath -u ${quote(directory)})"` : quote(directory);
   // The unbound default entry is Bash, whose directory can precede the CI
   // Python on PATH. Select the probed bootstrap for this observed call only.
-  return `PATH=${bin}:"$PATH" python -m venv .venv`;
+  return `PATH=${bin}:"$PATH" python -m venv ${prefix}`;
 }
 
-export async function startBackgroundWriter(cwd, signal) {
-  const marker = join(cwd, '.venv/background-partial');
+export async function startBackgroundWriter(cwd, signal, venvDir = join(cwd, '.venv')) {
+  const marker = join(venvDir, 'background-partial');
   const writer = "const fs=require('node:fs'),marker=process.argv[1],heartbeat=marker+'-heartbeat';let ticks=0;const writeHeartbeat=value=>{const temp=heartbeat+'.tmp';fs.writeFileSync(temp,value);try{fs.renameSync(temp,heartbeat)}catch{fs.writeFileSync(heartbeat,value);fs.rmSync(temp,{force:true})}};writeHeartbeat('0');fs.writeFileSync(marker,'partial');const timer=setInterval(()=>{ticks+=1;writeHeartbeat(String(ticks))},100);setTimeout(()=>clearInterval(timer),90_000)";
   const child = spawn(process.execPath, ['-e', writer, marker], {
     // Unix retains the owner's process group. On Windows, detached skips
@@ -53,7 +53,11 @@ export default function (pi) {
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     async execute(_id, _params, signal) {
       const cwd = process.cwd();
-      const pid = await startBackgroundWriter(cwd, signal);
+      // Managed state lives under {state}; HOME points at {state}/.agent-home (or
+      // {workspace}/.agent-home for a workspace-bound launch), so its parent
+      // names the same venv the launcher selected.
+      const home = process.env.HOME ?? process.env.USERPROFILE;
+      const pid = await startBackgroundWriter(cwd, signal, join(home, '..', '.venv'));
       return { content: [{ type: 'text', text: `BACKGROUND_STARTED ${pid}` }], details: { pid } };
     },
   });
