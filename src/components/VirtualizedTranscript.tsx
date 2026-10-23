@@ -301,6 +301,11 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     if (segments) {
       segmentedRef.current = true;
       const states = segmentStatesRef.current;
+      // A parse-option change (for example the header turn becoming skippable
+      // once the first window reaches byte zero) must re-parse even when a
+      // segment's text is unchanged; otherwise its cached rows keep the user
+      // turn the new options would have dropped.
+      if (parseOptions !== parseOptionsRef.current) states.clear();
       const live = new Set(segments.map(segment => segment.source));
       for (const source of states.keys()) if (!live.has(source)) states.delete(source);
       let changed = false;

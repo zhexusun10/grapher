@@ -769,10 +769,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // canonical bubble instead of rendering it twice.
     return withoutLiveFirstTurn(items, plannerMessages[0]?.id);
   }, [plannerStream.items, plannerMessages]);
-  const persistedTurnHistory = useMemo(() => {
-    if (plannerMessages.length <= 1) return [];
-    return plannerUserTurns(activePlannerOutput(savedPlannerOutput, plannerEdits));
-  }, [savedPlannerOutput, plannerEdits, plannerMessages.length]);
+  // The history is also what tells the saved replay to skip the turn already
+  // rendered as the conversation header. A header-only conversation still has
+  // one persisted turn, so this must not short-circuit to an empty list or the
+  // replay renders the goal a second time.
+  const persistedTurnHistory = useMemo(() =>
+    plannerUserTurns(activePlannerOutput(savedPlannerOutput, plannerEdits)),
+    [savedPlannerOutput, plannerEdits]);
   // Only hide an optimistic turn when the transcript really replays that turn.
   // A partial window that starts at a steer keeps the header out of history, so
   // skipping its first row would drop the user's message instead of a duplicate.

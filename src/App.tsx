@@ -3125,7 +3125,35 @@ export default function App() {
   };
   const publicationMergers = useMemo(() => (state.mergers ?? []).filter(merger => merger.node === "merger"), [state.mergers]);
   const handleLoadRun = useStableCallback((id: string) => {
-    if (!runs.includes(id) || id.startsWith("pending-")) return;
+    if (!runs.includes(id)) return;
+    if (id.startsWith("pending-")) {
+      // The backend has not assigned a durable Run ID yet, so there is no
+      // snapshot to fetch. Reopen the local provisional conversation instead of
+      // ignoring the click; the detached stream adopts the real ID once the
+      // Planner starts, and the normal poll takes over from there.
+      if (id === state.runId) return;
+      detachForeground(config.repository);
+      historyPrefetchRef.current?.abort();
+      setLoadingRunId(null);
+      const mode = runModes[id];
+      setState(() => ({
+        ...emptySnapshot,
+        runId: id,
+        config,
+        planType: mode === "serial" ? "serial" : "graph",
+        phase: "planning",
+        graph: { ...emptySnapshot.graph, originalGoal: runLabels[id] || "" },
+      }));
+      setPlannerStream({ ...initialPlannerStream, runId: id, stage: "planning", startedAt: Date.now() });
+      setSessionEntries(messagesByRunRef.current.get(id) ?? []);
+      setRouteType(mode === "serial" ? "serial" : mode === "auto" ? "undecided" : "graph");
+      setGoal(runLabels[id] || "");
+      setSelected("");
+      setEditingMessage(null);
+      setEditPrefillText("");
+      setError("");
+      return;
+    }
     if (id !== state.runId || isPlanning || recoveredPlanning) detachForeground(config.repository);
     historyPrefetchRef.current?.abort();
     const controller = new AbortController();

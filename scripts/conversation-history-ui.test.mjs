@@ -853,6 +853,98 @@ test("actual App re-attaches a running revision plan without locking or stale ro
   }
 });
 
+test("actual App renders a Planner goal once even when the saved replay contains it", { timeout: 45_000 }, async () => {
+  // A conversation stopped before any follow-up still has its goal in the
+  // durable planner.jsonl. The saved replay must skip that turn (it is already
+  // the conversation header) instead of rendering a second identical bubble.
+  const config = { repository: "/mock/goal-dup", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const saved = { ...empty, runId: "goal-dup-run", config, planType: "graph", phase: "awaiting_approval", planningId: "goal-plan",
+    graph: { originalGoal: "Only goal", nodes: [], edges: [] },
+    events: [{ type: "created", sequence: 1, planning_id: "goal-plan", timestamp: 1 }] };
+  const output = line({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "Only goal" }] } })
+    + line({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "Only goal" }] } })
+    + assistant("Only answer");
+  const { context, page, errors } = await newPage(route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [saved.runId], repositoryInfo: { path: config.repository, name: "Goal dup", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = saved; break;
+      case "snapshot_if_changed": result = { version: "fixed", snapshot: null }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_planning_output": { const bytes = Buffer.byteLength(output); result = { planningId: body.planningId, role: "planner", content: body.offset ? "" : output,
+        startOffset: body.offset ?? 0, nextOffset: bytes, totalBytes: bytes, complete: true, running: false }; break; }
+      default: result = {};
+    }
+    return route.fulfill({ json: { result } });
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="goal-dup-run"]').click();
+    await page.getByText("Only answer", { exact: true }).first().waitFor();
+    await page.waitForTimeout(500);
+    assert.equal(await page.locator('.chat-bubble-user', { hasText: "Only goal" }).count(), 1,
+      "the goal renders once as the conversation header, not again in the saved replay");
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("actual App reopens a provisional conversation before the Planner assigns a Run ID", { timeout: 45_000 }, async () => {
+  const config = { repository: "/mock/provisional", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const other = { ...empty, runId: "other-run", config, planType: "serial", phase: "completed", approved: true,
+    graph: { originalGoal: "Other", nodes: [{ name: "task", task: "Other" }], edges: [] },
+    nodes: { task: { status: "completed", revision: 1, instruction: "", error: null } },
+    executions: [{ id: "other-exec", node: "task", status: "completed", revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "s", worktree: "/mock", before: "", after: "", output: "" }] };
+  onPlanStream = (_body, res) => {
+    // The backend is still starting the Planner, so no run_started arrives yet.
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+  };
+  const { context, page, errors } = await newPage(async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    if (command === "plan_goal_stream") return route.continue();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [other.runId], repositoryInfo: { path: config.repository, name: "Provisional", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = other; break;
+      case "snapshot_if_changed": result = { version: "fixed", snapshot: other }; break;
+      case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_execution_output": result = { runId: body.runId, executionId: body.executionId, content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, status: "completed" }; break;
+      default: result = {};
+    }
+    return route.fulfill({ json: { result } });
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    const input = page.locator(".landing-screen textarea");
+    await input.fill("PROVISIONAL GOAL"); await input.press("Enter");
+    await page.waitForFunction(() => !!document.querySelector('[data-run-id^="pending-"]'));
+    // Switch away while the Planner is still starting.
+    await page.locator('[data-run-id="other-run"]').click();
+    await page.getByText("Other", { exact: true }).first().waitFor();
+    // Returning must reopen the provisional conversation, not ignore the click.
+    await page.locator('[data-run-id^="pending-"]').first().click();
+    await page.locator('.chat-bubble-user', { hasText: "PROVISIONAL GOAL" }).waitFor();
+    assert.deepEqual(errors, []);
+  } finally {
+    onPlanStream = undefined;
+    await context.close();
+  }
+});
+
 test("actual App: first Serial message keeps the footer still through approval and execution startup", { timeout: 30_000 }, async () => {
   const config = { repository: "/mock/first-serial", model: "test/model", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
