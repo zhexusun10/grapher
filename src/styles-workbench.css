@@ -1242,7 +1242,7 @@ button.session-label-toggle:focus-visible {
   overflow: visible;
   /* Splitting into graph mode slides the conversation pane open smoothly;
    * manual resizer drags opt out via .workbench.resizing. */
-  transition: width 0.34s cubic-bezier(0.22, 1, 0.36, 1), max-width 0.34s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: width 0.50s cubic-bezier(0.22, 1, 0.36, 1), max-width 0.50s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .workbench-resizer {
@@ -2083,7 +2083,7 @@ button.session-label-toggle:focus-visible {
   padding-top: 4px;
 }
 
-.workspace-details .session-details-row > p {
+.workspace-details .session-details-row>p {
   max-width: 100%;
   padding-top: 0;
 }
