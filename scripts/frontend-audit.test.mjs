@@ -1544,7 +1544,6 @@ test("recovered planning polls activity before route discovery and opens the com
   page.on("pageerror", error => errors.push(String(error)));
   try {
     await page.goto(origin, { waitUntil: "domcontentloaded" });
-    await page.locator(".floating-recovered-banner").waitFor();
     await waitFor(() => offsets.length > 0);
     assert.equal(await page.locator(".route-decision-pill").innerText(), "Evaluating task routing...");
     assert.equal(offsets[0], 0, "missing initial output must keep polling instead of settling the cache");
@@ -1557,7 +1556,6 @@ test("recovered planning polls activity before route discovery and opens the com
     await activity.getByText("Automatically appended activity", { exact: true }).waitFor();
     assert.ok(offsets.includes(Buffer.byteLength(first)), "append polling resumes at the UTF-8 byte offset");
     assert.equal(await activity.getByText("Recovered activity 中文🚀", { exact: true }).count(), 1);
-    await page.locator(".floating-recovered-banner").waitFor({ state: "detached" });
 
     finished = true;
     await page.locator('.run-item.chosen[data-run-id="recovered-run"]').waitFor();
@@ -1566,7 +1564,7 @@ test("recovered planning polls activity before route discovery and opens the com
   } finally { await context.close(); }
 });
 
-test("pure frontend refresh during active planning announces reconnection once and auto-dismisses without flicker", { timeout: 45_000 }, async () => {
+test("pure frontend refresh during active planning re-attaches silently without a reconnect banner", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const runningPlanning = { planningId: "active-plan", repository: "/a", status: "running", createdAt: Date.now(),
     modelDuration: 0, totalPlanningDuration: 0, roles: { partition: {}, planner: {} } };
@@ -1626,15 +1624,14 @@ test("pure frontend refresh during active planning announces reconnection once a
   page.on("pageerror", error => errors.push(String(error)));
   try {
     await page.goto(origin, { waitUntil: "domcontentloaded" });
-    // Planning activity should poll and render directly
+    // Planning activity should poll and render directly.
     const activity = page.getByRole("region", { name: "Planning activity" });
     await activity.getByText("Streaming active plan output", { exact: true }).waitFor();
-    // A persisted running turn is re-attached immediately; the reconnect banner must
-    // appear exactly once and auto-dismiss after the conversation becomes ready.
-    await page.waitForFunction(() => window.recoveryBanner.shown >= 1, null, { timeout: 10_000 });
-    await page.locator(".floating-recovered-banner").waitFor({ state: "detached", timeout: 10_000 });
-    const banner = await page.evaluate(() => window.recoveryBanner);
-    assert.deepEqual(banner, { shown: 1, removed: 1 }, "the reconnect banner is announced once and removed without flicker");
+    // Re-attaching a persisted running turn is silent: no reconnect banner.
+    await page.waitForTimeout(2000);
+    assert.equal(await page.locator(".floating-recovered-banner").count(), 0,
+      "a recovered running turn must not surface a reconnect banner");
+    assert.deepEqual(await page.evaluate(() => window.recoveryBanner), { shown: 0, removed: 0 });
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

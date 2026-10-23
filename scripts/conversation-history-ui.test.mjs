@@ -841,9 +841,6 @@ test("actual App re-attaches a running revision plan without locking or stale ro
   try {
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.locator('[data-run-id="recovered-run"]').click();
-    const banner = page.locator(".floating-recovered-banner");
-    await banner.waitFor();
-    assert.match(await banner.innerText(), /Connected to the active planning session/);
     const input = page.locator(".pane-bottom-chat textarea");
     await input.waitFor();
     assert.equal(await input.isDisabled(), false, "recovering a plan must not lock the composer");

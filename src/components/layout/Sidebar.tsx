@@ -1,11 +1,58 @@
 import { t } from "../../i18n";
 import React, { useState } from "react";
 import { createPortal } from "react-dom";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2 } from "lucide-react";
 import { ProjectItem } from "../../types";
 import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
 
 export { normalizeWorkspacePath } from "../../services/workspaceConversations";
+
+// Match the previous CSS entrance while giving cards a real exit, so removing a
+// workspace or conversation fades out before the list closes the gap.
+const CARD_EASE: [number, number, number, number] = [0.16, 1, 0.3, 1];
+
+function cardMotion(reduceMotion: boolean, index: number) {
+  if (reduceMotion) {
+    return {
+      initial: false,
+      animate: { opacity: 1, y: 0 },
+      exit: { opacity: 0 },
+    };
+  }
+  return {
+    initial: { opacity: 0, y: 6 },
+    animate: { opacity: 1, y: 0, transition: { duration: 0.24, ease: CARD_EASE, delay: Math.min(index, 12) * 0.028 } },
+    exit: { opacity: 0, y: -4, scale: 0.98, transition: { duration: 0.18, ease: CARD_EASE } },
+  };
+}
+
+/**
+ * Conversation card. The caller keys it by a stable card key so adopting a
+ * durable Run ID after the provisional card reuses the same node instead of
+ * remounting it (which would replay the entrance and exit animations).
+ */
+const RunItem: React.FC<{
+  runId: string;
+  index: number;
+  reduceMotion: boolean;
+  className?: string;
+  onClick: () => void;
+  onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  children: React.ReactNode;
+}> = ({ runId, index, reduceMotion, className = "", onClick, onContextMenu, children }) => {
+  return (
+    <motion.button
+      data-run-id={runId}
+      className={`run-item ${className}`.trim()}
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+      {...cardMotion(reduceMotion, index)}
+    >
+      {children}
+    </motion.button>
+  );
+};
 
 interface SidebarProps {
   projects: ProjectItem[];
@@ -24,6 +71,7 @@ interface SidebarProps {
   onOpenSettings: () => void;
   isSettingsOpen: boolean;
   runLabels?: Record<string, string>;
+  runCardKeys?: Record<string, string>;
   isReady?: boolean;
   isOpeningProject?: boolean;
   switchingProjectPath?: string | null;
@@ -47,6 +95,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   onOpenSettings,
   isSettingsOpen,
   runLabels = {},
+  runCardKeys = {},
   isReady = true,
   isOpeningProject = false,
   switchingProjectPath = null,
@@ -73,6 +122,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
 
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; project: ProjectItem } | null>(null);
   const [runContextMenu, setRunContextMenu] = useState<{ x: number; y: number; runId: string } | null>(null);
+  const reduceMotion = useReducedMotion() ?? false;
 
   React.useEffect(() => {
     const handleClose = () => {
@@ -86,6 +136,78 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       window.removeEventListener("contextmenu", handleClose);
     };
   }, []);
+
+  const projectCards = projects.map((proj, index) => {
+    const isActive = workspaceKey(activeRepo) === workspaceKey(proj.path);
+    const isSwitching = switchingProjectPath ? workspaceKey(switchingProjectPath) === workspaceKey(proj.path) : false;
+    return (
+      <motion.div
+        key={proj.path}
+        className={`project-workspace-item ${isActive ? "active" : ""} ${isSwitching ? "is-switching" : ""}`}
+        onClick={() => onSelectProject(proj)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setRunContextMenu(null);
+          setProjectContextMenu({ x: e.clientX, y: e.clientY, project: proj });
+        }}
+        {...cardMotion(reduceMotion, index)}
+      >
+        <div className="proj-details">
+          <div className="proj-name-row">
+            <strong>{proj.name}</strong>
+          </div>
+          <small className="proj-path-text">{normalizeWorkspacePath(proj.path)}</small>
+        </div>
+      </motion.div>
+    );
+  });
+
+  const runCards = runs.map((id, index) => {
+    const indicator = runIndicators[id];
+    const isThisRunActive = ["running", "awaiting_approval", "publishing", "merging"].includes(indicator?.phase ?? (activeBackendRunId === id ? activeBackendPhase ?? "" : ""));
+    const isUnread = Boolean(indicator?.unread && currentRunId !== id);
+    const needsUnreadApproval = isUnread && indicator.phase === "awaiting_approval";
+    const isChosen = (loadingRunId ?? currentRunId) === id;
+    const isLoadingThisRun = loadingRunId === id && currentRunId !== id;
+    let displayLabel = `Graph ${id.slice(0, 8)}`;
+    const labelText = runLabels[id];
+    const isResolvingLabel = labelText === undefined;
+    if (labelText) {
+      displayLabel = labelText;
+    }
+    return (
+      <RunItem
+        // A provisional card keeps its key when the durable Run ID arrives so
+        // the same node is reused instead of remounting.
+        key={runCardKeys[id] ?? id}
+        runId={id}
+        index={index}
+        reduceMotion={reduceMotion}
+        className={`${isChosen ? "chosen" : ""} ${isLoadingThisRun ? "is-loading" : ""}`}
+        onClick={() => onLoadRun(id)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setProjectContextMenu(null);
+          setRunContextMenu({ x: e.clientX, y: e.clientY, runId: id });
+        }}
+      >
+        {isThisRunActive ? (
+          <span
+            className="run-dot running-pulse"
+          />
+        ) : isUnread ? (
+          <span
+            className={`run-dot ${needsUnreadApproval ? "approval-pulse" : ""}`}
+          />
+        ) : null}
+        <span className={`run-title-text ${isResolvingLabel ? "is-resolving" : ""}`}>
+          {displayLabel}
+        </span>
+      </RunItem>
+    );
+  });
 
   return (
     <aside className={`sidebar${isCollapsed ? " is-collapsed" : ""}`} aria-label={t("侧边栏")}>
@@ -122,33 +244,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       </div>
 
       <div className="projects-list">
-        {projects.length > 0 ? (
-          projects.map((proj, index) => {
-            const isActive = workspaceKey(activeRepo) === workspaceKey(proj.path);
-            const isSwitching = switchingProjectPath ? workspaceKey(switchingProjectPath) === workspaceKey(proj.path) : false;
-            return (
-              <div
-                key={proj.path}
-                className={`project-workspace-item ${isActive ? "active" : ""} ${isSwitching ? "is-switching" : ""}`}
-                style={{ "--proj-index": Math.min(index, 8) } as React.CSSProperties}
-                onClick={() => onSelectProject(proj)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setRunContextMenu(null);
-                  setProjectContextMenu({ x: e.clientX, y: e.clientY, project: proj });
-                }}
-              >
-                <div className="proj-details">
-                  <div className="proj-name-row">
-                    <strong>{proj.name}</strong>
-                  </div>
-                  <small className="proj-path-text">{normalizeWorkspacePath(proj.path)}</small>
-                </div>
-              </div>
-            );
-          })
-        ) : (
+        {reduceMotion ? projectCards : <AnimatePresence>{projectCards}</AnimatePresence>}
+        {projects.length === 0 && (
           <div className="projects-placeholder">
             <span>{t("暂无工作区")}</span>
           </div>
@@ -194,53 +291,17 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
               </div>
             </div>
           </div>
-        ) : runs.length > 0 ? (
-          runs.map((id, index) => {
-            const indicator = runIndicators[id];
-            const isThisRunActive = ["running", "awaiting_approval", "publishing", "merging"].includes(indicator?.phase ?? (activeBackendRunId === id ? activeBackendPhase ?? "" : ""));
-            const isUnread = Boolean(indicator?.unread && currentRunId !== id);
-            const needsUnreadApproval = isUnread && indicator.phase === "awaiting_approval";
-            const isChosen = (loadingRunId ?? currentRunId) === id;
-            const isLoadingThisRun = loadingRunId === id && currentRunId !== id;
-            let displayLabel = `Graph ${id.slice(0, 8)}`;
-            const labelText = runLabels[id];
-            const isResolvingLabel = labelText === undefined;
-            if (labelText) {
-              displayLabel = labelText;
-            }
-            return (
-              <button
-                data-run-id={id}
-                className={`run-item ${isChosen ? "chosen" : ""} ${isLoadingThisRun ? "is-loading" : ""}`}
-                style={{ "--item-index": Math.min(index, 12) } as React.CSSProperties}
-                key={id}
-                onClick={() => onLoadRun(id)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setProjectContextMenu(null);
-                  setRunContextMenu({ x: e.clientX, y: e.clientY, runId: id });
-                }}
-              >
-                {isThisRunActive ? (
-                  <span
-                    className="run-dot running-pulse"
-                  />
-                ) : isUnread ? (
-                  <span
-                    className={`run-dot ${needsUnreadApproval ? "approval-pulse" : ""}`}
-                  />
-                ) : null}
-                <span className={`run-title-text ${isResolvingLabel ? "is-resolving" : ""}`}>
-                  {displayLabel}
-                </span>
-              </button>
-            );
-          })
         ) : (
-          <div className="run-placeholder">
-            <span>{t("暂无对话记录")}</span>
-          </div>
+          <>
+            {reduceMotion
+              ? runCards
+              : <AnimatePresence key={workspaceKey(activeRepo)}>{runCards}</AnimatePresence>}
+            {runs.length === 0 && (
+              <div className="run-placeholder">
+                <span>{t("暂无对话记录")}</span>
+              </div>
+            )}
+          </>
         )}
       </div>
 

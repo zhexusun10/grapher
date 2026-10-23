@@ -21,17 +21,28 @@ test("Planner status context is not shown as conversation text", () => {
   );
 });
 
-test("only completed Planner user turns replace optimistic messages", () => {
-  const line = (type: string, content: string) => JSON.stringify({
-    type, message: { role: "user", content: [{ type: "text", text: content }] },
+test("Planner user turns follow the transcript parser's start/end rules", () => {
+  const line = (type: string, content: string, id?: string) => JSON.stringify({
+    type, message: { id, role: "user", content: [{ type: "text", text: content }] },
   });
+  // A start/end pair for one message renders once, from its start.
   assert.deepEqual(plannerUserTurns([
-    line("message_start", "User query:\n\nOriginal"),
-    line("message_end", "User query:\n\nOriginal"),
-    line("message_start", "still pending"),
-    line("message_end", "Current graph node status:\n- worker: completed\n\n继续优化"),
-    "{incomplete",
+    line("message_start", "User query:\n\nOriginal", "m1"),
+    line("message_end", "User query:\n\nOriginal", "m1"),
+    line("message_start", "Current graph node status:\n- worker: completed\n\n继续优化", "m2"),
+    line("message_end", "Current graph node status:\n- worker: completed\n\n继续优化", "m2"),
   ].join("\n")), ["Original", "继续优化"]);
+  // A message_end without a start is still a rendered turn.
+  assert.deepEqual(plannerUserTurns([line("message_end", "继续优化", "m3")].join("\n")), ["继续优化"]);
+  // A turn aborted after its start was flushed persists no message_end. The
+  // transcript parser still renders it, so it must count as a replacement for
+  // the optimistic bubble instead of rendering the message twice.
+  assert.deepEqual(plannerUserTurns([
+    line("message_start", "User query:\n\nOriginal", "m4"),
+    line("message_end", "User query:\n\nOriginal", "m4"),
+    line("message_start", "stopped steer", "m5"),
+    "{incomplete",
+  ].join("\n")), ["Original", "stopped steer"]);
 });
 
 test("live continuation does not repeat the already rendered first turn", () => {
@@ -102,6 +113,25 @@ test("persisted user turns are not duplicated in follow-up message list during l
   assert.deepEqual(visibleFollowUps, []);
 });
 
+test("a steer persisted only as message_start still suppresses its optimistic bubble after an interrupt", () => {
+  // Pausing the Planner can leave the sent instruction in the durable JSONL as
+  // a message_start without a message_end. The saved replay renders that row,
+  // so the optimistic bubble must be treated as already represented.
+  const savedPlannerOutput = [
+    JSON.stringify({ type: "message_start", message: { id: "goal", role: "user", content: [{ type: "text", text: "Initial Goal" }] } }),
+    JSON.stringify({ type: "message_end", message: { id: "goal", role: "user", content: [{ type: "text", text: "Initial Goal" }] } }),
+    JSON.stringify({ type: "message_start", message: { id: "steer", role: "user", content: [{ type: "text", text: "Stopped steer" }] } }),
+  ].join("\n");
+  const persistedTurns = plannerUserTurns(savedPlannerOutput);
+  assert.deepEqual(persistedTurns, ["Initial Goal", "Stopped steer"]);
+  const remaining = new Map<string, number>([[persistedTurns[1], 1]]);
+  const visible = ["Stopped steer"].filter((text) => {
+    const count = remaining.get(text) ?? 0;
+    if (count > 0) { remaining.set(text, count - 1); return false; }
+    return true;
+  });
+  assert.deepEqual(visible, []);
+});
 
 test("a partial transcript window keeps a later steer when the header is absent", () => {
   assert.equal(skipsFirstPersistedTurn(["Initial goal", "Steer"], "Initial goal"), true);

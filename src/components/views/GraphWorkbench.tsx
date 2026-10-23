@@ -115,7 +115,6 @@ interface GraphWorkbenchProps {
   edgeTypes: any;
   tokens: any;
   failedPlanning?: PlanningSummary | null;
-  onConversationReady?: () => void;
 }
 
 function nodeInstructionText(text: string): string {
@@ -297,7 +296,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   nodeTypes,
   edgeTypes,
   tokens,
-  onConversationReady,
 }) => {
   const [attemptId, setAttemptId] = useState("");
   const [collapsedAttemptIds, setCollapsedAttemptIds] = useState<Set<string>>(new Set());
@@ -1656,10 +1654,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         suppressAutoScrollRef.current = false;
         setScrollBottomVisible(false);
         setReadyConversationKey(key);
-        onConversationReady?.();
       });
     });
-  }, [conversationViewKey, syncViewScroll, setScrollBottomVisible, onConversationReady]);
+  }, [conversationViewKey, syncViewScroll, setScrollBottomVisible]);
 
   const visibleExecutionIds = useMemo(() => {
     if (selectedNode && routeType === "graph") {
@@ -2411,7 +2408,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       if (renderLivePlanner && plannerStream.items?.some((item: TranscriptItem) =>
                         item.role === "user" && item.id === msg.id)) return false;
                       // Keep an acknowledged steer visible across navigation
-                      // until its completed turn actually appears in JSONL.
+                      // until its turn actually appears in JSONL (start or end).
                       if (useSavedPlanner && savedPlannerShowsUserTurns) {
                         const text = msg.text.trim();
                         const count = remainingPersistedTurns.get(text) ?? 0;

@@ -1,6 +1,6 @@
 import { t, localizeError } from "./i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Loader2, X } from "lucide-react";
+import { AlertTriangle, X } from "lucide-react";
 import { motion, AnimatePresence, LayoutGroup } from "motion/react";
 
 import {
@@ -182,6 +182,9 @@ export default function App() {
     }
   });
   const [isBootstrapReady, setIsBootstrapReady] = useState(false);
+  // Session-only mapping from a durable Run ID to the provisional card key it
+  // replaced. Persisting it is pointless: pending cards do not survive reload.
+  const [runCardKeys, setRunCardKeys] = useState<Record<string, string>>({});
   const acceptedSettingsRef = useRef<Config | null>(null);
   const [runLabels, setRunLabels] = useState<Record<string, string>>(() => {
     try {
@@ -263,37 +266,6 @@ export default function App() {
     }
   });
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
-  const [dismissedRecoveryId, setDismissedRecoveryId] = useState<string | null>(null);
-  const autoDismissTimerRef = useRef<number | null>(null);
-
-  const handleConversationReady = useCallback(() => {
-    if (!recoveredPlanning) return;
-    const planningId = recoveredPlanning.planningId;
-    if (dismissedRecoveryId === planningId) return;
-
-    if (autoDismissTimerRef.current !== null) {
-      window.clearTimeout(autoDismissTimerRef.current);
-    }
-    autoDismissTimerRef.current = window.setTimeout(() => {
-      setDismissedRecoveryId(planningId);
-      autoDismissTimerRef.current = null;
-    }, 1500);
-  }, [recoveredPlanning, dismissedRecoveryId]);
-
-  useEffect(() => {
-    if (!recoveredPlanning && autoDismissTimerRef.current !== null) {
-      window.clearTimeout(autoDismissTimerRef.current);
-      autoDismissTimerRef.current = null;
-    }
-  }, [recoveredPlanning]);
-
-  useEffect(() => {
-    return () => {
-      if (autoDismissTimerRef.current !== null) {
-        window.clearTimeout(autoDismissTimerRef.current);
-      }
-    };
-  }, []);
 
   const [isPlanning, setIsPlanning] = useState(false);
   // Recover an orphaned Planner only on initial load, not after the user
@@ -321,6 +293,9 @@ export default function App() {
   };
 
   const replaceProvisionalRunId = (oldId: string, newId: string, label: string, repository: string) => {
+    // Keep the sidebar card keyed by the provisional ID so adopting the durable
+    // Run ID reuses the same node instead of replaying its entrance/exit.
+    setRunCardKeys((prev) => (prev[newId] === oldId ? prev : { ...prev, [newId]: oldId }));
     setWorkspaceRuns((prev) => {
       const updated = bindRunToWorkspace(prev, newId, repository, oldId);
       try {
@@ -1212,6 +1187,7 @@ export default function App() {
           composerDraftsRef.current.delete(id);
         });
         clearLandingDraft(pathToRemove);
+        setRunCardKeys((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => !deletedIds.has(id))));
         const remainingProjects = projects.filter((p) => workspaceKey(p.path) !== key);
         setProjects(prev => {
           const remaining = prev.filter(p => workspaceKey(p.path) !== key);
@@ -1265,6 +1241,12 @@ export default function App() {
       await runtimeService.deleteRun(runIdToDelete);
     }
     deletedRunIdsRef.current.add(runIdToDelete);
+    setRunCardKeys((prev) => {
+      if (!(runIdToDelete in prev)) return prev;
+      const copy = { ...prev };
+      delete copy[runIdToDelete];
+      return copy;
+    });
     setWorkspaceRuns((prev) => {
       const copy: Record<string, string[]> = {};
       for (const [repo, idList] of Object.entries(prev)) {
@@ -3207,6 +3189,7 @@ export default function App() {
             onRemoveProject={actions.removeProject}
             runs={runs}
             runLabels={runLabels}
+            runCardKeys={runCardKeys}
             isReady={isSidebarReady}
             currentRunId={state.runId}
             loadingRunId={loadingRunId}
@@ -3249,34 +3232,6 @@ export default function App() {
                       <X size={14} />
                     </button>
                   </motion.div>
-                )}
-                {recoveredPlanning && dismissedRecoveryId !== recoveredPlanning.planningId && (
-                  <motion.section
-                    key={`floating-recovered-banner-${recoveredPlanning.planningId}`}
-                    className="floating-recovered-banner"
-                    aria-label={t("恢复进行中的规划")}
-                    initial={{ opacity: 0, y: -20, scale: 0.96 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: -16, scale: 0.96 }}
-                    transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                  >
-                    <div className="floating-recovered-icon">
-                      <Loader2 size={13} className="floating-recovered-spinner" />
-                    </div>
-                    <div className="floating-recovered-content">
-                      <p role="status" className="floating-recovered-text">
-                        {t("已连接正在进行的规划，活动会自动更新")}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      className="floating-recovered-close"
-                      aria-label={t("关闭提示")}
-                      onClick={() => setDismissedRecoveryId(recoveredPlanning.planningId)}
-                    >
-                      <X size={13} />
-                    </button>
-                  </motion.section>
                 )}
               </AnimatePresence>
             </div>
@@ -3348,7 +3303,6 @@ export default function App() {
                     isPlanning={isPlanning || backendPlanning || !!recoveredPlanning}
                     plannerStream={plannerStream}
                     recoveredPlanningId={recoveredPlanning?.planningId || (!isPlanning && backendPlanning ? (state.planningId || state.planning?.planningId) : undefined)}
-                    onConversationReady={handleConversationReady}
                     onSendMessage={actions.send}
                     onRequestConfirmation={setConfirmModal}
                     onControl={actions.control}
