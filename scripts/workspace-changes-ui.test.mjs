@@ -124,8 +124,9 @@ test("full paths and backend counts update live; switching scope keeps one entry
     await trigger.click();
     await expect(panel.getByTestId("changed-file-item")).toHaveCount(6);
     await expect(panel.locator(".changed-file-path")).toHaveText([
-      "docs/readme.md → docs/guide.md", "src/components/a-very-long-file-name-for-a-small-conversation-pane.tsx",
-      "src/components/Button.tsx", "src/hooks/usePreview.ts", "src/legacy.ts", "src/styles/theme.css",
+      "src/hooks/usePreview.ts", "src/legacy.ts",
+      "src/styles/theme.css", "src/components/Button.tsx",
+      "src/components/a-very-long-file-name-for-a-small-conversation-pane.tsx", "docs/readme.md → docs/guide.md",
     ]);
     await expect(panel.getByRole("searchbox")).toHaveCount(0);
     await expect(panel.locator("select")).toHaveCount(0);
@@ -184,6 +185,37 @@ test("trigger matches the session disclosure; totals stay out of it", { timeout:
     assert.deepEqual([colors.add, colors.del], [normalize(colors.addToken), normalize(colors.delToken)]);
     await trigger.click();
     await expectCollapsed(page, trigger);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("added/deleted files lead and each group ranks by changed line count", { timeout: 30_000 }, async () => {
+  const { page, context, errors } = await fixture("serial&mix=1");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    const panel = page.getByTestId("workspace-changes-panel");
+    await trigger.click();
+    await expect(panel.locator(".changed-file-path")).toHaveText([
+      "src/added-large.ts", "src/deleted-large.ts", "src/added-small.ts", "src/deleted-small.ts",
+      "src/mod-large.ts", "src/mod-small.ts",
+    ]);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("large change sets render only the first 500 rows and mark the remainder", { timeout: 30_000 }, async () => {
+  const { page, context, errors } = await fixture("serial&many=1");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    const panel = page.getByTestId("workspace-changes-panel");
+    await expect(trigger).toContainText("1205 files changed");
+    // The cap applies while collapsed too: the disclosure keeps children mounted.
+    await expect(panel.getByTestId("changed-file-item")).toHaveCount(500);
+    const truncated = panel.getByTestId("workspace-changes-truncated");
+    await expect(truncated).toHaveCount(1);
+    await expect(truncated).toContainText("705 more file changes omitted");
+    await trigger.click();
+    await expect(panel.getByTestId("changed-file-item")).toHaveCount(500);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

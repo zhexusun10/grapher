@@ -1,7 +1,7 @@
-import React, { useRef } from "react";
+import React, { useMemo, useRef } from "react";
 import { ChevronRight } from "lucide-react";
 import { t } from "../../i18n";
-import type { FileChangeSummary } from "../../types";
+import type { FileChangeItem, FileChangeSummary } from "../../types";
 import { AnimatedDisclosure } from "../AnimatedDisclosure";
 import { ChangedFileRow } from "./ChangedFileRow";
 import "./WorkspaceChanges.css";
@@ -25,6 +25,23 @@ export const WorkspaceChangesTrigger = React.memo(function WorkspaceChangesTrigg
   </button>;
 });
 
+/** Rendering tens of thousands of rows freezes the workbench even while the
+ * disclosure stays collapsed, so only the first slice is mounted; the rest is
+ * implied by a trailing ellipsis row. */
+export const MAX_RENDERED_FILE_CHANGES = 500;
+
+const LEAD_STATUSES = new Set<FileChangeItem["status"]>(["added", "deleted"]);
+
+/** Added/deleted files lead (they are the most notable); within each group the
+ * rows rank by total changed lines so the cap keeps the heaviest edits. */
+function sortFileChangesForDisplay(files: FileChangeItem[]): FileChangeItem[] {
+  return [...files].sort((a, b) => {
+    const lead = Number(LEAD_STATUSES.has(b.status)) - Number(LEAD_STATUSES.has(a.status));
+    if (lead !== 0) return lead;
+    return (b.additions + b.deletions) - (a.additions + a.deletions);
+  });
+}
+
 interface WorkspaceChangesPanelProps {
   id: string;
   summary: FileChangeSummary;
@@ -40,6 +57,14 @@ export const WorkspaceChangesPanel = React.memo(function WorkspaceChangesPanel({
   id, summary, open, scrollContainerRef, onBeforeToggle, onAfterToggle,
 }: WorkspaceChangesPanelProps) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const orderedFiles = useMemo(
+    () => sortFileChangesForDisplay(summary.files),
+    [summary.files],
+  );
+  const truncated = orderedFiles.length > MAX_RENDERED_FILE_CHANGES;
+  const visibleFiles = truncated
+    ? orderedFiles.slice(0, MAX_RENDERED_FILE_CHANGES)
+    : orderedFiles;
 
   return <div ref={rootRef} className="workspace-changes">
     <AnimatedDisclosure
@@ -52,7 +77,12 @@ export const WorkspaceChangesPanel = React.memo(function WorkspaceChangesPanel({
       <div id={id} className="workspace-changes-panel"
         data-testid="workspace-changes-panel" role="region" aria-label={t("文件变更列表")}>
         {summary.files.length
-          ? summary.files.map(item => <ChangedFileRow key={item.path} item={item} />)
+          ? <>
+              {visibleFiles.map(item => <ChangedFileRow key={item.path} item={item} />)}
+              {truncated && <div className="changes-panel-truncated" data-testid="workspace-changes-truncated">
+                {t("… 其余 {0} 个文件变更已省略", orderedFiles.length - MAX_RENDERED_FILE_CHANGES)}
+              </div>}
+            </>
           : <div className="changes-panel-empty">{t("当前会话尚未产生文件新增、修改或删除")}</div>}
       </div>
     </AnimatedDisclosure>

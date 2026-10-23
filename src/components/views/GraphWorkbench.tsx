@@ -17,7 +17,7 @@ import {
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
-import { EditableUserBubble } from "./ChatBubbles";
+import { EditableUserBubble, StreamingAssistantBubble } from "./ChatBubbles";
 import { NodeTaskCard } from "./NodeTaskCard";
 import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
@@ -26,6 +26,7 @@ import { activeNodeConversationEvents, activeNodeExecutions, executionIdForMessa
 import { captureViewScrollState, resolveViewScroll, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
 import { isNodeWorking, nodeDependenciesCompleted } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
+import { isUncommittedSteer, nodeInstructionText, steerRollbackKey } from "../../lib/pendingSteers";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTimeTookText, PlannerTimeTookText, formatSessionStartTime } from "../ExecutionTimeTook";
@@ -41,7 +42,6 @@ import { plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from 
 import { executionSessionTiming, executionSessionUsageThrough, mergePlannerTurns, plannerLegacyUsage, plannerSessionTiming, plannerSessionUsageThrough, plannerTurnSummaries, addTokenUsage } from "../../services/sessionMetrics";
 import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
-import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
 import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
 import { computeExecutionLayers } from "../../hooks/useGraphElements";
@@ -53,15 +53,33 @@ import { useWorkspaceChanges } from "../../hooks/useWorkspaceChanges";
 import { WorkspaceChangesPanel, WorkspaceChangesTrigger } from "../changes/WorkspaceChangesPanel";
 import { AnimatedDisclosure, getConversationViewport } from "../AnimatedDisclosure";
 
+/** Stable default so an omitted rollback set never invalidates the memos. */
+const EMPTY_ID_SET: ReadonlySet<string> = new Set();
+
 /** Transient I/O status takes precedence over the durable phase copy. */
 function activityStatusText(activity: RuntimeActivity[]): string | null {
   if (!activity.length) return null;
   const byKind = (kind: string) => activity.find(item => item.kind === kind);
   const prepare = byKind("workspace_prepare");
   if (prepare) {
-    return prepare.nodes.length
-      ? t("正在复制节点工作区：{0}", prepare.nodes.join("、"))
-      : t("正在复制节点工作区");
+    const nodes = prepare.nodes.join("、");
+    // A preparation pass covers Git composition, conflict preparation and a
+    // full metadata verification, not only copying. Report the phase so a long
+    // merge/conflict step is not mistaken for a slow directory copy.
+    switch (prepare.phase) {
+      case "compose":
+        return nodes
+          ? t("正在准备节点工作区（合并上游结果）：{0}", nodes)
+          : t("正在准备节点工作区（合并上游结果）");
+      case "conflict":
+        return nodes
+          ? t("正在准备节点工作区（解决合并冲突）：{0}", nodes)
+          : t("正在准备节点工作区（解决合并冲突）");
+      default:
+        return nodes
+          ? t("正在复制节点工作区：{0}", nodes)
+          : t("正在复制节点工作区");
+    }
   }
   if (byKind("source_materialize")) return t("正在建立临时 Git 快照（首次收录项目文件）");
   if (byKind("source_capture")) return t("正在记录 Git 源快照");
@@ -94,6 +112,9 @@ interface GraphWorkbenchProps {
   onSendMessage: (val: string, options?: PromptBoxSubmitOptions) => boolean | void | Promise<boolean>;
   onEditMessageSubmit?: (msg: ChatMessage, newText: string, selectedVersion?: number) => boolean | void | Promise<boolean | void>;
   onSwitchMessageVersion?: (msg: ChatMessage, targetIndex: number) => void;
+  /** Steer cards rolled back after a pause; their text returns to the composer. */
+  rolledBackSteerKeys?: ReadonlySet<string>;
+  onRollbackSteers?: (keys: string[]) => void;
   onRequestConfirmation: (config: ConfirmModalState) => void;
   followUpQueue?: Array<{ id: string; text: string; node?: string; timestamp: number }>;
   onCancelFollowUp?: (id: string) => void;
@@ -115,10 +136,6 @@ interface GraphWorkbenchProps {
   edgeTypes: any;
   tokens: any;
   failedPlanning?: PlanningSummary | null;
-}
-
-function nodeInstructionText(text: string): string {
-  return text.replace(/^\[@[^\]]+\]\s*/, "").trim();
 }
 
 /** Inline transcript rows currently carry text only; attached files/images stay
@@ -276,6 +293,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   onSendMessage,
   onEditMessageSubmit,
   onSwitchMessageVersion,
+  rolledBackSteerKeys = EMPTY_ID_SET,
+  onRollbackSteers,
   onRequestConfirmation,
   followUpQueue,
   onCancelFollowUp,
@@ -308,6 +327,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // bubble remains visible until then, so a consumed steer never disappears
   // while Pi is still finishing the current tool call.
   const [inlineUserTurns, setInlineUserTurns] = useState<Record<string, string[]>>({});
+  // Bumped when a paused steer's text is returned to the composer. It remounts
+  // the uncontrolled PromptBox so its defaultValue picks up the restored draft.
+  const [composerEpoch, setComposerEpoch] = useState(0);
   const handleInlineUserTurns = useCallback((execId: string, texts: string[]) => {
     setInlineUserTurns(prev => {
       const previous = prev[execId] ?? [];
@@ -505,8 +527,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
       };
     });
-    return [...recorded, ...localRemaining];
-  }, [selectedNode?.name, conversationNode, effectiveMessages, state.runId, state.events]);
+    return [...recorded, ...localRemaining].filter(message => {
+      const key = steerRollbackKey(message);
+      return !key || !rolledBackSteerKeys.has(key);
+    });
+  }, [selectedNode?.name, conversationNode, effectiveMessages, state.runId, state.events, rolledBackSteerKeys]);
   const attempts = useMemo(() => {
     if (!selectedNode) return [];
     if (publicationMergerSelected) {
@@ -650,12 +675,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [state.runId, state.graph.originalGoal]);
   const conversationViewKey = `${currentRunKey}:${routeType}:${selected || "planner"}`;
   const composerDraftKey = JSON.stringify([selected, selectedMerger?.id ?? ""]);
+  // Remounting on epoch bumps is the only way to push restored text into the
+  // uncontrolled composer without making every keystroke controlled.
+  const composerKey = `${composerDraftKey}:${composerEpoch}`;
   const handleComposerChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     const text = event.target.value;
     if (text) composerDrafts?.set(composerDraftKey, text);
     else composerDrafts?.delete(composerDraftKey);
   };
-  const smoothPlannerText = useSmoothStreamText(plannerStream.plannerText, isPlanning);
   // Live SSE is ephemeral. After reload or run selection, replay the durable
   // planning JSONL associated with the selected run, never a previous run's stream.
   const backgroundReview = plannerStream.stage !== "planning" && state.events.some(event =>
@@ -1380,7 +1407,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, [
     effectiveMessages,
-    smoothPlannerText,
+    plannerStream.plannerText,
     plannerStream.items,
     plannerStream.plannerThinking,
     isPlanning,
@@ -1526,7 +1553,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     });
 
     const assigned = new Set(turns[0].executions.map(execution => execution.id));
-    const followUps = messages.slice(1);
+    const followUps = messages.slice(1).filter(message => {
+      const key = steerRollbackKey(message);
+      return !key || !rolledBackSteerKeys.has(key);
+    });
     const lastMessageByExecution = new Map(followUps.filter(message => !message.delivery && message.executionId)
       .map(message => [message.executionId, message.id]));
     for (const msg of followUps) {
@@ -1558,9 +1588,39 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
 
     return turns;
-  }, [routeType, serialNode?.name, effectiveMessages, serialExecutions, state.graph.originalGoal, state.runId, state.events]);
+  }, [routeType, serialNode?.name, effectiveMessages, serialExecutions, state.graph.originalGoal, state.runId, state.events, rolledBackSteerKeys]);
 
   const isSerialExecution = routeType === "serial" && state.graph.nodes.length > 0;
+  // Pausing a node must not strand a steer Pi never read: the card disappears
+  // (the stopped execution stops rendering it) and its text returns to the
+  // composer so the user can edit and resend it instead of hitting an edit that
+  // cannot find the turn in the Pi conversation tree.
+  const restoreUncommittedSteerDrafts = useCallback((targetNode?: string) => {
+    const steers = routeType === "serial"
+      ? serialTurns.flatMap(turn => turn.steerMessages ?? [])
+      : nodeTurns.flatMap(turn => turn.steerMessages ?? []);
+    // Only the live attempts being interrupted can still read a queued steer.
+    // A collapsed historical attempt would look uncommitted simply because its
+    // transcript is not mounted, and a node stop must not touch other nodes.
+    const running = new Set([...state.executions, ...(state.mergers ?? [])]
+      .filter(execution => execution.status === "running" && (!targetNode || execution.node === targetNode))
+      .map(execution => execution.id));
+    const unread = steers.filter(message => message.executionId !== undefined &&
+      running.has(message.executionId) && isUncommittedSteer(message, inlineUserTurns));
+    if (unread.length === 0) return;
+    const keys = unread.map(steerRollbackKey).filter((key): key is string => !!key);
+    if (keys.length > 0) onRollbackSteers?.(keys);
+    // Editing the rolled-back steer disabled the composer; its card is about to
+    // disappear, so leave the edit instead of stranding a disabled input.
+    const editingKey = editingMessage ? steerRollbackKey(editingMessage) : null;
+    if (editingKey && keys.includes(editingKey)) onCancelEditMessage?.();
+    const texts = unread.map(message => nodeInstructionText(message.text)).filter(Boolean);
+    if (texts.length === 0) return;
+    const existing = (composerDrafts?.get(composerDraftKey) ?? "").trim();
+    const restored = texts.join("\n\n");
+    composerDrafts?.set(composerDraftKey, existing ? `${existing}\n\n${restored}` : restored);
+    setComposerEpoch(epoch => epoch + 1);
+  }, [routeType, serialTurns, nodeTurns, inlineUserTurns, state.executions, state.mergers, composerDrafts, composerDraftKey, onRollbackSteers, editingMessage, onCancelEditMessage]);
   const serialWorkingAfterMessage = serialTurns.length > 0 && serialTurns[serialTurns.length - 1].executions.length === 0 &&
     !serialTurns[serialTurns.length - 1].userMessage.executionId;
   const serialDependenciesCompleted = !serialNode ||
@@ -2112,16 +2172,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   <p>session id: {execution?.sessionId || "waiting for initialization…"}</p>
                   <p>commit before: {execution?.before || "not snapshotted"}</p>
                   <p>commit after: {execution ? (execution.after === "" ? "direct modification (no snapshot)" : execution.after ?? "pending") : "pending"}</p>
+                  <div className="session-details-row">
+                    <p>start time: {formatSessionStartTime(executionSession.startedAt ?? execution?.startedAt)}</p>
+                    <p>time took: <ExecutionTimeTookText execution={execution} priorDurationSeconds={executionSession.priorDurationSeconds} /></p>
+                  </div>
                   {snapshotModelInfo && (
                     <div className="session-details-row">
                       <p>model: {snapshotModelInfo.model}</p>
                       <p>thinking level: {snapshotModelInfo.thinkingLevel}</p>
                     </div>
                   )}
-                  <div className="session-details-row">
-                    <p>start time: {formatSessionStartTime(executionSession.startedAt ?? execution?.startedAt)}</p>
-                    <p>time took: <ExecutionTimeTookText execution={execution} priorDurationSeconds={executionSession.priorDurationSeconds} /></p>
-                  </div>
                   {(showExecutionTokenUsage || executionContext) && (
                     <SessionTokenUsage usage={executionUsage} context={executionContext}
                       showTokens={showExecutionTokenUsage} />
@@ -2165,7 +2225,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
               <PromptBox
-                key={composerDraftKey}
+                key={composerKey}
                 defaultValue={composerDrafts?.get(composerDraftKey) ?? ""}
                 onChange={handleComposerChange}
                 layoutId="conversation-composer"
@@ -2192,7 +2252,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 }
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
-                onInterrupt={onInterrupt ? () => onInterrupt(selectedNode?.name) : undefined}
+                onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(selectedNode?.name); onInterrupt(selectedNode?.name); } : undefined}
                 disabled={
                   locked ||
                   !!editingMessage ||
@@ -2322,16 +2382,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     >
                       <p>workspace: {serialExecution?.worktree || config.repository || repoInfo?.name || "preparing workspace…"}</p>
                       <p>session id: {serialExecution?.sessionId || "waiting for initialization…"}</p>
+                      <div className="session-details-row">
+                        <p>start time: {formatSessionStartTime(serialSession.startedAt ?? serialExecution?.startedAt)}</p>
+                        <p>time took: <ExecutionTimeTookText execution={serialExecution} priorDurationSeconds={serialSession.priorDurationSeconds} /></p>
+                      </div>
                       {serialModelInfo && (
                         <div className="session-details-row">
                           <p>model: {serialModelInfo.model}</p>
                           <p>thinking level: {serialModelInfo.thinkingLevel}</p>
                         </div>
                       )}
-                      <div className="session-details-row">
-                        <p>start time: {formatSessionStartTime(serialSession.startedAt ?? serialExecution?.startedAt)}</p>
-                        <p>time took: <ExecutionTimeTookText execution={serialExecution} priorDurationSeconds={serialSession.priorDurationSeconds} /></p>
-                      </div>
                       {(showSerialTokenUsage || serialContext) && (
                         <SessionTokenUsage usage={serialUsage} context={serialContext}
                           showTokens={showSerialTokenUsage} />
@@ -2467,7 +2527,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         onCancelEdit={onCancelEditMessage} onEditSubmit={onEditMessageSubmit}
                         onSendMessage={onSendMessage} onUserResize={handleExpandableContentChange} />
                     ) : (
-                      renderLivePlanner && (plannerStream.plannerThinking || smoothPlannerText) && (
+                      renderLivePlanner && (plannerStream.plannerThinking || plannerStream.plannerText) && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                           {plannerStream.plannerThinking && (
                             <ThinkingCard
@@ -2480,14 +2540,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               onExpandedChange={handleExpandableContentChange}
                             />
                           )}
-                          {smoothPlannerText && (
+                          {plannerStream.plannerText && (
                             <motion.div
                               className="chat-message-row assistant"
                               initial={false}
                               animate={{ opacity: 1, y: 0, scale: 1 }}
                             >
                               <div className="chat-bubble-assistant chat-message-assistant">
-                                <MarkdownRenderer content={smoothPlannerText} isStreaming={isPlanning} />
+                                <StreamingAssistantBubble content={plannerStream.plannerText} isStreaming={isPlanning} />
                               </div>
                             </motion.div>
                           )}
@@ -2511,12 +2571,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   >
                     <p>workspace: {plannerWorkspace || config.repository || "preparing workspace…"}</p>
                     <div className="session-details-row">
-                      <p>model: {plannerModelInfo.model}</p>
-                      <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
-                    </div>
-                    <div className="session-details-row">
                       <p>start time: {formatSessionStartTime(plannerStartTime)}</p>
                       <p>time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerLiveTurnStart} durationSeconds={plannerRole?.durationSeconds} priorDurationSeconds={plannerSession.priorDurationSeconds} /></p>
+                    </div>
+                    <div className="session-details-row">
+                      <p>model: {plannerModelInfo.model}</p>
+                      <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
                     </div>
                     {(showPlannerTokenUsage || displayedPlannerContext) && (
                       <SessionTokenUsage usage={plannerUsage} context={displayedPlannerContext}
@@ -2592,7 +2652,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
               <PromptBox
-                key={composerDraftKey}
+                key={composerKey}
                 defaultValue={composerDrafts?.get(composerDraftKey) ?? ""}
                 onChange={handleComposerChange}
                 layoutId="conversation-composer"
@@ -2611,7 +2671,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 }
                 isExecuting={isMainViewWorking}
                 isWorking={isMainViewWorking}
-                onInterrupt={onInterrupt ? () => onInterrupt() : undefined}
+                onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(); onInterrupt(); } : undefined}
                 disabled={
                   !!editingMessage ||
                   (locked && !isPlanning)
@@ -2706,7 +2766,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <span>
                       <span className="progress-dot" />
                       {completed} / {state.graph.nodes.length}{t(" 节点完成")}</span>
-                    <span>{phaseText[graphPhase] ?? graphPhase}</span>
+                    {/* "running" is already expressed by the approval-row's
+                        "确定性运行时正在推进"; the phase label would only
+                        duplicate it. */}
+                    {graphPhase !== "running" && (
+                      <span>{phaseText[graphPhase] ?? graphPhase}</span>
+                    )}
                   </div>
                   <div className="progress-track">
                     <div style={{ width: `${(completed / Math.max(1, state.graph.nodes.length)) * 100}%` }} />
@@ -2755,7 +2820,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           disabled={locked || publishing || publicationFailed || state.phase === "completed" || graphPhase === "pausing"
                             || (graphPhase === "needs_attention" && !canContinue)}
                           title={graphPhase === "needs_attention" && !canContinue ? t("执行已停止；请在失败节点的对话中发送介入指令以继续") : undefined}
-                          onClick={() => onControl(canContinue ? "resume" : "pause")}
+                          onClick={() => {
+                            if (!canContinue) restoreUncommittedSteerDrafts();
+                            onControl(canContinue ? "resume" : "pause");
+                          }}
                         >
                           {canContinue ? <Play size={13} /> : <Pause size={13} />}
                           {graphPhase === "pausing" ? t("正在暂停") : canContinue ? t("继续") : t("暂停")}

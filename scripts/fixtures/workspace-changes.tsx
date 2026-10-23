@@ -25,10 +25,28 @@ const referenceFiles: FileChangeItem[] = [
   { path: "src/hooks/useChat.ts", status: "modified", additions: 0, deletions: 0 },
 ];
 
+/** Enough rows to exceed the render cap without making the fixture unwieldy. */
+const manyFiles: FileChangeItem[] = Array.from({ length: 1205 }, (_, index) => ({
+  path: `src/generated/file-${String(index).padStart(4, "0")}.ts`,
+  status: "modified" as const, additions: 1, deletions: 0,
+}));
+
+/** Mixed statuses and sizes to pin the added/deleted-first, lines-descending order. */
+const mixedFiles: FileChangeItem[] = [
+  { path: "src/mod-small.ts", status: "modified", additions: 1, deletions: 0 },
+  { path: "src/added-large.ts", status: "added", additions: 40, deletions: 0 },
+  { path: "src/deleted-small.ts", status: "deleted", additions: 0, deletions: 2 },
+  { path: "src/added-small.ts", status: "added", additions: 3, deletions: 1 },
+  { path: "src/mod-large.ts", status: "modified", additions: 30, deletions: 5 },
+  { path: "src/deleted-large.ts", status: "deleted", additions: 0, deletions: 25 },
+];
+
 function Fixture() {
   const params = new URLSearchParams(location.search);
   const mode = params.get("mode") || "serial";
-  const shownFiles = params.get("reference") === "1" ? referenceFiles : files;
+  const shownFiles = params.get("many") === "1" ? manyFiles
+    : params.get("mix") === "1" ? mixedFiles
+    : params.get("reference") === "1" ? referenceFiles : files;
   const writeDebug = params.get("write") === "1";
   const [running, setRunning] = useState(true);
   const [empty, setEmpty] = useState(false);

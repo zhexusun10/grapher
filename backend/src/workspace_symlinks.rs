@@ -173,10 +173,8 @@ pub(crate) fn materialize(root: &Path, path: &Path, link: &Link) -> Result<(), S
 #[cfg(windows)]
 mod windows {
     use super::*;
-    use std::{
-        ffi::c_void,
-        os::windows::{ffi::OsStrExt, fs::MetadataExt},
-    };
+    use crate::path_identity::windows_api_path as wide;
+    use std::{ffi::c_void, os::windows::fs::MetadataExt};
     #[link(name = "kernel32")]
     extern "system" {
         fn CreateFileW(
@@ -200,13 +198,11 @@ mod windows {
         ) -> i32;
         fn CloseHandle(handle: *mut c_void) -> i32;
     }
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain([0]).collect()
-    }
     fn ioctl(path: &Path, write: bool, data: &mut [u8]) -> Result<usize, String> {
+        let name = wide(path)?;
         let handle = unsafe {
             CreateFileW(
-                wide(path).as_ptr(),
+                name.as_ptr(),
                 if write { 0x4000_0000 } else { 0 },
                 7,
                 std::ptr::null(),
@@ -216,7 +212,11 @@ mod windows {
             )
         };
         if handle as isize == -1 {
-            return Err(std::io::Error::last_os_error().to_string());
+            return Err(format!(
+                "Cannot open project reparse point {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
         }
         let mut returned = 0;
         let result = unsafe {
@@ -306,5 +306,37 @@ mod windows {
             return Err(error);
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[test]
+    fn windows_long_path_junction_capture_and_materialization() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut root = crate::native::host_path(temp.path());
+        while root.as_os_str().encode_wide().count() < 300 {
+            root.push("中文 dependency directory");
+        }
+        fs::create_dir_all(&root).unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let link = root.join("original");
+        crate::path_safety::directory_link(&outside, &link);
+        fs::remove_dir(&outside).unwrap();
+
+        // Read/rebuild the reparse point itself, even with a missing target.
+        let metadata = fs::symlink_metadata(&link).unwrap();
+        let expected = capture(&root, &link, &metadata).unwrap();
+        assert_eq!(expected.kind, Kind::Junction);
+        assert!(!expected.project_absolute);
+        let copied = root.join("copied");
+        materialize(&root, &copied, &expected).unwrap();
+        let metadata = fs::symlink_metadata(&copied).unwrap();
+        assert_eq!(capture(&root, &copied, &metadata).unwrap(), expected);
+        assert!(!outside.exists());
     }
 }

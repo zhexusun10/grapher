@@ -1,5 +1,5 @@
 import { t } from "../i18n";
-import React, { useState, useEffect, useRef, useDeferredValue } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Brain, ChevronRight, Copy, Check, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { TranscriptItem } from "../types";
@@ -38,17 +38,17 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const rawContent = (item ? item.content : directContent) || "";
     const isStreaming = item ? item.status === "running" : Boolean(directStreaming);
     const hasVisibleContent = Boolean(rawContent.trim());
-    const smoothContent = useSmoothStreamText(rawContent, isStreaming);
-    // Markdown parsing is O(content) per delta. Defer the render so streamed
-    // answer text and scrolling stay responsive, and superseded intermediate
-    // deltas are skipped instead of parsed one by one.
-    const renderedContent = useDeferredValue(smoothContent);
     // The Settings toggle (default on) decides whether watching a run may pop
     // reasoning cards open. A collapsed card never mounts its Markdown body.
     const autoExpandCot = useAutoExpandCot();
 
     // If the user explicitly collapses/expands, respect their choice; otherwise auto-expand while streaming.
     const [userToggled, setUserToggled] = useState<boolean | null>(null);
+    const isExpanded = expanded ?? (userToggled !== null ? userToggled
+      : autoExpandCot && (defaultExpanded || (autoExpandWhileStreaming && isStreaming)));
+    // Collapsed cards keep the body unmounted, so only type while expanded; the
+    // remaining text is revealed when the user opens the card again.
+    const smoothContent = useSmoothStreamText(rawContent, isStreaming, isExpanded);
     const [isCopied, setIsCopied] = useState(false);
     const cardRef = useRef<HTMLDivElement>(null);
     const bodyRef = useRef<HTMLDivElement>(null);
@@ -56,18 +56,18 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const lastScrollTopRef = useRef(0);
     const wasStreamingRef = useRef(isStreaming);
 
-    const isExpanded = expanded ?? (userToggled !== null ? userToggled
-      : autoExpandCot && (defaultExpanded || (autoExpandWhileStreaming && isStreaming)));
-
-    // Auto-scroll within the thinking box while streaming if user hasn't scrolled up
+    // Auto-scroll within the thinking box while text is still being revealed if
+    // the user hasn't scrolled up. `smoothContent` trails `rawContent` during the
+    // post-stream drain too, so keep following until it catches up.
+    const stillTyping = isStreaming || smoothContent.length < rawContent.length;
     useEffect(() => {
       const justFinished = wasStreamingRef.current && !isStreaming;
       wasStreamingRef.current = isStreaming;
-      if ((isStreaming || justFinished) && isExpanded && !userScrolledUpRef.current && bodyRef.current) {
+      if ((stillTyping || justFinished) && isExpanded && !userScrolledUpRef.current && bodyRef.current) {
         bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
         lastScrollTopRef.current = bodyRef.current.scrollTop;
       }
-    }, [renderedContent, isStreaming, isExpanded]);
+    }, [smoothContent, isStreaming, isExpanded, stillTyping]);
 
     const handleScroll = () => {
       const el = bodyRef.current;
@@ -107,7 +107,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       onExpandedChange?.(nextExpanded, cardRef.current ?? undefined);
     };
 
-    const charCount = rawContent.trim() ? (isStreaming && smoothContent ? smoothContent : rawContent).length : 0;
+    const charCount = rawContent.trim() ? rawContent.length : 0;
 
     const animateAppear = useCardAppear(item?.id, isStreaming, item?.timestamp, directAnimateAppear ?? item?.animateAppear);
 
@@ -180,7 +180,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
             {hasVisibleContent ? (
               <div className="thinking-content-container">
                 <MarkdownRenderer
-                  content={renderedContent}
+                  content={smoothContent}
                   isStreaming={isStreaming}
                   streamingCursor={isStreaming}
                   className="thinking-markdown"

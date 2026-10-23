@@ -1513,6 +1513,32 @@ fn choose_metadata(
     }
     Ok(changes.pop().unwrap_or(base))
 }
+/// True when the already-scanned entry carries exactly the metadata a
+/// `restore_entry` call would materialize for `expected` (kind, mode and full
+/// metadata including the Windows security descriptor). `expected` metadata for
+/// written files and created directories is captured from disk, so this is the
+/// common case; composed metadata from recorded views still triggers a restore.
+fn metadata_materialized(current: Option<&Entry>, expected: &Entry) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    match (current, expected) {
+        (
+            Entry::File { mode: a, extra: ae, .. },
+            Entry::File { mode: b, extra: be, .. },
+        )
+        | (
+            Entry::Directory { mode: a, extra: ae },
+            Entry::Directory { mode: b, extra: be },
+        ) => a == b && ae.identical(be),
+        (Entry::Link { extra: ae, .. }, Entry::Link { extra: be, .. }) => ae.identical(be),
+        (
+            Entry::Special { mode: a, extra: ae, .. },
+            Entry::Special { mode: b, extra: be, .. },
+        ) => a == b && ae.identical(be),
+        _ => false,
+    }
+}
 fn restore_entry(path: &Path, entry: &Entry) -> Result<(), String> {
     match entry {
         Entry::File { mode, extra, .. } | Entry::Directory { mode, extra } => {
@@ -1697,6 +1723,12 @@ pub(crate) fn prepare(
     let mut actual = BTreeMap::new();
     scan_scoped(path, Path::new(""), &mut actual, false, path, exclusions)?;
     let mut expected = BTreeMap::new();
+    // Entries this pass writes, links or recreates get fresh OS metadata that
+    // the scan above could not observe (for example writing clears a read-only
+    // bit, and a recreated special/link starts from inherited metadata). Their
+    // pre-change scan entry is not proof a restore is unnecessary, so they are
+    // excluded from the skip below and always materialized.
+    let mut materialized = std::collections::BTreeSet::new();
     if conflict {
         // Conflict marker bytes are task composition state, not HEAD bytes.
         expected.extend(
@@ -1718,9 +1750,9 @@ pub(crate) fn prepare(
             }) {
                 return Err("Unsafe graph project path".into());
             }
-            let data = workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?;
             let target = path.join(name);
             if fields[0] == "120000" {
+                let data = workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?;
                 let target_name = String::from_utf8(data).map_err(|_| "Non-UTF-8 project link")?;
                 let baseline = base_view
                     .entries
@@ -1747,14 +1779,34 @@ pub(crate) fn prepare(
                 };
                 target.value = target_name;
                 crate::workspace_symlinks::materialize(path, &path.join(name), &target)?;
+                materialized.insert(name.to_string());
                 expected.insert(name.into(), Entry::Link { target, extra });
             } else {
                 real_child_path(path, &target, true)?;
-                let blob = git2::Oid::hash_object(git2::ObjectType::Blob, &data)
-                    .map_err(|e| e.to_string())?
-                    .to_string();
-                if !matches!(actual.get(name), Some(Entry::File { blob: actual, .. }) if actual == &blob)
+                // The view's blob identity is the SHA-1 content hash that
+                // `scan_scoped` records, so a SHA-1 graph tree's `ls-tree` OID is
+                // already that identity: reuse it and skip reading unchanged
+                // bytes, which otherwise spawned one `git cat-file` per project
+                // file on every preparation pass. A SHA-256 tree reports a
+                // different OID, so its bytes are still read and hashed to keep
+                // the recorded identity comparable.
+                let mut cached = None;
+                let blob = if fields[2].len() == 40 {
+                    fields[2].to_string()
+                } else {
+                    let data = workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?;
+                    let hash = git2::Oid::hash_object(git2::ObjectType::Blob, &data)
+                        .map_err(|e| e.to_string())?
+                        .to_string();
+                    cached = Some(data);
+                    hash
+                };
+                if !matches!(actual.get(name), Some(Entry::File { blob: current, .. }) if current == &blob)
                 {
+                    let data = match cached {
+                        Some(data) => data,
+                        None => workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?,
+                    };
                     if let Some(existing) = actual.get(name) {
                         if !matches!(existing, Entry::File { .. }) {
                             remove_entry(existing, &target)?;
@@ -1773,6 +1825,7 @@ pub(crate) fn prepare(
                         }
                     }
                     fs::write(&target, &data).map_err(|e| e.to_string())?;
+                    materialized.insert(name.to_string());
                 }
                 let metadata = fs::symlink_metadata(&target).map_err(|e| e.to_string())?;
                 expected.insert(
@@ -1955,6 +2008,7 @@ pub(crate) fn prepare(
                     remove_entry(entry, &target)?;
                 }
                 create_special(&target, special, *special_mode, *device)?;
+                materialized.insert(name.clone());
             }
         }
     }
@@ -1979,6 +2033,15 @@ pub(crate) fn prepare(
     )?;
     crate::workspace_links::restore(path, &topology, &signatures)?;
     for (name, entry) in expected.iter().rev() {
+        // Reuse the metadata captured by the scan above: an entry whose on-disk
+        // metadata already matches what `restore` would write needs no ACL/
+        // stream/attribute syscalls. Entries this pass rewrote are excluded so a
+        // stale scan entry can never hide a needed restore. The complete
+        // comparison below still gates readiness, so this only removes redundant
+        // work, never verification.
+        if !materialized.contains(name) && metadata_materialized(actual.get(name), entry) {
+            continue;
+        }
         restore_entry(&path.join(name), entry)?;
     }
     for (name, entry) in actual.iter().rev() {

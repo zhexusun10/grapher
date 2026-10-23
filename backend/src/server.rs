@@ -35,7 +35,17 @@ pub struct Service {
 /// Transient display-only activity. It lives outside the Run mutex so the
 /// browser can observe long Git/directory preparation passes without blocking
 /// on their I/O. Entries are keyed by Run and by a unique operation key.
-type ActivityEntries = BTreeMap<String, (String, String)>;
+/// One in-flight operation. `phase` is an optional finer-grained step of the
+/// operation (for example a node workspace's compose/conflict/verify stage) so
+/// the browser can report what a long preparation is actually doing instead of
+/// a single generic label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActivityEntry {
+    kind: String,
+    node: String,
+    phase: Option<String>,
+}
+type ActivityEntries = BTreeMap<String, ActivityEntry>;
 type ActivityRuns = BTreeMap<String, ActivityEntries>;
 
 #[derive(Default)]
@@ -48,6 +58,8 @@ struct ActivityBoard {
 struct RuntimeActivity {
     kind: String,
     nodes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
 }
 
 static ACTIVITY: OnceLock<ActivityBoard> = OnceLock::new();
@@ -56,10 +68,9 @@ fn activity() -> &'static ActivityBoard {
     ACTIVITY.get_or_init(ActivityBoard::default)
 }
 
-fn set_activity(run: &str, key: &str, kind: &str, node: &str) {
+fn insert_activity(run: &str, key: &str, entry: ActivityEntry) {
     let mut changed = false;
     if let Ok(mut runs) = activity().runs.lock() {
-        let entry = (kind.to_owned(), node.to_owned());
         let prev = runs
             .entry(run.into())
             .or_default()
@@ -69,6 +80,43 @@ fn set_activity(run: &str, key: &str, kind: &str, node: &str) {
     if changed {
         notify_snapshot_changed(run, "");
     }
+}
+
+fn set_activity(run: &str, key: &str, kind: &str, node: &str) {
+    insert_activity(
+        run,
+        key,
+        ActivityEntry {
+            kind: kind.to_owned(),
+            node: node.to_owned(),
+            phase: None,
+        },
+    );
+}
+
+/// Advance an existing operation's phase. A missing key is a no-op so callers
+/// outside the HTTP worker (fixtures, embedded use) never create a dangling
+/// activity entry that no guard will clear.
+fn set_activity_phase(run: &str, key: &str, phase: &str) {
+    let mut changed = false;
+    if let Ok(mut runs) = activity().runs.lock() {
+        if let Some(entry) = runs.get_mut(run).and_then(|entries| entries.get_mut(key)) {
+            if entry.phase.as_deref() != Some(phase) {
+                entry.phase = Some(phase.to_owned());
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        notify_snapshot_changed(run, "");
+    }
+}
+
+/// Node-workspace preparation phase, keyed to the same activity entry the
+/// worker's `ActivityGuard` owns. Runtime calls this while composing parent
+/// results or preparing a conflicted worktree.
+pub(crate) fn set_prepare_phase(run: &str, execution_id: &str, phase: &str) {
+    set_activity_phase(run, &format!("prepare-{execution_id}"), phase);
 }
 
 fn clear_activity(run: &str, key: &str) {
@@ -93,18 +141,27 @@ fn run_activity(run: &str) -> Vec<RuntimeActivity> {
     let Some(entries) = runs.get(run) else {
         return Vec::new();
     };
-    let mut grouped: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (kind, node) in entries.values() {
-        let nodes = grouped.entry(kind.clone()).or_default();
-        if !node.is_empty() {
-            nodes.insert(node.clone());
+    // A phase label applies to the whole kind and its node list, so it is only
+    // reported when every entry agrees. Concurrent nodes in different stages
+    // fall back to the generic label instead of mislabeling one of them.
+    let mut grouped: BTreeMap<String, (BTreeSet<String>, BTreeSet<Option<String>>)> = BTreeMap::new();
+    for entry in entries.values() {
+        let group = grouped.entry(entry.kind.clone()).or_default();
+        if !entry.node.is_empty() {
+            group.0.insert(entry.node.clone());
         }
+        group.1.insert(entry.phase.clone());
     }
     grouped
         .into_iter()
-        .map(|(kind, nodes)| RuntimeActivity {
+        .map(|(kind, (nodes, phases))| RuntimeActivity {
             kind,
             nodes: nodes.into_iter().collect(),
+            phase: if phases.len() == 1 {
+                phases.into_iter().next().flatten()
+            } else {
+                None
+            },
         })
         .collect()
 }
@@ -874,6 +931,15 @@ fn save_config(config: Config, service: &Arc<Service>) -> Result<Bootstrap, Stri
     save_config_projection(config, None, service, false)
 }
 
+/// The persisted global Auto Approve toggle, or `None` when no config has been
+/// saved yet. A Planner turn consults it when it commits its plan, so toggling
+/// Auto Approve while that turn runs still decides the plan it produces.
+fn saved_auto_approve(runtime: &Runtime) -> Option<bool> {
+    fs::read(runtime.root.join("config.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok())
+        .map(|config| config.auto_approve)
+}
+
 /// A save inside a conversation owns only that Run's model selection. Keep the
 /// last-saved global model defaults so other conversations and new ones do not
 /// inherit this conversation's switch; all non-model settings stay global.
@@ -904,9 +970,13 @@ fn save_config_projection(
         if runtime.state.run_id != *run_id {
             return Err("Run changed while saving settings".into());
         }
-        if !runtime.state.config.as_ref().is_some_and(|current|
-            same_repository_binding(&current.repository, &config.repository)) {
-            return Err("Settings repository does not match the selected Run".into());
+        // A Planner turn publishes its Run identity before it commits the Run's
+        // configuration. The repository binding is validated at commit, so a
+        // settings save may still proceed while that Run is planning.
+        if let Some(current) = runtime.state.config.as_ref() {
+            if !same_repository_binding(&current.repository, &config.repository) {
+                return Err("Settings repository does not match the selected Run".into());
+            }
         }
     }
     let defaults = run_id.as_ref()
@@ -916,7 +986,63 @@ fn save_config_projection(
     if run_id.is_some() {
         runtime.update_node_models(&config)?;
     }
+    // Auto Approve is a live boolean, not a creation-time snapshot: while it is
+    // on, a Graph waiting for approval starts instead of staying pending. A Run
+    // that already has Auto Approve on cannot normally be waiting (its Planner
+    // and review turns approve as they commit), so this is idempotent for the
+    // ordinary case and also retries after a transient approval failure.
+    let approve_repository = if run_id.is_some()
+        && config.auto_approve
+        && !runtime.state.approved
+        && runtime.state.plan_type.as_deref() == Some("graph")
+        && runtime.state.phase == "awaiting_approval"
+    {
+        runtime.state.config.as_ref().map(|current| current.repository.clone())
+    } else {
+        None
+    };
     drop(runtime);
+    // Approval is a best-effort side effect of the save, like the other
+    // post-commit enrichments here: the settings are already durable, so a
+    // failed approval must not turn the save into an error or leave the client
+    // with a setting it was told did not persist. The returned snapshot is the
+    // source of truth, so a Run that could not be approved still shows as
+    // waiting and can be approved manually, which surfaces the real reason.
+    //
+    // Approval records a source snapshot, and the manual Approve path serializes
+    // that against every other source capture with the per-repository lock. Take
+    // it before re-acquiring the Run lock rather than inverting the lock order.
+    let approval = if let Some(repository) = approve_repository {
+        let repository = PathBuf::from(repository);
+        (|| -> Result<bool, String> {
+            crate::workspace::validate_binding(&repository)?;
+            let lock = source_lock(&repository)?;
+            let _guard = lock.lock().map_err(|e| e.to_string())?;
+            let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+            // The Run may have changed while the locks were released; re-check.
+            if run_id.as_deref() == Some(runtime.state.run_id.as_str())
+                && config.auto_approve
+                && !runtime.state.approved
+                && runtime.state.plan_type.as_deref() == Some("graph")
+                && runtime.state.phase == "awaiting_approval"
+            {
+                runtime.approve()?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })()
+    } else {
+        Ok(false)
+    };
+    match approval {
+        Ok(true) => drive(service.clone()),
+        Ok(false) => {}
+        Err(error) => eprintln!(
+            "[Grapher] Auto Approve saved but could not start Run {}: {error}",
+            run_id.as_deref().unwrap_or_default()
+        ),
+    }
     #[cfg(not(feature = "fixture"))]
     {
         crate::engine::invalidate_warm_node();
@@ -927,116 +1053,116 @@ fn save_config_projection(
     bootstrap_projection(service, metadata, false, false)
 }
 
-pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetrics {
-    let mut session_id = None;
-    let mut session_start = None;
-    let mut last_event = None;
-    let mut duration_seconds = 0.0;
-    let mut assistant_messages = 0;
-    let mut tools = 0;
-    let mut tool_errors = 0;
-    let mut usage = TokenUsage::default();
-    let mut context_tokens = 0;
-    let mut context_peak = 0;
-
-    for line in log.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("[stderr]") {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(ts) = value.get("grapherReceivedAt").or_else(|| value.get("timestamp")) {
-                let ts_str = if let Some(s) = ts.as_str() {
-                    s.to_string()
-                } else if let Some(n) = ts.as_u64() {
-                    format!("{n}")
-                } else {
-                    String::new()
-                };
-                if !ts_str.is_empty() {
-                    if session_start.is_none() {
-                        session_start = Some(ts_str.clone());
-                    }
-                    last_event = Some(ts_str);
-                }
+/// Fold one streamed role line into a Planner/Partitioner metrics accumulator.
+///
+/// Returns whether the line moved a counter the live session panel reads, so
+/// callers can publish a progress update at assistant-message boundaries
+/// instead of on every timestamped delta. Tool counts are folded but do not
+/// publish on their own: the live session panel never shows them, so a durable
+/// record would only bloat the log. `parse_planning_role_metrics` replays a
+/// whole log through the same fold, so the live and final views agree.
+fn accumulate_planning_role_line(metrics: &mut PlanningRoleMetrics, line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with("[stderr]") {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return false;
+    };
+    if let Some(ts) = value.get("grapherReceivedAt").or_else(|| value.get("timestamp")) {
+        let ts_str = if let Some(s) = ts.as_str() {
+            s.to_string()
+        } else if let Some(n) = ts.as_u64() {
+            format!("{n}")
+        } else {
+            String::new()
+        };
+        if !ts_str.is_empty() {
+            if metrics.session_start.is_none() {
+                metrics.session_start = Some(ts_str.clone());
             }
-            match value
-                .get("type")
+            metrics.last_event = Some(ts_str);
+        }
+    }
+    match value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+    {
+        "grapher_process_exited" => {
+            if let Some(elapsed) = value.get("elapsedMs").and_then(|v| v.as_f64()) {
+                metrics.duration_seconds += elapsed / 1000.0;
+            }
+            false
+        }
+        // Every role process reports the Pi session it appends to, so a
+        // resumed Planner turn stays in the same session bucket.
+        "grapher_process_started" => {
+            if let Some(id) = value
+                .get("sessionId")
                 .and_then(|v| v.as_str())
-                .unwrap_or_default()
+                .filter(|id| !id.is_empty())
             {
-                "grapher_process_exited" => {
-                    if let Some(elapsed) = value.get("elapsedMs").and_then(|v| v.as_f64()) {
-                        duration_seconds += elapsed / 1000.0;
-                    }
-                }
-                // Every role process reports the Pi session it appends to, so a
-                // resumed Planner turn stays in the same session bucket.
-                "grapher_process_started" => {
-                    if let Some(id) = value
-                        .get("sessionId")
-                        .and_then(|v| v.as_str())
-                        .filter(|id| !id.is_empty())
-                    {
-                        session_id = Some(id.to_string());
-                    }
-                }
-                "message_end" => {
-                    if let Some(msg) = value.get("message") {
-                        if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
-                            assistant_messages += 1;
-                            if let Some(u) = msg.get("usage") {
-                                let message = TokenUsage::from_message_usage(u);
-                                // An aborted turn reports usage without a prompt; keep
-                                // the last turn that actually read a context.
-                                let prompt = message.context_tokens();
-                                if prompt > 0 {
-                                    context_tokens = prompt;
-                                    context_peak = context_peak.max(prompt);
-                                }
-                                usage.accumulate(&message);
-                            }
-                        }
-                    }
-                }
-                "tool_execution_start" => {
-                    tools += 1;
-                }
-                "tool_execution_end" => {
-                    if value
-                        .get("isError")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                    {
-                        tool_errors += 1;
-                    }
-                }
-                _ => {}
+                metrics.session_id = Some(id.to_string());
+                return true;
             }
+            false
         }
+        "message_end" => {
+            if let Some(msg) = value.get("message") {
+                if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                    metrics.assistant_messages += 1;
+                    if let Some(u) = msg.get("usage") {
+                        let message = TokenUsage::from_message_usage(u);
+                        // An aborted turn reports usage without a prompt; keep
+                        // the last turn that actually read a context.
+                        let prompt = message.context_tokens();
+                        if prompt > 0 {
+                            metrics.context_tokens = prompt;
+                            metrics.context_peak = metrics.context_peak.max(prompt);
+                        }
+                        metrics.usage.accumulate(&message);
+                    }
+                    return true;
+                }
+            }
+            false
+        }
+        "tool_execution_start" => {
+            metrics.tools += 1;
+            false
+        }
+        "tool_execution_end" => {
+            if value
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                metrics.tool_errors += 1;
+            }
+            false
+        }
+        _ => false,
     }
+}
 
-    if duration_seconds == 0.0 {
+pub fn parse_planning_role_metrics(model: &str, log: &str) -> PlanningRoleMetrics {
+    let mut metrics = PlanningRoleMetrics {
+        model: model.to_string(),
+        ..Default::default()
+    };
+    for line in log.lines() {
+        accumulate_planning_role_line(&mut metrics, line);
+    }
+    if metrics.duration_seconds == 0.0 {
         if let (Some(start), Some(end)) = (
-            session_start.as_deref().and_then(|s| s.parse::<u64>().ok()),
-            last_event.as_deref().and_then(|s| s.parse::<u64>().ok()),
+            metrics.session_start.as_deref().and_then(|s| s.parse::<u64>().ok()),
+            metrics.last_event.as_deref().and_then(|s| s.parse::<u64>().ok()),
         ) {
-            duration_seconds = end.saturating_sub(start) as f64 / 1000.0;
+            metrics.duration_seconds = end.saturating_sub(start) as f64 / 1000.0;
         }
     }
-    PlanningRoleMetrics {
-        model: model.to_string(),
-        session_id,
-        session_start,
-        last_event,
-        duration_seconds,
-        assistant_messages,
-        tools,
-        tool_errors,
-        usage,
-        context_tokens,
-        context_peak,
-    }
+    metrics
 }
 
 pub fn validate_planning_preflight(config: &Config, mode: Option<&str>) -> Result<(), String> {
@@ -1463,6 +1589,7 @@ fn event_planner_id(kind: &EventKind) -> Option<&str> {
         } => Some(&planning.planning_id),
         EventKind::PlanningStarted { planning, .. }
         | EventKind::PlannerWorkspaceSelected { planning }
+        | EventKind::PlannerTurnProgress { planning }
         | EventKind::PlannerReviewStarted { planning }
         | EventKind::PlannerReviewFinished { planning, .. }
         | EventKind::PlannerTurnAborted { planning }
@@ -1882,6 +2009,12 @@ fn plan_goal_internal_with_started(
                             .emit(EventKind::PlannerWorkspaceSelected { planning: running.clone() })?;
                         let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
                         let planner_config = planner_model_cfg.effective_config(&config);
+                        // The live progress fold reports the model that actually
+                        // answered, so session details never show an empty model
+                        // while the turn is still streaming.
+                        if let Some(role) = running.roles.get_mut("planner") {
+                            role.model = planner_config.model.clone();
+                        }
                         let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
                             .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string());
                         let (task, is_followup) = {
@@ -2044,6 +2177,22 @@ fn plan_goal_internal_with_started(
                                     &text,
                                 );
                                 on_planner_line(&text);
+                                // Publish live Planner usage at assistant-message
+                                // and tool boundaries so the session token panel
+                                // does not wait for the committed turn summary.
+                                let advanced = running
+                                    .roles
+                                    .get_mut("planner")
+                                    .is_some_and(|role| accumulate_planning_role_line(role, &text));
+                                if advanced {
+                                    if let Ok(mut runtime) = service.runtime.lock() {
+                                        if runtime.state.run_id == owner {
+                                            let _ = runtime.emit(EventKind::PlannerTurnProgress {
+                                                planning: running.clone(),
+                                            });
+                                        }
+                                    }
+                                }
                                 if let Some(event) = serde_json::from_str::<serde_json::Value>(&text).ok() {
                                     if event["type"] == "tool_execution_end" && event["toolName"] == "switch_workspace" && event["isError"] != true {
                                         let result_text = event["result"]["content"].as_array().map(|parts| parts.iter()
@@ -2187,6 +2336,14 @@ fn plan_goal_internal_with_started(
                                 return Err("Run changed during graph revision".into());
                             }
                         }
+                    }
+                }
+                // Auto Approve is a live toggle. A settings save made while this
+                // Planner turn was running must decide the plan it produces, not
+                // the value captured when the turn started.
+                if let Ok(runtime) = service.runtime.lock() {
+                    if let Some(auto_approve) = saved_auto_approve(&runtime) {
+                        config.auto_approve = auto_approve;
                     }
                 }
                 let _source_guard = if route.plan_type == "serial" || config.auto_approve || revision_run_id.is_some() {

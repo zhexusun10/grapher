@@ -1835,6 +1835,69 @@ for (const planType of ["graph", "serial"]) {
   });
 }
 
+test("pausing a node returns an unread steer to the composer and removes its card", { timeout: 45_000 }, async () => {
+  const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };
+  const live = { id: "live-exec", node: "task", status: "running", revision: 1, attempt: 1, sessionId: "s", worktree: "/a", before: "", after: null, startedAt: 1, completedAt: null, output: "" };
+  let current = { runId: "pause-steer-run", config, planType: "graph", approved: true, paused: false, phase: "running",
+    graph: { originalGoal: "Pause steer goal", nodes: [{ name: "task", task: "Pause steer task" }], edges: [] },
+    nodes: { task: { status: "running", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
+    executions: [live], plan: null,
+    events: [{ type: "started", sequence: 1, timestamp: 1, execution: live, message_sequences: [] }],
+    base: "", feedbackCounts: {} };
+  const empty = { ...current, runId: "", config: null, approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [] };
+  const actions = [], errors = [];
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "history": case "snapshot": result = current; break;
+      case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
+      case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = catalog; break;
+      case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+      case "get_execution_output": result = { runId: current.runId, executionId: body.executionId, content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, status: current.executions.find(item => item.id === body.executionId)?.status }; break;
+      case "control": {
+        actions.push({ action: body.action, node: body.node });
+        if (body.action === "steer") {
+          const sequence = current.events.length + 1;
+          current = { ...current, events: [...current.events, { type: "steered", sequence, timestamp: sequence + 2, node: "task", execution_id: body.executionId, instruction: body.instruction }] };
+        } else if (body.action === "stop") {
+          current = { ...current, paused: true, phase: "paused",
+            nodes: { task: { ...current.nodes.task, status: "paused" } },
+            executions: current.executions.map(item => item.id === "live-exec" ? { ...item, status: "paused", completedAt: 5 } : item) };
+        }
+        result = current; break;
+      }
+      default: errors.push(`Unexpected API: ${command}`); return route.fulfill({ status: 400, json: { error: command } });
+    }
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage(); page.setDefaultTimeout(10_000);
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="pause-steer-run"]').click();
+    await page.locator('[data-node-name="task"]').click();
+    const composer = page.locator(".pane-bottom-chat textarea");
+    await composer.fill("Unread steer instruction");
+    await composer.press("Enter");
+    await page.locator('.chat-message-row.user', { hasText: "Unread steer instruction" }).waitFor();
+    assert.deepEqual(actions, [{ action: "steer", node: "task" }]);
+    await page.getByRole("button", { name: "Click to interrupt execution" }).click();
+    await page.waitForFunction(() => document.querySelector(".pane-bottom-chat textarea")?.value === "Unread steer instruction");
+    assert.equal(await page.locator('.chat-message-row.user', { hasText: "Unread steer instruction" }).count(), 0,
+      "the unread steer card is removed");
+    assert.deepEqual(actions, [{ action: "steer", node: "task" }, { action: "stop", node: "task" }]);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("late node sends and edits cannot overwrite another workspace or its composer draft", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const base = { plan: null, events: [], approved: true, paused: false, phase: "completed", base: "", feedbackCounts: {} };

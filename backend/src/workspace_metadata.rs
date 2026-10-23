@@ -30,6 +30,23 @@ impl PartialEq for Extra {
 }
 impl Eq for Extra {}
 
+impl Extra {
+    /// Full equality, including the recorded Windows security descriptor.
+    /// The derived `PartialEq` deliberately ignores `security` so two
+    /// source-equivalent views compare equal; materialization uses this
+    /// stricter form so an entry is left untouched only when even its ACL,
+    /// streams, attributes and encryption state already match what `restore`
+    /// would write. Skipping an identical restore is a pure no-op.
+    pub(crate) fn identical(&self, other: &Self) -> bool {
+        self.attributes == other.attributes
+            && self.security == other.security
+            && self.protected == other.protected
+            && self.flags == other.flags
+            && self.owner == other.owner
+            && self.efs == other.efs
+    }
+}
+
 pub(crate) fn capture(path: &Path, _metadata: &fs::Metadata) -> Result<Extra, String> {
     platform::capture(path)
 }
@@ -360,7 +377,8 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::*;
-    use std::{ffi::c_void, os::windows::ffi::OsStrExt};
+    use crate::path_identity::windows_api_path as wide;
+    use std::ffi::c_void;
     #[repr(C)]
     struct Stream {
         size: i64,
@@ -425,9 +443,6 @@ mod platform {
             length: *mut u32,
         ) -> i32;
     }
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain([0]).collect()
-    }
     pub(super) fn file_identity(path: &Path) -> Result<(u128, u64), String> {
         use std::os::windows::io::AsRawHandle;
         let file = fs::File::open(path).map_err(|e| e.to_string())?;
@@ -445,11 +460,12 @@ mod platform {
         ))
     }
     pub(super) fn set_encrypted(path: &Path, encrypted: bool) -> Result<(), String> {
+        let name = wide(path)?;
         let result = unsafe {
             if encrypted {
-                EncryptFileW(wide(path).as_ptr())
+                EncryptFileW(name.as_ptr())
             } else {
-                DecryptFileW(wide(path).as_ptr())
+                DecryptFileW(name.as_ptr())
             }
         };
         if result == 0 {
@@ -470,7 +486,7 @@ mod platform {
         use std::os::windows::fs::MetadataExt;
         let source_metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
         let efs = source_metadata.file_attributes() & 0x4000 != 0;
-        let name = wide(path);
+        let name = wide(path)?;
         // Open the link itself, never canonicalize/follow it to a live source
         // target when capturing or restoring security metadata.
         let handle = unsafe {
@@ -485,7 +501,11 @@ mod platform {
             )
         };
         if handle as isize == -1 {
-            return Err(std::io::Error::last_os_error().to_string());
+            return Err(format!(
+                "Cannot open project metadata {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
         }
         let mut descriptor = std::ptr::null_mut();
         let result = unsafe {
@@ -578,7 +598,10 @@ mod platform {
             if handle as isize == -1 {
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() != Some(38) {
-                    return Err(format!("Cannot enumerate project streams: {error}"));
+                    return Err(format!(
+                        "Cannot enumerate project streams {}: {error}",
+                        path.display()
+                    ));
                 }
             } else {
                 let result = (|| {
@@ -633,6 +656,7 @@ mod platform {
         })
     }
     pub(super) fn restore(path: &Path, extra: &Extra, _mode: Option<u32>) -> Result<(), String> {
+        let native_path = wide(path)?;
         for (key, bytes) in &extra.attributes {
             if !key.starts_with(':') || !key.ends_with(":$DATA") || key.contains(['/', '\\', '\0'])
             {
@@ -644,7 +668,7 @@ mod platform {
         }
         if unsafe {
             SetFileAttributesW(
-                wide(path).as_ptr(),
+                native_path.as_ptr(),
                 if extra.flags == 0 { 0x80 } else { extra.flags },
             )
         } == 0
@@ -678,7 +702,7 @@ mod platform {
         // cannot silently add permissions or alter the source's ordered ACEs.
         let handle = unsafe {
             CreateFileW(
-                wide(path).as_ptr(),
+                native_path.as_ptr(),
                 0x000e_0000,
                 7,
                 std::ptr::null(),
@@ -713,5 +737,84 @@ mod platform {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::os::windows::ffi::OsStrExt;
+
+    fn long_directory(root: &Path) -> std::path::PathBuf {
+        let mut path = crate::native::host_path(root);
+        while path.as_os_str().encode_wide().count() < 300 {
+            path.push("中文 dependency directory");
+        }
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn windows_long_path_metadata_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = long_directory(temp.path());
+        let source = directory.join("source.js");
+        let target = directory.join("target.js");
+        fs::write(&source, "project bytes").unwrap();
+        fs::write(source.with_file_name("source.js:business"), "stream bytes").unwrap();
+        let mut permissions = fs::metadata(&source).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&source, permissions).unwrap();
+        let expected = capture(&source, &fs::symlink_metadata(&source).unwrap()).unwrap();
+        assert!(!expected.attributes.is_empty());
+
+        fs::write(&target, "project bytes").unwrap();
+        restore(&target, &expected).unwrap();
+        assert_eq!(
+            capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            fs::read(target.with_file_name("target.js:business")).unwrap(),
+            b"stream bytes"
+        );
+        assert!(fs::metadata(&target).unwrap().permissions().readonly());
+    }
+
+    #[test]
+    fn windows_long_path_encrypted_metadata_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = long_directory(temp.path());
+        let source = directory.join("encrypted.js");
+        let target = directory.join("restored.js");
+        fs::write(&source, "encrypted project bytes").unwrap();
+        if let Err(error) = set_encrypted(&source, true) {
+            eprintln!("EFS is unavailable on this Windows host volume: {error}");
+            return;
+        }
+        let expected = capture(&source, &fs::symlink_metadata(&source).unwrap()).unwrap();
+        assert!(expected.efs);
+        fs::write(&target, "encrypted project bytes").unwrap();
+        restore(&target, &expected).unwrap();
+        assert_eq!(
+            capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"encrypted project bytes");
+    }
+
+    #[test]
+    fn windows_long_path_metadata_does_not_follow_dangling_junctions() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = long_directory(temp.path());
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let link = directory.join("junction");
+        crate::path_safety::directory_link(&outside, &link);
+        fs::remove_dir(&outside).unwrap();
+        let metadata = fs::symlink_metadata(&link).unwrap();
+        assert!(crate::workspace_symlinks::is_link(&metadata));
+        capture(&link, &metadata).unwrap();
+        assert!(!outside.exists());
     }
 }

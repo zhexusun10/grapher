@@ -105,7 +105,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
           return {
             icon: <Terminal size={14} className="tool-icon bash" />,
             badge: "bash",
-            summary: args.command ? `$ ${args.command}` : t("执行系统终端命令"),
+            summary: args.command ? `> ${args.command}` : t("执行系统终端命令"),
             type: "terminal",
           };
         case "read":
@@ -304,12 +304,13 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
                     {isTruncated ? t("已截断 (Truncated)") : t("完整 (Complete)")}
                   </span>
                 </div>
-                {args.command && (
-                  <div className="tool-meta-item cmd-full">
-                    <span className="meta-lbl">{t("命令:")}</span>
-                    <code className="meta-val-code">{args.command}</code>
-                  </div>
-                )}
+              </div>
+            )}
+
+            {args.command && (
+              <div className="tool-command-section">
+                <div className="section-label">{t("命令 (Command)")}</div>
+                <pre className="tool-command-code">{args.command}</pre>
               </div>
             )}
 

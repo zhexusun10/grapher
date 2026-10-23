@@ -291,6 +291,17 @@ impl Runtime {
             .unwrap_or(0)
     }
 
+    /// Clone the running attempt's live metrics so an append can tell whether
+    /// it actually moved usage, context, model or tool counters.
+    fn live_metrics(&self, execution_id: &str) -> Option<ExecutionMetrics> {
+        self.state
+            .executions
+            .iter()
+            .chain(&self.state.mergers)
+            .find(|execution| execution.id == execution_id)
+            .and_then(|execution| execution.metrics.clone())
+    }
+
     /// Persist the tiny per-Run file-change summary after durable terminal
     /// events, so reopening a conversation never replays its logs for counts.
     fn persist_file_changes_if(&self, terminal: bool) {
@@ -413,10 +424,17 @@ impl Runtime {
                 }
             }
         }
+        // Snapshot watchers must refresh when a streamed record actually moves
+        // the live metrics projection (usage, context, model or tool counters),
+        // so session token details do not wait for the bounded watchdog poll.
+        // Capture the metrics before the append so a text delta that merely
+        // mentions a marker string cannot trigger a refresh.
         let output_target = match &kind {
-            EventKind::Output { execution_id, .. } => {
-                Some((execution_id.clone(), self.execution_bytes(execution_id)))
-            }
+            EventKind::Output { execution_id, .. } => Some((
+                execution_id.clone(),
+                self.execution_bytes(execution_id),
+                self.live_metrics(execution_id),
+            )),
             _ => None,
         };
         let terminal_target = match &kind {
@@ -439,9 +457,11 @@ impl Runtime {
         );
         self.store.append(&mut self.state, kind)?;
         self.persist_file_changes_if(persist_changes);
-        if let Some((execution_id, before_bytes)) = output_target {
+        if let Some((execution_id, before_bytes, metrics_before)) = output_target {
             let after_bytes = self.execution_bytes(&execution_id);
-            if before_bytes == 0 && after_bytes > 0 {
+            if (before_bytes == 0 && after_bytes > 0)
+                || self.live_metrics(&execution_id) != metrics_before
+            {
                 self.touch();
             } else {
                 self.revision = self.revision.wrapping_add(1);
@@ -479,11 +499,18 @@ impl Runtime {
         let mut has_non_output = false;
         let mut targets: std::collections::BTreeMap<String, (usize, bool)> =
             std::collections::BTreeMap::new();
+        // Metrics before this batch, so the notification below can tell a real
+        // usage/model/tool update from a text delta that mentions a marker.
+        let mut metrics_before: std::collections::BTreeMap<String, Option<ExecutionMetrics>> =
+            std::collections::BTreeMap::new();
         for kind in &events {
             match kind {
                 EventKind::Output { execution_id, .. } => {
                     let before = self.execution_bytes(execution_id);
                     targets.entry(execution_id.clone()).or_insert((before, false));
+                    metrics_before
+                        .entry(execution_id.clone())
+                        .or_insert_with(|| self.live_metrics(execution_id));
                 }
                 EventKind::Finished { execution_id, .. }
                 | EventKind::Failed {
@@ -525,7 +552,12 @@ impl Runtime {
             }
             notifications.push((execution_id, after_bytes, settled));
         }
-        if has_non_output || crossed_zero {
+        if has_non_output
+            || crossed_zero
+            || metrics_before
+                .iter()
+                .any(|(execution_id, before)| self.live_metrics(execution_id) != *before)
+        {
             self.touch();
         } else {
             self.revision = self.revision.wrapping_add(1);
@@ -4683,6 +4715,7 @@ fn perform_with_merger_inner(
     } else if job.source_direct || source_tree {
         String::new()
     } else {
+        crate::server::set_prepare_phase(&job.run_id, &job.execution.id, "compose");
         workspace::prepare_with_merger_expected_for_run_scoped(
             &repository,
             path,
@@ -4692,6 +4725,10 @@ fn perform_with_merger_inner(
             Some(&job.run_id),
             &exclusions,
             || {
+                // Conflict preparation re-materializes the composed view and can
+                // take far longer than the merge itself; report it distinctly so
+                // the browser does not keep showing a routine preparation label.
+                crate::server::set_prepare_phase(&job.run_id, &job.execution.id, "conflict");
                 crate::graph_merge::resolve_with_merger_for_node(
                     path,
                     &job.task,
@@ -4708,6 +4745,7 @@ fn perform_with_merger_inner(
     };
     if !reused && !crate::workspace_view::is_bound(path) {
         if let Some(source) = &job.copy_from_workspace {
+            crate::server::set_prepare_phase(&job.run_id, &job.execution.id, "copy");
             workspace::copy_ordinary_files(
                 Path::new(source),
                 path,

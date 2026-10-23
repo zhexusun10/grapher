@@ -33,6 +33,7 @@ import { resetPresentedCardIds } from "./services/cardAnimations";
 import { TaskNode } from "./components/graph/TaskNode";
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
 import { plannerEdgeEdits, plannerNodeEdits } from "./lib/plannerGraphEdits";
+import { steerRollbackKey } from "./lib/pendingSteers";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
@@ -413,6 +414,30 @@ export default function App() {
   const messagesByRunRef = useRef(new Map<string, ChatMessage[]>());
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
   const [editPrefillText, setEditPrefillText] = useState<string>("");
+  // Steer cards the user rolled back by pausing. Their text returned to the
+  // composer, so the durable `Steered` event must not render the card again.
+  const [rolledBackSteers, setRolledBackSteers] = useState<Record<string, string[]>>({});
+  const handleRollbackSteers = useCallback((keys: string[]) => {
+    if (keys.length === 0) return;
+    const rolledBack = new Set(keys);
+    // Drop the optimistic card; the durable `Steered` event is filtered by the
+    // same key inside the workbench.
+    setSessionEntries(prev => {
+      const next = prev.filter(message => {
+        const key = steerRollbackKey(message);
+        return !key || !rolledBack.has(key);
+      });
+      return next.length === prev.length ? prev : next;
+    });
+    setRolledBackSteers(prev => {
+      const runId = state.runId;
+      const merged = new Set([...(prev[runId] ?? []), ...keys]);
+      return { ...prev, [runId]: [...merged] };
+    });
+  }, [state.runId]);
+  const rolledBackSteerKeys = useMemo(
+    () => new Set(rolledBackSteers[state.runId] ?? []),
+    [rolledBackSteers, state.runId]);
   const planningAbortControllerRef = useRef<AbortController | null>(null);
 
   // 规划路由模式选择：graph (默认，Planner跳过Partitioner) / serial (单Agent跳过Partitioner) / auto (Partitioner评估)
@@ -3327,6 +3352,8 @@ export default function App() {
                     onCancelEditMessage={handleCancelEditMessage}
                     onEditMessageSubmit={actions.edit}
                     onSwitchMessageVersion={actions.switchVersion}
+                    rolledBackSteerKeys={rolledBackSteerKeys}
+                    onRollbackSteers={handleRollbackSteers}
                     onInterrupt={handleInterrupt}
                     isPlanning={isPlanning || backendPlanning || !!recoveredPlanning}
                     plannerStream={plannerStream}

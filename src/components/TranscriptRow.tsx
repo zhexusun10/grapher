@@ -2,8 +2,7 @@ import React, { memo, useCallback } from "react";
 import type { TranscriptItem } from "../types";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
-import { MarkdownRenderer } from "./MarkdownRenderer";
-import { EditableUserBubble } from "./views/ChatBubbles";
+import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
 import { AnimatedUserTurn } from "./AnimatedUserTurn";
 import { motion } from "motion/react";
 
@@ -45,7 +44,7 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
   return <motion.div className="chat-message-row assistant" initial={false}
     animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}>
     <div className="chat-bubble-assistant chat-message-assistant">
-      <MarkdownRenderer content={item.content || ""} isStreaming={item.status === "running"} />
+      <StreamingAssistantBubble content={item.content || ""} isStreaming={item.status === "running"} />
     </div>
   </motion.div>;
 });

@@ -736,6 +736,12 @@ pub enum EventKind {
     PlannerReviewProgress {
         graph: Graph,
     },
+    /// Live counter update for an in-flight Planner turn. History/display only:
+    /// the committed summary replaces it when the turn settles, so a resumed
+    /// turn's totals stay authoritative.
+    PlannerTurnProgress {
+        planning: PlanningSummary,
+    },
     PlannerReviewFinished {
         planning: PlanningSummary,
         approval_required: bool,
@@ -1044,6 +1050,7 @@ impl Event {
         match &self.kind {
             EventKind::PlanningStarted { planning, .. }
             | EventKind::PlannerWorkspaceSelected { planning }
+            | EventKind::PlannerTurnProgress { planning }
             | EventKind::PlannerReviewStarted { planning }
             | EventKind::PlannerReviewFinished { planning, .. }
             | EventKind::PlannerTurnAborted { planning }
@@ -1750,6 +1757,25 @@ pub fn now() -> u64 {
         .as_millis() as u64
 }
 
+/// Record types the live metrics projection folds in. A line carrying none of
+/// them cannot move usage, model/thinking or tool counters, so it can skip JSON
+/// parsing even when it is a large tool payload.
+const LIVE_METRIC_MARKERS: [&str; 6] = [
+    "\"message_start\"",
+    "\"message_end\"",
+    "\"model_change\"",
+    "\"thinking_level_change\"",
+    "\"tool_execution_start\"",
+    "\"tool_execution_end\"",
+];
+
+fn line_advances_live_metrics(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && !trimmed.starts_with("[stderr]")
+        && LIVE_METRIC_MARKERS.iter().any(|marker| trimmed.contains(marker))
+}
+
 /// Fold one streamed chunk into the running attempt's metrics.
 ///
 /// Pi reports usage on `message_end`; folding those records as they arrive
@@ -1760,20 +1786,10 @@ pub fn now() -> u64 {
 fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
     let metrics = execution.metrics.get_or_insert_with(ExecutionMetrics::default);
     for line in text.lines() {
+        if !line_advances_live_metrics(line) {
+            continue;
+        }
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("[stderr]") {
-            continue;
-        }
-        // Avoid reparsing large tool payloads that cannot move token counters.
-        if !trimmed.contains("\"message_start\"")
-            && !trimmed.contains("\"message_end\"")
-            && !trimmed.contains("\"model_change\"")
-            && !trimmed.contains("\"thinking_level_change\"")
-            && !trimmed.contains("\"tool_execution_start\"")
-            && !trimmed.contains("\"tool_execution_end\"")
-        {
-            continue;
-        }
         let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
@@ -1891,7 +1907,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.plan_type = plan_type.clone();
             state.phase = "planning".into();
         }
-        EventKind::PlannerWorkspaceSelected { planning } => {
+        EventKind::PlannerWorkspaceSelected { planning }
+        | EventKind::PlannerTurnProgress { planning } => {
             state.planning_id = Some(planning.planning_id.clone());
             state.planning = Some(planning.clone());
         }

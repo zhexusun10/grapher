@@ -3166,6 +3166,49 @@ fn activity_is_reported_without_blocking_on_a_busy_run_lock() {
     assert_eq!(idle["activity"], serde_json::json!([]));
 }
 
+#[test]
+fn prepare_activity_reports_a_phase_only_when_all_nodes_agree() {
+    let run = "phase-run";
+    set_activity(run, "prepare-a", "workspace_prepare", "a");
+    set_activity(run, "prepare-b", "workspace_prepare", "b");
+    // An unknown operation must not create a dangling entry no guard clears.
+    set_prepare_phase(run, "missing", "conflict");
+
+    // Different concurrent stages must not mislabel either node.
+    set_prepare_phase(run, "a", "compose");
+    set_prepare_phase(run, "b", "conflict");
+    let mixed = run_activity(run);
+    assert_eq!(mixed.len(), 1, "only the two real preparations are reported");
+    assert_eq!(mixed[0].kind, "workspace_prepare");
+    assert_eq!(mixed[0].nodes, vec!["a".to_string(), "b".to_string()]);
+    assert!(
+        mixed[0].phase.is_none(),
+        "mixed stages fall back to the generic label"
+    );
+
+    // When every node agrees, the phase is reported.
+    set_prepare_phase(run, "a", "conflict");
+    let agreed = run_activity(run);
+    assert_eq!(agreed[0].phase.as_deref(), Some("conflict"));
+    assert_eq!(
+        serde_json::to_value(&agreed[0]).unwrap()["phase"],
+        serde_json::json!("conflict")
+    );
+
+    // A phase-less operation omits the field so existing payloads are unchanged.
+    set_activity(run, "capture", "source_capture", "");
+    let capture = run_activity(run)
+        .into_iter()
+        .find(|entry| entry.kind == "source_capture")
+        .unwrap();
+    assert!(serde_json::to_value(&capture).unwrap().get("phase").is_none());
+
+    clear_activity(run, "prepare-a");
+    clear_activity(run, "prepare-b");
+    clear_activity(run, "capture");
+    assert!(run_activity(run).is_empty());
+}
+
 #[cfg(feature = "fixture")]
 #[test]
 fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
@@ -3386,6 +3429,72 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     assert_eq!(runtime.state.phase, "completed");
     let input = fs::read_to_string(repository.join("consumer-input.txt")).unwrap();
     assert_eq!(input.trim_end(), "Work", "the consumer receives only its own task, not upstream feedback or budget warnings");
+}
+
+#[test]
+fn live_planner_metrics_fold_matches_the_whole_log_parse() {
+    let log = concat!(
+        "{\"type\":\"grapher_process_started\",\"sessionId\":\"planner-session\",\"timestamp\":1726300000000}\n",
+        // A timestamp-only delta carries no counter and must not publish.
+        "{\"type\":\"text_delta\",\"text\":\"thinking\",\"timestamp\":1726300000001}\n",
+        "{\"type\":\"tool_execution_start\",\"toolName\":\"bash\"}\n",
+        "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":100,\"cacheRead\":900,\"cacheWrite\":50,\"output\":10,\"totalTokens\":1060}}}\n",
+    );
+    let mut live = PlanningRoleMetrics::default();
+    let advanced: Vec<bool> = log
+        .lines()
+        .map(|line| accumulate_planning_role_line(&mut live, line))
+        .collect();
+    // Only the session-id and usage records publish a progress update; the
+    // text delta and tool boundary move counters but are not shown live.
+    assert_eq!(advanced, vec![true, false, false, true]);
+
+    let parsed = parse_planning_role_metrics("m", log);
+    assert_eq!(live.session_id, parsed.session_id);
+    assert_eq!(live.assistant_messages, parsed.assistant_messages);
+    assert_eq!(live.tools, parsed.tools);
+    assert_eq!(live.usage, parsed.usage);
+    assert_eq!(live.context_tokens, parsed.context_tokens);
+    assert_eq!(live.context_peak, parsed.context_peak);
+    assert_eq!(live.usage.consumed_tokens, 160);
+}
+
+#[test]
+fn planner_turn_progress_publishes_live_session_metrics() {
+    let mut state = Snapshot { run_id: "run".into(), phase: "running".into(), ..Default::default() };
+    let planning = PlanningSummary {
+        planning_id: "plan-1".into(),
+        status: Some("running".into()),
+        roles: [(
+            "planner".to_string(),
+            PlanningRoleMetrics {
+                model: "m".into(),
+                session_id: Some("sess-1".into()),
+                usage: TokenUsage {
+                    input: 100, output: 10, cache_write: 50, consumed_tokens: 160,
+                    ..Default::default()
+                },
+                context_tokens: 500,
+                context_peak: 500,
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    apply(&mut state, &Event {
+        sequence: 1,
+        timestamp: 0,
+        kind: EventKind::PlannerTurnProgress { planning },
+    });
+
+    assert_eq!(state.planning.as_ref().unwrap().roles["planner"].usage.consumed_tokens, 160);
+    let run = state.run_metrics.as_ref().expect("progress must refresh Run metrics");
+    assert_eq!(run.session_usage["sess-1"].consumed_tokens, 160);
+    assert_eq!(run.session_context["sess-1"].tokens, 500);
+    // A progress record is history, not a settled turn: the phase is untouched.
+    assert_eq!(state.phase, "running");
 }
 
 #[test]
@@ -4474,6 +4583,111 @@ fn save_config_updates_bootstrap_and_persists() {
         reloaded.effective_role_models.get("planner").unwrap(),
         "openai/gpt-4o"
     );
+}
+
+/// A compiled Graph Run waiting for approval, plus its binding and config.
+fn pending_graph_run(auto_approve: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>, Config, String) {
+    let temp = tempfile::TempDir::new().unwrap();
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repository, "model": "test/model", "thinkingLevel": "medium",
+        "maxParallel": 1, "autoApprove": auto_approve
+    })).unwrap();
+    let run_id = {
+        let mut runtime = service.runtime.lock().unwrap();
+        runtime.emit(EventKind::Created {
+            graph: Graph {
+                nodes: vec![Node { name: "work".into(), task: "work".into() }],
+                ..Graph::default()
+            },
+            config: config.clone(),
+            planning_id: None,
+            planning: None,
+        }).unwrap();
+        runtime.set_route("graph").unwrap();
+        assert_eq!(runtime.state.phase, "awaiting_approval");
+        assert!(!runtime.state.approved);
+        runtime.state.run_id.clone()
+    };
+    (temp, repository, service, config, run_id)
+}
+
+#[test]
+fn save_config_enabling_auto_approve_approves_pending_graph() {
+    let (_temp, _repository, service, config, run_id) = pending_graph_run(false);
+    // Hold the driver so this test owns only the approval transition.
+    service.driving.store(true, Ordering::SeqCst);
+    let mut enabled = config.clone();
+    enabled.auto_approve = true;
+    let updated = save_config_projection(enabled, Some(run_id), &service, false).unwrap();
+    service.driving.store(false, Ordering::SeqCst);
+    assert_eq!(updated.snapshot["approved"], true, "enabling Auto Approve approves the waiting Graph");
+    assert_eq!(updated.snapshot["phase"], "running");
+    assert!(updated.config.auto_approve);
+}
+
+#[test]
+fn save_config_approves_a_waiting_graph_when_auto_approve_was_already_on() {
+    // A Run can be waiting with Auto Approve on (e.g. the setting was turned off
+    // for a review, then back on). Saving settings with it on must still start it.
+    let (_temp, _repository, service, config, run_id) = pending_graph_run(true);
+    service.driving.store(true, Ordering::SeqCst);
+    let updated = save_config_projection(config, Some(run_id), &service, false).unwrap();
+    service.driving.store(false, Ordering::SeqCst);
+    assert_eq!(updated.snapshot["approved"], true);
+    assert_eq!(updated.snapshot["phase"], "running");
+}
+
+#[test]
+fn save_config_keeps_the_setting_when_auto_approve_cannot_start_the_run() {
+    let (_temp, repository, service, config, run_id) = pending_graph_run(false);
+    // The binding disappears after the Run was created, so approval cannot
+    // snapshot the source. The save must still persist and return the true
+    // (still waiting) state instead of failing after the write.
+    fs::remove_dir_all(&repository).unwrap();
+    let mut enabled = config;
+    enabled.auto_approve = true;
+    let updated = save_config_projection(enabled, Some(run_id), &service, false).unwrap();
+    assert!(updated.config.auto_approve, "the setting is persisted even when approval fails");
+    assert_eq!(updated.snapshot["approved"], false);
+    assert_eq!(updated.snapshot["phase"], "awaiting_approval");
+}
+
+#[test]
+fn save_config_while_planning_does_not_require_a_committed_binding() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let repository = temp.path().join("repo");
+    fs::create_dir_all(&repository).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let run_id = {
+        let mut runtime = service.runtime.lock().unwrap();
+        // A Planner turn publishes its identity before the Run commits config.
+        runtime.state.run_id = "planning-run".into();
+        runtime.state.phase = "planning".into();
+        runtime.state.run_id.clone()
+    };
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repository, "model": "test/model", "thinkingLevel": "medium",
+        "maxParallel": 1, "autoApprove": true
+    })).unwrap();
+    let updated = save_config_projection(config, Some(run_id), &service, false).unwrap();
+    assert!(updated.config.auto_approve);
+    assert_eq!(updated.snapshot["phase"], "planning");
+    assert_eq!(updated.snapshot["approved"], false);
 }
 
 #[test]

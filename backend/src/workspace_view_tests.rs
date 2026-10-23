@@ -483,6 +483,116 @@ fn named_streams_and_readonly_flags_survive_private_materialization() {
 }
 
 #[test]
+fn metadata_materialization_requires_full_equality_and_never_hides_a_restore() {
+    use crate::workspace_metadata::Extra;
+    let plain = Extra::default();
+    let secured: Extra = serde_json::from_value(serde_json::json!({
+        "attributes": [], "security": [1, 2, 3], "protected": false,
+        "flags": 0, "owner": null, "efs": false
+    }))
+    .unwrap();
+    let file = |mode: u32, extra: Extra| Entry::File { mode, blob: String::new(), extra };
+
+    // Identical kind, mode and full metadata (including the ACL) is the only
+    // case that may skip a restore.
+    assert!(metadata_materialized(Some(&file(0, plain.clone())), &file(0, plain.clone())));
+    // A mode change (for example a read-only bit cleared before a rewrite) is
+    // not already materialized.
+    assert!(!metadata_materialized(Some(&file(1, plain.clone())), &file(0, plain.clone())));
+    // A security-descriptor difference must still restore even though the
+    // view-identity comparison ignores `security`.
+    assert!(!metadata_materialized(Some(&file(0, secured.clone())), &file(0, plain.clone())));
+    // A missing or differently-typed on-disk entry never counts as materialized.
+    assert!(!metadata_materialized(None, &file(0, plain.clone())));
+    assert!(!metadata_materialized(
+        Some(&Entry::Directory { mode: 0, extra: plain.clone() }),
+        &file(0, plain.clone())
+    ));
+}
+
+#[test]
+fn sha256_repository_prepares_and_materializes_project_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("sha256-source");
+    fs::create_dir(&source).unwrap();
+    if workspace::git(&source, &["init", "-q", "--object-format=sha256"]).is_err() {
+        eprintln!("Git lacks SHA-256 object format support; skipping");
+        return;
+    }
+    configure_author(&source);
+    fs::write(source.join("tracked.txt"), "sha256 committed\n").unwrap();
+    fs::create_dir_all(source.join("nested/empty")).unwrap();
+    workspace::git(&source, &["add", "tracked.txt"]).unwrap();
+    workspace::git(&source, &["commit", "-qm", "sha256 history"]).unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let target = slot(&temp, "sha256");
+    workspace::prepare(&source, &target, &base, &[]).unwrap();
+    // The recorded blob identity stays the SHA-1 content hash even though the
+    // graph tree is SHA-256; the complete-view comparison must still succeed.
+    assert_eq!(bytes(&target.join("tracked.txt")), b"sha256 committed\n");
+    assert!(target.join("nested/empty").is_dir());
+    verify_result(
+        &target,
+        &source,
+        &workspace::git(&target, &["rev-parse", "HEAD"]).unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_long_path_fan_in_prepares_after_conflict_and_retry() {
+    use std::os::windows::ffi::OsStrExt;
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let mut relative = PathBuf::from("UI/node_modules");
+    while source.join(&relative).as_os_str().encode_wide().count() < 280 {
+        relative.push("nested-dependency");
+    }
+    relative.push("index.js");
+    let name = name(&relative).unwrap();
+    let mut parents = Vec::new();
+    for label in ["left", "right"] {
+        let path = slot(&temp, label);
+        workspace::prepare(&source, &path, &base, &[]).unwrap();
+        fs::create_dir_all(path.join(&relative).parent().unwrap()).unwrap();
+        fs::write(path.join(&relative), format!("{label}\n")).unwrap();
+        parents.push(workspace::snapshot_node(&path, &source, label).unwrap());
+    }
+    let target = slot(&temp, "long-path-join");
+    let error = workspace::prepare_with_merger(&source, &target, &base, &parents, || {
+        Err("injected interrupted conflict repair".into())
+    }).unwrap_err();
+    assert!(error.contains("injected interrupted conflict repair"));
+    assert!(target.join(&relative).is_file());
+
+    let mut repairs = 0;
+    let head = workspace::prepare_with_merger(&source, &target, &base, &parents, || {
+        repairs += 1;
+        // Like the real Merger, repair through the canonical (extended) cwd.
+        let canonical = target.canonicalize().unwrap();
+        fs::write(canonical.join(&relative), "resolved\n").unwrap();
+        workspace::git(&canonical, &["add", "-f", "--", &name])?;
+        workspace::git(&canonical, &["commit", "--no-edit"])?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(repairs, 1);
+    assert_eq!(bytes(&target.join(&relative)), b"resolved\n");
+    validate_ready(&target, &source).unwrap();
+    verify_result(&target, &source, &head).unwrap();
+    for parent in &parents {
+        workspace::verify_prepared_ancestor(&target, parent).unwrap();
+    }
+    // Import the result as Runtime does before passing it to the next node.
+    let result = workspace::snapshot_node(&target, &source, "long-path-join").unwrap();
+    let next = slot(&temp, "long-path-next");
+    workspace::prepare(&source, &next, &result, &[]).unwrap();
+    validate_ready(&next, &source).unwrap();
+    assert_eq!(bytes(&next.join(&relative)), b"resolved\n");
+}
+
+#[test]
 fn plain_conflict_noop_does_not_manufacture_completion_or_a_git_entry() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("plain-conflict");

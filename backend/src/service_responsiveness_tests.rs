@@ -338,3 +338,138 @@ fn sse_event_stream_coalesces_outputs_and_suppresses_mid_stream_snapshot_storms(
 
     drop(stream);
 }
+
+#[test]
+fn a_usage_bearing_output_chunk_refreshes_snapshot_watchers() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut stream = subscribe_runtime_events();
+    let mut connected_buf = [0u8; 64];
+    let n = std::io::Read::read(&mut stream, &mut connected_buf).unwrap();
+    assert_eq!(&connected_buf[..n], b": connected\n\n");
+
+    let mut runtime = Runtime::open_lazy(temp.path()).unwrap();
+    runtime.state.run_id = "sse-usage-run".into();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": temp.path(), "model": "mock/model", "maxParallel": 1
+    }))
+    .unwrap();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "live usage".into(),
+                nodes: vec![Node {
+                    name: "node-1".into(),
+                    task: "work".into(),
+                }],
+                edges: vec![],
+            },
+            config,
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Started {
+            message_sequences: None,
+            fresh_restart: false,
+            execution: Execution {
+                id: "exec-usage".into(),
+                node: "node-1".into(),
+                revision: 0,
+                attempt: 1,
+                session_id: "sess-usage".into(),
+                worktree: temp.path().to_string_lossy().into_owned(),
+                before: String::new(),
+                workspace_lineage: vec![],
+                after: None,
+                input: None,
+                result: None,
+                status: "running".into(),
+                output: String::new(),
+                output_bytes: 0,
+                pid: None,
+                started_at: now(),
+                completed_at: None,
+                metrics: None,
+            },
+        })
+        .unwrap();
+
+    // Same framing helper as above, scoped to this Run's frames.
+    fn usage_frames(stream: &mut SseStreamReceiver, expected: &str) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut pending = String::new();
+        let mut own = String::new();
+        while !own.contains(expected) {
+            assert!(std::time::Instant::now() < deadline, "Missing {expected}: {own}");
+            let mut bytes = vec![0; 64 * 1024];
+            let count = std::io::Read::read(stream, &mut bytes).unwrap();
+            assert!(count > 0);
+            pending.push_str(&String::from_utf8_lossy(&bytes[..count]));
+            while let Some(end) = pending.find("\n\n") {
+                let frame: String = pending.drain(..end + 2).collect();
+                if frame.contains("\"runId\":\"sse-usage-run\"") {
+                    own.push_str(&frame);
+                }
+            }
+        }
+        own
+    }
+
+    let first = "first\n";
+    // The first byte crossing zero already refreshes watchers.
+    runtime
+        .emit(EventKind::Output {
+            execution_id: "exec-usage".into(),
+            text: first.into(),
+        })
+        .unwrap();
+    let frame1 = usage_frames(&mut stream, &format!("\"totalBytes\":{}", first.len()));
+    assert!(frame1.contains("event: snapshot_changed"), "{frame1}");
+
+    // A line that merely mentions a metric marker (here inside streamed tool
+    // output) must not refresh watchers, because it moves no counter.
+    let fake = "noise \"message_end\"\n";
+    runtime
+        .emit(EventKind::Output {
+            execution_id: "exec-usage".into(),
+            text: fake.into(),
+        })
+        .unwrap();
+    let fake_total = first.len() + fake.len();
+    let frame2 = usage_frames(&mut stream, &format!("\"totalBytes\":{fake_total}"));
+    assert!(
+        !frame2.contains("event: snapshot_changed"),
+        "Marker text that does not move metrics must stay output-only: {frame2}"
+    );
+
+    // A usage-bearing record must refresh watchers before the terminal event,
+    // so session token details do not wait for the watchdog poll.
+    runtime
+        .emit(EventKind::Output {
+            execution_id: "exec-usage".into(),
+            text: "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":100,\"cacheRead\":900,\"cacheWrite\":50,\"output\":10,\"totalTokens\":1060}}}\n".into(),
+        })
+        .unwrap();
+    let frame3 = usage_frames(&mut stream, "event: snapshot_changed");
+    assert!(
+        frame3.contains("event: snapshot_changed"),
+        "A usage-bearing chunk must refresh snapshot watchers: {frame3}"
+    );
+    assert!(
+        frame3.contains("event: output_available"),
+        "The transcript fast path must still be notified: {frame3}"
+    );
+
+    let usage = runtime
+        .state
+        .run_metrics
+        .as_ref()
+        .expect("live metrics must refresh Run totals")
+        .session_usage
+        .get("sess-usage")
+        .expect("usage must be bucketed by session");
+    assert_eq!(usage.consumed_tokens, 160);
+
+    drop(stream);
+}

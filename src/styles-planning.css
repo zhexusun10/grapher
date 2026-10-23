@@ -630,7 +630,7 @@
 }
 
 .tool-summary {
-  font-family: var(--font-mono, monospace);
+  font-family: inherit;
   font-size: 12px;
   color: var(--text-secondary);
   overflow: hidden;
@@ -638,6 +638,13 @@
   white-space: nowrap;
   min-width: 0;
   flex: 1;
+}
+
+/* Code-like summaries (shell commands, file paths) keep the terminal look;
+   prose summaries use the UI font so CJK does not fall back to a second face. */
+.tool-call-card.terminal .tool-summary,
+.tool-call-card.file .tool-summary {
+  font-family: var(--font-mono, monospace);
 }
 
 .tool-header-right {
@@ -710,11 +717,6 @@
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-  padding: 6px 8px;
-  background: var(--bg-canvas);
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  margin-bottom: 6px;
 }
 
 /* Bottom line of an expanded tool body: the duration reported by the runtime. */
@@ -723,7 +725,7 @@
   align-items: baseline;
   justify-content: flex-end;
   gap: 6px;
-  color: var(--text-muted);
+  color: var(--text-primary);
 }
 
 .tool-timing-lbl {
@@ -744,13 +746,8 @@
   min-width: 0;
 }
 
-.tool-meta-item.cmd-full {
-  width: 100%;
-  align-items: flex-start;
-}
-
 .meta-lbl {
-  color: var(--text-secondary);
+  color: var(--text-primary);
   white-space: nowrap;
   flex-shrink: 0;
   user-select: none;
@@ -776,18 +773,6 @@
   color: var(--text-primary);
 }
 
-.meta-val-code {
-  font: inherit;
-  background: rgba(255, 255, 255, 0.05);
-  padding: 1px 6px;
-  border-radius: 4px;
-  color: var(--text-primary);
-  word-break: break-all;
-  white-space: pre-wrap;
-  min-width: 0;
-  flex: 1;
-}
-
 .tool-copy-btn {
   border: none;
   background: transparent;
@@ -811,17 +796,18 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: rgba(0, 0, 0, 0.15);
+  background: var(--bg-canvas);
 }
 
 .section-label {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.4px;
-  color: var(--text-muted);
+  color: var(--text-primary);
   margin-bottom: 4px;
 }
 
+.tool-command-code,
 .tool-args-code,
 .tool-result-code {
   font: inherit;

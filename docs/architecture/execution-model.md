@@ -22,7 +22,7 @@ The Partitioner is a tool-free classifier; its `parallel` response maps to the i
 2. For Graph's initial planning, the Planner runs directly in the bound source project directory, not a private copy. Later turns select their cwd afresh as described below.
 3. Tools follow the [Pi role-loading policy](../development/pi-integration.md#role-loading-policy). Native Bash has no write-command filter, including when dedicated `write`/`edit` tools are disabled. Writes affect the selected directory immediately, even on failure/cancellation.
 4. Planning output, Pi session history and Graph IR are kept in runtime/session data directories, not copied project workspaces. Neither Partitioner nor Planner creates a Git worktree/project copy. There is no separate Planner publication or preview merge. A `planner-workspace` marker records that turn's actual cwd for session/legacy compatibility; it is not a directory allocation.
-5. The graph is validated and presented for approval. Approval validates the binding. Standard Git Graphs record a source snapshot; ordinary folders defer it to [first-node shadow materialization](workspace-snapshots-and-feedback.md#shadow-repository-lifecycle). Serial records no approval snapshot.
+5. The graph is validated and presented for approval. Approval validates the binding. Standard Git Graphs record a source snapshot; ordinary folders defer it to [first-node shadow materialization](workspace-snapshots-and-feedback.md#shadow-repository-lifecycle). Serial records no approval snapshot. With **Auto Approve** enabled, a Graph is approved and starts executing without a manual click; enabling it while a Graph is already waiting for approval, or while its Planner turn is still running, takes effect immediately.
 
 **Graph approval is permission to execute the plan, not a promise that no project changes occurred earlier.** Planner commands change the source before approval. Reject, failure, and cancellation do not undo those changes, Git commits, or external command side effects. Host source snapshots use a private index and internal commits: they do not stage into the user's index or advance the user's branch. Existing source changes are included in the final files-only delivery.
 
@@ -74,7 +74,7 @@ and the Planner details browser case in [conversation UI tests](../../scripts/co
 
 **Post-task Planner review** is an independent Settings toggle directly below
 Auto Approve, enabled by default (including saved configurations that predate
-it). Like Auto Approve, it is captured in a new Run's configuration. It applies
+it). Unlike Auto Approve, it is captured in a new Run's configuration. It applies
 to Graph Runs, which already have a Planner conversation, not Serial Runs.
 
 After every successful publication, when all nodes are completed, an enabled Run

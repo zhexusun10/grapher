@@ -232,7 +232,14 @@ See [request deadlines](../../src/services/requestTimeout.ts).
 browser keeps a bounded re-check of durable state while the stream is connected,
 resumes timer polling when it errors or closes, and recreates a stream the
 `EventSource` gave up on. A missed push therefore costs latency, not a frozen
-transcript or status. See
+transcript or status. Streamed text/thinking deltas emit `output_available`
+alone; a chunk that actually moves the live metrics projection (assistant
+`message_end` usage, context, model/thinking change, or tool start/end) also
+emits `snapshot_changed`, so session token details refresh at message and tool
+boundaries instead of waiting for the watchdog poll. An in-flight Planner turn
+publishes its usage and context as a `planner_turn_progress` event at
+assistant-message boundaries (history only; the committed summary replaces it),
+so its session panel refreshes before the turn settles. See
 [runtimeEvents.ts](../../src/services/runtimeEvents.ts) and
 [ExecutionTranscript.tsx](../../src/components/ExecutionTranscript.tsx).
 

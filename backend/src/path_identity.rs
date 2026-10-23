@@ -190,6 +190,33 @@ pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     path_key(left) == path_key(right)
 }
 
+/// Encode an absolute, NUL-terminated path for raw Win32 filesystem calls.
+/// Unlike canonicalize, this does not follow the final symlink/junction (which
+/// may be dangling). Keep this native boundary separate from Node/Git paths.
+#[cfg(windows)]
+pub(crate) fn windows_api_path(path: &Path) -> Result<Vec<u16>, String> {
+    use std::{
+        os::windows::ffi::OsStrExt,
+        path::{Component, Prefix},
+    };
+    let absolute = std::path::absolute(path).map_err(|e| {
+        format!("Cannot prepare native Windows path {}: {e}", path.display())
+    })?;
+    let (prefix, skip) = match absolute.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(_) => (r"\\?\", 0),
+            Prefix::UNC(..) => (r"\\?\UNC\", 2),
+            _ => ("", 0),
+        },
+        _ => ("", 0),
+    };
+    Ok(OsStr::new(prefix)
+        .encode_wide()
+        .chain(absolute.as_os_str().encode_wide().skip(skip))
+        .chain([0])
+        .collect())
+}
+
 /// Windows tools downstream (Node module loader, Git for Windows, Git Bash)
 /// receive ordinary, non-extended paths. Give the user an actionable failure
 /// before a deep MAX_PATH error.
@@ -242,6 +269,34 @@ mod tests {
         let existing = temp.path().canonicalize().unwrap();
         let missing = existing.join("not-created-yet");
         assert_eq!(actual_path(&missing).unwrap(), missing);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_long_path_encoding_preserves_native_prefixes() {
+        for (input, expected) in [
+            (r"C:\project\file", r"\\?\C:\project\file"),
+            (r"C:/project/../file", r"\\?\C:\file"),
+            (r"C:\中文 space\file", r"\\?\C:\中文 space\file"),
+            (r"\\server\share\file", r"\\?\UNC\server\share\file"),
+            (r"\\?\C:\project\file", r"\\?\C:\project\file"),
+            (r"\\?\UNC\server\share\file", r"\\?\UNC\server\share\file"),
+        ] {
+            let actual = windows_api_path(Path::new(input)).unwrap();
+            assert_eq!(actual.last(), Some(&0));
+            assert_eq!(
+                String::from_utf16(&actual[..actual.len() - 1]).unwrap(),
+                expected
+            );
+        }
+        let relative = Path::new("project/../file");
+        assert_eq!(
+            windows_api_path(relative).unwrap(),
+            windows_api_path(&std::path::absolute(relative).unwrap()).unwrap()
+        );
+        for invalid in ["invalid\0path", concat!(r"\\?\C:\invalid", "\0path")] {
+            assert!(windows_api_path(Path::new(invalid)).is_err());
+        }
     }
 
     #[cfg(windows)]

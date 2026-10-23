@@ -161,6 +161,8 @@ export interface Snapshot {
 export interface RuntimeActivity {
   kind: "source_capture" | "workspace_prepare" | string;
   nodes: string[];
+  /** Optional finer-grained step of a long operation (compose/conflict/verify/copy). */
+  phase?: string;
 }
 export interface RepositoryInfo {
   path: string;

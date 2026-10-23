@@ -33,6 +33,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::PlanningFailed { .. } => "planning_failed",
         EventKind::PlannerReviewStarted { .. } => "planner_review_started",
         EventKind::PlannerReviewProgress { .. } => "planner_review_progress",
+        EventKind::PlannerTurnProgress { .. } => "planner_turn_progress",
         EventKind::PlannerReviewFinished { .. } => "planner_review_finished",
         EventKind::PlannerTurnAborted { .. } => "planner_turn_aborted",
         EventKind::PlannerWorkspaceSelected { .. } => "planner_workspace_selected",
