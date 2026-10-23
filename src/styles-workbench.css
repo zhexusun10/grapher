@@ -1050,7 +1050,7 @@ button.session-label-toggle:focus-visible {
 .stat-num {
   font-size: 14px;
   font-weight: 700;
-  color: var(--brand-default);
+  color: #000;
   font-family: var(--font-mono, monospace);
 }
 
