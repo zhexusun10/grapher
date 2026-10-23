@@ -132,6 +132,24 @@ fn acquire(directory: &Path) -> Result<fs::File, String> {
     lock_file(&directory.join(LEASE), false)?.ok_or_else(|| "Native runtime is in use".into())
 }
 
+/// `acquire` is taken right after a shared reader released the same lease, but a
+/// concurrently forked child can briefly keep the inherited open file
+/// description alive (`flock` is per open file description and `fork` shares
+/// it). Retry for a bounded window so that transient holder is not mistaken for
+/// a live reader; a real reader never releases and is still reported.
+fn acquire_settled(directory: &Path) -> Result<fs::File, String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        match acquire(directory) {
+            Ok(lease) => return Ok(lease),
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn lock_parent(parent: &Path, cancelled: &impl Fn() -> bool) -> Result<fs::File, String> {
     let path = parent.join(".native-runtime-cache.lock");
     real_child_path(parent, &path, true)?;
@@ -343,7 +361,7 @@ fn unused_locked(
         }
         // Validate an existing lock file before acquire() opens it.
         real_child_path(&parent, &path.join("runtime.lock"), true)?;
-        if let Ok(lease) = acquire(&directory) {
+        if let Ok(lease) = acquire_settled(&directory) {
             unused.push(NativeRuntime {
                 directory,
                 _lease: lease,
@@ -425,7 +443,7 @@ pub(crate) fn get_or_prepare_verified(
         }
         if !valid {
             drop(lease);
-            let lease = acquire(&directory)
+            let lease = acquire_settled(&directory)
                 .map_err(|_| "Shared native runtime failed verification and is still in use")?;
             remove(&NativeRuntime {
                 directory,
