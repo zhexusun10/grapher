@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
+import { removeSandboxMasks } from './fixtures/sandbox-masks.mjs';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -43,6 +44,8 @@ test('Windows projects/backends share a persistent engine and default workspaces
     }
     throw new Error(`${label} within ${timeoutMs}ms\n${backend.diagnostics}`);
   };
+  // Declared before the try so the teardown can reclaim sandbox masks.
+  const engines = join(directory, 'LocalAppData', 'Grapher', 'workspaces', '.grapher-workspaces');
   try {
     await new Promise(completed => modelServer.listen(0, '127.0.0.1', completed));
     const agent = join(directory, 'agent');
@@ -54,7 +57,6 @@ test('Windows projects/backends share a persistent engine and default workspaces
     } } }));
     const local = join(directory, 'LocalAppData');
     const cache = join(local, 'Grapher', 'workspaces');
-    const engines = join(cache, '.grapher-workspaces');
     const start = async name => {
       const source = join(directory, 'Desktop', name);
       await mkdir(source, { recursive: true });
@@ -138,6 +140,7 @@ test('Windows projects/backends share a persistent engine and default workspaces
     await Promise.all(backends.map(stop));
     modelServer.closeAllConnections();
     await new Promise(completed => modelServer.close(completed));
+    removeSandboxMasks(engines);
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
   }
 });

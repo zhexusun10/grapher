@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { removeSandboxMasks } from './fixtures/sandbox-masks.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -386,6 +387,7 @@ test('production Planner writes source directly; Merger repairs node and publica
     }
     modelServer.closeAllConnections();
     await new Promise<void>(completed => modelServer.close(() => completed()));
+    removeSandboxMasks(join(directory, 'runtime'));
     await rm(directory, { recursive: true, force: true, maxRetries: 40, retryDelay: 250 });
   }
 });

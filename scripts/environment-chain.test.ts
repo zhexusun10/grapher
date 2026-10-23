@@ -14,6 +14,7 @@ import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { venvCreationCommand } from './fixtures/environment-native.mjs';
+import { removeSandboxMasks } from './fixtures/sandbox-masks.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -318,6 +319,7 @@ test('default environment discovery binds one private venv across a parallel Gra
   } catch (error) { throw new Error(`${error}\nEnvironment chain elapsed=${Date.now() - started}ms; modelCalls=${modelCalls}; toolRequests=${commands.length}\n${diagnostics}`); }
   finally {
     await stop(); await new Promise<void>(completed => modelServer.close(() => completed()));
+    removeSandboxMasks(join(directory, 'engine-cache'));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });

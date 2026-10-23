@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The native acceptance teardowns now reclaim the Linux private-execution mask trees before deleting their temporary root, mirroring the backend's own mask-aware engine-cache reaping. A mask clears the read bit so that listing a protected path reports a permission error instead of a silent empty directory, and a generic recursive delete cannot list such a directory.
 - The model-visible path namespace now renders the source project as the workspace root too, not only the current workspace. A denied source path therefore reports the model-visible `./...` spelling instead of echoing its physical location, matching the physical mapping that already redirects source paths into the current tree.
 - The model shell environment check now reads the temp binding that survives the host shell: Git for Windows resets `TMPDIR`/`TMP`/`TEMP` to its own `/tmp` but keeps `XDG_RUNTIME_DIR`, so the Run cache scratch is verified through the surviving binding and no temp binding may reveal `data/`.
 - Markdown replies and replayed transcripts now pass through a parsed HTML allowlist rather than regex filtering. Event handlers, executable/encoded URLs, embedded documents and other active markup cannot execute scripts or call the local API, while code blocks, tables, images and inert task-list checkboxes remain usable.

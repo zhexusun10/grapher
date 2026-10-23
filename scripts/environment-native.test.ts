@@ -12,6 +12,7 @@ import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { venvCreationCommand } from './fixtures/environment-native.mjs';
+import { removeSandboxMasks } from './fixtures/sandbox-masks.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -491,6 +492,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
   finally {
     heldBackground?.destroy();
     await stop(); await new Promise<void>(completed => modelServer.close(() => completed()));
+    removeSandboxMasks(join(directory, 'engine-cache'));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     if (ml) await rm(workspaceParent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
