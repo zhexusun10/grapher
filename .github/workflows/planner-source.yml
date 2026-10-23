@@ -19,8 +19,12 @@ jobs:
   planner-source:
     name: Planner source / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Native/environment/Merger step budgets total 65 minutes. Leave headroom
-    # for dependency setup, cold Rust builds, fixtures and post-job cleanup.
+    # ubuntu/macOS run the cross-platform backend/environment/merger/native
+    # suites; Windows skips the ones whose failures also surface on macOS (they
+    # cost ~1h there) and keeps its own library and Windows-native acceptance
+    # coverage. Budgets total 65 minutes on ubuntu/macOS and ~15 on Windows,
+    # leaving headroom for dependency setup, cold Rust builds, fixtures and
+    # post-job cleanup.
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -54,14 +58,20 @@ jobs:
       - name: Verify frontend state, i18n and transcript contracts
         run: npm run test:frontend
       - name: Verify snapshot inheritance, failed revisions and event replay
+        if: runner.os != 'Windows'
         run: npm run test:backend
       - name: Verify production HTTP paths and safe workspace cleanup
         run: npm run test:hardening
       - name: Verify the same unmodified Planner Bash on every host
         run: npm run test:planner-bash
       - name: Verify production native launchers and filesystem boundaries
+        if: runner.os != 'Windows'
         timeout-minutes: 8
         run: npm run test:native
+      - name: Verify Windows native launchers and the prewarm contract
+        if: runner.os == 'Windows'
+        timeout-minutes: 8
+        run: npm run test:native:scripts
       - name: Verify macOS filesystem policy with real child processes
         if: runner.os == 'macOS'
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --test sandbox
@@ -70,9 +80,11 @@ jobs:
         shell: pwsh
         run: '"GRAPHER_ENV_TEST_PARENT=C:\g-env-tests" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       - name: Verify managed E/L with real native Python, editable package and lifecycle
+        if: runner.os != 'Windows'
         timeout-minutes: 45
         run: npm run test:environment
       - name: Verify production Planner revisions, dependency composition and Merger (local model)
+        if: runner.os != 'Windows'
         timeout-minutes: 12
         run: npm run test:merger
       - name: Run the full backend library test suite on Windows
