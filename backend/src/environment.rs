@@ -539,12 +539,45 @@ impl Environments {
         else { Ok(path.to_path_buf()) }
     }
 
+    fn discovery_roots(&self, path: &Path) -> Result<(PathBuf, Option<PathBuf>), String> {
+        let workspace = path.to_path_buf();
+        let state = if self.config.launch.state_bound() {
+            Some(self.state_root(path)?)
+        } else {
+            None
+        };
+        Ok((workspace, state))
+    }
+
+    /// A binding owns its prefix in either the visible workspace (genuine
+    /// project `.venv`) or the external process-state root (provisioned envs).
+    fn environment_root(&self, path: &Path, launch: &LaunchConfig) -> Result<PathBuf, String> {
+        let (workspace, state) = self.discovery_roots(path)?;
+        let roots = match state.as_deref() {
+            Some(state) => vec![("workspace", workspace.as_path()), ("state", state)],
+            None => vec![("workspace", workspace.as_path())],
+        };
+        let label = crate::environment_discovery::binding_root_label(launch, &roots);
+        if label == "state" {
+            state.ok_or("Native environment state root is unavailable".into())
+        } else {
+            Ok(workspace)
+        }
+    }
+
+    fn environment_root_for(&self, path: &Path, reference: &str) -> Result<PathBuf, String> {
+        self.environment_root(path, &self.load_launch(reference)?)
+    }
+
     pub(crate) fn verify_view(&self, path: &Path, launch: &str, version: &str) -> Result<(), String> {
-        self.scoped_files(launch)?.verify(&self.state_root(path)?, version, "")
+        self.scoped_files(launch)?.verify(&self.environment_root_for(path, launch)?, version, "")
     }
 
     pub(crate) fn validate_launch(&self, path: &Path, launch: &LaunchConfig) -> Result<(), String> {
-        crate::environment_discovery::validate_launch(&self.state_root(path)?, launch, !self.config.best_effort)
+        let (_, state) = self.discovery_roots(path)?;
+        crate::environment_discovery::validate_launch_with_state(
+            path, state.as_deref(), launch, !self.config.best_effort,
+        )
     }
 
     pub(crate) fn launch(&self, config: &LaunchConfig) -> Result<String, String> {
@@ -800,7 +833,7 @@ impl Environments {
         let same_view = selected.layout.as_deref()
             .is_some_and(|original| crate::path_identity::same_path(Path::new(original), Path::new(&layout)));
         let scoped = self.scoped_files(&selected.launch_ref)?;
-        let state = self.state_root(path)?;
+        let state = self.environment_root_for(path, &selected.launch_ref)?;
         let unbound_best_effort = self.config.best_effort
             && selected.layout.is_none()
             && self.load_launch(&selected.launch_ref)?.environment.is_none();
@@ -918,7 +951,27 @@ impl Environments {
     }
 
     pub(crate) fn exclusions(&self, reference: &str) -> Result<Vec<String>, String> {
-        if self.config.launch.state_bound() { self.load_launch(reference)?; return Ok(Vec::new()); }
+        if self.config.launch.state_bound() {
+            let launch = self.load_launch(reference)?;
+            // A genuine project environment stays in the visible workspace, so
+            // its project-relative scopes must remain excluded from Git. An
+            // environment provisioned under {state} is not project-relative.
+            let project = launch.environment.as_ref()
+                .and_then(|binding| binding.root.as_deref())
+                .is_some_and(|root| root == "workspace");
+            if !project { return Ok(Vec::new()); }
+            let mut paths = self.config.scopes.clone();
+            if let Some(binding) = &launch.environment {
+                if !paths.iter().any(|scope| {
+                    workspace::scope_contains(Path::new(&binding.prefix), Path::new(scope))
+                }) {
+                    paths.push(binding.prefix.clone());
+                }
+            }
+            paths.sort();
+            paths.dedup();
+            return Ok(paths);
+        }
         self.scope_paths(reference)
     }
 
@@ -928,7 +981,7 @@ impl Environments {
             if !paths.iter().any(|scope| {
                 workspace::scope_contains(Path::new(&binding.prefix), Path::new(scope))
             }) {
-                paths.push(binding.prefix);
+                paths.push(binding.prefix.clone());
             }
         }
         paths.extend(self.load_launch(reference)?.managed_scopes);
@@ -950,7 +1003,7 @@ impl Environments {
     fn capture_scoped(&self, path: &Path, parent: &str, reference: &str) -> Result<String, String> {
         let files = self.scoped_files(reference)?;
         let version = Uuid::new_v4().to_string();
-        files.capture(&self.state_root(path)?, &version, "", &[parent.into()])?;
+        files.capture(&self.environment_root_for(path, reference)?, &version, "", &[parent.into()])?;
         if files.same_contents(parent, &version)? {
             Ok(parent.into())
         } else {
@@ -967,9 +1020,10 @@ impl Environments {
         if !self.config.discovery {
             return Ok(input.clone());
         }
-        let state = self.state_root(path)?;
-        let launch = crate::environment_discovery::resolve_for_policy(
-            &state,
+        let (_, state) = self.discovery_roots(path)?;
+        let launch = crate::environment_discovery::resolve_for_policy_with_state(
+            path,
+            state.as_deref(),
             &self.load_launch(&input.launch_ref)?,
             session,
             &input.generation,
@@ -1382,14 +1436,14 @@ pub(crate) fn bind_command(
     // Rebinding L (also for proofs) must not rescan every environment byte.
     store.validate_result_metadata(input)?;
     let launch = store.load_launch(&input.launch_ref)?.expanded(path);
-    if config.launch.state_bound() {
-        let state = store.state_root(path)?;
+    let state = if config.launch.state_bound() { Some(store.state_root(path)?) } else { None };
+    if let Some(state) = state.as_deref() {
         for key in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "npm_config_cache", "PIP_CACHE_DIR", "CONDA_ENVS_PATH", "CONDA_PKGS_DIRS"] {
             if let Some(value) = launch.variables.get(key) {
                 let paths: Vec<_> = if matches!(key, "CONDA_ENVS_PATH" | "CONDA_PKGS_DIRS") { std::env::split_paths(value).collect() } else { vec![PathBuf::from(value)] };
                 for value in paths {
-                    if !value.is_absolute() || !workspace::scope_contains(&value, &state) { return Err(format!("Runtime variable {key} leaves its external owned state root")); }
-                    real_child_path(&state, &value, false)?;
+                    if !value.is_absolute() || !workspace::scope_contains(&value, state) { return Err(format!("Runtime variable {key} leaves its external owned state root")); }
+                    real_child_path(state, &value, false)?;
                 }
             }
         }
@@ -1410,8 +1464,9 @@ pub(crate) fn bind_command(
         command.env("GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS", hints);
     }
     if config.discovery {
-        let context = crate::environment_discovery::context(
-            &store.state_root(path)?,
+        let context = crate::environment_discovery::context_with_state(
+            path,
+            state.as_deref(),
             &input.generation,
             &launch,
             session,

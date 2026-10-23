@@ -150,6 +150,9 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
 // (Git for Windows re-injects PLINK_PROTOCOL=ssh at shell startup; it carries no
 // path, so it is left alone rather than fought.)
 const grapherInternalKey = /^GRAPHER_/i;
+// The node label is path-free business identity used by ordinary task
+// commands; it is not a Grapher control path and stays visible.
+const visibleModelKeys = new Set(['GRAPHER_NODE_NAME']);
 const hiddenModelKeys = new Set([
   // Pi session/credential paths and identity the shell never needs.
   'PI_SESSION_FILE', 'PI_SESSION_ID', 'PI_CODING_AGENT_DIR',
@@ -171,7 +174,8 @@ function modelShellScratch(env) {
 export function scrubModelShellEnvironment(env) {
   const scratch = modelShellScratch(env);
   for (const key of Object.keys(env)) {
-    if (grapherInternalKey.test(key) || hiddenModelKeys.has(key.toUpperCase())) delete env[key];
+    if (grapherInternalKey.test(key) && !visibleModelKeys.has(key.toUpperCase())
+        || hiddenModelKeys.has(key.toUpperCase())) delete env[key];
   }
   for (const key of ['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR']) {
     if (scratch) env[key] = scratch;

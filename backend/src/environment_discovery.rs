@@ -41,6 +41,10 @@ pub struct Binding {
     pub kind: String,
     pub prefix: String,
     pub abi: String,
+    /// Ownership root for `prefix`: the visible project workspace or the
+    /// external process-state root. Omitted only by pre-dual-root records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
 }
 impl Binding {
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -51,6 +55,9 @@ impl Binding {
         {
             return Err("Invalid discovered native environment binding".into());
         }
+        if self.root.as_deref().is_some_and(|root| !matches!(root, "workspace" | "state")) {
+            return Err("Invalid discovered native environment root".into());
+        }
         Ok(())
     }
 }
@@ -59,6 +66,10 @@ impl Binding {
 struct Context {
     schema: u32,
     workspace: String,
+    /// External process-state root for state-bound launches. Absent in old
+    /// receipts and for source-only policies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
     generation: String,
     launch: LaunchConfig,
     /// Best-effort business environment tools are not policy-gated.
@@ -74,6 +85,9 @@ struct Receipt {
     prefix: String,
     kind: String,
     created: bool,
+    /// Root that owns `prefix`; old receipts default to the policy root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -128,6 +142,45 @@ fn owned(root: &Path, prefix: &Path) -> Result<String, String> {
     }
     Ok(name)
 }
+fn roots<'a>(workspace: &'a Path, state: Option<&'a Path>) -> Vec<(&'static str, &'a Path)> {
+    match state {
+        Some(state) if !crate::path_identity::same_path(workspace, state) =>
+            vec![("workspace", workspace), ("state", state)],
+        _ => vec![("workspace", workspace)],
+    }
+}
+fn root_for<'a>(roots: &[(&'static str, &'a Path)], label: &str) -> Result<&'a Path, String> {
+    roots.iter().find(|(candidate, _)| *candidate == label)
+        .map(|(_, path)| *path)
+        .ok_or_else(|| "Native environment root is unavailable".to_string())
+}
+pub(crate) fn binding_root_label(launch: &LaunchConfig, roots: &[(&'static str, &Path)]) -> &'static str {
+    launch.environment.as_ref()
+        .and_then(|binding| binding.root.as_deref())
+        .map(|root| if root == "workspace" { "workspace" } else { "state" })
+        .unwrap_or_else(|| if launch.state_bound() && roots.iter().any(|(label, _)| *label == "state") {
+            "state"
+        } else {
+            "workspace"
+        })
+}
+/// Resolve a prefix against each candidate root. A path inside one root that
+/// fails ownership (excluded scope, link escape) is a policy error; a path that
+/// does not belong to a root simply continues to the next candidate.
+fn owned_any(roots: &[(&'static str, &Path)], prefix: &Path) -> Result<(String, String), String> {
+    let mut outside = None;
+    for (label, root) in roots {
+        match owned(root, prefix) {
+            Ok(relative) => return Ok(((*label).to_string(), relative)),
+            Err(error) if error.contains("must belong to this workspace") => {
+                outside = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(outside.unwrap_or_else(|| "Environment prefix has no owned root".into()))
+}
+
 fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("Missing receipt directory")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -142,8 +195,19 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     fs::rename(&temp, path).map_err(|e| e.to_string())
 }
+#[cfg(test)]
 pub(crate) fn context(
     root: &Path,
+    generation: &str,
+    launch: &LaunchConfig,
+    session: &Path,
+    best_effort: bool,
+) -> Result<PathBuf, String> {
+    context_with_state(root, None, generation, launch, session, best_effort)
+}
+pub(crate) fn context_with_state(
+    workspace: &Path,
+    state: Option<&Path>,
     generation: &str,
     launch: &LaunchConfig,
     session: &Path,
@@ -153,7 +217,8 @@ pub(crate) fn context(
     let file = session.join(format!("environment-observer-{generation}.json"));
     let bytes = serde_json::to_vec(&Context {
         schema: 1,
-        workspace: text(&canonical(root)?),
+        workspace: text(&canonical(workspace)?),
+        state: state.map(canonical).transpose()?.map(|path| text(&path)),
         generation: generation.into(),
         launch: launch.clone(),
         best_effort,
@@ -210,7 +275,9 @@ fn executable_prefix(program: &Path) -> Result<Option<PathBuf>, String> {
     };
     Ok(kind(prefix)?.map(|_| prefix.to_path_buf()))
 }
-fn create_prefixes(tool: &str, args: &[String], root: &Path) -> Result<Vec<PathBuf>, String> {
+fn create_prefixes(tool: &str, args: &[String], workspace: &Path, state: Option<&Path>) -> Result<Vec<PathBuf>, String> {
+    let roots = roots(workspace, state);
+    let conda_root = state.unwrap_or(workspace);
     let module = args.windows(2).position(|pair| pair == ["-m", "venv"]);
     if matches!(tool, "python" | "python3") && module.is_some() {
         let mut prefixes = Vec::new();
@@ -228,7 +295,7 @@ fn create_prefixes(tool: &str, args: &[String], root: &Path) -> Result<Vec<PathB
                 continue;
             }
             let path = PathBuf::from(arg);
-            owned(root, &path)?;
+            owned_any(&roots, &path)?;
             prefixes.push(path);
         }
         if prefixes.is_empty() {
@@ -249,7 +316,7 @@ fn create_prefixes(tool: &str, args: &[String], root: &Path) -> Result<Vec<PathB
                     .or_else(|| args.get(i + 1).cloned())
                     .ok_or("Missing Conda prefix")?;
                 let prefix = PathBuf::from(value);
-                owned(root, &prefix)?;
+                owned_any(&roots, &prefix)?;
                 return Ok(vec![prefix]);
             }
             if arg == "-n" || arg == "--name" || arg.starts_with("--name=") {
@@ -261,8 +328,8 @@ fn create_prefixes(tool: &str, args: &[String], root: &Path) -> Result<Vec<PathB
                 if name.contains(['/', '\\']) || matches!(name.as_str(), "base" | "root") {
                     return Err("Invalid private Conda environment name".into());
                 }
-                let prefix = root.join(".environments").join(name);
-                owned(root, &prefix)?;
+                let prefix = conda_root.join(".environments").join(name);
+                owned(conda_root, &prefix)?;
                 return Ok(vec![prefix]);
             }
         }
@@ -306,17 +373,18 @@ fn private_conda_args(args: &[String], root: &Path) -> Result<Vec<String>, Strin
     Ok(result)
 }
 
-fn hint(name: &str, program: &Path, args: &[String], root: &Path, launch: &LaunchConfig) -> Option<AmbientEnvironmentHint> {
+fn hint(name: &str, program: &Path, args: &[String], workspace: &Path, state: Option<&Path>, launch: &LaunchConfig) -> Option<AmbientEnvironmentHint> {
     let manager = match name {
         "conda" => "conda",
         "python" | "python3" | "pip" | "pip3" => "python",
         _ => return None,
     };
-    if executable_prefix(program).ok().flatten().is_some_and(|prefix| owned(root, &prefix).is_ok()) {
+    let roots = roots(workspace, state);
+    if executable_prefix(program).ok().flatten().is_some_and(|prefix| owned_any(&roots, &prefix).is_ok()) {
         return None;
     }
     let selector = if name == "conda" {
-        conda_private_prefix(args, root).map(|path| text(&path))
+        conda_private_prefix(args, state.unwrap_or(workspace)).map(|path| text(&path))
             .or_else(|| conda_environment_name(args).map(|name| format!("name:{name}")))
             .or_else(|| std::env::var("CONDA_PREFIX").ok())
     } else {
@@ -371,7 +439,8 @@ fn conda_private_prefix(args: &[String], root: &Path) -> Option<PathBuf> {
 
 fn launch_environment_differs(
     launch: &LaunchConfig,
-    root: &Path,
+    workspace: &Path,
+    state: Option<&Path>,
     name: &str,
     program: &Path,
     detected_prefix: Option<&Path>,
@@ -380,11 +449,17 @@ fn launch_environment_differs(
         return false;
     }
     let Some(binding) = &launch.environment else { return false; };
+    let roots = roots(workspace, state);
+    let Ok(root) = root_for(&roots, binding_root_label(launch, &roots)) else { return false; };
     let expected = root.join(&binding.prefix);
     match detected_prefix {
         Some(prefix) => canonical(prefix).ok().as_deref() != canonical(&expected).ok().as_deref(),
-        None => canonical(program).ok().as_deref()
-            != canonical(&PathBuf::from(launch.entry.replace("{workspace}", &text(root)))).ok().as_deref(),
+        None => {
+            let entry = launch.entry
+                .replace("{workspace}", &text(workspace))
+                .replace("{state}", &text(state.unwrap_or(workspace)));
+            canonical(program).ok().as_deref() != canonical(&PathBuf::from(entry)).ok().as_deref()
+        }
     }
 }
 
@@ -429,7 +504,10 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     }
     Uuid::parse_str(&ctx.generation).map_err(|_| "Invalid environment observer generation")?;
     ctx.launch.validate()?;
-    let root = canonical(Path::new(&ctx.workspace))?;
+    let workspace = canonical(Path::new(&ctx.workspace))?;
+    let state = ctx.state.as_deref().map(|path| canonical(Path::new(path))).transpose()?;
+    let roots = roots(&workspace, state.as_deref());
+    let conda_root = state.as_deref().unwrap_or(&workspace);
     let name = &args[1];
     if !matches!(
         name.as_str(),
@@ -452,8 +530,13 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     }
     let program = canonical(&requested)?;
     let detected_prefix = executable_prefix(&requested)?;
-    let private_prefix = detected_prefix.clone().filter(|prefix| owned(&root, prefix).is_ok());
-    let in_view = workspace::scope_contains(&program, &root) || private_prefix.is_some();
+    let private = detected_prefix.clone()
+        .and_then(|prefix| owned_any(&roots, &prefix).ok().map(|(_, relative)| (prefix, relative)))
+        .filter(|(_, relative)| !relative.is_empty());
+    let private_prefix = private.as_ref().map(|(prefix, _)| prefix.clone());
+    let in_view = workspace::scope_contains(&program, &workspace)
+        || state.as_deref().is_some_and(|state| workspace::scope_contains(&program, state))
+        || private_prefix.is_some();
     if !ctx.best_effort && !in_view
         && !ctx.launch.path.iter().any(|path| {
             program.parent().is_some_and(|parent| {
@@ -464,7 +547,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
         return Err("Native tool is outside the frozen bootstrap/view; no substitute".into());
     }
     let mut business = if name == "conda" && !ctx.best_effort {
-        private_conda_args(&args[3..], &root)?
+        private_conda_args(&args[3..], conda_root)?
     } else {
         args[3..].to_vec()
     };
@@ -475,9 +558,9 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
         // never guess a private prefix or rewrite those native arguments.
         Vec::new()
     } else if ctx.best_effort {
-        create_prefixes(name, &business, &root).unwrap_or_default()
+        create_prefixes(name, &business, &workspace, state.as_deref()).unwrap_or_default()
     } else {
-        create_prefixes(name, &business, &root)?
+        create_prefixes(name, &business, &workspace, state.as_deref())?
     };
     if !ctx.best_effort && name == "conda"
         && business.first().is_some_and(|s| s == "shell.posix")
@@ -489,12 +572,12 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
         let prefix = if target.contains(['/', '\\']) {
             PathBuf::from(target)
         } else {
-            root.join(".environments").join(target)
+            conda_root.join(".environments").join(target)
         };
         if matches!(target.as_str(), "base" | "root") {
             return Err("Host-global Conda activation is not a business binding".into());
         }
-        owned(&root, &prefix)?;
+        owned_any(&roots, &prefix)?;
         if kind(&prefix)? != Some("conda") {
             return Err("Private Conda activation target is missing; no host name fallback".into());
         }
@@ -552,7 +635,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
                         arg.strip_prefix(&format!("{flag}="))
                     };
                     if let Some(value) = value {
-                        owned(&root, Path::new(value))?;
+                        owned_any(&roots, Path::new(value))?;
                     }
                 }
             }
@@ -570,7 +653,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
             })
         });
         if let Some(target) = target {
-            owned(&root, Path::new(&target))?;
+            owned_any(&roots, Path::new(&target))?;
         } else {
             return Err("Package installation into the host interpreter is forbidden; a workspace-owned environment is required".into());
         }
@@ -594,16 +677,16 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
             } else if arg == "-n" || arg == "--name" {
                 business
                     .get(index + 1)
-                    .map(|value| root.join(".environments").join(value))
+                    .map(|value| conda_root.join(".environments").join(value))
             } else {
                 arg.strip_prefix("--name=")
-                    .map(|value| root.join(".environments").join(value))
+                    .map(|value| conda_root.join(".environments").join(value))
             }
         });
         let active = targeted
             .or_else(|| std::env::var_os("CONDA_PREFIX").map(PathBuf::from))
             .ok_or("Conda mutation has no owned active prefix")?;
-        owned(&root, &active)?;
+        owned_any(&roots, &active)?;
     }
     // Keep the lexical executable path: resolving a Unix venv symlink and
     // launching its host target would silently lose sys.prefix/pyvenv.cfg.
@@ -616,7 +699,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     }
     if name == "conda" && !ctx.best_effort {
         command
-            .env("CONDA_ENVS_PATH", root.join(".environments"))
+            .env("CONDA_ENVS_PATH", conda_root.join(".environments"))
             .env("CONDA_PKGS_DIRS", {
                 let cache = PathBuf::from(
                     ctx.launch
@@ -624,8 +707,8 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
                         .get("CONDA_PKGS_DIRS")
                         .ok_or("Missing Run-owned Conda cache binding")?,
                 );
-                real_child_path(&root, &cache, false)?;
-                if !workspace::scope_contains(&cache, &root.join(".runtime-cache")) {
+                real_child_path(conda_root, &cache, false)?;
+                if !workspace::scope_contains(&cache, &conda_root.join(".runtime-cache")) {
                     return Err("Conda cache leaves its excluded workspace scope".into());
                 }
                 cache
@@ -661,7 +744,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     let status = command.status().map_err(|e| e.to_string())?;
     if status.success() {
         if ctx.best_effort {
-            if let Some(hint) = hint(name, &program, &business, &root, &ctx.launch) {
+            if let Some(hint) = hint(name, &program, &business, &workspace, state.as_deref(), &ctx.launch) {
                 let receipt = AmbientReceipt {
                     schema: 1,
                     generation: ctx.generation.clone(),
@@ -680,8 +763,8 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
             candidates.push((prefix, false));
         }
         if ctx.best_effort && name == "conda" {
-            if let Some(prefix) = conda_private_prefix(&business, &root) {
-                if owned(&root, &prefix).is_ok() { candidates.push((prefix, false)); }
+            if let Some(prefix) = conda_private_prefix(&business, conda_root) {
+                if owned_any(&roots, &prefix).is_ok() { candidates.push((prefix, false)); }
             }
         }
         let mut unique = BTreeMap::new();
@@ -691,11 +774,11 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
         for (prefix, created) in unique {
             let result = (|| -> Result<_, String> {
                 let prefix = canonical(&prefix)?;
-                let relative = owned(&root, &prefix)?;
+                let (root, relative) = owned_any(&roots, &prefix)?;
                 let kind = kind(&prefix)?.ok_or("Created environment has no verifiable native metadata")?;
-                Ok((relative, kind))
+                Ok((root, relative, kind))
             })();
-            let (relative, kind) = match result {
+            let (root, relative, kind) = match result {
                 Ok(value) => value,
                 Err(_) if ctx.best_effort => continue,
                 Err(error) => return Err(error),
@@ -707,16 +790,18 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
                 prefix: relative,
                 kind: kind.into(),
                 created,
+                root: Some(root),
             };
             write_receipt(&file, &receipt, &ctx.generation)?;
         }
         let switched_from_bound = ctx.best_effort && launch_environment_differs(
-            &ctx.launch, &root, name, &program, detected_prefix.as_deref(),
+            &ctx.launch, &workspace, state.as_deref(), name, &program, detected_prefix.as_deref(),
         );
         if switched_from_bound {
             let receipt = Receipt {
                 schema: 1, generation: ctx.generation.clone(), tool: text(&program),
                 prefix: "external".into(), kind: "external".into(), created: false,
+                root: None,
             };
             write_receipt(&file, &receipt, &ctx.generation)?;
         }
@@ -724,7 +809,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     Ok(status.code().unwrap_or(1))
 }
 
-fn verify(root: &Path, prefix: &str, expected_kind: &str, project_requirements: bool) -> Result<Binding, String> {
+fn verify(root: &Path, root_label: &str, prefix: &str, expected_kind: &str, project_requirements: bool) -> Result<Binding, String> {
     let path = root.join(prefix);
     let canonical_prefix = canonical(&path)?;
     owned(root, &canonical_prefix)?;
@@ -818,12 +903,26 @@ print(json.dumps({'version':sys.version,'abi':sysconfig.get_config_var('SOABI'),
         kind: expected_kind.into(),
         prefix: prefix.into(),
         abi,
+        root: Some(root_label.into()),
     })
 }
 
+#[cfg(test)]
 pub(crate) fn validate_launch(root: &Path, launch: &LaunchConfig, project_requirements: bool) -> Result<(), String> {
+    validate_launch_with_state(root, None, launch, project_requirements)
+}
+
+pub(crate) fn validate_launch_with_state(
+    workspace: &Path,
+    state: Option<&Path>,
+    launch: &LaunchConfig,
+    project_requirements: bool,
+) -> Result<(), String> {
     if let Some(expected) = &launch.environment {
-        if verify(root, &expected.prefix, &expected.kind, project_requirements)? != *expected {
+        let roots = roots(workspace, state);
+        let label = binding_root_label(launch, &roots).to_string();
+        let root = root_for(&roots, &label)?;
+        if verify(root, &label, &expected.prefix, &expected.kind, project_requirements)? != *expected {
             return Err(
                 "Bound native interpreter ABI/library bytes changed; refusing unsafe startup"
                     .into(),
@@ -840,6 +939,7 @@ pub(crate) fn resolve(
     resolve_for_policy(root, launch, session, generation, true, false)
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_for_policy(
     root: &Path,
     launch: &LaunchConfig,
@@ -848,8 +948,21 @@ pub(crate) fn resolve_for_policy(
     project_requirements: bool,
     best_effort: bool,
 ) -> Result<LaunchConfig, String> {
+    resolve_for_policy_with_state(root, None, launch, session, generation, project_requirements, best_effort)
+}
+
+pub(crate) fn resolve_for_policy_with_state(
+    workspace: &Path,
+    state: Option<&Path>,
+    launch: &LaunchConfig,
+    session: &Path,
+    generation: &str,
+    project_requirements: bool,
+    best_effort: bool,
+) -> Result<LaunchConfig, String> {
+    let roots = roots(workspace, state);
     let directory = session.join("environment-observations").join(generation);
-    let mut candidates = BTreeMap::new();
+    let mut candidates = BTreeMap::<(String, String), String>::new();
     let mut external_selected = false;
     let mut discovered_scopes = Vec::new();
     let mut ambient_hints = launch.ambient_hints.clone();
@@ -890,7 +1003,18 @@ pub(crate) fn resolve_for_policy(
                     return Err("External interpreter receipt is invalid under the frozen policy".into());
                 }
                 environment::safe_relative(&receipt.prefix)?;
-                candidates.insert(receipt.prefix, receipt.kind);
+                let label = receipt.root.as_deref()
+                    .unwrap_or(if launch.state_bound() { "state" } else { "workspace" });
+                if !matches!(label, "workspace" | "state") {
+                    return Err("Invalid native environment receipt root".into());
+                }
+                if root_for(&roots, label).is_err() {
+                    return Err("Native environment receipt root is unavailable".into());
+                }
+                let previous = candidates.insert((label.into(), receipt.prefix), receipt.kind.clone());
+                if previous.is_some_and(|previous| previous != receipt.kind) {
+                    return Err("Conflicting native environment observations".into());
+                }
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -898,59 +1022,62 @@ pub(crate) fn resolve_for_policy(
     }
     // Metadata inventory is a bounded refusal guard, never an adoption
     // heuristic. Do not traverse environment contents or follow directory links.
-    let mut inventory = vec![root.to_path_buf()];
-    let mut visited = 0;
-    while let Some(directory) = inventory.pop() {
-        visited += 1;
-        if visited > 50_000 {
-            if best_effort { break; }
-            return Err(
-                "Native environment metadata inventory exceeded its safe directory bound".into(),
-            );
-        }
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(_) if best_effort => continue,
-            Err(error) => return Err(error.to_string()),
-        };
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
+    for (label, root) in &roots {
+        let mut inventory = vec![root.to_path_buf()];
+        let mut visited = 0;
+        while let Some(directory) = inventory.pop() {
+            visited += 1;
+            if visited > 50_000 {
+                if best_effort { break; }
+                return Err(
+                    "Native environment metadata inventory exceeded its safe directory bound".into(),
+                );
+            }
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
                 Err(_) if best_effort => continue,
                 Err(error) => return Err(error.to_string()),
             };
-            if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-                continue;
-            }
-            let prefix = entry.path();
-            let relative = prefix
-                .strip_prefix(root)
-                .map_err(|e| e.to_string())?
-                .to_string_lossy()
-                .replace('\\', "/");
-            if [".git", ".runtime-cache", ".agent-home", ".pi", ".project-git", ".git-config"]
-                .iter()
-                .any(|scope| workspace::scope_contains(Path::new(&relative), Path::new(scope)))
-            {
-                continue;
-            }
-            if let Ok(Some(_environment_kind)) = kind(&prefix) {
-                match owned(root, &prefix) {
-                    Ok(relative) => {
-                        discovered_scopes.push(relative.clone());
-                        if !candidates.contains_key(&relative)
-                            && launch.environment.as_ref().is_none_or(|binding| binding.prefix != relative)
-                        {
-                            if !best_effort {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(_) if best_effort => continue,
+                    Err(error) => return Err(error.to_string()),
+                };
+                if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+                    continue;
+                }
+                let prefix = entry.path();
+                let relative = prefix
+                    .strip_prefix(root)
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if [".git", ".runtime-cache", ".agent-home", ".pi", ".project-git", ".git-config"]
+                    .iter()
+                    .any(|scope| workspace::scope_contains(Path::new(&relative), Path::new(scope)))
+                {
+                    continue;
+                }
+                if let Ok(Some(_environment_kind)) = kind(&prefix) {
+                    match owned(root, &prefix) {
+                        Ok(relative) => {
+                            discovered_scopes.push(relative.clone());
+                            let observed = candidates.contains_key(&((*label).into(), relative.clone()))
+                                || launch.environment.as_ref().is_some_and(|binding| {
+                                    binding.prefix == relative
+                                        && binding_root_label(launch, &roots) == *label
+                                });
+                            if !observed && !best_effort {
                                 return Err(format!("Unobserved native environment at {relative}; refusing directory-name inference or a silent bootstrap binding"));
                             }
                         }
+                        Err(_) if best_effort => {}
+                        Err(error) => return Err(error),
                     }
-                    Err(_) if best_effort => {}
-                    Err(error) => return Err(error),
+                } else {
+                    inventory.push(prefix);
                 }
-            } else {
-                inventory.push(prefix);
             }
         }
     }
@@ -971,13 +1098,14 @@ pub(crate) fn resolve_for_policy(
         if best_effort { return unbound_launch(&next, &[]); }
         return Err("Ambiguous independent native environments in this execution; no automatic authority or user selection".into());
     }
-    if let Some((prefix, kind)) = candidates.into_iter().next() {
-        let binding = match verify(root, &prefix, &kind, project_requirements) {
+    if let Some(((root_label, prefix), kind)) = candidates.into_iter().next() {
+        let root = root_for(&roots, &root_label)?;
+        let binding = match verify(root, &root_label, &prefix, &kind, project_requirements) {
             Ok(binding) => binding,
             Err(_) if best_effort => return unbound_launch(&next, &[]),
             Err(error) => return Err(error),
         };
-        let token = if launch.state_bound() { "{state}" } else { "{workspace}" };
+        let token = if root_label == "state" { "{state}" } else { "{workspace}" };
         let entry = interpreter(Path::new(&format!("{token}/{prefix}")), &kind);
         let bin = text(
             entry
@@ -1019,7 +1147,9 @@ pub(crate) fn resolve_for_policy(
         next.managed_scopes.sort();
         next.managed_scopes.dedup();
     } else if let Some(binding) = &launch.environment {
-        match verify(root, &binding.prefix, &binding.kind, project_requirements) {
+        let root_label = binding_root_label(launch, &roots).to_string();
+        let root = root_for(&roots, &root_label)?;
+        match verify(root, &root_label, &binding.prefix, &binding.kind, project_requirements) {
             Ok(verified) => next.environment = Some(verified),
             Err(_) if best_effort => return unbound_launch(&next, &[]),
             Err(error) => return Err(error),

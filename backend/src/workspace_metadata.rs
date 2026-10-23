@@ -294,9 +294,19 @@ mod platform {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let result = -1;
             if result != 0 {
+                let error = std::io::Error::last_os_error();
+                // macOS manages provenance itself and rejects user-process
+                // writes (including onto read-only Git objects). The destination
+                // already carries its own system-assigned value; retrying cannot
+                // preserve the source marker and must not fail the copy.
+                #[cfg(target_os = "macos")]
+                if name == "com.apple.provenance"
+                    && matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES))
+                {
+                    continue;
+                }
                 return Err(format!(
-                    "Cannot preserve project xattr {name}: {}",
-                    std::io::Error::last_os_error()
+                    "Cannot preserve project xattr {name}: {error}"
                 ));
             }
         }

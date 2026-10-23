@@ -4123,14 +4123,14 @@ impl PublicationJob {
                 // original node code.
                 let current = workspace::git(path, &["rev-parse", "HEAD"])?;
                 let expected = if current == selected.code_ref { selected.code_ref.as_str() } else { head };
-                crate::workspace_view::verify_result(path, &self.repository, expected)?;
+                crate::workspace_view::verify_result_scoped(path, &self.repository, expected, &exclusions)?;
                 self.store.verify_view(path, &selected.launch_ref, &selected.environment_ref)?;
                 if !workspace::repository_status(path, &exclusions)?.is_empty() {
                     return Err("Published code view changed outside its writer lease".into());
                 }
             }
-            let code = workspace::prepare_with_merger_expected_for_run(
-                &self.repository, path, head, &[], head, Some(&self.run_id),
+            let code = workspace::prepare_with_merger_expected_for_run_scoped(
+                &self.repository, path, head, &[], head, Some(&self.run_id), &exclusions,
                 || Err("Publication descriptor requires a clean composed code result".into()),
             )?;
             if !present {
@@ -4226,7 +4226,7 @@ pub(crate) fn perform_result(
                     return Err("Failed native result partial view is missing; refusing a silent reset to the published result".into());
                 }
                 if present && !job.retry {
-                    crate::workspace_view::verify_result(path, &repository, &job.descriptor.result.code_ref)?;
+                    crate::workspace_view::verify_result_scoped(path, &repository, &job.descriptor.result.code_ref, &exclusions)?;
                     if workspace::git(path, &["rev-parse", "HEAD"])?
                         != job.descriptor.result.code_ref
                         || !workspace::repository_status(path, &exclusions)?.is_empty()
@@ -4242,13 +4242,14 @@ pub(crate) fn perform_result(
                     &job.descriptor.result,
                 )?;
                 if !present {
-                    workspace::prepare_with_merger_expected_for_run(
+                    workspace::prepare_with_merger_expected_for_run_scoped(
                         &repository,
                         path,
                         &job.descriptor.result.code_ref,
                         &[],
                         &job.descriptor.result.code_ref,
                         Some(&job.run_id),
+                        &exclusions,
                         || Err("Result reconstruction cannot require a Merger".into()),
                     )?;
                 }
@@ -4429,7 +4430,13 @@ fn perform_with_merger_inner(
     if reused && preserved_head.is_none() && !job.history_edit && !job.feedback_repair_retry
         && crate::workspace_view::is_bound(path) {
         let current = workspace::git(path, &["rev-parse", "HEAD"])?;
-        crate::workspace_view::verify_result(path, &repository, &current)?;
+        let early_exclusions = if let (Some(policy), Some(input)) = (&job.config.environment, &job.environment_input) {
+            crate::environment::Environments::new(root, &job.run_id, policy)?
+                .exclusions(&input.launch_ref)?
+        } else {
+            Vec::new()
+        };
+        crate::workspace_view::verify_result_scoped(path, &repository, &current, &early_exclusions)?;
     }
     let mut selected_environment = job.environment_input.clone();
     // A failed slot may still carry an environment scope that an older Merger
@@ -4526,7 +4533,7 @@ fn perform_with_merger_inner(
             let feedback_head = workspace::git(source_path, &["rev-parse", "HEAD"])?;
             let feedback_status = workspace::repository_status(source_path, &source_exclusions)?;
             if feedback_head != source.head || !feedback_status.is_empty()
-                || crate::workspace_view::verify_result(source_path, &repository, &source.head).is_err() {
+                || crate::workspace_view::verify_result_scoped(source_path, &repository, &source.head, &source_exclusions).is_err() {
                 // A single-source handoff executes the target in the sender's
                 // directory, so a failed attempt of this very node can leave
                 // residue there: its unrecorded after-snapshot commit or
@@ -4676,13 +4683,14 @@ fn perform_with_merger_inner(
     } else if job.source_direct || source_tree {
         String::new()
     } else {
-        workspace::prepare_with_merger_expected_for_run(
+        workspace::prepare_with_merger_expected_for_run_scoped(
             &repository,
             path,
             execution_before,
             &input_heads,
             expected_source_head,
             Some(&job.run_id),
+            &exclusions,
             || {
                 crate::graph_merge::resolve_with_merger_for_node(
                     path,

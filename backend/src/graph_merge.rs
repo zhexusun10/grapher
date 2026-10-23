@@ -137,8 +137,8 @@ fn compose_graph_scoped(repository: &Path, source: &Path, heads: &[String], excl
         let current = git(repository, &["rev-parse", "HEAD"])?;
         let mut inputs = heads.to_vec();
         if crate::workspace_view::has_record(source, &current) { inputs.push(current); }
-        crate::workspace_view::prepare(source, repository, &base, &inputs)?;
-        return crate::workspace_view::seal_prepared(repository, source);
+        crate::workspace_view::prepare(source, repository, &base, &inputs, exclusions)?;
+        return crate::workspace_view::seal_prepared_scoped(repository, source, exclusions);
     }
     git(repository, &["rev-parse", "HEAD"])
 }
@@ -283,7 +283,7 @@ pub(crate) fn resolve_with_merger_for_node(
             .unwrap_or_default();
         crate::workspace_view::import_resolution(repository)?;
         finish_merge(repository, &incoming, &exclusions)?;
-        if crate::workspace_view::is_bound(repository) { crate::workspace_view::seal_prepared(repository, Path::new(&config.repository))?; }
+        if crate::workspace_view::is_bound(repository) { crate::workspace_view::seal_prepared_scoped(repository, Path::new(&config.repository), &exclusions)?; }
         Ok(())
     });
     match &result {

@@ -1634,6 +1634,7 @@ pub(crate) fn prepare(
     path: &Path,
     base: &str,
     parents: &[String],
+    exclusions: &[String],
 ) -> Result<(), String> {
     let base_view = load(&record_path(source, base)?)?;
     let mut inputs = Vec::new();
@@ -1694,7 +1695,7 @@ pub(crate) fn prepare(
     }
     let conflict = workspace::git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok();
     let mut actual = BTreeMap::new();
-    scan(path, Path::new(""), &mut actual, false)?;
+    scan_scoped(path, Path::new(""), &mut actual, false, path, exclusions)?;
     let mut expected = BTreeMap::new();
     if conflict {
         // Conflict marker bytes are task composition state, not HEAD bytes.
@@ -2014,7 +2015,7 @@ pub(crate) fn prepare(
         .ok_or("Missing project root metadata")?;
     restore_entry(path, &root)?;
     let mut verified = BTreeMap::new();
-    scan(path, Path::new(""), &mut verified, false)?;
+    scan_scoped(path, Path::new(""), &mut verified, false, path, exclusions)?;
     if verified != expected || capture_links(path, &verified)? != topology {
         return Err("Complete project-view comparison failed; no agent may see the partially prepared workspace".into());
     }
@@ -2153,7 +2154,7 @@ fn nested_repository_views(project: &Path) -> Result<BTreeMap<String, View>, Str
     Ok(views)
 }
 
-fn node_view(path: &Path, source: &Path) -> Result<Option<(View, Option<PathBuf>)>, String> {
+fn node_view(path: &Path, source: &Path, exclusions: &[String]) -> Result<Option<(View, Option<PathBuf>)>, String> {
     if is_bound(path) {
         validate_bound(path, source)?;
         if path.join(".git").exists()
@@ -2162,7 +2163,7 @@ fn node_view(path: &Path, source: &Path) -> Result<Option<(View, Option<PathBuf>
         {
             return Err("Unresolved project Git conflicts remain".into());
         }
-        let mut view = inspect(path)?;
+        let mut view = inspect_scoped(path, path, exclusions)?;
         set_source_keys(&mut view, source);
         return Ok(Some((view, None)));
     }
@@ -2178,7 +2179,7 @@ fn node_view(path: &Path, source: &Path) -> Result<Option<(View, Option<PathBuf>
     let record = record_path(source, &base)?;
     let mut view = load(&record)?;
     view.entries.clear();
-    scan(path, Path::new(""), &mut view.entries, false)?;
+    scan_scoped(path, Path::new(""), &mut view.entries, false, path, exclusions)?;
     view.hardlinks = capture_links(path, &view.entries)?;
     // Do not reuse nested repository evidence recorded from another state:
     // a host-only/fixture checkout can still advance its nested worktrees.
@@ -2214,9 +2215,13 @@ pub(crate) fn reject_undeliverable_special_changes(
     Err("Task changed special project entries (named pipe/device); files-only publication cannot deliver them, so this result is refused explicitly instead of dropping entries".into())
 }
 
-pub(crate) fn seal_prepared(path: &Path, source: &Path) -> Result<String, String> {
+pub(crate) fn seal_prepared_scoped(
+    path: &Path,
+    source: &Path,
+    exclusions: &[String],
+) -> Result<String, String> {
     let head = workspace::git(path, &["rev-parse", "HEAD"])?;
-    let Some(identity) = node_identity(path, source)? else {
+    let Some(identity) = node_identity_scoped(path, source, exclusions)? else {
         return Ok(head);
     };
     if !record_matches(source, &head, &identity) {
@@ -2225,7 +2230,7 @@ pub(crate) fn seal_prepared(path: &Path, source: &Path) -> Result<String, String
             // current view for that head instead of manufacturing a per-entry
             // commit, so every entry of one publication keeps the same code
             // reference (`code_ref == head == workspace HEAD`).
-            capture_node(path, source, &head)?;
+            capture_node_scoped(path, source, &head, exclusions)?;
             return Ok(head);
         }
         workspace::git(
@@ -2239,17 +2244,27 @@ pub(crate) fn seal_prepared(path: &Path, source: &Path) -> Result<String, String
         )?;
     }
     let head = workspace::git(path, &["rev-parse", "HEAD"])?;
-    capture_node(path, source, &head)?;
+    capture_node_scoped(path, source, &head, exclusions)?;
     Ok(head)
 }
 
+#[cfg(test)]
 pub(crate) fn verify_result(path: &Path, source: &Path, head: &str) -> Result<(), String> {
+    verify_result_scoped(path, source, head, &[])
+}
+
+pub(crate) fn verify_result_scoped(
+    path: &Path,
+    source: &Path,
+    head: &str,
+    exclusions: &[String],
+) -> Result<(), String> {
     if !is_bound(path) || !has_record(source, head) {
         // Without recorded evidence there is nothing to compare against; a
         // stale or reclaimed head must not block a rebaseline.
         return Ok(());
     }
-    let (current, _) = node_view(path, source)?.ok_or("Missing current project view")?;
+    let (current, _) = node_view(path, source, exclusions)?.ok_or("Missing current project view")?;
     if current != load(&record_path(source, head)?)? {
         return Err("Completed project/Git metadata changed outside its recorded execution".into());
     }
@@ -2263,8 +2278,12 @@ pub(crate) fn preparation_guard(path: &Path) -> Result<String, String> {
         .to_string())
 }
 
-pub(crate) fn node_identity(path: &Path, source: &Path) -> Result<Option<String>, String> {
-    node_view(path, source)?
+pub(crate) fn node_identity_scoped(
+    path: &Path,
+    source: &Path,
+    exclusions: &[String],
+) -> Result<Option<String>, String> {
+    node_view(path, source, exclusions)?
         .map(|(view, _)| {
             let bytes = normalized_bytes(&view)?;
             Ok(git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
@@ -2281,8 +2300,13 @@ pub(crate) fn record_matches(source: &Path, head: &str, identity: &str) -> bool 
         == Some(identity)
 }
 
-pub(crate) fn capture_node(path: &Path, source: &Path, head: &str) -> Result<(), String> {
-    let Some((view, inherited)) = node_view(path, source)? else {
+pub(crate) fn capture_node_scoped(
+    path: &Path,
+    source: &Path,
+    head: &str,
+    exclusions: &[String],
+) -> Result<(), String> {
+    let Some((view, inherited)) = node_view(path, source, exclusions)? else {
         return Ok(());
     };
     let target = record_path(source, head)?;
@@ -2405,6 +2429,7 @@ pub(crate) fn prepare_conflicts(source: &Path, path: &Path) -> Result<(), String
         path,
         &base,
         &parents.lines().map(str::to_owned).collect::<Vec<_>>(),
+        &[],
     )?;
     if !path.join(".git").exists() {
         let conflicts = workspace::git(path, &["diff", "--name-only", "--diff-filter=U", "-z"])?;

@@ -2489,6 +2489,21 @@ pub(crate) fn prepare_with_merger_expected_for_run(
     parents: &[String],
     expected_source_head: &str,
     run_id: Option<&str>,
+    resolve: impl FnMut() -> Result<(), String>,
+) -> Result<String, String> {
+    prepare_with_merger_expected_for_run_scoped(
+        repository, path, base, parents, expected_source_head, run_id, &[], resolve,
+    )
+}
+
+pub(crate) fn prepare_with_merger_expected_for_run_scoped(
+    repository: &Path,
+    path: &Path,
+    base: &str,
+    parents: &[String],
+    expected_source_head: &str,
+    run_id: Option<&str>,
+    exclusions: &[String],
     mut resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
     if let Some(id) = run_id {
@@ -2763,8 +2778,8 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         if head != base_head && crate::workspace_view::has_record(&canonical_repo, &head) {
             views.push(head.clone());
         }
-        crate::workspace_view::prepare(&canonical_repo, path, &base_head, &views)?;
-        return crate::workspace_view::seal_prepared(path, &canonical_repo);
+        crate::workspace_view::prepare(&canonical_repo, path, &base_head, &views, exclusions)?;
+        return crate::workspace_view::seal_prepared_scoped(path, &canonical_repo, exclusions);
     }
     Ok(head)
 }
@@ -2844,7 +2859,7 @@ pub(crate) fn snapshot_node_scoped(
     if !git(&canonical_path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
         return Err("Unresolved merge conflicts remain".into());
     }
-    let view_identity = crate::workspace_view::node_identity(&canonical_path, &canonical_repo)?;
+    let view_identity = crate::workspace_view::node_identity_scoped(&canonical_path, &canonical_repo, exclusions)?;
     if view_identity.is_some() {
         crate::workspace_view::reject_undeliverable_special_changes(
             &canonical_path,
@@ -2941,7 +2956,7 @@ pub(crate) fn snapshot_node_scoped(
         args.push(&node_refspec);
         match git(&canonical_repo, &args) {
             Ok(_) => {
-                crate::workspace_view::capture_node(&canonical_path, &canonical_repo, &head)?;
+                crate::workspace_view::capture_node_scoped(&canonical_path, &canonical_repo, &head, exclusions)?;
                 return Ok(head);
             }
             Err(error) if attempt == 3 => return Err(error),
@@ -3020,6 +3035,9 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
         )?;
         let mut status = raw;
         for name in ignored.split('\0').filter(|s| !s.is_empty()) {
+            if status_path_excluded(name, None, None, exclusions) {
+                continue;
+            }
             status.push_str(&format!("!! {name}\0"));
         }
         return Ok(status);

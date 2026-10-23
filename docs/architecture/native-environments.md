@@ -46,7 +46,10 @@ and not a user environment choice:
   temporary activation into a Runtime failure. The OS sandbox/permissions and
   the command's own exit status still apply. Runtime records receipts only when
   a private project-owned environment can be verified; external use is recorded
-  as unbound business execution. No task-text parser, extra binding message or maintenance Agent is involved.
+  as unbound business execution. Discovery accepts both roots: a genuine project
+  `.venv` stays in W and binds as workspace-owned, while a prefix provisioned
+  under S binds as state-owned; the receipt and L record the owning root. No
+  task-text parser, extra binding message or maintenance Agent is involved.
 - After drain, Runtime tries to identify a unique private candidate's ownership,
   native metadata, actual interpreter prefix and ABI/library-byte evidence, then
   versions L and captures E separately. The current workspace policy treats

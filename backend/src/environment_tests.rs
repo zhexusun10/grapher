@@ -215,6 +215,7 @@ fn history_scope_transition_is_checked_before_touching_code_or_partial_environme
         kind: "venv".into(),
         prefix: "business-env".into(),
         abi: "0".repeat(40),
+        root: None,
     });
     let custom = store.launch(&previous).unwrap();
     assert!(store

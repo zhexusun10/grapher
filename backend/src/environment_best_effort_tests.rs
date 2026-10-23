@@ -33,8 +33,8 @@ fn run_created(runtime: &mut Runtime, job: &Job, prefix: &str) {
         let launch = env.load_launch(&input.launch_ref)?.expanded(Path::new(&job.execution.worktree));
         let session = root.join("sessions").join(&job.execution.id);
         let state = env.state_root(Path::new(&job.execution.worktree))?;
-        let context = crate::environment_discovery::context(
-            &state, &job.execution.id, &launch, &session, true,
+        let context = crate::environment_discovery::context_with_state(
+            Path::new(&job.execution.worktree), Some(&state), &job.execution.id, &launch, &session, true,
         )?;
         let venv = state.join(prefix);
         assert!(!venv.exists(), "unportable input must not be copied");
