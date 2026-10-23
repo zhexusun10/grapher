@@ -256,7 +256,12 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     ? projectRoots.map(root => actualPath(resolve(root)))
     : null;
   const resolvedProjectRoots = actualProjectRoots ?? projectRoots.map(root => resolve(root));
-  const aliases = [...new Set(allWorkspaces.flatMap(variants))].sort((a, b) => b.length - a.length);
+  // The visible namespace unifies the source project and every worktree a turn
+  // may switch to: each renders as the workspace root, matching the physical
+  // mapping that already redirects source paths into the current tree. Without
+  // the source here, a denied source path would echo its physical location
+  // instead of the model-visible `./...` spelling.
+  const aliases = [...new Set([...allWorkspaces, ...projectRoots].flatMap(variants))].sort((a, b) => b.length - a.length);
   const projects = [...new Set(projectRoots.flatMap(variants))].sort((a, b) => b.length - a.length);
   const boundary = c => c === undefined || /[\s\\/"'`<>:;,&|()\[\]{}]/.test(c);
   function replaceable(text, at, length) {

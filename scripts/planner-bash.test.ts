@@ -195,14 +195,19 @@ test('Planner Bash never exposes Grapher control paths to the model shell', { ti
       `model shell leaked a Pi/editor path:\n${output}`);
     assert.ok(output.includes('GIT_ASKPASS=C:\\ide\\git\\askpass.sh'), `the credential helper must stay:\n${output}`);
     assert.ok(output.includes('VSCODE_GIT_ASKPASS_NODE=C:\\ide\\node.exe'), output);
-    const tmpLine = output.split('\n').find(line => line.startsWith('TMPDIR='));
-    assert.ok(tmpLine, output);
+    // Git Bash resets TMPDIR/TMP/TEMP to its own /tmp but keeps
+    // XDG_RUNTIME_DIR, so the Run cache scratch is whichever binding survives.
     // The model-visible spelling may be host or Git Bash form; the invariant is
-    // that the scratch is the cache tmp and never the session/data directory.
-    const scratch = tmpLine!.slice('TMPDIR='.length);
-    assert.ok(scratch.endsWith('/tmp') || scratch.endsWith('\\tmp'), output);
-    assert.ok(scratch.includes(cache.split(/[\\/]/).pop()!), output);
-    assert.ok(!/[\\/]data[\\/]/i.test(scratch), output);
+    // that some temp binding is the cache tmp and none reveals the session/data
+    // directory.
+    const scratchValues = output.split('\n')
+      .filter(line => /^(?:TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR)=/.test(line))
+      .map(line => line.slice(line.indexOf('=') + 1));
+    assert.ok(scratchValues.length, output);
+    const cacheName = cache.split(/[\\/]/).pop()!;
+    assert.ok(scratchValues.some(value =>
+      (value.endsWith('/tmp') || value.endsWith('\\tmp')) && value.includes(cacheName)), output);
+    assert.ok(scratchValues.every(value => !/[\\/]data[\\/]/i.test(value)), output);
   } finally {
     if (previousCache === undefined) delete process.env.GRAPHER_CACHE_DIR;
     else process.env.GRAPHER_CACHE_DIR = previousCache;
