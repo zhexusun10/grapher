@@ -379,8 +379,9 @@ test("completed write-back details live inside the topology overview with copy a
       "there is no separate execution-completed card");
     assert.match(await overview.locator(".plan-summary-header").innerText(), /Execution graph overview/);
     assert.equal(await details.locator(".pub-card-path").innerText(), publication.repository);
-    assert.match(await details.innerText(), /Completed all 1/);
-    assert.match(await details.innerText(), /Results from 1 terminal nodes/);
+    // The write-back details show the target workspace and completion time; the
+    // former summary line was removed with its copy.
+    assert.doesNotMatch(await details.innerText(), /Completed all|terminal nodes|Results have been combined/);
     assert.equal(await details.locator(".pub-card-time").innerText(), await page.evaluate(stamp =>
       new Date(stamp).toLocaleString("en-US"), completedAt));
     await details.getByRole("button", { name: "Copy workspace directory", exact: true }).click();
@@ -395,7 +396,6 @@ test("completed write-back details live inside the topology overview with copy a
     // still belong to the same overview, using the configured workspace.
     await page.evaluate(() => window.audit.setPublicationResult(null));
     await details.locator(".pub-card-path").filter({ hasText: "/mock" }).waitFor();
-    assert.match(await details.innerText(), /Results have been combined and written/);
     assert.equal(await overview.count(), 1);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
@@ -1749,7 +1749,7 @@ test("actual App stop preserves a sent Planner follow-up and the next unsent dra
   } finally { streamResponse?.destroy(); streamResponse = undefined; await context.close(); }
 });
 
-test("switching conversations on a large viewport never flashes the top user prompt during multi-page or multi-turn history fill", { timeout: 45_000 }, async () => {
+test("switching conversations on a large viewport stays anchored to the newest rows while history fills", { timeout: 45_000 }, async () => {
   const config = { repository: "/mock/large-switch", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
@@ -1916,13 +1916,40 @@ test("switching conversations on a large viewport never flashes the top user pro
       });
       assert.ok(samples.length >= 3, `${runId}: expected visible frame samples`);
       for (const frame of samples) {
-        assert.equal(frame.historyFilled, true,
-          `${runId}: history appeared before the initial viewport fill: ${JSON.stringify(frame)}`);
-        assert.equal(frame.topPromptVisible, false,
-          `${runId}: top user prompt flashed on screen during switch: ${JSON.stringify(frame)}`);
+        // The conversation reveals on the first byte page and fills its viewport
+        // behind the visible frame. It must stay anchored to the newest rows so
+        // the fill never jumps the reader or drops them mid-history.
         assert.ok(frame.distanceFromBottom <= 35,
           `${runId}: visible frame was not anchored at the bottom: ${JSON.stringify(frame)}`);
       }
+      // The fill still completes without any user gesture, and once it has grown
+      // the conversation the top user prompt is scrolled out instead of left on
+      // screen (a short tail legitimately fits the viewport until then).
+      await page.waitForFunction(targetRunId => {
+        const cache = window.switchCache;
+        return targetRunId === "graph-paged"
+          ? cache.planningTranscriptCache.has("graph-paged:plan-older")
+          : targetRunId === "serial-paged"
+            ? cache.executionTranscriptCache.get("serial-paged:exec-paged")?.startOffset === 0
+            : cache.executionTranscriptCache.has("serial-multiturn:exec-turn-1") &&
+              cache.executionTranscriptCache.has("serial-multiturn:exec-turn-2");
+      }, runId, { timeout: 5000 });
+      await page.waitForTimeout(60);
+      const settled = await page.evaluate(targetRunId => {
+        const scroll = document.querySelector(".initial-query-scroll");
+        const topPrompt = [...document.querySelectorAll(".chat-bubble-user")].find(el =>
+          el.textContent?.includes(`TOP_USER_GOAL_${targetRunId}`));
+        const scrollRect = scroll.getBoundingClientRect();
+        const promptRect = topPrompt.getBoundingClientRect();
+        return {
+          distanceFromBottom: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+          topPromptVisible: promptRect.bottom > scrollRect.top + 4 && promptRect.top < scrollRect.bottom,
+        };
+      }, runId);
+      assert.equal(settled.topPromptVisible, false,
+        `${runId}: top user prompt flashed back into view after the fill settled`);
+      assert.ok(settled.distanceFromBottom <= 35,
+        `${runId}: settled frame was not anchored at the bottom: ${JSON.stringify(settled)}`);
     };
     for (const reducedMotion of ["no-preference", "reduce"]) {
       await page.emulateMedia({ reducedMotion });

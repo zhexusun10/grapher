@@ -51,7 +51,7 @@ function Fixture() {
   const [running, setRunning] = useState(true);
   const [empty, setEmpty] = useState(false);
   const [revision, setRevision] = useState(0);
-  const [selected, setSelected] = useState(mode === "node" ? "worker" : mode === "merger" ? publicationMergerCardId : "");
+  const [selected, setSelected] = useState(mode === "node" || mode === "waiting" ? "worker" : mode === "merger" ? publicationMergerCardId : "");
   const [selectedMergerId, setSelectedMergerId] = useState("");
   const summary = buildSummaryFromFiles(empty ? [] : (writeDebug ? [{ path: "src/components/WriteOnly.tsx", status: "added" as const, additions: 2, deletions: 0, source: "write" as const }] : shownFiles).map((file, index) => ({
     ...file, additions: file.additions + (index === 0 ? revision : 0),
@@ -67,10 +67,10 @@ function Fixture() {
     ...emptySnapshot, runId: "changes-run", config, planType: mode === "serial" ? "serial" : "graph",
     approved: true, phase: running ? "running" : "completed",
     graph: { originalGoal: "Review the file changes in this conversation.", nodes: [{ name: "worker", task: "Implement the preview component." }], edges: [] },
-    nodes: { worker: { status: running ? "running" : "completed", revision: 0, head: null, instruction: "", error: null } },
-    executions: mode === "planner" || mode === "merger" ? [] : [execution],
+    nodes: { worker: { status: mode === "waiting" ? "waiting" : running ? "running" : "completed", revision: 0, head: null, instruction: "", error: null } },
+    executions: mode === "planner" || mode === "merger" || mode === "waiting" ? [] : [execution],
     mergers: mode === "merger" ? [{ ...execution, id: "merger-execution", node: "merger" }] : [],
-    fileChanges: mode === "planner" ? summary : undefined,
+    fileChanges: mode === "planner" || mode === "waiting" ? summary : undefined,
   };
   (window as any).changesAudit = {
     settle: () => setRunning(false), empty: () => setEmpty(true),

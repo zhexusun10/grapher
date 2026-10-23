@@ -539,6 +539,80 @@ fn sha256_repository_prepares_and_materializes_project_bytes() {
     .unwrap();
 }
 
+#[test]
+fn generated_artifacts_are_not_collected_unless_tracked() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    for (path, value) in [
+        ("node_modules/pkg/index.js", "dep\n"),
+        (".next/build-id", "build\n"),
+        ("src/__pycache__/mod.pyc", "bytecode\n"),
+        ("tsconfig.tsbuildinfo", "cache\n"),
+        ("dist/authored.txt", "authored\n"),
+    ] {
+        fs::create_dir_all(source.join(path).parent().unwrap()).unwrap();
+        fs::write(source.join(path), value).unwrap();
+    }
+    // A generated-looking file that the user committed is authored content.
+    fs::write(source.join("committed.pyc"), "tracked bytecode\n").unwrap();
+    workspace::git(&source, &["add", "-f", "committed.pyc"]).unwrap();
+    workspace::git(&source, &["commit", "-qm", "commit bytecode"]).unwrap();
+
+    let assert_collected = |target: &Path| {
+        assert!(!target.join("node_modules").exists(), "node_modules must not be collected");
+        assert!(!target.join(".next").exists(), ".next must not be collected");
+        assert!(!target.join("src/__pycache__").exists(), "__pycache__ must not be collected");
+        assert!(!target.join("tsconfig.tsbuildinfo").exists(), "tsbuildinfo must not be collected");
+        // An ambiguous authored directory and a committed generated file stay.
+        assert_eq!(bytes(&target.join("dist/authored.txt")), b"authored\n");
+        assert_eq!(bytes(&target.join("committed.pyc")), b"tracked bytecode\n");
+    };
+
+    // Default snapshot (scanned/staged project view).
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let target = slot(&temp, "generated");
+    workspace::prepare(&source, &target, &base, &[]).unwrap();
+    assert_collected(&target);
+
+    // A non-empty exclusion forces the forced-`git add` path too.
+    let scoped = workspace::snapshot_repository_scoped(&source, &[".venv".into()]).unwrap();
+    let forced = slot(&temp, "generated-forced-add");
+    workspace::prepare(&source, &forced, &scoped, &[]).unwrap();
+    assert_collected(&forced);
+}
+
+#[test]
+fn completed_view_check_tolerates_recorded_generated_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "tolerant");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(node.join("result.txt"), "r\n").unwrap();
+    let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+    verify_result(&node, &source, &head).unwrap();
+
+    // Simulate a view recorded before the generated-artifact policy: it still
+    // lists an untracked generated artifact that the current scan omits.
+    let record = record_path(&source, &head).unwrap();
+    let mut view = load(&record).unwrap();
+    view.entries.insert(
+        "node_modules/pkg/index.js".into(),
+        Entry::Directory {
+            mode: 0,
+            extra: crate::workspace_metadata::Extra::default(),
+        },
+    );
+    save(&record, &view).unwrap();
+
+    // The completed-view check must not fail on that difference alone.
+    verify_result(&node, &source, &head).unwrap();
+
+    // A real content change is still detected.
+    fs::write(node.join("result.txt"), "changed\n").unwrap();
+    assert!(verify_result(&node, &source, &head).is_err());
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_long_path_fan_in_prepares_after_conflict_and_retry() {
@@ -546,7 +620,9 @@ fn windows_long_path_fan_in_prepares_after_conflict_and_retry() {
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);
     let base = workspace::snapshot_repository(&source).unwrap();
-    let mut relative = PathBuf::from("UI/node_modules");
+    // A long authored path (not a generated artifact name, which the runtime
+    // no longer collects).
+    let mut relative = PathBuf::from("UI/deep");
     while source.join(&relative).as_os_str().encode_wide().count() < 280 {
         relative.push("nested-dependency");
     }

@@ -7,11 +7,6 @@
   color: var(--text-primary);
 }
 
-.pub-card-icon {
-  color: var(--status-success);
-  flex-shrink: 0;
-}
-
 .pub-card-body {
   display: flex;
   flex-direction: column;
@@ -96,16 +91,6 @@
   font-size: 11px;
   color: var(--text-secondary);
   font-family: var(--font-mono, monospace);
-}
-
-.pub-card-summary-tip {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--text-secondary);
-  line-height: 1.5;
-  padding: 0 2px;
 }
 
 /* Merger 现场记录折叠面板 */

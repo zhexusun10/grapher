@@ -2,7 +2,7 @@ import { t } from "../i18n";
 import { invalidateTranscriptCaches } from "./transcriptCache";
 import { enableRuntimeEvents } from "./runtimeEvents";
 import { RequestTimeoutError, withRequestTimeout } from "./requestTimeout";
-import type { Bootstrap, Config, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
+import type { Bootstrap, Config, FileChangeSummary, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
 
 const filesCache = new Map<string, string[]>();
 const skillsCache = new Map<string, SkillItem[]>();
@@ -238,6 +238,9 @@ export const runtimeService = {
   getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false, tail = false, before?: number, limit?: number) =>
     request<{ runId: string; executionId: string; content: string; startOffset?: number; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
       "get_execution_output", { runId, executionId, offset, full, ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
+  getFileChanges: (runId: string, executionId?: string, signal?: AbortSignal) =>
+    request<{ runId: string; executionId: string | null; summary: FileChangeSummary }>(
+      "get_file_changes", { runId, ...(executionId ? { executionId } : {}) }, signal),
   getMergerPrompt: async (runId: string, executionId: string, signal?: AbortSignal): Promise<string> => {
     const res = await request<{ runId: string; executionId: string; prompt: string }>(
       "get_merger_prompt", { runId, executionId }, signal

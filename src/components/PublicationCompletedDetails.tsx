@@ -1,6 +1,6 @@
 import { t, locale } from "../i18n";
 import React, { useState, useMemo } from "react";
-import { CheckCircle2, FolderGit2, Clock, Copy, Check, GitMerge } from "lucide-react";
+import { FolderGit2, Clock, Copy, Check, GitMerge } from "lucide-react";
 import type { Snapshot, Execution } from "../types";
 import { ExecutionTranscript } from "./ExecutionTranscript";
 import "./PublicationCompletedDetails.css";
@@ -40,7 +40,6 @@ export const PublicationCompletedDetails: React.FC<PublicationCompletedDetailsPr
   };
 
   const completedAtStr = completedAt ? new Date(completedAt).toLocaleString(locale) : "";
-  const headsCount = publication?.heads?.length ?? state.graph.nodes.length;
 
   return (
     <div className="plan-publication-details" data-testid="publication-completed-details">
@@ -76,13 +75,6 @@ export const PublicationCompletedDetails: React.FC<PublicationCompletedDetailsPr
               <span className="pub-card-time">{completedAtStr}</span>
             </div>
           )}
-        </div>
-
-        <div className="pub-card-summary-tip">
-          <CheckCircle2 size={14} className="pub-card-icon" aria-hidden="true" />
-          <span>
-            {t("已完成所有 ")}{state.graph.nodes.length}{t(" 个规划节点的执行，")}{publication?.heads ? t("{0} 个拓扑终点及上游变更已聚合并写回目标目录。", headsCount) : t("已聚合写入源文件工作区。")}
-          </span>
         </div>
 
         {mergers.length > 0 && activeMerger && (

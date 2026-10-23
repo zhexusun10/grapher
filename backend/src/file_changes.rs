@@ -106,6 +106,14 @@ struct FileChangesCache {
     live: HashMap<(String, String), ChangeAccumulator>,
     /// Same, for streaming Planner turns (writes before any node runs).
     planning_live: HashMap<(String, String), ChangeAccumulator>,
+    /// Runs whose durable sidecar is already loaded into this cache. The
+    /// sidecar can be tens of MiB, so it is parsed once per process rather
+    /// than on every warm call.
+    hydrated_runs: std::collections::HashSet<String>,
+    /// Executions whose sidecar summary already merged their log and Git parts.
+    /// Without this the warm path would re-run an expensive Git diff for every
+    /// settled execution on each cold access.
+    hydrated_executions: std::collections::HashSet<(String, String)>,
 }
 
 static CACHE: OnceLock<Mutex<FileChangesCache>> = OnceLock::new();
@@ -122,6 +130,8 @@ pub fn invalidate_run(run_id: &str) {
         guard.planning_changes.retain(|(r, _), _| r != run_id);
         guard.live.retain(|(r, _), _| r != run_id);
         guard.planning_live.retain(|(r, _), _| r != run_id);
+        guard.hydrated_runs.remove(run_id);
+        guard.hydrated_executions.retain(|(r, _)| r != run_id);
     }
 }
 
@@ -133,6 +143,8 @@ pub fn clear_all() {
         guard.planning_changes.clear();
         guard.live.clear();
         guard.planning_live.clear();
+        guard.hydrated_runs.clear();
+        guard.hydrated_executions.clear();
     }
 }
 
@@ -934,6 +946,30 @@ pub fn merge_summaries(summaries: &[FileChangeSummary], is_running: bool) -> Fil
     FileChangeSummary::from_files(map.into_values().collect(), any_running, active_file_path)
 }
 
+/// How many rows the browser ever renders. A build-heavy Run can produce tens of
+/// thousands of paths (a Next.js `.next` tree alone is ~36k files); sending them
+/// all on every snapshot inflates the first-screen response from a few KiB to
+/// tens of MiB. Keep the true totals and only the most notable rows, matching
+/// the browser's added/deleted-first, lines-descending display order.
+pub const MAX_DISPLAYED_FILE_CHANGES: usize = 60;
+
+pub fn cap_summary_files(mut summary: FileChangeSummary, limit: usize) -> FileChangeSummary {
+    if summary.files.len() <= limit {
+        return summary;
+    }
+    let mut indices: Vec<usize> = (0..summary.files.len()).collect();
+    indices.sort_by(|a, b| {
+        let lead = |item: &FileChangeItem| matches!(item.status.as_str(), "added" | "deleted");
+        let changed = |item: &FileChangeItem| item.additions + item.deletions;
+        let (first, second) = (&summary.files[*a], &summary.files[*b]);
+        lead(second).cmp(&lead(first)).then_with(|| changed(second).cmp(&changed(first)))
+    });
+    indices.truncate(limit);
+    let files = indices.iter().map(|index| summary.files[*index].clone()).collect();
+    summary.files = files;
+    summary
+}
+
 pub fn update_from_log_text(
     run_id: &str,
     execution_id: &str,
@@ -1319,11 +1355,17 @@ pub fn persist_run(root: &Path, run_id: &str) -> Result<(), String> {
 /// after a restart does not re-read megabytes of execution logs.
 pub fn hydrate_run(root: &Path, run_id: &str) {
     let Some(path) = persisted_path(root, run_id) else { return; };
+    if cache().lock().map(|guard| guard.hydrated_runs.contains(run_id)).unwrap_or(false) {
+        return;
+    }
     let Ok(text) = fs::read_to_string(&path) else { return; };
     let Ok(saved) = serde_json::from_str::<PersistedRunChanges>(&text) else { return; };
     let Ok(mut guard) = cache().lock() else { return; };
     let key_run = run_id.to_string();
     for (execution_id, summary) in saved.executions {
+        guard
+            .hydrated_executions
+            .insert((key_run.clone(), execution_id.clone()));
         guard
             .log_changes
             .entry((key_run.clone(), execution_id))
@@ -1341,6 +1383,7 @@ pub fn hydrate_run(root: &Path, run_id: &str) {
             .entry(key_run)
             .or_insert(publication);
     }
+    guard.hydrated_runs.insert(run_id.to_string());
 }
 
 /// Warm cache for a Run (called on load/history and by the summary endpoint).
@@ -1414,7 +1457,8 @@ pub fn warm_run_changes(state: &Snapshot, store: &crate::store::Store, root: Opt
                 let has_git = cache()
                     .lock()
                     .ok()
-                    .is_some_and(|g| g.git_changes.contains_key(&key));
+                    .is_some_and(|g| g.git_changes.contains_key(&key)
+                        || g.hydrated_executions.contains(&key));
                 if !has_git && !repo_str.is_empty() {
                     record_git_commit_changes(
                         &state.run_id,

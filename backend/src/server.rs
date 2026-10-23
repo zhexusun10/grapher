@@ -880,9 +880,9 @@ fn snapshot(service: &Arc<Service>) -> Result<Snapshot, String> {
 
 fn history(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> {
     let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-    let snapshot = runtime.store.load(&run_id)?;
-    crate::file_changes::warm_run_changes(&snapshot, &runtime.store, Some(&runtime.root));
-    Ok(snapshot)
+    // Labels and history fallbacks never read file changes, so do not parse a
+    // potentially huge sidecar (or replay logs) just to answer them.
+    runtime.store.load(&run_id)
 }
 
 fn load_run(run_id: String, service: &Arc<Service>) -> Result<Snapshot, String> {
@@ -4393,16 +4393,23 @@ fn get_file_changes(
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let state = {
+    let (state, root) = {
         let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
         let state = if requested_run_id.is_empty() || runtime.state.run_id == requested_run_id {
             runtime.state.clone()
         } else {
             runtime.store.load(&requested_run_id)?
         };
-        crate::file_changes::warm_run_changes(&state, &runtime.store, Some(&runtime.root));
-        state
+        (state, runtime.root.clone())
     };
+    // Restore the durable sidecar before taking the Run lock for the log-based
+    // warm: it can be tens of MiB, and an on-demand change read must not stall
+    // the run's polling or its Planner transcript.
+    crate::file_changes::hydrate_run(&root, &state.run_id);
+    {
+        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        crate::file_changes::warm_run_changes(&state, &runtime.store, Some(&root));
+    }
 
     let summary = if let Some(exec_id) = &execution_id {
         if let Some(exec) = state
@@ -4436,6 +4443,10 @@ fn get_file_changes(
     } else {
         crate::file_changes::get_cached_run_changes(&state).unwrap_or_default()
     };
+    // The browser renders at most a small slice; keep the true totals and cap
+    // the transferred rows so a build-heavy Run stays cheap to display.
+    let summary = crate::file_changes::cap_summary_files(
+        summary, crate::file_changes::MAX_DISPLAYED_FILE_CHANGES);
 
     Ok(serde_json::json!({
         "runId": state.run_id,

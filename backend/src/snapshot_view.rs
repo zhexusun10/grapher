@@ -43,7 +43,7 @@ fn execution_metadata(execution: &Execution) -> ExecutionMetadata<'_> {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum EventMetadata<'a> {
-    Original(&'a Event),
+    Projected(Value),
     Finished {
         #[serde(rename = "type")]
         kind: &'static str,
@@ -52,6 +52,23 @@ enum EventMetadata<'a> {
         sequence: i64,
         timestamp: u64,
     },
+}
+
+/// The browser reads the projected `graph`/`executions` fields, never the
+/// durable graph, config or environment payloads embedded in a business event.
+/// Re-sending them on every metadata poll only inflates the first-screen
+/// response, so keep event identity, the Planner summary and the started
+/// Execution's identity, and drop the rest.
+fn metadata_event(event: &Event) -> Value {
+    let Ok(mut value) = serde_json::to_value(event) else { return Value::Null };
+    let Some(object) = value.as_object_mut() else { return value };
+    for key in ["graph", "config", "input", "result", "descriptor", "files", "settings"] {
+        object.remove(key);
+    }
+    if let Some(execution) = object.get_mut("execution").and_then(Value::as_object_mut) {
+        execution.retain(|key, _| matches!(key.as_str(), "id" | "node"));
+    }
+    value
 }
 
 /// Durable projection only: history stays in events, transcripts in execution_logs.
@@ -85,7 +102,7 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
             kind: "finished", execution_id, head,
             sequence: event.sequence, timestamp: event.timestamp,
         }),
-        _ => Some(EventMetadata::Original(event)),
+        _ => Some(EventMetadata::Projected(metadata_event(event))),
     }).collect::<Vec<_>>();
     let mut metadata = json!({
         "runId": state.run_id, "planningId": state.planning_id, "planning": state.planning,
@@ -129,19 +146,11 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         metadata["planType"] = json!(plan_type);
     }
     if !state.run_id.is_empty() {
-        for (idx, exec) in state.executions.iter().enumerate() {
-            if let Some(changes) = crate::file_changes::get_cached_execution_changes(&state.run_id, exec) {
-                metadata["executions"][idx]["fileChanges"] = json!(changes);
-            }
-        }
-        for (idx, exec) in state.mergers.iter().enumerate() {
-            if let Some(changes) = crate::file_changes::get_cached_execution_changes(&state.run_id, exec) {
-                metadata["mergers"][idx]["fileChanges"] = json!(changes);
-            }
-        }
-        if let Some(run_changes) = crate::file_changes::get_cached_run_changes(state) {
-            metadata["fileChanges"] = json!(run_changes);
-        }
+        // File changes are read on demand through `get_file_changes`: a
+        // build-heavy Run can hold tens of thousands of paths, and the first
+        // screen only shows a collapsed trigger. Mark the omission so the
+        // browser knows to fetch instead of reading a stale empty summary.
+        metadata["fileChangesOmitted"] = json!(true);
     }
     Ok(metadata)
 }
@@ -149,7 +158,7 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Event, EventKind};
+    use crate::model::{Event, EventKind, Graph, PlanningSummary};
 
     #[test]
     fn file_change_metadata_exposes_counts_for_the_browser() {
@@ -178,13 +187,18 @@ mod tests {
         );
 
         let projected = snapshot_metadata(&state).unwrap();
-        let changes = &projected["executions"][0]["fileChanges"];
-        assert_eq!(changes["totalFiles"], 1);
-        assert_eq!(changes["files"][0]["path"], "src/a.ts");
-        assert_eq!(changes["files"][0]["additions"], 1);
-        assert_eq!(changes["files"][0]["deletions"], 1);
-        assert!(changes["files"][0].get("diff").is_none());
-        assert_eq!(projected["fileChanges"]["totalFiles"], 1);
+        assert_eq!(projected["fileChangesOmitted"], true);
+        assert!(projected.get("fileChanges").is_none());
+        assert!(projected["executions"][0].get("fileChanges").is_none());
+        // Counts remain available through the on-demand projection.
+        let changes = crate::file_changes::get_cached_run_changes(&state).unwrap();
+        let value = serde_json::to_value(crate::file_changes::cap_summary_files(
+            changes, crate::file_changes::MAX_DISPLAYED_FILE_CHANGES)).unwrap();
+        assert_eq!(value["totalFiles"], 1);
+        assert_eq!(value["files"][0]["path"], "src/a.ts");
+        assert_eq!(value["files"][0]["additions"], 1);
+        assert_eq!(value["files"][0]["deletions"], 1);
+        assert!(value["files"][0].get("diff").is_none());
         crate::file_changes::invalidate_run("changes-run");
     }
 
@@ -223,5 +237,62 @@ mod tests {
         assert_eq!(metadata["executions"][0]["pid"], 123);
         assert_eq!(metadata["executions"][0]["output"], "");
         assert_eq!(metadata["executions"][0]["outputBytes"], state.executions[0].output.len());
+    }
+
+    #[test]
+    fn metadata_events_drop_durable_payloads_but_keep_conversation_fields() {
+        let mut state = Snapshot::default();
+        state.run_id = "trim-run".into();
+        state.events.push(Event {
+            sequence: 1, timestamp: 1,
+            kind: EventKind::Started {
+                execution: Execution {
+                    id: "worker".into(), node: "task".into(), revision: 1, attempt: 1,
+                    session_id: "s".into(), worktree: "/repo".into(), before: String::new(),
+                    workspace_lineage: vec!["/repo".into()], after: None, input: None, result: None,
+                    status: "completed".into(), started_at: 1, completed_at: Some(2),
+                    metrics: None, output_bytes: 0, pid: None, output: "secret".into(),
+                },
+                message_sequences: Some(vec![1]), fresh_restart: false,
+            },
+        });
+        state.events.push(Event {
+            sequence: 2, timestamp: 2,
+            kind: EventKind::GraphRevised {
+                graph: Graph { original_goal: "goal".into(), nodes: vec![], edges: vec![] },
+                planning_id: "plan".into(), planning: PlanningSummary::default(),
+                invalidated: vec![], source_head: None,
+            },
+        });
+        let metadata = snapshot_metadata(&state).unwrap();
+        let events = metadata["events"].as_array().unwrap();
+        // The browser needs the Execution identity, not its worktree/output.
+        assert_eq!(events[0]["execution"], json!({"id": "worker", "node": "task"}));
+        assert_eq!(events[0]["message_sequences"], json!([1]));
+        // The projected `graph`/`config` fields carry these; the event copy is redundant.
+        assert!(events[1].get("graph").is_none());
+        assert!(events[1].get("config").is_none());
+        assert_eq!(events[1]["planning_id"], "plan");
+        assert!(events[1]["planning"].is_object());
+    }
+
+    #[test]
+    fn metadata_caps_large_change_lists_but_keeps_true_totals() {
+        use crate::file_changes::{FileChangeItem, FileChangeSummary};
+        let files = (0..120).map(|index| FileChangeItem {
+            path: format!("UI/.next/standalone/node_modules/pkg-{index}.js"),
+            old_path: None,
+            status: if index % 40 == 0 { "added".into() } else { "modified".into() },
+            additions: index, deletions: 0, is_running: false,
+            nodes: vec![], execution_ids: vec![], source: Some("git".into()),
+        }).collect::<Vec<_>>();
+        let summary = FileChangeSummary::from_files(files, false, None);
+        let capped = crate::file_changes::cap_summary_files(
+            summary, crate::file_changes::MAX_DISPLAYED_FILE_CHANGES);
+        let projected = serde_json::to_value(&capped).unwrap();
+        assert_eq!(projected["totalFiles"], 120);
+        assert_eq!(projected["files"].as_array().unwrap().len(), crate::file_changes::MAX_DISPLAYED_FILE_CHANGES);
+        // Added files lead the retained slice, matching the browser display order.
+        assert_eq!(projected["files"][0]["status"], "added");
     }
 }

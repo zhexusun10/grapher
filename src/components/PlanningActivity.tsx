@@ -109,12 +109,14 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     notifyLoading(!initialReady);
     return () => notifyLoading(false);
   }, [initialReady, notifyLoading]);
+  // Reveal on the newest revision's first page. The viewport auto-fill keeps
+  // running behind the painted overview instead of gating the reveal on it.
   useLayoutEffect(() => {
-    if (initialReady && !announcedRef.current) {
+    if (ready && !announcedRef.current) {
       announcedRef.current = true;
       notifyReady();
     }
-  }, [initialReady, notifyReady]);
+  }, [ready, notifyReady]);
 
   useEffect(() => {
     const abort = new AbortController();

@@ -28,7 +28,7 @@ export const WorkspaceChangesTrigger = React.memo(function WorkspaceChangesTrigg
 /** Rendering tens of thousands of rows freezes the workbench even while the
  * disclosure stays collapsed, so only the first slice is mounted; the rest is
  * implied by a trailing ellipsis row. */
-export const MAX_RENDERED_FILE_CHANGES = 500;
+export const MAX_RENDERED_FILE_CHANGES = 50;
 
 const LEAD_STATUSES = new Set<FileChangeItem["status"]>(["added", "deleted"]);
 
@@ -80,7 +80,7 @@ export const WorkspaceChangesPanel = React.memo(function WorkspaceChangesPanel({
           ? <>
               {visibleFiles.map(item => <ChangedFileRow key={item.path} item={item} />)}
               {truncated && <div className="changes-panel-truncated" data-testid="workspace-changes-truncated">
-                {t("… 其余 {0} 个文件变更已省略", orderedFiles.length - MAX_RENDERED_FILE_CHANGES)}
+                {t("… 其余 {0} 个文件变更已省略", Math.max(0, summary.totalFiles - MAX_RENDERED_FILE_CHANGES))}
               </div>}
             </>
           : <div className="changes-panel-empty">{t("当前会话尚未产生文件新增、修改或删除")}</div>}

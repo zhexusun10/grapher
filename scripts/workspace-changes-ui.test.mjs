@@ -151,6 +151,25 @@ test("full paths and backend counts update live; switching scope keeps one entry
   } finally { await context.close(); }
 });
 
+test("waiting node scopes to its own (empty) executions, not the run aggregate", { timeout: 30_000 }, async () => {
+  const { page, context, errors } = await fixture("waiting");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    const panel = page.getByTestId("workspace-changes-panel");
+    // The run aggregate carries every node's six files, but the selected node
+    // has not executed yet, so its conversation must not claim those changes.
+    await expect(trigger).toHaveText(/No file changes/);
+    await trigger.click();
+    await expect(panel.getByTestId("changed-file-item")).toHaveCount(0);
+    await expect(panel).toContainText("No files added, modified, or deleted in this session yet");
+    // The main view still reads the run-level projection.
+    await page.evaluate(() => window.changesAudit.select(""));
+    await expect(trigger).toContainText("6 files changed");
+    await expect(panel.getByTestId("changed-file-item")).toHaveCount(6);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("trigger matches the session disclosure; totals stay out of it", { timeout: 30_000 }, async () => {
   const { page, context, errors } = await fixture("serial&reference=1");
   try {
@@ -203,19 +222,19 @@ test("added/deleted files lead and each group ranks by changed line count", { ti
   } finally { await context.close(); }
 });
 
-test("large change sets render only the first 500 rows and mark the remainder", { timeout: 30_000 }, async () => {
+test("large change sets render only the first 50 rows and mark the remainder", { timeout: 30_000 }, async () => {
   const { page, context, errors } = await fixture("serial&many=1");
   try {
     const trigger = page.getByTestId("workspace-changes-trigger");
     const panel = page.getByTestId("workspace-changes-panel");
     await expect(trigger).toContainText("1205 files changed");
     // The cap applies while collapsed too: the disclosure keeps children mounted.
-    await expect(panel.getByTestId("changed-file-item")).toHaveCount(500);
+    await expect(panel.getByTestId("changed-file-item")).toHaveCount(50);
     const truncated = panel.getByTestId("workspace-changes-truncated");
     await expect(truncated).toHaveCount(1);
-    await expect(truncated).toContainText("705 more file changes omitted");
+    await expect(truncated).toContainText("1155 more file changes omitted");
     await trigger.click();
-    await expect(panel.getByTestId("changed-file-item")).toHaveCount(500);
+    await expect(panel.getByTestId("changed-file-item")).toHaveCount(50);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

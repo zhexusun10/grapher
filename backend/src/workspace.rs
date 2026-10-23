@@ -3001,6 +3001,92 @@ pub(crate) fn scope_contains(path: &Path, scope: &Path) -> bool {
     Path::new(&key(path)).starts_with(Path::new(&key(scope)))
 }
 
+/// Dependency/bytecode directory names the runtime never treats as authored
+/// source. A package install or interpreter cache is rebuilt from a manifest,
+/// so collecting it would only multiply snapshot, composition and write-back
+/// cost. The files stay on disk for the agent; the runtime just does not
+/// collect, compose or publish them. `dist`/`build`/`out`/`target` are
+/// deliberately absent: they are ambiguous with authored directories.
+pub(crate) const GENERATED_ARTIFACT_DIRS: &[&str] = &[
+    "node_modules",
+    ".next",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".turbo",
+    ".parcel-cache",
+];
+/// Compiler/interpreter cache file suffixes.
+pub(crate) const GENERATED_ARTIFACT_SUFFIXES: &[&str] = &[".pyc", ".pyo", ".tsbuildinfo"];
+
+/// True when any path component names a dependency/bytecode directory, or the
+/// file name ends with a generated-artifact suffix.
+pub(crate) fn is_generated_artifact(relative: &Path) -> bool {
+    if relative.components().any(|part| match part {
+        std::path::Component::Normal(name) => {
+            let name = name.to_string_lossy();
+            GENERATED_ARTIFACT_DIRS
+                .iter()
+                .any(|dir| name.eq_ignore_ascii_case(dir))
+        }
+        _ => false,
+    }) {
+        return true;
+    }
+    relative.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        GENERATED_ARTIFACT_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+    })
+}
+
+/// The project's own Git-tracked paths (never the force-collected graph index).
+/// A plain folder has no project Git, so its tracked set is empty.
+pub(crate) fn project_tracked_paths(root: &Path) -> std::collections::BTreeSet<String> {
+    project_git(root, &["ls-files", "-z", "--cached"])
+        .ok()
+        .map(|raw| {
+            raw.split('\0')
+                .filter(|name| !name.is_empty())
+                .map(|name| name.replace('\\', "/"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One collection-boundary decision shared by every snapshot/scan/copy path.
+/// Managed environment/cache scopes are always excluded. A generated artifact
+/// is excluded only when the project's own Git does not track it, so committed
+/// dependencies, build output or bytecode stay authored project content.
+pub(crate) fn collection_excluded(
+    relative: &Path,
+    tracked: &std::collections::BTreeSet<String>,
+    exclusions: &[String],
+) -> bool {
+    if exclusions
+        .iter()
+        .any(|scope| scope_contains(relative, Path::new(scope)))
+    {
+        return true;
+    }
+    is_generated_artifact(relative) && !tracked.contains(&relative.to_string_lossy().replace('\\', "/"))
+}
+
+/// Git pathspecs that exclude generated artifacts from a forced `git add`.
+fn generated_artifact_pathspecs() -> Vec<String> {
+    let mut specs = Vec::new();
+    for dir in GENERATED_ARTIFACT_DIRS {
+        specs.push(format!(":(exclude,glob,icase)**/{dir}"));
+        specs.push(format!(":(exclude,glob,icase)**/{dir}/**"));
+    }
+    for suffix in GENERATED_ARTIFACT_SUFFIXES {
+        specs.push(format!(":(exclude,glob,icase)**/*{suffix}"));
+    }
+    specs
+}
+
 pub(crate) fn scoped_args<'a>(base: &[&'a str], exclusions: &'a [String]) -> Vec<String> {
     let mut args: Vec<String> = base.iter().map(|s| s.to_string()).collect();
     if !exclusions.is_empty() {
@@ -3023,19 +3109,24 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
     let args = scoped_args(&["status", "--porcelain", "-z"], exclusions);
     let raw = repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     if crate::workspace_view::is_bound(path) {
-        let ignored = git(
-            path,
-            &[
-                "ls-files",
-                "--others",
-                "--ignored",
-                "--exclude-standard",
-                "-z",
-            ],
-        )?;
+        // Generated artifacts are not collected, so do not enumerate them as
+        // ignored files (a large dependency tree would otherwise be walked here).
+        let mut ignored_args = vec![
+            "ls-files".to_string(),
+            "--others".to_string(),
+            "--ignored".to_string(),
+            "--exclude-standard".to_string(),
+            "-z".to_string(),
+            "--".to_string(),
+            ".".to_string(),
+        ];
+        ignored_args.extend(generated_artifact_pathspecs());
+        let ignored_args = ignored_args.iter().map(String::as_str).collect::<Vec<_>>();
+        let ignored = git(path, &ignored_args)?;
+        let tracked = project_tracked_paths(path);
         let mut status = raw;
         for name in ignored.split('\0').filter(|s| !s.is_empty()) {
-            if status_path_excluded(name, None, None, exclusions) {
+            if status_path_excluded(name, None, None, exclusions, &tracked) {
                 continue;
             }
             status.push_str(&format!("!! {name}\0"));
@@ -3044,7 +3135,7 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
     }
     let mut status = filtered_status(raw, path, exclusions);
     if !cfg!(target_os = "macos") {
-        let args = scoped_args(
+        let mut args = scoped_args(
             &[
                 "ls-files",
                 "--others",
@@ -3054,6 +3145,11 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
             ],
             exclusions,
         );
+        // Generated artifacts are not collected, so do not enumerate them.
+        if exclusions.is_empty() {
+            args.extend(["--".to_string(), ".".to_string()]);
+        }
+        args.extend(generated_artifact_pathspecs());
         let ignored = repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         let ignored = ignored_host_metadata(&ignored, path, exclusions);
         if !ignored.is_empty() {
@@ -3066,11 +3162,66 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
     Ok(status)
 }
 
+/// Re-stage generated artifacts that the project's own Git tracks, which the
+/// generated-artifact `git add` pathspecs would otherwise drop. Deletions are
+/// recorded explicitly so a removed tracked artifact is not resurrected.
+fn restore_tracked_generated(
+    path: &Path,
+    tracked: &std::collections::BTreeSet<String>,
+    exclusions: &[String],
+    local: bool,
+) -> Result<(), String> {
+    let generated: Vec<&String> = tracked
+        .iter()
+        .filter(|name| {
+            // A tracked artifact inside a managed scope stays excluded: the
+            // managed scope is runtime-owned even when the user committed it.
+            is_generated_artifact(Path::new(name))
+                && !exclusions
+                    .iter()
+                    .any(|scope| scope_contains(Path::new(name), Path::new(scope)))
+        })
+        .collect();
+    if generated.is_empty() {
+        return Ok(());
+    }
+    let present: Vec<&str> = generated
+        .iter()
+        .filter(|name| path.join(name).exists())
+        .map(|name| name.as_str())
+        .collect();
+    let missing: Vec<&str> = generated
+        .iter()
+        .filter(|name| !path.join(name).exists())
+        .map(|name| name.as_str())
+        .collect();
+    let run = |args: Vec<String>| -> Result<(), String> {
+        let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        if local { git(path, &args) } else { repository_git(path, &args) }.map(|_| ())
+    };
+    if !present.is_empty() {
+        let mut args = vec!["add".to_string(), "-f".to_string(), "--".to_string()];
+        args.extend(present.iter().map(|name| (*name).to_string()));
+        run(args)?;
+    }
+    if !missing.is_empty() {
+        let mut args = vec![
+            "update-index".to_string(),
+            "--force-remove".to_string(),
+            "--".to_string(),
+        ];
+        args.extend(missing.iter().map(|name| (*name).to_string()));
+        run(args)?;
+    }
+    Ok(())
+}
+
 fn status_path_excluded(
     name: &str,
     root: Option<&Path>,
     data: Option<&Path>,
     exclusions: &[String],
+    tracked: &std::collections::BTreeSet<String>,
 ) -> bool {
     if crate::path_identity::is_runtime_metadata_path(Path::new(name)) {
         return true;
@@ -3079,6 +3230,9 @@ fn status_path_excluded(
         .iter()
         .any(|scope| scope_contains(Path::new(name), Path::new(scope)))
     {
+        return true;
+    }
+    if is_generated_artifact(Path::new(name)) && !tracked.contains(&name.replace('\\', "/")) {
         return true;
     }
     root.zip(data).is_some_and(|(root, data)| {
@@ -3097,6 +3251,7 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
     if raw.is_empty() {
         return raw;
     }
+    let tracked = project_tracked_paths(root);
     let root = root.canonicalize().ok();
     let data = data_root().canonicalize().ok();
     let mut lines = Vec::new();
@@ -3107,6 +3262,11 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
         }
         let code = &entry[..2];
         let path = &entry[3..];
+        // Generated artifacts are not collected, so an untracked one is not a
+        // collection-relevant change and must not fail a cleanliness check.
+        if (code == "??" || code == "!!") && is_generated_artifact(Path::new(path)) {
+            continue;
+        }
         let renamed = code.contains('R') || code.contains('C');
         // macOS treats Finder bookkeeping as host metadata. Elsewhere it is an
         // ordinary project file, but tracked edits remain visible on every host.
@@ -3115,7 +3275,7 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
                 continue;
             }
             if code == "!!"
-                && status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions)
+                && status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions, &tracked)
             {
                 continue;
             }
@@ -3134,13 +3294,14 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
 }
 
 fn ignored_host_metadata(raw: &str, root: &Path, exclusions: &[String]) -> String {
+    let tracked = project_tracked_paths(root);
     let root = root.canonicalize().ok();
     let data = data_root().canonicalize().ok();
     raw.split('\0')
         .filter(|path| {
             !path.is_empty()
                 && is_host_metadata_name(path)
-                && !status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions)
+                && !status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions, &tracked)
         })
         .map(|path| format!("!! {path}"))
         .collect::<Vec<_>>()
@@ -3308,6 +3469,10 @@ fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<
             format!(":(exclude,literal){scope}")
         }
     }));
+    // Generated dependency/bytecode artifacts are not collected unless the
+    // project's own Git tracks them (re-added after the add below).
+    let tracked = project_tracked_paths(path);
+    pathspecs.extend(generated_artifact_pathspecs());
     let mut args = vec![
         "add".to_string(),
         "-f".to_string(),
@@ -3337,6 +3502,7 @@ fn stage_scoped_impl(path: &Path, exclusions: &[String], local: bool) -> Result<
     } else {
         repository_git(path, &args)?;
     }
+    restore_tracked_generated(path, &tracked, exclusions, local)?;
     #[cfg(target_os = "macos")]
     stage_tracked_host_metadata_impl(path, local)?;
     Ok(())
@@ -3354,6 +3520,7 @@ pub(crate) fn copy_ordinary_files(
         .map_err(|error| error.to_string())?;
     let source_tracked = tracked_paths(&source)?;
     let destination_tracked = tracked_paths(&destination)?;
+    let project_tracked = project_tracked_paths(&source);
     let runtime_data = runtime_data.canonicalize().ok();
     crate::native_copy::copy_tree(&source, &destination, |relative| {
         let Some(name) = relative.to_str().map(|name| {
@@ -3367,6 +3534,7 @@ pub(crate) fn copy_ordinary_files(
         };
         crate::path_identity::is_runtime_metadata_path(relative)
             || source_tracked.contains(&name)
+            || (is_generated_artifact(relative) && !project_tracked.contains(&name))
             || is_host_metadata(&name)
             || destination_tracked.iter().any(|tracked| {
                 tracked == &name
@@ -3403,7 +3571,8 @@ fn tracked_paths(repository: &Path) -> Result<std::collections::BTreeSet<String>
 pub(crate) fn collection_path_excluded(path: &Path, name: &str, exclusions: &[String]) -> bool {
     let root = path.canonicalize().ok();
     let data = data_root().canonicalize().ok();
-    status_path_excluded(name, root.as_deref(), data.as_deref(), exclusions)
+    let tracked = project_tracked_paths(path);
+    status_path_excluded(name, root.as_deref(), data.as_deref(), exclusions, &tracked)
 }
 
 /// A private Planner/node slot owns its own Git database (visible or hidden).

@@ -292,8 +292,8 @@ fn deliver(repository: &Path, journal: &Path, prepared: &Prepared, standard: boo
     drop(lease);
     let outcome = (|| -> Result<String, String> {
         if standard { verify_source(repository, journal, prepared)?; }
+        let next_index = journal.join("checkout-index");
         if live_tree != final_tree {
-            let next_index = journal.join("checkout-index");
             private_index_git(repository, &next_index, &["read-tree", &live])?;
             if let Err(error) = private_index_git(repository, &next_index, &["update-index", "--refresh"]) {
                 let dirty = private_index_git(repository, &next_index, &["diff", "--name-only", "--no-ext-diff", "--no-textconv", "-z"])?;
@@ -305,9 +305,21 @@ fn deliver(repository: &Path, journal: &Path, prepared: &Prepared, standard: boo
             private_index_git(repository, &next_index, &["read-tree", "-m", "-u", &live, &prepared.result])?;
         }
         if standard { verify_source(repository, journal, prepared)?; }
-        let checked = workspace::snapshot_repository_scoped(repository, exclusions)?;
-        if tree(repository, &checked)? != final_tree {
-            return Err("Source files changed while applying publication; retained checkout requires explicit recovery".into());
+        // Confirm the delivered working tree is exactly the composed result
+        // without a second full metadata scan of every delivered file. A
+        // checkout leaves the private index describing `result`, so its tree
+        // plus a stat-cache diff (only files whose stat moved are re-hashed)
+        // verifies the same content the full snapshot did. When nothing was
+        // written, the already-captured `live` snapshot is the result; the
+        // source is under the publication lease, so no write can race it.
+        if live_tree != final_tree {
+            let _ = private_index_git(repository, &next_index, &["update-index", "--refresh"]);
+            let index_tree = private_index_git(repository, &next_index, &["write-tree"])?.trim().to_string();
+            let dirty = private_index_git(repository, &next_index, &["diff", "--name-only", "--no-ext-diff", "--no-textconv", "-z"])?;
+            let dirty = dirty.split('\0').filter(|path| !path.is_empty()).any(|path| !workspace::collection_path_excluded(repository, path, exclusions));
+            if dirty || index_tree != final_tree {
+                return Err("Source files changed while applying publication; retained checkout requires explicit recovery".into());
+            }
         }
         if standard { verify_source(repository, journal, prepared)?; }
         save_once(&journal.join("installed"), prepared.result.as_bytes())?;

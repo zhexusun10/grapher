@@ -911,6 +911,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const historyReadingRef = useRef(false);
   const isPreparingConversationRef = useRef(true);
   const readyExecutionIdsRef = useRef(new Set<string>());
+  // The first-byte reveal must not let the viewport jump when older pages are
+  // auto-filled behind it. Track the transcripts still filling their initial
+  // viewport so the scroller keeps pinning the newest rows to the bottom.
+  const [loadingExecutionIds, setLoadingExecutionIds] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const [plannerHistoryLoading, setPlannerHistoryLoading] = useState(false);
+  const handleExecutionLoadingChange = useCallback((execId: string, loading: boolean) => {
+    setLoadingExecutionIds(previous => {
+      if (previous.has(execId) === loading) return previous;
+      const next = new Set(previous);
+      if (loading) next.add(execId); else next.delete(execId);
+      return next;
+    });
+  }, []);
+  const initialFillPending = loadingExecutionIds.size > 0 || plannerHistoryLoading;
   const graphCanvasRef = useRef<HTMLDivElement>(null);
   const scrollBottomBtnRef = useRef<HTMLButtonElement>(null);
   const setScrollBottomVisible = useCallback((visible: boolean) => {
@@ -1733,7 +1747,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         if (activeConversationViewRef.current !== key || conversationGenerationRef.current !== generation) return;
         syncViewScroll(key);
         isPreparingConversationRef.current = false;
-        if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptPreparing;
         suppressAutoScrollRef.current = false;
         setScrollBottomVisible(false);
         setReadyConversationKey(key);
@@ -1842,11 +1855,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     setChangesOpenForView(null);
   }, [conversationViewKey]);
 
+  const inNodeScope = !!selectedNode && routeType === "graph";
   const activeScopeExecutions = useMemo(() => (
-    selectedNode && routeType === "graph"
+    inNodeScope
       ? nodeTurns.flatMap((turn) => turn.executions)
       : []
-  ), [selectedNode, routeType, nodeTurns]);
+  ), [inNodeScope, nodeTurns]);
 
   const isCurrentViewWorking =
     selectedNode && routeType === "graph"
@@ -1860,8 +1874,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     state,
     // Node/Merger conversations show only their own executions; the main view
     // uses the run-level projection, which also covers Planner and publication.
-    scopedExecutions:
-      selectedNode && routeType === "graph" ? activeScopeExecutions : undefined,
+    // A waiting node scopes to an empty execution list, which must not fall back
+    // to that run aggregate.
+    scopedExecutions: inNodeScope ? activeScopeExecutions : null,
     isWorking: isCurrentViewWorking,
   });
 
@@ -1982,7 +1997,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
             <div
               className={`initial-query-scroll ${isConversationReady ? "conversation-ready" : "conversation-preparing"}`}
-              data-transcript-preparing={!isConversationReady && !isUserScrolledUpRef.current ? "true" : undefined}
+              data-transcript-preparing={(!isConversationReady || initialFillPending) && !isUserScrolledUpRef.current ? "true" : undefined}
               ref={chatScrollRef}
               onScroll={handleChatScroll}
               style={conversationRevealStyle}
@@ -2130,6 +2145,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   execution={exec}
                                   onUserResize={handleExpandableContentChange}
                                   onInitialOutputReady={handleExecutionOutputReady}
+                                  onLoadingChange={(loading) => handleExecutionLoadingChange(exec.id, loading)}
                                   onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
                                   inlineUserTurnTexts={inlineSteerTexts}
                                   onInlineUserTurnsChange={(texts) => handleInlineUserTurns(exec.id, texts)}
@@ -2266,7 +2282,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           <div className="initial-query-view">
             <div
               className={`initial-query-scroll ${isConversationReady ? "conversation-ready" : "conversation-preparing"}`}
-              data-transcript-preparing={!isConversationReady && !isUserScrolledUpRef.current ? "true" : undefined}
+              data-transcript-preparing={(!isConversationReady || initialFillPending) && !isUserScrolledUpRef.current ? "true" : undefined}
               ref={chatScrollRef}
               onScroll={handleChatScroll}
               style={conversationRevealStyle}
@@ -2349,6 +2365,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                     execution={exec}
                                     onUserResize={handleExpandableContentChange}
                                     onInitialOutputReady={handleExecutionOutputReady}
+                                    onLoadingChange={(loading) => handleExecutionLoadingChange(exec.id, loading)}
                                     onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
                                     inlineUserTurnTexts={inlineSteerTexts}
                                     onInlineUserTurnsChange={(texts) => handleInlineUserTurns(exec.id, texts)}
@@ -2465,6 +2482,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           skipFirstUser={plannerMessages.length > 0 && skipFirstPersistedTurn}
                           running={isPlanning || !!recoveredPlanningId}
                           onCompactingChange={setPlannerHistoryCompacting}
+                          onLoadingChange={setPlannerHistoryLoading}
                           onReady={() => {
                             setReadySavedPlannerKey(savedPlannerKey);
                             if (!isConversationReady) revealConversation();

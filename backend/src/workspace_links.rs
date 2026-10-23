@@ -15,6 +15,15 @@ pub(crate) struct Topology {
     outside: BTreeMap<String, u64>,
 }
 
+impl Topology {
+    /// Drop aliases/outside records whose path fails `keep`. Used when a
+    /// comparison ignores generated artifacts a recorded view may still carry.
+    pub(crate) fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        self.aliases.retain(|name, target| keep(name) && keep(target));
+        self.outside.retain(|name, _| keep(name));
+    }
+}
+
 fn safe(name: &str) -> Result<(), String> {
     if name.is_empty()
         || !Path::new(name)

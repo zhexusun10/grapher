@@ -95,12 +95,15 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
     notifyLoading(!initialReady);
     return () => notifyLoading(false);
   }, [initialReady, notifyLoading]);
+  // Reveal the conversation on the first byte page, not after the viewport
+  // auto-fill. `initialReady` still governs the busy/loading affordance, but a
+  // bounded tail is enough to paint the history; older pages fill in behind it.
   useLayoutEffect(() => {
-    if (initialReady && !announcedRef.current) {
+    if (ready && !announcedRef.current) {
       announcedRef.current = true;
       onInitialOutputReady?.(execution.id);
     }
-  }, [initialReady, onInitialOutputReady, execution.id]);
+  }, [ready, onInitialOutputReady, execution.id]);
 
   useEffect(() => {
     if (!paged) { setReady(true); return; }

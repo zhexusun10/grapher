@@ -172,10 +172,9 @@ impl Runtime {
             root: root.into(),
             _lock: lock,
         };
-        // Restore the durable file-change sidecar before any terminal event can
-        // persist a partial cache over it. The live snapshot path never warms
-        // logs, so without this a restart hides completed executions' changes.
-        crate::file_changes::hydrate_run(&runtime.root, &runtime.state.run_id);
+        // The durable file-change sidecar is large on build-heavy Runs and is
+        // only read on demand (`get_file_changes`); `persist_run` re-reads and
+        // merges it, so opening a Run does not need to parse it up front.
         let interrupted: Vec<_> = runtime
             .state
             .executions
@@ -234,8 +233,7 @@ impl Runtime {
             root,
             _lock: lock,
         };
-        // Same cold-start restoration as the primary runtime above.
-        crate::file_changes::hydrate_run(&runtime.root, &runtime.state.run_id);
+        // Lazy sidecar hydration, as in the primary runtime above.
         let interrupted: Vec<_> = runtime
             .state
             .executions
