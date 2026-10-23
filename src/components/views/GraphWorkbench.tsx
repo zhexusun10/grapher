@@ -2320,9 +2320,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           showTokens={showSerialTokenUsage} />
                       )}
                     </WorkspaceDetailsPanel>
-                    {serialNodeState?.error && (
-                      <NodeErrorPanel error={serialNodeState.error} paused={serialNodeState.status === "paused"} />
-                    )}
                   </div>
                 ) : (
                   <>
