@@ -6,7 +6,7 @@ import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   Code2, ArrowLeft,
   Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2, ChevronRight,
-  AlertCircle
+  AlertCircle, PanelRightClose, PanelRightOpen
 } from "lucide-react";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
@@ -45,7 +45,7 @@ import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
 import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
 import { computeExecutionLayers } from "../../hooks/useGraphElements";
-import { PublicationCompletedCard } from "../PublicationCompletedCard";
+import { PublicationCompletedDetails } from "../PublicationCompletedDetails";
 import { PlannerTranscript } from "../PlannerTranscript";
 import { resolveExecutionModelAndThinking, roleModelConfig } from "../../modelConfig";
 import { AnimatedUserTurn } from "../AnimatedUserTurn";
@@ -825,6 +825,22 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     plannerStream.stage === "planning" || plannerStream.plannerThinkingActive ||
     Boolean(plannerStream.compacting);
   const { workbenchRef, isResizing, splitRatio, handleStartResize, handleResetResizer } = useWorkbenchResizer();
+  const [graphPane, setGraphPane] = useState({ collapsed: false, generation: 0 });
+  const graphPaneCollapsed = graphPane.collapsed;
+  const graphPaneNeedsFocus = useRef(false);
+  const toggleGraphPane = useCallback(() => {
+    graphPaneNeedsFocus.current = true;
+    setGraphPane(current => ({
+      collapsed: !current.collapsed,
+      generation: current.generation + (current.collapsed ? 1 : 0),
+    }));
+  }, []);
+  const focusGraphPaneToggle = useCallback((button: HTMLButtonElement | null) => {
+    if (button && graphPaneNeedsFocus.current) {
+      button.focus({ preventScroll: true });
+      graphPaneNeedsFocus.current = false;
+    }
+  }, []);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const expandedCardObserverRef = useRef<ResizeObserver | null>(null);
   const expandedCardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1604,11 +1620,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const hasGraphToolCalled =
     (plannerStream.items || []).some(hasAcceptedGraphTool) ||
     (plannerStream.tools || []).some(hasAcceptedGraphTool);
-  const showGraphPane = routeType === "graph" && (state.graph.nodes.length > 0 || hasGraphToolCalled);
+  const hasGraphPane = routeType === "graph" && (state.graph.nodes.length > 0 || hasGraphToolCalled);
+  const showGraphPane = hasGraphPane && !graphPaneCollapsed;
 
   const animatedNodes = useAnimatedNodes(nodes, state.runId);
+  const graphViewportKey = `${currentRunKey}:${graphPane.generation}`;
   const { ready: isGraphReadyForRun, initialize: centerGraph, synchronize: synchronizeGraph } = useGraphViewport(
-    currentRunKey, showGraphPane, nodes, edges, isPlanning, graphCanvasRef,
+    // Keep the exiting canvas painted; a new generation initializes a fresh
+    // viewport on reopen, including when the user interrupts the exit animation.
+    graphViewportKey, hasGraphPane, nodes, edges, isPlanning, graphCanvasRef,
   );
 
   const prevMsgCountRef = useRef(effectiveMessages.length);
@@ -1802,7 +1822,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   />;
 
   const plannerResultCards = <>
-    {routeType === "graph" && state.graph.nodes.length > 0 && (
+    {routeType === "graph" && (state.graph.nodes.length > 0 || hasCompletedPublication) && (
       <motion.div
         className="plan-summary-card"
         initial={false}
@@ -1856,17 +1876,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             })}
           </div>
         </div>
-      </motion.div>
-    )}
 
-    {/* 此次执行已完成，已完成写入源文件工作区卡片 */}
-    {hasCompletedPublication && (
-      <PublicationCompletedCard
-        state={state}
-        routeType={routeType}
-        repository={config?.repository || repoInfo?.path}
-        animateAppear={false}
-      />
+        {hasCompletedPublication && (
+          <PublicationCompletedDetails
+            state={state}
+            repository={config?.repository || repoInfo?.path}
+          />
+        )}
+      </motion.div>
     )}
   </>;
 
@@ -1874,7 +1891,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     <section
       // Keep exit animations and split-width transitions within one Conversation.
       key={currentRunKey}
-      className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"} ${isPlanning ? "planning-active" : "historical-settled"}`}
+      className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"} ${hasGraphPane && graphPaneCollapsed ? "graph-collapsed" : ""} ${isPlanning ? "planning-active" : "historical-settled"}`}
       ref={workbenchRef}
       style={{
         "--workbench-split-ratio": splitRatio,
@@ -2605,16 +2622,29 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         )}
       </motion.div>
 
-      {/* 左右可调节分割器 与 右侧执行拓扑图面板 */}
-      <AnimatePresence>
+      {hasGraphPane && graphPaneCollapsed && (
+        <button
+          type="button"
+          className="graph-pane-expand"
+          ref={focusGraphPaneToggle}
+          title={t("展开执行拓扑图")}
+          aria-label={t("展开执行拓扑图")}
+          aria-expanded={false}
+          onClick={toggleGraphPane}
+        >
+          <PanelRightOpen size={16} />
+        </button>
+      )}
+
+      <AnimatePresence mode="wait">
         {showGraphPane && (
-          <>
+          <React.Fragment key={graphViewportKey}>
             <motion.div
               key="workbench-resizer"
               className={`workbench-resizer ${isResizing ? "active" : ""}`}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              exit={{ opacity: 0, transition: { duration: 0.16 } }}
+              exit={{ opacity: 0, transition: { duration: reduceMotion ? 0 : 0.3 } }}
               transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
               onMouseDown={handleStartResize}
               onDoubleClick={handleResetResizer}
@@ -2628,7 +2658,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               className="graph-pane"
               initial={{ opacity: 0, x: 28 }}
               animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 28, transition: { duration: 0.16, ease: [0.3, 0, 0.8, 0.15] } }}
+              exit={{ opacity: 0, x: reduceMotion ? 0 : 28, transition: { duration: reduceMotion ? 0 : 0.3, ease: [0.22, 1, 0.36, 1] } }}
               transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
             >
               <div className="graph-toolbar">
@@ -2637,6 +2667,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   <strong>{t("执行拓扑图")}</strong>
                 </div>
                 <div className="toolbar-right">
+                  <button
+                    type="button"
+                    className="icon-button"
+                    ref={focusGraphPaneToggle}
+                    title={t("收起执行拓扑图")}
+                    aria-label={t("收起执行拓扑图")}
+                    aria-expanded={true}
+                    onClick={toggleGraphPane}
+                  >
+                    <PanelRightClose size={16} />
+                  </button>
                   <button
                     type="button"
                     className="icon-button"
@@ -2649,7 +2690,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               </div>
 
               <div className="graph-canvas" ref={graphCanvasRef}>
-                <GraphCanvas runKey={currentRunKey} ready={isGraphReadyForRun}
+                <GraphCanvas runKey={graphViewportKey} ready={isGraphReadyForRun}
                   nodes={animatedNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} tokens={tokens}
                   onInit={centerGraph} onSelect={selectGraphNode} onLayout={synchronizeGraph} />
 
@@ -2725,7 +2766,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
             </motion.div>
-          </>
+          </React.Fragment>
         )}
       </AnimatePresence>
     </section>

@@ -109,6 +109,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       const context = await browser.newContext({ viewport: { width: 1280, height: 768 }, reducedMotion });
       await context.addInitScript(({ repository, config }) => {
         localStorage.setItem("grapher_language_v1", "en");
+        localStorage.setItem("grapher_workbench_split_ratio", "0.55");
         localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Project", lastOpened: 1 }]));
         localStorage.setItem("grapher_config", JSON.stringify(config));
       }, { repository, config });
@@ -169,6 +170,69 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
           });
         }, expected);
         assert.deepEqual(await page.locator(".graph-canvas .react-flow__node").evaluateAll(nodes => nodes.map(node => node.dataset.id).sort()), expected);
+      };
+      const assertGraphCollapsible = async id => {
+        const pane = page.locator(".conversation-pane");
+        const draft = await page.locator(".pane-bottom-chat textarea").inputValue();
+        const originalWidth = (await pane.boundingBox()).width;
+        const storedRatio = await page.evaluate(() => localStorage.getItem("grapher_workbench_split_ratio"));
+        await page.evaluate(() => {
+          window.collapseFrames = [];
+          window.sampleCollapse = true;
+          const sample = () => {
+            const workbench = document.querySelector(".workbench");
+            if (workbench.classList.contains("graph-collapsed")) {
+              const graph = workbench.querySelector(".graph-pane");
+              const flow = graph?.querySelector(".react-flow");
+              window.collapseFrames.push({
+                width: workbench.querySelector(".conversation-pane").getBoundingClientRect().width,
+                fullWidth: workbench.clientWidth,
+                opacity: graph ? Number(getComputedStyle(graph).opacity) : 0,
+                canvasPainted: flow && Number(getComputedStyle(flow).opacity) > 0.99,
+              });
+            }
+            if (window.sampleCollapse) requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+        });
+        await page.getByRole("button", { name: "Collapse execution graph", exact: true }).click();
+        await page.getByRole("button", { name: "Expand execution graph", exact: true }).waitFor();
+        await page.locator(".graph-pane").waitFor({ state: "detached" });
+        assert.equal(await page.locator(".graph-pane, .workbench-resizer").count(), 0,
+          "collapse removes both the graph and its minimum-width splitter");
+        await page.waitForFunction(() => {
+          const workbench = document.querySelector(".workbench");
+          const pane = workbench.querySelector(".conversation-pane");
+          return Math.abs(pane.clientWidth - workbench.clientWidth) <= 1;
+        });
+        const frames = await page.evaluate(() => { window.sampleCollapse = false; return window.collapseFrames; });
+        if (reducedMotion === "no-preference") {
+          assert.ok(frames.some(frame => frame.width > originalWidth + 2 && frame.width < frame.fullWidth - 2),
+            "conversation expands through intermediate widths rather than jumping to full width");
+          assert.ok(frames.some(frame => frame.opacity > 0.05 && frame.opacity < 0.95 && frame.canvasPainted),
+            "the graph canvas stays painted while its panel fades out");
+        }
+        assert.equal(await page.locator(".pane-bottom-chat textarea").inputValue(), draft,
+          "collapsing preserves the current conversation draft");
+        assert.equal(await page.getByRole("button", { name: "Expand execution graph", exact: true }).evaluate(button =>
+          button === document.activeElement), true, "keyboard focus moves to the expand control");
+        await page.keyboard.press("Enter");
+        await assertGraphVisible(id);
+        await page.waitForFunction(width => Math.abs(document.querySelector(".conversation-pane").getBoundingClientRect().width - width) < 1, originalWidth);
+        assert.equal(await page.evaluate(() => localStorage.getItem("grapher_workbench_split_ratio")), storedRatio,
+          "reopening preserves the saved split ratio");
+        assert.equal(await page.locator(".pane-bottom-chat textarea").inputValue(), draft);
+        assert.equal(await page.getByRole("button", { name: "Collapse execution graph", exact: true }).evaluate(button =>
+          button === document.activeElement), true, "keyboard focus returns to the collapse control");
+        // Toggle without waiting for a pane exit animation: the remounted canvas
+        // must still initialize instead of remaining transparent indefinitely.
+        await page.getByRole("button", { name: "Collapse execution graph", exact: true }).click();
+        await page.keyboard.press("Enter");
+        await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Collapse execution graph");
+        await assertGraphVisible(id);
+        assert.equal(await page.locator(".graph-pane").count(), 1,
+          "interrupting an exit mounts exactly one fresh, visible graph");
+        await page.waitForFunction(width => Math.abs(document.querySelector(".conversation-pane").getBoundingClientRect().width - width) < 1, originalWidth);
       };
       const switchAndMeasure = async id => {
         await page.waitForFunction(() => !document.querySelector(".pane-bottom-chat .prompt-box-container")?.hasAttribute("data-resizing"));
@@ -329,6 +393,8 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       await page.locator('[data-run-id="b"]').click();
       await assertGraphVisible("b");
       await waitForComposerSettled(page, ".pane-bottom-chat .prompt-box-container");
+      await assertGraphCollapsible("b");
+      await waitForComposerSettled(page, ".pane-bottom-chat .prompt-box-container");
       await page.evaluate(() => {
         window.recordComposerFrames = [];
         window.sampleRecordComposer = true;
@@ -359,6 +425,9 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       await assertGraphVisible("b");
       assert.equal(await composer.inputValue(), "", "node draft is separate from Planner");
       await composer.fill("Unsent shared-node draft");
+      await assertGraphCollapsible("b");
+      assert.equal(await page.locator(".conversation-heading h2").textContent(), "shared",
+        "collapsing and reopening the graph keeps the selected node conversation");
       await page.locator(".back-to-query-btn").click();
       assert.equal(await composer.inputValue(), drafts.get("b"));
       await page.locator('.react-flow__node[data-id="shared"]').click();

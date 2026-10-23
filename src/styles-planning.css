@@ -6,8 +6,22 @@
   justify-content: center;
 }
 
-.workbench.dialogue-only-mode .conversation-pane {
+.workbench.dialogue-only-mode:not(.graph-collapsed) .conversation-pane {
   transition: none !important;
+}
+
+.workbench.graph-collapsed {
+  justify-content: flex-start;
+}
+
+.workbench.graph-collapsed .graph-pane {
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workbench.graph-collapsed .conversation-pane {
+    transition: none !important;
+  }
 }
 
 .conversation-pane.full-width {
@@ -28,8 +42,7 @@
 
 .conversation-pane.full-width .chat-messages-stream,
 .conversation-pane.full-width .initial-query-scroll>div:not(.chat-messages-stream),
-.conversation-pane.full-width .plan-summary-card,
-.conversation-pane.full-width .workspace-written-completed-card {
+.conversation-pane.full-width .plan-summary-card {
   max-width: 860px;
   margin-left: auto;
   margin-right: auto;
@@ -65,7 +78,6 @@
 .workbench.historical-settled .chat-message-row,
 .workbench.historical-settled .route-decision-pill,
 .workbench.historical-settled .plan-summary-card,
-.workbench.historical-settled .workspace-written-completed-card,
 .workbench.historical-settled .thinking-card,
 .workbench.historical-settled .initial-query-scroll>div:not(.chat-messages-stream) {
   opacity: 1 !important;
@@ -73,7 +85,7 @@
 }
 
 .workbench.historical-settled .task-node,
-.workbench.historical-settled .graph-pane,
+.workbench.historical-settled:not(.graph-collapsed) .graph-pane,
 .workbench.historical-settled .workbench-resizer,
 .workbench.historical-settled .thinking-card {
   animation: none !important;

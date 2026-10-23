@@ -331,6 +331,76 @@ test("Planner details show the backend-selected cwd for every turn", { timeout: 
   } finally { await context.close(); }
 });
 
+test("completed write-back details live inside the topology overview with copy and merger history", { timeout: 30_000 }, async () => {
+  const mergerReads = [];
+  const { context, page, errors } = await newPage(route => {
+    if (route.request().url().endsWith("/get_execution_output")) {
+      const body = route.request().postDataJSON();
+      mergerReads.push(body.executionId);
+      const content = assistant(`PUBLICATION_LOG_${body.executionId}`);
+      return route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        content, startOffset: 0, nextOffset: Buffer.byteLength(content), totalBytes: Buffer.byteLength(content),
+        complete: true, status: "completed" } } });
+    }
+    return route.fulfill({ json: { result: {} } });
+  });
+  const completedAt = Date.UTC(2025, 4, 6, 12, 34, 56);
+  const publication = { repository: "/published/source-workspace", heads: ["terminal-1"],
+    status: "completed", head: null, error: null, startedAt: completedAt - 1000, completedAt };
+  const attempts = [1, 2].map(attempt => ({ id: `publication-${attempt}`, node: "merger", attempt,
+    revision: 1, sessionId: `merger-session-${attempt}`, worktree: `/worktrees/merger-${attempt}`,
+    before: "before", after: "", status: "completed", output: "",
+    outputBytes: Buffer.byteLength(assistant(`PUBLICATION_LOG_publication-${attempt}`)),
+    startedAt: completedAt - 1000, completedAt }));
+  try {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
+    await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.setPublicationResult);
+    await page.evaluate(() => {
+      window.audit.startExecution();
+      window.audit.finish();
+      window.audit.setRunSummary("completed", null);
+      window.audit.setPublicationResult({ status: "failed" });
+    });
+    const overview = page.locator(".plan-summary-card");
+    const details = overview.getByTestId("publication-completed-details");
+    await overview.waitFor();
+    for (const status of ["failed", "publishing", "merging"]) {
+      await page.evaluate(async status => {
+        window.audit.setPublicationResult({ status });
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      }, status);
+      assert.equal(await details.count(), 0, `${status} must not claim results were written back`);
+    }
+    await page.evaluate(({ publication, attempts }) => window.audit.setPublicationResult(publication, attempts), { publication, attempts });
+    await details.waitFor();
+    assert.equal(await overview.count(), 1);
+    assert.equal(await page.getByTestId("workspace-written-completed-card").count(), 0,
+      "there is no separate execution-completed card");
+    assert.match(await overview.locator(".plan-summary-header").innerText(), /Execution graph overview/);
+    assert.equal(await details.locator(".pub-card-path").innerText(), publication.repository);
+    assert.match(await details.innerText(), /Completed all 1/);
+    assert.match(await details.innerText(), /Results from 1 terminal nodes/);
+    assert.equal(await details.locator(".pub-card-time").innerText(), await page.evaluate(stamp =>
+      new Date(stamp).toLocaleString("en-US"), completedAt));
+    await details.getByRole("button", { name: "Copy workspace directory", exact: true }).click();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), publication.repository);
+    await details.locator(".pub-card-mergers-summary").click();
+    await details.getByText("PUBLICATION_LOG_publication-2", { exact: true }).waitFor();
+    await details.getByLabel("Select execution:", { exact: true }).selectOption("publication-1");
+    await details.getByText("PUBLICATION_LOG_publication-1", { exact: true }).waitFor();
+    assert.match(await details.locator(".pub-card-merger-info").innerText(), /merger-session-1/);
+    assert.deepEqual([...new Set(mergerReads)].sort(), ["publication-1", "publication-2"]);
+    // Older runs may have no publication projection; their completion details
+    // still belong to the same overview, using the configured workspace.
+    await page.evaluate(() => window.audit.setPublicationResult(null));
+    await details.locator(".pub-card-path").filter({ hasText: "/mock" }).waitFor();
+    assert.match(await details.innerText(), /Results have been combined and written/);
+    assert.equal(await overview.count(), 1);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("completed topology reports task token totals and cache percentage only after completion", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
   const emptyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0, consumedTokens: 0 };

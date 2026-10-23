@@ -1408,6 +1408,36 @@ button.session-label-toggle:focus-visible {
   background: var(--bg-canvas);
 }
 
+.graph-pane-expand {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid var(--border-default);
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.graph-pane-expand:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+
+.graph-pane-expand:focus-visible {
+  outline: 2px solid var(--brand-default);
+  outline-offset: -2px;
+}
+
 .graph-toolbar {
   height: 68px;
   box-sizing: border-box;

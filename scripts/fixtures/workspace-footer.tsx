@@ -50,6 +50,12 @@ function WorkspaceFooterFixture() {
   const [runPhase, setRunPhase] = useState<string>();
   const [runMetrics, setRunMetrics] = useState<Snapshot["runMetrics"]>();
   const [mergerId, setMergerId] = useState("");
+  const [publication, setPublication] = useState<Snapshot["publication"]>();
+  const [publicationMergers, setPublicationMergers] = useState<Execution[]>([]);
+  audit.setPublicationResult = (result: Snapshot["publication"], attempts: Execution[] = []) => {
+    setPublication(result);
+    setPublicationMergers(attempts);
+  };
   // Mirror the backend's per-session totals so a resumed session keeps the
   // usage of its earlier Executions instead of restarting on each attempt.
   const sessionUsage: Record<string, TokenUsage> = {};
@@ -100,7 +106,8 @@ function WorkspaceFooterFixture() {
     graph: { originalGoal: "Initial task", nodes: hasNode ? [{ name: "task", task: "Initial task" }] : [], edges: [] },
     nodes: hasNode ? { task: { status, revision: 0, instruction: "", error: null } } : {},
     executions: merger ? [] : executions,
-    mergers,
+    mergers: [...mergers, ...publicationMergers],
+    publication,
     planning: plannerTurns.at(-1),
     events: plannerTurns.map((planning, index) => ({ type: "planner_workspace_selected", sequence: index + 1, timestamp: index + 1, planning })),
   };

@@ -1,27 +1,24 @@
 import { t, locale } from "../i18n";
 import React, { useState, useMemo } from "react";
 import { CheckCircle2, FolderGit2, Clock, Copy, Check, GitMerge } from "lucide-react";
-import { motion } from "motion/react";
-import type { Snapshot, PlanRouteType, Execution } from "../types";
+import type { Snapshot, Execution } from "../types";
 import { ExecutionTranscript } from "./ExecutionTranscript";
-import "./PublicationCompletedCard.css";
+import "./PublicationCompletedDetails.css";
 
-interface PublicationCompletedCardProps {
+interface PublicationCompletedDetailsProps {
   state: Snapshot;
-  routeType: PlanRouteType;
   repository?: string;
-  /** Suppress the entrance when the previous plan is reflowed above a follow-up. */
-  animateAppear?: boolean;
 }
 
-export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> = React.memo(({
+/** Write-back details embedded in the execution graph overview. */
+export const PublicationCompletedDetails: React.FC<PublicationCompletedDetailsProps> = React.memo(({
   state,
   repository,
-  animateAppear = true,
 }) => {
   const [copiedRepo, setCopiedRepo] = useState(false);
   const [mergerDetailsOpen, setMergerDetailsOpen] = useState(false);
   const [selectedMergerId, setSelectedMergerId] = useState("");
+  const mergerSelectId = React.useId();
 
   const publication = state.publication;
   const targetRepo = publication?.repository || repository || state.config?.repository || "";
@@ -46,20 +43,7 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
   const headsCount = publication?.heads?.length ?? state.graph.nodes.length;
 
   return (
-    <motion.div
-      className="workspace-written-completed-card"
-      data-testid="workspace-written-completed-card"
-      initial={animateAppear ? { opacity: 0, y: 12, scale: 0.99 } : false}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.36, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
-    >
-      <div className="pub-card-header">
-        <div className="pub-card-title-group">
-          <CheckCircle2 size={18} className="pub-card-icon" />
-          <span className="pub-card-title">{t("此次执行已完成，已完成写入源文件工作区")}</span>
-        </div>
-      </div>
-
+    <div className="plan-publication-details" data-testid="publication-completed-details">
       <div className="pub-card-body">
         <div className="pub-card-fields-grid">
           {targetRepo && (
@@ -95,6 +79,7 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
         </div>
 
         <div className="pub-card-summary-tip">
+          <CheckCircle2 size={14} className="pub-card-icon" aria-hidden="true" />
           <span>
             {t("已完成所有 ")}{state.graph.nodes.length}{t(" 个规划节点的执行，")}{publication?.heads ? t("{0} 个拓扑终点及上游变更已聚合并写回目标目录。", headsCount) : t("已聚合写入源文件工作区。")}
           </span>
@@ -112,9 +97,9 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
             </summary>
             <div className="pub-card-mergers-body">
               <div className="pub-card-mergers-select-row">
-                <label htmlFor="merger-attempt-select">{t("选择执行记录：")}</label>
+                <label htmlFor={mergerSelectId}>{t("选择执行记录：")}</label>
                 <select
-                  id="merger-attempt-select"
+                  id={mergerSelectId}
                   className="pub-card-merger-select"
                   value={activeMerger.id}
                   onChange={(e) => setSelectedMergerId(e.target.value)}
@@ -139,6 +124,6 @@ export const PublicationCompletedCard: React.FC<PublicationCompletedCardProps> =
           </details>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 });
