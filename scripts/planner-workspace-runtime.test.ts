@@ -40,6 +40,9 @@ test('backend Planner target rebinds cwd, HOME/cache/Git and native Bash togethe
     assert.equal(readFileSync('project-file', 'utf8'), 'b', 'arbitrary filesystem APIs follow the selection');
     const env = managedBashOptions({ env: { ...process.env, HOME: project, XDG_CACHE_HOME: project, GIT_CONFIG_GLOBAL: 'wrong' } }).env;
     for (const [key, value] of Object.entries(be)) assert.equal(env[key], value);
+    assert.ok(!Object.keys(env).some(key => /^GRAPHER_/i.test(key)), 'Grapher control keys must not reach the model shell');
+    assert.equal(env.TMPDIR.replaceAll('\\', '/'), join(be.XDG_CACHE_HOME, 'tmp').replaceAll('\\', '/'), 'session temp is retargeted away from data/');
+    assert.equal(env.XDG_RUNTIME_DIR, env.TMPDIR);
     const shell = process.platform === 'win32'
       ? join(resolve(execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(), '../../..'), 'bin/bash.exe') : '/bin/bash';
     const output = spawnSync(shell, ['--noprofile', '--norc', '-c', 'test "$(cat project-file)" = b && git config --global --get user.name'], { env, encoding: 'utf8' });

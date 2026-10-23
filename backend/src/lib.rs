@@ -1,3 +1,4 @@
+mod attachment_inputs;
 pub mod cleanup;
 #[cfg(test)]
 mod cleanup_tests;

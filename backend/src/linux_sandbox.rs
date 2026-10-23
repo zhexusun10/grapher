@@ -4,6 +4,7 @@
 
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::OnceLock,
@@ -73,11 +74,24 @@ fn mount_boundaries(
     for (index, mask) in masks.iter().enumerate() {
         let empty = staging.join(index.to_string());
         fs::create_dir_all(&empty).map_err(|e| e.to_string())?;
+        // Recreate the mount points for allowed exceptions under this mask
+        // before the mask itself is made unreadable.
+        let mut carries_exception = false;
         for path in masks.iter().map(PathBuf::as_path).chain([current, session]).chain(borrowed_objects.iter().map(PathBuf::as_path)).chain(state).chain(additional.iter().map(PathBuf::as_path)).chain(extra_binds.iter().map(PathBuf::as_path)) {
             if let Ok(relative) = path.strip_prefix(mask) {
-                fs::create_dir_all(empty.join(relative)).map_err(|e| e.to_string())?;
+                if !relative.as_os_str().is_empty() {
+                    carries_exception = true;
+                    fs::create_dir_all(empty.join(relative)).map_err(|e| e.to_string())?;
+                }
             }
         }
+        // An empty read-only tree is indistinguishable from a genuinely empty
+        // directory: listing it silently succeeds and reads fail as ENOENT. Clear
+        // the read bit so listing and traversing report a permission error instead
+        // of an empty listing. A mask that carries an allowed exception stays
+        // traversable (execute-only) so that exception's mount point is reachable.
+        let mode = if carries_exception { 0o111 } else { 0o000 };
+        fs::set_permissions(&empty, fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
         command.arg("--ro-bind").arg(&empty).arg(mask);
     }
     for objects in borrowed_objects {
@@ -137,7 +151,7 @@ fn probe() -> Result<(), String> {
             &[],
         )?;
         command.args(["--", "/bin/sh", "-c",
-            ": <>/dev/null && test ! -e \"$1/secret\" && ! (echo bad > \"$1/secret\") 2>/dev/null && ! (echo bad > \"$4/code\") 2>/dev/null && echo ok > \"$2/write\" && echo ok > \"$3/write\"",
+            ": <>/dev/null && test ! -r \"$1\" && test ! -e \"$1/secret\" && ! (echo bad > \"$1/secret\") 2>/dev/null && ! (echo bad > \"$4/code\") 2>/dev/null && echo ok > \"$2/write\" && echo ok > \"$3/write\"",
             "probe"])
             .args([&source, &current, &session, &installation]);
         let output = command.stdout(Stdio::null()).output().map_err(|e| {
@@ -157,7 +171,9 @@ fn probe() -> Result<(), String> {
         }
         Ok(())
     })();
-    let _ = fs::remove_dir_all(&base);
+    // The mask trees cleared their read bit; the generic recursive delete
+    // cannot list them, so restore access before removing the probe root.
+    let _ = crate::native_runtime_storage::remove_dir_all_masked(&base);
     result
 }
 
@@ -323,6 +339,23 @@ pub(crate) fn execution_command_scoped(
 mod tests {
     use super::*;
 
+    /// A test tempdir whose removal restores the mask read bit first.
+    /// `std::fs::remove_dir_all` cannot list an unreadable directory.
+    struct SandboxTemp(tempfile::TempDir);
+    impl SandboxTemp {
+        fn path(&self) -> &Path {
+            self.0.path()
+        }
+    }
+    impl Drop for SandboxTemp {
+        fn drop(&mut self) {
+            let _ = crate::native_runtime_storage::remove_dir_all_masked(self.0.path());
+        }
+    }
+    fn sandbox_tempdir() -> SandboxTemp {
+        SandboxTemp(tempfile::tempdir().unwrap())
+    }
+
     fn prepare_view(source: &Path, current: &Path) {
         if !source.join(".git").exists() {
             fs::create_dir_all(source).unwrap();
@@ -385,7 +418,7 @@ mod tests {
     #[test]
     fn external_session_remains_writable_while_source_is_masked() {
         require_supported().expect("Linux Graph requires bwrap in CI");
-        let temp = tempfile::tempdir().unwrap();
+        let temp = sandbox_tempdir();
         let base = temp.path().canonicalize().unwrap();
         let source = base.join("source");
         let root = base.join(".grapher-worktrees");
@@ -410,7 +443,7 @@ mod tests {
         let mut probe = Command::new(BWRAP);
         let result = probe.args(&args[..args.len()-2]).args([
             "/bin/sh", "-c",
-            "set -e; : <>/dev/null; test ! -f \"$1/secret\"; ! (echo bad > \"$1/secret\") 2>/dev/null; echo ok > \"$2/new\"",
+            "set -e; : <>/dev/null; test ! -r \"$1\"; test ! -f \"$1/secret\"; ! (echo bad > \"$1/secret\") 2>/dev/null; echo ok > \"$2/new\"",
             "probe",
         ]).args([&source, &session]).current_dir(&current).output().unwrap();
         assert!(
@@ -428,7 +461,7 @@ mod tests {
     #[test]
     fn node_workspace_exposes_project_git_but_hides_source_objects() {
         require_supported().expect("Linux Graph requires bwrap in CI");
-        let temp = tempfile::tempdir().unwrap();
+        let temp = sandbox_tempdir();
         let base = temp.path().canonicalize().unwrap();
         let source = base.join("source");
         let root = base.join(".grapher-worktrees");
@@ -463,7 +496,7 @@ mod tests {
     #[test]
     fn separate_external_git_database_stays_hidden_from_the_node() {
         require_supported().expect("Linux Graph requires bwrap in CI");
-        let temp = tempfile::tempdir().unwrap();
+        let temp = sandbox_tempdir();
         let base = temp.path().canonicalize().unwrap();
         let source = base.join("source");
         let root = base.join(".grapher-worktrees");
@@ -494,7 +527,7 @@ mod tests {
     #[test]
     fn external_git_database_is_not_accessible_to_node() {
         require_supported().expect("Linux Graph requires bwrap in CI");
-        let temp = tempfile::tempdir().unwrap();
+        let temp = sandbox_tempdir();
         let base = temp.path().canonicalize().unwrap();
         let source = base.join("source");
         let root = base.join(".grapher-worktrees");
@@ -542,7 +575,7 @@ mod tests {
         require_supported().expect("Linux Graph requires bwrap in CI");
         let source = canonical(&crate::native::installation_root()).unwrap();
         assert!(source.join("package.json").is_file());
-        let temp = tempfile::tempdir().unwrap();
+        let temp = sandbox_tempdir();
         let base = temp.path().canonicalize().unwrap();
         let root = base.join(".grapher-worktrees");
         let current = root.join("run/node");
@@ -584,7 +617,7 @@ mod tests {
     #[test]
     fn graph_nodes_are_isolated_from_source_siblings_and_sessions() {
         require_supported().expect("Linux Graph requires functional bwrap/user namespaces in CI");
-        let temp = tempfile::tempdir().unwrap();
+        let temp = sandbox_tempdir();
         let base = temp.path().canonicalize().unwrap();
         let source = base.join("source");
         let root = base.join(".grapher-worktrees");
@@ -627,7 +660,7 @@ mod tests {
         );
         let mut cmd = Command::new(BWRAP);
         cmd.args(&args[..args.len() - 2]); // keep production mounts through `--`
-        cmd.args(["/bin/sh", "-c", "set -e; : <>/dev/null; test ! -f \"$1/marker\"; test ! -f \"/proc/1/root$1/marker\"; test ! -f \"$2/marker\"; test ! -f \"$3/marker\"; test ! -f \"$4/source-link/marker\"; ! (echo leak > \"$1/new\") 2>/dev/null; ! (echo leak > \"$2/new\") 2>/dev/null; echo ok > new; echo ok > \"$5/new\"; echo ok > \"$4/new\"; test -f \"$6/marker\"; test -f \"$7/marker\"; ! (echo leak > \"$7/marker\") 2>/dev/null", "probe"])
+        cmd.args(["/bin/sh", "-c", "set -e; : <>/dev/null; test ! -r \"$1\"; test ! -f \"$1/marker\"; test ! -f \"/proc/1/root$1/marker\"; test ! -f \"$2/marker\"; test ! -f \"$3/marker\"; test ! -f \"$4/source-link/marker\"; ! (echo leak > \"$1/new\") 2>/dev/null; ! (echo leak > \"$2/new\") 2>/dev/null; echo ok > new; echo ok > \"$5/new\"; echo ok > \"$4/new\"; test -f \"$6/marker\"; test -f \"$7/marker\"; ! (echo leak > \"$7/marker\") 2>/dev/null", "probe"])
             .args([&source, &sibling, &other, &outside, &session, &pi_dir, &engine])
             .current_dir(&current);
         let output = cmd.output().unwrap();

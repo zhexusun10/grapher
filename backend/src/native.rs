@@ -470,6 +470,61 @@ pub fn execution_command(
     execution_command_scoped(role, repository, cwd, data, session, &[])
 }
 
+/// Describe the private-execution deny set for model-visible diagnostics.
+///
+/// This value grants no access; the platform profile (macOS Seatbelt) or mount
+/// layout (Linux bubblewrap) remains the boundary. It lets the engine report a
+/// uniform "permission denied" for a denied path instead of the platform's raw
+/// errno (EPERM on macOS; ENOENT for masked reads and EROFS for read-only
+/// writes on Linux). `allowed` lists the exempted paths so a genuine error
+/// inside them stays a genuine error rather than a reported denial.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn denied_paths_value(
+    repository: &Path,
+    source: &Path,
+    worktree_root: &Path,
+    current: &Path,
+    data: &Path,
+    session: &Path,
+    engine: &Path,
+    allowances: &[PathBuf],
+    merger_git: &[PathBuf],
+) -> String {
+    let mut allowed = vec![current.to_path_buf(), session.to_path_buf()];
+    if let Ok(state) = crate::workspace_state::prepare(current) {
+        allowed.push(state);
+    }
+    // The sandbox also exposes each authorized Planner follow-up workspace and
+    // its per-slot state, so both are allowed here or a switched Planner would
+    // misreport a genuine error under the new state as a sandbox denial.
+    for workspace in allowances {
+        allowed.push(workspace.clone());
+        if let Ok(state) = crate::workspace_state::prepare(workspace) {
+            allowed.push(state);
+        }
+    }
+    allowed.extend(merger_git.iter().cloned());
+    let mut read = vec![source.to_path_buf(), worktree_root.to_path_buf(), data.to_path_buf()];
+    if !crate::path_identity::same_path(repository, source) {
+        read.push(repository.to_path_buf());
+    }
+    let mut write = read.clone();
+    write.push(engine.to_path_buf());
+    write.push(installation_root());
+    let host = |paths: &[PathBuf]| {
+        paths
+            .iter()
+            .map(|path| host_path(path).to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "read": host(&read),
+        "write": host(&write),
+        "allowed": host(&allowed),
+    })
+    .to_string()
+}
+
 pub(crate) fn execution_command_scoped(
     role: PiRole,
     repository: &Path,
@@ -527,6 +582,18 @@ pub(crate) fn execution_command_scoped(
     } else {
         Vec::new()
     };
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let denied_paths = denied_paths_value(
+        repository,
+        &source,
+        worktree_root,
+        &current,
+        data,
+        session,
+        &engine,
+        &allowances,
+        &merger_git,
+    );
     #[cfg(target_os = "macos")]
     {
         let profile = session.join("execution-instance.sb");
@@ -549,7 +616,8 @@ pub(crate) fn execution_command_scoped(
             .arg(engine.join("engine/entrypoint.mjs"));
         command
             .current_dir(&current)
-            .env("PI_CODING_AGENT_DIR", agent_dir()?);
+            .env("PI_CODING_AGENT_DIR", agent_dir()?)
+            .env("GRAPHER_DENIED_PATHS", &denied_paths);
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
         bind_process_paths(&mut command, session);
@@ -580,6 +648,7 @@ pub(crate) fn execution_command_scoped(
             &allowances,
             &merger_git,
         )?;
+        command.env("GRAPHER_DENIED_PATHS", &denied_paths);
         clear_git_environment(&mut command);
         bind_trusted_git(&mut command)?;
         bind_process_paths(&mut command, session);

@@ -22,7 +22,7 @@ jobs:
     # ubuntu/macOS run the cross-platform backend/environment/merger/native
     # suites; Windows skips the ones whose failures also surface on macOS (they
     # cost ~1h there) and keeps its own library and Windows-native acceptance
-    # coverage. Budgets total 65 minutes on ubuntu/macOS and ~15 on Windows,
+    # coverage. Budgets total 80 minutes on ubuntu/macOS and ~15 on Windows,
     # leaving headroom for dependency setup, cold Rust builds, fixtures and
     # post-job cleanup.
     timeout-minutes: 90
@@ -83,6 +83,10 @@ jobs:
         if: runner.os != 'Windows'
         timeout-minutes: 45
         run: npm run test:environment
+      - name: Verify default environment discovery across a Graph chain (local model)
+        if: runner.os != 'Windows'
+        timeout-minutes: 15
+        run: npm run test:environment-chain
       - name: Verify production Planner revisions, dependency composition and Merger (local model)
         if: runner.os != 'Windows'
         timeout-minutes: 12

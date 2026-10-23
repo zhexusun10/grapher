@@ -1,10 +1,33 @@
 import { marked, type Token } from "marked";
+import sanitize from "sanitize-html";
 import { shareJson } from "./structuralSharing";
 
+// Model output and replayed transcripts are untrusted HTML. Parse with an
+// allowlist rather than trying to recognize executable markup with regexes.
 export function sanitizeHtml(html: string): string {
-  return html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
-    .replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, "")
-    .replace(/href\s*=\s*(['"])\s*(javascript:|data:text\/html)/gi, "href=$1#blocked");
+  return sanitize(html, {
+    allowedTags: [...sanitize.defaults.allowedTags, "img", "details", "summary", "input"],
+    allowedAttributes: {
+      a: ["href", "title"],
+      img: ["src", "alt", "title", "width", "height"],
+      code: ["class"],
+      th: ["align"],
+      td: ["align"],
+      ol: ["start"],
+      input: ["type", "checked", "disabled"],
+    },
+    allowedClasses: { code: ["language-*"] },
+    allowedSchemes: ["http", "https", "mailto", "tel"],
+    allowedSchemesByTag: { img: ["http", "https"] },
+    allowProtocolRelative: false,
+    transformTags: {
+      // Preserve GFM task lists without allowing interactive HTML inputs.
+      input: (_tag, attributes) => ({ tagName: "input", attribs: {
+        type: "checkbox", disabled: "",
+        ...(Object.hasOwn(attributes, "checked") ? { checked: "" } : {}),
+      } }),
+    },
+  });
 }
 
 export function repairStreamingMarkdown(text: string): string {

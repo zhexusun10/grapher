@@ -21,6 +21,9 @@ pub struct Job {
     pub parent_heads: Vec<String>,
     pub config: Config,
     pub task: String,
+    /// Accepted filesystem-input references. Continuity resumes Pi without
+    /// resending a prompt, but must still deliver an input interrupted before copy.
+    pub attachment_instructions: String,
     pub images: Option<Vec<ImageAttachment>>,
     pub resume_execution_id: Option<String>,
     pub session_fork: Option<Execution>,
@@ -1941,6 +1944,76 @@ impl Runtime {
         Ok(())
     }
 
+    /// A Merger attachment targets its own repair workspace. A settled
+    /// publication Merger has already returned to the user's source directory.
+    pub(crate) fn merger_attachment_workspace(&self, node: &str) -> Result<PathBuf, String> {
+        let merger = self.state.mergers.iter().rev().find(|execution| execution.node == node)
+            .ok_or("Merger workspace not found in this Run")?;
+        if merger.status != "running" && node == "merger"
+            && self.state.publication.as_ref().is_some_and(|publication| publication.status == "completed") {
+            return self.state.config.as_ref().map(|config| PathBuf::from(&config.repository))
+                .ok_or_else(|| "Missing Run config".into());
+        }
+        Ok(PathBuf::from(&merger.worktree))
+    }
+
+    /// The workspace a Planner attachment would resolve to, if one exists. A
+    /// running turn reports its live cwd; otherwise the next turn's selection.
+    pub(crate) fn planner_attachment_workspace(&self) -> Result<Option<PathBuf>, String> {
+        if let Some(worktree) = self.state.planning.as_ref()
+            .filter(|planning| planning.status.as_deref() == Some("running"))
+            .and_then(|planning| planning.worktree.as_ref()) {
+            return Ok(Some(PathBuf::from(worktree)));
+        }
+        Ok(self.planner_workspace()?.map(|execution| PathBuf::from(execution.worktree)))
+    }
+
+    /// A regular node's attachment is written in place only for a source-direct
+    /// follow-up. Every other node owns a private workspace that must be staged,
+    /// including a node that has not run yet and therefore has no workspace.
+    pub(crate) fn node_attachment_is_source_direct(&self, node: &str) -> bool {
+        self.source_direct_context(node)
+    }
+
+    /// Filesystem inputs accepted for the unfinished turn(s) of a node session.
+    /// Continue does not resend the prompt, so references are rebuilt from the
+    /// durable `Started` message claims and accepted steers. An initial recovery
+    /// that does resend the task contributes that text as well, so a batched
+    /// turn never loses one of its claimed attachment references.
+    fn recovery_attachment_instructions(&self, node: &str, session: &str, resent_task: &str) -> String {
+        let executions: BTreeSet<_> = self.state.executions.iter().rev()
+            .filter(|execution| execution.node == node && execution.session_id == session
+                && !self.state.superseded_execution_ids.contains(&execution.id))
+            // Only the unfinished turn and its recovery attempts need inputs;
+            // older completed turns must not resurrect deliberately removed files.
+            .take_while(|execution| execution.status != "completed")
+            .map(|execution| execution.id.as_str()).collect();
+        let mut sequences: BTreeSet<i64> = BTreeSet::new();
+        let mut parts: Vec<String> = Vec::new();
+        if !resent_task.trim().is_empty() {
+            parts.push(resent_task.to_string());
+        }
+        for event in &self.state.events {
+            match &event.kind {
+                EventKind::Started { execution, message_sequences, .. }
+                    if executions.contains(execution.id.as_str()) => {
+                    sequences.extend(message_sequences.clone().unwrap_or_default());
+                }
+                EventKind::Steered { execution_id, instruction, .. }
+                    if executions.contains(execution_id.as_str()) => parts.push(instruction.clone()),
+                _ => {}
+            }
+        }
+        for event in &self.state.events {
+            if let EventKind::Invalidated { target, instruction, .. } = &event.kind {
+                if target == node && sequences.contains(&event.sequence) {
+                    parts.push(instruction.clone());
+                }
+            }
+        }
+        parts.join("\n")
+    }
+
     /// Post-publication conversations with a completed node edit the user's source
     /// directory directly instead of rebuilding a Graph worktree. Managed
     /// environments keep their fixed-layout workspace contract, so they are
@@ -2716,6 +2789,9 @@ impl Runtime {
             } else {
                 format!("{}\n{}", node.task, state.instruction)
             };
+            let attachment_instructions = if continuation || initial_recovery {
+                self.recovery_attachment_instructions(&node.name, &execution.session_id, &task)
+            } else { task.clone() };
             let images = queued_prompt.map(|(_, images)| images).unwrap_or_else(|| state.instruction_images.clone());
             let feedback_source = self
                 .state
@@ -2898,6 +2974,7 @@ impl Runtime {
                 parent_heads,
                 config: node_config,
                 task,
+                attachment_instructions,
                 images,
                 resume_execution_id,
                 session_fork,
@@ -4668,6 +4745,11 @@ fn perform_with_merger_inner(
             )?;
         }
     }
+    // Uploads for a closed node are staged outside its immutable project
+    // view. Deliver accepted inputs only after validation/preparation and the
+    // durable Prepared boundary, so failed/interrupted delivery is recoverable.
+    crate::attachment_inputs::deliver_prepared(root, &job.run_id, &job.execution.node,
+        &job.attachment_instructions, path, job.preserved_workspace.is_some())?;
     let mut execution_view = job.execution.clone();
     execution_view.input = environment_input.clone();
     let mut on_output = on_output;

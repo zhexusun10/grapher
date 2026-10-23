@@ -1,10 +1,10 @@
 // Grapher-owned launch boundary. Applied before extension/MCP factories, not
 // merely in one Bash subprocess. Hooks are part of the frozen native policy,
 // not a frontend/user environment-selection surface.
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { delimiter, isAbsolute, dirname } from 'node:path';
-import { samePath } from './path-identity.mjs';
+import { samePath, toHostInput } from './path-identity.mjs';
 
 let active;
 let activePath;
@@ -135,8 +135,57 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
 
 // Pi prepends its managed search-bin directory in getShellEnv(). For managed
 // business execution, preserve the configured PATH after that second processing.
-export function managedBashOptions(options) {
-  if (!active && !Object.keys(runtimeEnvironment).length) return options;
+//
+// The model's shell is the one place Grapher's own control paths must not appear:
+// a single `env` otherwise hands the agent the Run's `data/` and `.grapher-state/`
+// layout, which it can then walk into (other nodes' sessions, graph Git, the
+// install directory). Grapher-owned keys are dropped, Pi session/credential keys
+// are dropped (pi-trim removed the "inspect PI_*" guidance, so the shell needs
+// none of them), and session-directory temp bindings are retargeted to the Run's
+// cache scratch, which never reveals `data/`.
+//
+// The host Git credential helper (GIT_ASKPASS and the VSCODE_GIT_ASKPASS_* the
+// askpass script reads) is deliberately KEPT: a task that authenticates to a
+// private remote must still work. Only path-free editor breadcrumbs are dropped.
+// (Git for Windows re-injects PLINK_PROTOCOL=ssh at shell startup; it carries no
+// path, so it is left alone rather than fought.)
+const grapherInternalKey = /^GRAPHER_/i;
+const hiddenModelKeys = new Set([
+  // Pi session/credential paths and identity the shell never needs.
+  'PI_SESSION_FILE', 'PI_SESSION_ID', 'PI_CODING_AGENT_DIR',
+  // Path-free host editor/terminal breadcrumbs with no functional value here.
+  'VSCODE_INJECTION', 'VSCODE_PYTHON_AUTOACTIVATE_GUARD',
+  'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'ANTIGRAVITY_CLI_ALIAS',
+]);
+const dataPathComponent = /[\\/]data(?:[\\/]|$)/i;
+function modelShellScratch(env) {
+  for (const key of ['XDG_CACHE_HOME', 'GRAPHER_CACHE_DIR']) {
+    const value = env[key];
+    if (typeof value === 'string' && value && !value.includes('\0') && !dataPathComponent.test(value)) {
+      return `${value.replace(/[\\/]+$/, '')}/tmp`;
+    }
+  }
+  return undefined;
+}
+/** Strip Grapher-owned paths from the shell env; returns the temp scratch to create. */
+export function scrubModelShellEnvironment(env) {
+  const scratch = modelShellScratch(env);
+  for (const key of Object.keys(env)) {
+    if (grapherInternalKey.test(key) || hiddenModelKeys.has(key.toUpperCase())) delete env[key];
+  }
+  for (const key of ['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR']) {
+    if (scratch) env[key] = scratch;
+    else delete env[key];
+  }
+  return scratch;
+}
+/**
+ * Build the model's shell environment. `managed` marks a Grapher role process
+ * (always true from the workspace policy); the unmanaged compatibility process
+ * passes nothing and keeps the historical no-op behavior.
+ */
+export function managedBashOptions(options, managed = false) {
+  if (!active && !Object.keys(runtimeEnvironment).length && !managed) return options;
   // The bash tool supplies the full shell environment; Pi's user_bash path may
   // omit it entirely. Keep the same Runtime bytecode policy in both cases.
   const env = { ...(options.env ?? process.env) };
@@ -144,5 +193,13 @@ export function managedBashOptions(options) {
   for (const key of Object.keys(env)) if (/^(BASH_ENV|ENV|SHELLOPTS|BASHOPTS|CDPATH|OLDPWD|GLOBIGNORE)$/i.test(key) || active && /^PATH$/i.test(key)) delete env[key];
   if (active) env.PATH = activePath;
   Object.assign(env, runtimeEnvironment, deviceEnvironment);
+  const scratch = scrubModelShellEnvironment(env);
+  if (scratch) {
+    // 0o700: the scratch is also XDG_RUNTIME_DIR, which the spec requires to be
+    // private. Ignored on Windows; the parent cache dir already exists, so only
+    // the leaf is created here.
+    try { mkdirSync(toHostInput(scratch), { recursive: true, mode: 0o700 }); }
+    catch { for (const key of ['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR']) delete env[key]; }
+  }
   return { ...options, env };
 }

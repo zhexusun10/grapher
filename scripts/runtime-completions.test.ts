@@ -44,6 +44,81 @@ for (const type of ["files", "skills"] as const) {
   });
 }
 
+test("attachment requests preserve Run targeting and reject missing, legacy or traversing response paths", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalReader = globalThis.FileReader;
+  const id = "00000000-0000-4000-8000-000000000004";
+  const path = `grapher-attachments/${id}/中文说明.txt`;
+  const file = new File(["fixture"], "中文说明.txt", { type: "text/plain" });
+  let result: unknown = { name: file.name, path };
+  let sent: Record<string, unknown> | undefined;
+  const commands: string[] = [];
+  try {
+    globalThis.FileReader = class {
+      result = "data:text/plain;base64,Zml4dHVyZQ==";
+      onload: (() => void) | null = null;
+      readAsDataURL() { queueMicrotask(() => this.onload?.()); }
+    } as unknown as typeof FileReader;
+    globalThis.fetch = async (url, init) => {
+      commands.push(String(url));
+      sent = JSON.parse(String(init?.body));
+      return response(result);
+    };
+    assert.deepEqual(await runtimeService.writeWorkspaceFile(file, "/repo", {
+      runId: "owning-run", node: "merge:worker", attachmentId: id,
+    }), result);
+    assert.equal(sent?.runId, "owning-run");
+    assert.equal(sent?.node, "merge:worker");
+    assert.equal(sent?.attachmentId, id);
+    assert.equal(commands.at(-1), "/api/write_workspace_attachment");
+    await runtimeService.writeWorkspaceFile(file, "/repo", { runId: "", node: "" });
+    assert.equal(Object.hasOwn(sent!, "runId"), false, "a failed/empty conversation uploads as a new source input");
+    assert.equal(Object.hasOwn(sent!, "node"), false);
+    for (const invalid of [undefined, file.name, `grapher-attachments/${id}/../../original.txt`]) {
+      result = { name: file.name, path: invalid };
+      await assert.rejects(runtimeService.writeWorkspaceFile(file, "/repo"));
+    }
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "Cannot delete attachment" }), { status: 400 });
+    await assert.rejects(runtimeService.deleteWorkspaceFile(path, "/repo"), /Cannot delete attachment/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.FileReader = originalReader;
+  }
+});
+
+test("unsupported safe attachment APIs never fall back to legacy mutating commands", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalReader = globalThis.FileReader;
+  const calls: string[] = [];
+  let projectFile = "uncommitted original";
+  try {
+    globalThis.FileReader = class {
+      result = "data:text/plain;base64,Zml4dHVyZQ==";
+      onload: (() => void) | null = null;
+      readAsDataURL() { queueMicrotask(() => this.onload?.()); }
+    } as unknown as typeof FileReader;
+    globalThis.fetch = async url => {
+      calls.push(String(url));
+      if (String(url).endsWith("write_workspace_file")) {
+        projectFile = "overwritten by legacy API";
+        return response({ name: "original.txt", path: "original.txt" });
+      }
+      if (String(url).endsWith("delete_workspace_file")) {
+        projectFile = "";
+        return response({ success: true });
+      }
+      return new Response(JSON.stringify({ error: "Unknown command" }), { status: 400 });
+    };
+    await assert.rejects(runtimeService.writeWorkspaceFile(new File(["fixture"], "original.txt"), "/repo"));
+    await assert.rejects(runtimeService.deleteWorkspaceFile("original.txt", "/repo"));
+    assert.deepEqual(calls, ["/api/write_workspace_attachment", "/api/delete_workspace_attachment"]);
+    assert.equal(projectFile, "uncommitted original");
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.FileReader = originalReader;
+  }
+});
+
 test("aborted requests retain their cancellation error instead of reporting a backend outage", async () => {
   const original = globalThis.fetch;
   const controller = new AbortController();

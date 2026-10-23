@@ -343,7 +343,7 @@ export const runtimeService = {
   writeWorkspaceFile: async (
     file: File,
     repository?: string,
-    context?: { runId?: string; node?: string }
+    context?: { runId?: string; node?: string; attachmentId?: string }
   ): Promise<{ name: string; path: string }> => {
     const base64Data = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -351,13 +351,27 @@ export const runtimeService = {
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
-    const res = await request<{ name: string; path: string }>("write_workspace_file", {
-      repository,
-      filename: file.name,
-      content: base64Data,
-      runId: context?.runId,
-      node: context?.node,
-    });
+    let res: { name: string; path: string };
+    try {
+      // Never try the legacy basename-writing API, even after a 404. An old
+      // backend must reject before it can overwrite a same-name project file.
+      res = await request("write_workspace_attachment", {
+        repository,
+        filename: file.name,
+        content: base64Data,
+        runId: context?.runId || undefined,
+        node: context?.node || undefined,
+        attachmentId: context?.attachmentId,
+      });
+    } catch (error) {
+      if (error instanceof Error && /Unknown command|404/i.test(error.message)) {
+        throw new Error(t("后端不支持安全附件上传，请更新后端后重试。"));
+      }
+      throw error;
+    }
+    if (typeof res?.path !== "string" || !/^grapher-attachments\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\/[^/\\]+$/.test(res.path)) {
+      throw new Error(t("后端未返回安全的附件路径，请更新后端后重试。"));
+    }
     const key = repository || "__default__";
     filesCache.delete(key);
     return res;
@@ -367,17 +381,13 @@ export const runtimeService = {
     repository?: string,
     context?: { runId?: string; node?: string }
   ): Promise<void> => {
-    try {
-      await request<{ success: boolean }>("delete_workspace_file", {
-        repository,
-        filename,
-        runId: context?.runId,
-        node: context?.node,
-      });
-      const key = repository || "__default__";
-      filesCache.delete(key);
-    } catch (err) {
-      console.warn("Failed to delete workspace file:", err);
-    }
+    await request<{ success: boolean }>("delete_workspace_attachment", {
+      repository,
+      filename,
+      runId: context?.runId || undefined,
+      node: context?.node || undefined,
+    });
+    const key = repository || "__default__";
+    filesCache.delete(key);
   },
 };

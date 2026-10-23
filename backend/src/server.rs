@@ -20,6 +20,10 @@ use std::{
 
 use uuid::Uuid;
 
+#[path = "workspace_attachments.rs"]
+mod workspace_attachments;
+use workspace_attachments::{delete_workspace_attachment, write_workspace_attachment};
+
 pub struct Service {
     runtime: Mutex<Runtime>,
     driving: AtomicBool,
@@ -1979,6 +1983,16 @@ fn plan_goal_internal_with_started(
                         let planning_worktree = planner_workspace.to_string_lossy().into_owned();
                         let mut log_error = None;
                         check_planning_cancelled(&owner)?;
+                        // Planner uploads are staged like node inputs; deliver the
+                        // accepted references now that this turn owns the workspace.
+                        crate::attachment_inputs::deliver_prepared(
+                            &root,
+                            &owner,
+                            "planner",
+                            &task,
+                            &planner_workspace,
+                            true,
+                        )?;
                         let planner_start = std::time::Instant::now();
                         let launch_workspace = planner_workspace.clone();
                         let planner_result = run_pi(
@@ -3085,6 +3099,17 @@ fn control(
         if include_rework_note {
             runtime.emit(EventKind::PlannerReworkNoteInjected)?;
         }
+        // Staged Planner uploads become inputs of the workspace this turn owns.
+        if let Some(worktree) = runtime.state.planning.as_ref().and_then(|planning| planning.worktree.clone()) {
+            crate::attachment_inputs::deliver_prepared(
+                &runtime.root,
+                &runtime.state.run_id,
+                "planner",
+                instruction.trim(),
+                std::path::Path::new(&worktree),
+                true,
+            )?;
+        }
         let snapshot = runtime.state.clone();
         drop(runtime);
         if let Some(id) = run_id {
@@ -3140,12 +3165,14 @@ fn control(
                 .executions
                 .iter()
                 .chain(&runtime.state.mergers)
-                .any(|e| e.id == execution_id && e.node == node && e.status == "running");
-            if run_id.as_deref() != Some(runtime.state.run_id.as_str()) || !running {
+                .find(|e| e.id == execution_id && e.node == node && e.status == "running");
+            if run_id.as_deref() != Some(runtime.state.run_id.as_str()) || running.is_none() {
                 return Err(
                     "Node execution is no longer running; send a new instruction instead".into(),
                 );
             }
+            crate::attachment_inputs::deliver(&runtime.root, &runtime.state.run_id, &node,
+                &instruction, std::path::Path::new(&running.unwrap().worktree))?;
         }
         crate::engine::steer_nowait(&execution_id, instruction.trim(), images.clone())?;
         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
@@ -3263,6 +3290,17 @@ fn control(
             runtime.state.clone()
         };
         let run_id = run_id.ok_or("Missing run identity")?;
+        {
+            let root = service.runtime.lock().map_err(|e| e.to_string())?.root.clone();
+            crate::attachment_inputs::deliver_prepared(
+                &root,
+                &run_id,
+                &previous.node,
+                instruction.trim(),
+                std::path::Path::new(&target_worktree),
+                true,
+            )?;
+        }
         let worker_service = service.clone();
         let worker_execution = execution.clone();
         let worker_previous = previous.clone();
@@ -4457,6 +4495,7 @@ fn collect_files_from_dir(dir: &std::path::Path) -> Vec<String> {
     if is_git {
         if let Ok(output) = std::process::Command::new("git")
             .arg("ls-files")
+            .arg("-z")
             .arg("--cached")
             .arg("--others")
             .arg("--exclude-standard")
@@ -4464,11 +4503,10 @@ fn collect_files_from_dir(dir: &std::path::Path) -> Vec<String> {
             .output()
         {
             if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() && !is_excluded_project_path(trimmed) {
-                        files.push(trimmed.to_string());
+                for entry in output.stdout.split(|byte| *byte == 0) {
+                    let Ok(path) = std::str::from_utf8(entry) else { continue; };
+                    if !path.is_empty() && !is_excluded_project_path(path) {
+                        files.push(path.to_string());
                     }
                 }
             }
@@ -4528,157 +4566,6 @@ fn list_files(
 
     files.sort();
     Ok(serde_json::json!({ "files": files }))
-}
-
-fn write_workspace_file(
-    service: &Arc<Service>,
-    body: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let repo_path = resolve_repo_path(service, argument(&body, "repository").ok());
-    if !repo_path.exists() {
-        return Err("Repository workspace directory not found".into());
-    }
-    let raw_filename: String = argument(&body, "filename")?;
-    let content: String = argument(&body, "content")?;
-    let run_id_param: Option<String> = argument(&body, "runId").ok();
-    let node_param: Option<String> = argument(&body, "node").ok();
-
-    let file_name = std::path::Path::new(&raw_filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or("Invalid filename")?;
-
-    let clean_base64 = if let Some(idx) = content.find(',') {
-        &content[idx + 1..]
-    } else {
-        &content
-    };
-    let bytes = decode_base64(clean_base64).ok_or("Invalid base64 content")?;
-
-    // 1. 若指定了特定节点与运行上下文，同步写入该节点真实的私有 worktree 物理目录，
-    // 确保拓扑图沙箱内的 NodeAgent / Merger 能够立即物理访问该文件。
-    let mut written_worktree = false;
-    if let (Some(ref run_id), Some(ref node_name)) = (&run_id_param, &node_param) {
-        if let Ok(runtime) = service.runtime.lock() {
-            if runtime.state.run_id == *run_id {
-                let clean_node_name = node_name.strip_prefix("merge:").unwrap_or(node_name);
-                let is_merger = node_name == "merger" || node_name.starts_with("merge:");
-
-                let target_worktree = if is_merger {
-                    runtime
-                        .state
-                        .mergers
-                        .iter()
-                        .rev()
-                        .find(|m| {
-                            m.node == *node_name
-                                || m.node == *clean_node_name
-                                || (node_name == "merger" && m.node == "merger")
-                        })
-                        .map(|m| PathBuf::from(&m.worktree))
-                } else {
-                    runtime
-                        .state
-                        .executions
-                        .iter()
-                        .rev()
-                        .find(|e| e.node == *node_name)
-                        .map(|e| PathBuf::from(&e.worktree))
-                };
-
-                if let Some(worktree) = target_worktree {
-                    if worktree.is_dir() {
-                        let _ = fs::write(worktree.join(file_name), &bytes);
-                        written_worktree = true;
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. 无论是否写入特定 worktree，源仓库根目录始终同步写入一份，保证归档完整性。
-    let target_file = repo_path.join(file_name);
-    fs::write(&target_file, &bytes)
-        .map_err(|e| format!("Failed to write workspace file: {e}"))?;
-
-    Ok(serde_json::json!({
-        "name": file_name,
-        "path": file_name,
-        "size": bytes.len(),
-        "written_to_worktree": written_worktree,
-    }))
-}
-
-fn delete_workspace_file(
-    service: &Arc<Service>,
-    body: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    let repo_path = resolve_repo_path(service, argument(&body, "repository").ok());
-    if !repo_path.exists() {
-        return Err("Repository workspace directory not found".into());
-    }
-    let raw_filename: String = argument(&body, "filename")?;
-    let run_id_param: Option<String> = argument(&body, "runId").ok();
-    let node_param: Option<String> = argument(&body, "node").ok();
-
-    let file_name = std::path::Path::new(&raw_filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or("Invalid filename")?;
-
-    // 1. 若指定了特定节点，从该节点的私有 worktree 中清理
-    if let (Some(ref run_id), Some(ref node_name)) = (&run_id_param, &node_param) {
-        if let Ok(runtime) = service.runtime.lock() {
-            if runtime.state.run_id == *run_id {
-                let clean_node_name = node_name.strip_prefix("merge:").unwrap_or(node_name);
-                let is_merger = node_name == "merger" || node_name.starts_with("merge:");
-
-                let target_worktree = if is_merger {
-                    runtime
-                        .state
-                        .mergers
-                        .iter()
-                        .rev()
-                        .find(|m| {
-                            m.node == *node_name
-                                || m.node == *clean_node_name
-                                || (node_name == "merger" && m.node == "merger")
-                        })
-                        .map(|m| PathBuf::from(&m.worktree))
-                } else {
-                    runtime
-                        .state
-                        .executions
-                        .iter()
-                        .rev()
-                        .find(|e| e.node == *node_name)
-                        .map(|e| PathBuf::from(&e.worktree))
-                };
-
-                if let Some(worktree) = target_worktree {
-                    let node_file = worktree.join(file_name);
-                    if node_file.is_file() {
-                        let _ = fs::remove_file(&node_file);
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. 从源仓库清理
-    let target_file = repo_path.join(file_name);
-    if target_file.is_file() {
-        let _ = fs::remove_file(&target_file);
-    }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "name": file_name,
-    }))
 }
 
 fn list_skills(
@@ -5094,8 +4981,10 @@ pub fn dispatch(
         "detect_repository" => to_value(detect_repository(argument(&body, "path")?)?),
         "pick_repository" => to_value(crate::workspace::pick_repository()?),
         "list_files" => to_value(list_files(service, argument(&body, "repository").ok())?),
-        "write_workspace_file" => to_value(write_workspace_file(service, body)?),
-        "delete_workspace_file" => to_value(delete_workspace_file(service, body)?),
+        // Versioned command names deliberately have no legacy fallback: older
+        // backends must reject before touching a project basename.
+        "write_workspace_attachment" => to_value(write_workspace_attachment(service, body)?),
+        "delete_workspace_attachment" => to_value(delete_workspace_attachment(service, body)?),
         "list_skills" => to_value(list_skills(service, argument(&body, "repository").ok())?),
         "reset_workspace" => to_value(reset_workspace(service)?),
         "clear_history" => to_value(clear_history(service)?),
@@ -5429,6 +5318,8 @@ fn api_service(
         | "delete_run"
         | "get_execution_output"
         | "get_merger_prompt"
+        | "write_workspace_attachment"
+        | "delete_workspace_attachment"
         | "result_descriptor"
         | "launch_result" => {
             if let Some(run_id) = body.get("runId").and_then(serde_json::Value::as_str) {

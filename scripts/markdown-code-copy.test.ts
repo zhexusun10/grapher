@@ -19,7 +19,7 @@ test("fenced and indented blocks each get an accessible copy button without chan
   const html = render('```bash\nprintf "<tag> & 中文"\n```\n\n```\npwd\n```\n\n    echo indented\n');
   assert.equal(buttons(html), 3);
   assert.equal((html.match(/class="code-block-wrapper"/g) ?? []).length, 3);
-  assert.ok(html.includes('<code class="language-bash">printf &quot;&lt;tag&gt; &amp; 中文&quot;\n</code>'));
+  assert.ok(html.includes('<code class="language-bash">printf "&lt;tag&gt; &amp; 中文"\n</code>'));
   assert.ok(html.includes("<code>pwd\n</code>"));
   assert.ok(html.includes("<code>echo indented\n</code>"));
   assert.equal((html.match(/type="button"/g) ?? []).length, 3);
@@ -43,6 +43,7 @@ test("HTML-looking code stays escaped rather than becoming executable markup", (
   const html = render('```html\n<script>alert("x")</script>\n<button onclick="bad()">text</button>\n```');
   assert.equal(buttons(html), 1);
   assert.ok(!html.includes("<script>"));
-  assert.ok(!html.includes('onclick="bad()"'));
+  assert.ok(!/<button\b[^>]*\sonclick\s*=/i.test(html));
+  assert.ok(html.includes('&lt;button onclick="bad()"&gt;text&lt;/button&gt;'));
   assert.ok(html.includes("&lt;script&gt;"));
 });

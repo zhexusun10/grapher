@@ -15,6 +15,11 @@ const INTERRUPTED_CONTINUATION = '__grapher_continue_interrupted__';
 export default function (pi: ExtensionAPI) {
   const continuation = process.env.GRAPHER_CONTINUE_INTERRUPTED === 'true';
   const cwd = process.cwd();
+  // This is Grapher's workspace policy: a Grapher role always carries GRAPHER_MODE
+  // (node/planner/partition/merger/result) and/or GRAPHER_EXECUTION_KIND. Capture
+  // that once at factory time so the shell scrub still applies after any tool-time
+  // env restoration, while the unmanaged compatibility process stays a no-op.
+  const managedShell = !!process.env.GRAPHER_MODE || !!process.env.GRAPHER_EXECUTION_KIND;
   if (continuation) {
     // The host sends a private RPC marker. Intercept it before Pi appends a
     // user message, then start an empty custom turn. The context hook below
@@ -133,7 +138,7 @@ export default function (pi: ExtensionAPI) {
   if (launch || process.env.GRAPHER_EXECUTION_KIND === 'graph') {
     pi.on('user_bash', async () => ({ operations: {
       exec: (command, workingDirectory, options) => localOps.exec(managedBashCommand(activePaths ? activePaths.command(command) : command),
-        activePaths?.root || workingDirectory, managedBashOptions(options)),
+        activePaths?.root || workingDirectory, managedBashOptions(options, managedShell)),
     } }));
   }
 
@@ -148,7 +153,7 @@ export default function (pi: ExtensionAPI) {
       let callExitCode: number | null = null;
       const scopedOps: BashOperations = {
         exec: async (command, cwd, options) => {
-          const res = await localOps.exec(managedBashCommand(command), activePaths?.root || cwd, managedBashOptions(options));
+          const res = await localOps.exec(managedBashCommand(command), activePaths?.root || cwd, managedBashOptions(options, managedShell));
           callExitCode = res.exitCode;
           return res;
         },
@@ -174,7 +179,7 @@ export default function (pi: ExtensionAPI) {
       toolCallExitCodes.set(toolCallId, { exitCode, command: rawCmd, truncated: isTruncated });
 
       if (execError) {
-        if (execError instanceof Error && activePaths) execError.message = activePaths.visible(execError.message);
+        if (execError instanceof Error && activePaths) execError.message = view(execError.message);
         throw execError;
       }
 

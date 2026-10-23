@@ -7,6 +7,22 @@ import { actualPath, foldPath, hostPath, isCaseInsensitive, mapPhysicalPath, msy
 
 // Explicit tool adaptation, not an operating-system mount namespace.
 
+// Backend-described deny set for private executions. Diagnostic only: it never
+// grants access, and the platform profile/mount layout stays the boundary.
+function parseDeniedPaths(raw) {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    const list = value => Array.isArray(value) ? value.filter(entry => typeof entry === 'string' && entry.length > 0) : [];
+    const read = list(parsed?.read);
+    const write = list(parsed?.write);
+    const allowed = list(parsed?.allowed);
+    return read.length || write.length ? { read, write, allowed } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 let cygpath;
 const msysPaths = new Map();
 
@@ -196,6 +212,7 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
   const base = hostPath(resolve(originalRoot));
   const WORKSPACE_PATH = base;
   const caseInsensitive = isCaseInsensitive(root);
+  const denied = parseDeniedPaths(process.env.GRAPHER_DENIED_PATHS);
   const variants = value => {
     const source = unicodeVariants(hostPath(value));
     if (process.platform !== 'win32') return source;
@@ -465,8 +482,32 @@ export function createWorkspacePaths(directory, originalRoot = directory, source
     for (const edit of edits.reverse()) text = text.slice(0, edit.start) + edit.replacement + text.slice(edit.end);
     return mapCommand(text);
   }
+  // A private execution reports denied paths as a permission error instead of
+  // the platform's raw errno: macOS returns EPERM, while Linux masked reads
+  // return ENOENT (like a missing file) and read-only writes return EROFS.
+  const mentions = (text, root) =>
+    text.includes(root + '/') || text.includes(root + '\\')
+    || text.includes(root + "'") || text.includes(root + '"');
+  function classify(text) {
+    if (!denied || typeof text !== 'string' || text.length === 0) return text;
+    // Cheap precondition first: most model-visible strings are not errors.
+    const permission = /EPERM|EACCES|EROFS|Operation not permitted|Read-only file system|Permission denied/.test(text);
+    const missing = /ENOENT|No such file or directory/.test(text);
+    if (!permission && !missing) return text;
+    // An error about an allowed path is genuine, never a sandbox denial.
+    if (denied.allowed.some(exception => mentions(text, exception))) return text;
+    const roots = permission ? denied.write : denied.read;
+    if (!roots.some(deniedRoot => mentions(text, deniedRoot))) return text;
+    return text
+      .replace(/\b(?:EPERM|EACCES|EROFS|ENOENT): [^,\n]*, /g, 'EACCES: permission denied, ')
+      // The file tools report `Could not edit file: <path>. Error code: <errno>.`
+      .replace(/Error code: (?:EPERM|EACCES|EROFS|ENOENT)\b/g, 'Error code: EACCES')
+      .replace(/Operation not permitted/g, 'Permission denied')
+      .replace(/Read-only file system/g, 'Permission denied')
+      .replace(/No such file or directory/g, 'Permission denied');
+  }
   function view(value) {
-    if (typeof value === 'string') return visible(value);
+    if (typeof value === 'string') return visible(classify(value));
     if (Array.isArray(value)) return value.map(view);
     if (value && typeof value === 'object') {
       // Opaque provider signatures and image bytes must survive context mapping.

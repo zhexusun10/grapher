@@ -72,9 +72,10 @@ function PromptFixture({ compact = false, uncontrolled = false }: { compact?: bo
     onChange={uncontrolled ? undefined : event => setValue(event.target.value)}
     onCancel={() => { audit.cancels = (audit.cancels ?? 0) + 1; }}
     onPaste={() => { audit.pastes = (audit.pastes ?? 0) + 1; }}
-    onSubmit={async message => {
+    onSubmit={async (message, options) => {
       audit.submissions = (audit.submissions ?? 0) + 1;
       audit.lastMessage = message;
+      audit.lastOptions = options;
       if (audit.deferSubmit) return new Promise<boolean>(resolve => { audit.resolve = resolve; });
       return true;
     }} />;

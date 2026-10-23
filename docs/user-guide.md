@@ -36,7 +36,7 @@ For Graph, inspect tasks and dependencies, then choose **Approve**. Independent 
 | Pause Graph node work | Use the topology's **Pause**; it interrupts active node processes and stops new dispatches for that Run. Wait for pausing to finish before **Continue**. It does not stop the Planner or other Runs. |
 | Stop just one conversation | Use that node conversation's **Stop**. Global Stop/cancel also cancels planning. |
 
-Switching conversations does not stop background Runs. Unsent text drafts survive conversation switching only in browser memory; reload clears them, and unsent attachments are not retained.
+Switching conversations does not stop background Runs. Unsent text drafts survive conversation switching only in browser memory; reload clears them, and unsent attachments are not retained. Selecting or removing an attachment does not change project files. Sending stores it under a unique path without replacing an existing same-name file. For a completed node, the file is staged separately and delivered when its follow-up execution is prepared, leaving the completed snapshot unchanged. If the workspace is unavailable or the backend is too old to support safe uploads, the draft and attachment stay in the composer for retry.
 
 Planner follow-ups may work in a current node workspace, even alongside its active writer. They do not present a merged view of every parallel branch. Use **Planning session details** to inspect the actual directory used for each turn.
 

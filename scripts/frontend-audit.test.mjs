@@ -55,7 +55,8 @@ async function fixture(name, handler = async () => false, reducedMotion = "reduc
     const defaults = { provider_auth: catalog, pi_extensions: { globalDirectory: "mock", extensions: [] },
       environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true },
       list_files: { files: [] }, list_skills: { skills: [] },
-      write_workspace_file: { success: true }, delete_workspace_file: { success: true } };
+      write_workspace_attachment: { name: "fixture.txt", path: "grapher-attachments/00000000-0000-4000-8000-000000000001/fixture.txt" },
+      delete_workspace_attachment: { success: true } };
     if (Object.hasOwn(defaults, command)) return route.fulfill({ json: { result: defaults[command] } });
     errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ status: 500, json: { error: `Unexpected API: ${command}` } });
@@ -72,6 +73,33 @@ async function fixture(name, handler = async () => false, reducedMotion = "reduc
   }
   return { context, page, errors };
 }
+
+test("Markdown cannot execute HTML handlers or reach local APIs in live or replay views", { timeout: 30_000 }, async () => {
+  const apiCalls = [];
+  const { context, page, errors } = await fixture("markdownCopy", async (_route, command) => {
+    apiCalls.push(command);
+    return false;
+  });
+  try {
+    for (const streaming of [true, false]) {
+      await page.evaluate(streaming => {
+        window.audit.xss = 0;
+        const handler = "window.audit.xss++;fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})";
+        window.audit.setMarkdown(`<img src="data:image/png;base64,AA==" onerror="${handler}">` +
+          `<svg onload="${handler}"></svg><a href="&#x6a;avascript:window.audit.xss++">unsafe link</a>` +
+          '<iframe srcdoc="<script>parent.audit.xss++</script>"></iframe>', streaming);
+      }, streaming);
+      await page.locator(".markdown-content a").waitFor();
+      await page.locator(".markdown-content a").click();
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => window.audit.xss), 0);
+      assert.equal(await page.locator(".markdown-content [onerror], .markdown-content [onload], .markdown-content iframe, .markdown-content svg").count(), 0);
+      assert.equal(await page.locator(".markdown-content a").getAttribute("href"), null);
+    }
+    assert.deepEqual(apiCalls, []);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 test("Markdown block copy controls copy only their current code and recover from clipboard denial", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("markdownCopy");
@@ -98,11 +126,13 @@ test("Markdown block copy controls copy only their current code and recover from
     assert.equal(await page.evaluate(() => window.audit.copies.at(-1)), 'print("second")\n');
 
     await page.evaluate(() => window.audit.setMarkdown("```sh\necho streaming", true));
+    await page.waitForFunction(() => document.querySelectorAll(".code-copy-btn").length === 1);
     assert.equal(await buttons.count(), 1);
     await buttons.first().click();
     await page.waitForFunction(() => window.audit.copies.length === 3);
     assert.equal(await page.evaluate(() => window.audit.copies.at(-1)), "echo streaming\n");
     await page.evaluate(() => window.audit.setMarkdown("```sh\necho streaming updated", true));
+    await page.waitForFunction(() => document.querySelector("pre code")?.textContent === "echo streaming updated\n");
     await buttons.first().click();
     await page.waitForFunction(() => window.audit.copies.length === 4);
     assert.equal(await page.evaluate(() => window.audit.copies.at(-1)), "echo streaming updated\n");
@@ -1042,6 +1072,151 @@ test("late workspace completions cannot replace current files/skills; controlled
     assert.equal(await input.inputValue(), "");
     assert.deepEqual(errors, []);
   } finally { gate.resolve(); await context.close(); }
+});
+
+test("attachments stay local until Send and retries reuse only their own managed upload", { timeout: 30_000 }, async () => {
+  const writes = [], deletes = [];
+  const path = "grapher-attachments/00000000-0000-4000-8000-000000000002/original.txt";
+  const { context, page, errors } = await fixture("prompt", async (route, command, body) => {
+    if (command === "delete_workspace_attachment") deletes.push(body);
+    if (command !== "write_workspace_attachment") return false;
+    writes.push(body);
+    await route.fulfill({ json: { result: { name: "original.txt", path } } });
+    return true;
+  });
+  try {
+    const file = { name: "original.txt", mimeType: "text/plain", buffer: Buffer.from("attachment bytes") };
+    const input = page.locator("textarea");
+    await input.fill("Keep the original");
+    await page.locator('input[type="file"]').setInputFiles(file);
+    await page.locator(".prompt-box-file-badge").waitFor();
+    await page.getByRole("button", { name: "Remove file", exact: true }).click();
+    assert.deepEqual(writes, []); assert.deepEqual(deletes, []);
+    await page.locator('input[type="file"]').setInputFiles(file);
+    await page.evaluate(() => { window.audit.deferSubmit = true; });
+    await input.press("Enter");
+    await page.waitForFunction(() => window.audit.submissions === 1);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].repository, "/a");
+    assert.equal(writes[0].filename, "original.txt");
+    assert.equal(await page.evaluate(() => window.audit.lastMessage), `@${path} Keep the original`);
+    await page.evaluate(() => window.audit.resolve(false));
+    await page.waitForFunction(() => !document.querySelector("textarea").disabled);
+    assert.equal(await input.inputValue(), "Keep the original");
+    assert.equal(await page.locator(".prompt-box-file-badge").count(), 1);
+    await input.press("Enter");
+    await page.waitForFunction(() => window.audit.submissions === 2);
+    assert.equal(writes.length, 2, "each retry revalidates the backend's current target");
+    assert.equal(writes[1].attachmentId, writes[0].attachmentId, "the same pending file keeps its idempotency key");
+    assert.match(writes[0].attachmentId, /^[0-9a-f-]{36}$/);
+    await page.evaluate(() => window.audit.resolve(true));
+    await page.waitForFunction(() => window.audit.value === "");
+    await page.locator(".prompt-box-file-badge").waitFor({ state: "detached" });
+    assert.equal(await page.locator(".prompt-box-file-badge").count(), 0);
+    assert.deepEqual(deletes, []);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("attachment upload failure retains the draft and file and never submits a missing path", { timeout: 30_000 }, async () => {
+  let writes = 0;
+  const { context, page, errors } = await fixture("prompt", async (route, command) => {
+    if (command !== "write_workspace_attachment") return false;
+    writes++;
+    await route.fulfill({ status: 400, json: { error: "Attachment workspace directory is unavailable" } });
+    return true;
+  });
+  try {
+    const input = page.locator("textarea");
+    await input.fill("Keep this draft");
+    await page.locator('input[type="file"]').setInputFiles({ name: "fixture.txt", mimeType: "text/plain", buffer: Buffer.from("fixture") });
+    assert.equal(writes, 0);
+    await input.press("Enter");
+    await page.getByRole("alert").filter({ hasText: "Attachment workspace directory is unavailable" }).waitFor();
+    assert.equal(writes, 1);
+    assert.equal(await page.evaluate(() => window.audit.submissions ?? 0), 0);
+    assert.equal(await input.inputValue(), "Keep this draft");
+    assert.equal(await page.locator(".prompt-box-file-badge").count(), 1);
+    assert.equal(await input.isDisabled(), false);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("an older backend is rejected before a legacy upload can overwrite a project basename", { timeout: 30_000 }, async () => {
+  const calls = [];
+  let original = "uncommitted project content";
+  const { context, page, errors } = await fixture("prompt", async (route, command) => {
+    calls.push(command);
+    if (command === "write_workspace_file") {
+      original = "destructive legacy upload";
+      await route.fulfill({ json: { result: { name: "original.txt", path: "original.txt" } } });
+      return true;
+    }
+    if (command === "write_workspace_attachment") {
+      await route.fulfill({ status: 400, json: { error: "Unknown command" } });
+      return true;
+    }
+    return false;
+  });
+  try {
+    const input = page.locator("textarea");
+    await input.fill("Keep my draft");
+    await page.locator('input[type="file"]').setInputFiles({ name: "original.txt", mimeType: "text/plain", buffer: Buffer.from("attachment") });
+    await input.press("Enter");
+    await page.getByRole("alert").filter({ hasText: "Update the backend" }).waitFor();
+    assert.deepEqual(calls, ["write_workspace_attachment"]);
+    assert.equal(original, "uncommitted project content");
+    assert.equal(await input.inputValue(), "Keep my draft");
+    assert.equal(await page.locator(".prompt-box-file-badge").count(), 1);
+    assert.equal(await page.evaluate(() => window.audit.submissions ?? 0), 0);
+    assert.equal(await input.isDisabled(), false);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("late attachment uploads cannot submit into a newly selected workspace", { timeout: 30_000 }, async () => {
+  const gate = deferred();
+  let requested = false;
+  const { context, page, errors } = await fixture("prompt", async (route, command) => {
+    if (command !== "write_workspace_attachment") return false;
+    requested = true;
+    await gate.promise;
+    await route.fulfill({ json: { result: { name: "fixture.txt", path: "grapher-attachments/00000000-0000-4000-8000-000000000003/fixture.txt" } } });
+    return true;
+  });
+  try {
+    const input = page.locator("textarea");
+    await input.fill("Old workspace draft");
+    await page.locator('input[type="file"]').setInputFiles({ name: "fixture.txt", mimeType: "text/plain", buffer: Buffer.from("fixture") });
+    await input.press("Enter"); await waitFor(() => requested);
+    await page.evaluate(() => window.audit.switchRepository());
+    await input.fill("New workspace draft");
+    gate.resolve(); await page.waitForTimeout(150);
+    assert.equal(await page.evaluate(() => window.audit.submissions ?? 0), 0);
+    assert.equal(await input.inputValue(), "New workspace draft");
+    await page.locator(".prompt-box-file-badge").waitFor({ state: "detached" });
+    assert.equal(await page.locator(".prompt-box-file-badge").count(), 0);
+    assert.equal(await input.isDisabled(), false);
+    assert.deepEqual(errors, []);
+  } finally { gate.resolve(); await context.close(); }
+});
+
+test("file completions search Unicode names and quote paths containing spaces", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("prompt", async (route, command) => {
+    if (command !== "list_files") return false;
+    await route.fulfill({ json: { result: { files: ["中文说明.txt", "with spaces.txt"] } } });
+    return true;
+  });
+  try {
+    const input = page.locator("textarea");
+    await input.fill("@中文");
+    await page.locator(".suggestion-item-title-row", { hasText: "中文说明.txt" }).click();
+    assert.equal(await input.inputValue(), "@中文说明.txt ");
+    await input.fill("@with");
+    await page.locator(".suggestion-item-title-row", { hasText: "with spaces.txt" }).click();
+    assert.equal(await input.inputValue(), '@"with spaces.txt" ');
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
 });
 
 test("unreadable attachments retain the draft and file instead of sending an incomplete message", { timeout: 30_000 }, async () => {

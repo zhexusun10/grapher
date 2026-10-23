@@ -2154,7 +2154,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 layoutId="conversation-composer"
                 repository={config?.repository}
                 runId={state.runId}
-                node={selectedNode?.name}
+                node={conversationNode}
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={
                   !state.approved

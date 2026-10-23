@@ -78,7 +78,7 @@ impl Target {
             Self::Data { bucket, id } => {
                 if !matches!(
                     bucket.as_str(),
-                    "sessions" | "planning" | "mergers" | "planner-sessions" | "partition-workers" | "environments" | "file-changes"
+                    "sessions" | "planning" | "mergers" | "planner-sessions" | "partition-workers" | "environments" | "file-changes" | "attachment-inputs"
                 ) || !safe_id(id)
                 {
                     return Err("Invalid owned session directory".into());

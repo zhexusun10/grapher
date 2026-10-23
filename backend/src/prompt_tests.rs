@@ -4045,7 +4045,7 @@ fn list_files_and_list_skills_dispatch() {
 }
 
 #[test]
-fn write_and_delete_workspace_file_dispatch() {
+fn workspace_attachment_dispatch_preserves_originals() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path().join("runtime");
     let service = Arc::new(Service {
@@ -4059,10 +4059,11 @@ fn write_and_delete_workspace_file_dispatch() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
 
-    // 1. 写入文件至工作区根目录（"hello world" -> "aGVsbG8gd29ybGQ="）
+    fs::write(repo.join("hello.txt"), "original unsaved work").unwrap();
+    // Upload returns a managed path and never replaces the original basename.
     let write_res = dispatch(
         &service,
-        "write_workspace_file",
+        "write_workspace_attachment",
         serde_json::json!({
             "repository": repo.to_string_lossy(),
             "filename": "hello.txt",
@@ -4071,16 +4072,14 @@ fn write_and_delete_workspace_file_dispatch() {
     )
     .unwrap();
     assert_eq!(write_res["name"], "hello.txt");
-    assert_eq!(write_res["path"], "hello.txt");
-    assert_eq!(
-        fs::read_to_string(repo.join("hello.txt")).unwrap(),
-        "hello world"
-    );
+    let uploaded = write_res["path"].as_str().unwrap();
+    assert_eq!(fs::read_to_string(repo.join(uploaded)).unwrap(), "hello world");
+    assert_eq!(fs::read_to_string(repo.join("hello.txt")).unwrap(), "original unsaved work");
 
-    // 2. 验证路径穿越被安全剥离，只写在工作区根目录
+    // A cross-platform basename is isolated below a new attachment ID.
     let traversal_res = dispatch(
         &service,
-        "write_workspace_file",
+        "write_workspace_attachment",
         serde_json::json!({
             "repository": repo.to_string_lossy(),
             "filename": "../../sub/evil.py",
@@ -4089,28 +4088,40 @@ fn write_and_delete_workspace_file_dispatch() {
     )
     .unwrap();
     assert_eq!(traversal_res["name"], "evil.py");
-    assert!(repo.join("evil.py").is_file());
+    assert!(repo.join(traversal_res["path"].as_str().unwrap()).is_file());
     assert!(!temp.path().join("evil.py").exists());
 
-    // 3. 删除文件
+    // Deletion accepts only the returned path, not arbitrary project files.
+    assert!(dispatch(&service, "delete_workspace_attachment", serde_json::json!({
+        "repository": repo, "filename": "hello.txt",
+    })).is_err());
     let del_res = dispatch(
         &service,
-        "delete_workspace_file",
+        "delete_workspace_attachment",
         serde_json::json!({
             "repository": repo.to_string_lossy(),
-            "filename": "hello.txt",
+            "filename": uploaded,
         }),
     )
     .unwrap();
     assert_eq!(del_res["success"], true);
-    assert!(!repo.join("hello.txt").exists());
+    assert!(!repo.join(uploaded).exists());
+    assert_eq!(fs::read_to_string(repo.join("hello.txt")).unwrap(), "original unsaved work");
 
-    // 4. 针对特定节点工作区（worktree）的定向写入与删除验证
+    // A private node workspace is never edited at upload time: the file is
+    // staged for that Run/node scope and delivered when an agent owns it.
     let node_worktree = temp.path().join("worktrees/run-1/node-a");
     fs::create_dir_all(&node_worktree).unwrap();
+    let run_id = Uuid::new_v4().to_string();
     {
         let mut runtime = service.runtime.lock().unwrap();
-        runtime.state.run_id = "run-1".to_string();
+        runtime.state.run_id = run_id.clone();
+        runtime.state.config = Some(serde_json::from_value(serde_json::json!({
+            "repository": repo, "model": "test/model", "maxParallel": 1,
+        })).unwrap());
+        runtime.state.nodes.insert("node-a".into(), NodeState {
+            status: "running".into(), ..Default::default()
+        });
         runtime.state.executions.push(Execution {
             id: "exec-1".to_string(),
             node: "node-a".to_string(),
@@ -4135,40 +4146,45 @@ fn write_and_delete_workspace_file_dispatch() {
 
     let node_write_res = dispatch(
         &service,
-        "write_workspace_file",
+        "write_workspace_attachment",
         serde_json::json!({
             "repository": repo.to_string_lossy(),
             "filename": "node_data.csv",
             "content": "MSwyLDM=", // "1,2,3"
-            "runId": "run-1",
+            "runId": run_id,
             "node": "node-a",
         }),
     )
     .unwrap();
-    assert_eq!(node_write_res["written_to_worktree"], true);
-    assert_eq!(
-        fs::read_to_string(node_worktree.join("node_data.csv")).unwrap(),
-        "1,2,3"
-    );
-    assert_eq!(
-        fs::read_to_string(repo.join("node_data.csv")).unwrap(),
-        "1,2,3"
-    );
+    assert_eq!(node_write_res["staged"], true);
+    let node_path = node_write_res["path"].as_str().unwrap();
+    assert!(!node_worktree.join(node_path).exists());
+    assert!(!repo.join(node_path).exists());
+    assert!(!repo.join("node_data.csv").exists());
+    let runtime_root = service.runtime.lock().unwrap().root.clone();
+    crate::attachment_inputs::deliver(
+        &runtime_root,
+        &run_id,
+        "node-a",
+        &format!("Read @{node_path}"),
+        &node_worktree,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(node_worktree.join(node_path)).unwrap(), "1,2,3");
 
     // 5. 定向删除测试
     let node_del_res = dispatch(
         &service,
-        "delete_workspace_file",
+        "delete_workspace_attachment",
         serde_json::json!({
             "repository": repo.to_string_lossy(),
-            "filename": "node_data.csv",
-            "runId": "run-1",
+            "filename": node_path,
+            "runId": run_id,
             "node": "node-a",
         }),
     )
     .unwrap();
     assert_eq!(node_del_res["success"], true);
-    assert!(!node_worktree.join("node_data.csv").exists());
     assert!(!repo.join("node_data.csv").exists());
 }
 

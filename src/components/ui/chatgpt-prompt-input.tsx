@@ -129,6 +129,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const [isDraggingOver, setIsDraggingOver] = useState(false);
     const dragCounterRef = useRef(0);
     const selectedFileRef = useRef<File | null>(null);
+    const attachmentIdRef = useRef<string | null>(null);
+    const attachmentGenerationRef = useRef(0);
     const [isPreparing, setIsPreparing] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const submittingRef = useRef(false);
@@ -142,6 +144,18 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       mountedRef.current = true;
       return () => { mountedRef.current = false; };
     }, []);
+
+    useEffect(() => {
+      selectedFileRef.current = null;
+      attachmentIdRef.current = null;
+      submittingRef.current = false;
+      setSelectedFile(null);
+      setSelectedImage(null);
+      setAttachmentError("");
+      setIsPreparing(false);
+      setIsSubmitting(false);
+      return () => { attachmentGenerationRef.current += 1; };
+    }, [repository, runId, node]);
 
     // 智能补全联想状态（@ 文件/智能体，/ Skills）
     const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
@@ -307,7 +321,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             type: "file",
             title: f.fileName,
             subtitle: f.dir ? `${f.dir}/` : f.file,
-            value: `@${f.file} `,
+            value: `@${/[\s"\\]/.test(f.file) ? JSON.stringify(f.file) : f.file} `,
             badge: ext,
             _score: f.score,
           });
@@ -539,12 +553,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const processIncomingFile = useCallback((file: File) => {
       setAttachmentError("");
       selectedFileRef.current = file;
+      attachmentIdRef.current = crypto.randomUUID();
       setSelectedFile(file);
       setSelectedImage(null);
-      // 自动写入对应工作区（如果指定了当前节点则写入其专属 worktree，同时同步源工作区）
-      void runtimeService.writeWorkspaceFile(file, repository, { runId, node }).catch((err) => {
-        console.warn("Failed to write incoming file to workspace:", err);
-      });
+      // Selection is local only. Persist a collision-safe attachment on Send.
       if (file.type.startsWith("image/")) {
         const reader = new FileReader();
         reader.onload = () => {
@@ -552,7 +564,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         };
         reader.readAsDataURL(file);
       }
-    }, [repository, runId, node]);
+    }, []);
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -628,17 +640,15 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       e.stopPropagation();
       if (submittingRef.current) return;
       setAttachmentError("");
-      const removedFile = selectedFileRef.current;
       selectedFileRef.current = null;
+      attachmentIdRef.current = null;
       setSelectedImage(null);
       setSelectedFile(null);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
-      // 用户删除附件时，同步将对应节点工作区与源工作区中的文件删除
-      if (removedFile?.name) {
-        void runtimeService.deleteWorkspaceFile(removedFile.name, repository, { runId, node });
-      }
+      // Never unlink a project file on Cancel. An earlier rejected/ambiguous
+      // send may already have delivered its uniquely named attachment.
     };
 
     const handleSubmitAction = async () => {
@@ -648,11 +658,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       setIsSubmitting(true);
       setAttachmentError("");
 
+      const generation = attachmentGenerationRef.current;
+      const isCurrent = () => mountedRef.current && generation === attachmentGenerationRef.current;
       const currentAttachment = selectedFile;
       let combinedPrompt = trimmed;
 
-      // 如果有附件，确保其写入工作区根目录，并直接以 @filename 形式在提示词中引用，无需 attachment 前缀
       if (currentAttachment) {
+        const attachmentId = attachmentIdRef.current ??= crypto.randomUUID();
+        let uploadedPath: string;
         setIsPreparing(true);
         try {
           if (!currentAttachment.type.startsWith("image/")) {
@@ -667,19 +680,28 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               });
             }
           }
-          await runtimeService.writeWorkspaceFile(currentAttachment, repository, { runId, node });
+          if (!isCurrent()) return;
+          // Revalidate delivery on every retry: the backend may have handed
+          // this node to another workspace or published it since the last send.
+          const uploaded = await runtimeService.writeWorkspaceFile(currentAttachment, repository, {
+            runId, node, attachmentId,
+          });
+          if (!isCurrent()) return;
+          uploadedPath = uploaded.path;
         } catch (err) {
           console.error("Failed to process attached file:", err);
-          submittingRef.current = false;
-          if (mountedRef.current) {
-            setAttachmentError(t("无法读取附件，请重新选择文件后重试。"));
+          if (isCurrent()) {
+            submittingRef.current = false;
+            setAttachmentError(`${t("无法读取附件，请重新选择文件后重试。")} ${err instanceof Error ? err.message : String(err)}`);
             setIsSubmitting(false);
           }
           return;
         } finally {
-          if (mountedRef.current) setIsPreparing(false);
+          if (isCurrent()) setIsPreparing(false);
         }
-        const fileMention = `@${currentAttachment.name}`;
+        if (!isCurrent()) return;
+        const path = uploadedPath;
+        const fileMention = `@${/[\s"\\]/.test(path) ? JSON.stringify(path) : path}`;
         combinedPrompt = trimmed ? `${fileMention} ${trimmed}` : fileMention;
       }
       const displayText = combinedPrompt;
@@ -712,7 +734,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
 
       try {
-        if (!mountedRef.current) return;
+        if (!isCurrent()) return;
         if (onSubmit) {
           const accepted = await onSubmit(combinedPrompt, {
             files: currentAttachment ? [currentAttachment] : [],
@@ -721,7 +743,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             displayText,
             mode: (isExecuting || isWorking) ? "steer" : undefined,
           });
-          if (accepted === false || !mountedRef.current) return;
+          if (accepted === false || !isCurrent()) return;
         }
 
         animateSendArrowRef.current = true;
@@ -733,11 +755,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         selectedFileRef.current = null;
         setSelectedImage(null);
         setSelectedFile(null);
+        attachmentIdRef.current = null;
       } catch (error) {
         console.error("Failed to send message:", error);
       } finally {
-        submittingRef.current = false;
-        if (mountedRef.current) setIsSubmitting(false);
+        if (isCurrent()) {
+          submittingRef.current = false;
+          setIsSubmitting(false);
+        }
       }
     };
 

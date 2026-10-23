@@ -482,6 +482,43 @@ pub(crate) fn get_or_prepare_verified(
     preparation.commit_shared(key)
 }
 
+/// Remove a directory tree even when a private-execution mask cleared the read
+/// bit on a directory. Linux `bubblewrap` masks are execute-only or unreadable,
+/// and the generic recursive delete cannot open an unreadable directory to list
+/// it. Ownership allows restoring access on the way down before deleting.
+pub(crate) fn remove_dir_all_masked(path: &Path) -> std::io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Only Unix masks clear the read bit; elsewhere retry as-is.
+            #[cfg(unix)]
+            {
+                restore_dir_permissions(path);
+                if fs::remove_dir_all(path).is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Restore owner access on a directory tree so it can be listed and deleted.
+#[cfg(unix)]
+fn restore_dir_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if fs::symlink_metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir()) {
+                restore_dir_permissions(&entry.path());
+            }
+        }
+    }
+}
+
 pub(crate) fn remove(runtime: &NativeRuntime) -> Result<(), String> {
     if runtime.persistent {
         return Err("Cannot delete a shared native runtime reader".into());
@@ -496,12 +533,12 @@ pub(crate) fn remove(runtime: &NativeRuntime) -> Result<(), String> {
                 continue;
             }
             if entry.path().is_dir() {
-                fs::remove_dir_all(entry.path())?;
+                remove_dir_all_masked(&entry.path())?;
             } else {
                 fs::remove_file(entry.path())?;
             }
         }
-        fs::remove_dir_all(&runtime.directory)
+        remove_dir_all_masked(&runtime.directory)
     })();
     match removal {
         Ok(()) => Ok(()),

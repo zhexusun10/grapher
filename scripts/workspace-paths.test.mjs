@@ -223,3 +223,45 @@ test('Windows workspace mapping preserves native and slash paths without requiri
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('private-execution denials report permission, not a platform errno', { skip: process.platform === 'win32' }, () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'grapher-denied-')));
+  const previous = process.env.GRAPHER_DENIED_PATHS;
+  try {
+    const source = join(root, 'source');
+    const worktrees = join(root, '.grapher-worktrees');
+    const workspace = join(worktrees, 'run', 'node');
+    const data = join(root, 'data');
+    const session = join(data, 'sessions', 'node');
+    const engine = join(root, 'engine');
+    for (const dir of [source, workspace, session, engine]) mkdirSync(dir, { recursive: true });
+    process.env.GRAPHER_DENIED_PATHS = JSON.stringify({
+      read: [source, worktrees, data],
+      write: [source, worktrees, data, engine],
+      allowed: [workspace, session],
+    });
+    const paths = createWorkspacePaths(workspace, source);
+    // Linux masks a denied read as ENOENT; report the sandbox's denial instead.
+    assert.equal(paths.view(`ENOENT: no such file or directory, access '${join(source, 'secret')}'`),
+      "EACCES: permission denied, access './secret'");
+    // macOS denies a read with EPERM.
+    assert.equal(paths.view(`EPERM: operation not permitted, open '${join(source, 'secret')}'`),
+      "EACCES: permission denied, open './secret'");
+    // A sibling workspace is denied the same way and keeps its external path.
+    assert.equal(paths.view(`EROFS: read-only file system, open '${join(worktrees, 'run', 'other', 'x')}'`),
+      `EACCES: permission denied, open '${join(worktrees, 'run', 'other', 'x')}'`);
+    // A genuine missing file inside the workspace stays a missing file.
+    assert.equal(paths.view(`ENOENT: no such file or directory, access '${join(workspace, 'missing')}'`),
+      "ENOENT: no such file or directory, access './missing'");
+    // Shell stderr gets the same reason.
+    assert.equal(paths.view(`cat: ${join(source, 'secret')}: No such file or directory`),
+      'cat: ./secret: Permission denied');
+    // The file tools wrap the errno as `Error code: <errno>`.
+    assert.equal(paths.view(`Could not edit file: ${join(source, 'secret')}. Error code: ENOENT.`),
+      'Could not edit file: ./secret. Error code: EACCES.');
+  } finally {
+    if (previous === undefined) delete process.env.GRAPHER_DENIED_PATHS;
+    else process.env.GRAPHER_DENIED_PATHS = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

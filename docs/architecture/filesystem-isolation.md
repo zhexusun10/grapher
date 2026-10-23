@@ -23,6 +23,13 @@ Source-native Planner turns use host-user permissions; private-workspace turns r
 
 ## Platform boundaries
 
+A denied path is reported to the model as a permission error rather than a
+platform errno: macOS Seatbelt returns `EPERM`, while on Linux a masked read
+looks like a missing file and a read-only write looks like a read-only
+filesystem. The backend supplies the private execution's deny set to the engine
+for this diagnostic only. It grants no access and does not change the platform
+boundary.
+
 ### macOS
 
 Private Graph executions, Planner turns and Mergers use Seatbelt through `sandbox-exec`. Source-native Planner turns use host-user permissions. The execution profile restricts ordinary access to the source, sibling workspaces, and other sessions while permitting its current workspace/session and required host resources. The shared engine copy is protected from writes.
@@ -31,7 +38,7 @@ Private Graph executions, Planner turns and Mergers use Seatbelt through `sandbo
 
 Private Graph executions, Planner turns and Mergers use bubblewrap. Source-native Planner execution does not use these private-workspace mounts. The host/task container must allow unprivileged user, mount, and PID namespaces plus required bind/proc mounts. Graph preflight fails closed; it does not replace a rejected Graph with an unisolated execution or test fixture.
 
-The mount layout exposes the current private repository/session, masks source and unrelated workspace/data paths, and makes the shared engine and original installation read-only, including linked dependency targets. The container's `/dev` is explicitly mounted and `/dev/null` read/write is checked. Network access remains available for configured providers.
+The mount layout exposes the current private repository/session, masks source and unrelated workspace/data paths, and makes the shared engine and original installation read-only, including linked dependency targets. A masked directory is made unreadable rather than left empty, so listing or traversing it fails with a permission error instead of a silent empty listing. The container's `/dev` is explicitly mounted and `/dev/null` read/write is checked. Network access remains available for configured providers.
 
 An outer Docker/Harbor container is **not** a substitute for these per-execution boundaries. See [Harbor requirements](../benchmarks/harbor.md#linux-task-environment).
 
@@ -115,6 +122,8 @@ Private executions load the shared engine copy from [prepare-native-runtime.mjs]
 
 Pi authentication uses its dedicated configuration directory, not a per-node credential vault. Model tools may read auth material available to their process. Shared HOME, temporary files, hard links, services and global configuration are outside Git node-version isolation.
 
+Environment exposure is separate from path mapping. The Bash environment handed to a Graph node, Planner or Merger drops Grapher's own control variables (`GRAPHER_*`), Pi session/credential path variables and host editor/credential-helper injection, and retargets `TMPDIR`/`TMP`/`TEMP`/`XDG_RUNTIME_DIR` to the Run's cache scratch instead of the session directory under the Run's `data/`. OS variables and the Run-state HOME/cache bindings remain. This removes environment breadcrumbs only; it is not an access boundary, and a variable the host shell itself re-injects is left alone. See the [launch binding](../../engine/launch-binding.mjs).
+
 ## Process lifecycle
 
 Unix uses process groups; Windows attaches suspended children to kill-on-close Job Objects before resuming them. Cancellation, timeout, and shutdown use these lifecycle mechanisms. A Job Object is not a filesystem access policy.
@@ -140,4 +149,4 @@ a passing group check is not detection or cleanup evidence for detached Bash wri
 
 [Testing](../development/testing.md) lists fixture, Pi launcher, and platform-boundary checks. Validate permission changes on the affected platform.
 
-Implementation: [native.rs](../../backend/src/native.rs), [sandbox.rs](../../backend/src/sandbox.rs), [linux_sandbox.rs](../../backend/src/linux_sandbox.rs), [workspace-paths.mjs](../../engine/workspace-paths.mjs), [workspace-tools.ts](../../engine/workspace-tools.ts), and [prompt-extension.ts](../../engine/prompt-extension.ts).
+Implementation: [native.rs](../../backend/src/native.rs), [sandbox.rs](../../backend/src/sandbox.rs), [linux_sandbox.rs](../../backend/src/linux_sandbox.rs), [workspace-paths.mjs](../../engine/workspace-paths.mjs), [workspace-tools.ts](../../engine/workspace-tools.ts), [launch-binding.mjs](../../engine/launch-binding.mjs), and [prompt-extension.ts](../../engine/prompt-extension.ts).
