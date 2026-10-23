@@ -5,7 +5,7 @@ All notable changes to Grapher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] - 2026-10-23
 
 ### Breaking
 
@@ -237,7 +237,7 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
-[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.2.6...HEAD
+[1.3.0]: https://github.com/zhexusun10/grapher/compare/v1.2.6...v1.3.0
 [1.2.6]: https://github.com/zhexusun10/grapher/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.5
 [1.2.4]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.4
