@@ -265,6 +265,24 @@ pub fn assign_to_current_owner(tree: &ProcessTree) -> Result<(), String> {
     Ok(())
 }
 
+/// Move an already-tracked lifecycle boundary to another owner namespace.
+///
+/// A settled Serial turn parks its process tree instead of terminating it: the
+/// parked tree must stop answering its old execution owner's cancellation
+/// (invalidate/retry would otherwise kill the warm shell and any service it
+/// started), while staying reachable for backend shutdown and explicit cleanup.
+/// Claiming a parked tree re-keys it back to the new execution owner.
+pub fn reassign_owner(tree: &ProcessTree, owner: &str) -> Result<(), String> {
+    let mut processes = registry().lock().map_err(|error| error.to_string())?;
+    let weak = Arc::downgrade(&tree.0);
+    let entry = processes
+        .iter_mut()
+        .find(|(_, candidate)| candidate.ptr_eq(&weak))
+        .ok_or("Process tree is no longer tracked")?;
+    entry.0 = owner.to_owned();
+    Ok(())
+}
+
 fn retry_termination(mut terminate: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
     for attempt in 1..=3 {
         match terminate() {
@@ -383,6 +401,33 @@ impl ProcessTree {
         self.drain(POST_TERMINATE_DRAIN)
     }
 
+    /// Whether any process is still alive inside this lifecycle boundary.
+    ///
+    /// Used after a node agent exits: a surviving background service keeps the
+    /// boundary non-empty, so the backend keeps the Job/process group open
+    /// instead of closing it (which would kill the service).
+    pub fn has_live_members(&self) -> bool {
+        #[cfg(windows)]
+        unsafe {
+            let mut info: JobObjectBasicAccountingInformation = std::mem::zeroed();
+            if QueryInformationJobObject(
+                self.0.job as RawHandle,
+                1,
+                &mut info as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of_val(&info) as u32,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                return false;
+            }
+            info.active_processes > 0
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(self.0.pid as i32), 0) == 0
+        }
+    }
+
     fn drain(&self, budget: std::time::Duration) -> Result<(), String> {
         // Keep polling even after terminate(): SIGKILL delivery is asynchronous,
         // and handoff must still wait for descendants that have not exited.
@@ -428,6 +473,15 @@ impl ProcessTree {
 
     pub fn terminate(&self) {
         let _ = terminate_inner(&self.0); // Failures are retried and logged.
+    }
+
+    /// Number of live owners of this boundary.
+    ///
+    /// The engine's drop guard terminates only when it is the last owner, so a
+    /// boundary deliberately kept alive elsewhere (a held service) is not torn
+    /// down when the turn's guard is dropped.
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
     }
 }
 
@@ -851,6 +905,33 @@ mod tests {
         assert!(second.try_wait().unwrap().is_none());
         second_tree.terminate();
         let _ = second.wait();
+    }
+
+    #[test]
+    fn reassigned_tree_answers_only_its_new_owner() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping 127.0.0.1 -n 10 > NUL"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 10"]);
+            command
+        };
+        configure_command(&mut command);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let tree = with_owner("execution-owner", || track(&child).unwrap());
+        reassign_owner(&tree, "linger-owner").unwrap();
+        // Retry/invalidate target the execution owner; a parked tree must survive.
+        terminate_owner("execution-owner");
+        assert!(child.try_wait().unwrap().is_none());
+        // The parked owner still terminates on shutdown/cleanup.
+        terminate_owner("linger-owner");
+        assert!(!child.wait().unwrap().success());
     }
 
     #[test]

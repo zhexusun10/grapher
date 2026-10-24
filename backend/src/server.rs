@@ -3839,6 +3839,8 @@ fn delete_run(run_id: String, service: &Arc<Service>) -> Result<(), String> {
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
+    // A deleted Run must not leave a warm Serial shell (and its services) behind.
+    crate::engine::stop_lingering_for_run(&run_id);
     let root = runtime.root.clone();
     runtime.delete_run(&run_id)?;
     drop(runtime);
@@ -3885,6 +3887,9 @@ fn delete_workspace(repository: String, service: &Arc<Service>) -> Result<Vec<St
     }
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
+    for id in &ids {
+        crate::engine::stop_lingering_for_run(id);
+    }
     runtimes[0].delete_runs(&ids)?;
     for runtime in &mut runtimes { runtime.forget_deleted_runs(&ids); }
     drop(runtimes);
@@ -5694,6 +5699,7 @@ pub fn run() -> Result<(), String> {
             crate::native::begin_shutdown();
             #[cfg(not(feature = "fixture"))]
             crate::engine::stop_partition_prewarm();
+            crate::engine::stop_lingering();
             if let Ok(mut runtime) = shutdown_service.runtime.lock() {
                 if matches!(runtime.state.phase.as_str(), "publishing" | "merging") {
                     let _ = runtime.emit(EventKind::PublicationFailed {

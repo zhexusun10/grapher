@@ -29,6 +29,8 @@ mod output_buffer;
 #[cfg(not(feature = "fixture"))]
 pub(crate) mod prewarm;
 #[cfg(not(feature = "fixture"))]
+mod lingering;
+#[cfg(not(feature = "fixture"))]
 mod process_prewarm;
 #[cfg(not(feature = "fixture"))]
 use prewarm::{Pool, ReadyProcess, Ticket, Worker};
@@ -420,7 +422,12 @@ struct ProcessGuard(process_control::ProcessTree);
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        self.0.terminate();
+        // Terminate only when this guard is the last owner of the boundary. A
+        // held service keeps a clone, and its Job/process group must stay open
+        // so the service survives the node agent's exit.
+        if self.0.strong_count() <= 1 {
+            self.0.terminate();
+        }
     }
 }
 
@@ -762,11 +769,24 @@ fn run_pi_with_timeout(
     timeout: Option<Duration>,
 ) -> Result<String, String> {
     let launch_started = Instant::now();
-    let phase = request.role.name();
     let config = request.config;
     #[cfg(not(feature = "fixture"))]
     crate::workspace::validate_binding(Path::new(&config.repository))?;
     fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
+    // Source-native conversations stay resident: reuse a parked shell for this
+    // session before any cold launch. Graph node agents are never parked, so
+    // this is a miss for them.
+    #[cfg(not(feature = "fixture"))]
+    if let Some(key) = serial_linger_key(&request) {
+        if let Some(host) = lingering_pool().claim(&key) {
+            return run_resumed(host, &request, on_output, timeout, launch_started);
+        }
+    } else if let Some(key) = planner_session_key(&request) {
+        // A Planner turn outside the source (a node workspace) advances the same
+        // Pi session, so any parked source-native Planner shell for this
+        // conversation is now stale and must not be reused later.
+        lingering_pool().retire_key(&key);
+    }
     // Production always runs the pinned, Grapher-owned entrypoint. Persisted
     // legacy command fields cannot select a different engine implementation.
     #[cfg(not(feature = "fixture"))]
@@ -1071,6 +1091,8 @@ fn run_pi_with_timeout(
         && request.cwd.canonicalize().ok().is_some_and(|cwd|
             Path::new(&config.repository).canonicalize().ok()
                 .is_some_and(|repository| crate::path_identity::same_path(&cwd, &repository)));
+    #[cfg(feature = "fixture")]
+    let source_role = false;
     #[cfg(not(feature = "fixture"))]
     let prepared = if warm_node.is_none() && source_role {
         process_prewarm::claim(config, request.role, request.cwd)
@@ -1253,6 +1275,64 @@ fn run_pi_with_timeout(
             }
         }
     });
+    let mut channels = SessionChannels { receiver, input_receiver, rpc_sender, rpc_pending };
+    let outcome = run_turn(
+        request.role,
+        rpc_agent,
+        &initial_rpc_id,
+        timeout,
+        started,
+        &process_tree,
+        &mut child,
+        &mut channels,
+        &mut on_output,
+    )?;
+    finish_turn(
+        &request,
+        &mut on_output,
+        timeout,
+        started,
+        child,
+        process_tree,
+        channels,
+        rpc_guard,
+        outcome,
+        managed,
+        source_role,
+    )
+}
+
+struct SessionChannels {
+    receiver: mpsc::Receiver<(bool, String)>,
+    input_receiver: mpsc::Receiver<Result<(), std::io::Error>>,
+    rpc_sender: Option<mpsc::Sender<String>>,
+    rpc_pending: Option<Arc<Mutex<HashMap<String, mpsc::Sender<Result<(), String>>>>>>,
+}
+
+struct TurnOutcome {
+    final_text: String,
+    agent_error: Option<String>,
+    input_error: Option<std::io::Error>,
+    timed_out: bool,
+    settled: bool,
+    stderr_tail: String,
+    stderr_lines: Vec<String>,
+    raw_stdout_lines: Vec<String>,
+    first_output_ms: Option<u128>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_turn(
+    role: PiRole,
+    rpc_agent: bool,
+    initial_rpc_id: &str,
+    timeout: Option<Duration>,
+    started: Instant,
+    process_tree: &process_control::ProcessTree,
+    child: &mut std::process::Child,
+    channels: &mut SessionChannels,
+    on_output: &mut impl FnMut(String),
+) -> Result<TurnOutcome, String> {
     let mut input_error = None;
     let mut final_text = String::new();
     let mut agent_error = None;
@@ -1266,16 +1346,16 @@ fn run_pi_with_timeout(
     let mut tool_output = tool_output::ToolOutputProjection::default();
     let mut output_buffer = output_buffer::OutputBuffer::default();
     loop {
-        output_buffer.flush_due(&mut on_output)?;
+        output_buffer.flush_due(&mut *on_output)?;
         // Planners/nodes need a steer handoff window. The Partitioner has no
         // follow-up commands, so close RPC stdin as soon as its turn settles.
-        let handoff = if request.role == PiRole::Partitioner {
+        let handoff = if role == PiRole::Partitioner {
             Duration::ZERO
         } else {
             Duration::from_millis(500)
         };
         if rpc_agent && agent_ended.is_some_and(|t| t.elapsed() > handoff) {
-            let pending_empty = rpc_pending
+            let pending_empty = channels.rpc_pending
                 .as_ref()
                 .is_some_and(|p| p.lock().is_ok_and(|p| p.is_empty()));
             if pending_empty {
@@ -1289,10 +1369,10 @@ fn run_pi_with_timeout(
             let _ = child.kill();
             break;
         }
-        if let Ok(Err(error)) = input_receiver.try_recv() {
+        if let Ok(Err(error)) = channels.input_receiver.try_recv() {
             input_error = Some(error);
         }
-        match receiver.recv_timeout(output_buffer.wait_timeout()) {
+        match channels.receiver.recv_timeout(output_buffer.wait_timeout()) {
             Ok((is_error, line)) => {
                 if is_error {
                     if line.contains("No project session found with id")
@@ -1305,7 +1385,7 @@ fn run_pi_with_timeout(
                         stderr_lines.push(trimmed.to_string());
                     }
                     stderr_tail = line.clone();
-                    output_buffer.flush(&mut on_output)?;
+                    output_buffer.flush(&mut *on_output)?;
                     on_output(format!("[stderr] {line}\n"));
                     continue;
                 }
@@ -1322,7 +1402,7 @@ fn run_pi_with_timeout(
                         "agent_start" | "turn_start" if rpc_agent => agent_ended = None,
                         "agent_settled" if rpc_agent => agent_ended = Some(Instant::now()),
                         "response" if rpc_agent => {
-                            if event["id"].as_str() == Some(initial_rpc_id.as_str())
+                            if event["id"].as_str() == Some(initial_rpc_id)
                                 && event["success"] == false
                             {
                                 agent_error = Some(
@@ -1333,7 +1413,7 @@ fn run_pi_with_timeout(
                                 );
                                 agent_ended = Some(Instant::now());
                             }
-                            if let (Some(id), Some(pending)) = (event["id"].as_str(), &rpc_pending)
+                            if let (Some(id), Some(pending)) = (event["id"].as_str(), &channels.rpc_pending)
                             {
                                 if let Ok(mut pending) = pending.lock() {
                                     if let Some(reply) = pending.remove(id) {
@@ -1421,9 +1501,9 @@ fn run_pi_with_timeout(
                     object.insert("grapherReceivedAt".into(), crate::model::now().into());
                 }
                 if let Some(event) = event {
-                    output_buffer.push(event, &mut on_output)?;
+                    output_buffer.push(event, &mut *on_output)?;
                 } else {
-                    output_buffer.flush(&mut on_output)?;
+                    output_buffer.flush(&mut *on_output)?;
                     on_output(format!("{line}\n"));
                 }
             }
@@ -1456,81 +1536,134 @@ fn run_pi_with_timeout(
     }
     // Includes timeout/EOF paths without a final message: never lose the last
     // buffered thinking/text suffix, even if the child did not settle.
-    output_buffer.flush(&mut on_output)?;
-    // Do not hold the input pipe open after the final agent turn.
+    output_buffer.flush(&mut *on_output)?;
+    Ok(TurnOutcome {
+        final_text,
+        agent_error,
+        input_error,
+        timed_out,
+        settled: agent_ended.is_some(),
+        stderr_tail,
+        stderr_lines,
+        raw_stdout_lines,
+        first_output_ms,
+    })
+}
+
+/// Commit a finished turn: park the warm Serial shell, or terminate the process
+/// boundary exactly as before. Parking keeps a source-native Serial session's
+/// shell (and any service it started) alive for the next turn.
+#[allow(clippy::too_many_arguments)]
+fn finish_turn(
+    request: &PiRequest<'_>,
+    on_output: &mut impl FnMut(String),
+    timeout: Option<Duration>,
+    started: Instant,
+    mut child: std::process::Child,
+    process_tree: process_control::ProcessTree,
+    mut channels: SessionChannels,
+    rpc_guard: Option<NodeRpcGuard>,
+    outcome: TurnOutcome,
+    managed: bool,
+    source_role: bool,
+) -> Result<String, String> {
+    let phase = request.role.name();
+    let config = request.config;
+    let _ = config;
     drop(rpc_guard);
-    drop(rpc_sender);
+    let settled_response = outcome.settled
+        && outcome.agent_error.is_none()
+        && !outcome.final_text.trim().is_empty();
+    // A Serial (source-native) conversation stays resident: park the whole shell
+    // instead of terminating it, so the next turn reuses it and any service it
+    // started survives. Graph node agents are reclaimed below as before.
+    #[cfg(not(feature = "fixture"))]
+    if source_role
+        && matches!(request.role, PiRole::NodeAgent | PiRole::Planner)
+        && request.session_id.is_some()
+        && settled_response
+        && matches!(child.try_wait(), Ok(None))
+    {
+        if let Some(key) = serial_linger_key(request) {
+            let owner = process_control::current_owner().unwrap_or_default();
+            let run_id = owner.split(":node:").next().unwrap_or(&owner).to_string();
+            let linger_owner = format!("linger:{}:{}", config.repository, key.session_id);
+            let _ = process_control::reassign_owner(&process_tree, &linger_owner);
+            on_output(format!(
+                "{}\n",
+                serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":null, "success":true, "timedOut":false, "parked":true, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "firstOutputMs":outcome.first_output_ms, "timestamp":crate::model::now()})
+            ));
+            on_output(format!(
+                "{}\n",
+                serde_json::json!({"type":"grapher_session_parked", "pid":child.id(), "sessionId":request.session_id, "cwd":request.cwd, "runId":run_id, "timestamp":crate::model::now()})
+            ));
+            // Keep the unbound prewarm slot warm for the next *different* session.
+            process_prewarm::request(config, request.role, true);
+            lingering_pool().park(
+                key,
+                run_id,
+                ParkedSerial {
+                    child,
+                    tree: process_tree.clone(),
+                    channels,
+                },
+            );
+            return Ok(outcome.final_text);
+        }
+    }
+    // Reclaim the node agent: close its input and wait for it to exit.
+    let _ = source_role;
+    drop(channels.rpc_sender.take());
     let status = child.wait().map_err(|error| error.to_string())?;
-    while let Ok(Err(error)) = input_receiver.try_recv() {
+    let mut input_error = outcome.input_error;
+    while let Ok(Err(error)) = channels.input_receiver.try_recv() {
         if input_error.is_none() {
             input_error = Some(error);
         }
     }
     #[cfg(not(feature = "fixture"))]
-    if source_role { process_prewarm::request(config, request.role, true); }
-    // A settled turn is complete even if the runtime crashes on its way out.
-    // Node on Windows can fail-fast (0xc0000409) while disposing the session
-    // after the final text and agent_settled have already been emitted; that
-    // teardown fault must not discard the completed response.
-    let settled_response = rpc_agent
-        && agent_ended.is_some()
-        && agent_error.is_none()
-        && !final_text.trim().is_empty();
-    // If the process completed its turn and emitted valid assistant text, a
-    // BrokenPipe on writing stdin simply indicates that the process finished
-    // its work and closed its stdin pipe early.
-    let input_broken_pipe_on_success = input_error
-        .as_ref()
-        .is_some_and(|error| error.kind() == std::io::ErrorKind::BrokenPipe
+    if source_role {
+        process_prewarm::request(config, request.role, true);
+    }
+    let input_broken_pipe_on_success = input_error.as_ref().is_some_and(|error| {
+        error.kind() == std::io::ErrorKind::BrokenPipe
             && (status.success() || settled_response)
-            && !final_text.trim().is_empty());
-    // Let a short-lived background helper finish on its own while the node stays
-    // `running`; terminate only what is still alive after the grace. A timed-out,
-    // rejected, or failed turn has no complete work left to wait for.
-    let drain_grace = if timed_out
-        || agent_error.is_some()
+            && !outcome.final_text.trim().is_empty()
+    });
+    let drain_grace = if outcome.timed_out
+        || outcome.agent_error.is_some()
         || (!status.success() && !settled_response)
     {
-        std::time::Duration::ZERO
+        Duration::ZERO
     } else {
         process_control::HANDOFF_DRAIN_GRACE
     };
-    if managed { process_tree.drain_for_handoff(drain_grace)?; }
-    // ProcessGuard clears the process group. Detached descendants are not
-    // guaranteed to be covered; tasks must finish background work before returning.
+    if managed {
+        process_tree.drain_for_handoff(drain_grace)?;
+    }
     on_output(format!(
         "{}\n",
-        serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success() && !timed_out && (input_error.is_none() || input_broken_pipe_on_success), "timedOut":timed_out, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "firstOutputMs":first_output_ms, "timestamp":crate::model::now()})
+        serde_json::json!({"type":"grapher_process_exited", "pid":child.id(), "code":status.code(), "success":status.success() && !outcome.timed_out && (input_error.is_none() || input_broken_pipe_on_success), "timedOut":outcome.timed_out, "phase":phase, "elapsedMs":started.elapsed().as_millis(), "firstOutputMs":outcome.first_output_ms, "timestamp":crate::model::now()})
     ));
-    if timed_out {
+    if outcome.timed_out {
         return Err(format!(
             "{phase} timed out after {} seconds",
             timeout.expect("timed out with a deadline").as_secs_f64()
         ));
     }
-    if let Some(error) = agent_error {
+    if let Some(error) = outcome.agent_error {
         return Err(clean_model_error(&error));
     }
     if !status.success() && !settled_response {
-        let stderr_summary = if !stderr_tail.trim().is_empty() {
-            stderr_tail.trim().to_string()
+        let stderr_summary = if !outcome.stderr_tail.trim().is_empty() {
+            outcome.stderr_tail.trim().to_string()
         } else {
-            stderr_lines
-                .iter()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .cloned()
-                .unwrap_or_default()
+            outcome.stderr_lines.iter().rev().find(|l| !l.trim().is_empty()).cloned().unwrap_or_default()
         };
         let tail = if !stderr_summary.is_empty() {
             stderr_summary
         } else {
-            raw_stdout_lines
-                .iter()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .cloned()
-                .unwrap_or_default()
+            outcome.raw_stdout_lines.iter().rev().find(|l| !l.trim().is_empty()).cloned().unwrap_or_default()
         };
         return Err(if tail.is_empty() {
             format!("Pi exited with {status}")
@@ -1548,13 +1681,226 @@ fn run_pi_with_timeout(
             return Err(format!("Cannot send task to {phase}: {error}"));
         }
     }
-    if final_text.trim().is_empty() {
+    if outcome.final_text.trim().is_empty() {
         return Err(
             "Pi returned no final assistant text; check model authentication and CLI compatibility"
                 .into(),
         );
     }
-    Ok(final_text)
+    Ok(outcome.final_text)
+}
+
+#[cfg(not(feature = "fixture"))]
+struct ParkedSerial {
+    child: std::process::Child,
+    tree: process_control::ProcessTree,
+    channels: SessionChannels,
+}
+
+#[cfg(not(feature = "fixture"))]
+impl Worker for ParkedSerial {
+    fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+    fn retire(mut self) {
+        self.tree.terminate();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(not(feature = "fixture"))]
+static LINGER_POOL: OnceLock<lingering::Lingering<ParkedSerial>> = OnceLock::new();
+
+#[cfg(not(feature = "fixture"))]
+fn lingering_pool() -> &'static lingering::Lingering<ParkedSerial> {
+    LINGER_POOL.get_or_init(lingering::Lingering::new)
+}
+
+/// Stop every parked shell. A parked shell has no idle TTL: it lives for the
+/// whole backend process, so this is the one automatic exit (plus explicit Run
+/// or workspace deletion).
+#[cfg(not(feature = "fixture"))]
+pub fn stop_lingering() {
+    if let Some(pool) = LINGER_POOL.get() {
+        pool.shutdown();
+    }
+}
+
+/// Retire a Run's parked shells (Run deletion).
+#[cfg(not(feature = "fixture"))]
+pub fn stop_lingering_for_run(run_id: &str) {
+    if run_id.is_empty() {
+        return;
+    }
+    if let Some(pool) = LINGER_POOL.get() {
+        pool.retire_where(|held| held == run_id);
+    }
+}
+
+#[cfg(feature = "fixture")]
+pub fn stop_lingering() {}
+#[cfg(feature = "fixture")]
+pub fn stop_lingering_for_run(_run_id: &str) {}
+
+/// Serial source-native sessions are the only parkable shells: a Node Agent
+/// whose cwd is the bound source and that has no managed environment. Graph node
+/// agents run in a private workspace and are never parked.
+#[cfg(not(feature = "fixture"))]
+fn serial_linger_key(request: &PiRequest<'_>) -> Option<lingering::SessionKey> {
+    // Source-native roles stay resident: Serial (a Node Agent in the source) and
+    // a Planner whose selected workspace is the source (for example after the
+    // graph has finished). A Planner working in a node workspace is not parked.
+    if !matches!(request.role, PiRole::NodeAgent | PiRole::Planner) {
+        return None;
+    }
+    // Only a Node Agent can be managed; a Planner always runs source-native, so
+    // the run's environment policy must not exclude it.
+    if request.role == PiRole::NodeAgent && request.config.environment.is_some() {
+        return None;
+    }
+    let session_id = request.session_id?;
+    let cwd = request.cwd.canonicalize().ok()?;
+    let repository = Path::new(&request.config.repository).canonicalize().ok()?;
+    if !crate::path_identity::same_path(&cwd, &repository) {
+        return None;
+    }
+    Some(lingering::SessionKey {
+        repository,
+        session_id: session_id.to_string(),
+    })
+}
+
+#[cfg(not(feature = "fixture"))]
+fn planner_session_key(request: &PiRequest<'_>) -> Option<lingering::SessionKey> {
+    if request.role != PiRole::Planner || request.config.environment.is_some() {
+        return None;
+    }
+    let session_id = request.session_id?;
+    let repository = Path::new(&request.config.repository).canonicalize().ok()?;
+    Some(lingering::SessionKey {
+        repository,
+        session_id: session_id.to_string(),
+    })
+}
+
+#[cfg(not(feature = "fixture"))]
+fn node_rpc_id(request: &PiRequest<'_>) -> Result<String, String> {
+    // Mirror the launch-time RPC identity so a resumed turn replaces the same
+    // registry entry (Planner steering looks the session up by `planner:<run>`).
+    if request.role == PiRole::Planner {
+        let run_id = request
+            .environment
+            .iter()
+            .find(|(key, _)| *key == "GRAPHER_ACTIVE_RUN_ID")
+            .map(|(_, value)| value.clone())
+            .filter(|value| !value.is_empty());
+        let identity = run_id.unwrap_or_else(|| request.session_dir.to_string_lossy().into_owned());
+        return Ok(format!("planner:{identity}"));
+    }
+    request
+        .environment
+        .iter()
+        .find(|(key, _)| *key == "GRAPHER_NODE_EXECUTION_ID")
+        .map(|(_, value)| value.clone())
+        .or_else(|| {
+            request
+                .session_dir
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .ok_or_else(|| "Missing execution identity".to_string())
+}
+
+#[cfg(not(feature = "fixture"))]
+fn begin_resumed_turn(
+    host: &mut ParkedSerial,
+    request: &PiRequest<'_>,
+) -> Result<(String, String), String> {
+    let id = node_rpc_id(request)?;
+    let pending = host
+        .channels
+        .rpc_pending
+        .clone()
+        .ok_or("Resumed session has no RPC pending map")?;
+    let sender = host
+        .channels
+        .rpc_sender
+        .clone()
+        .ok_or("Resumed session has no RPC input")?;
+    NODE_RPC
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|error| error.to_string())?
+        .insert(
+            id.clone(),
+            NodeRpc {
+                sender: sender.clone(),
+                pending,
+                revision_run_id: None,
+                run_id: None,
+            },
+        );
+    let initial_rpc_id = uuid::Uuid::new_v4().to_string();
+    let mut initial_val =
+        serde_json::json!({"id": initial_rpc_id, "type": "prompt", "message": request.task});
+    if let Some(images) = request.images {
+        if !images.is_empty() {
+            initial_val["images"] = serde_json::json!(images);
+        }
+    }
+    sender
+        .send(initial_val.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok((id, initial_rpc_id))
+}
+
+/// Reuse a parked Serial shell for a new turn of the same conversation.
+#[cfg(not(feature = "fixture"))]
+fn run_resumed(
+    mut host: ParkedSerial,
+    request: &PiRequest<'_>,
+    mut on_output: impl FnMut(String),
+    timeout: Option<Duration>,
+    launch_started: Instant,
+) -> Result<String, String> {
+    let owner = process_control::current_owner()
+        .ok_or("A resumed session requires an owning execution")?;
+    process_control::reassign_owner(&host.tree, &owner)?;
+    // Drop anything the settled turn left buffered: a stale agent_settled must
+    // not make the next turn exit immediately.
+    while host.channels.receiver.try_recv().is_ok() {}
+    while host.channels.input_receiver.try_recv().is_ok() {}
+    let (id, initial_rpc_id) = begin_resumed_turn(&mut host, request)?;
+    on_output(format!(
+        "{}\n",
+        serde_json::json!({"type":"grapher_session_resumed", "pid":host.child.id(), "sessionId":request.session_id, "cwd":request.cwd, "launchPreparationMs":launch_started.elapsed().as_millis(), "timestamp":crate::model::now()})
+    ));
+    let started = Instant::now();
+    let rpc_guard = Some(NodeRpcGuard(id));
+    let outcome = run_turn(
+        request.role,
+        true,
+        &initial_rpc_id,
+        timeout,
+        started,
+        &host.tree,
+        &mut host.child,
+        &mut host.channels,
+        &mut on_output,
+    )?;
+    finish_turn(
+        request,
+        &mut on_output,
+        timeout,
+        started,
+        host.child,
+        host.tree,
+        host.channels,
+        rpc_guard,
+        outcome,
+        false,
+        true,
+    )
 }
 
 pub(crate) const FEEDBACK_INSTRUCTIONS: &str = "\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker.";
@@ -1926,6 +2272,173 @@ sys.stdin.read()
         assert_eq!(metrics.assistant_messages, 1);
         assert_eq!(metrics.tools, 1);
         assert_eq!(metrics.model.as_deref(), Some("mock/model"));
+    }
+
+    #[cfg(not(feature = "fixture"))]
+    #[test]
+    fn dropping_the_guard_does_not_kill_a_held_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let bg = temp.path().join("bg.js");
+        let pidfile = temp.path().join("pid");
+        fs::write(&bg, "require('fs').writeFileSync(process.argv[2], String(process.pid)); setTimeout(()=>{}, 60000);").unwrap();
+        let cmd = format!(
+            "(nohup node \"{}\" \"{}\" > /dev/null 2>&1 &); sleep 1",
+            bg.display(), pidfile.display()
+        );
+        let mut command = std::process::Command::new("C:\\Program Files\\Git\\usr\\bin\\bash.exe");
+        command.args(["-c", &cmd]);
+        process_control::configure_command(&mut command);
+        command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let tree = process_control::track(&child).unwrap();
+        let _ = child.wait();
+        // A held boundary keeps a clone, exactly as the registry does.
+        let held = tree.clone();
+        drop(ProcessGuard(tree.clone()));
+        assert!(held.has_live_members(), "the guard must not kill a boundary held elsewhere");
+        held.terminate();
+    }
+
+    #[cfg(not(feature = "fixture"))]
+    #[test]
+    fn finish_turn_parks_a_settled_serial_shell() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "ping 127.0.0.1 -n 30 > NUL"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            command
+        };
+        process_control::configure_command(&mut command);
+        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let child = command.spawn().unwrap();
+        let tree =
+            process_control::with_owner("linger-run", || process_control::track(&child).unwrap());
+        let (_line_tx, receiver) = mpsc::channel::<(bool, String)>();
+        let (_input_tx, input_receiver) = mpsc::channel::<Result<(), std::io::Error>>();
+        let (rpc_tx, _rpc_rx) = mpsc::channel::<String>();
+        let channels = SessionChannels {
+            receiver,
+            input_receiver,
+            rpc_sender: Some(rpc_tx),
+            rpc_pending: Some(Arc::new(Mutex::new(HashMap::new()))),
+        };
+        let session_dir = temp.path().join("session");
+        let config = Config {
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            role_models: Default::default(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+            post_task_review: false,
+            planner_write_tools: true,
+            environment: None,
+        };
+        let request = PiRequest {
+            role: PiRole::NodeAgent,
+            config: &config,
+            cwd: temp.path(),
+            task: "task",
+            session_dir: &session_dir,
+            extension: None,
+            tools: None,
+            session_id: Some("linger-session"),
+            extra_args: vec![],
+            environment: vec![],
+            system_prompt: None,
+            images: None,
+        };
+        let outcome = TurnOutcome {
+            final_text: "done".into(),
+            agent_error: None,
+            input_error: None,
+            timed_out: false,
+            settled: true,
+            stderr_tail: String::new(),
+            stderr_lines: vec![],
+            raw_stdout_lines: vec![],
+            first_output_ms: None,
+        };
+        let mut output = String::new();
+        let result = process_control::with_owner("linger-run", || {
+            finish_turn(
+                &request,
+                &mut |line| output.push_str(&line),
+                None,
+                Instant::now(),
+                child,
+                tree,
+                channels,
+                None,
+                outcome,
+                false,
+                true,
+            )
+        })
+        .unwrap();
+        assert_eq!(result, "done");
+        assert!(output.contains("grapher_session_parked"));
+        assert_eq!(lingering_pool().len(), 1, "a settled Serial shell must be parked");
+        let key = serial_linger_key(&request).expect("a parked Serial shell has a session key");
+        let claimed = lingering_pool()
+            .claim(&key)
+            .expect("the parked shell must be claimable");
+        claimed.retire();
+        stop_lingering_for_run("linger-run");
+        assert_eq!(lingering_pool().len(), 0);
+    }
+
+    #[cfg(not(feature = "fixture"))]
+    #[test]
+    fn source_native_planner_is_parkable_but_a_node_workspace_is_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("session");
+        let config = Config {
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            role_models: Default::default(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+            post_task_review: false,
+            planner_write_tools: true,
+            environment: None,
+        };
+        let source = PiRequest {
+            role: PiRole::Planner,
+            config: &config,
+            cwd: temp.path(),
+            task: "task",
+            session_dir: &session_dir,
+            extension: None,
+            tools: None,
+            session_id: Some("planner-session"),
+            extra_args: vec![],
+            environment: vec![],
+            system_prompt: None,
+            images: None,
+        };
+        assert!(
+            serial_linger_key(&source).is_some(),
+            "a source-native Planner is parkable"
+        );
+
+        let node_dir = temp.path().join("node-workspace");
+        fs::create_dir_all(&node_dir).unwrap();
+        let node = PiRequest {
+            cwd: &node_dir,
+            ..source
+        };
+        assert!(
+            serial_linger_key(&node).is_none(),
+            "a Planner in a node workspace is not parked"
+        );
     }
 
     #[cfg(feature = "fixture")]

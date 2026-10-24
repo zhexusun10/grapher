@@ -1881,7 +1881,9 @@ pub fn append_live_output(execution: &mut Execution, text: &str) {
         // The lifecycle record may itself span multiple output messages.
         if let Some(line) = execution.output.split_once('\n').map(|(line, _)| line) {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-                if value["type"] == "grapher_process_started" {
+                if value["type"] == "grapher_process_started"
+                    || value["type"] == "grapher_session_resumed"
+                {
                     execution.pid = value["pid"].as_u64();
                 }
             }

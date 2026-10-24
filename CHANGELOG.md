@@ -5,6 +5,16 @@ All notable changes to Grapher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A source-native conversation now stays resident. A successful **Serial** turn, or a **Planner** turn whose selected workspace is the source (for example after the graph has finished), **parks** its whole process boundary (the Pi process, its pipes and its tracked process tree) instead of terminating it, and the next turn of the same conversation **reuses** that warm process, so the conversation — and any server it started, such as a dev server — keeps running and hot-reloading across follow-ups. A Planner working in a node workspace, and every Graph node agent, are unaffected: their shell and Pi process are still reclaimed at the end of the turn. A parked shell has **no idle TTL**: a source-native conversation that ran in this backend stays warm for the whole backend process, and it is retired only when the Run or its workspace is deleted, or when the backend stops. Because a parked boundary is re-keyed off its execution owner, invalidating or retrying that turn no longer kills it, and the turn's lifecycle guard now terminates a boundary only when it is the last owner. See [Process lifecycle](docs/architecture/filesystem-isolation.md#parked-source-native-shells).
+
+### Changed
+
+- Upgrade the bundled `pi-continuity` extension from 0.3.0 to 0.3.1, validated against the pinned Pi public boundary: a TLS certificate validation failure is now terminal even when wrapped as `TLS handshake failed: ...`, while a reset connection and a TLS handshake failure without a certificate cause stay retryable.
+
 ## [1.3.0] - 2026-10-23
 
 ### Breaking

@@ -51,7 +51,7 @@
     "marked": "^18.0.13",
     "motion": "^13.2.0",
     "pi-better-web-search": "0.1.4",
-    "pi-continuity": "0.3.0",
+    "pi-continuity": "0.3.1",
     "pi-trim": "0.2.0",
     "react": "19.2.0",
     "react-dom": "19.2.0",
