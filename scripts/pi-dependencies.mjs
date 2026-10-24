@@ -37,6 +37,12 @@ export function dependencyManifest(root) {
   }
   add('typescript', upstream.devDependencies.typescript);
   add('@types/node', upstream.devDependencies['@types/node']);
+  // Security patch on top of Pi's own pins: Pi 1.4.0's core packages still
+  // declare `undici` 8.10.2, which now carries high-severity advisories
+  // (GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472, GHSA-xjj6-f33q-929c; fixed in
+  // 8.12.3) and fails the `pi:setup` audit gate. Pin the patched 8.12.x until
+  // upstream Pi bumps it.
+  dependencies.undici = '8.12.3';
   return {
     name: 'grapher-pi-dependencies', version, private: true, type: 'module',
     description: 'Pinned dependencies for the unmodified Pi source runtime; no example workspaces or shelljs build chain.',

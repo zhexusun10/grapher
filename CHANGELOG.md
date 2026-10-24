@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Upgrade the bundled `pi-continuity` extension from 0.3.0 to 0.3.1, validated against the pinned Pi public boundary: a TLS certificate validation failure is now terminal even when wrapped as `TLS handshake failed: ...`, while a reset connection and a TLS handshake failure without a certificate cause stay retryable.
+- The reviewed Pi dependency profile pins `undici` 8.12.3 instead of 8.10.2, so a clean `npm run pi:setup` and the dependency audit no longer fail on the new high-severity `undici` advisories (fixed upstream in 8.12.3).
 
 ## [1.3.0] - 2026-10-23
 
