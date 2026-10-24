@@ -90,22 +90,6 @@ impl<W: Worker> Lingering<W> {
         Some(entry.worker)
     }
 
-    /// Retire the parked shell for a specific conversation, if any. Used to
-    /// invalidate a stale shell (for example a source-native Planner shell once
-    /// a Planner turn has advanced the same session from a node workspace).
-    pub(crate) fn retire_key(&self, key: &SessionKey) {
-        let retired = {
-            let mut entries = self.lock();
-            entries
-                .iter()
-                .position(|entry| &entry.key == key)
-                .map(|index| entries.remove(index).worker)
-        };
-        if let Some(worker) = retired {
-            worker.retire();
-        }
-    }
-
     /// Retire every parked shell matching a predicate (Run/workspace deletion).
     pub(crate) fn retire_where(&self, predicate: impl Fn(&str) -> bool) {
         let retired = {
@@ -227,19 +211,6 @@ mod tests {
         assert_eq!(r1.load(Ordering::SeqCst), 1);
         assert_eq!(pool.len(), 1);
         assert!(pool.claim(&key("a")).is_some());
-    }
-
-    #[test]
-    fn retire_key_only_touches_the_matching_session() {
-        let pool = Lingering::new();
-        let (first, _a, r1) = worker();
-        pool.park(key("a"), "run-a".into(), first);
-        let (second, _b, r2) = worker();
-        pool.park(key("b"), "run-b".into(), second);
-        pool.retire_key(&key("a"));
-        assert_eq!(r1.load(Ordering::SeqCst), 1);
-        assert_eq!(r2.load(Ordering::SeqCst), 0);
-        assert_eq!(pool.len(), 1);
     }
 
     #[test]

@@ -781,11 +781,6 @@ fn run_pi_with_timeout(
         if let Some(host) = lingering_pool().claim(&key) {
             return run_resumed(host, &request, on_output, timeout, launch_started);
         }
-    } else if let Some(key) = planner_session_key(&request) {
-        // A Planner turn outside the source (a node workspace) advances the same
-        // Pi session, so any parked source-native Planner shell for this
-        // conversation is now stale and must not be reused later.
-        lingering_pool().retire_key(&key);
     }
     // Production always runs the pinned, Grapher-owned entrypoint. Persisted
     // legacy command fields cannot select a different engine implementation.
@@ -1579,7 +1574,7 @@ fn finish_turn(
     // started survives. Graph node agents are reclaimed below as before.
     #[cfg(not(feature = "fixture"))]
     if source_role
-        && matches!(request.role, PiRole::NodeAgent | PiRole::Planner)
+        && request.role == PiRole::NodeAgent
         && request.session_id.is_some()
         && settled_response
         && matches!(child.try_wait(), Ok(None))
@@ -1747,15 +1742,12 @@ pub fn stop_lingering_for_run(_run_id: &str) {}
 /// agents run in a private workspace and are never parked.
 #[cfg(not(feature = "fixture"))]
 fn serial_linger_key(request: &PiRequest<'_>) -> Option<lingering::SessionKey> {
-    // Source-native roles stay resident: Serial (a Node Agent in the source) and
-    // a Planner whose selected workspace is the source (for example after the
-    // graph has finished). A Planner working in a node workspace is not parked.
-    if !matches!(request.role, PiRole::NodeAgent | PiRole::Planner) {
-        return None;
-    }
-    // Only a Node Agent can be managed; a Planner always runs source-native, so
-    // the run's environment policy must not exclude it.
-    if request.role == PiRole::NodeAgent && request.config.environment.is_some() {
+    // Only a source-native Serial Node Agent is parked. A Planner is never
+    // parked: its launch binding is per planning attempt (`GRAPHER_GRAPH_PATH`
+    // is `graph-{planningId}.json`), so a reused process would mutate the
+    // previous attempt's graph. Reuse would need a per-turn rebind, which the
+    // one-use prepared-host binding does not provide.
+    if request.role != PiRole::NodeAgent || request.config.environment.is_some() {
         return None;
     }
     let session_id = request.session_id?;
@@ -1771,32 +1763,7 @@ fn serial_linger_key(request: &PiRequest<'_>) -> Option<lingering::SessionKey> {
 }
 
 #[cfg(not(feature = "fixture"))]
-fn planner_session_key(request: &PiRequest<'_>) -> Option<lingering::SessionKey> {
-    if request.role != PiRole::Planner || request.config.environment.is_some() {
-        return None;
-    }
-    let session_id = request.session_id?;
-    let repository = Path::new(&request.config.repository).canonicalize().ok()?;
-    Some(lingering::SessionKey {
-        repository,
-        session_id: session_id.to_string(),
-    })
-}
-
-#[cfg(not(feature = "fixture"))]
 fn node_rpc_id(request: &PiRequest<'_>) -> Result<String, String> {
-    // Mirror the launch-time RPC identity so a resumed turn replaces the same
-    // registry entry (Planner steering looks the session up by `planner:<run>`).
-    if request.role == PiRole::Planner {
-        let run_id = request
-            .environment
-            .iter()
-            .find(|(key, _)| *key == "GRAPHER_ACTIVE_RUN_ID")
-            .map(|(_, value)| value.clone())
-            .filter(|value| !value.is_empty());
-        let identity = run_id.unwrap_or_else(|| request.session_dir.to_string_lossy().into_owned());
-        return Ok(format!("planner:{identity}"));
-    }
     request
         .environment
         .iter()
@@ -2391,54 +2358,6 @@ sys.stdin.read()
         claimed.retire();
         stop_lingering_for_run("linger-run");
         assert_eq!(lingering_pool().len(), 0);
-    }
-
-    #[cfg(not(feature = "fixture"))]
-    #[test]
-    fn source_native_planner_is_parkable_but_a_node_workspace_is_not() {
-        let temp = tempfile::tempdir().unwrap();
-        let session_dir = temp.path().join("session");
-        let config = Config {
-            repository: temp.path().to_string_lossy().into(),
-            model: "mock/model".into(),
-            thinking_level: "medium".into(),
-            role_models: Default::default(),
-            max_parallel: 1,
-            max_feedback: 0,
-            auto_approve: false,
-            post_task_review: false,
-            planner_write_tools: true,
-            environment: None,
-        };
-        let source = PiRequest {
-            role: PiRole::Planner,
-            config: &config,
-            cwd: temp.path(),
-            task: "task",
-            session_dir: &session_dir,
-            extension: None,
-            tools: None,
-            session_id: Some("planner-session"),
-            extra_args: vec![],
-            environment: vec![],
-            system_prompt: None,
-            images: None,
-        };
-        assert!(
-            serial_linger_key(&source).is_some(),
-            "a source-native Planner is parkable"
-        );
-
-        let node_dir = temp.path().join("node-workspace");
-        fs::create_dir_all(&node_dir).unwrap();
-        let node = PiRequest {
-            cwd: &node_dir,
-            ..source
-        };
-        assert!(
-            serial_linger_key(&node).is_none(),
-            "a Planner in a node workspace is not parked"
-        );
     }
 
     #[cfg(feature = "fixture")]

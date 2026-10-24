@@ -145,23 +145,23 @@ still terminate them when the execution exits. The native environment drain
 fixture uses a project-extension child in the owned Unix group or Windows Job;
 a passing group check is not detection or cleanup evidence for detached Bash writers.
 
-### Parked source-native shells
+### Parked Serial shells
 
-A **source-native** turn stays resident. A successful source-native turn
-**parks** its whole lifecycle boundary — the Pi process, its stdin/stdout
-channels and the tracked `ProcessTree` — in a backend-owned pool and re-keys it
-from the execution owner to `linger:<repository>:<session>`, instead of
-terminating it. The next turn of the same conversation **claims** the parked
-boundary and runs on the same process, so the conversation and any service it
-started (for example a dev server) stay alive. A dead entry is retired and that
-turn cold-launches instead.
+A successful **Serial** turn stays resident. It **parks** its whole lifecycle
+boundary — the Pi process, its stdin/stdout channels and the tracked
+`ProcessTree` — in a backend-owned pool and re-keys it from the execution owner
+to `linger:<repository>:<session>`, instead of terminating it. The next turn of
+the same conversation **claims** the parked boundary and runs on the same
+process, so the conversation and any service it started (for example a dev
+server) stay alive. A dead entry is retired and that turn cold-launches instead.
 
-Source-native means the turn's cwd is the bound source and it has no managed
-environment: a **Serial** Node Agent, and a **Planner** whose selected workspace
-is the source (for example after the graph has finished). A Planner working in a
-node workspace is not source-native and is not parked. A Graph node agent — any
-turn with a managed environment or a private workspace — is reclaimed at turn
-end exactly as before; its shell and Pi process are not retained.
+Serial means a source-native Node Agent: its cwd is the bound source and it has
+no managed environment. A **Planner is never parked**, even when it runs in the
+source: its launch binding is per planning attempt (`GRAPHER_GRAPH_PATH` is
+`graph-{planningId}.json`), so a reused process would mutate the previous
+attempt's graph. A Graph node agent — any turn with a managed environment or a
+private workspace — is reclaimed at turn end exactly as before; its shell and Pi
+process are not retained.
 
 Because a parked boundary no longer answers `terminate_node`/`terminate_owner`
 for the execution that created it, invalidating or retrying that turn cannot
@@ -170,12 +170,12 @@ reclaims it. The turn's lifecycle guard terminates a boundary only when it is th
 **last owner**, so a boundary kept by the registry is not torn down when the
 turn's guard drops.
 
-A parked boundary has **no idle TTL and no browser-owned deadline**: a
-source-native conversation that ran in this backend stays warm for the whole
-backend process. It is retired only on explicit Run or workspace deletion, or on
-backend shutdown. There is no capacity eviction, so a long-lived backend
-accumulates one parked shell per source-native conversation that ran; this is
-bounded by the user's own activity, not by an idle timer.
+A parked boundary has **no idle TTL and no browser-owned deadline**: a Serial
+conversation that ran in this backend stays warm for the whole backend process.
+It is retired only on explicit Run or workspace deletion, or on backend
+shutdown. There is no capacity eviction, so a long-lived backend accumulates one
+parked shell per Serial conversation that ran; this is bounded by the user's own
+activity, not by an idle timer.
 
 Only turns that settle successfully are parked, and parking carries no snapshot
 or delivery obligation, so the drain-before-seal rule above is unchanged for
