@@ -987,6 +987,211 @@ fn editing_an_earlier_serial_turn_branches_pi_and_supersedes_later_executions() 
 }
 
 #[test]
+fn editing_a_repeated_steer_uses_its_log_cursor_and_can_reedit_the_retained_prefix() {
+    for route in ["serial", "graph"] {
+        let (_temp, _source, mut runtime) = setup(true, single());
+        runtime.set_route(route).unwrap();
+        runtime.approve().unwrap();
+        let first = runtime.jobs().unwrap().remove(0);
+        let time = first.execution.started_at;
+        let session_dir = runtime.root.join("sessions").join(&first.execution.id);
+        fs::create_dir_all(&session_dir).unwrap();
+        let file = session_dir.join(format!("test_{}.jsonl", first.execution.session_id));
+        let entries = [
+            serde_json::json!({"type":"session", "id":first.execution.session_id, "cwd":first.execution.worktree}),
+            serde_json::json!({"type":"message", "id":"opening", "parentId":null, "message":{"role":"user", "content":first.task, "timestamp":time}}),
+            serde_json::json!({"type":"message", "id":"answer", "parentId":"opening", "message":{"role":"assistant", "content":[]}}),
+            serde_json::json!({"type":"message", "id":"steer-one", "parentId":"answer", "message":{"role":"user", "content":"继续 中文🚀", "timestamp":time}}),
+            serde_json::json!({"type":"message", "id":"reply-one", "parentId":"steer-one", "message":{"role":"assistant", "content":[]}}),
+            serde_json::json!({"type":"message", "id":"steer-two", "parentId":"reply-one", "message":{"role":"user", "content":"继续 中文🚀", "timestamp":time}}),
+        ];
+        let history = entries.iter().map(|entry| format!("{entry}\n")).collect::<String>();
+        fs::write(&file, &history).unwrap();
+        let line = |kind: &str, role: &str, text: &str| format!("{}\n", serde_json::json!({"type":kind,
+            "message":{"role":role,"content":[{"type":"text","text":text}],"timestamp":time}}));
+        let mut output = line("message_end", "user", &first.task) + &line("message_end", "assistant", "original response");
+        let earlier = output.len();
+        output += &(line("message_start", "user", "继续 中文🚀") + &line("message_end", "user", "继续 中文🚀"));
+        output += &line("message_end", "assistant", "keep this reply");
+        let later = output.len();
+        output += &(line("message_start", "user", "继续 中文🚀") + &line("message_end", "user", "继续 中文🚀"));
+        runtime.emit(EventKind::Output { execution_id: first.execution.id.clone(), text: output }).unwrap();
+        for _ in 0..2 {
+            runtime.emit(EventKind::Steered { execution_id: first.execution.id.clone(), node: "task".into(),
+                instruction: "继续 中文🚀".into(), images: None }).unwrap();
+        }
+        assert!(runtime.edit_node_message("task", &first.execution.id, "继续 中文🚀", "wrong", None).is_err());
+        assert!(runtime.edit_node_message_at("task", &first.execution.id, "继续 中文🚀", "wrong", None, None, Some(later + 1)).is_err());
+        assert!(runtime.state.execution_stop_requests.is_empty(), "invalid or ambiguous edits must not stop the writer");
+        assert_eq!(fs::read_to_string(&file).unwrap(), history);
+        runtime.edit_node_message_at("task", &first.execution.id, "继续 中文🚀", "edited later", None, None, Some(later)).unwrap();
+        let marker: serde_json::Value = serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
+        assert_eq!(marker["parentId"], "reply-one", "the second identical message was selected");
+        runtime.emit(EventKind::Failed { node: "task".into(), execution_id: Some(first.execution.id.clone()),
+            error: "stopped".into(), output_bytes: 0, metrics: None }).unwrap();
+        let next = runtime.jobs().unwrap().remove(0);
+        // Pi appends the replacement onto the newly selected branch.
+        use std::io::Write;
+        let replacement = serde_json::json!({"type":"message", "id":"replacement", "parentId":marker["id"],
+            "message":{"role":"user","content":"edited later","timestamp":next.execution.started_at}});
+        writeln!(fs::OpenOptions::new().append(true).open(&file).unwrap(), "{replacement}").unwrap();
+        runtime.emit(EventKind::Output { execution_id: next.execution.id.clone(), text: format!("{}\n", serde_json::json!({
+            "type":"message_end", "message":{"role":"user","content":"edited later","timestamp":next.execution.started_at}
+        })) }).unwrap();
+        let checkpoint = runtime.store.load(&runtime.state.run_id).unwrap();
+        assert!(matches!(&checkpoint.events.iter().rev().find(|event| matches!(event.kind, EventKind::ConversationEdited { .. })).unwrap().kind,
+            EventKind::ConversationEdited { from_output_offset: Some(end), .. } if *end == later));
+        runtime.state = checkpoint;
+        let before_invalid = fs::read_to_string(&file).unwrap();
+        assert!(runtime.edit_node_message_at("task", &first.execution.id, "继续 中文🚀", "abandoned", None, None, Some(later)).is_err());
+        assert!(!runtime.state.execution_stop_requests.contains(&next.execution.id));
+        assert_eq!(fs::read_to_string(&file).unwrap(), before_invalid);
+        let opening_sequence = runtime.state.events.iter().rev().find(|event| matches!(event.kind, EventKind::ConversationEdited { .. })).unwrap().sequence;
+        runtime.edit_node_message("task", &next.execution.id, "edited later", "edited replacement opening", None).unwrap();
+        assert!(matches!(&runtime.state.events.last().unwrap().kind, EventKind::ConversationEdited {
+            from_event_sequence, from_output_offset: Some(0), ..
+        } if *from_event_sequence == opening_sequence), "editing the replacement prompt must replace, not append to, its human event");
+        runtime.edit_node_message_at("task", &first.execution.id, "继续 中文🚀", "edited earlier", None, None, Some(earlier)).unwrap();
+        let marker: serde_json::Value = serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
+        assert_eq!(marker["parentId"], "answer", "the retained earlier message remains editable");
+        assert_eq!(runtime.state.graph.nodes[0].task, "self-contained task");
+        assert!(matches!(&runtime.store.load(&runtime.state.run_id).unwrap().events.last().unwrap().kind,
+            EventKind::ConversationEdited { from_output_offset: Some(end), first_turn: false, .. } if *end == earlier));
+        // The surrounding task bubble has no log cursor; a uniquely retained
+        // opening turn must still be editable after editing a Steer.
+        runtime.edit_node_message("task", &first.execution.id, "self-contained task", "edited opening", None).unwrap();
+        assert_eq!(runtime.state.graph.nodes[0].task, "edited opening");
+        assert!(matches!(&runtime.store.load(&runtime.state.run_id).unwrap().events.last().unwrap().kind,
+            EventKind::ConversationEdited { from_output_offset: Some(0), first_turn: true, .. }));
+    }
+}
+
+#[test]
+fn a_text_only_edit_scans_only_the_retained_prefix() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.set_route("serial").unwrap();
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    let time = first.execution.started_at;
+    let session_dir = runtime.root.join("sessions").join(&first.execution.id);
+    fs::create_dir_all(&session_dir).unwrap();
+    let file = session_dir.join(format!("test_{}.jsonl", first.execution.session_id));
+    let entries = [
+        serde_json::json!({"type":"session", "id":first.execution.session_id, "cwd":first.execution.worktree}),
+        serde_json::json!({"type":"message", "id":"opening", "parentId":null, "message":{"role":"user", "content":first.task, "timestamp":time}}),
+        serde_json::json!({"type":"message", "id":"answer", "parentId":"opening", "message":{"role":"assistant", "content":[]}}),
+        serde_json::json!({"type":"message", "id":"steer-one", "parentId":"answer", "message":{"role":"user", "content":"again", "timestamp":time}}),
+        serde_json::json!({"type":"message", "id":"reply-one", "parentId":"steer-one", "message":{"role":"assistant", "content":[]}}),
+        serde_json::json!({"type":"message", "id":"steer-two", "parentId":"reply-one", "message":{"role":"user", "content":"again", "timestamp":time}}),
+    ];
+    fs::write(&file, entries.iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+    let line = |kind: &str, role: &str, text: &str| format!("{}\n", serde_json::json!({"type":kind,
+        "message":{"role":role,"content":[{"type":"text","text":text}],"timestamp":time}}));
+    let mut output = line("message_end", "user", &first.task) + &line("message_end", "assistant", "answer");
+    let earlier = output.len();
+    output += &line("message_end", "user", "again");
+    let later = output.len();
+    output += &line("message_end", "user", "again");
+    runtime.emit(EventKind::Output { execution_id: first.execution.id.clone(), text: output }).unwrap();
+    // The first edit keeps only the prefix before the second identical turn.
+    runtime.edit_node_message_at("task", &first.execution.id, "again", "edited later", None, None, Some(later)).unwrap();
+    runtime.emit(EventKind::Failed { node: "task".into(), execution_id: Some(first.execution.id.clone()),
+        error: "stopped".into(), output_bytes: 0, metrics: None }).unwrap();
+    runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+    // A text-only edit must see the first turn once (the second is abandoned and
+    // must not be read), resolving instead of reporting an ambiguous match.
+    runtime.edit_node_message("task", &first.execution.id, "again", "edited earlier", None).unwrap();
+    assert!(matches!(&runtime.store.load(&runtime.state.run_id).unwrap().events.last().unwrap().kind,
+        EventKind::ConversationEdited { from_output_offset: Some(end), .. } if *end == earlier));
+}
+
+#[test]
+fn editing_a_consumed_steer_keeps_the_opening_task_and_branches_at_the_steer() {
+    for route in ["serial", "graph"] {
+        for running in [true, false] {
+            let (_temp, _source, mut runtime) = setup(true, single());
+            runtime.set_route(route).unwrap();
+            runtime.approve().unwrap();
+            let first = runtime.jobs().unwrap().remove(0);
+            for instruction in ["earlier steer", "steer this work"] {
+                runtime.emit(EventKind::Steered {
+                    execution_id: first.execution.id.clone(), node: "task".into(),
+                    instruction: instruction.into(), images: None,
+                }).unwrap();
+            }
+            let steer_sequence = runtime.state.events.last().unwrap().sequence;
+            let session_dir = runtime.root.join("sessions").join(&first.execution.id);
+            fs::create_dir_all(&session_dir).unwrap();
+            let file = session_dir.join(format!("test_{}.jsonl", first.execution.session_id));
+            let entries = [
+                serde_json::json!({"type":"session", "id":first.execution.session_id, "cwd":first.execution.worktree}),
+                serde_json::json!({"type":"message", "id":"opening", "parentId":null, "message":{"role":"user", "content":first.task, "timestamp":first.execution.started_at}}),
+                serde_json::json!({"type":"message", "id":"answer", "parentId":"opening", "message":{"role":"assistant", "content":[]}}),
+                serde_json::json!({"type":"message", "id":"earlier-steer", "parentId":"answer", "message":{"role":"user", "content":"earlier steer", "timestamp":first.execution.started_at}}),
+                serde_json::json!({"type":"message", "id":"steer", "parentId":"earlier-steer", "message":{"role":"user", "content":"steer this work", "timestamp":first.execution.started_at}}),
+            ];
+            let history = entries.iter().map(|entry| format!("{entry}\n")).collect::<String>();
+            fs::write(&file, &history).unwrap();
+            if !running {
+                runtime.emit(EventKind::Finished {
+                    execution_id: first.execution.id.clone(), head: runtime.state.base.clone(),
+                    output: "done".into(), output_bytes: 0, metrics: None,
+                }).unwrap();
+            }
+            let original_goal = runtime.state.graph.original_goal.clone();
+            let original_task = runtime.state.graph.nodes[0].task.clone();
+            runtime.edit_node_message("task", &first.execution.id, "steer this work", "edited steer", None).unwrap();
+            let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
+            assert_eq!(replayed.graph.original_goal, original_goal, "{route}, running={running}");
+            assert_eq!(replayed.graph.nodes[0].task, original_task);
+            assert!(matches!(&replayed.events.last().unwrap().kind,
+                EventKind::ConversationEdited { first_turn: false, from_event_sequence, .. } if *from_event_sequence == steer_sequence));
+            let branched = fs::read_to_string(&file).unwrap();
+            assert!(branched.starts_with(&history), "the abandoned branch is retained");
+            let marker: serde_json::Value = serde_json::from_str(branched.lines().last().unwrap()).unwrap();
+            assert_eq!(marker["parentId"], "earlier-steer");
+            if running {
+                assert!(runtime.state.execution_stop_requests.contains(&first.execution.id));
+                runtime.emit(EventKind::Failed {
+                    node: "task".into(), execution_id: Some(first.execution.id.clone()),
+                    error: "stopped for edit".into(), output_bytes: 0, metrics: None,
+                }).unwrap();
+                assert_eq!(runtime.state.nodes["task"].status, "dirty");
+            }
+            // Reload the authoritative state before dispatching the replacement.
+            runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+            let edited = runtime.jobs().unwrap().remove(0);
+            assert_eq!(edited.task, "edited steer");
+            assert_eq!(edited.execution.session_id, first.execution.session_id);
+            assert!(runtime.state.superseded_execution_ids.contains(&first.execution.id));
+        }
+    }
+}
+
+#[cfg(not(feature = "fixture"))]
+#[test]
+fn editing_a_node_turn_retires_the_runs_parked_serial_shell() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.set_route("serial").unwrap();
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    let session_dir = runtime.root.join("sessions").join(&first.execution.id);
+    fs::create_dir_all(&session_dir).unwrap();
+    let file = session_dir.join(format!("test_{}.jsonl", first.execution.session_id));
+    fs::write(&file, [
+        serde_json::json!({"type":"session", "id":first.execution.session_id, "cwd":first.execution.worktree}),
+        serde_json::json!({"type":"message", "id":"opening", "parentId":null, "message":{"role":"user", "content":first.task, "timestamp":first.execution.started_at}}),
+        serde_json::json!({"type":"message", "id":"answer", "parentId":"opening", "message":{"role":"assistant", "content":[]}}),
+    ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+    crate::engine::park_test_shell(&runtime.state.run_id, &first.execution.session_id);
+    assert_eq!(crate::engine::parked_shell_count(), 1);
+    runtime.edit_node_message("task", &first.execution.id, &first.task, "edited opening", None).unwrap();
+    // A parked shell holds the pre-edit conversation in memory, so the next turn
+    // must cold-launch and re-read the branched Pi session file.
+    assert_eq!(crate::engine::parked_shell_count(), 0, "a history edit must retire the parked shell");
+}
+
+#[test]
 fn editing_a_running_node_stops_its_execution_and_branches_from_the_start() {
     let (_temp, source, mut runtime) = setup(true, single());
     runtime.set_route("serial").unwrap();

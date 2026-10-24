@@ -961,8 +961,9 @@ pub enum EventKind {
         #[serde(default)]
         source_direct: bool,
     },
-    /// Move Pi's active leaf before an earlier user turn. Old executions and
-    /// transcript entries remain durable but no longer belong to this branch.
+    /// Move Pi's active leaf before an earlier user turn. Old executions stay
+    /// durable; only their prefix before the selected log cursor belongs to
+    /// this branch, and retained prefixes are not runnable executions.
     ConversationEdited {
         nodes: Vec<String>,
         target: String,
@@ -971,6 +972,9 @@ pub enum EventKind {
         images: Option<Vec<ImageAttachment>>,
         from_execution_id: String,
         from_event_sequence: i64,
+        /// Exclusive execution-log cursor of the retained transcript prefix.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_output_offset: Option<usize>,
         old_instruction: String,
         first_turn: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]

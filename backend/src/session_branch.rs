@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub struct PreparedBranch {
     path: PathBuf,
     old_len: u64,
+    pub first_user_turn: bool,
 }
 
 impl PreparedBranch {
@@ -207,19 +208,97 @@ pub fn branch_before_user(
     session_dir: &Path, session_id: &str, cwd: &Path,
     old_text: &str, started_at: u64, completed_at: u64,
 ) -> Result<PreparedBranch, String> {
-    branch_before_user_matching(session_dir, session_id, cwd, old_text, started_at, completed_at, false)
+    prepare_user_branch(session_dir, session_id, cwd, old_text, started_at, completed_at, false, None)?.commit()
 }
 
 pub fn branch_before_planner_user(
     session_dir: &Path, session_id: &str, cwd: &Path, old_text: &str,
 ) -> Result<PreparedBranch, String> {
-    branch_before_user_matching(session_dir, session_id, cwd, old_text, 0, u64::MAX, true)
+    prepare_user_branch(session_dir, session_id, cwd, old_text, 0, u64::MAX, true, None)?.commit()
 }
 
-fn branch_before_user_matching(
+/// The absolute execution-log cursor identifies a row even when its text is
+/// repeated or only a tail of the transcript is mounted in the browser.
+pub struct OutputUserTurn {
+    occurrence: usize,
+    total_occurrences: usize,
+    timestamp: Option<u64>,
+    entry_id: Option<String>,
+}
+
+fn output_user_turns(output: &str, old_text: &str) -> Vec<(usize, Option<u64>, Option<String>)> {
+    let normalized = |text: &str| text.strip_suffix(crate::engine::FEEDBACK_INSTRUCTIONS).unwrap_or(text).trim().to_string();
+    let expected = normalized(old_text);
+    let mut cursor = 0;
+    let mut turns = Vec::new();
+    let mut pending_start = false;
+    for line in output.split_inclusive('\n') {
+        let at = cursor;
+        cursor += line.len();
+        let Ok(event) = serde_json::from_str::<Value>(line) else { continue; };
+        let kind = event["type"].as_str().unwrap_or_default();
+        if !matches!(kind, "message_start" | "message_end" | "message") || event["message"]["role"] != "user" { continue; }
+        if kind == "message_end" && pending_start { pending_start = false; continue; }
+        pending_start = kind == "message_start";
+        let mut wrapped = event.clone();
+        wrapped["type"] = json!("message");
+        let text = user_text(&wrapped).unwrap_or_default();
+        if normalized(&text) != expected { continue; }
+        let id = if kind == "message" { event["id"].as_str() } else { event["message"]["id"].as_str() };
+        turns.push((at, event["message"]["timestamp"].as_u64(), id.map(str::to_owned)));
+    }
+    turns
+}
+
+pub fn unique_output_user_turn_offset(output: &str, old_text: &str) -> Option<usize> {
+    let turns = output_user_turns(output, old_text);
+    (turns.len() == 1).then(|| turns[0].0)
+}
+
+/// Truncate a live in-memory transcript to a byte cursor, never splitting a
+/// UTF-8 scalar. `None` keeps the whole output.
+pub fn truncate_output(output: &str, end: Option<usize>) -> String {
+    match end {
+        Some(end) if end < output.len() => {
+            let mut boundary = end;
+            while boundary > 0 && !output.is_char_boundary(boundary) { boundary -= 1; }
+            output[..boundary].to_string()
+        }
+        _ => output.to_string(),
+    }
+}
+
+pub fn output_user_turn(output: &str, offset: usize, old_text: &str) -> Result<OutputUserTurn, String> {
+    let turns = output_user_turns(output, old_text);
+    let total_occurrences = turns.len();
+    turns.into_iter().enumerate()
+        .find(|(_, (at, _, _))| *at == offset)
+        .map(|(occurrence, (_, timestamp, entry_id))| OutputUserTurn { occurrence, total_occurrences, timestamp, entry_id })
+        .ok_or_else(|| "The selected output row is not that user turn".into())
+}
+
+/// Read-only validation happens before stopping a writer. Only commit mutates
+/// the session, and it rechecks membership after the writer has stopped.
+pub struct UserBranch {
+    path: PathBuf,
+    selected_id: String,
+    parent: Option<String>,
+    pub first_user_turn: bool,
+    pub first_in_execution: bool,
+    require_active: bool,
+}
+
+pub fn prepare_node_user_branch(
+    session_dir: &Path, session_id: &str, cwd: &Path, old_text: &str,
+    started_at: u64, completed_at: u64, selector: Option<&OutputUserTurn>,
+) -> Result<UserBranch, String> {
+    prepare_user_branch(session_dir, session_id, cwd, old_text, started_at, completed_at, false, selector)
+}
+
+fn prepare_user_branch(
     session_dir: &Path, session_id: &str, cwd: &Path,
-    old_text: &str, started_at: u64, completed_at: u64, planner: bool,
-) -> Result<PreparedBranch, String> {
+    old_text: &str, started_at: u64, completed_at: u64, planner: bool, selector: Option<&OutputUserTurn>,
+) -> Result<UserBranch, String> {
     Uuid::parse_str(session_id).map_err(|_| "Invalid Pi session identity")?;
     let suffix = format!("_{session_id}.jsonl");
     let files: Vec<_> = fs::read_dir(session_dir).map_err(|error| error.to_string())?
@@ -272,7 +351,22 @@ fn branch_before_user_matching(
         let parent = entry.get("parentId").and_then(Value::as_str).map(str::to_owned);
         matches.push((id, parent, active_ids.contains(id)));
     }
-    let candidate = match matches.as_slice() {
+    let candidate = if let Some(selector) = selector {
+        let active: Vec<_> = matches.iter().filter(|(_, _, active)| *active).collect();
+        let by_id = selector.entry_id.as_deref().and_then(|id| active.iter().copied().find(|candidate| candidate.0 == id));
+        let by_time: Vec<_> = active.iter().copied().filter(|candidate| selector.timestamp.is_some_and(|time|
+            entries.get(candidate.0).is_some_and(|entry| entry["message"]["timestamp"].as_u64() == Some(time)))).collect();
+        let candidate = if let Some(candidate) = by_id { candidate }
+            else if by_time.len() == 1 { by_time[0] }
+            else if active.len() == selector.total_occurrences { *active.get(selector.occurrence)
+                .ok_or("The selected user turn is no longer in the active Pi branch")? }
+            else { return Err("Cannot unambiguously align this output row with the active Pi user turns".into()); };
+        let entry = entries.get(candidate.0).ok_or("Missing selected Pi entry")?;
+        if selector.timestamp.is_some_and(|time| entry["message"]["timestamp"].as_u64() != Some(time)) {
+            return Err("The output row does not match the persisted Pi user turn".into());
+        }
+        candidate
+    } else { match matches.as_slice() {
         [] => return Err("Cannot locate that user turn in the Pi conversation tree".into()),
         [single] => single,
         many => {
@@ -280,33 +374,104 @@ fn branch_before_user_matching(
             if active.len() == 1 { active[0] }
             else { return Err("Multiple identical user turns match this Pi conversation".into()); }
         }
-    };
+    }};
     let parent = candidate.1.clone();
-    // Pi loads the last entry as the active leaf. A context-free custom entry
-    // rooted at the previous parent selects a new branch without injecting an
-    // abandoned summary into the model's next prompt.
-    let marker = json!({
-        "type": "custom", "id": Uuid::new_v4().to_string(), "parentId": parent,
-        "timestamp": values.last().and_then(|v| v.get("timestamp")).and_then(Value::as_str)
-            .unwrap_or("2025-01-01T00:00:00.000Z"),
-        "customType": "grapher-edit", "data": {"fromId": leaf},
-    });
-    let old_len = contents.len() as u64;
-    let mut file = OpenOptions::new().append(true).open(&path).map_err(|error| error.to_string())?;
-    let branch = PreparedBranch { path, old_len };
-    if let Err(error) = file.write_all(format!("{marker}\n").as_bytes()).and_then(|()| file.sync_data()) {
-        drop(file);
-        return Err(match branch.rollback() {
-            Ok(()) => error.to_string(),
-            Err(rollback) => format!("{error}; {rollback}"),
-        });
+    // One execution can contain the opening prompt and many consumed steers.
+    // Only a turn with no user ancestor may replace the node's original task.
+    let mut first_user_turn = true;
+    let mut cursor = parent.as_deref();
+    let mut ancestors = HashSet::new();
+    while let Some(id) = cursor {
+        if !ancestors.insert(id) { return Err("Pi session contains a cycle".into()); }
+        let entry = entries.get(id).ok_or("Pi session contains a missing parent")?;
+        if user_text(entry).is_some() { first_user_turn = false; break; }
+        cursor = entry.get("parentId").and_then(Value::as_str);
     }
-    Ok(branch)
+    let first_in_execution = values.iter().skip(1).find(|entry| {
+        let time = entry["message"]["timestamp"].as_u64().unwrap_or(0);
+        user_text(entry).is_some() && entry["id"].as_str().is_some_and(|id| active_ids.contains(id)) &&
+            time >= started_at && time <= completed_at
+    }).is_some_and(|entry| entry["id"].as_str() == Some(candidate.0));
+    Ok(UserBranch { path, selected_id: candidate.0.into(), parent, first_user_turn, first_in_execution, require_active: selector.is_some() })
+}
+
+impl UserBranch {
+    pub fn commit(self) -> Result<PreparedBranch, String> {
+        let contents = fs::read_to_string(&self.path).map_err(|error| error.to_string())?;
+        if !contents.ends_with('\n') { return Err("Pi session has an incomplete last entry".into()); }
+        let values: Vec<Value> = contents.lines().map(|line| serde_json::from_str(line)
+            .map_err(|_| "Invalid Pi session entry".to_string())).collect::<Result<_, _>>()?;
+        let leaf = values.last().and_then(|entry| entry["id"].as_str()).ok_or("Missing Pi leaf")?;
+        if self.require_active {
+            let entries: HashMap<_, _> = values.iter().skip(1).filter_map(|entry| entry["id"].as_str().map(|id| (id, entry))).collect();
+            let mut cursor = Some(leaf);
+            let mut seen = HashSet::new();
+            let mut found = false;
+            while let Some(id) = cursor {
+                if !seen.insert(id) { return Err("Pi session contains a cycle".into()); }
+                if id == self.selected_id { found = true; break; }
+                cursor = entries.get(id).ok_or("Missing Pi parent")?["parentId"].as_str();
+            }
+            if !found { return Err("The selected user turn is no longer active".into()); }
+        }
+        let marker = json!({
+            "type": "custom", "id": Uuid::new_v4().to_string(), "parentId": self.parent,
+            "timestamp": values.last().and_then(|v| v["timestamp"].as_str()).unwrap_or("2025-01-01T00:00:00.000Z"),
+            "customType": "grapher-edit", "data": {"fromId": leaf},
+        });
+        let old_len = contents.len() as u64;
+        let mut file = OpenOptions::new().append(true).open(&self.path).map_err(|error| error.to_string())?;
+        let branch = PreparedBranch { path: self.path, old_len, first_user_turn: self.first_user_turn };
+        if let Err(error) = file.write_all(format!("{marker}\n").as_bytes()).and_then(|()| file.sync_data()) {
+            drop(file);
+            return Err(match branch.rollback() { Ok(()) => error.to_string(), Err(rollback) => format!("{error}; {rollback}") });
+        }
+        Ok(branch)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncating_a_live_transcript_keeps_utf8_scalars_intact() {
+        let text = "a中文🚀z";
+        assert_eq!(truncate_output(text, None), text);
+        assert_eq!(truncate_output(text, Some(text.len())), text);
+        assert_eq!(truncate_output(text, Some(1)), "a");
+        assert_eq!(truncate_output(text, Some(4)), "a中");
+        assert_eq!(truncate_output(text, Some(2)), "a", "a cursor inside a scalar floors to the previous boundary");
+    }
+
+    #[test]
+    fn cursor_alignment_rejects_missing_identical_rows_unless_the_pi_identity_is_known() {
+        for identified in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let id = Uuid::new_v4().to_string();
+            let file = temp.path().join(format!("test_{id}.jsonl"));
+            let history = [
+                json!({"type":"session", "id":id,"cwd":temp.path()}),
+                json!({"type":"message", "id":"opening","parentId":null,"message":{"role":"user","content":"again","timestamp":10}}),
+                json!({"type":"message", "id":"steer","parentId":"opening","message":{"role":"user","content":"again","timestamp":10}}),
+            ].iter().map(|entry| format!("{entry}\n")).collect::<String>();
+            fs::write(&file, &history).unwrap();
+            let mut row = json!({"type":"message_start","message":{"role":"user","content":"again","timestamp":10}});
+            if identified { row["message"]["id"] = json!("steer"); }
+            let selector = output_user_turn(&format!("{row}\n"), 0, "again").unwrap();
+            let pending = prepare_node_user_branch(temp.path(), &id, temp.path(), "again", 0, 20, Some(&selector));
+            if identified {
+                let pending = pending.unwrap();
+                assert!(!pending.first_user_turn);
+                pending.commit().unwrap();
+                let marker: Value = serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
+                assert_eq!(marker["parentId"], "opening");
+            } else {
+                assert!(pending.is_err(), "a missing opening row must not shift an ambiguous occurrence onto the wrong turn");
+                assert_eq!(fs::read_to_string(&file).unwrap(), history);
+            }
+        }
+    }
     #[cfg(target_os = "macos")]
     #[test]
     fn session_header_is_rebound_to_the_filesystem_case_spelling() {

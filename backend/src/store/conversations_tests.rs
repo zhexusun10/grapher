@@ -282,6 +282,7 @@ fn sidebar_title_edits_use_the_canonical_reducer() {
                     images: None,
                     from_execution_id: "anchor".into(),
                     from_event_sequence: 1,
+                    from_output_offset: Some(17),
                     old_instruction: "Original".into(),
                     first_turn,
                     selected_version: None,

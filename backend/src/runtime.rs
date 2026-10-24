@@ -1844,6 +1844,13 @@ impl Runtime {
         images: Option<Vec<ImageAttachment>>,
         selected_version: Option<usize>,
     ) -> Result<(), String> {
+        self.edit_node_message_at(node, execution_id, old_text, instruction, images, selected_version, None)
+    }
+
+    pub fn edit_node_message_at(
+        &mut self, node: &str, execution_id: &str, old_text: &str, instruction: &str,
+        images: Option<Vec<ImageAttachment>>, selected_version: Option<usize>, user_turn_offset: Option<usize>,
+    ) -> Result<(), String> {
         if instruction.trim().is_empty() {
             return Err("Enter a replacement message".into());
         }
@@ -1871,8 +1878,6 @@ impl Runtime {
                 execution.id == execution_id
                     && execution.node == node
                     && (execution.completed_at.is_some() || execution.status == "running")
-                    && (selected_version.is_some()
-                        || !self.state.superseded_execution_ids.contains(&execution.id))
             })
             .ok_or("Select an active node message to edit")?
             .clone();
@@ -1883,16 +1888,42 @@ impl Runtime {
                 .ok_or("Historical environment input is unavailable")?;
             store.validate_result_metadata(input)?;
         }
-        // Editing branches the Pi session file, and Pi resumes from the last
-        // entry. A live writer would keep appending past the branch marker, so
-        // its process tree is stopped first — the same lifecycle as switching
-        // a /tree branch before rewriting the opening prompt.
-        for (_, stopped_execution) in self.request_execution_stop(Some(node))? {
-            crate::process_control::stop_owner(&crate::process_control::execution_owner(
-                &self.state.run_id,
-                node,
-                &stopped_execution,
-            ))?;
+        let superseded = self.state.superseded_execution_ids.contains(&anchor.id);
+        // Resolve the retained prefix from durable events before reading the log,
+        // so an abandoned suffix is never materialized.
+        let mut retained_end = None;
+        let anchor_index = self.state.executions.iter().position(|execution| execution.id == anchor.id).expect("validated edit anchor");
+        if superseded && selected_version.is_none() {
+            for event in &self.state.events {
+                if let EventKind::ConversationEdited { target, from_execution_id, from_output_offset, .. } = &event.kind {
+                    if target != node { continue; }
+                    let Some((cut_index, cut)) = self.state.executions.iter().enumerate().find(|(_, execution)| execution.id == *from_execution_id) else { continue; };
+                    if cut.session_id != anchor.session_id { continue; }
+                    if cut_index < anchor_index { retained_end = None; }
+                    if cut.id == anchor.id { retained_end = *from_output_offset; }
+                }
+            }
+            let current_session = self.state.executions.iter().rev().find(|execution| execution.node == node &&
+                !self.state.superseded_execution_ids.contains(&execution.id));
+            if current_session.is_some_and(|execution| execution.session_id != anchor.session_id) || retained_end.is_none() ||
+                (current_session.is_none() && self.state.nodes[node].edit_execution_id.is_none()) {
+                return Err("Select a user turn retained in the active conversation".into());
+            }
+        }
+        // A retained prefix only ever resolves a user row inside itself; a live
+        // edit reads the whole log because it must prove the row is unique.
+        let logged = self.store.log_bytes(&self.state.run_id, &anchor.id)?;
+        let output = if logged > 0 {
+            let limit = retained_end.map_or(usize::MAX, |end| end.min(logged));
+            self.store.execution_log_page(&self.state.run_id, &anchor.id, 0, limit)?.content
+        } else if anchor.output_bytes == 0 || anchor.output_bytes == anchor.output.len() {
+            crate::session_branch::truncate_output(&anchor.output, retained_end)
+        } else { String::new() };
+        let user_turn_offset = if user_turn_offset.is_none() && selected_version.is_none() {
+            crate::session_branch::unique_output_user_turn_offset(&output, old_text)
+        } else { user_turn_offset };
+        if superseded && selected_version.is_none() && !user_turn_offset.zip(retained_end).is_some_and(|(offset, end)| offset < end) {
+            return Err("Select a user turn retained in the active conversation".into());
         }
         let start = self
             .state
@@ -1904,7 +1935,7 @@ impl Runtime {
                     )
             })
             .ok_or("Missing execution start")?;
-        let from_event_sequence = self.state.events[..start]
+        let opening_event_sequence = self.state.events[..start]
             .iter()
             .rev()
             .find_map(|event| match &event.kind {
@@ -1921,6 +1952,13 @@ impl Runtime {
                 _ => None,
             })
             .unwrap_or(self.state.events[start].sequence);
+        // Editing a Steer abandons that turn and later turns, not the other
+        // user instructions already consumed inside the same execution.
+        let from_event_sequence = self.state.events[start..].iter().find_map(|event| match &event.kind {
+            EventKind::Steered { execution_id: owner, instruction, .. }
+                if owner == execution_id && instruction.trim() == old_text.trim() => Some(event.sequence),
+            _ => None,
+        }).unwrap_or(opening_event_sequence);
         let first_id = self
             .state
             .executions
@@ -1940,18 +1978,38 @@ impl Runtime {
         // next attempt starts the first turn in the retained session slot. A
         // completed or running conversation still fails closed if its history
         // disappeared, instead of silently losing the abandoned branch.
-        let branch = if !persisted && anchor.status == "failed" {
+        let selector = user_turn_offset.map(|offset| crate::session_branch::output_user_turn(&output, offset, old_text)).transpose()?;
+        let session_writer = self.state.executions.iter().rev().find(|execution| execution.node == node &&
+            execution.session_id == anchor.session_id && !self.state.superseded_execution_ids.contains(&execution.id))
+            .unwrap_or(&anchor);
+        let pending = if !persisted && anchor.status == "failed" && selector.is_none() {
             None
         } else {
-            Some(crate::session_branch::branch_before_user(
-                &session_dir,
-                &anchor.session_id,
-                Path::new(&anchor.worktree),
-                old_text,
-                anchor.started_at,
-                anchor.completed_at.unwrap_or(u64::MAX),
+            Some(crate::session_branch::prepare_node_user_branch(
+                &session_dir, &anchor.session_id, Path::new(&session_writer.worktree), old_text,
+                anchor.started_at, anchor.completed_at.unwrap_or(u64::MAX), selector.as_ref(),
             )?)
         };
+        let first_turn = pending.as_ref().map_or(anchor.id == first_id, |branch| branch.first_user_turn);
+        // Distinguish the execution's opening prompt from later Steers. Editing
+        // an opening prompt must replace its pre-Started human event too; a
+        // recovery attempt must not claim an older execution's opening event.
+        let opening_event = self.state.events.iter().position(|event| event.sequence == opening_event_sequence);
+        let bound_opening = opening_event.is_some_and(|index| index < start &&
+            !self.state.events[index + 1..start].iter().any(|event| matches!(&event.kind,
+                EventKind::Started { execution, .. } if execution.node == node)));
+        let edits_opening = first_turn || (bound_opening && pending.as_ref().is_some_and(|turn| turn.first_in_execution));
+        let from_event_sequence = if edits_opening { opening_event_sequence }
+            else if user_turn_offset.is_some() { self.state.events[start].sequence }
+            else { from_event_sequence };
+        // No mutation or process interruption occurs until the exact user turn
+        // has been validated. Stop the sole writer only before committing.
+        for (_, stopped_execution) in self.request_execution_stop(Some(node))? {
+            crate::process_control::stop_owner(&crate::process_control::execution_owner(
+                &self.state.run_id, node, &stopped_execution,
+            ))?;
+        }
+        let branch = pending.map(|branch| branch.commit()).transpose()?;
         if let Err(error) = self.emit(EventKind::ConversationEdited {
             nodes: vec![node.into()],
             target: node.into(),
@@ -1959,8 +2017,9 @@ impl Runtime {
             images,
             from_execution_id: execution_id.into(),
             from_event_sequence,
+            from_output_offset: user_turn_offset,
             old_instruction: old_text.into(),
-            first_turn: anchor.id == first_id,
+            first_turn,
             selected_version,
         }) {
             return Err(match branch {
@@ -1971,6 +2030,10 @@ impl Runtime {
                 None => error,
             });
         }
+        // A parked source-native shell keeps the pre-edit conversation in memory.
+        // Retire this Run's parked shells so the next turn re-reads the branched
+        // Pi session file instead of continuing the abandoned branch.
+        crate::engine::stop_lingering_for_run(&self.state.run_id);
         Ok(())
     }
 

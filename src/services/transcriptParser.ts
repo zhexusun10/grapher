@@ -1,4 +1,4 @@
-import type { TranscriptItem } from "../types";
+import type { ImageAttachment, TranscriptItem } from "../types";
 import { utf8Bytes } from "../lib/BoundedLruCache";
 import { stripPlannerContext } from "./plannerText";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./thinkingTranscript";
@@ -9,6 +9,12 @@ function textContent(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content.filter((part: any) => part?.type === "text")
     .map((part: any) => typeof part.text === "string" ? part.text : "").join("\n");
+}
+
+function imageContent(content: unknown): ImageAttachment[] | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const images = content.filter((part: any) => part?.type === "image" && typeof part.mimeType === "string" && typeof part.data === "string");
+  return images.length ? images : undefined;
 }
 
 /** Parse state shared by the incremental parser and its callers. */
@@ -171,7 +177,7 @@ export function parseTranscriptChunkLines(
       const first = !state.seenFirstUser;
       state.seenFirstUser = true;
       if (first && options.skipFirstUser) return;
-      currentItems.push({ id: `session_user_${entryId || rowId("user")}`, type: "text", role: "user", content: text, timestamp: Date.now() });
+      currentItems.push({ id: `session_user_${entryId || rowId("user")}`, type: "text", role: "user", content: text, userTurnOffset: lineOffset, images: imageContent(message.content), timestamp: Date.now() });
       return;
     }
     if (message.role === "toolResult") {
@@ -241,7 +247,7 @@ export function parseTranscriptChunkLines(
         if (first && options.skipFirstUser) continue;
         if (display.trim()) currentItems.push({
           id: messageId ? `user_${messageId}` : rowId("user"),
-          type: "text", role: "user", content: display, timestamp: Date.now(),
+          type: "text", role: "user", content: display, userTurnOffset: lineOffset, images: imageContent(content), timestamp: Date.now(),
         });
         continue;
       }

@@ -1,7 +1,7 @@
 import { t } from "../i18n";
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
-import { TranscriptItem } from "../types";
+import { type ImageAttachment, TranscriptItem } from "../types";
 import { closeThinkingItems } from "../services/thinkingTranscript";
 import { parseTranscriptChunkLines, type ParseTranscriptChunkState, type TranscriptParseOptions } from "../services/transcriptParser";
 import { settleInterruptedItems } from "../services/transcriptSettle";
@@ -30,16 +30,17 @@ interface VirtualizedTranscriptProps {
   userTurnTexts?: readonly string[];
   /** The source execution is terminal: unterminated live markers display as interrupted, not running. */
   settled?: boolean;
-  onEditUser?: (text: string, replacement: string) => boolean | void | Promise<unknown>;
+  onEditUser?: (text: string, replacement: string, userTurnOffset?: number, images?: ImageAttachment[]) => boolean | void | Promise<unknown>;
   /** Called when the user reaches the top of a shared history scroller. */
   onReachTop?: () => void;
   /** Reports whether the parsed stream sits inside a compaction (a
    * compaction_start seen without its matching compaction_end), so
    * conversation chrome can swap its working label for a compacting one. */
   onCompactingChange?: (compacting: boolean) => void;
-  /** Reports the user turns actually present in the transcript. Steer bubbles
-   * outside the transcript stay visible until their inline copy is parsed. */
-  onInlineUserTurnsChange?: (texts: string[]) => void;
+  /** Reports the user turns actually present in the transcript, and whether the
+   * loaded window starts at the transcript's first byte. Steer bubbles outside
+   * the transcript stay visible until their inline copy is parsed. */
+  onInlineUserTurnsChange?: (texts: string[], complete: boolean) => void;
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -666,9 +667,12 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     .filter(item => item.role === "user")
     .map(item => item.content || ""), [items]);
   const inlineUserTurnsKey = inlineUserTurns.join("\u0000");
+  // A window that starts at byte 0 is a complete view of the conversation; a
+  // tail page cannot prove which repeated turns Pi already consumed.
+  const inlineUserTurnsComplete = startOffset === 0;
   useEffect(() => {
-    if (showUserTurns) onInlineUserTurnsChangeRef.current?.(inlineUserTurns);
-  }, [inlineUserTurnsKey, showUserTurns]);
+    if (showUserTurns) onInlineUserTurnsChangeRef.current?.(inlineUserTurns, inlineUserTurnsComplete);
+  }, [inlineUserTurnsKey, showUserTurns, inlineUserTurnsComplete]);
 
   const lastScrollTopRef = useRef(0);
   const prevItemsVersionRef = useRef(itemsVersion);

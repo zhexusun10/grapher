@@ -173,6 +173,29 @@ const assistantEnd = (text: string) => JSON.stringify({
   type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] },
 }) + "\n";
 
+test("repeated user rows retain distinct absolute UTF-8 cursors in full and paged transcripts", () => {
+  const image = { type: "image", mimeType: "image/png", data: "aA==" };
+  const start = (text: string) => JSON.stringify({ type: "message_start", message: { role: "user", content: [{ type: "text", text }, image] } }) + "\n";
+  const end = (text: string) => JSON.stringify({ type: "message_end", message: { role: "user", content: [{ type: "text", text }] } }) + "\n";
+  const prefix = assistantEnd("中文🚀 before the user turn");
+  const first = start("继续") + end("继续") + assistantEnd("middle");
+  const output = prefix + first + start("继续") + end("继续");
+  for (const offset of [0, utf8Bytes(prefix + first)]) {
+    const state: ParseTranscriptChunkState = {
+      source: "output", byteOffset: offset, leadingFragment: false,
+      inTagThinking: false, inFinalResponse: false, finalResponseSuppressed: false,
+      seenFirstUser: false, pendingUserStart: false, assistantStartIndex: 0,
+      userMessageStarts: new Set(), compacting: false,
+    };
+    const text = Buffer.from(output).subarray(offset).toString();
+    const rows = parseTranscriptChunkLines(text.trimEnd().split("\n"), [], new Map(), state,
+      { showUserTurns: true, skipFirstUser: false }).currentItems.filter(item => item.role === "user");
+    assert.deepEqual(rows.map(item => item.userTurnOffset), offset === 0
+      ? [utf8Bytes(prefix), utf8Bytes(prefix + first)] : [offset]);
+    assert.ok(rows.every(row => row.images?.length === 1 && row.images[0].data === image.data), 'retained prefix rows keep their image payloads');
+  }
+});
+
 test("only requested user turns render inline without replaying the task turn", () => {
   const output = [
     { type: "message", id: "task", message: { role: "user", content: [{ type: "text", text: "2" }] } },

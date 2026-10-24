@@ -976,6 +976,39 @@ test("prompt expansion responds to container width, external values and viewport
   } finally { await context.close(); }
 });
 
+for (const name of ["prompt", "compactPrompt"]) {
+  test(`${name}: pending submissions clear immediately, restore failures and cannot clear a new workspace draft`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(name);
+    try {
+      const input = page.locator("textarea");
+      const draft = "  Steer draft 中文🚀  ";
+      await page.evaluate(() => { window.audit.deferSubmit = true; });
+      await input.fill(draft); await input.press("Enter");
+      await page.waitForFunction(() => window.audit.submissions === 1);
+      assert.equal(await input.inputValue(), "");
+      assert.equal(await input.isDisabled(), true);
+      assert.equal(await page.evaluate(() => window.audit.lastMessage), draft.trim());
+      await page.evaluate(() => window.audit.reject(new Error("Send failed")));
+      await page.waitForFunction(() => !document.querySelector("textarea").disabled);
+      assert.equal(await input.inputValue(), draft, "a thrown failure restores the exact, untrimmed draft");
+      await input.press("Enter");
+      await page.waitForFunction(() => window.audit.submissions === 2);
+      assert.equal(await input.inputValue(), "");
+      await page.evaluate(() => window.audit.resolve(false));
+      await page.waitForFunction(() => !document.querySelector("textarea").disabled);
+      assert.equal(await input.inputValue(), draft, "an explicit rejection also restores the draft");
+      await input.press("Enter");
+      await page.waitForFunction(() => window.audit.submissions === 3);
+      await page.evaluate(() => window.audit.switchRepository());
+      await input.fill("New workspace draft");
+      await page.evaluate(() => window.audit.resolve(true));
+      await page.waitForTimeout(100);
+      assert.equal(await input.inputValue(), "New workspace draft");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
 test("expanded prompt retains a rejected submission and collapses only after acceptance", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("prompt");
   try {
@@ -989,6 +1022,7 @@ test("expanded prompt retains a rejected submission and collapses only after acc
     await page.waitForFunction(() => typeof window.audit.resolve === "function");
     assert.equal(await collapse.isDisabled(), true);
     assert.equal(await input.isDisabled(), true);
+    assert.equal(await input.inputValue(), "", "the submitted text does not linger while acceptance is pending");
     await page.evaluate(() => { window.audit.resolve(false); delete window.audit.resolve; });
     await page.waitForFunction(() => !document.querySelector("textarea").disabled);
     assert.equal(await input.inputValue(), draft);
@@ -996,7 +1030,7 @@ test("expanded prompt retains a rejected submission and collapses only after acc
     await input.press("Enter");
     await page.waitForFunction(() => typeof window.audit.resolve === "function");
     await page.evaluate(() => window.audit.resolve(true));
-    await page.waitForFunction(() => document.querySelector("textarea").value === "");
+    await page.waitForFunction(() => { const input = document.querySelector("textarea"); return input.value === "" && !input.disabled; });
     assert.equal(await collapse.count(), 0);
     assert.equal(await page.getByRole("button", { name: "Expand input", exact: true }).count(), 0);
     assert.equal(await page.evaluate(() => window.audit.lastMessage), draft);
@@ -1795,8 +1829,13 @@ for (const planType of ["graph", "serial"]) {
       await openNode();
       const composer = page.locator(".pane-bottom-chat textarea");
       const send = async text => {
+        const before = actions.length;
         await composer.fill(text); await composer.press("Enter");
-        await page.waitForFunction(() => document.querySelector(".pane-bottom-chat textarea")?.value === "");
+        await waitFor(() => actions.length === before + 1);
+        await page.waitForFunction(() => {
+          const input = document.querySelector(".pane-bottom-chat textarea");
+          return input?.value === "" && !input.disabled;
+        });
       };
       await send("Repeated queued instruction");
       await send("Repeated queued instruction");
@@ -1830,8 +1869,155 @@ for (const planType of ["graph", "serial"]) {
       await page.getByText("First live Steer", { exact: true }).waitFor();
       await page.getByText("Second live Steer", { exact: true }).waitFor();
       assert.equal(await page.locator('[data-execution-id="queue-batch"]').count(), 1);
+      assert.ok(await page.evaluate(() => {
+        const steer = [...document.querySelectorAll(".chat-message-row.user")].find(row => row.textContent.includes("First live Steer"));
+        const output = document.querySelector('[data-execution-id="queue-batch"]');
+        return !!steer && !!output && !!(steer.compareDocumentPosition(output) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }), "a historical Steer missing from the loaded transcript stays above its owning output, not at the bottom");
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
+  });
+}
+
+for (const planType of ["graph", "serial"]) {
+  test(`${planType}: Steers clear the composer before acknowledgement and remain editable inline after reload`, { timeout: 45_000 }, async () => {
+    const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };
+    const output = (role, text) => JSON.stringify({ type: "message_end", message: { role, content: [{ type: "text", text }] } }) + "\n";
+    const live = { id: "steer-live", node: "task", status: "running", revision: 1, attempt: 1, sessionId: "s", worktree: "/a", before: "", after: null, startedAt: 1, completedAt: null,
+      output: output("assistant", "Original agent response") + output("user", "Consumed steer") + output("assistant", "Earlier steer reply") +
+        JSON.stringify({ type: "tool_execution_start", toolCallId: "retained-tool", toolName: "bash", args: { command: "echo retained" } }) + "\n" +
+        JSON.stringify({ type: "tool_execution_end", toolCallId: "retained-tool", toolName: "bash", result: { content: [{ type: "text", text: "Retained tool output" }] } }) + "\n" };
+    let current = { runId: "edit-steer-run", config, planType, approved: true, paused: false, phase: "running",
+      graph: { originalGoal: "Original goal", nodes: [{ name: "task", task: "Original task" }], edges: [] },
+      nodes: { task: { status: "running", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
+      executions: [live], plan: null, events: [{ type: "started", sequence: 1, timestamp: 1, execution: live, message_sequences: [] },
+        { type: "steered", sequence: 2, timestamp: 2, node: "task", execution_id: live.id, instruction: "Consumed steer" }],
+      base: "", feedbackCounts: {} };
+    const empty = { ...current, runId: "", config: null, approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [] };
+    const gate = deferred(), controls = [], edits = [], errors = [];
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+      let result;
+      switch (command) {
+        case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+        case "history": case "snapshot": result = current; break;
+        case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
+        case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+        case "list_plannings": result = []; break;
+        case "list_files": result = { files: [] }; break;
+        case "list_skills": result = { skills: [] }; break;
+        case "provider_auth": result = catalog; break;
+        case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+        case "get_execution_output": {
+          const execution = current.executions.find(item => item.id === body.executionId);
+          const bytes = Buffer.from(execution.output);
+          const end = Math.min(body.endOffset ?? bytes.length, bytes.length);
+          const start = body.tail ? Math.max(0, (body.before ?? end) - (body.limit ?? end)) : body.offset;
+          const next = Math.min(end, start + (body.limit ?? end));
+          result = { runId: current.runId, executionId: execution.id, content: bytes.subarray(start, next).toString(),
+            startOffset: start, nextOffset: next, totalBytes: end, complete: next === end, status: execution.status };
+          break;
+        }
+        case "control":
+          controls.push(body);
+          assert.equal(body.action, "steer");
+          await gate.promise;
+          current = { ...current, events: [...current.events, { type: "steered", sequence: 3, timestamp: 3,
+            node: "task", execution_id: live.id, instruction: body.instruction }] };
+          result = current; break;
+        case "edit_node": {
+          edits.push(body);
+          if (edits.length === 1) {
+            await route.fulfill({ status: 400, json: { error: "Retry this edit" } }); return;
+          }
+          const sequence = current.events.length + 1;
+          const replacement = { ...live, id: `steer-edited-${edits.length}`, attempt: edits.length, startedAt: sequence + 1,
+            output: output("assistant", edits.length === 2 ? "Edited steer response" : "Edited earlier response") };
+          current = { ...current, supersededExecutionIds: current.executions.map(item => item.id),
+            executions: [...current.executions.map(item => ({ ...item, status: "paused", completedAt: sequence, outputBytes: Buffer.byteLength(item.output) })), replacement],
+            events: [...current.events,
+              { type: "conversation_edited", sequence, timestamp: sequence, target: "task", nodes: ["task"], instruction: body.instruction,
+                old_instruction: body.oldText, from_execution_id: live.id, from_event_sequence: 1, from_output_offset: body.userTurnOffset, first_turn: false },
+              { type: "started", sequence: sequence + 1, timestamp: sequence + 1, execution: replacement, message_sequences: [] }] };
+          result = current; break;
+        }
+        default: errors.push(`Unexpected API: ${command}`); return route.fulfill({ status: 400, json: { error: command } });
+      }
+      await route.fulfill({ json: { result } });
+    });
+    const page = await context.newPage(); page.setDefaultTimeout(10_000);
+    page.on("pageerror", error => errors.push(String(error)));
+    const open = async () => {
+      await page.locator('[data-run-id="edit-steer-run"]').click();
+      if (planType === "graph") await page.locator('[data-node-name="task"]').click();
+      await page.getByText("Original agent response", { exact: true }).waitFor();
+    };
+    try {
+      await page.goto(origin, { waitUntil: "networkidle" }); await open();
+      const composer = page.locator(".pane-bottom-chat textarea");
+      await composer.fill("Consumed steer"); await composer.press("Enter");
+      await waitFor(() => controls.length === 1);
+      await page.waitForFunction(() => document.querySelector(".pane-bottom-chat textarea")?.value === "");
+      assert.equal(current.events.length, 2, "the input clears without waiting for the backend acknowledgement");
+      const pending = page.locator(".chat-message-row.user.planner-follow-up", { hasText: "Consumed steer" });
+      await pending.waitFor();
+      await page.waitForTimeout(100);
+      assert.equal(await pending.count(), 1, "the earlier identical turn must not hide the new unread Steer");
+      assert.equal(await pending.locator(".chat-message-edit-btn").count(), 0, "an unread steer cannot branch a nonexistent Pi turn");
+      gate.resolve();
+      await page.waitForFunction(() => !document.querySelector(".pane-bottom-chat textarea")?.disabled);
+      current = { ...current, executions: [{ ...live, output: live.output + output("user", "Consumed steer") + output("assistant", "Steer reply") }] };
+      const rows = page.locator('[data-execution-id="steer-live"] .chat-message-row.user', { hasText: "Consumed steer" });
+      const inline = rows.last();
+      await page.waitForFunction(() => [...document.querySelectorAll('[data-execution-id="steer-live"] .chat-message-row.user')].filter(row => row.textContent.includes("Consumed steer")).length === 2);
+      assert.equal(await pending.count(), 0, "both identical messages move inline without an extra outer bubble");
+      await page.reload({ waitUntil: "networkidle" }); await open();
+      await inline.locator(".chat-user-message-card-wrapper").hover();
+      await inline.locator(".chat-message-edit-btn").click();
+      const editor = page.locator(".chat-bubble-edit-textarea");
+      await editor.fill("Replacement steer"); await editor.press("Enter");
+      await page.getByRole("alert").filter({ hasText: "Retry this edit" }).waitFor();
+      await page.waitForFunction(() => !document.querySelector(".chat-bubble-edit-textarea")?.disabled);
+      assert.equal(await editor.inputValue(), "Replacement steer", "a rejected edit retains its draft");
+      await editor.press("Enter");
+      await page.getByText("Edited steer response", { exact: true }).waitFor();
+      await page.getByText("Consumed steer", { exact: true }).waitFor();
+      await page.getByText("Original agent response", { exact: true }).waitFor();
+      await page.getByText("Earlier steer reply", { exact: true }).waitFor();
+      assert.equal(await page.locator('[data-execution-id="steer-live"] .tool-call-card').count(), 1);
+      const ordered = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll(".chat-message-row")];
+        const index = text => rows.findIndex(row => row.textContent.includes(text));
+        return index("Consumed steer") < index("Replacement steer") && index("Replacement steer") < index("Edited steer response");
+      });
+      assert.ok(ordered, "earlier turns and the edited instruction precede its replacement response");
+      assert.equal(edits.length, 2);
+      assert.deepEqual(edits[1], { runId: current.runId, node: "task", executionId: live.id, oldText: "Consumed steer", instruction: "Replacement steer", userTurnOffset: Buffer.byteLength(live.output), compact: true, detail: "metadata" });
+      assert.equal(current.graph.originalGoal, "Original goal");
+      assert.equal(current.graph.nodes[0].task, "Original task");
+      assert.equal(await page.locator(".chat-bubble-edit-textarea").count(), 0);
+      // Reload the durable prefix, then edit its earlier, identically worded
+      // Steer even though its execution is now superseded.
+      await page.reload({ waitUntil: "networkidle" }); await open();
+      await page.getByText("Earlier steer reply", { exact: true }).waitFor();
+      const earlier = rows.first();
+      await earlier.locator(".chat-user-message-card-wrapper").hover();
+      await earlier.locator(".chat-message-edit-btn").click();
+      await editor.fill("Replacement earlier steer"); await editor.press("Enter");
+      await page.getByText("Edited earlier response", { exact: true }).waitFor();
+      assert.equal(edits.length, 3);
+      assert.equal(edits[2].executionId, live.id);
+      assert.equal(edits[2].userTurnOffset, Buffer.byteLength(output("assistant", "Original agent response")));
+      assert.equal(await page.getByText("Earlier steer reply", { exact: true }).count(), 0);
+      assert.equal(await page.getByText("Edited steer response", { exact: true }).count(), 0);
+      assert.equal(await page.locator(".tool-call-card").count(), 0);
+      await page.getByText("Original agent response", { exact: true }).waitFor();
+      await page.reload({ waitUntil: "networkidle" }); await open();
+      await page.getByText("Edited earlier response", { exact: true }).waitFor();
+      assert.deepEqual(errors, []);
+    } finally { gate.resolve(); await context.close(); }
   });
 }
 
@@ -1894,6 +2080,81 @@ test("pausing a node returns an unread steer to the composer and removes its car
     assert.equal(await page.locator('.chat-message-row.user', { hasText: "Unread steer instruction" }).count(), 0,
       "the unread steer card is removed");
     assert.deepEqual(actions, [{ action: "steer", node: "task" }, { action: "stop", node: "task" }]);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a partially loaded transcript never rolls back a repeated consumed steer", { timeout: 45_000 }, async () => {
+  const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };
+  const line = (role, text) => JSON.stringify({ type: "message_end", message: { role, content: [{ type: "text", text }] } }) + "\n";
+  const output = line("assistant", "Opening answer") + line("user", "again") +
+    ["first", "second", "third"].map(index => line("assistant", `${index} ${"x".repeat(250_000)}`)).join("") +
+    line("user", "again") + line("assistant", "Tail visible reply");
+  const bytes = Buffer.from(output);
+  const live = { id: "live-exec", node: "task", status: "running", revision: 1, attempt: 1, sessionId: "s", worktree: "/a", before: "", after: null, startedAt: 1, completedAt: null, output: "", outputBytes: bytes.length };
+  let current = { runId: "tail-steer-run", config, planType: "graph", approved: true, paused: false, phase: "running",
+    graph: { originalGoal: "Tail steer goal", nodes: [{ name: "task", task: "Tail steer task" }], edges: [] },
+    nodes: { task: { status: "running", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
+    executions: [live], plan: null, base: "", feedbackCounts: {},
+    events: [{ type: "started", sequence: 1, timestamp: 1, execution: live, message_sequences: [] },
+      { type: "steered", sequence: 2, timestamp: 2, node: "task", execution_id: live.id, instruction: "again" },
+      { type: "steered", sequence: 3, timestamp: 3, node: "task", execution_id: live.id, instruction: "again" }] };
+  const empty = { ...current, runId: "", config: null, approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [], events: [] };
+  const actions = [], errors = [];
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "history": case "snapshot": result = current; break;
+      case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
+      case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = catalog; break;
+      case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+      case "get_execution_output": {
+        // The initial read is a tail page that starts after the first identical
+        // user turn, so the window cannot prove it was consumed.
+        const end = Math.min(body.endOffset ?? bytes.length, bytes.length);
+        const next = body.tail ? Math.min(body.before ?? end, end) : Math.min(end, body.offset + (body.limit ?? 262144));
+        const start = body.tail ? Math.max(0, next - (body.limit ?? 262144)) : body.offset;
+        result = { runId: current.runId, executionId: live.id, content: bytes.subarray(start, next).toString(),
+          startOffset: start, nextOffset: next, totalBytes: end, complete: next === end, status: current.executions[0].status };
+        break;
+      }
+      case "control":
+        actions.push({ action: body.action, node: body.node });
+        if (body.action === "stop") {
+          current = { ...current, paused: true, phase: "paused",
+            nodes: { task: { ...current.nodes.task, status: "paused" } },
+            executions: [{ ...live, status: "paused", completedAt: 5 }] };
+        }
+        result = current; break;
+      default: errors.push(`Unexpected API: ${command}`); return route.fulfill({ status: 400, json: { error: command } });
+    }
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage(); page.setDefaultTimeout(10_000);
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="tail-steer-run"]').click();
+    await page.locator('[data-node-name="task"]').click();
+    await page.getByText("Tail visible reply", { exact: true }).waitFor();
+    await page.waitForTimeout(200);
+    assert.equal(await page.locator('[data-execution-id="live-exec"] .chat-message-row.user', { hasText: "again" }).count(), 1,
+      "the tail page renders the one consumed turn it loaded");
+    assert.equal(await page.locator('.chat-message-row.user.planner-follow-up', { hasText: "again" }).count(), 0,
+      "a repeated turn already inline does not grow a duplicate card");
+    await page.getByRole("button", { name: "Click to interrupt execution", exact: true }).click();
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator(".pane-bottom-chat textarea").inputValue(), "",
+      "a partially loaded transcript never returns a consumed steer to the composer");
+    assert.deepEqual(actions, [{ action: "stop", node: "task" }]);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

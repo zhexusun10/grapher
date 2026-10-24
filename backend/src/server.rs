@@ -3756,6 +3756,7 @@ fn edit_node(
     run_id: String,
     images: Option<Vec<crate::model::ImageAttachment>>,
     selected_version: Option<usize>,
+    user_turn_offset: Option<usize>,
     service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
@@ -3764,13 +3765,14 @@ fn edit_node(
     }
     #[cfg(not(feature = "fixture"))]
     crate::engine::invalidate_warm_node();
-    runtime.edit_node_message_with_version(
+    runtime.edit_node_message_at(
         &node,
         &execution_id,
         &old_text,
         &instruction,
         images,
         selected_version,
+        user_turn_offset,
     )?;
     let snapshot = runtime.state.clone();
     drop(runtime);
@@ -4316,14 +4318,20 @@ fn get_execution_output(
     } else {
         body.get("limit").map(|_| argument::<usize>(body, "limit")).transpose()?.unwrap_or(256 * 1024).clamp(4, 1024 * 1024)
     };
-    let page = if tail {
-        runtime.store.execution_log_tail_page(&run_id, &execution_id, before.unwrap_or(total), limit)?
+    // Prefix views use the durable edit cursor, not the abandoned execution's
+    // physical EOF. Byte offsets stay those of the original immutable log.
+    let end = body.get("endOffset").map(|_| argument::<usize>(body, "endOffset")).transpose()?.unwrap_or(total).min(total);
+    let mut page = if tail {
+        runtime.store.execution_log_tail_page(&run_id, &execution_id, before.unwrap_or(end).min(end), limit)?
     } else {
-        runtime.store.execution_log_page(&run_id, &execution_id, offset, limit)?
+        if offset > end { return Err("Invalid prefix output offset".into()); }
+        runtime.store.execution_log_page(&run_id, &execution_id, offset, limit.min(end - offset))?
     };
+    page.total_bytes = end;
+    page.complete = page.next_offset == end;
     // Legacy events without a checkpoint have no structured metrics. Recover
     // them from the already requested full response, never during Store::load.
-    if !page.content.is_empty() && page.start_offset == 0 && page.complete {
+    if end == total && !page.content.is_empty() && page.start_offset == 0 && page.complete {
         if let Some(exec) = runtime.state.executions.iter().chain(&runtime.state.mergers)
             .find(|e| e.id == execution_id) {
             let repo = runtime.state.config.as_ref().map(|c| c.repository.as_str()).unwrap_or_default();
@@ -4339,7 +4347,7 @@ fn get_execution_output(
             );
         }
     }
-    if status != "running" && page.start_offset == 0 && page.complete {
+    if end == total && status != "running" && page.start_offset == 0 && page.complete {
         let state = &mut runtime.state;
         if let Some(exec) = state.executions.iter_mut().chain(state.mergers.iter_mut())
             .find(|e| e.id == execution_id && e.metrics.is_none()) {
@@ -4352,7 +4360,7 @@ fn get_execution_output(
     // finished session's context is its newest prompt: at the end of the log.
     // Recover it from whichever page reaches that end instead of re-reading
     // whole historical logs during load.
-    if status != "running" && page.complete {
+    if end == total && status != "running" && page.complete {
         let stale = |metrics: &Option<ExecutionMetrics>| metrics.as_ref()
             .is_some_and(|metrics| metrics.context_tokens == 0 && metrics.assistant_messages > 0);
         if runtime.state.executions.iter().chain(&runtime.state.mergers)
@@ -4968,6 +4976,7 @@ pub fn dispatch(
                 argument(&body, "runId")?,
                 argument(&body, "images").ok(),
                 argument(&body, "versionIndex").ok(),
+                body.get("userTurnOffset").filter(|value| !value.is_null()).map(|_| argument(&body, "userTurnOffset")).transpose()?,
                 service,
             )?),
             "reset_workspace" => Some(reset_workspace(service)?),
@@ -5142,6 +5151,7 @@ pub fn dispatch(
             argument(&body, "runId")?,
             argument(&body, "images").ok(),
             argument(&body, "versionIndex").ok(),
+            body.get("userTurnOffset").filter(|value| !value.is_null()).map(|_| argument(&body, "userTurnOffset")).transpose()?,
             service,
         )?),
         "repository_status" => {

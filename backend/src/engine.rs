@@ -1711,6 +1711,42 @@ fn lingering_pool() -> &'static lingering::Lingering<ParkedSerial> {
     LINGER_POOL.get_or_init(lingering::Lingering::new)
 }
 
+/// Park a throwaway shell for a Run/session so runtime tests can observe that a
+/// history edit retires the conversation's parked process.
+#[cfg(all(test, not(feature = "fixture")))]
+pub(crate) fn park_test_shell(run_id: &str, session_id: &str) {
+    let mut command = if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "ping 127.0.0.1 -n 30 > NUL"]);
+        command
+    } else {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        command
+    };
+    process_control::configure_command(&mut command);
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command.spawn().unwrap();
+    let tree = process_control::with_owner(run_id, || process_control::track(&child).unwrap());
+    let (_line_tx, receiver) = mpsc::channel::<(bool, String)>();
+    let (_input_tx, input_receiver) = mpsc::channel::<Result<(), std::io::Error>>();
+    let (rpc_tx, _rpc_rx) = mpsc::channel::<String>();
+    let channels = SessionChannels {
+        receiver, input_receiver, rpc_sender: Some(rpc_tx),
+        rpc_pending: Some(Arc::new(Mutex::new(HashMap::new()))),
+    };
+    lingering_pool().park(
+        lingering::SessionKey { repository: PathBuf::new(), session_id: session_id.into() },
+        run_id.into(),
+        ParkedSerial { child, tree, channels },
+    );
+}
+
+#[cfg(all(test, not(feature = "fixture")))]
+pub(crate) fn parked_shell_count() -> usize {
+    lingering_pool().len()
+}
+
 /// Stop every parked shell. A parked shell has no idle TTL: it lives for the
 /// whole backend process, so this is the one automatic exit (plus explicit Run
 /// or workspace deletion).

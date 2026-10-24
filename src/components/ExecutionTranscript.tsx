@@ -1,7 +1,7 @@
 import { t, localizeError } from "../i18n";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
-import type { Execution } from "../types";
+import type { Execution, ImageAttachment } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
@@ -19,6 +19,7 @@ export { executionTranscriptCache } from "../services/transcriptCache";
 type Props = {
   runId: string;
   execution: Execution;
+  endOffset?: number;
   onLoadingChange?: (loading: boolean) => void;
   onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
   onInitialOutputReady?: (executionId: string) => void;
@@ -26,11 +27,12 @@ type Props = {
   /** Render only these steer turns inline; the surrounding chat owns the task
    * and continuation turns. */
   inlineUserTurnTexts?: readonly string[];
-  onInlineUserTurnsChange?: (texts: string[]) => void;
+  onInlineUserTurnsChange?: (texts: string[], complete: boolean) => void;
+  onEditUser?: (text: string, replacement: string, userTurnOffset?: number, images?: ImageAttachment[]) => boolean | void | Promise<unknown>;
 };
 
 export function ExecutionTranscript(props: Props) {
-  return <ExecutionHistory key={`${props.runId}:${props.execution.id}`} {...props} />;
+  return <ExecutionHistory key={`${props.runId}:${props.execution.id}:${props.endOffset ?? "full"}`} {...props} />;
 }
 
 /** Keep pending turns identical to an empty live transcript, including its
@@ -42,10 +44,10 @@ export function ExecutionTranscriptPlaceholder() {
   </div>;
 }
 
-function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onInitialOutputReady, onCompactingChange, inlineUserTurnTexts, onInlineUserTurnsChange }: Props) {
-  const cacheKey = `${runId}:${execution.id}`;
+function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUserResize, onInitialOutputReady, onCompactingChange, inlineUserTurnTexts, onInlineUserTurnsChange, onEditUser }: Props) {
+  const cacheKey = `${runId}:${execution.id}${endOffset !== undefined ? `:${endOffset}` : ""}`;
   const paged = execution.outputBytes !== undefined;
-  const settled = execution.status !== "running";
+  const settled = endOffset !== undefined || execution.status !== "running";
   const [window, setWindow] = useState(() => transcriptFromCache(executionTranscriptCache.get(cacheKey)));
   const windowRef = useRef(window);
   const [error, setError] = useState("");
@@ -57,9 +59,10 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
   const announcedRef = useRef(false);
   const lifetime = useTranscriptReader("execution", cacheKey);
   const notifyLoading = useStableCallback((loading: boolean) => onLoadingChange?.(loading));
-  const notifyInlineUserTurns = useStableCallback((texts: string[]) => onInlineUserTurnsChange?.(texts));
+  const notifyInlineUserTurns = useStableCallback((texts: string[], complete: boolean) => onInlineUserTurnsChange?.(texts, complete));
   const hasOlder = ready && Boolean(window?.start);
-  const displayedText = paged ? (window ? renderTranscriptWindow(window) : "") : execution.output;
+  const displayedText = paged ? (window ? renderTranscriptWindow(window) : "") : endOffset === undefined ? execution.output :
+    new TextDecoder().decode(new TextEncoder().encode(execution.output).subarray(0, endOffset));
 
   // Node histories are view-owned. Going back to Planner releases their RAM,
   // including on collapse, Node-to-Node navigation and Conversation exit.
@@ -78,7 +81,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
     olderBusy.current = true; setLoadingOlder(true); setError("");
     if (preserveReading) markTranscriptPrepend(wrapperRef.current);
     try {
-      const page = await runtimeService.getExecutionOutput(runId, execution.id, 0, signal, false, true, before.start, OLDER_TRANSCRIPT_BYTES);
+      const page = await runtimeService.getExecutionOutput(runId, execution.id, 0, signal, false, true, before.start, OLDER_TRANSCRIPT_BYTES, endOffset);
       if (signal.aborted) return;
       if (page.runId !== runId || page.executionId !== execution.id) throw new Error(t("执行记录与请求不匹配"));
       // A simultaneous forward response may have extended end; never replace it.
@@ -112,7 +115,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
     let emptyPages = 0;
     setError("");
     const cached = windowRef.current;
-    if (cached?.settled && settled && cached.end === cached.total && cached.end >= (execution.outputBytes ?? cached.total)) {
+    if (cached?.settled && settled && cached.end === cached.total && cached.end >= Math.min(execution.outputBytes ?? cached.total, endOffset ?? Infinity)) {
       setReady(true);
       return () => abort.abort();
     }
@@ -121,20 +124,20 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
       const offset = before?.end ?? 0;
       try {
         const page = await runtimeService.getExecutionOutput(runId, execution.id, offset, signal, false, !before, undefined,
-          !before ? INITIAL_TRANSCRIPT_BYTES : undefined);
+          !before ? INITIAL_TRANSCRIPT_BYTES : undefined, endOffset);
         if (signal.aborted) return null;
         if (page.runId !== runId || page.executionId !== execution.id || page.nextOffset < offset || (!page.complete && page.nextOffset === offset)) {
           throw new Error(t("执行记录与请求不匹配"));
         }
         const latest = windowRef.current;
         const next = latest
-          ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, page.status !== "running")
-          : windowFromPage(page, page.status !== "running");
+          ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, settled || page.status !== "running")
+          : windowFromPage(page, settled || page.status !== "running");
         publish(next); // Empty terminal pages still update settled/total.
         setReady(true);
         emptyPages = page.content ? 0 : emptyPages + 1;
         if (!page.complete) return 0;
-        if (page.status !== "running") return null;
+        if (settled || page.status !== "running") return null;
         // A missed output notification (dropped SSE frame, half-open stream)
         // must degrade to timer reads instead of stalling the transcript.
         return isRuntimeEventsConnected() ? RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS : liveOutputDelay(emptyPages);
@@ -152,7 +155,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
       stop.wake();
     });
     return () => { unsubscribeOutput(); unsubscribeConnect(); abort.abort(); stop(); };
-  }, [runId, execution.id, execution.status, paged, settled, retry, publish, lifetime]);
+  }, [runId, execution.id, execution.status, paged, settled, retry, publish, lifetime, endOffset]);
 
   return <div ref={wrapperRef} data-execution-id={execution.id} data-run-id={runId} aria-busy={!initialReady}>
     {error && <p role="alert">{localizeError(error)} <button onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
@@ -164,6 +167,7 @@ function ExecutionHistory({ runId, execution, onLoadingChange, onUserResize, onI
     </div> : <VirtualizedTranscript compact output={displayedText} startOffset={window?.start ?? 0} settled={settled}
       showUserTurns={!!inlineUserTurnTexts?.length}
       userTurnTexts={inlineUserTurnTexts}
+      onEditUser={onEditUser}
       onInlineUserTurnsChange={notifyInlineUserTurns}
       onReachTop={window?.start && !error ? () => { void loadOlder(); } : undefined}
       onUserResize={onUserResize}

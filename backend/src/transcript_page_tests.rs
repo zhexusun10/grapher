@@ -46,6 +46,52 @@ fn planner_tail_pages_preserve_long_jsonl_records_and_unicode_across_boundaries(
     assert!(larger["content"].as_str().unwrap().len() > initial["content"].as_str().unwrap().len());
 }
 
+#[test]
+fn execution_prefix_pages_stop_at_the_durable_edit_cursor_without_changing_the_original_log() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+    runtime.create(serde_json::from_value(serde_json::json!({"originalGoal":"test", "nodes":[{"name":"task","task":"test"}],"edges":[]})).unwrap(),
+        serde_json::from_value(serde_json::json!({"repository":source,"model":"test","maxParallel":1})).unwrap()).unwrap();
+    let execution: crate::model::Execution = serde_json::from_value(serde_json::json!({
+        "id":"prefix-exec","node":"task","revision":1,"attempt":1,"sessionId":"prefix-session","worktree":source,
+        "before":"","after":null,"status":"running","output":"","startedAt":1,"completedAt":null
+    })).unwrap();
+    runtime.emit(EventKind::Started { execution, message_sequences: Some(vec![]), fresh_restart: false }).unwrap();
+    let prefix = "retained 中文🚀 reply\n".repeat(40_000);
+    let output = format!("{prefix}ABANDONED_USER_TURN\nABANDONED_RESPONSE\n");
+    runtime.emit(EventKind::Output { execution_id: "prefix-exec".into(), text: output.clone() }).unwrap();
+    runtime.emit(EventKind::Finished { execution_id: "prefix-exec".into(), head: "".into(), output: "".into(),
+        output_bytes: output.len(), metrics: None }).unwrap();
+    let run = runtime.state.run_id.clone();
+    let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()), planning: AtomicBool::new(false), extension: temp.path().join("unused") });
+    let mut before = prefix.len();
+    let mut restored = String::new();
+    loop {
+        let page = get_execution_output(&serde_json::json!({"runId":run,"executionId":"prefix-exec","tail":true,
+            "before":before,"limit":65_536,"endOffset":prefix.len()}), &service).unwrap();
+        let start = page["startOffset"].as_u64().unwrap() as usize;
+        assert_eq!(page["nextOffset"], before);
+        assert_eq!(page["totalBytes"], prefix.len());
+        assert_eq!(page["complete"], before == prefix.len());
+        assert_eq!(page["content"].as_str().unwrap().as_bytes(), &prefix.as_bytes()[start..before]);
+        restored.insert_str(0, page["content"].as_str().unwrap());
+        if start == 0 { break; }
+        assert!(start < before);
+        before = start;
+    }
+    assert_eq!(restored, prefix);
+    let eof = get_execution_output(&serde_json::json!({"runId":run,"executionId":"prefix-exec",
+        "offset":prefix.len(),"endOffset":prefix.len()}), &service).unwrap();
+    assert_eq!(eof["content"], "");
+    assert_eq!(eof["complete"], true);
+    let runtime = service.runtime.lock().unwrap();
+    assert_eq!(runtime.store.log_bytes(&run, "prefix-exec").unwrap(), output.len());
+    assert_eq!(runtime.store.execution_log_page(&run, "prefix-exec", 0, usize::MAX).unwrap().content, output);
+}
+
 /// The planner writer appends to planner.jsonl while live pages are read. A
 /// size sampled before a forward read must never make the page report
 /// nextOffset beyond totalBytes, which the frontend rejects as an invalid

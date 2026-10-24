@@ -20,7 +20,7 @@ import { applyModelConfig, modelRoles, planningModelRoles, roleModelConfig } fro
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
-import { executionIdForMessage, executionIdForVersion } from "./services/conversationBranch";
+import { executionIdForMessage, executionIdForVersion, nodeConversationExecutions } from "./services/conversationBranch";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./services/thinkingTranscript";
 import { appendItemDelta } from "./services/transcriptUpdates";
 import { mapWithConcurrency } from "./services/boundedRequests";
@@ -33,7 +33,7 @@ import { resetPresentedCardIds } from "./services/cardAnimations";
 import { TaskNode } from "./components/graph/TaskNode";
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
 import { plannerEdgeEdits, plannerNodeEdits } from "./lib/plannerGraphEdits";
-import { steerRollbackKey } from "./lib/pendingSteers";
+import { nodeInstructionText, steerRollbackKey } from "./lib/pendingSteers";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
@@ -635,6 +635,14 @@ export default function App() {
         role: "user", text: textToRecord, images: options?.images, files: fileAttachments, timestamp: Date.now(),
         runId: state.runId || plannerStream.runId, node: targetNodeName, delivery, executionId, animateAppear: true,
       };
+      if (delivery === "steered" && executionId) {
+        const clean = nodeInstructionText(textToRecord);
+        const accepted = state.events.filter(event => event.type === "steered" && event.execution_id === executionId && !event.images?.length &&
+          nodeInstructionText(event.instruction ?? "") === clean).length;
+        message.steerOrdinal = Math.max(accepted, ...sessionEntries.filter(entry => entry.delivery === "steered" && !entry.images?.length && !entry.files?.length &&
+          entry.executionId === executionId && nodeInstructionText(entry.text) === clean)
+          .map(entry => (entry.steerOrdinal ?? -1) + 1));
+      }
       setSessionEntries(prev => [...(prev.length ? prev : effectiveMessages), message]);
       setEditingMessage(null);
       setEditPrefillText("");
@@ -2624,8 +2632,7 @@ export default function App() {
       // existing Run instead of pretending a new unrelated Run is a tree edit.
       if (routeType === "serial" && state.approved && state.graph.nodes.length > 0) {
         const node = state.graph.nodes[0].name;
-        const first = state.executions.find((execution) => execution.node === node &&
-          !state.supersededExecutionIds?.includes(execution.id));
+        const first = nodeConversationExecutions(state, node)[0];
         if (!first || !["completed", "failed", "paused"].includes(first.status)) {
           setError(t("请等待当前执行结束后再修改初始消息。"));
           return;
@@ -2901,18 +2908,24 @@ export default function App() {
       const execution = state.executions.find((item) => item.id === resolvedExecutionId);
       if (!execution || execution.node !== targetNodeName ||
           !["completed", "failed", "paused", "running"].includes(execution.status) ||
-          state.supersededExecutionIds?.includes(execution.id)) {
+          (state.supersededExecutionIds?.includes(execution.id) && targetMsg.userTurnOffset === undefined &&
+            !nodeConversationExecutions(state, targetNodeName).some(item => item.id === execution.id && item.historyEndOffset !== undefined))) {
         setError(t("无法定位这条消息对应的 Pi 会话。请重新加载对话后重试。"));
-        return;
+        return false;
       }
       return run(async () => {
         if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editNode({
           runId: state.runId, node: targetNodeName, executionId: execution.id,
           oldText: cleanExisting, instruction: backendGoal, images: targetMsg.images,
+          userTurnOffset: targetMsg.userTurnOffset,
         });
         if (!await acceptNodeEdit(snap)) return false;
-        setSessionEntries(rolledBackEntries);
+        // Cursor edits are projected from durable events and retained log
+        // prefixes, never from a text-matched optimistic version of that row.
+        if (targetMsg.userTurnOffset !== undefined) {
+          setSessionEntries(prev => prev.filter(entry => entry.node !== targetNodeName));
+        } else setSessionEntries(rolledBackEntries);
         setEditingMessage(null);
         setEditPrefillText("");
         return true;

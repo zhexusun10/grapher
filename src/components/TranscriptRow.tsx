@@ -1,5 +1,5 @@
 import React, { memo, useCallback } from "react";
-import type { TranscriptItem } from "../types";
+import type { ImageAttachment, TranscriptItem } from "../types";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
@@ -12,7 +12,7 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
   onExpandedChange: (id: string, expanded: boolean, card?: HTMLElement) => void;
   editing: boolean; draft: string; onDraftChange: (text: string) => void;
   onStartEdit: (id: string, text: string) => void; onCancelEdit: () => void;
-  onEditUser?: (text: string, replacement: string) => boolean | void | Promise<unknown>;
+  onEditUser?: (text: string, replacement: string, userTurnOffset?: number, images?: ImageAttachment[]) => boolean | void | Promise<unknown>;
 }) {
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
   // Keep execution rows in the exact same layout as the Planner transcript:
@@ -26,11 +26,11 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
     <span className={`system-pill${item.isError && item.role === "assistant" ? " conversation-error-message" : ""}`}>{item.content}</span>
   </div>;
   if (item.role === "user") return <AnimatedUserTurn id={item.id} animateAppear={item.animateAppear}
-    className="chat-message-row user planner-user-turn"><EditableUserBubble text={item.content || ""}
+    className="chat-message-row user planner-user-turn"><EditableUserBubble text={item.content || ""} images={item.images}
     editing={editing} draft={draft} onDraftChange={onDraftChange}
     onEdit={onEditUser ? () => onStartEdit(item.id, item.content || "") : undefined}
     onCancel={onCancelEdit} onSend={onEditUser ? text => {
-      return Promise.resolve(onEditUser(item.content || "", text)).then(accepted => {
+      return Promise.resolve(onEditUser(item.content || "", text, item.userTurnOffset, item.images)).then(accepted => {
         if (accepted !== false) onCancelEdit();
         return accepted === false ? false : true;
       });

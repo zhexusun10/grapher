@@ -133,6 +133,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const attachmentGenerationRef = useRef(0);
     const [isPreparing, setIsPreparing] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isAwaitingAcceptance, setIsAwaitingAcceptance] = useState(false);
     const submittingRef = useRef(false);
     const pillLayoutId = useId();
     const animateSendArrowRef = useRef(false);
@@ -154,6 +155,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       setAttachmentError("");
       setIsPreparing(false);
       setIsSubmitting(false);
+      setIsAwaitingAcceptance(false);
       return () => { attachmentGenerationRef.current += 1; };
     }, [repository, runId, node]);
 
@@ -216,7 +218,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       return () => clearTimeout(timer);
     }, [value]);
 
-    const currentText = value !== undefined && onChange ? value : internalValue;
+    // Clear the visible input as soon as submission begins, without discarding
+    // its rollback draft (or notifying the draft owner of acceptance) early.
+    // Rejection reveals the exact draft again; identity changes invalidate it.
+    const currentText = isAwaitingAcceptance ? "" : (value !== undefined && onChange ? value : internalValue);
     const hasText = currentText.trim().length > 0;
 
     // 分析光标左侧文本中是否存在 @ 或 /
@@ -736,6 +741,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       try {
         if (!isCurrent()) return;
         if (onSubmit) {
+          setIsAwaitingAcceptance(true);
           const accepted = await onSubmit(combinedPrompt, {
             files: currentAttachment ? [currentAttachment] : [],
             images: structuredImages,
@@ -762,6 +768,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         if (isCurrent()) {
           submittingRef.current = false;
           setIsSubmitting(false);
+          setIsAwaitingAcceptance(false);
         }
       }
     };

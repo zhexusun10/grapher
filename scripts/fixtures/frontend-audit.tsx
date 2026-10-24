@@ -76,7 +76,7 @@ function PromptFixture({ compact = false, uncontrolled = false }: { compact?: bo
       audit.submissions = (audit.submissions ?? 0) + 1;
       audit.lastMessage = message;
       audit.lastOptions = options;
-      if (audit.deferSubmit) return new Promise<boolean>(resolve => { audit.resolve = resolve; });
+      if (audit.deferSubmit) return new Promise<boolean>((resolve, reject) => { audit.resolve = resolve; audit.reject = reject; });
       return true;
     }} />;
 }

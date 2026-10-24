@@ -235,9 +235,9 @@ export const runtimeService = {
       reader.releaseLock();
     }
   },
-  getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false, tail = false, before?: number, limit?: number) =>
+  getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false, tail = false, before?: number, limit?: number, endOffset?: number) =>
     request<{ runId: string; executionId: string; content: string; startOffset?: number; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
-      "get_execution_output", { runId, executionId, offset, full, ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
+      "get_execution_output", { runId, executionId, offset, full, ...(endOffset !== undefined ? { endOffset } : {}), ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
   getFileChanges: (runId: string, executionId?: string, signal?: AbortSignal) =>
     request<{ runId: string; executionId: string | null; summary: FileChangeSummary }>(
       "get_file_changes", { runId, ...(executionId ? { executionId } : {}) }, signal),
@@ -257,7 +257,7 @@ export const runtimeService = {
   control: (action: string, extra?: Record<string, unknown>) => request<Snapshot>("control", { action, ...extra }),
   editPlanner: (input: { runId: string; oldText: string; instruction: string; versionIndex?: number }) =>
     request<Snapshot>("edit_planner", input),
-  editNode: (input: { runId: string; node: string; executionId: string; oldText: string; instruction: string; images?: import("../types").ImageAttachment[]; versionIndex?: number }) =>
+  editNode: (input: { runId: string; node: string; executionId: string; oldText: string; instruction: string; images?: import("../types").ImageAttachment[]; versionIndex?: number; userTurnOffset?: number }) =>
     request<Snapshot>("edit_node", input),
   detectRepository: (path?: string | null) => request<RepositoryInfo | null>("detect_repository", { path: path || null }),
   async pickRepository(): Promise<RepositoryInfo | null> {

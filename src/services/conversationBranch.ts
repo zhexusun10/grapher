@@ -1,16 +1,14 @@
-import type { ChatMessageVersion, GraphEvent, Snapshot } from "../types";
+import type { ChatMessageVersion, Execution, GraphEvent, Snapshot } from "../types";
 
 /** Only the chosen branch contributes turns to the active conversation. The
  * original durable events and executions remain available for history. */
 export function activeNodeConversationEvents(state: Snapshot, node: string): GraphEvent[] {
   const edits = state.events.filter((event) => event.type === "conversation_edited" && event.nodes?.includes(node));
-  // A from-zero re-execution (fresh session, no continuation) restarts the
-  // node's conversation: the backend supersedes the prior attempts, and human
-  // turns recorded before the oldest surviving attempt are dead history.
   const superseded = new Set(state.supersededExecutionIds ?? []);
+  const lineage = nodeConversationLineage(state, node);
   const freshBoundary = state.events
     .filter((event) => event.type === "started" && event.execution?.node === node
-      && !superseded.has(event.execution.id))
+      && (!superseded.has(event.execution.id) || lineage.has(event.execution.id)))
     .map((event) => event.sequence)
     .reduce((oldest, sequence) => Math.min(oldest, sequence), Number.POSITIVE_INFINITY);
   const belongs = (event: GraphEvent) => event.node === node || event.target === node;
@@ -97,6 +95,53 @@ export function versionsForEdit(state: Snapshot, edit: GraphEvent): ChatMessageV
     }
   }
   return versions;
+}
+
+/** Executions whose conversation history belongs to the node's active
+ * conversation: the live attempts plus each edit's retained anchor. A from-zero
+ * restart discards everything before it, so a fork (which is not a restart)
+ * keeps its retained prefix even though its Pi session ID changed. */
+export function nodeConversationLineage(state: Snapshot, node: string): Set<string> {
+  const lineage = new Set(activeNodeExecutions(state, node).map(execution => execution.id));
+  const restart = state.events.reduce((latest, event) =>
+    event.type === "started" && event.execution?.node === node && event.fresh_restart && event.sequence > latest
+      ? event.sequence : latest, Number.NEGATIVE_INFINITY);
+  for (const event of state.events) {
+    if (event.type !== "conversation_edited" || event.target !== node) continue;
+    if (event.sequence < restart) continue;
+    if (event.from_execution_id) lineage.add(event.from_execution_id);
+  }
+  return lineage;
+}
+
+export type ConversationExecution = Execution & { historyEndOffset?: number; historyReadOnly?: boolean };
+
+/** Durable edits retain a byte-bounded prefix of an abandoned execution. A
+ * later edit of an earlier prefix replaces that cut and drops later prefixes. */
+export function nodeConversationExecutions(state: Snapshot, node: string): ConversationExecution[] {
+  const active = activeNodeExecutions(state, node);
+  const order = new Map(state.executions.map((execution, index) => [execution.id, index]));
+  const edits = state.events.filter(event => event.type === "conversation_edited" && event.target === node);
+  const lineage = nodeConversationLineage(state, node);
+  // A retained prefix is editable only while its Pi session is still the
+  // conversation's current session. A fork continues in a new session file, so
+  // branching the old one could not affect the active conversation (the runtime
+  // refuses that edit), and offering it would only fail.
+  const currentSession = active.length > 0 ? active[active.length - 1].sessionId : undefined;
+  const prefixes = new Map<string, ConversationExecution>();
+  for (const edit of edits) {
+    const anchor = state.executions.find(execution => execution.id === edit.from_execution_id);
+    if (!anchor || !lineage.has(anchor.id)) continue;
+    for (const [id, prefix] of prefixes) {
+      if (prefix.sessionId === anchor.sessionId && order.get(prefix.id)! >= order.get(anchor.id)!) prefixes.delete(id);
+    }
+    if (edit.from_output_offset !== undefined && edit.from_output_offset > 0) {
+      prefixes.set(anchor.id, { ...anchor, historyEndOffset: edit.from_output_offset,
+        historyReadOnly: currentSession !== undefined && anchor.sessionId !== currentSession });
+    }
+  }
+  for (const execution of active) prefixes.delete(execution.id);
+  return [...prefixes.values(), ...active].sort((a, b) => order.get(a.id)! - order.get(b.id)!);
 }
 
 export function activeNodeExecutions(state: Snapshot, node: string) {
