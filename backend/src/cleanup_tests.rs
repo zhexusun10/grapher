@@ -702,6 +702,72 @@ fn locked_session_files_leave_retryable_cleanup_not_orphaned_ownership() {
     assert!(runtime.store.pending_cleanups().unwrap().is_empty());
 }
 
+#[cfg(windows)]
+#[test]
+fn cleanup_removes_read_blocked_windows_junctions() {
+    // Reproduces the `INetCache\Content.IE5` artifact: a junction carrying an
+    // explicit `Everyone:(DENY)(RD)` ACE. `fs::remove_dir_all` cannot list it
+    // and fails with access denied (os error 5), so the cleanup was retried
+    // forever. The owned tree must still be removed without touching the
+    // junction target.
+    let (temp, _source, mut runtime) = setup();
+    let id = runtime.state.run_id.clone();
+    let workspace = temp.path().join(".grapher-worktrees").join(&id);
+    let target = temp.path().join("outside-target");
+    directory(&workspace);
+    directory(&target);
+    let link = workspace.join("Content.IE5");
+    crate::path_safety::directory_link(&target, &link);
+    let output = std::process::Command::new("icacls")
+        .arg(&link)
+        .arg("/deny")
+        .arg("*S-1-1-0:(RD)")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "could not apply the deny ACE");
+    runtime.delete_run(&id).unwrap();
+    assert!(!workspace.exists());
+    assert!(
+        target.join("nested/dependencies/file").is_file(),
+        "cleanup must unlink the junction, never recurse into its target"
+    );
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+}
+
+#[test]
+fn cleanup_unlinks_directory_links_without_following_their_targets() {
+    let (temp, _source, mut runtime) = setup();
+    let id = runtime.state.run_id.clone();
+    let workspace = temp.path().join(".grapher-worktrees").join(&id);
+    let outside = temp.path().join("outside-target");
+    directory(&outside);
+    directory(&workspace);
+    crate::path_safety::directory_link(&outside, &workspace.join("link"));
+    runtime.delete_run(&id).unwrap();
+    assert!(!workspace.exists());
+    assert!(
+        outside.join("nested/dependencies/file").is_file(),
+        "cleanup must unlink a directory link, never recurse into its target"
+    );
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn cleanup_removes_readonly_files_instead_of_retrying_forever() {
+    let (temp, _source, mut runtime) = setup();
+    let id = runtime.state.run_id.clone();
+    let workspace = temp.path().join(".grapher-worktrees").join(&id);
+    directory(&workspace);
+    let file = workspace.join("nested/dependencies/file");
+    let mut permissions = fs::metadata(&file).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&file, permissions).unwrap();
+    runtime.delete_run(&id).unwrap();
+    assert!(!workspace.exists());
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+}
+
 #[test]
 fn workspace_adopted_as_source_is_not_erased_even_after_all_history_is_cleared() {
     let (temp, _source, mut runtime) = setup();

@@ -139,7 +139,7 @@ pub(crate) fn remove_paths(paths: Vec<PathBuf>) -> Result<(), String> {
         {
             continue;
         }
-        match fs::remove_dir_all(path) {
+        match remove_tree(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("Cannot remove owned directory {}: {error}", path.display())),
@@ -157,5 +157,87 @@ pub(crate) fn remove_paths(paths: Vec<PathBuf>) -> Result<(), String> {
             }
         }
     }
+    Ok(())
+}
+
+/// Recursively remove an owned tree without following links or junctions.
+///
+/// `fs::remove_dir_all` lists a directory before deleting it. Windows shell
+/// caches such as `INetCache\Content.IE5` are reparse points carrying an
+/// explicit `Everyone:(DENY)(RD)` ACE, so listing them fails with access denied
+/// (os error 5) and the cleanup would retry forever. Unlink such entries from
+/// their parent instead of descending into them, and clear read-only attributes
+/// that block deletion.
+///
+/// Shared with other callers that delete Run-owned agent workspaces, which can
+/// contain the same protected Windows shell caches.
+pub(crate) fn remove_tree(path: &Path) -> std::io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if is_link_or_reparse(&metadata) {
+        // Never follow a link to clear the target's attributes; the link itself
+        // (junctions, symlinks) is removed without needing that.
+        return remove_link(path, &metadata);
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            remove_tree(&entry?.path())?;
+        }
+        // A directory's read-only attribute does not block `remove_dir`, and
+        // mutating it could fail where plain removal would have succeeded.
+        fs::remove_dir(path)
+    } else {
+        clear_readonly(path, &metadata)?;
+        fs::remove_file(path)
+    }
+}
+
+/// Detect links and Windows reparse points. Besides symlinks this also covers
+/// other reparse tags (for example dedup or appexeclink) that `is_symlink`
+/// does not report but must never be recursed into.
+fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// Remove a link itself, never its target.
+///
+/// Rust reports Windows junctions as `is_symlink` with `is_dir == false`, so
+/// decide directory-ness from the raw `FILE_ATTRIBUTE_DIRECTORY` bit; a
+/// junction or directory symlink must be unlinked with `remove_dir`.
+fn remove_link(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
+            return fs::remove_dir(path);
+        }
+    }
+    let _ = metadata;
+    fs::remove_file(path)
+}
+
+/// A read-only attribute blocks `remove_file` on Windows.
+fn clear_readonly(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
+    #[cfg(windows)]
+    if metadata.permissions().readonly() {
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)?;
+    }
+    let _ = (path, metadata);
     Ok(())
 }

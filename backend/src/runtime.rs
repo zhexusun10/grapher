@@ -3492,7 +3492,7 @@ impl Runtime {
                 continue;
             };
             if !keep.contains(&path) {
-                fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
+                crate::workspace_cleanup::remove_tree(&path).map_err(|error| error.to_string())?;
                 crate::workspace::remove_private_git(&path)?;
                 crate::workspace_state::reclaim(&path)?;
             }
