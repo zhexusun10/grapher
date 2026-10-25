@@ -54,8 +54,18 @@ fn sandbox_rejects_symlinked_exceptions() {
         fs::create_dir_all(dir).unwrap();
     }
     let profile = base.join("profile.sb");
-    sandbox::write_execution_profile(&profile, &source, &root, &current, &data, &session, &engine)
-        .unwrap();
+    let installation = grapher::native::installation_root();
+    sandbox::write_execution_profile(
+        &profile,
+        &source,
+        &root,
+        &current,
+        &data,
+        &session,
+        &engine,
+        &installation,
+    )
+    .unwrap();
     let alias = root.join("alias");
     symlink(root.join("run"), &alias).unwrap();
     assert!(
@@ -70,7 +80,8 @@ fn sandbox_rejects_symlinked_exceptions() {
         &current,
         &data,
         &session_alias,
-        &engine
+        &engine,
+        &installation
     )
     .is_err());
     assert!(sandbox::write_graph_profile(

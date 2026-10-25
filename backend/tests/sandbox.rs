@@ -82,6 +82,54 @@ fn graph_filesystem_policy_and_inherited_child_processes() {
 }
 
 #[test]
+fn grapher_installation_and_shared_engine_are_write_protected() {
+    let temp = TempDir::new().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let source = base.join("source");
+    let root = base.join(".grapher-worktrees");
+    let current = root.join("run/current");
+    // Production keeps the default runtime data root inside the installation,
+    // so its writable session must be carved out of the installation denial.
+    let installation = base.join("installation");
+    let data = installation.join(".grapher");
+    let session = data.join("sessions/current");
+    let engine = base.join("engine-cache/grapher-native-engine-x");
+    for dir in [&source, &current, &session, &engine, &installation] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("marker"), "original").unwrap();
+    }
+    let profile = base.join("profile.sb");
+    sandbox::write_execution_profile(
+        &profile, &source, &root, &current, &data, &session, &engine, &installation,
+    )
+    .unwrap();
+    for target in [&engine, &installation] {
+        // The shared engine copy and the original installation stay readable so
+        // linked dependency targets resolve, but an execution may never write.
+        let read = run(&profile, &current, "/bin/cat \"$1/marker\"", &[target]);
+        assert!(
+            read.status.success(),
+            "read blocked: {}",
+            target.display()
+        );
+        let write = run(&profile, &current, "echo overwrite > \"$1/marker\"", &[target]);
+        assert!(
+            !write.status.success(),
+            "write escaped policy: {}",
+            target.display()
+        );
+        assert_eq!(fs::read_to_string(target.join("marker")).unwrap(), "original");
+    }
+    let scratch = run(&profile, &current, "echo ok > \"$1/scratch\"", &[&session]);
+    assert!(
+        scratch.status.success(),
+        "session write failed: {}",
+        String::from_utf8_lossy(&scratch.stderr)
+    );
+    assert_eq!(fs::read_to_string(session.join("scratch")).unwrap(), "ok\n");
+}
+
+#[test]
 fn node_network_and_upstream_tools_work_inside_sandbox() {
     use std::{
         io::{Read, Write},

@@ -50,7 +50,10 @@ pub fn write_graph_profile(
     write_profile(path, repository, worktree_root, current, None, &[], &[])
 }
 
-/// Production adds session/data and engine boundaries.
+/// Production adds session/data, engine and installation boundaries. The
+/// installation is the Grapher source checkout (or packaged app); like the
+/// shared engine copy it stays readable but must never be writable by an
+/// execution, matching the Linux bubblewrap read-only bind.
 pub fn write_execution_profile(
     path: &Path,
     repository: &Path,
@@ -59,16 +62,17 @@ pub fn write_execution_profile(
     data: &Path,
     session: &Path,
     engine: &Path,
+    installation: &Path,
 ) -> Result<PathBuf, String> {
-    write_execution_profile_scoped(path, repository, worktree_root, current, data, session, engine, &[], &[])
+    write_execution_profile_scoped(path, repository, worktree_root, current, data, session, engine, installation, &[], &[])
 }
 
 pub(crate) fn write_execution_profile_scoped(
     path: &Path, repository: &Path, worktree_root: &Path, current: &Path,
-    data: &Path, session: &Path, engine: &Path, workspaces: &[PathBuf],
-    extra_exceptions: &[PathBuf],
+    data: &Path, session: &Path, engine: &Path, installation: &Path,
+    workspaces: &[PathBuf], extra_exceptions: &[PathBuf],
 ) -> Result<PathBuf, String> {
-    write_profile(path, repository, worktree_root, current, Some((data, session, engine)), workspaces, extra_exceptions)
+    write_profile(path, repository, worktree_root, current, Some((data, session, engine, installation)), workspaces, extra_exceptions)
 }
 
 fn write_profile(
@@ -76,7 +80,7 @@ fn write_profile(
     repository: &Path,
     worktree_root: &Path,
     current: &Path,
-    execution: Option<(&Path, &Path, &Path)>,
+    execution: Option<(&Path, &Path, &Path, &Path)>,
     workspaces: &[PathBuf],
     extra_exceptions: &[PathBuf],
 ) -> Result<PathBuf, String> {
@@ -100,15 +104,19 @@ fn write_profile(
         .map(|path| canonical_exception(&worktree_root, path))
         .collect::<Result<Vec<_>, _>>()?;
     let extra = execution
-        .map(|(data, session, engine)| -> Result<_, String> {
+        .map(|(data, session, engine, installation)| -> Result<_, String> {
             Ok((
                 data.canonicalize().map_err(|e| e.to_string())?,
                 canonical_exception(data, session)?,
                 engine.canonicalize().map_err(|e| e.to_string())?,
+                installation.canonicalize().map_err(|e| e.to_string())?,
             ))
         })
         .transpose()?;
-    if let Some((data, session, engine)) = &extra {
+    if let Some((data, session, engine, installation)) = &extra {
+        if installation == Path::new("/") {
+            return Err("Invalid Grapher installation location".into());
+        }
         if !session.starts_with(data)
             || session == data
             || current.starts_with(session)
@@ -143,7 +151,7 @@ fn write_profile(
         }
         None
     })();
-    let source_rule = if let Some((_, session, _)) = &extra {
+    let source_rule = if let Some((_, session, _, _)) = &extra {
         format!(
             "(require-all (subpath {}) (require-not (subpath {})))",
             quote(&repository)?,
@@ -203,7 +211,7 @@ fn write_profile(
         current = quote(&current)?,
         run = quote(current.parent().ok_or("Invalid execution path")?)?,
     );
-    if let Some((data, session, engine)) = &extra {
+    if let Some((data, session, engine, installation)) = &extra {
         let data_rule = format!("(require-all (subpath {}) (require-not (subpath {})))",
             quote(data)?, quote(session)?);
         if let Some(objects) = borrowed_objects.as_ref().filter(|p| p.starts_with(data)) {
@@ -219,6 +227,20 @@ fn write_profile(
             text.push_str(&format!("(deny file-read* {data_rule})\n"));
         }
         text.push_str(&format!("(deny file-write* {data_rule})\n(deny file-write* (subpath {}))\n", quote(engine)?));
+        // The original Grapher installation (source checkout or packaged app)
+        // is shared host state. An execution may load from the prepared engine
+        // copy but must not modify the installation, exactly as Linux mounts it
+        // read-only. Reads stay allowed so linked dependency targets resolve.
+        // The default runtime data root (`<installation>/.grapher`) lives inside
+        // the installation, so its writable session/workspace exceptions are
+        // carved out of this write denial just as they are elsewhere.
+        let installation_rule = format!(
+            "(require-all (subpath {installation}) (require-not (subpath {session})) (require-not (subpath {current})){state_exception})",
+            installation = quote(installation)?,
+            session = quote(session)?,
+            current = quote(&current)?,
+        );
+        text.push_str(&format!("(deny file-write* {installation_rule})\n"));
     }
     // External shadow repositories keep Git metadata outside source; explicitly deny them.
     let shadow_dir = crate::workspace::shadow_repo_dir(&repository)?;

@@ -32,7 +32,7 @@ boundary.
 
 ### macOS
 
-Private Graph executions, Planner turns and Mergers use Seatbelt through `sandbox-exec`. Source-native Planner turns use host-user permissions. The execution profile restricts ordinary access to the source, sibling workspaces, and other sessions while permitting its current workspace/session and required host resources. The shared engine copy is protected from writes.
+Private Graph executions, Planner turns and Mergers use Seatbelt through `sandbox-exec`. Source-native Planner turns use host-user permissions. The execution profile restricts ordinary access to the source, sibling workspaces, and other sessions while permitting its current workspace/session and required host resources. The shared engine copy and the original Grapher installation (the source checkout or packaged app) are protected from writes, so an execution cannot modify Grapher's own code or the cache it loads from.
 
 ### Linux
 

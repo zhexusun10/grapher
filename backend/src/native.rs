@@ -605,6 +605,7 @@ pub(crate) fn execution_command_scoped(
             data,
             session,
             &engine,
+            &crate::native::installation_root(),
             &allowances,
             &merger_git,
         )?;
@@ -1213,24 +1214,8 @@ export default async function () {
             fs::create_dir_all(&session).unwrap();
             let mut command =
                 execution_command(role, &source, cwd, &data, &session).unwrap();
-            // macOS additionally denies the original installation when
-            // testing Grapher on its own source; Linux's copied engine is RO.
-            #[cfg(target_os = "macos")]
-            {
-                let profile = session.join("execution-instance.sb");
-                let mut policy = fs::read_to_string(&profile).unwrap();
-                policy.push_str(&format!(
-                    "(deny file-read* file-write* (subpath {}))\n",
-                    serde_json::to_string(
-                        &installation_root()
-                            .canonicalize()
-                            .unwrap()
-                            .to_string_lossy()
-                    )
-                    .unwrap()
-                ));
-                fs::write(profile, policy).unwrap();
-            }
+            // The production profile already makes the Grapher installation
+            // read-only (write-denied) on every platform boundary.
             command
                 .args([
                     "--mode",
