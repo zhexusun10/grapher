@@ -42,6 +42,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveError] = useState("");
+  // The modal mounts before the background Run re-read finishes, so it can
+  // briefly hold a stale conversation config. Adopt the refreshed config while
+  // the draft is untouched; once the user edits, their draft wins.
+  const dirtyRef = useRef(false);
+  const syncedConfigRef = useRef(config);
+  const markDirty = () => { dirtyRef.current = true; };
+  const updateDraftConfig: React.Dispatch<React.SetStateAction<Config>> = (action) => {
+    dirtyRef.current = true;
+    setDraftConfig(action);
+  };
+  useEffect(() => {
+    if (config === syncedConfigRef.current) return;
+    syncedConfigRef.current = config;
+    if (dirtyRef.current) return;
+    setDraftConfig({ ...config });
+    setAutoApprove(config.autoApprove ?? false);
+    setPostTaskReview(config.postTaskReview ?? true);
+    setPlannerWriteTools(config.plannerWriteTools ?? false);
+  }, [config]);
   const save = async () => {
     if (savingRef.current) return;
     savingRef.current = true;
@@ -86,13 +105,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   if (!isOpen) return null;
 
   return (
-    <motion.div
-      className="modal-backdrop settings-backdrop"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: reduceMotion ? 0 : 0.3, ease: "easeInOut" }}
-    >
+    <div className="modal-backdrop settings-backdrop">
+      {/* Light translucent veil only: a full-screen backdrop-filter forced the
+          browser onto a slow compositing path and made even modal scrolling
+          janky. Only this layer fades, via a cheap compositor opacity change. */}
+      <motion.div
+        className="settings-backdrop-tint"
+        aria-hidden="true"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={{ duration: reduceMotion ? 0 : 0.2, ease: "easeOut" }}
+      />
       <motion.section
         className="modal settings-modal"
         inert={pendingLanguage !== null}
@@ -131,7 +155,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <p className="section-desc">{conversationScoped
                 ? t("当前显示并编辑此对话的模型配置；保存只影响此对话。")
                 : t("当前显示并编辑新对话的默认模型配置；已有对话保留各自配置。")}</p>
-              <RoleModelSettings config={draftConfig} setConfig={setDraftConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy || saving} />
+              <RoleModelSettings config={draftConfig} setConfig={updateDraftConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy || saving} />
             </section>
 
             <ExtensionSettings disabled={saving} />
@@ -151,7 +175,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   type="checkbox"
                   checked={autoApprove}
                   disabled={saving}
-                  onChange={(event) => setAutoApprove(event.target.checked)}
+                  onChange={(event) => { markDirty(); setAutoApprove(event.target.checked); }}
                   aria-label={t("Auto Approve Planner 图纸")}
                 />
               </label>
@@ -164,7 +188,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   type="checkbox"
                   checked={postTaskReview}
                   disabled={saving}
-                  onChange={(event) => setPostTaskReview(event.target.checked)}
+                  onChange={(event) => { markDirty(); setPostTaskReview(event.target.checked); }}
                   aria-label={t("任务后 Planner 复盘")}
                 />
               </label>
@@ -185,7 +209,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   type="checkbox"
                   checked={plannerWriteTools}
                   disabled={saving}
-                  onChange={(event) => setPlannerWriteTools(event.target.checked)}
+                  onChange={(event) => { markDirty(); setPlannerWriteTools(event.target.checked); }}
                   aria-label={t("挂载 Planner write 和 edit 工具")}
                 />
               </label>
@@ -298,7 +322,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
           />
         )}
       </AnimatePresence>
-    </motion.div>
+    </div>
   );
 });
 

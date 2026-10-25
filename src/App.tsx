@@ -1383,28 +1383,31 @@ export default function App() {
     setError("");
   };
 
-  // Settings is a projection of the selected conversation. Re-read the Run
-  // before mounting the modal so a stale local copy cannot keep showing the
-  // model selection from an older checkpoint/publication.
-  const handleOpenSettings = async () => {
+  // Settings is a projection of the selected conversation. Mount the modal
+  // immediately, then re-read the Run in the background: the durable snapshot
+  // endpoint clones the whole Run, so awaiting it before mounting made the
+  // click feel frozen on large conversations. The modal adopts the refreshed
+  // config while its draft is still untouched (see SettingsModal).
+  const handleOpenSettings = () => {
     const runId = state.runId;
     const generation = foregroundGeneration.current;
-    if (runId && !runId.startsWith("pending-")) {
-      try {
-        const snapshot = await runtimeService.snapshotForRun(runId);
-        if (generation !== foregroundGeneration.current) return;
-        if (snapshot.runId === runId && snapshotBelongsToWorkspace(snapshot, config.repository)) {
-          const conversationConfig = snapshotModelConfig(snapshot, config.repository);
-          if (conversationConfig) {
-            setConfig(prev => applyModelConfig(prev, conversationConfig));
-          }
-        }
-      } catch {
-        if (generation !== foregroundGeneration.current) return;
-        // Opening Settings must remain available when a snapshot read fails.
-      }
-    }
     setModal("settings");
+    if (runId && !runId.startsWith("pending-")) {
+      void (async () => {
+        try {
+          const snapshot = await runtimeService.snapshotForRun(runId);
+          if (generation !== foregroundGeneration.current) return;
+          if (snapshot.runId === runId && snapshotBelongsToWorkspace(snapshot, config.repository)) {
+            const conversationConfig = snapshotModelConfig(snapshot, config.repository);
+            if (conversationConfig) {
+              setConfig(prev => applyModelConfig(prev, conversationConfig));
+            }
+          }
+        } catch {
+          // Opening Settings must remain available when a snapshot read fails.
+        }
+      })();
+    }
   };
 
   const handleCloseSettings = useCallback(() => setModal(null), []);
