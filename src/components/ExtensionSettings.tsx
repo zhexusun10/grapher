@@ -9,7 +9,7 @@ export function ExtensionItem({ extension, disabled, onToggle }: {
 }) {
   const bundledDescriptions: Record<string, string> = {
     'npm:pi-continuity': 'more robust loop engineering: auto-recovers unexpected stream interruptions, truncated messages, network disconnections, and API 5h/week quota limits',
-    'npm:pi-better-web-search': 'registers the web_search tool provided by available model providers; the tool is not registered when no provider can search',
+    'npm:pi-better-web-search': t('开启前请确认你的所有 Provider 中有支持 web_search API 的 Provider；注册由可用模型 Provider 提供的 web_search 工具，当没有 Provider 可搜索时不注册。'),
   };
   const description = extension.bundled
     ? `${extension.source}${bundledDescriptions[extension.id] ? ` · ${bundledDescriptions[extension.id]}` : ''}`
@@ -66,7 +66,7 @@ export function ExtensionSettings({ disabled = false }: { disabled?: boolean }) 
       <button type="button" className="icon-button" aria-label={t('刷新扩展')} disabled={busy || disabled} onClick={() => void update()}><RefreshCw size={14} /></button>
     </div>
     <p className="section-desc">{t('删除仅在 Grapher 中停用，不卸载全局扩展；可从待选列表随时加回。')}</p>
-    <p className="section-desc">{t('pi-trim 对所有角色生效；pi-continuity 对 Planner、Node Agent 和 Merger 生效；pi-better-web-search 默认启用且仅对 Planner、Node Agent 生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。')}</p>
+    <p className="section-desc">{t('pi-trim 对所有角色生效；pi-continuity 对 Planner、Node Agent 和 Merger 生效；pi-better-web-search 默认停用，需在设置中手动启用且仅对 Planner、Node Agent 生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。')}</p>
     {catalog && <code className="extension-settings-directory">{catalog.globalDirectory}</code>}
     {busy && <p role="status" className="section-desc">{t('正在读取扩展…')}</p>}
     {error && <p role="alert" className="settings-language-error">{localizeError(error)}</p>}

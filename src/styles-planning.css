@@ -1980,8 +1980,8 @@
   align-items: center;
   gap: 6px;
   padding: 8px 16px;
-  background: #22c55e;
-  color: #000;
+  background: var(--brand-default, #2563EB);
+  color: #fff;
   border-radius: 6px;
   font-size: 12px;
   font-weight: 600;

@@ -177,7 +177,7 @@ try {
   assert.ok(catalog.providers.length > 0 && catalog.models.length > 0);
   const extensions = await api('pi_extensions', { version: 1, operation: 'catalog' });
   for (const [id, enabled] of [
-    ['npm:pi-trim', true], ['npm:pi-continuity', true], ['npm:pi-better-web-search', true],
+    ['npm:pi-trim', true], ['npm:pi-continuity', true], ['npm:pi-better-web-search', false],
   ]) {
     const extension = extensions.extensions.find(value => value.id === id);
     assert.ok(extension?.bundled, `${id} must be bundled`);

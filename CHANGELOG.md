@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Upgrade the bundled `pi-better-web-search` extension from 0.1.4 to 0.1.5: candidate models are ranked by capability tier before version, a deeper round-robin fallback tries sibling models across families when a specific model is rejected, and search/fetch failures are classified as provider-wide (skip the provider) or model-specific (keep trying siblings). It is now **off by default** in Settings; before enabling, confirm at least one configured provider supports the `web_search` API. Its Settings description states this prerequisite.
 - Upgrade the bundled `pi-continuity` extension from 0.3.0 to 0.3.1, validated against the pinned Pi public boundary: a TLS certificate validation failure is now terminal even when wrapped as `TLS handshake failed: ...`, while a reset connection and a TLS handshake failure without a certificate cause stay retryable.
 - The reviewed Pi dependency profile pins `undici` 8.12.3 instead of 8.10.2, so a clean `npm run pi:setup` and the dependency audit no longer fail on the new high-severity `undici` advisories (fixed upstream in 8.12.3).
 

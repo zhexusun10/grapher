@@ -21,7 +21,7 @@ Settings Add/Remove changes Grapher's selection, not installed global files. Cha
 
 External resources default to `~/.pi/agent` (`GRAPHER_GLOBAL_PI_AGENT_DIR` overrides it). Grapher credentials and selection overrides use `PI_CODING_AGENT_DIR`, normally `~/.grapher/pi-agent`. Dedicated resources shadow external copies; bundled copies are deduplicated against both. [global-extensions.ts](../../engine/global-extensions.ts) owns discovery, identity, and precedence.
 
-`pi-trim` is mandatory for every role. `pi-continuity` is enabled by default for Planner/Node/Merger and can be disabled. `pi-better-web-search` is enabled by default for Planner/Node, registering search only for supported available providers. Exact releases and integrity belong in `package.json` and `package-lock.json`, not a second version list here.
+`pi-trim` is mandatory for every role. `pi-continuity` is enabled by default for Planner/Node/Merger and can be disabled. `pi-better-web-search` is off by default for Planner/Node and must be enabled in Settings; before enabling, confirm at least one configured provider supports the `web_search` API. It registers search only for supported available providers. Exact releases and integrity belong in `package.json` and `package-lock.json`, not a second version list here.
 
 ### MCP project overrides
 

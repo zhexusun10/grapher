@@ -93,10 +93,10 @@ test('Settings IPC discovers extensions and persists removal/restoration without
     const webSearch = catalog.extensions.find(extension => extension.id === 'npm:pi-better-web-search');
     assert.ok(webSearch?.bundled);
     assert.equal(webSearch.required, false);
-    assert.equal(webSearch.enabled, true);
-    assert.equal(call({ operation: 'set_enabled', id: webSearch.id, enabled: false }).extensions.find(value => value.id === webSearch.id).enabled, false);
-    assert.equal(call({ operation: 'catalog' }).extensions.find(value => value.id === webSearch.id).enabled, false);
+    assert.equal(webSearch.enabled, false);
     assert.equal(call({ operation: 'set_enabled', id: webSearch.id, enabled: true }).extensions.find(value => value.id === webSearch.id).enabled, true);
+    assert.equal(call({ operation: 'catalog' }).extensions.find(value => value.id === webSearch.id).enabled, true);
+    assert.equal(call({ operation: 'set_enabled', id: webSearch.id, enabled: false }).extensions.find(value => value.id === webSearch.id).enabled, false);
     const extension = catalog.extensions.find(extension => !extension.bundled);
     assert.ok(extension);
     assert.equal(call({ operation: 'set_enabled', id: extension.id, enabled: false }).extensions.find(value => value.id === extension.id).enabled, false);

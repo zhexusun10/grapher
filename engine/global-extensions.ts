@@ -24,7 +24,7 @@ export const bundledWebSearch = fileURLToPath(new URL('../node_modules/pi-better
 const bundledExtensions = [
   { id: trimId, name: 'pi-trim', path: bundledTrim, required: true, defaultEnabled: true },
   { id: continuityId, name: 'pi-continuity', path: bundledContinuity, required: false, defaultEnabled: true },
-  { id: webSearchId, name: 'pi-better-web-search', path: bundledWebSearch, required: false, defaultEnabled: true },
+  { id: webSearchId, name: 'pi-better-web-search', path: bundledWebSearch, required: false, defaultEnabled: false },
 ];
 const bundledDefault = (id: string) => bundledExtensions.find(extension => extension.id === id)?.defaultEnabled ?? true;
 export const globalAgentDir = () => {

@@ -236,7 +236,7 @@ test('bundled continuity defaults on, supports persistent removal/restore and ob
   } finally { f.close(); }
 });
 
-test('bundled web search defaults on, persists opt-out for Planner/Node only and obeys exclusion flags', async () => {
+test('bundled web search defaults off, persists opt-in for Planner/Node only and obeys exclusion flags', async () => {
   const f = fixture();
   try {
     const initial = (await extensionCatalog(f.own)).extensions.find(extension => extension.id === webSearchId)!;
@@ -244,7 +244,13 @@ test('bundled web search defaults on, persists opt-out for Planner/Node only and
     assert.equal(initial.path, bundledWebSearch);
     assert.equal(initial.bundled, true);
     assert.equal(initial.required, false);
-    assert.equal(initial.enabled, true);
+    assert.equal(initial.enabled, false);
+    for (const role of ['partition', 'merger', 'planner', 'node']) {
+      assert.ok(!(await executionResources([], f.own, role)).args.includes(bundledWebSearch));
+    }
+    const enabled = await setExtensionEnabled(f.own, webSearchId, true);
+    assert.equal(enabled.extensions.find(extension => extension.id === webSearchId)?.enabled, true);
+    assert.equal(JSON.parse(readFileSync(join(f.own, 'extensions.json'), 'utf8')).overrides[webSearchId], true);
     for (const role of ['planner', 'node']) {
       assert.equal((await executionResources([], f.own, role)).args.filter(arg => arg === bundledWebSearch).length, 1);
       for (const flag of ['--no-extensions', '-ne']) {
@@ -258,14 +264,6 @@ test('bundled web search defaults on, persists opt-out for Planner/Node only and
     assert.equal(disabled.extensions.find(extension => extension.id === webSearchId)?.enabled, false);
     assert.equal(JSON.parse(readFileSync(join(f.own, 'extensions.json'), 'utf8')).overrides[webSearchId], false);
     for (const role of ['partition', 'merger', 'planner', 'node']) {
-      assert.ok(!(await executionResources([], f.own, role)).args.includes(bundledWebSearch));
-    }
-    const enabled = await setExtensionEnabled(f.own, webSearchId, true);
-    assert.equal(enabled.extensions.find(extension => extension.id === webSearchId)?.enabled, true);
-    for (const role of ['planner', 'node']) {
-      assert.equal((await executionResources([], f.own, role)).args.filter(arg => arg === bundledWebSearch).length, 1);
-    }
-    for (const role of ['partition', 'merger']) {
       assert.ok(!(await executionResources([], f.own, role)).args.includes(bundledWebSearch));
     }
     assert.ok(existsSync(bundledWebSearch), 'removal must not uninstall the bundled package');
