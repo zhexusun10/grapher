@@ -14,13 +14,52 @@ fn execution(bytes: usize, running: bool) -> Execution {
     }
 }
 
-fn snapshot_token(run: &str, exec: &Execution) -> CacheToken {
-    let state = Snapshot { run_id: run.into(), executions: vec![exec.clone()], ..Default::default() };
-    capture_warm_fence(&state, None).unwrap().logs[&exec.id]
+// The display cache is process-wide and shared with parallel tests, so emulate
+// the production caller's retry instead of failing on its retryable busy error.
+fn capture_fence(state: &Snapshot, scope: Option<&[String]>) -> WarmFence {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match capture_warm_fence(state, scope) {
+            Ok(fence) => return fence,
+            Err(error) => {
+                assert!(error.contains("retry the read"), "unexpected warm-fence error: {error}");
+                assert!(std::time::Instant::now() < deadline, "file-change cache stayed busy: {error}");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
 }
 
 // Sequential tests capture their fence at the snapshot boundary. Race tests
 // retain an earlier token explicitly and call the production helper directly.
+fn snapshot_token(run: &str, exec: &Execution) -> CacheToken {
+    let state = Snapshot { run_id: run.into(), executions: vec![exec.clone()], ..Default::default() };
+    capture_fence(&state, None).logs[&exec.id]
+}
+
+// `warm_run_changes` silently skips when the shared cache is momentarily busy.
+// Tests that assert on warmed entries capture a retrying fence first instead.
+fn warm_run(state: &Snapshot, store: &crate::store::Store, root: Option<&Path>) {
+    let fence = capture_fence(state, None);
+    warm_scoped_changes(state, store, root, None, &fence);
+}
+
+// The read-only hint is also best-effort under cache contention. Retry until it
+// is observable so the test measures cursor advancement, not lock scheduling.
+fn note_read_only_append(run: &str, exec: &Execution, bytes: usize, running: bool) {
+    let key = (run.to_string(), exec.id.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        note_read_only_log_append(run, &exec.id, bytes, running);
+        let applied = cache().lock().unwrap().log_state.get(&key).is_some_and(|entry| entry.scanned == Some((bytes, running)));
+        if applied {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "read-only append hint was not applied");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 fn warm_execution_log(run: &str, exec: &Execution, repository: &str,
     read: impl FnOnce(usize) -> Result<String, String>) {
     super::warm_execution_log(run, exec, repository, snapshot_token(run, exec), read);
@@ -62,7 +101,7 @@ fn known_read_only_appends_advance_the_cursor_without_parsing_history() {
     let mut exec = execution(READ_ONLY.len(), true);
     warm_execution_log(&run, &exec, "/repo", |_| Ok(READ_ONLY.into()));
     exec.output_bytes *= 2;
-    note_read_only_log_append(&run, &exec.id, exec.output_bytes, true);
+    note_read_only_append(&run, &exec, exec.output_bytes, true);
     warm_execution_log(&run, &exec, "/repo", |_| panic!("assistant-only appends do not require a full read"));
     update_from_log_chunk(&run, &exec.id, "worker", "/repo", "/repo", WRITE, true);
     assert_eq!(get_cached_execution_changes(&run, &exec).unwrap().total_files, 1);
@@ -154,16 +193,20 @@ fn scoped_warming_skips_other_executions_and_reader_cannot_write() {
     }
     let reader = crate::store::Store::open_reader(&path).unwrap();
     let scope = Some(std::slice::from_ref(&first.id));
-    let fence = capture_warm_fence(&state, scope).unwrap();
+    let fence = capture_fence(&state, scope);
     warm_scoped_changes(&state, &reader, None, scope, &fence);
     {
         let guard = cache().lock().unwrap();
-        assert_eq!(guard.log_state[&(run.clone(), first.id.clone())].scanned, Some((READ_ONLY.len(), false)));
-        assert!(!guard.log_state.contains_key(&(run.clone(), second.id.clone())), "a scoped read must not warm unrelated history");
+        let scanned = guard.log_state.get(&(run.clone(), first.id.clone())).and_then(|state| state.scanned);
+        let warmed_second = guard.log_state.contains_key(&(run.clone(), second.id.clone()));
+        drop(guard);
+        assert_eq!(scanned, Some((READ_ONLY.len(), false)));
+        assert!(!warmed_second, "a scoped read must not warm unrelated history");
     }
-    let fence = capture_warm_fence(&state, Some(&[])).unwrap();
+    let fence = capture_fence(&state, Some(&[]));
     warm_scoped_changes(&state, &reader, None, Some(&[]), &fence);
-    assert!(!cache().lock().unwrap().log_state.contains_key(&(run.clone(), second.id.clone())));
+    let warmed_second = cache().lock().unwrap().log_state.contains_key(&(run.clone(), second.id.clone()));
+    assert!(!warmed_second);
     let before = reader.log_bytes(&run, &first.id).unwrap();
     assert!(reader.append(&mut state, crate::model::EventKind::Output {
         execution_id: first.id.clone(), text: "cannot write".into(),
@@ -270,10 +313,12 @@ fn empty_planner_warms_are_cached_and_live_writes_supersede_them() {
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join("planner.jsonl"), READ_ONLY).unwrap();
     let state = Snapshot { run_id: run.clone(), planning_id: Some(planning.clone()), ..Default::default() };
-    warm_run_changes(&state, &store, Some(temp.path()));
-    assert!(cache().lock().unwrap().planning_changes[&(run.clone(), planning.clone())].is_empty());
+    warm_run(&state, &store, Some(temp.path()));
+    let planning_key = (run.clone(), planning.clone());
+    let warmed = cache().lock().unwrap().planning_changes.get(&planning_key).cloned();
+    assert!(warmed.is_some_and(|summary| summary.is_empty()));
     update_planning_from_log_chunk(&run, &planning, "/repo", "/repo", WRITE);
-    warm_run_changes(&state, &store, Some(temp.path()));
+    warm_run(&state, &store, Some(temp.path()));
     assert_eq!(get_cached_run_changes(&state).unwrap().total_files, 1);
     invalidate_run(&run);
 }
