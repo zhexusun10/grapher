@@ -132,7 +132,9 @@ test("workspace details panel toggle does not scroll on collapse", () => {
     false, // nextOpen = false
     180,   // current animator height
     0,     // target height
+    200,   // anchor top
     600,   // panel bottom
+    0,     // visible top
     500,   // visible bottom
   );
   assert.equal(delta, 0);
@@ -144,7 +146,9 @@ test("workspace details panel toggle scrolls only overflow on expand", () => {
     true, // nextOpen = true
     0,    // current animator height
     180,  // target height
+    200,  // anchor top
     400,  // panel bottom (before expand)
+    0,    // visible top
     500,  // visible bottom
   );
   // futurePanelBottom = 400 + 180 = 580. visibleBottom = 500. Overflow = 80.
@@ -155,10 +159,32 @@ test("workspace details panel toggle scrolls only overflow on expand", () => {
     true,
     0,
     180,
-    250,
-    500,
+    100, // anchor top
+    250, // panel bottom
+    0,   // visible top
+    500, // visible bottom
   );
   assert.equal(noOverflowDelta, 0);
+});
+
+test("a disclosure taller than the viewport stops at its anchor", () => {
+  // The bottom cannot be revealed without pushing the trigger offscreen, so
+  // scroll no further than the anchor row. The list then opens at its first row
+  // instead of jumping into the middle of thousands of changes.
+  const delta = calculateWorkspaceDetailsScrollDelta(
+    true,   // nextOpen = true
+    0,      // current animator height
+    1200,   // target height, taller than the 600px viewport
+    300,    // anchor top
+    340,    // panel bottom before expand
+    100,    // visible top
+    700,    // visible bottom
+  );
+  assert.equal(delta, 200);
+
+  // An anchor already at the viewport top must not scroll itself away.
+  const anchored = calculateWorkspaceDetailsScrollDelta(true, 0, 1200, 100, 140, 100, 700);
+  assert.equal(anchored, 0);
 });
 
 test("workspace details panel re-expand mid-animation does not double-count height", () => {
@@ -169,7 +195,9 @@ test("workspace details panel re-expand mid-animation does not double-count heig
     true, // nextOpen = true
     100,  // current animator height
     180,  // target height
+    320,  // anchor top
     500,  // panel bottom (which already includes the 100px)
+    0,    // visible top
     500,  // visible bottom
   );
   assert.equal(delta, 80);
@@ -184,12 +212,15 @@ test("repeated rapid expand and collapse cycles remain scroll-stable without rat
 
   // Cycle 1: Expand from fully closed near the bottom of viewport
   let animatorHeight = 0;
+  let anchorTopViewport = (panelDocumentTop - scrollTop); // 600
   let panelBottomViewport = (panelDocumentTop + triggerHeight + animatorHeight) - scrollTop; // 624
   let scrollDelta = calculateWorkspaceDetailsScrollDelta(
     true,
     animatorHeight,
     fullContentHeight,
+    anchorTopViewport,
     panelBottomViewport,
+    0,
     visibleBottom,
   );
   // futurePanelBottom = 624 + 180 = 804. visibleBottom = 700. Overflow = 104.
@@ -198,24 +229,30 @@ test("repeated rapid expand and collapse cycles remain scroll-stable without rat
   animatorHeight = fullContentHeight;
 
   // Cycle 2: Collapse
+  anchorTopViewport = (panelDocumentTop - scrollTop);
   panelBottomViewport = (panelDocumentTop + triggerHeight + animatorHeight) - scrollTop;
   scrollDelta = calculateWorkspaceDetailsScrollDelta(
     false,
     animatorHeight,
     0,
+    anchorTopViewport,
     panelBottomViewport,
+    0,
     visibleBottom,
   );
   assert.equal(scrollDelta, 0); // No scroll on collapse
   animatorHeight = 0;
 
   // Cycle 3: Expand again after collapse settles
+  anchorTopViewport = (panelDocumentTop - scrollTop);
   panelBottomViewport = (panelDocumentTop + triggerHeight + animatorHeight) - scrollTop; // 1124 - 604 = 520
   scrollDelta = calculateWorkspaceDetailsScrollDelta(
     true,
     animatorHeight,
     fullContentHeight,
+    anchorTopViewport,
     panelBottomViewport,
+    0,
     visibleBottom,
   );
   // futurePanelBottom = 520 + 180 = 700 <= visibleBottom (700). Overflow = 0.

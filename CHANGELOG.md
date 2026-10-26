@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A node's file-change list no longer reports non-existent deletions when a bash command deletes paths outside the workspace (for example `cd /tmp && rm -rf pkgcheck`). Relative `rm`/`mv` targets now resolve against the command's own `cd` directory and are reported only when they land inside the worktree or repository; persisted transcript-derived summaries from the previous parser are re-derived instead of kept authoritative.
 - Reloading during a Planner turn no longer waits for the whole plan to finish before showing the topology. Each accepted `node`/`edge` edit now records the draft topology as a display-only durable projection, so a refreshed (or second) browser rebuilds the same card-by-card preview while the Planner is still writing. The committed graph still owns execution until the turn commits, and a commit, failure or abort discards the draft.
 - A workspace whose source folder was renamed or deleted is now forgotten from the sidebar automatically, with no error banner. Its persisted conversations are retained so restoring the same path can recover them. The landing composer is no longer left permanently disabled by the vanished binding.
 - The Windows workspace folder picker now opens above the browser. The backend is a background process, so its unowned dialog could appear behind the page while the add button kept spinning; the picker now uses an invisible topmost owner window so it is always visible.

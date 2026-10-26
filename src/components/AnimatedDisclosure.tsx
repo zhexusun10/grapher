@@ -66,9 +66,15 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
     onBeforeToggle?.();
 
     if (container && open) {
-      const visibleBottom = getConversationViewport(container).bottom - 12;
+      const viewport = getConversationViewport(container);
+      // The changes list is a disclosure nested beside the session-details
+      // trigger; keep that enclosing trigger row visible, not just the list's
+      // own top edge.
+      const anchor = panel.closest<HTMLElement>(".workspace-details") ?? panel;
       scrollDelta = calculateWorkspaceDetailsScrollDelta(
-        open, startHeight, targetHeight, panel.getBoundingClientRect().bottom, visibleBottom,
+        open, startHeight, targetHeight,
+        anchor.getBoundingClientRect().top, panel.getBoundingClientRect().bottom,
+        viewport.top + 12, viewport.bottom - 12,
       );
       const onUserScroll = () => { interruptedRef.current = true; };
       container.addEventListener("wheel", onUserScroll, { passive: true });

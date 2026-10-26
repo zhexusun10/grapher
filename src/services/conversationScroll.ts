@@ -72,7 +72,9 @@ export function resolveViewScroll(
  *
  * Expanding scrolls only the additional height required to reveal the panel if
  * it extends below the visible viewport, correctly handling in-flight animations
- * without double-counting current height.
+ * without double-counting current height. A disclosure taller than the viewport
+ * cannot be revealed in full; stop at its anchor (the trigger row) instead of
+ * chasing its bottom, which would push the trigger and the first rows out of view.
  * Collapsing never applies a programmatic scroll delta, allowing the panel to fold
  * into the button in place without ratcheting or shifting the conversation upward.
  */
@@ -80,12 +82,16 @@ export function calculateWorkspaceDetailsScrollDelta(
   nextOpen: boolean,
   currentAnimatorHeight: number,
   targetHeight: number,
+  anchorTop: number,
   panelBottom: number,
+  visibleTop: number,
   visibleBottom: number,
 ): number {
   if (!nextOpen) return 0;
   const additionalHeight = Math.max(0, targetHeight - currentAnimatorHeight);
   const futurePanelBottom = panelBottom + additionalHeight;
-  return futurePanelBottom > visibleBottom ? futurePanelBottom - visibleBottom : 0;
+  const bottomOverflow = Math.max(0, futurePanelBottom - visibleBottom);
+  const keepAnchorVisible = Math.max(0, anchorTop - visibleTop);
+  return Math.min(bottomOverflow, keepAnchorVisible);
 }
 

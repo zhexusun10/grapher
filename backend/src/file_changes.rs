@@ -356,6 +356,172 @@ pub fn count_line_changes(old_text: &str, new_text: &str) -> (usize, usize) {
     (n - lcs, m - lcs)
 }
 
+/// Split one shell command into words while honoring quotes. Operators were
+/// already detached by the caller; keeping quoted paths together is enough to
+/// resolve `cd "some dir"` correctly.
+fn split_shell_tokens(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut characters = input.chars().peekable();
+    while let Some(character) = characters.next() {
+        match quote {
+            Some(active) => {
+                if character == '\\' && active == '"' {
+                    // Inside double quotes a backslash only escapes shell-special
+                    // characters; Windows paths keep their separators.
+                    match characters.peek() {
+                        Some('$' | '`' | '"' | '\\') => {
+                            current.push(characters.next().unwrap_or('\\'));
+                        }
+                        _ => current.push('\\'),
+                    }
+                } else if character == active {
+                    quote = None;
+                } else {
+                    current.push(character);
+                }
+            }
+            None if character == '\'' || character == '"' => quote = Some(character),
+            None if character.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(character),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// Strip `.`/`..` components without touching the filesystem, so a deleted
+/// target still resolves to the directory a shell would have used.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut parts: Vec<Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match parts.last() {
+                Some(Component::Normal(_)) => {
+                    parts.pop();
+                }
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                _ => parts.push(component),
+            },
+            other => parts.push(other),
+        }
+    }
+    let mut normalized = PathBuf::new();
+    for part in parts {
+        normalized.push(part.as_os_str());
+    }
+    normalized
+}
+
+fn unresolved_shell_word(word: &str) -> bool {
+    word.is_empty()
+        || word.starts_with('~')
+        || word.chars().any(|character| {
+            matches!(
+                character,
+                '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' | '<' | '>' | '|' | '&'
+            )
+        })
+}
+
+/// Resolve a path from a parsed shell command against that command's current
+/// directory. A relative `rm`/`mv` target runs in the shell's `cd` directory,
+/// which may be outside the workspace; only targets that land inside the
+/// workspace may appear in the change list.
+fn resolve_bash_path(
+    raw: &str,
+    cwd: Option<&Path>,
+    worktree: &str,
+    repository: &str,
+) -> Option<String> {
+    let word = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+    if unresolved_shell_word(word) {
+        return None;
+    }
+    let raw_path = Path::new(word);
+    let candidate = if raw_path.is_absolute() || raw_path.has_root() {
+        raw_path.to_path_buf()
+    } else {
+        cwd?.join(raw_path)
+    };
+    let candidate = normalize_slashes(&normalize_lexically(&candidate).to_string_lossy());
+    for root in [worktree, repository] {
+        if root.is_empty() {
+            continue;
+        }
+        if let Some(relative) = strip_root_prefix(&candidate, root) {
+            let mut rel = normalize_slashes(&relative);
+            while let Some(rest) = rel.strip_prefix("./") {
+                rel = rest.to_string();
+            }
+            rel = rel.trim_start_matches('/').to_string();
+            if rel.is_empty() || rel == "." || rel == ".." || rel.starts_with("../") {
+                return None;
+            }
+            if crate::path_identity::is_runtime_metadata_path(Path::new(&rel)) {
+                return None;
+            }
+            let leaf = rel.rsplit('/').next().unwrap_or(&rel);
+            if leaf == ".DS_Store"
+                || leaf.starts_with("._")
+                || rel == ".git"
+                || rel.starts_with(".git/")
+            {
+                return None;
+            }
+            return Some(rel);
+        }
+    }
+    None
+}
+
+fn resolve_cd_target(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    let word = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+    if unresolved_shell_word(word) || word == "-" {
+        return None;
+    }
+    let target = Path::new(word);
+    let resolved = if target.is_absolute() || target.has_root() {
+        target.to_path_buf()
+    } else {
+        cwd?.join(target)
+    };
+    Some(normalize_lexically(&resolved))
+}
+
+fn path_change_item(
+    path: String,
+    old_path: Option<String>,
+    status: &str,
+    node: &str,
+    execution_id: &str,
+) -> FileChangeItem {
+    FileChangeItem {
+        path,
+        old_path,
+        status: status.into(),
+        additions: 0,
+        deletions: 0,
+        is_running: false,
+        nodes: if node.is_empty() { vec![] } else { vec![node.into()] },
+        execution_ids: if execution_id.is_empty() {
+            vec![]
+        } else {
+            vec![execution_id.into()]
+        },
+        source: Some("bash".into()),
+    }
+}
+
 fn parse_bash_command_changes(
     command: &str,
     worktree: &str,
@@ -364,72 +530,74 @@ fn parse_bash_command_changes(
     execution_id: &str,
 ) -> Vec<FileChangeItem> {
     let mut items = Vec::new();
+    let root = if !worktree.is_empty() {
+        Some(PathBuf::from(worktree))
+    } else if !repository.is_empty() {
+        Some(PathBuf::from(repository))
+    } else {
+        None
+    };
+    // A bash tool call starts at the workspace root, but an inline `cd` (for
+    // example `cd /tmp && rm -rf build`) moves every following relative target
+    // outside it. Commands without a resolved directory cannot be attributed.
+    let mut cwd = root;
     for segment in command.split(|c| c == ';' || c == '\n') {
         for sub in segment.split("&&") {
             let trimmed = sub.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            let tokens = split_shell_tokens(trimmed);
             if tokens.is_empty() {
                 continue;
             }
-            let (cmd, args_slice) = if tokens[0] == "git" && tokens.len() >= 2 {
-                (tokens[1], &tokens[2..])
+            // A subshell may separate the opening parenthesis from its first
+            // word: `( cd /tmp && ... )`.
+            let mut start = 0;
+            while start + 1 < tokens.len() && tokens[start] == "(" {
+                start += 1;
+            }
+            let command_token = tokens[start].trim_start_matches('(');
+            let (cmd, args_slice) = if command_token == "git" && tokens.len() >= start + 2 {
+                (tokens[start + 1].as_str(), &tokens[start + 2..])
             } else {
-                (tokens[0], &tokens[1..])
+                (command_token, &tokens[start + 1..])
             };
             match cmd {
+                "cd" | "pushd" => {
+                    cwd = args_slice
+                        .iter()
+                        .find(|arg| !arg.starts_with('-'))
+                        .and_then(|arg| resolve_cd_target(arg, cwd.as_deref()));
+                }
                 "rm" | "unlink" | "del" | "Remove-Item" => {
                     for arg in args_slice {
                         if arg.starts_with('-') {
                             continue;
                         }
-                        if let Some(path) = normalize_workspace_path(arg, worktree, repository) {
-                            items.push(FileChangeItem {
-                                path,
-                                old_path: None,
-                                status: "deleted".into(),
-                                additions: 0,
-                                deletions: 0,
-                                is_running: false,
-                                nodes: if node.is_empty() { vec![] } else { vec![node.into()] },
-                                execution_ids: if execution_id.is_empty() {
-                                    vec![]
-                                } else {
-                                    vec![execution_id.into()]
-                                },
-                                source: Some("bash".into()),
-                            });
+                        if let Some(path) = resolve_bash_path(arg, cwd.as_deref(), worktree, repository) {
+                            items.push(path_change_item(path, None, "deleted", node, execution_id));
                         }
                     }
                 }
                 "mv" => {
                     let non_flags: Vec<&str> = args_slice
                         .iter()
-                        .copied()
+                        .map(String::as_str)
                         .filter(|a| !a.starts_with('-'))
                         .collect();
                     if non_flags.len() == 2 {
                         if let (Some(old_path), Some(new_path)) = (
-                            normalize_workspace_path(non_flags[0], worktree, repository),
-                            normalize_workspace_path(non_flags[1], worktree, repository),
+                            resolve_bash_path(non_flags[0], cwd.as_deref(), worktree, repository),
+                            resolve_bash_path(non_flags[1], cwd.as_deref(), worktree, repository),
                         ) {
-                            items.push(FileChangeItem {
-                                path: new_path,
-                                old_path: Some(old_path),
-                                status: "renamed".into(),
-                                additions: 0,
-                                deletions: 0,
-                                is_running: false,
-                                nodes: if node.is_empty() { vec![] } else { vec![node.into()] },
-                                execution_ids: if execution_id.is_empty() {
-                                    vec![]
-                                } else {
-                                    vec![execution_id.into()]
-                                },
-                                source: Some("bash".into()),
-                            });
+                            items.push(path_change_item(
+                                new_path,
+                                Some(old_path),
+                                "renamed",
+                                node,
+                                execution_id,
+                            ));
                         }
                     }
                 }
@@ -1344,6 +1512,19 @@ struct PersistedRunChanges {
     publication: Option<FileChangeSummary>,
 }
 
+/// Derived summaries are a cache, not history. Bump this whenever transcript
+/// parsing changes semantics so an older sidecar cannot keep stale rows (for
+/// example bash deletions that were never inside the workspace) authoritative.
+const PERSISTED_CHANGES_VERSION: u32 = 2;
+
+fn read_persisted(path: &Path) -> PersistedRunChanges {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<PersistedRunChanges>(&text).ok())
+        .filter(|saved| saved.version == PERSISTED_CHANGES_VERSION)
+        .unwrap_or_default()
+}
+
 fn safe_run_id(run_id: &str) -> bool {
     !run_id.is_empty()
         && run_id
@@ -1387,11 +1568,8 @@ pub fn persist_run(root: &Path, run_id: &str) -> Result<(), String> {
     // restarted process only replays the executions the live view happens to
     // warm, so writing the in-memory cache alone would silently drop every
     // earlier terminal summary that was never re-derived in this session.
-    let mut persisted = fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<PersistedRunChanges>(&text).ok())
-        .unwrap_or_default();
-    persisted.version = 1;
+    let mut persisted = read_persisted(&path);
+    persisted.version = PERSISTED_CHANGES_VERSION;
     {
         let Ok(guard) = cache().lock() else { return Ok(()); };
         let mut per_execution: BTreeMap<String, Vec<FileChangeSummary>> = BTreeMap::new();
@@ -1434,6 +1612,9 @@ pub fn hydrate_run(root: &Path, run_id: &str) {
     }
     let Ok(text) = fs::read_to_string(&path) else { return; };
     let Ok(saved) = serde_json::from_str::<PersistedRunChanges>(&text) else { return; };
+    if saved.version != PERSISTED_CHANGES_VERSION {
+        return;
+    }
     let Ok(mut guard) = cache().lock() else { return; };
     let key_run = run_id.to_string();
     for (execution_id, summary) in saved.executions {
@@ -1695,6 +1876,46 @@ mod tests {
     }
 
     #[test]
+    fn bash_deletions_outside_the_workspace_are_not_reported() {
+        let jsonl = [
+            r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"cd /tmp && rm -rf pkgcheck && mkdir pkgcheck && cd pkgcheck && curl -fsSL https://example.invalid/continuity.tgz -o continuity.tgz"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t1","toolName":"bash","isError":false,"result":{"details":{"exitCode":0}}}"#,
+            r#"{"type":"tool_execution_start","toolCallId":"t2","toolName":"bash","args":{"command":"cd /tmp/pkgcheck && rm -rf continuity websearch && mkdir continuity websearch && tar -xzf continuity.tgz -C continuity"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t2","toolName":"bash","isError":false,"result":{"details":{"exitCode":0}}}"#,
+            r#"{"type":"tool_execution_start","toolCallId":"t3","toolName":"bash","args":{"command":"rm -rf /tmp/unrelated && rm -- /var/tmp/other"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t3","toolName":"bash","isError":false,"result":{"details":{"exitCode":0}}}"#,
+        ]
+        .join("\n");
+
+        let summary = parse_jsonl_file_changes(&jsonl, "foundation", "exec-1", "/repo", "/repo", false);
+        assert!(
+            summary.files.is_empty(),
+            "rm targets outside the workspace must not be reported: {:?}",
+            summary.files
+        );
+    }
+
+    #[test]
+    fn bash_deletions_resolve_relative_to_the_command_directory() {
+        let jsonl = [
+            r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"bash","args":{"command":"cd src && rm old.ts"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t1","toolName":"bash","isError":false,"result":{"details":{"exitCode":0}}}"#,
+            r#"{"type":"tool_execution_start","toolCallId":"t2","toolName":"bash","args":{"command":"cd \"docs\" && rm -rf draft.md"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t2","toolName":"bash","isError":false,"result":{"details":{"exitCode":0}}}"#,
+            r#"{"type":"tool_execution_start","toolCallId":"t3","toolName":"bash","args":{"command":"rm keep.ts"}}"#,
+            r#"{"type":"tool_execution_end","toolCallId":"t3","toolName":"bash","isError":false,"result":{"details":{"exitCode":0}}}"#,
+        ]
+        .join("\n");
+
+        let summary = parse_jsonl_file_changes(&jsonl, "foundation", "exec-1", "/repo", "/repo", false);
+        let paths: Vec<&str> = summary.files.iter().map(|file| file.path.as_str()).collect();
+        assert!(paths.contains(&"src/old.ts"), "paths: {paths:?}");
+        assert!(paths.contains(&"docs/draft.md"), "paths: {paths:?}");
+        assert!(paths.contains(&"keep.ts"), "paths: {paths:?}");
+        assert_eq!(summary.total_files, 3);
+    }
+
+    #[test]
     fn tracks_in_flight_tool_calls_while_running() {
         let jsonl = r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"edit","args":{"path":"src/live.ts","edits":[{"oldText":"a","newText":"b"}]}}"#;
         let running = parse_jsonl_file_changes(jsonl, "task", "exec-1", "/repo", "/repo", true);
@@ -1794,6 +2015,43 @@ mod tests {
     }
 
     #[test]
+    fn stale_sidecar_versions_are_reparsed_instead_of_hydrated() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let run = "stale-sidecar-run";
+        let path = root.join("file-changes").join(run).join("changes.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let stale = serde_json::json!({
+            "version": 1,
+            "executions": {
+                "exec": {
+                    "files": [{"path": "pkgcheck", "status": "deleted", "source": "bash"}],
+                    "totalFiles": 1,
+                    "deletedCount": 1
+                }
+            },
+            "planning": {},
+            "publication": null
+        });
+        fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        invalidate_run(run);
+        hydrate_run(root, run);
+        let execution = Execution {
+            id: "exec".into(), node: "foundation".into(), revision: 0, attempt: 1,
+            session_id: "session".into(), worktree: "/repo".into(), before: String::new(),
+            workspace_lineage: vec![], after: None, input: None, result: None,
+            status: "completed".into(), output: String::new(), output_bytes: 0, pid: None,
+            started_at: 1, completed_at: Some(2), metrics: None,
+        };
+        assert!(
+            get_cached_execution_changes(run, &execution).is_none(),
+            "a pre-fix sidecar must not keep stale transcript rows authoritative"
+        );
+        invalidate_run(run);
+    }
+
+    #[test]
     fn persisting_over_a_sidecar_keeps_untouched_executions() {
         let summary = |path: &str| {
             FileChangeSummary::from_files(
@@ -1812,7 +2070,7 @@ mod tests {
                 None,
             )
         };
-        let mut persisted = PersistedRunChanges { version: 1, ..Default::default() };
+        let mut persisted = PersistedRunChanges { version: PERSISTED_CHANGES_VERSION, ..Default::default() };
         persisted.executions.insert("exec-old".into(), summary("src/old.ts"));
 
         // The current session only derived a different execution. The earlier

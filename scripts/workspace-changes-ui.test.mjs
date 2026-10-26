@@ -404,6 +404,31 @@ test("large change sets render only the first 50 rows and mark the remainder", {
   } finally { await context.close(); }
 });
 
+test("a long change list opens at its first row without moving the entry out of view", { timeout: 30_000 }, async () => {
+  const { page, context, errors } = await fixture("node&many=1");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await trigger.scrollIntoViewIfNeeded();
+    await trigger.click();
+    await page.waitForTimeout(450);
+    const bounds = await page.evaluate(() => {
+      const scroll = document.querySelector(".initial-query-scroll");
+      const composer = scroll.parentElement.querySelector(".pane-bottom-chat");
+      const viewportTop = scroll.getBoundingClientRect().top;
+      const visibleBottom = composer.getBoundingClientRect().top;
+      const trigger = document.querySelector('[data-testid="workspace-changes-trigger"]').getBoundingClientRect();
+      const first = document.querySelector('[data-testid="changed-file-item"]').getBoundingClientRect();
+      const inside = rect => rect.top >= viewportTop && rect.bottom <= visibleBottom;
+      return { viewportTop, visibleBottom, triggerFits: inside(trigger), firstRowFits: inside(first) };
+    });
+    // The oversized list cannot be revealed in full; scrolling to its bottom
+    // would hide the trigger and drop the reader into the middle of the list.
+    assert.equal(bounds.triggerFits, true, JSON.stringify(bounds));
+    assert.equal(bounds.firstRowFits, true, JSON.stringify(bounds));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("narrow conversation: review stays within the page and the entry remains reachable", { timeout: 30_000 }, async () => {
   const { page, context, errors } = await fixture("serial", { width: 420, height: 640 });
   try {
