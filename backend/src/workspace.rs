@@ -1315,8 +1315,36 @@ pub fn pick_folder() -> Result<Option<PathBuf>, String> {
     #[cfg(target_os = "windows")]
     {
         // The script is constant: the selected path is returned through stdout,
-        // never interpolated into PowerShell source.
-        let script = r#"Add-Type -AssemblyName System.Windows.Forms; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [System.Windows.Forms.Application]::EnableVisualStyles(); $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = 'Select a project folder'; $dialog.ShowNewFolderButton = $false; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.WriteLine($dialog.SelectedPath) }"#;
+        // never interpolated into PowerShell source. The backend is a background
+        // process, so an unowned dialog can open behind the browser that started
+        // the request. Give it an invisible topmost owner so the picker is
+        // always visible above the page the user clicked from.
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$owner = New-Object System.Windows.Forms.Form
+$owner.Text = 'Grapher folder picker'
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$owner.Size = New-Object System.Drawing.Size(1, 1)
+$owner.Opacity = 0
+$owner.Show()
+try {
+  $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+  $dialog.Description = 'Select a project folder'
+  $dialog.ShowNewFolderButton = $false
+  if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::Out.WriteLine($dialog.SelectedPath)
+  }
+} finally {
+  $owner.Close()
+  $owner.Dispose()
+}
+"#;
         let output = Command::new("powershell.exe")
             .args([
                 "-NoLogo",
