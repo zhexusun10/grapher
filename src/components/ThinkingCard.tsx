@@ -1,6 +1,6 @@
 import { t } from "../i18n";
 import React, { useState, useEffect, useRef } from "react";
-import { Brain, ChevronRight, Copy, Check, Sparkles } from "lucide-react";
+import { ChevronRight, Copy, Check, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { TranscriptItem } from "../types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -134,8 +134,8 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
               <ChevronRight size={14} className={`thinking-expand-chevron ${isExpanded ? "open" : ""}`} />
             </span>
             <div className={`thinking-icon-box ${isStreaming ? "pulse" : ""}`}>
-              <span key={isStreaming ? "sparkles" : "brain"} className="thinking-icon-glyph">
-                {isStreaming ? <Sparkles size={14} /> : <Brain size={14} />}
+              <span className="thinking-icon-glyph">
+                <Sparkles size={14} />
               </span>
             </div>
             <span className="thinking-title">{title}</span>
