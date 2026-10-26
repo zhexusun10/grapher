@@ -52,7 +52,8 @@ interface WorkspaceChangesPanelProps {
 }
 
 /** Expands in the same slot and width as the session-details body, using the
- * same height/opacity transition and scroll follow. */
+ * same height/opacity transition, but never scrolls the conversation: a list
+ * must open at its trigger no matter how many rows it has. */
 export const WorkspaceChangesPanel = React.memo(function WorkspaceChangesPanel({
   id, summary, open, scrollContainerRef, onBeforeToggle, onAfterToggle,
 }: WorkspaceChangesPanelProps) {
@@ -71,6 +72,7 @@ export const WorkspaceChangesPanel = React.memo(function WorkspaceChangesPanel({
       open={open}
       panelRef={rootRef}
       scrollContainerRef={scrollContainerRef}
+      revealOnOpen={false}
       onBeforeToggle={onBeforeToggle}
       onAfterToggle={onAfterToggle}
     >

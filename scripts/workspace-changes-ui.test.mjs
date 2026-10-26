@@ -429,6 +429,46 @@ test("a long change list opens at its first row without moving the entry out of 
   } finally { await context.close(); }
 });
 
+test("opening a short change list never moves a long node conversation", { timeout: 30_000 }, async () => {
+  const { page, context, errors } = await fixture("node&long=1");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await page.evaluate(() => {
+      const scroll = document.querySelector(".initial-query-scroll");
+      scroll.scrollTop = scroll.scrollHeight;
+    });
+    await page.waitForTimeout(300);
+    const before = await page.evaluate(() => {
+      const scroll = document.querySelector(".initial-query-scroll");
+      const trigger = document.querySelector('[data-testid="workspace-changes-trigger"]');
+      const s = scroll.getBoundingClientRect(), t = trigger.getBoundingClientRect();
+      return { scrollTop: scroll.scrollTop, max: scroll.scrollHeight - scroll.clientHeight,
+        clientHeight: scroll.clientHeight, triggerTop: t.top - s.top, triggerBottom: t.bottom - s.top };
+    });
+    assert.ok(before.max > 1000, "the conversation must be scrollable");
+    assert.ok(before.triggerTop >= 0 && before.triggerBottom <= before.clientHeight, JSON.stringify(before));
+    const box = await trigger.boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(500);
+    const after = await page.evaluate(() => {
+      const scroll = document.querySelector(".initial-query-scroll");
+      const trigger = document.querySelector('[data-testid="workspace-changes-trigger"]').getBoundingClientRect();
+      const first = document.querySelector('[data-testid="changed-file-item"]').getBoundingClientRect();
+      const s = scroll.getBoundingClientRect();
+      return { scrollTop: scroll.scrollTop, triggerBottom: trigger.bottom - s.top,
+        firstTop: first.top - s.top,
+        triggerFits: trigger.top >= s.top && trigger.bottom <= s.top + scroll.clientHeight };
+    });
+    // A short list must open at its trigger. Scrolling even by the panel height
+    // is visible as a jump when the reader is at the end of a long transcript.
+    assert.equal(after.scrollTop, before.scrollTop, JSON.stringify({ before, after }));
+    assert.equal(after.triggerFits, true, JSON.stringify(after));
+    assert.ok(after.firstTop >= after.triggerBottom - 1, JSON.stringify(after));
+    assert.ok(after.firstTop >= 0, JSON.stringify(after));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("narrow conversation: review stays within the page and the entry remains reachable", { timeout: 30_000 }, async () => {
   const { page, context, errors } = await fixture("serial", { width: 420, height: 640 });
   try {

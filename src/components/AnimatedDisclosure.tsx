@@ -21,6 +21,10 @@ interface AnimatedDisclosureProps {
   /** Wrapper whose bottom edge is revealed while the height grows. */
   panelRef: React.RefObject<HTMLElement | null>;
   scrollContainerRef?: React.RefObject<HTMLElement | null>;
+  /** Whether expanding may scroll the conversation to reveal the added body.
+   * A list opens in place so the reader keeps their current position; only the
+   * session details need the viewport to follow their short body. */
+  revealOnOpen?: boolean;
   onBeforeToggle?: () => void;
   onAfterToggle?: () => void;
   children: React.ReactNode;
@@ -29,7 +33,7 @@ interface AnimatedDisclosureProps {
 /** One shared height/opacity disclosure used by the session details and the
  * file-change list, so both expand and collapse identically. */
 export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
-  open, panelRef, scrollContainerRef, onBeforeToggle, onAfterToggle, children,
+  open, panelRef, scrollContainerRef, revealOnOpen = true, onBeforeToggle, onAfterToggle, children,
 }) => {
   const animatorRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -65,7 +69,7 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
     cleanupListenersRef.current = null;
     onBeforeToggle?.();
 
-    if (container && open) {
+    if (container && open && revealOnOpen) {
       const viewport = getConversationViewport(container);
       // The changes list is a disclosure nested beside the session-details
       // trigger; keep that enclosing trigger row visible, not just the list's
@@ -109,7 +113,7 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
       onAfterToggle?.();
     };
     rafIdRef.current = requestAnimationFrame(tick);
-  }, [open, onAfterToggle, onBeforeToggle, panelRef, scrollContainerRef]);
+  }, [open, onAfterToggle, onBeforeToggle, panelRef, revealOnOpen, scrollContainerRef]);
 
   return <div
     ref={animatorRef}

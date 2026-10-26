@@ -41,6 +41,10 @@ const mixedFiles: FileChangeItem[] = [
   { path: "src/deleted-large.ts", status: "deleted", additions: 0, deletions: 25 },
 ];
 
+const longConversationOutput = Array.from({ length: 80 }, (_, index) => JSON.stringify({
+  type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `Review message ${index}: the implementation is ready for inspection.` }] },
+})).join("\n") + "\n";
+
 function Fixture() {
   const params = new URLSearchParams(location.search);
   const mode = params.get("mode") || "serial";
@@ -63,7 +67,8 @@ function Fixture() {
     id: "execution", node: "worker", revision: 0, attempt: 1,
     sessionId: "session", worktree: "/project", before: "", after: "",
     status: running ? "running" : "completed", startedAt: repeatedAttempts ? 2 : 1, completedAt: running ? null : 3,
-    output: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The implementation is ready for review." }] } }) + "\n",
+    output: params.get("long") === "1" ? longConversationOutput
+      : JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The implementation is ready for review." }] } }) + "\n",
     fileChanges: metadata ? undefined : summary,
   };
   const attempts: Execution[] = repeatedAttempts
