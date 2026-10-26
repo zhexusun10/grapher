@@ -122,6 +122,40 @@ fn restart_recovers_durable_and_legacy_planning_with_the_original_run_id() {
 }
 
 #[test]
+fn restart_discards_a_foreground_planner_preview_before_serving_the_committed_graph() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = service(temp.path());
+    let id = Uuid::new_v4().to_string();
+    let (_, running) = attempt(temp.path(), &id, false, false);
+    let child = service_for_run(&primary, &id, true).unwrap();
+    {
+        let mut runtime = child.runtime.lock().unwrap();
+        runtime.emit(EventKind::PlanningStarted {
+            goal: "Original goal".into(), config: config(temp.path()),
+            planning: running.clone(), plan_type: Some("graph".into()),
+        }).unwrap();
+        runtime.emit(EventKind::PlannerPreviewProgress { graph: Graph {
+            original_goal: "Original goal".into(),
+            nodes: vec![Node { name: "draft".into(), task: "draft".into() }],
+            edges: vec![],
+        }}).unwrap();
+        let live = snapshot_metadata(&runtime.state).unwrap();
+        assert_eq!(live["graph"]["nodes"][0]["name"], "draft");
+        assert_eq!(live["phase"], "planning");
+    }
+    invalidate_service_cache(temp.path(), Some(&id));
+    recover_plannings(&primary).unwrap();
+    let restored = service_for_run(&primary, &id, false).unwrap();
+    let state = snapshot(&restored).unwrap();
+    // Restarting aborts the turn; a preview that never committed must not be
+    // served as the topology of a recording conversation.
+    assert_eq!(state.phase, "planning_failed");
+    assert!(state.preview_graph.is_none());
+    assert!(state.graph.nodes.is_empty());
+    assert!(snapshot_metadata(&state).unwrap()["graph"]["nodes"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn failed_planning_survives_cache_eviction_and_keeps_a_stable_id_on_commit() {
     let temp = tempfile::tempdir().unwrap();
     let primary = service(temp.path());

@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, type Config } from "../src/types.ts";
 import { applyModelConfig, defaultRoleThinkingLevel, normalizeModelThinkingLevels, planningModelRoles, resolveExecutionModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
-import { providerAuth, type ProviderCatalog } from "../src/services/providerAuth.ts";
+import { providerAuth, hasUnsupportedCredentialCharacters, type ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
 import type { Execution } from "../src/types.ts";
 
@@ -407,6 +407,62 @@ test("ProviderAuthAdapter passes device ID to runtime login options", async () =
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.ok(capturedOptions, "options were passed to runtime.login");
   assert.equal((capturedOptions as { getDeviceId: () => string }).getDeviceId(), "mock-device-id-1234");
+});
+
+test("credentials outside printable ASCII are rejected before reaching Pi", () => {
+  assert.equal(hasUnsupportedCredentialCharacters("oc_sk_live-1234._~+/="), false);
+  assert.equal(hasUnsupportedCredentialCharacters("sk-ant-api03-abc_DEF"), false);
+  assert.equal(hasUnsupportedCredentialCharacters(""), false);
+  assert.equal(hasUnsupportedCredentialCharacters("https://github.com/zhexusun10/grapher 上面"), true);
+  assert.equal(hasUnsupportedCredentialCharacters("ｓｋ－１２３"), true);
+  assert.equal(hasUnsupportedCredentialCharacters("sk-abc\ndef"), true);
+  assert.equal(hasUnsupportedCredentialCharacters("sk-abc\tdef"), true);
+});
+
+test("ProviderAuthAdapter refuses to resolve a secret prompt with non-ASCII text", async () => {
+  const { ProviderAuthAdapter } = await import("../engine/provider-auth-adapter.mjs");
+  let submitted: string | undefined;
+  const provider = {
+    id: "custom",
+    auth: {
+      apiKey: {
+        name: "API key",
+        login: async (interaction: { prompt: (prompt: { type: string; message: string }) => Promise<string> }) => {
+          const key = await interaction.prompt({ type: "secret", message: "Enter API key" });
+          submitted = key;
+          return { type: "api_key", key };
+        },
+      },
+    },
+  };
+  const mockRuntime = {
+    getProviders: () => [provider],
+    login: async (_providerId: string, _method: string, interaction: Parameters<typeof provider.auth.apiKey.login>[0]) => {
+      await provider.auth.apiKey.login(interaction);
+    },
+  };
+  const adapter = new ProviderAuthAdapter(() => Promise.resolve(mockRuntime as never));
+  try {
+    const job = await adapter.start("custom", "api_key");
+    let prompt = adapter.get(job.id).prompt;
+    for (let attempt = 0; attempt < 50 && !prompt; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      prompt = adapter.get(job.id).prompt;
+    }
+    assert.ok(prompt, "the API key prompt is pending");
+    assert.throws(
+      () => adapter.respond(job.id, prompt.id, "https://example.com 上面这些都只是噪音"),
+      /printable ASCII/
+    );
+    assert.equal(submitted, undefined, "invalid input never reaches the provider login");
+    adapter.respond(job.id, prompt.id, "oc_sk_live-1234._~");
+    for (let attempt = 0; attempt < 50 && submitted === undefined; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(submitted, "oc_sk_live-1234._~");
+  } finally {
+    adapter.close();
+  }
 });
 
 test("resolveExecutionModelAndThinking extracts model and thinking from execution output events", () => {

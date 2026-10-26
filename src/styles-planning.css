@@ -2105,6 +2105,15 @@
   color: var(--text-primary);
 }
 
+.auth-input-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 0;
+  font-size: 11px;
+  color: var(--status-danger-text);
+}
+
 .prompt-action-row {
   display: flex;
   gap: 8px;

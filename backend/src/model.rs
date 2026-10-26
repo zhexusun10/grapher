@@ -736,6 +736,12 @@ pub enum EventKind {
     PlannerReviewProgress {
         graph: Graph,
     },
+    /// An accepted foreground Planner graph edit before the turn commits.
+    /// Display-only like a review candidate, but owned by the foreground turn:
+    /// a reload replays it so the draft topology keeps growing card by card.
+    PlannerPreviewProgress {
+        graph: Graph,
+    },
     /// Live counter update for an in-flight Planner turn. History/display only:
     /// the committed summary replaces it when the turn settles, so a resumed
     /// turn's totals stay authoritative.
@@ -1101,6 +1107,11 @@ pub struct Publication {
 pub struct Snapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_graph: Option<Graph>,
+    /// Display-only foreground Planner preview of the draft topology, not the
+    /// unapproved graph itself. Cleared when the turn commits, fails or
+    /// aborts, and whenever live work starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_graph: Option<Graph>,
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
@@ -1565,6 +1576,21 @@ impl Snapshot {
                 || !self.preparation_failed_nodes().is_empty())
     }
 
+    /// Whether any execution can still publish. A display-only Planner draft
+    /// must not replace the committed topology while that is true, so a
+    /// provisional edit never passes for running work.
+    pub fn has_live_work(&self) -> bool {
+        matches!(
+            self.phase.as_str(),
+            "running" | "followup" | "publishing" | "merging" | "publication_failed"
+        ) || self.executions.iter().any(|execution| execution.status == "running")
+            || self.mergers.iter().any(|merger| merger.status == "running")
+            || self
+                .nodes
+                .values()
+                .any(|node| matches!(node.status.as_str(), "running" | "dirty"))
+    }
+
     pub fn is_node_user_paused(&self, node: &str) -> bool {
         self.nodes.get(node).is_some_and(|n| n.is_user_paused())
     }
@@ -1744,6 +1770,9 @@ pub fn is_credential_error(error: &str) -> bool {
         || lower.contains("oauth auth derivation failed")
         || lower.contains("credential store read failed")
         || lower.contains("credential store modify failed")
+        // A credential that cannot be encoded into an HTTP header fails before
+        // the provider request leaves the process. Re-entering the key fixes it.
+        || lower.contains("cannot convert argument to a bytestring because the character")
         || lower.contains("api key auth failed")
         || lower.contains("provider is not configured")
         || lower.contains("invalid_grant")
@@ -1912,6 +1941,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.planning = Some(planning.clone());
             state.plan_type = plan_type.clone();
             state.phase = "planning".into();
+            state.preview_graph = None;
         }
         EventKind::PlannerWorkspaceSelected { planning }
         | EventKind::PlannerTurnProgress { planning } => {
@@ -1963,12 +1993,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.planning_id = Some(planning.planning_id.clone());
             state.planning = Some(planning.clone());
             state.review_graph = Some(state.graph.clone());
+            state.preview_graph = None;
             state.phase = "planning".into();
         }
         EventKind::PlannerReviewProgress { graph } => {
             if state.review_graph.is_some() {
                 state.review_graph = Some(graph.clone());
             }
+        }
+        EventKind::PlannerPreviewProgress { graph } => {
+            state.preview_graph = Some(graph.clone());
         }
         EventKind::PlannerReviewFinished { planning, approval_required } => {
             state.planning = Some(planning.clone());
@@ -1991,10 +2025,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::PlannerTurnAborted { planning } => {
             state.planning_id = Some(planning.planning_id.clone());
             state.planning = Some(planning.clone());
+            // A preview that never commits must not outlive its turn.
+            state.preview_graph = None;
         }
         EventKind::PlanningFailed { planning } => {
             state.planning = Some(planning.clone());
             state.phase = "planning_failed".into();
+            state.preview_graph = None;
         }
         EventKind::Created {
             graph,
@@ -2006,6 +2043,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.config = Some(config.clone());
             state.planning_id = planning_id.clone();
             state.planning = planning.clone();
+            // The committed topology replaces the provisional draft.
+            state.preview_graph = None;
             state.plan = crate::compiler::compile_legacy(graph, true).ok();
             state.nodes = graph
                 .nodes
@@ -2032,6 +2071,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.stop_requested = false;
             let changed = state.graph != *graph;
             state.graph = graph.clone();
+            state.preview_graph = None;
             state.plan = crate::compiler::compile_legacy(graph, true).ok();
             state.planning_id = Some(planning_id.clone());
             state.planning = Some(planning.clone());
@@ -2095,6 +2135,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::DraftEdited { graph, config } => {
             state.graph = graph.clone();
+            state.preview_graph = None;
             state.config = Some(config.clone());
             state.plan_type = Some("graph".into());
             state.plan = crate::compiler::compile_legacy(graph, true).ok();
@@ -2215,6 +2256,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             node.pending_messages.retain(|message| message_sequences.as_ref()
                 .is_some_and(|sequences| !sequences.contains(&message.sequence)));
             if source_direct { state.phase = "followup".into(); }
+            // Live work owns the displayed topology; provisional draft edits
+            // must never pass for a running graph.
+            state.preview_graph = None;
             node.edit_execution_id = None;
             node.continuation = false;
             node.status = "running".into();

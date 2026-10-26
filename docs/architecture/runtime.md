@@ -13,16 +13,20 @@ During foreground planning, the graph pane opens on an accepted (successful)
 `node`/`edge` tool result, not on a pending or failed call.
 Successful tool results update the Planner's draft preview before the Planner's
 text stream ends, including the single-edit and JSON-string argument shapes the
-tools tolerate and a revision of an approved graph that is not executing. An
-actively executing graph keeps showing the committed topology until the revision
-commits, so provisional edits never pass for running work. Cards appear centered
-as soon as they are measured; edge edits animate the layout while the viewport
-follows its center. Draft edits invalidate old displayed execution batches, and
-durable polling must not restore them over the live preview. A failed or aborted
-approved revision restores the committed topology instead of leaving a preview
-that never commits. This visualization does not approve, dispatch, or complete
-any work; approved revisions still commit atomically in Rust. Browser
-regressions:
+tools tolerate and a revision of an approved graph that is not executing. Each
+accepted result also records the whole draft topology as a display-only durable
+event, so a reload (or another client) replays the same preview instead of
+waiting for the turn to commit. An actively executing graph keeps showing the
+committed topology until the revision commits, so provisional edits never pass
+for running work. Cards appear centered as soon as they are measured; edge edits
+animate the layout while the viewport follows its center. Draft edits invalidate
+old displayed execution batches, and durable polling must not restore them over
+the live preview. A commit, failure or abort discards the draft and restores the
+committed topology instead of leaving a preview that never commits. This
+visualization does not approve, dispatch, or complete any work; approved
+revisions still commit atomically in Rust. Backend evidence:
+[planner review and draft projection](../../backend/src/planner_review_tests.rs);
+browser regressions:
 [Planner streaming and auto-fit](../../scripts/graph-planning-fit.test.mjs).
 
 ## Node states

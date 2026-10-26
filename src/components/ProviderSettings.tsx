@@ -22,6 +22,7 @@ import {
 import { CollapsibleCardBody } from "./CollapsibleCardBody";
 import {
   providerAuth,
+  hasUnsupportedCredentialCharacters,
   type LoginState,
   type ProviderCatalog,
   type ProviderInfo,
@@ -74,6 +75,9 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   const catalogGeneration = useRef(0);
   const actionInFlight = useRef(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const credentialInputError = login?.prompt?.type === "secret" && hasUnsupportedCredentialCharacters(answer)
+    ? t("API Key 只能包含 ASCII 可见字符，不能包含中文、全角符号或换行。")
+    : "";
 
   async function load(refresh = false) {
     const generation = ++catalogGeneration.current;
@@ -186,6 +190,9 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
 
   async function respond() {
     if (!login?.prompt || !answer.trim() || actionInFlight.current) return;
+    // API keys travel in HTTP headers. Never send text that could only fail
+    // later inside the provider client, after Pi has stored the credential.
+    if (login.prompt.type === "secret" && hasUnsupportedCredentialCharacters(answer)) return;
     const generation = authGeneration.current;
     const revision = ++loginRevision.current;
     actionInFlight.current = true;
@@ -619,6 +626,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     autoComplete="off"
                     spellCheck={false}
                     value={answer}
+                    aria-invalid={credentialInputError ? true : undefined}
                     placeholder={
                       login.prompt.placeholder || t("输入 API Key (如 sk-...)")
                     }
@@ -639,11 +647,18 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                 </div>
               )}
 
+              {credentialInputError && (
+                <p className="auth-input-error" role="alert">
+                  <AlertCircle size={13} />
+                  <span>{credentialInputError}</span>
+                </p>
+              )}
+
               <div className="prompt-action-row">
                 <button
                   type="button"
                   className="primary submit-key-btn"
-                  disabled={busy || !answer.trim()}
+                  disabled={busy || !answer.trim() || !!credentialInputError}
                   onClick={() => void respond()}
                 >
                   <Check size={14} />{t(" 保存并绑定到 Pi")}</button>

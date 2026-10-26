@@ -126,6 +126,7 @@ export const en: Record<string, string> = {
   "输入 API Key": "Enter API Key",
   "请选择选项...": "Select an option...",
   "输入 API Key (如 sk-...)": "Enter API Key (e.g. sk-...)",
+  "API Key 只能包含 ASCII 可见字符，不能包含中文、全角符号或换行。": "API Keys can only contain printable ASCII characters (no Chinese, full-width symbols, or line breaks).",
   "请输入...": "Enter a value...",
   "隐藏": "Hide",
   "显示": "Show",

@@ -19,6 +19,10 @@ const KNOWN_PROVIDER_ENV_VARS = {
   xai: ["XAI_API_KEY"],
 };
 
+// Credentials are emitted verbatim as HTTP header values. Non-ASCII input can
+// only fail inside the provider client, after Pi has already stored it.
+const PRINTABLE_ASCII = /^[\x20-\x7E]*$/;
+
 function getDisabledProvidersPath() {
   const dir = toHostInput(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".grapher", "pi-agent"));
   return join(dir, "disabled-providers.json");
@@ -209,6 +213,9 @@ export class ProviderAuthAdapter {
     if (job.status !== "pending" || !job.pending || job.prompt?.id !== promptId) throw new Error("Authentication prompt is no longer active.");
     if (typeof value !== "string" || value.length > 65536) throw new Error("Invalid authentication response.");
     if (job.prompt.type === "select" && !job.prompt.options.some(o => o.id === value)) throw new Error("Invalid selection.");
+    if (job.prompt.type === "secret" && !PRINTABLE_ASCII.test(value)) {
+      throw new Error("API keys must contain printable ASCII characters only.");
+    }
     job.pending.resolve(value);
     return this.view(job);
   }

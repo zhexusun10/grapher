@@ -88,6 +88,7 @@ pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
         "canResume": state.can_resume(), "phase": state.phase, "base": state.base,
         "publishedHead": state.published_head, "feedbackCounts": state.feedback_counts,
         "pendingFeedback": state.pending_feedback, "reviewGraph": state.review_graph,
+        "previewGraph": state.preview_graph,
         "environmentPolicy": state.environment_policy,
         "environmentBaseline": state.environment_baseline, "publishedResult": state.published_result,
         "resultExecution": state.result_execution,
@@ -139,6 +140,12 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         }
     }
     if let Some(graph) = &state.review_graph {
+        metadata["graph"] = json!(graph);
+        metadata["plan"] = json!(crate::compiler::compile(graph, false).ok());
+    } else if let Some(graph) = state.preview_graph.as_ref().filter(|_| !state.has_live_work()) {
+        // The foreground Planner draft is display-only, so a reload rebuilds
+        // the incremental topology from the durable projection. Running work
+        // keeps the committed graph; a commit, failure or abort clears it.
         metadata["graph"] = json!(graph);
         metadata["plan"] = json!(crate::compiler::compile(graph, false).ok());
     }
@@ -294,5 +301,43 @@ mod tests {
         assert_eq!(projected["files"].as_array().unwrap().len(), crate::file_changes::MAX_DISPLAYED_FILE_CHANGES);
         // Added files lead the retained slice, matching the browser display order.
         assert_eq!(projected["files"][0]["status"], "added");
+    }
+
+    #[test]
+    fn planner_preview_graph_is_display_only_and_cleared_by_its_turn() {
+        let draft = Graph {
+            original_goal: "Draft a topology".into(),
+            nodes: vec![crate::model::Node { name: "one".into(), task: "Do one".into() }],
+            edges: vec![],
+        };
+        let mut state = Snapshot::default();
+        crate::model::apply(&mut state, &Event {
+            sequence: 1, timestamp: 1,
+            kind: EventKind::PlannerPreviewProgress { graph: draft.clone() },
+        });
+        // Accepted edits preview before the turn commits, and a reload replays
+        // them from the checkpoint/event log instead of waiting for the commit.
+        assert_eq!(state.preview_graph, Some(draft.clone()));
+        assert_eq!(state.graph.nodes.len(), 0, "the committed graph stays unchanged");
+        let metadata = snapshot_metadata(&state).unwrap();
+        assert_eq!(metadata["graph"], serde_json::to_value(&draft).unwrap());
+        assert_eq!(metadata["plan"]["executionBatches"], json!([["one"]]));
+        assert_eq!(checkpoint_projection(&state)["previewGraph"],
+            serde_json::to_value(&draft).unwrap());
+
+        // Live work keeps owning the displayed topology; provisional edits
+        // must never pass for a running graph.
+        state.nodes.insert("one".into(), crate::model::NodeState { status: "running".into(), ..Default::default() });
+        assert_eq!(snapshot_metadata(&state).unwrap()["graph"], json!(state.graph));
+        state.nodes.get_mut("one").unwrap().status = "waiting".into();
+        assert_eq!(snapshot_metadata(&state).unwrap()["graph"], serde_json::to_value(&draft).unwrap());
+
+        // A failed or aborted turn restores the committed topology.
+        crate::model::apply(&mut state, &Event {
+            sequence: 2, timestamp: 2,
+            kind: EventKind::PlannerTurnAborted { planning: PlanningSummary::default() },
+        });
+        assert_eq!(state.preview_graph, None);
+        assert_eq!(snapshot_metadata(&state).unwrap()["graph"], json!(state.graph));
     }
 }

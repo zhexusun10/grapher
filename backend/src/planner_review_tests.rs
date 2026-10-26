@@ -298,3 +298,67 @@ fn transcript_projection_hides_the_synthetic_review_turn_everywhere() {
     let plain = format!("{}\n", serde_json::json!({ "type": "agent_end", "messages": [] }));
     assert_eq!(review_transcript_line(&plain, true).as_deref(), Some(plain.as_str()));
 }
+
+#[test]
+fn foreground_planner_preview_progress_rebuilds_the_topology_before_the_turn_commits() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = crate::fixture::repository(temp.path()).unwrap();
+    let script = temp.path().join("draft-preview.mjs");
+    fs::write(&script, r#"
+import fs from 'node:fs';
+let task = ''; for await (const chunk of process.stdin) task += chunk;
+if (process.env.GRAPHER_MODE !== 'planner') process.exit(0);
+const emit = event => console.log(JSON.stringify(event));
+const path = process.env.GRAPHER_GRAPH_PATH;
+const graph = JSON.parse(fs.readFileSync(path, 'utf8'));
+graph.nodes.push({ name: 'one', task: 'Do one' });
+fs.writeFileSync(path, JSON.stringify(graph));
+emit({ type: 'tool_execution_end', toolCallId: 'node-one', toolName: 'node', isError: false });
+const release = new URL('./release-draft', import.meta.url);
+while (!fs.existsSync(release)) await new Promise(done => setTimeout(done, 20));
+graph.nodes.push({ name: 'two', task: 'Do two' });
+graph.edges.push({ from: 'one', to: 'two', feedback: false });
+fs.writeFileSync(path, JSON.stringify(graph));
+emit({ type: 'tool_execution_end', toolCallId: 'edge-two', toolName: 'edge', isError: false });
+emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Ready' }] } });
+"#).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repo, "engine": "pi", "piCommand": "node", "piArgs": [script],
+        "model": "mock/draft", "thinkingLevel": "off", "maxParallel": 2,
+        "postTaskReview": false, "autoApprove": false
+    })).unwrap();
+    let worker_service = service.clone();
+    let worker = thread::spawn(move || plan_goal_internal("Draft a topology".into(), config,
+        Some("graph"), None, None, &worker_service, |_| {}, |_| {}, |_| {}));
+    // The accepted node edit previews while the Planner is still writing.
+    let live = wait(&service, |state| state.preview_graph.as_ref().is_some_and(|graph| graph.nodes.len() == 1));
+    assert_eq!(live.phase, "planning");
+    assert!(!live.approved);
+    assert!(!live.has_live_work());
+    assert!(live.graph.nodes.is_empty(), "the committed graph is unchanged during the turn");
+    let projected = snapshot_metadata(&live).unwrap();
+    assert_eq!(projected["graph"]["nodes"][0]["name"], "one");
+    assert_eq!(projected["graph"]["nodes"][0]["task"], "Do one");
+    // The draft is durable, not browser state: a reload (or another client)
+    // rebuilds the same preview before the turn commits.
+    let run_id = live.run_id.clone();
+    let reloaded = service.runtime.lock().unwrap().store.load(&run_id).unwrap();
+    assert_eq!(reloaded.preview_graph.as_ref().map(|graph| graph.nodes.len()), Some(1));
+    assert_eq!(snapshot_metadata(&reloaded).unwrap()["graph"], projected["graph"]);
+
+    fs::write(temp.path().join("release-draft"), "go").unwrap();
+    let committed = worker.join().unwrap().unwrap();
+    assert_eq!(committed.phase, "awaiting_approval");
+    assert_eq!(committed.preview_graph, None, "the commit replaces the provisional preview");
+    assert_eq!(committed.graph.nodes.iter().map(|node| node.name.as_str()).collect::<Vec<_>>(), ["one", "two"]);
+    assert_eq!(committed.graph.edges.len(), 1);
+    assert_eq!(snapshot_metadata(&committed).unwrap()["graph"],
+        serde_json::to_value(&committed.graph).unwrap());
+}

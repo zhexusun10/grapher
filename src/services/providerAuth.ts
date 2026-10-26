@@ -2,6 +2,16 @@ import { t } from "../i18n";
 import type { ThinkingLevel } from "../types";
 import { withRequestTimeout } from "./requestTimeout";
 
+/**
+ * Provider credentials are sent verbatim in HTTP header values, so anything
+ * outside printable ASCII (Chinese, full-width symbols, line breaks) can never
+ * authenticate. Reject it at entry instead of failing later inside a model
+ * request, after the credential has already been stored.
+ */
+export function hasUnsupportedCredentialCharacters(value: string): boolean {
+  return /[^\x20-\x7E]/.test(value);
+}
+
 interface ProviderMethod { id: "api_key" | "oauth"; name: string }
 export interface ProviderInfo {
   id: string;

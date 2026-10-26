@@ -1672,6 +1672,57 @@ fn planner_session_directory_for_workspace(
     Ok((session, snapshot.run_id.clone()))
 }
 
+/// Project the Planner's current graph file as a display-only candidate. The
+/// extension writes that file only after an edit validated, so an accepted
+/// tool end publishes the whole draft topology; storing it durably lets a
+/// reload keep building the same preview while the committed graph stays
+/// authoritative for execution. Preview persistence never fails the turn: the
+/// commit reads the same file and reports a real read/parse failure there.
+fn project_planner_graph_preview(
+    service: &Arc<Service>,
+    owner: &str,
+    graph_path: &std::path::Path,
+    background_review: bool,
+) {
+    let candidate = fs::read(graph_path)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            serde_json::from_slice::<Graph>(&bytes).map_err(|error| error.to_string())
+        });
+    let graph = match candidate {
+        Ok(graph) => graph,
+        Err(error) => {
+            eprintln!("[Grapher] [Planner] Cannot read the draft graph for preview: {error}");
+            return;
+        }
+    };
+    let mut runtime = match service.runtime.lock() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[Grapher] [Planner] Cannot project the draft graph: {error}");
+            return;
+        }
+    };
+    // A switched-away Planner must never project its draft into another conversation.
+    if runtime.state.run_id != owner {
+        return;
+    }
+    let emitted = if background_review {
+        if runtime.state.review_graph.as_ref() == Some(&graph) {
+            return;
+        }
+        runtime.emit(EventKind::PlannerReviewProgress { graph })
+    } else {
+        if runtime.state.preview_graph.as_ref() == Some(&graph) {
+            return;
+        }
+        runtime.emit(EventKind::PlannerPreviewProgress { graph })
+    };
+    if let Err(error) = emitted {
+        eprintln!("[Grapher] [Planner] Cannot persist the draft graph preview: {error}");
+    }
+}
+
 fn plan_goal_internal(
     goal: String,
     config: Config,
@@ -2230,19 +2281,9 @@ fn plan_goal_internal_with_started(
                                             }
                                         }
                                     }
-                                    if background_review && event["toolName"].as_str().is_some_and(|name| matches!(name, "node" | "edge")) && event["type"] == "tool_execution_end" {
-                                        let candidate = fs::read(&graph_path).map_err(|e| e.to_string())
-                                            .and_then(|bytes| serde_json::from_slice::<Graph>(&bytes).map_err(|e| e.to_string()));
-                                        match candidate.and_then(|graph| {
-                                            let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                                            if runtime.state.review_graph.as_ref() != Some(&graph) {
-                                                runtime.emit(EventKind::PlannerReviewProgress { graph })?;
-                                            }
-                                            Ok(())
-                                        }) {
-                                            Ok(()) => {},
-                                            Err(error) => log_error = Some(error),
-                                        }
+                                    // The Planner extension writes the graph file only after an edit validated, so an accepted tool end publishes the whole draft topology. Storing it durably lets a reload keep building the same preview, while the committed graph stays authoritative for execution.
+                                    if event["type"] == "tool_execution_end" && event["toolName"].as_str().is_some_and(|name| matches!(name, "node" | "edge")) {
+                                        project_planner_graph_preview(&service, &owner, &graph_path, background_review);
                                     }
                                 }
                             },

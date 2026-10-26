@@ -487,6 +487,32 @@ fn credential_failure_is_continued_without_a_synthetic_message() {
 }
 
 #[test]
+fn header_invalid_credentials_enable_continue_without_a_synthetic_message() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let failed = runtime.jobs().unwrap().remove(0);
+    // undici rejects a credential that cannot be encoded in an HTTP header
+    // before the provider request leaves the process. Re-entering the API key
+    // removes the cause, so Continue must be offered as a continuity turn.
+    runtime
+        .finish(
+            &failed.execution,
+            Err("Cannot convert argument to a ByteString because the character at index 45 has a value of 19978 which is greater than 255.".into()),
+        )
+        .unwrap();
+    runtime.jobs().unwrap();
+    assert!(runtime.state.can_resume());
+    assert_eq!(
+        crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"],
+        true,
+        "the browser's Continue button follows the same recovery hint"
+    );
+    runtime.pause(false).unwrap();
+    assert_eq!(runtime.state.nodes["task"].status, "waiting");
+    assert!(runtime.state.nodes["task"].continuation);
+}
+
+#[test]
 fn credential_recovery_classification_stays_narrow() {
     for error in [
         "OAuth refresh failed for openai: OpenAI OAuth token request failed (400): { \"error\": \"invalid_grant\" }",
@@ -494,6 +520,7 @@ fn credential_recovery_classification_stays_narrow() {
         "Credential store read failed for openai",
         "API key auth failed for provider openai",
         "Provider is not configured: openai",
+        "Cannot convert argument to a ByteString because the character at index 45 has a value of 19978 which is greater than 255.",
     ] {
         assert!(crate::model::is_credential_error(error), "{error}");
         assert!(!crate::model::is_interrupted_error(error), "{error}");
