@@ -246,6 +246,23 @@ test("Planner time took adds earlier turns of the same Planner session", async (
   assert.deepEqual(recoveredMerge.map(item => item.planningId), ["turn-old", "turn-2"]);
 });
 
+test("sub-ten-second tool durations keep one decimal, like `Took 0.3s`", () => {
+  assert.equal(formatToolDuration(0), "0.0s");
+  assert.equal(formatToolDuration(120), "0.1s");
+  assert.equal(formatToolDuration(300), "0.3s");
+  assert.equal(formatToolDuration(2_480), "2.5s");
+  assert.equal(formatToolDuration(9_960), "10.0s");
+});
+
+test("tool durations are reported in h/m/s units", () => {
+  assert.equal(formatToolDuration(10_000), "10s");
+  assert.equal(formatToolDuration(42_000), "42s");
+  assert.equal(formatToolDuration(59_400), "59s");
+  assert.equal(formatToolDuration(65_000), "1m 05s");
+  assert.equal(formatToolDuration(3_780_000), "1h 3m 0s");
+  assert.equal(formatToolDuration(-5), "0.0s");
+});
+
 test("Planner session levels keep prior turns while the next turn streams live", () => {
   // Earlier turns contribute their completed 60s; the live turn adds its elapsed.
   const live = calculatePlannerDurationMs({ isPlanning: true, startedAt: 100_000, priorDurationSeconds: 60, now: 103_500 });

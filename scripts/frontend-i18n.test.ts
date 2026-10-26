@@ -62,6 +62,14 @@ test("Chinese copy and existing English stay unchanged; interpolation preserves 
   assert.equal(translate("en", "{0}分{1}秒", 2, 5), "2m 5s");
 });
 
+test("execution record toggle copy stays simplified without trailing load-log text", () => {
+  assert.equal(translate("zh-CN", "点击展开执行记录"), "点击展开执行记录");
+  assert.equal(translate("zh-CN", "点击收起执行记录"), "点击收起执行记录");
+  assert.equal(translate("en", "点击展开执行记录"), "Click to expand execution log");
+  assert.equal(translate("en", "点击收起执行记录"), "Click to collapse execution log");
+  assert.equal((en as Record<string, string>)["点击展开执行记录并加载日志"], undefined);
+});
+
 test("all English translations contain no Chinese and preserve placeholders", () => {
   for (const [key, value] of Object.entries(en)) {
     assert.doesNotMatch(value, han, key);
