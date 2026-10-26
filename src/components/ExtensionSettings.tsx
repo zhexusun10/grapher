@@ -8,7 +8,7 @@ export function ExtensionItem({ extension, disabled, onToggle }: {
   extension: PiExtension; disabled: boolean; onToggle: (extension: PiExtension) => void;
 }) {
   const bundledDescriptions: Record<string, string> = {
-    'npm:pi-continuity': 'more robust loop engineering: auto-recovers unexpected stream interruptions, truncated messages, network disconnections, and API 5h/week quota limits',
+    'npm:pi-continuity': t('更稳健的循环工程：自动恢复意外的流式中断、消息截断、网络断连，以及 API 5 小时/每周额度限制。'),
     'npm:pi-better-web-search': t('开启前请确认你的所有 Provider 中有支持 web_search API 的 Provider；注册由可用模型 Provider 提供的 web_search 工具，当没有 Provider 可搜索时不注册。'),
   };
   const description = extension.bundled

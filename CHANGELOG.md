@@ -5,7 +5,7 @@ All notable changes to Grapher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.1] - 2026-10-26
 
 ### Added
 
@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A partially loaded transcript window no longer misreads a repeated steering message as unread: the window proves consumption only when it starts at the transcript's first byte, so pausing never returns an already-consumed instruction to the composer or grows a duplicate card for a turn it did load.
 - A node history edit that forks its Pi session (for example when its workspace changed) keeps its retained transcript prefix: the conversation lineage now follows the edit anchors across a fork, and only a from-zero restart discards the earlier history.
 - Submitted text no longer lingers in the composer while the send request is pending. Rejected/failed sends restore the original draft, and late replies cannot clear a newly selected workspace's draft.
+- The bundled `pi-continuity` extension description in Settings is now localized, so the Chinese UI shows a Chinese description instead of the English-only text.
 
 ## [1.3.0] - 2026-10-23
 
@@ -259,6 +260,7 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
+[1.3.1]: https://github.com/zhexusun10/grapher/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/zhexusun10/grapher/compare/v1.2.6...v1.3.0
 [1.2.6]: https://github.com/zhexusun10/grapher/compare/v1.2.5...v1.2.6
 [1.2.5]: https://github.com/zhexusun10/grapher/releases/tag/v1.2.5

@@ -292,8 +292,7 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
     assert.ok(render(true, true, false).includes(t('{0}扩展 {1}', t('删除'), 'pi-continuity')));
     assert.ok(render(true, false, false).includes(t('{0}扩展 {1}', t('添加'), 'pi-continuity')));
     assert.ok(!render(true, true, false).includes(t('始终启用，不可删除')));
-    assert.match(render(true, true, false),
-      /more robust loop engineering: auto-recovers unexpected stream interruptions, truncated messages, network disconnections, and API 5h\/week quota limits/,
+    assert.ok(render(true, true, false).includes(t('更稳健的循环工程：自动恢复意外的流式中断、消息截断、网络断连，以及 API 5 小时/每周额度限制。')),
       'continuity describes its recovery guarantees');
     for (const enabled of [true, false]) {
       const path = '/Users/jerry/.pi/agent/npm/node_modules/pi-continuity/extensions/index.ts';

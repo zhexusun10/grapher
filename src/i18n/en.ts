@@ -7,6 +7,7 @@ export const en: Record<string, string> = {
   "{0}扩展 {1}": "{0} extension {1}",
   "刷新扩展": "Refresh extensions",
   "删除仅在 Grapher 中停用，不卸载全局扩展；可从待选列表随时加回。": "Removing only disables an extension in Grapher; it does not uninstall it globally. Add it back anytime.",
+  "更稳健的循环工程：自动恢复意外的流式中断、消息截断、网络断连，以及 API 5 小时/每周额度限制。": "more robust loop engineering: auto-recovers unexpected stream interruptions, truncated messages, network disconnections, and API 5h/week quota limits",
   "开启前请确认你的所有 Provider 中有支持 web_search API 的 Provider；注册由可用模型 Provider 提供的 web_search 工具，当没有 Provider 可搜索时不注册。": "Before enabling, confirm that at least one of your providers supports the web_search API; registers the web_search tool provided by available model providers, and is not registered when no provider can search.",
   "pi-trim 对所有角色生效；pi-continuity 对 Planner、Node Agent 和 Merger 生效；pi-better-web-search 默认停用，需在设置中手动启用且仅对 Planner、Node Agent 生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。": "pi-trim applies to all roles; pi-continuity applies to Planner, Node Agent and Merger; pi-better-web-search is off by default, must be enabled manually in settings, and applies only to Planner and Node Agent; other extensions, MCP and skills apply only to Planner and Node Agent.",
   "正在读取扩展…": "Loading extensions…",
