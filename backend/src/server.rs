@@ -5170,9 +5170,15 @@ pub fn dispatch(
         )?),
         "repository_status" => {
             let repository: String = argument(&body, "repository")?;
-            let error = crate::workspace::validate_binding(std::path::Path::new(&repository)).err();
+            let path = std::path::Path::new(&repository);
+            let error = crate::workspace::validate_binding(path).err();
+            // Only a binding whose directory no longer exists is safe to forget
+            // automatically. Permission/read failures and non-directories keep
+            // their explicit error and stay visible for the user to repair.
+            let missing = path.is_absolute() && path.metadata()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
             Ok(
-                serde_json::json!({ "repository": repository, "valid": error.is_none(), "error": error }),
+                serde_json::json!({ "repository": repository, "valid": error.is_none(), "missing": missing, "error": error }),
             )
         }
         "detect_repository" => to_value(detect_repository(argument(&body, "path")?)?),

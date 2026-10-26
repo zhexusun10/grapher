@@ -1196,6 +1196,51 @@ export default function App() {
     });
   };
 
+  // A renamed or deleted source folder is not a repairable binding. Drop the
+  // workspace instead of leaving it selected with a blocked composer; keep its
+  // persisted conversations so restoring the same path can recover them.
+  const forgetMissingWorkspace = useStableCallback((path: string) => {
+    const key = workspaceKey(path);
+    if (!key) return;
+    const remaining = projects.filter(project => workspaceKey(project.path) !== key);
+    if (remaining.length !== projects.length) {
+      setProjects(remaining);
+      try {
+        localStorage.setItem("grapher_projects", JSON.stringify(remaining));
+      } catch { }
+    }
+    // An open folder picker owns the next workspace selection, and bootstrap
+    // still owns the initial foreground state. Detaching now would invalidate
+    // either operation; the effect runs again once it has settled.
+    if (isOpeningProject || !isBootstrapReady) return;
+    if (workspaceKey(config.repository) !== key) return;
+    const nextProject = [...remaining].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0))[0];
+    const nextRepository = nextProject ? normalizeWorkspacePath(nextProject.path) : "";
+    detachForeground("");
+    setConfig(prev => {
+      const next = applyModelConfig({ ...prev, repository: nextRepository }, defaultSettings);
+      try {
+        localStorage.setItem("grapher_config", JSON.stringify(next));
+      } catch { }
+      return next;
+    });
+    setRepoInfo(null);
+    setState(emptySnapshot);
+    setRouteType("undecided");
+    setPlannerStream(initialPlannerStream);
+    setGoal("");
+    setLandingGoal(loadLandingDraft(nextRepository));
+    setSelected("");
+    setSwitchingProjectPath(null);
+    setError("");
+    resetSessionMessages();
+  });
+
+  useEffect(() => {
+    if (!config.repository || !repositoryStatus || repositoryStatus.valid || repositoryStatus.missing !== true) return;
+    forgetMissingWorkspace(config.repository);
+  }, [config.repository, forgetMissingWorkspace, isBootstrapReady, isOpeningProject, repositoryStatus]);
+
   const handleRemoveWorkspaceConfirm = (project: ProjectItem) => {
     setConfirmModal({
       title: t("移除工作区"),

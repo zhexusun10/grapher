@@ -109,7 +109,7 @@ export const runtimeService = {
     return request<Bootstrap>("bootstrap");
   },
   repositoryStatus: (repository: string, signal?: AbortSignal) =>
-    request<{ repository: string; valid: boolean; error: string | null }>("repository_status", { repository }, signal),
+    request<{ repository: string; valid: boolean; error: string | null; missing?: boolean }>("repository_status", { repository }, signal),
   snapshot: (signal?: AbortSignal) => request<Snapshot>("snapshot", {}, signal),
   snapshotForRun: (runId: string, signal?: AbortSignal) => request<Snapshot>("snapshot", { runId }, signal),
   snapshotIfChanged: (version: string | null, signal?: AbortSignal, runId?: string) =>
