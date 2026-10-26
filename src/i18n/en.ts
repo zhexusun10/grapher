@@ -19,6 +19,7 @@ export const en: Record<string, string> = {
   "无法读取附件，请重新选择文件后重试。": "The attachment could not be read. Select the file again and retry.",
   "后端未返回安全的附件路径，请更新后端后重试。": "The backend did not return a safe attachment path. Update the backend and retry.",
   "后端不支持安全附件上传，请更新后端后重试。": "The backend does not support safe attachment uploads. Update the backend and retry.",
+  "后端不支持按执行范围读取文件变更，请更新后端后重试。": "The backend does not support scoped file-change summaries. Update the backend and retry.",
   "此对话不属于当前工作区，请在对应工作区中打开。": "This conversation belongs to another workspace. Open it in its own workspace.",
   "项目绑定已失效，请重新选择目录。": "The project binding is no longer valid. Please select the directory again.",
   "正在确认项目绑定，请稍后重试。": "Checking the project binding. Please try again shortly.",

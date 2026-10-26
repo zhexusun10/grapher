@@ -93,7 +93,29 @@ impl FileChangeSummary {
 }
 
 #[derive(Default)]
+struct LogCacheState {
+    revision: u64,
+    /// A successful cold parse, including an empty result, at this log cursor.
+    scanned: Option<(usize, bool)>,
+}
+
+type CacheToken = (u64, u64, u64);
+
+/// Captured together with the authoritative Snapshot while its Run is locked.
+/// A reader must not attach a freshly sampled cache token to an older snapshot.
+pub(crate) struct WarmFence {
+    run_id: String,
+    logs: HashMap<String, CacheToken>,
+    planning: Option<(String, CacheToken)>,
+}
+
+#[derive(Default)]
 struct FileChangesCache {
+    /// Invalidation fences cold readers that are parsing outside the Run lock.
+    epoch: u64,
+    run_epochs: HashMap<String, u64>,
+    planning_revisions: HashMap<(String, String), u64>,
+    log_state: HashMap<(String, String), LogCacheState>,
     /// Keyed by `(run_id, execution_id)` -> log-derived summary
     log_changes: HashMap<(String, String), FileChangeSummary>,
     /// Keyed by `(run_id, execution_id)` -> git-derived summary
@@ -116,6 +138,29 @@ struct FileChangesCache {
     hydrated_executions: std::collections::HashSet<(String, String)>,
 }
 
+impl FileChangesCache {
+    fn log_token(&self, key: &(String, String)) -> CacheToken {
+        (self.epoch, self.run_epochs.get(&key.0).copied().unwrap_or(0),
+            self.log_state.get(key).map_or(0, |state| state.revision))
+    }
+
+    fn planning_token(&self, key: &(String, String)) -> CacheToken {
+        (self.epoch, self.run_epochs.get(&key.0).copied().unwrap_or(0),
+            self.planning_revisions.get(key).copied().unwrap_or(0))
+    }
+
+    fn planning_changed(&mut self, key: &(String, String)) {
+        let revision = self.planning_revisions.entry(key.clone()).or_default();
+        *revision = revision.wrapping_add(1);
+    }
+
+    fn log_changed(&mut self, key: &(String, String)) {
+        let state = self.log_state.entry(key.clone()).or_default();
+        state.revision = state.revision.wrapping_add(1);
+        state.scanned = None;
+    }
+}
+
 static CACHE: OnceLock<Mutex<FileChangesCache>> = OnceLock::new();
 
 fn cache() -> &'static Mutex<FileChangesCache> {
@@ -124,6 +169,10 @@ fn cache() -> &'static Mutex<FileChangesCache> {
 
 pub fn invalidate_run(run_id: &str) {
     if let Ok(mut guard) = cache().lock() {
+        let epoch = guard.run_epochs.entry(run_id.to_string()).or_default();
+        *epoch = epoch.wrapping_add(1);
+        guard.planning_revisions.retain(|(r, _), _| r != run_id);
+        guard.log_state.retain(|(r, _), _| r != run_id);
         guard.log_changes.retain(|(r, _), _| r != run_id);
         guard.git_changes.retain(|(r, _), _| r != run_id);
         guard.publication_changes.remove(run_id);
@@ -137,6 +186,10 @@ pub fn invalidate_run(run_id: &str) {
 
 pub fn clear_all() {
     if let Ok(mut guard) = cache().lock() {
+        guard.epoch = guard.epoch.wrapping_add(1);
+        guard.run_epochs.clear();
+        guard.planning_revisions.clear();
+        guard.log_state.clear();
         guard.log_changes.clear();
         guard.git_changes.clear();
         guard.publication_changes.clear();
@@ -987,6 +1040,7 @@ pub fn update_from_log_text(
         if replace {
             if let Ok(mut guard) = cache().lock() {
                 let key = (run_id.to_string(), execution_id.to_string());
+                guard.log_changed(&key);
                 guard.log_changes.remove(&key);
                 guard.live.remove(&key);
             }
@@ -1002,6 +1056,7 @@ pub fn update_from_log_text(
     let key = (run_id.to_string(), execution_id.to_string());
     if !summary.is_empty() {
         if let Ok(mut guard) = cache().lock() {
+            guard.log_changed(&key);
             if replace {
                 guard.live.insert(key.clone(), acc);
                 guard.log_changes.insert(key, summary);
@@ -1014,11 +1069,13 @@ pub fn update_from_log_text(
         }
     } else if replace {
         if let Ok(mut guard) = cache().lock() {
+            guard.log_changed(&key);
             guard.log_changes.remove(&key);
             guard.live.remove(&key);
         }
     } else if !is_running {
         if let Ok(mut guard) = cache().lock() {
+            guard.log_changed(&key);
             if let Some(entry) = guard.log_changes.get_mut(&key) {
                 entry.is_running = false;
                 entry.active_file_path = None;
@@ -1046,6 +1103,7 @@ pub fn update_from_log_chunk(
     }
     let key = (run_id.to_string(), execution_id.to_string());
     let Ok(mut guard) = cache().lock() else { return; };
+    guard.log_changed(&key);
     let acc = guard.live.entry(key.clone()).or_insert_with(|| ChangeAccumulator {
         process_alive: is_running,
         ..Default::default()
@@ -1062,6 +1120,22 @@ pub fn update_from_log_chunk(
     guard.log_changes.insert(key, summary);
 }
 
+/// The streaming store can advance a known empty parse over chunks that have
+/// no tool/process records. Growing assistant-only logs need no full reparse.
+pub(crate) fn note_read_only_log_append(run: &str, execution: &str, bytes: usize, running: bool) {
+    // This is only an optimization hint and can run under SQLite's global
+    // writer lock. Contention falls back to a later cold read, never blocks a
+    // text stream (or an unrelated Run's event commit) behind a cache reader.
+    let Ok(mut guard) = cache().try_lock() else { return; };
+    let key = (run.to_string(), execution.to_string());
+    if let Some(state) = guard.log_state.get_mut(&key) {
+        if state.scanned.is_some_and(|(previous, _)| previous <= bytes) {
+            state.revision = state.revision.wrapping_add(1);
+            state.scanned = Some((bytes, running));
+        }
+    }
+}
+
 /// A terminal event settles every in-flight tool call of that execution.
 pub fn settle(run_id: &str, execution_id: &str) {
     if run_id.is_empty() || execution_id.is_empty() {
@@ -1069,6 +1143,7 @@ pub fn settle(run_id: &str, execution_id: &str) {
     }
     let key = (run_id.to_string(), execution_id.to_string());
     let Ok(mut guard) = cache().lock() else { return; };
+    guard.log_changed(&key);
     let Some(acc) = guard.live.get_mut(&key) else { return; };
     acc.settled();
     let summary = accumulator_summary(acc);
@@ -1086,6 +1161,7 @@ pub fn reset_planning(run_id: &str, planning_id: &str) {
     }
     if let Ok(mut guard) = cache().lock() {
         let key = (run_id.to_string(), planning_id.to_string());
+        guard.planning_changed(&key);
         guard.live.remove(&key);
         guard.planning_changes.remove(&key);
         guard.planning_live.remove(&key);
@@ -1109,6 +1185,7 @@ pub fn update_planning_from_log_chunk(
     }
     let key = (run_id.to_string(), planning_id.to_string());
     let Ok(mut guard) = cache().lock() else { return; };
+    guard.planning_changed(&key);
     let acc = guard.planning_live.entry(key.clone()).or_insert_with(|| ChangeAccumulator {
         process_alive: true,
         ..Default::default()
@@ -1128,6 +1205,7 @@ pub fn settle_planning(run_id: &str, planning_id: &str) {
     }
     let key = (run_id.to_string(), planning_id.to_string());
     let Ok(mut guard) = cache().lock() else { return; };
+    guard.planning_changed(&key);
     let Some(acc) = guard.planning_live.get_mut(&key) else { return; };
     acc.settled();
     let summary = accumulator_summary(acc);
@@ -1153,12 +1231,10 @@ pub fn record_git_commit_changes(
     }
     let target = if worktree.exists() { worktree } else { repository };
     if let Some(summary) = compute_git_changes(target, before, Some(after), node, execution_id) {
-        if !summary.is_empty() {
-            if let Ok(mut guard) = cache().lock() {
-                guard
-                    .git_changes
-                    .insert((run_id.to_string(), execution_id.to_string()), summary);
-            }
+        // An empty diff is a successful result too, not a reason to rerun Git
+        // on every live poll. Failed reads remain uncached and retryable.
+        if let Ok(mut guard) = cache().lock() {
+            guard.git_changes.insert((run_id.to_string(), execution_id.to_string()), summary);
         }
     }
 }
@@ -1168,10 +1244,8 @@ pub fn record_publication_git_changes(run_id: &str, repository: &Path, base: &st
         return;
     }
     if let Some(summary) = compute_git_changes(repository, base, Some(head), "", "") {
-        if !summary.is_empty() {
-            if let Ok(mut guard) = cache().lock() {
-                guard.publication_changes.insert(run_id.to_string(), summary);
-            }
+        if let Ok(mut guard) = cache().lock() {
+            guard.publication_changes.insert(run_id.to_string(), summary);
         }
     }
 }
@@ -1386,9 +1460,72 @@ pub fn hydrate_run(root: &Path, run_id: &str) {
     guard.hydrated_runs.insert(run_id.to_string());
 }
 
+/// The caller holds the selected Run mutex, so these tokens and its Snapshot
+/// share the same live-writer boundary. Never wait for the global display cache
+/// while holding that mutex; a busy reader can simply retry its API request.
+pub(crate) fn capture_warm_fence(state: &Snapshot, scope: Option<&[String]>) -> Result<WarmFence, String> {
+    let guard = cache().try_lock().map_err(|_| "File-change cache is busy; retry the read".to_string())?;
+    let logs = state.executions.iter().chain(&state.mergers)
+        .filter(|exec| !state.superseded_execution_ids.contains(&exec.id)
+            && scope.is_none_or(|ids| ids.contains(&exec.id)))
+        .map(|exec| (exec.id.clone(), guard.log_token(&(state.run_id.clone(), exec.id.clone()))))
+        .collect();
+    let planning = state.planning_id.as_ref().filter(|_| scope.is_none())
+        .map(|id| (id.clone(), guard.planning_token(&(state.run_id.clone(), id.clone()))));
+    Ok(WarmFence { run_id: state.run_id.clone(), logs, planning })
+}
+
+/// Cold reads can run without Runtime's mutex. The snapshot's original fence
+/// rejects writes that won before I/O starts as well as those that win during it.
+fn warm_execution_log(
+    run: &str,
+    exec: &Execution,
+    repository: &str,
+    token: CacheToken,
+    read: impl FnOnce(usize) -> Result<String, String>,
+) {
+    let bytes = exec.output_bytes.max(exec.output.len());
+    if bytes == 0 || bytes > 4 * 1024 * 1024 { return; }
+    let key = (run.to_string(), exec.id.clone());
+    let fingerprint = (bytes, exec.status == "running");
+    {
+        let Ok(guard) = cache().lock() else { return; };
+        if token != guard.log_token(&key)
+            || guard.log_changes.contains_key(&key) || guard.git_changes.contains_key(&key)
+            || guard.log_state.get(&key).is_some_and(|state| state.scanned == Some(fingerprint))
+        {
+            return;
+        }
+    }
+    let Ok(text) = read(bytes) else { return; };
+    // Do not cache a partial/truncated read as a complete empty result.
+    if text.len() != bytes { return; }
+    let mut acc = ChangeAccumulator { process_alive: fingerprint.1, ..Default::default() };
+    apply_jsonl(&mut acc, &text, &exec.node, &exec.id, &exec.worktree, repository, fingerprint.1);
+    let summary = accumulator_summary(&acc);
+    let Ok(mut guard) = cache().lock() else { return; };
+    if token != guard.log_token(&key)
+        || guard.log_changes.contains_key(&key) || guard.git_changes.contains_key(&key)
+    {
+        return;
+    }
+    guard.log_changed(&key);
+    guard.log_state.get_mut(&key).unwrap().scanned = Some(fingerprint);
+    if !summary.is_empty() { guard.log_changes.insert(key.clone(), summary); }
+    if fingerprint.1 { guard.live.insert(key, acc); }
+}
+
 /// Warm cache for a Run (called on load/history and by the summary endpoint).
 pub fn warm_run_changes(state: &Snapshot, store: &crate::store::Store, root: Option<&Path>) {
-    if state.run_id.is_empty() {
+    if let Ok(fence) = capture_warm_fence(state, None) {
+        warm_scoped_changes(state, store, root, None, &fence);
+    }
+}
+
+pub(crate) fn warm_scoped_changes(
+    state: &Snapshot, store: &crate::store::Store, root: Option<&Path>, scope: Option<&[String]>, fence: &WarmFence,
+) {
+    if state.run_id.is_empty() || fence.run_id != state.run_id {
         return;
     }
     if let Some(root) = root {
@@ -1403,11 +1540,15 @@ pub fn warm_run_changes(state: &Snapshot, store: &crate::store::Store, root: Opt
 
     // Planner writes precede every node snapshot, so a reloaded run re-reads
     // its persisted planner log once (bounded) instead of losing those files.
-    if let (Some(root), Some(planning_id)) = (root, state.planning_id.as_deref()) {
-        let cached = cache().lock().ok()
-            .is_some_and(|g| g.planning_changes.contains_key(&(state.run_id.clone(), planning_id.to_string())));
+    if let (None, Some(root), Some(planning_id)) = (scope, root, state.planning_id.as_deref()) {
+        let key = (state.run_id.clone(), planning_id.to_string());
+        let token = fence.planning.as_ref().filter(|(id, _)| id == planning_id).map(|(_, token)| *token);
+        let token = token.filter(|token| cache().lock().ok().is_some_and(|guard| {
+            *token == guard.planning_token(&key)
+                && !guard.planning_changes.contains_key(&key) && !guard.planning_live.contains_key(&key)
+        }));
         let log = root.join("planning").join(planning_id).join("planner.jsonl");
-        if !cached && std::fs::metadata(&log).ok().is_some_and(|meta| meta.len() <= 4 * 1024 * 1024) {
+        if token.is_some() && std::fs::metadata(&log).ok().is_some_and(|meta| meta.len() <= 4 * 1024 * 1024) {
             if let Ok(text) = std::fs::read_to_string(&log) {
                 let worktree = state.planning.as_ref()
                     .and_then(|planning| planning.worktree.as_deref())
@@ -1415,11 +1556,13 @@ pub fn warm_run_changes(state: &Snapshot, store: &crate::store::Store, root: Opt
                 let summary = parse_jsonl_file_changes(
                     &text, "planner", planning_id, worktree, repo_str, false,
                 );
-                if !summary.is_empty() {
-                    if let Ok(mut guard) = cache().lock() {
-                        guard.planning_changes.insert(
-                            (state.run_id.clone(), planning_id.to_string()), summary,
-                        );
+                if let Ok(mut guard) = cache().lock() {
+                    if token == Some(guard.planning_token(&key))
+                        && !guard.planning_live.contains_key(&key) && !guard.planning_changes.contains_key(&key)
+                    {
+                        // Retain empty Planner results as well. This immutable
+                        // planning ID's live parser supersedes them on writes.
+                        guard.planning_changes.insert(key, summary);
                     }
                 }
             }
@@ -1427,30 +1570,16 @@ pub fn warm_run_changes(state: &Snapshot, store: &crate::store::Store, root: Opt
     }
 
     for exec in state.executions.iter().chain(state.mergers.iter()) {
-        if state.superseded_execution_ids.contains(&exec.id) {
+        if state.superseded_execution_ids.contains(&exec.id)
+            || scope.is_some_and(|ids| !ids.contains(&exec.id))
+        {
             continue;
         }
         let key = (state.run_id.clone(), exec.id.clone());
-        let already_cached = cache()
-            .lock()
-            .ok()
-            .is_some_and(|g| g.log_changes.contains_key(&key) || g.git_changes.contains_key(&key));
-
-        if !already_cached && exec.output_bytes > 0 && exec.output_bytes <= 4 * 1024 * 1024 {
-            if let Ok(page) = store.execution_log_page(&state.run_id, &exec.id, 0, 4 * 1024 * 1024)
-            {
-                update_from_log_text(
-                    &state.run_id,
-                    &exec.id,
-                    &exec.node,
-                    &exec.worktree,
-                    repo_str,
-                    &page.content,
-                    exec.status == "running",
-                    true,
-                );
-            }
-        }
+        let Some(token) = fence.logs.get(&exec.id).copied() else { continue; };
+        warm_execution_log(&state.run_id, exec, repo_str, token, |bytes| {
+            store.execution_log_page(&state.run_id, &exec.id, 0, bytes).map(|page| page.content)
+        });
 
         if let Some(after) = &exec.after {
             if !exec.before.is_empty() && !after.is_empty() {
@@ -1474,7 +1603,7 @@ pub fn warm_run_changes(state: &Snapshot, store: &crate::store::Store, root: Opt
         }
     }
 
-    if let Some(pub_state) = &state.publication {
+    if let (None, Some(pub_state)) = (scope, &state.publication) {
         if let Some(head) = &pub_state.head {
             if !state.base.is_empty() && !head.is_empty() && !pub_state.repository.is_empty() {
                 let has_pub = cache()
@@ -1493,6 +1622,10 @@ pub fn warm_run_changes(state: &Snapshot, store: &crate::store::Store, root: Opt
         }
     }
 }
+
+#[cfg(test)]
+#[path = "file_changes_cache_tests.rs"]
+mod cache_tests;
 
 #[cfg(test)]
 mod tests {

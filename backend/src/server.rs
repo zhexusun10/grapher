@@ -634,6 +634,12 @@ mod planning_repository_tests;
 #[path = "prompt_tests.rs"]
 mod prompt_tests;
 #[cfg(all(test, feature = "fixture"))]
+#[path = "merger_continuation_tests.rs"]
+mod merger_continuation_tests;
+#[cfg(test)]
+#[path = "file_changes_api_tests.rs"]
+mod file_changes_api_tests;
+#[cfg(all(test, feature = "fixture"))]
 #[path = "node_message_delivery_tests.rs"]
 mod node_message_delivery_tests;
 #[cfg(all(test, feature = "fixture"))]
@@ -3403,7 +3409,7 @@ fn control(
         let before = if source_direct { String::new() } else {
             merger_continuation_before(std::path::Path::new(&target_worktree))?
         };
-        let execution = Execution {
+        let mut execution = Execution {
             id: id.clone(),
             node: previous.node.clone(),
             revision: previous.revision,
@@ -3423,7 +3429,8 @@ fn control(
             completed_at: None,
             metrics: None,
         };
-        let snapshot = {
+        let run_id = run_id.ok_or("Missing run identity")?;
+        let root = {
             let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
             // Re-check under the Run lock: publication may have started and a
             // scheduled execution may have claimed the workspace meanwhile.
@@ -3435,20 +3442,27 @@ fn control(
             if runtime.path_is_running(std::path::Path::new(&target_worktree)) {
                 return Err("This workspace is currently in use; wait for it to finish".into());
             }
+            // Pin the target generation, not the original Merger's revision:
+            // a successful repair must not revive a subsequently revised node.
+            if let Some(target) = previous.node.strip_prefix("merge:")
+                .and_then(|name| runtime.state.nodes.get(name))
+            {
+                execution.revision = target.revision;
+            }
             runtime.emit(EventKind::MergerStarted {
                 execution: execution.clone(),
             })?;
-            runtime.emit(EventKind::Steered {
+            runtime.root.clone()
+        };
+        // Reservation precedes delivery, but every failure after reservation
+        // needs a terminal event, including errors before a worker is spawned.
+        let prepared = (|| -> Result<Snapshot, String> {
+            service.runtime.lock().map_err(|e| e.to_string())?.emit(EventKind::Steered {
                 execution_id: id.clone(),
                 node: previous.node.clone(),
                 instruction: instruction.trim().into(),
                 images: images.clone(),
             })?;
-            runtime.state.clone()
-        };
-        let run_id = run_id.ok_or("Missing run identity")?;
-        {
-            let root = service.runtime.lock().map_err(|e| e.to_string())?.root.clone();
             crate::attachment_inputs::deliver_prepared(
                 &root,
                 &run_id,
@@ -3457,7 +3471,20 @@ fn control(
                 std::path::Path::new(&target_worktree),
                 true,
             )?;
-        }
+            Ok(service.runtime.lock().map_err(|e| e.to_string())?.state.clone())
+        })();
+        let snapshot = match prepared {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                service.runtime.lock().map_err(|e| e.to_string())?.emit(EventKind::MergerFailed {
+                    execution_id: id,
+                    error: error.clone(),
+                    output_bytes: 0,
+                    metrics: None,
+                })?;
+                return Err(error);
+            }
+        };
         let worker_service = service.clone();
         let worker_execution = execution.clone();
         let worker_previous = previous.clone();
@@ -3498,19 +3525,6 @@ fn control(
                                     output_bytes: 0,
                                     metrics: None,
                                 });
-                            }
-                        }
-                    } else if let Some(target_node_name) = worker_previous.node.strip_prefix("merge:") {
-                        if let Ok(mut runtime) = worker_service.runtime.lock() {
-                            if let Some(target_node) = runtime.state.nodes.get_mut(target_node_name) {
-                                if target_node.status == "failed" || target_node.status == "blocked" {
-                                    target_node.status = "dirty".into();
-                                    target_node.error = None;
-                                    target_node.revision += 1;
-                                    if runtime.state.phase == "failed" || runtime.state.phase == "needs_attention" {
-                                        runtime.state.phase = "running".into();
-                                    }
-                                }
                             }
                         }
                     }
@@ -4406,31 +4420,36 @@ fn get_file_changes(
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let (state, root) = {
+    let execution_ids: Option<Vec<String>> = argument(body, "executionIds")?;
+    if execution_id.is_some() && execution_ids.is_some() {
+        return Err("Specify executionId or executionIds, not both".into());
+    }
+    let scope = execution_ids.clone().or_else(|| execution_id.clone().map(|id| vec![id]));
+    let (state, root, fence) = {
         let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
         let state = if requested_run_id.is_empty() || runtime.state.run_id == requested_run_id {
             runtime.state.clone()
         } else {
             runtime.store.load(&requested_run_id)?
         };
-        (state, runtime.root.clone())
+        // Pair freshness tokens with this snapshot before releasing its Run
+        // mutex. Sampling tokens only when cold I/O starts is already too late.
+        let fence = crate::file_changes::capture_warm_fence(&state, scope.as_deref())?;
+        (state, runtime.root.clone(), fence)
     };
-    // Restore the durable sidecar before taking the Run lock for the log-based
-    // warm: it can be tens of MiB, and an on-demand change read must not stall
-    // the run's polling or its Planner transcript.
-    crate::file_changes::hydrate_run(&root, &state.run_id);
-    {
-        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-        crate::file_changes::warm_run_changes(&state, &runtime.store, Some(&root));
-    }
+    // Cold sidecar/log parsing and Git diffs never hold the Run mutex. Use a
+    // read-only connection, and warm only this request's execution scope.
+    // Cache publication is fenced against concurrent live output/invalidation.
+    let reader = crate::store::Store::open_reader(&root.join("events.sqlite"))?;
+    crate::file_changes::warm_scoped_changes(&state, &reader, Some(&root), scope.as_deref(), &fence);
 
-    let summary = if let Some(exec_id) = &execution_id {
-        if let Some(exec) = state
-            .executions
-            .iter()
-            .chain(state.mergers.iter())
-            .find(|e| &e.id == exec_id)
-        {
+    let summary = if let Some(ids) = &scope {
+        let selected: Vec<_> = state.executions.iter().chain(state.mergers.iter())
+            .filter(|exec| ids.contains(&exec.id))
+            .collect();
+        let parts: Vec<_> = selected.iter().map(|exec| {
+            let cached = crate::file_changes::get_cached_execution_changes(&state.run_id, exec)
+                .unwrap_or_default();
             if exec.status == "running" && !exec.before.is_empty() && !exec.worktree.is_empty() {
                 if let Some(live_git) = crate::file_changes::compute_git_changes(
                     std::path::Path::new(&exec.worktree),
@@ -4439,20 +4458,14 @@ fn get_file_changes(
                     &exec.node,
                     &exec.id,
                 ) {
-                    let cached = crate::file_changes::get_cached_execution_changes(&state.run_id, exec)
-                        .unwrap_or_default();
-                    crate::file_changes::merge_summaries(&[cached, live_git], true)
-                } else {
-                    crate::file_changes::get_cached_execution_changes(&state.run_id, exec)
-                        .unwrap_or_default()
+                    return crate::file_changes::merge_summaries(&[cached, live_git], true);
                 }
-            } else {
-                crate::file_changes::get_cached_execution_changes(&state.run_id, exec)
-                    .unwrap_or_default()
             }
-        } else {
-            crate::file_changes::FileChangeSummary::default()
-        }
+            cached
+        }).collect();
+        // Union complete per-execution paths before capping the response. Adding
+        // already-capped totals in the browser cannot deduplicate shared files.
+        crate::file_changes::merge_summaries(&parts, selected.iter().any(|exec| exec.status == "running"))
     } else {
         crate::file_changes::get_cached_run_changes(&state).unwrap_or_default()
     };
@@ -4464,6 +4477,7 @@ fn get_file_changes(
     Ok(serde_json::json!({
         "runId": state.run_id,
         "executionId": execution_id,
+        "executionIds": execution_ids,
         "summary": summary,
     }))
 }
@@ -5500,13 +5514,20 @@ fn api_service(
         | "save_config"
         | "delete_run"
         | "get_execution_output"
+        | "get_file_changes"
         | "get_merger_prompt"
         | "write_workspace_attachment"
         | "delete_workspace_attachment"
         | "result_descriptor"
         | "launch_result" => {
             if let Some(run_id) = body.get("runId").and_then(serde_json::Value::as_str) {
-                service_for_run(primary, run_id, false)
+                // An empty runId means "the active Run" to the file-change
+                // handler; keep that meaning instead of failing a Run lookup.
+                if run_id.is_empty() && command == "get_file_changes" {
+                    Ok(primary.clone())
+                } else {
+                    service_for_run(primary, run_id, false)
+                }
             } else if command == "save_graph" {
                 service_for_run(primary, &Uuid::new_v4().to_string(), true)
             } else if command == "control"

@@ -31,12 +31,23 @@ async function expectCollapsed(page, trigger) {
   })).toBe(0);
 }
 
-async function fixture(mode, viewport = { width: 1280, height: 850 }) {
+async function fixture(mode, viewport = { width: 1280, height: 850 }, getFileChanges) {
   const context = await browser.newContext({ viewport, locale: "en-US", reducedMotion: "reduce" });
   await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
   const errors = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "get_file_changes" && getFileChanges) {
+      const body = route.request().postDataJSON();
+      let result;
+      try { result = await getFileChanges(body); }
+      catch {
+        await route.fulfill({ status: 503, json: { error: "temporary read failure" } });
+        return;
+      }
+      await route.fulfill({ json: { result: { ...result, executionIds: body.executionIds ?? null } } });
+      return;
+    }
     const defaults = { list_files: { files: [] }, list_skills: { skills: [] }, get_merger_prompt: { prompt: "Resolve the conflict." } };
     if (!(command in defaults)) errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ json: { result: defaults[command] ?? {} } });
@@ -48,6 +59,160 @@ async function fixture(mode, viewport = { width: 1280, height: 850 }) {
   await page.locator(".initial-query-scroll.conversation-ready").waitFor();
   return { page, context, errors };
 }
+
+function changesResult(paths, totalFiles = paths.length) {
+  return { runId: "changes-run", executionId: null, summary: {
+    files: paths.map(path => ({ path, status: "modified", additions: 1, deletions: 0, source: "git" })),
+    totalFiles, addedCount: 0, modifiedCount: totalFiles, deletedCount: 0, renamedCount: 0,
+    totalAdditions: totalFiles, totalDeletions: 0, isRunning: false,
+  } };
+}
+
+test("metadata changes refresh during a running execution and after a settled snapshot", { timeout: 30_000 }, async () => {
+  let current = changesResult(["src/first.ts"]);
+  const requests = [];
+  const { page, context, errors } = await fixture("node&metadata=1", undefined, body => {
+    requests.push(body);
+    return current;
+  });
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await expect(trigger).toContainText("1 files changed");
+    await trigger.click();
+    current = changesResult(["src/first.ts", "src/live.ts"]);
+    // No new execution, phase change or snapshot: the bounded watchdog must
+    // still discover fresh backend changes while this same writer is alive.
+    await expect(trigger).toContainText("2 files changed");
+    await expect(page.locator(".changed-file-path")).toHaveText(["src/first.ts", "src/live.ts"]);
+    assert.ok(requests.every(body => JSON.stringify(body.executionIds) === '["execution"]'));
+    const beforeBurst = requests.length;
+    await page.evaluate(() => { for (let n = 0; n < 20; n++) window.changesAudit.update(); });
+    await page.waitForTimeout(350);
+    assert.ok(requests.length <= beforeBurst + 1, "snapshot bursts must not cause unbounded change reads");
+    current = changesResult(["src/final.ts"]);
+    await page.evaluate(() => window.changesAudit.settle());
+    await expect(page.locator(".changed-file-path")).toHaveText(["src/final.ts"]);
+    current = changesResult(["src/after-settle.ts"]);
+    await page.evaluate(() => window.changesAudit.update());
+    await expect(page.locator(".changed-file-path")).toHaveText(["src/after-settle.ts"]);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const [mode, phase] of [["merger", "completed"], ["node", "followup"]]) {
+  test(`metadata main view refreshes during ${mode} work in phase ${phase}`, { timeout: 30_000 }, async () => {
+    let current = changesResult(["src/first.ts"]);
+    const requests = [];
+    const { page, context, errors } = await fixture(`${mode}&metadata=1&phase=${phase}`, undefined, body => {
+      requests.push(body);
+      return current;
+    });
+    try {
+      await page.evaluate(() => window.changesAudit.select(""));
+      const trigger = page.getByTestId("workspace-changes-trigger");
+      await expect.poll(() => requests.filter(body => body.executionIds === undefined).length).toBeGreaterThan(0);
+      await expect(trigger).toContainText("1 files changed");
+      current = changesResult(["src/first.ts", "src/live.ts"]);
+      // No snapshot or phase update: actual execution state must keep polling
+      // alive even when this Run does not have an ordinary running phase.
+      await expect(trigger).toContainText("2 files changed");
+      current = changesResult(["src/final.ts"]);
+      await page.evaluate(() => window.changesAudit.settle());
+      await expect(trigger).toContainText("1 files changed");
+      const settledReads = requests.length;
+      await page.waitForTimeout(2300);
+      assert.equal(requests.length, settledReads, "terminal work must suspend idle timer reads again");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("metadata scoped aggregation preserves capped totals without double-counting attempts", { timeout: 30_000 }, async () => {
+  const requests = [];
+  const result = changesResult(Array.from({ length: 60 }, (_, i) => `src/file-${i}.ts`), 120);
+  const { page, context, errors } = await fixture("node&metadata=1&attempts=2", undefined, body => {
+    requests.push(body);
+    return result;
+  });
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await expect(trigger).toContainText("120 files changed");
+    await trigger.click();
+    await expect(page.getByTestId("changed-file-item")).toHaveCount(50);
+    await expect(page.getByTestId("workspace-changes-truncated")).toContainText("70 more file changes omitted");
+    assert.ok(requests.length > 0);
+    assert.ok(requests.every(body => JSON.stringify(body.executionIds) === '["execution-prior","execution"]'));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("inline repeated attempts count shared files once", { timeout: 30_000 }, async () => {
+  const { page, context, errors } = await fixture("node&attempts=2");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await expect(trigger).toContainText("6 files changed");
+    await trigger.click();
+    await expect(page.getByTestId("changed-file-item")).toHaveCount(6);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("metadata scope switches reject late responses from the previous conversation", { timeout: 30_000 }, async () => {
+  let hold = false, pending = false, release;
+  const delayed = new Promise(resolve => { release = resolve; });
+  const { page, context, errors } = await fixture("node&metadata=1", undefined, async body => {
+    if (!body.executionIds) return changesResult(["src/main.ts"]);
+    if (hold) {
+      pending = true;
+      await delayed;
+      return changesResult(["src/stale.ts"]);
+    }
+    return changesResult(["src/node.ts"]);
+  });
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await expect(trigger).toContainText("1 files changed");
+    await trigger.click();
+    await expect(page.locator(".changed-file-path")).toHaveText(["src/node.ts"]);
+    hold = true;
+    await page.evaluate(() => window.changesAudit.update());
+    await expect.poll(() => pending).toBe(true);
+    await page.evaluate(() => window.changesAudit.select(""));
+    await expect(trigger).toContainText("1 files changed");
+    await trigger.click();
+    await expect(page.locator(".changed-file-path")).toHaveText(["src/main.ts"]);
+    release();
+    await page.waitForTimeout(250);
+    await expect(page.locator(".changed-file-path")).toHaveText(["src/main.ts"]);
+    assert.deepEqual(errors, []);
+  } finally { release(); await context.close(); }
+});
+
+test("metadata waiting scope stays empty and failed reads retain the last projection", { timeout: 30_000 }, async () => {
+  let failing = false;
+  let attempts = 0;
+  const { page, context, errors } = await fixture("waiting&metadata=1", undefined, body => {
+    attempts++;
+    if (failing) throw Error("unavailable");
+    return changesResult(body.executionIds ? [] : ["src/run.ts"]);
+  });
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await expect(trigger).toContainText("No file changes");
+    await page.evaluate(() => window.changesAudit.select(""));
+    await expect(trigger).toContainText("1 files changed");
+    failing = true;
+    const beforeFailure = attempts;
+    await page.evaluate(() => window.changesAudit.update());
+    await expect.poll(() => attempts).toBeGreaterThan(beforeFailure);
+    await expect(trigger).toContainText("1 files changed");
+    failing = false;
+    const beforeRetry = attempts;
+    await expect.poll(() => attempts).toBeGreaterThan(beforeRetry);
+    await expect(trigger).toContainText("1 files changed");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 for (const mode of ["serial", "planner", "node", "merger"]) {
   test(`${mode}: one disclosure beside session details opens page content without moving the composer`, { timeout: 30_000 }, async () => {

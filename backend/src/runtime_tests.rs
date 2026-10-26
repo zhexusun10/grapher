@@ -2637,6 +2637,7 @@ fn node_merger_events_do_not_enter_publication_phase() {
         })
         .unwrap();
     assert_eq!(runtime.state.phase, "running");
+    assert_eq!(runtime.state.nodes["task"].status, "running", "initial composition must not requeue its active node");
     assert!(runtime.state.publication.is_none());
 }
 

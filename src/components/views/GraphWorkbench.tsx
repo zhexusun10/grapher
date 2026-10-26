@@ -1890,7 +1890,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       : isMainViewWorking ||
       graphPhase === "running" ||
       graphPhase === "publishing" ||
-      graphPhase === "merging";
+      graphPhase === "merging" ||
+      // Standalone publication-Merger turns keep the Run completed; source
+      // follow-ups can likewise run outside the ordinary running phase.
+      state.executions.some(execution => execution.status === "running") ||
+      (state.mergers ?? []).some(execution => execution.status === "running");
 
   const { summary: workspaceChangesSummary } = useWorkspaceChanges({
     state,

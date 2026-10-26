@@ -2875,6 +2875,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             output_bytes,
             metrics,
         } => {
+            let repaired_node = state.mergers.iter()
+                .find(|execution| execution.id == *execution_id && execution.status == "running")
+                .and_then(|execution| execution.node.strip_prefix("merge:")
+                    .map(|name| (name.to_string(), execution.revision)));
             if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
                 execution.status = "completed".into();
                 execution.after = Some(head.clone());
@@ -2913,6 +2917,21 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 state.phase = "publishing".into();
                 if let Some(publication) = &mut state.publication {
                     publication.status = "publishing".into();
+                }
+            }
+            // Commit repair and target recovery in the same durable transition.
+            // Initial composition leaves its still-running node alone; stale or
+            // duplicate completions cannot revive a newer node generation.
+            if let Some((name, revision)) = repaired_node {
+                if let Some(node) = state.nodes.get_mut(&name) {
+                    if node.revision == revision && matches!(node.status.as_str(), "failed" | "blocked") {
+                        node.status = "dirty".into();
+                        node.error = None;
+                        node.revision += 1;
+                        if matches!(state.phase.as_str(), "failed" | "needs_attention") {
+                            state.phase = if state.paused { "paused" } else { "running" }.into();
+                        }
+                    }
                 }
             }
         }

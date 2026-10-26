@@ -56,6 +56,45 @@ test("timed-out history leaves the deduplication map and bootstrap does not retr
   } finally { globalThis.fetch = original; }
 });
 
+test("file change reads are bounded and carry an explicit empty or multi-execution scope", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const original = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  let signal: AbortSignal | null | undefined;
+  try {
+    globalThis.fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      signal = init?.signal;
+      return new Promise<Response>(() => {});
+    };
+    const scoped = runtimeService.getFileChanges("changes-run", ["first", "second"]);
+    const rejected = assert.rejects(scoped, RequestTimeoutError);
+    context.mock.timers.tick(15_000);
+    await rejected;
+    assert.equal(signal?.aborted, true);
+    assert.deepEqual(bodies[0].executionIds, ["first", "second"]);
+    assert.equal(bodies[0].executionId, undefined);
+    globalThis.fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return response({ summary: {}, executionIds: bodies.at(-1)?.executionIds ?? null });
+    };
+    await runtimeService.getFileChanges("changes-run", []);
+    assert.deepEqual(bodies[1].executionIds, []);
+    await runtimeService.getFileChanges("changes-run", "first");
+    assert.equal(bodies[2].executionId, "first");
+    assert.equal(bodies[2].executionIds, undefined);
+  } finally { globalThis.fetch = original; }
+});
+
+test("older backends cannot leak a run aggregate into an execution scope", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => response({ executionId: null, summary: { totalFiles: 100 } });
+    await assert.rejects(runtimeService.getFileChanges("changes-run", []));
+    await assert.rejects(runtimeService.getFileChanges("changes-run", ["first"]));
+  } finally { globalThis.fetch = original; }
+});
+
 test("settings body stalls are bounded", async context => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   const original = globalThis.fetch;

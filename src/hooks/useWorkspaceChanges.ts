@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { runtimeService } from "../services/runtime";
+import { startVisibilityPolling, type PollingController } from "../services/visibilityPolling";
 import type { Execution, FileChangeSummary, Snapshot } from "../types";
 import {
   emptyFileChangeSummary,
@@ -25,6 +26,7 @@ export interface WorkspaceChangesViewModel {
 }
 
 const EMPTY_NODES: string[] = [];
+const REFRESH_INTERVAL_MS = 2_000;
 
 /**
  * File changes are authoritative only in the backend summary: Git compares the
@@ -45,36 +47,45 @@ export function useWorkspaceChanges({
   const runId = state.runId;
   const scoped = scopedExecutions !== null;
   const scopedIds = scoped ? scopedExecutions.map((execution) => execution.id) : null;
-  const scopeKey = `${runId}|${scopedIds ? scopedIds.join(",") : "run"}`;
+  const scopeKey = JSON.stringify([runId, scopedIds]);
   const inline = !state.fileChangesOmitted;
   const [fetched, setFetched] = useState<{ key: string; summary: FileChangeSummary } | null>(null);
-  const scopedRef = useRef<Execution[] | null>(scopedExecutions);
-  scopedRef.current = scopedExecutions;
+  const poller = useRef<PollingController | null>(null);
+  const snapshotSequence = state.events.at(-1)?.sequence ?? 0;
 
   useEffect(() => {
     if (inline || !runId) { setFetched(null); return; }
-    let cancelled = false;
-    setFetched(null);
-    const load = async () => {
+    const abort = new AbortController();
+    let nextReadAt = 0;
+    const load = async (): Promise<number | null> => {
+      // Snapshot notifications coalesce with the live timer; frequent tool or
+      // metrics updates must not turn into an unbounded stream of Git scans.
+      if (Date.now() < nextReadAt) return nextReadAt - Date.now();
       try {
-        const parts = scoped
-          ? await Promise.all((scopedRef.current ?? []).map((execution) =>
-              runtimeService.getFileChanges(runId, execution.id)
-                .then((result) => result.summary)
-                .catch(() => null)))
-          : [(await runtimeService.getFileChanges(runId)).summary];
-        if (cancelled) return;
-        const merged = mergeFileChangeSummaries(parts, isWorking);
-        // The backend caps the transferred rows; keep its authoritative totals.
-        const totalFiles = parts.reduce((sum, part) => sum + (part?.totalFiles ?? part?.files.length ?? 0), 0);
-        setFetched({ key: scopeKey, summary: merged.totalFiles === totalFiles ? merged : { ...merged, totalFiles } });
+        const result = await runtimeService.getFileChanges(runId, scopedIds ?? undefined, abort.signal);
+        if (abort.signal.aborted) return null;
+        setFetched({ key: scopeKey, summary: result.summary });
+        nextReadAt = Date.now() + REFRESH_INTERVAL_MS;
+        return isWorking ? REFRESH_INTERVAL_MS : Infinity;
       } catch {
-        if (!cancelled) setFetched({ key: scopeKey, summary: emptyFileChangeSummary });
+        if (abort.signal.aborted) return null;
+        // A failed read is not an authoritative empty change list. Retain the
+        // last projection and retry, including after a terminal snapshot.
+        nextReadAt = Date.now() + REFRESH_INTERVAL_MS;
+        return REFRESH_INTERVAL_MS;
       }
     };
-    void load();
-    return () => { cancelled = true; };
+    const polling = startVisibilityPolling(load);
+    poller.current = polling;
+    return () => {
+      polling();
+      abort.abort();
+      if (poller.current === polling) poller.current = null;
+    };
+    // scopeKey contains the immutable execution-id list, not its array identity.
   }, [inline, runId, scopeKey, isWorking]);
+
+  useEffect(() => { poller.current?.wake(); }, [snapshotSequence]);
 
   return useMemo(() => {
     const superseded = new Set(state.supersededExecutionIds ?? []);
@@ -103,13 +114,9 @@ export function useWorkspaceChanges({
       }
 
       const anyRunning = isWorking || executions.some((execution) => execution.status === "running");
-      const merged = parts.length > 0
+      summary = parts.length > 0
         ? mergeFileChangeSummaries(parts, anyRunning)
         : emptyFileChangeSummary;
-      // The backend caps the shipped file list for build-heavy Runs, so the
-      // trigger must read the authoritative totals instead of the merged slice.
-      const totalFiles = parts.reduce((sum, part) => sum + (part.totalFiles ?? part.files.length), 0);
-      summary = merged.totalFiles === totalFiles ? merged : { ...merged, totalFiles };
     }
 
     const nodes = new Set<string>();

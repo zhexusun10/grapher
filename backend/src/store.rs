@@ -249,6 +249,19 @@ impl Store {
         })
     }
 
+    /// Independent read-only connection for cold log projection. No schema
+    /// setup, write transaction, or Runtime mutex is needed for these reads.
+    pub(crate) fn open_reader(path: &Path) -> Result<Self, String> {
+        let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| error.to_string())?;
+        connection.busy_timeout(std::time::Duration::from_secs(10)).map_err(|error| error.to_string())?;
+        Ok(Self {
+            connection,
+            appended_since_checkpoint: Cell::new(0),
+            execution_offsets: RefCell::new(HashMap::new()),
+        })
+    }
+
     pub fn append(&self, state: &mut Snapshot, mut kind: EventKind) -> Result<(), String> {
         if matches!(kind, EventKind::Output { .. }) {
             return self.append_logs(state, vec![kind]);

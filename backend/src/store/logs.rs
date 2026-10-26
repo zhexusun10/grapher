@@ -125,6 +125,10 @@ impl Store {
                         &text,
                         execution.status == "running",
                     );
+                } else {
+                    crate::file_changes::note_read_only_log_append(
+                        &state.run_id, &execution.id, execution.output_bytes, execution.status == "running",
+                    );
                 }
             }
         }

@@ -48,6 +48,9 @@ function Fixture() {
     : params.get("mix") === "1" ? mixedFiles
     : params.get("reference") === "1" ? referenceFiles : files;
   const writeDebug = params.get("write") === "1";
+  const metadata = params.get("metadata") === "1";
+  const repeatedAttempts = params.get("attempts") === "2";
+  const livePhase = params.get("phase") || "running";
   const [running, setRunning] = useState(true);
   const [empty, setEmpty] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -59,18 +62,23 @@ function Fixture() {
   const execution: Execution = {
     id: "execution", node: "worker", revision: 0, attempt: 1,
     sessionId: "session", worktree: "/project", before: "", after: "",
-    status: running ? "running" : "completed", startedAt: 1, completedAt: running ? null : 2,
+    status: running ? "running" : "completed", startedAt: repeatedAttempts ? 2 : 1, completedAt: running ? null : 3,
     output: JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The implementation is ready for review." }] } }) + "\n",
-    fileChanges: summary,
+    fileChanges: metadata ? undefined : summary,
   };
+  const attempts: Execution[] = repeatedAttempts
+    ? [{ ...execution, id: "execution-prior", attempt: 1, status: "completed", startedAt: 1, completedAt: 2 }, { ...execution, attempt: 2 }]
+    : [execution];
   const state: Snapshot = {
     ...emptySnapshot, runId: "changes-run", config, planType: mode === "serial" ? "serial" : "graph",
-    approved: true, phase: running ? "running" : "completed",
+    approved: true, phase: running ? livePhase : "completed",
     graph: { originalGoal: "Review the file changes in this conversation.", nodes: [{ name: "worker", task: "Implement the preview component." }], edges: [] },
-    nodes: { worker: { status: mode === "waiting" ? "waiting" : running ? "running" : "completed", revision: 0, head: null, instruction: "", error: null } },
-    executions: mode === "planner" || mode === "merger" || mode === "waiting" ? [] : [execution],
+    nodes: { worker: { status: mode === "waiting" ? "waiting" : running && livePhase !== "completed" ? "running" : "completed", revision: 0, head: null, instruction: "", error: null } },
+    executions: mode === "planner" || mode === "merger" || mode === "waiting" ? [] : attempts,
     mergers: mode === "merger" ? [{ ...execution, id: "merger-execution", node: "merger" }] : [],
-    fileChanges: mode === "planner" || mode === "waiting" ? summary : undefined,
+    fileChanges: !metadata && (mode === "planner" || mode === "waiting") ? summary : undefined,
+    fileChangesOmitted: metadata,
+    events: metadata ? [{ sequence: revision + 1, timestamp: 1, type: "workspace_files_changed" }] : [],
   };
   (window as any).changesAudit = {
     settle: () => setRunning(false), empty: () => setEmpty(true),

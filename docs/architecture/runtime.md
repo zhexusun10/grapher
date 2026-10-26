@@ -204,6 +204,27 @@ respects explicitly empty saved workspace lists. See the
 [summary projection](../../backend/src/store/conversations.rs) and
 [polling](../../src/hooks/useSnapshotPolling.ts) implementations.
 
+File-change rows are read separately from metadata snapshots. `get_file_changes`
+accepts either one `executionId`, an explicit `executionIds` scope (including an
+empty list), or no scope for the Run aggregate. The backend unions complete
+per-execution paths before capping response rows, preserving authoritative totals.
+Empty log results are cached by byte cursor and running/terminal state; scoped
+requests do not warm unrelated executions. Freshness tokens are captured together
+with the Snapshot under the Run mutex, so a reader that captured an older state
+cannot later overwrite newer live output or a terminal settlement; the whole cold
+read is skipped when the cache cannot be sampled without waiting. The summary
+endpoint uses a separate read-only database connection and performs cold log
+parsing and Git diffs outside the Run mutex. Advancing a known empty parse over
+tool-free text is a non-blocking hint, so a busy display cache never stalls a
+text stream or another Run's event commit. Empty Git/Planner results are cache
+hits too, rather than reasons to repeat cold work on every poll.
+The visible conversation revalidates during live work and on durable snapshot
+changes with bounded, non-overlapping reads; scope changes cancel old readers and
+failed reads retain the last display projection rather than implying no changes.
+The main view follows actual running executions/Mergers even when the Run phase
+stays `completed` for a standalone Merger or is `followup` for source-direct work;
+it suspends timer reads once those writers settle.
+
 Snapshot/history/list requests are metadata-oriented. Node logs load on demand by
 `(runId, executionId, byteOffset)`; planning revisions have their own cursor.
 Execution-log pages default to 256 KiB and are capped at 1 MiB; planning forward

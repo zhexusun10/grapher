@@ -21,7 +21,7 @@ const snapshotMutations = new Set([
 const boundedCommands = new Set([
   "bootstrap", "history", "snapshot", "snapshot_if_changed", "save_config",
   "detect_repository", "repository_status", "get_planning", "list_plannings",
-  "get_planning_snapshot", "get_execution_output", "get_planning_output",
+  "get_planning_snapshot", "get_execution_output", "get_planning_output", "get_file_changes",
   "provider_auth", "pi_extensions", "list_skills", "list_files",
   "get_merger_prompt",
 ]);
@@ -238,9 +238,20 @@ export const runtimeService = {
   getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false, tail = false, before?: number, limit?: number, endOffset?: number) =>
     request<{ runId: string; executionId: string; content: string; startOffset?: number; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
       "get_execution_output", { runId, executionId, offset, full, ...(endOffset !== undefined ? { endOffset } : {}), ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
-  getFileChanges: (runId: string, executionId?: string, signal?: AbortSignal) =>
-    request<{ runId: string; executionId: string | null; summary: FileChangeSummary }>(
-      "get_file_changes", { runId, ...(executionId ? { executionId } : {}) }, signal),
+  getFileChanges: async (runId: string, execution?: string | string[], signal?: AbortSignal) => {
+    const result = await request<{ runId: string; executionId: string | null; executionIds?: string[] | null; summary: FileChangeSummary }>(
+      "get_file_changes", {
+        runId,
+        ...(Array.isArray(execution) ? { executionIds: execution } : execution ? { executionId: execution } : {}),
+      }, signal);
+    // Older backends ignore executionIds and return the whole Run. Never let
+    // that aggregate masquerade as one node's (or an empty node's) changes.
+    if (Array.isArray(execution) && (!Array.isArray(result.executionIds) ||
+        result.executionIds.length !== execution.length || result.executionIds.some((id, index) => id !== execution[index]))) {
+      throw new Error(t("后端不支持按执行范围读取文件变更，请更新后端后重试。"));
+    }
+    return result;
+  },
   getMergerPrompt: async (runId: string, executionId: string, signal?: AbortSignal): Promise<string> => {
     const res = await request<{ runId: string; executionId: string; prompt: string }>(
       "get_merger_prompt", { runId, executionId }, signal

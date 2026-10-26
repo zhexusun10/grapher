@@ -5,6 +5,15 @@ All notable changes to Grapher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- File-change summaries are now authoritative and live. Reading a node, Merger or Planner conversation returns a deduplicated union of that conversation's executions (a new `executionIds` scope), so overlapping attempts no longer double-count the same file and a waiting node with no execution yet shows no changes instead of the whole Run's aggregate. The panel revalidates while the conversation is still working — including a standalone publication Merger that keeps the Run `completed` and a source-direct follow-up — and suspends timer reads once the writer settles, so the review list no longer freezes on its first snapshot.
+- A stale snapshot can no longer replace newer file-change state. Freshness is captured together with the snapshot under the Run lock, so a slow cold read cannot resurrect a failed write or drop a newer pending edit. Cold reads use a separate read-only database connection outside the Run mutex, an empty parse (log, Git or Planner) is cached by byte cursor instead of re-parsed on every live poll, and a scoped request no longer warms unrelated executions.
+- A Merger continuation that fails before its worker starts (for example a rejected attachment delivery) now records a terminal failure and releases the workspace reservation, instead of leaving a Merger marked running with no process that blocked later continuations, deletion and cleanup until a restart.
+- A successful node-composition Merger repair now persists the target node's recovery (back to `dirty`, revision bumped) in the same durable transition as the Merger's completion, so the recovered node survives event replay and restart. A stale or duplicate completion can no longer revive a node that was revised meanwhile.
+
 ## [1.3.1] - 2026-10-26
 
 ### Added
@@ -260,6 +269,7 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
+[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.3.1...HEAD
 [1.3.1]: https://github.com/zhexusun10/grapher/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/zhexusun10/grapher/compare/v1.2.6...v1.3.0
 [1.2.6]: https://github.com/zhexusun10/grapher/compare/v1.2.5...v1.2.6

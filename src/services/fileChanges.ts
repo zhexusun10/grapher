@@ -138,11 +138,19 @@ export function mergeFileChangeSummaries(
   if (!isWorking && !anyRunning) {
     for (const file of files) file.isRunning = false;
   }
-  return buildSummaryFromFiles(
+  const merged = buildSummaryFromFiles(
     files,
     Boolean(anyRunning || (isWorking && activeFilePath)),
     isWorking || anyRunning ? activeFilePath : undefined,
   );
+  const present = summaries.filter((summary): summary is FileChangeSummary => !!summary);
+  // A single backend aggregate may have capped rows but uncapped totals. Keep
+  // all of its counters. Multiple complete summaries are counted by path union,
+  // never by adding their overlapping totalFiles values; capped multi-execution
+  // scopes are aggregated by the backend before they reach this function.
+  return present.length === 1
+    ? { ...present[0], files: merged.files, isRunning: merged.isRunning, activeFilePath: merged.activeFilePath }
+    : merged;
 }
 
 /** Split a normalized path into `{ fileName, dirPath }` for compact UI display. */

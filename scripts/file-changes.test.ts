@@ -15,6 +15,28 @@ test("splitFilePath separates the file name and its directory", () => {
   assert.deepEqual(splitFilePath("README.md"), { fileName: "README.md", dirPath: "" });
 });
 
+test("merging repeated attempts counts shared paths once", () => {
+  const summary = buildSummaryFromFiles([
+    { path: "src/shared.ts", status: "modified", additions: 1, deletions: 0, source: "git" },
+  ]);
+  const merged = mergeFileChangeSummaries([summary, summary]);
+  assert.equal(merged.totalFiles, 1);
+  assert.equal(merged.files.length, 1);
+  assert.equal(merged.modifiedCount, 1);
+});
+
+test("a capped backend aggregate retains all authoritative counters", () => {
+  const aggregate = buildSummaryFromFiles(Array.from({ length: 120 }, (_, index) => ({
+    path: `src/file-${index}.ts`, status: "added" as const, additions: 2, deletions: 0,
+  })));
+  const capped = { ...aggregate, files: aggregate.files.slice(0, 60) };
+  const merged = mergeFileChangeSummaries([null, capped]);
+  assert.equal(merged.files.length, 60);
+  assert.equal(merged.totalFiles, 120);
+  assert.equal(merged.addedCount, 120);
+  assert.equal(merged.totalAdditions, 240);
+});
+
 test("merging backend summaries keeps Git counts authoritative and unions nodes", () => {
   const agentSummary = buildSummaryFromFiles([
     { path: "docs/plan.md", status: "added", additions: 2, deletions: 0, nodes: ["planner"], source: "write" },
