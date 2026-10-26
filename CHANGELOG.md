@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Topology cards now use a taller row pitch, so execution layers keep a clear vertical gap and side-routed or long edges have room to read, instead of the graph bunching every layer near the top of the pane.
+
 ### Fixed
 
-- Opening the workspace file-change list now expands it in place without scrolling the node conversation. The transcript therefore keeps the reader's current position instead of jumping toward the middle of the history, independent of how many files the list contains.
+- Opening the workspace file-change list now keeps the expansion's scroll reveal bounded: it stops once the trigger row reaches the viewport edge and never travels more than one viewport. A short list in a long node conversation therefore no longer jumps toward the middle of the history while the disclosure still animates into view.
+- A Serial conversation no longer treats selecting or clearing a graph node as a conversation switch. That transient selection used to capture the serial scroll offset and restore it later, leaving the Node Agent stuck mid-history after switching views or history pages. A view change also clears a stale history-reading marker on the shared scroller.
 - Entering a Node Agent conversation no longer ghost-fades the whole tool-card transcript after its loading state ends: the measured frame is revealed at full opacity, so a heavy history with several attempts no longer makes every card flash through a 250ms opacity transition.
 - A Provider transport failure such as `Connection error.` no longer strands a Graph Run without a recovery action: after Pi exhausts its automatic retries, the Run offers **Continue**, which resumes the failed node's unfinished turn in its existing session and requeues its blocked descendants. Deterministic failures (certificate validation, authentication, quota, context overflow) are still excluded and keep their existing recovery paths.
 - Live node file-change counts no longer include generated dependency/cache trees: on-demand Git comparison now applies the same generated-artifact boundary as snapshots, so an inherited `node_modules` tree can no longer turn one node's few authored files into tens of thousands. Ignored ordinary project files still count because snapshots force-add them. A node conversation also keeps its execution scope stable while transcript history loads, and unchanged polling results no longer re-render the workbench.

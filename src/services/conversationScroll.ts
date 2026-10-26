@@ -75,6 +75,8 @@ export function resolveViewScroll(
  * without double-counting current height. A disclosure taller than the viewport
  * cannot be revealed in full; stop at its anchor (the trigger row) instead of
  * chasing its bottom, which would push the trigger and the first rows out of view.
+ * The reveal is also capped at one viewport so a stale anchor or viewport
+ * measurement can never jump across the middle of a long conversation.
  * Collapsing never applies a programmatic scroll delta, allowing the panel to fold
  * into the button in place without ratcheting or shifting the conversation upward.
  */
@@ -92,6 +94,7 @@ export function calculateWorkspaceDetailsScrollDelta(
   const futurePanelBottom = panelBottom + additionalHeight;
   const bottomOverflow = Math.max(0, futurePanelBottom - visibleBottom);
   const keepAnchorVisible = Math.max(0, anchorTop - visibleTop);
-  return Math.min(bottomOverflow, keepAnchorVisible);
+  const maxReveal = Math.max(0, visibleBottom - visibleTop);
+  return Math.min(bottomOverflow, keepAnchorVisible, maxReveal);
 }
 

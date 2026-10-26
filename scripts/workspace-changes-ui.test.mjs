@@ -387,6 +387,28 @@ test("added/deleted files lead and each group ranks by changed line count", { ti
   } finally { await context.close(); }
 });
 
+test("serial node selection does not capture or restore the conversation scroll position", { timeout: 30_000 }, async () => {
+  const { page, context, errors } = await fixture("serial&long=1");
+  try {
+    const scroller = page.locator(".initial-query-scroll");
+    await scroller.evaluate(element => { element.scrollTop = (element.scrollHeight - element.clientHeight) * 0.4; });
+    await page.waitForTimeout(300);
+    const before = await scroller.evaluate(element => element.scrollTop);
+    assert.ok(await scroller.evaluate(element => element.scrollHeight - element.clientHeight) > 500,
+      "the conversation must be scrollable");
+    // Selecting a graph node does not change the visible Serial conversation.
+    await page.evaluate(() => window.changesAudit.select("worker"));
+    await page.waitForTimeout(400);
+    assert.equal(await scroller.evaluate(element => element.scrollTop), before,
+      "node selection must not capture or move the serial scroll position");
+    await page.evaluate(() => window.changesAudit.select(""));
+    await page.waitForTimeout(400);
+    assert.equal(await scroller.evaluate(element => element.scrollTop), before,
+      "deselecting must not restore an intermediate serial offset");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("large change sets render only the first 50 rows and mark the remainder", { timeout: 30_000 }, async () => {
   const { page, context, errors } = await fixture("serial&many=1");
   try {
@@ -429,7 +451,7 @@ test("a long change list opens at its first row without moving the entry out of 
   } finally { await context.close(); }
 });
 
-test("opening a short change list never moves a long node conversation", { timeout: 30_000 }, async () => {
+test("a short change list reveals in place without jumping through a long node conversation", { timeout: 30_000 }, async () => {
   const { page, context, errors } = await fixture("node&long=1");
   try {
     const trigger = page.getByTestId("workspace-changes-trigger");
@@ -455,13 +477,15 @@ test("opening a short change list never moves a long node conversation", { timeo
       const trigger = document.querySelector('[data-testid="workspace-changes-trigger"]').getBoundingClientRect();
       const first = document.querySelector('[data-testid="changed-file-item"]').getBoundingClientRect();
       const s = scroll.getBoundingClientRect();
-      return { scrollTop: scroll.scrollTop, triggerBottom: trigger.bottom - s.top,
+      return { scrollTop: scroll.scrollTop, triggerTop: trigger.top - s.top, triggerBottom: trigger.bottom - s.top,
         firstTop: first.top - s.top,
         triggerFits: trigger.top >= s.top && trigger.bottom <= s.top + scroll.clientHeight };
     });
-    // A short list must open at its trigger. Scrolling even by the panel height
-    // is visible as a jump when the reader is at the end of a long transcript.
-    assert.equal(after.scrollTop, before.scrollTop, JSON.stringify({ before, after }));
+    const reveal = after.scrollTop - before.scrollTop;
+    // Keep the animated reveal, but bound it to this disclosure: a short list
+    // may push the view up by its own height, never toward the conversation middle.
+    assert.ok(reveal > 0, JSON.stringify({ before, after }));
+    assert.ok(reveal <= before.clientHeight / 2, JSON.stringify({ before, after }));
     assert.equal(after.triggerFits, true, JSON.stringify(after));
     assert.ok(after.firstTop >= after.triggerBottom - 1, JSON.stringify(after));
     assert.ok(after.firstTop >= 0, JSON.stringify(after));

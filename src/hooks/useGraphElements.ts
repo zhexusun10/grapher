@@ -6,6 +6,16 @@ import { publicationMergerCardId, type FeedbackExhaustion, type Graph, type Plan
 import { tokens } from "../tokens";
 import type { WorkNode } from "../components/graph/TaskNode";
 
+// Topology geometry. Column pitch leaves a full card of horizontal room for the
+// side edge lanes; the taller row pitch keeps a generous gap between layers so
+// long edges stay readable and the graph uses the canvas height instead of
+// crowding every card into a narrow band.
+const NODE_WIDTH = 236;
+const COLUMN_PITCH = 300;
+const ROW_PITCH = 260;
+const PADDING_X = 160;
+const PADDING_Y = 24;
+
 export function graphEdgeId(edge: Pick<Graph["edges"][number], "from" | "to" | "feedback">): string {
   return JSON.stringify([edge.from, edge.feedback ? "fb" : "dep", edge.to]);
 }
@@ -100,20 +110,21 @@ export function useGraphElements(
   activity: RuntimeActivity[] = [],
   recentlyAddedNodeNames: Set<string> = new Set(),
 ) {
-  // Keep the same geometry for nodes and edges. Wider rows leave room for
-  // edge channels; cards in the same layer remain cleanly aligned.
+  // Keep the same geometry for nodes and edges. Columns leave room for edge
+  // channels; rows keep a readable gap between layers. Cards in the same layer
+  // remain cleanly aligned.
   const graphLayout = useMemo(() => {
     const layers = computeExecutionLayers(state.graph, state.plan);
     const positions = new Map<string, { x: number; y: number; layer: number }>();
     layers.forEach((batch, layer) => batch.forEach((name, index) => {
       positions.set(name, {
-        x: (index - (batch.length - 1) / 2) * 300 + 160,
-        y: layer * 210 + 24,
+        x: (index - (batch.length - 1) / 2) * COLUMN_PITCH + PADDING_X,
+        y: layer * ROW_PITCH + PADDING_Y,
         layer,
       });
     }));
     const xs = Array.from(positions.values(), (position) => position.x);
-    return { positions, minX: Math.min(...xs, 160), maxX: Math.max(...xs, 160) + 236 };
+    return { positions, minX: Math.min(...xs, PADDING_X), maxX: Math.max(...xs, PADDING_X) + NODE_WIDTH };
   }, [state.graph, state.plan]);
 
   const mergeTargets = useMemo(() => {
@@ -150,8 +161,8 @@ export function useGraphElements(
     let lastLayer = 0;
     for (const position of graphLayout.positions.values()) lastLayer = Math.max(lastLayer, position.layer);
     return {
-      x: (graphLayout.minX + graphLayout.maxX) / 2 - 118,
-      y: (lastLayer + 1) * 210 + 24,
+      x: (graphLayout.minX + graphLayout.maxX) / 2 - NODE_WIDTH / 2,
+      y: (lastLayer + 1) * ROW_PITCH + PADDING_Y,
       layer: lastLayer + 1,
     };
   }, [graphLayout]);
@@ -171,7 +182,7 @@ export function useGraphElements(
     const routing = new Map<string, { sourceHandle: string; targetHandle: string; routeX?: number; routeSide?: string }>(state.graph.edges.map((edge) => {
       const from = graphLayout.positions.get(edge.from);
       const to = graphLayout.positions.get(edge.to);
-      const side = from && to && (from.x + to.x + 236) / 2 > center ? "right" : "left";
+      const side = from && to && (from.x + to.x + NODE_WIDTH) / 2 > center ? "right" : "left";
       const boundary = side === "left" ? "min" : "max";
       const sideRoute = !!edge.feedback && !!from && !!to &&
         from.x === rowBounds.get(from.layer)?.[boundary] &&
@@ -193,7 +204,7 @@ export function useGraphElements(
         const from = graphLayout.positions.get(name);
         if (!from) continue;
         const routed = publicationPosition.layer - from.layer > 1;
-        const side = from.x + 118 > center ? "right" : "left";
+        const side = from.x + NODE_WIDTH / 2 > center ? "right" : "left";
         routing.set(`publication:${name}`, {
           sourceHandle: "bottom",
           targetHandle: "top",
@@ -217,7 +228,7 @@ export function useGraphElements(
 
   const nodes = useMemo<WorkNode[]>(() => {
     const taskNodes: WorkNode[] = state.graph.nodes.map((node) => {
-      const position = graphLayout.positions.get(node.name) ?? { x: 160, y: 24, layer: 0 };
+      const position = graphLayout.positions.get(node.name) ?? { x: PADDING_X, y: PADDING_Y, layer: 0 };
       const nodeAttempts = indexes.attempts.get(node.name) ?? [];
       const incoming = indexes.incoming.get(node.name) ?? [];
       const outgoing = indexes.outgoing.get(node.name) ?? [];
@@ -225,7 +236,7 @@ export function useGraphElements(
       return {
         id: node.name,
         type: "work",
-        width: 236,
+        width: NODE_WIDTH,
         position: { x: position.x, y: position.y },
         // A short-lived entrance class lets newly created cards animate in
         // without re-triggering the animation on later data updates.
@@ -267,7 +278,7 @@ export function useGraphElements(
       const placeLeft = !leftOccupied;
       const mergerX = placeLeft ? node.position.x - 280 : node.position.x + 280;
       return {
-        id: `merger:${target}`, type: "work", width: 236,
+        id: `merger:${target}`, type: "work", width: NODE_WIDTH,
         position: { x: mergerX, y: node.position.y },
         data: {
           name: `merger · ${target}`, task: t("合并上游分支冲突"),
@@ -282,7 +293,7 @@ export function useGraphElements(
     });
     if (!publicationMerger) return [...taskNodes, ...mergerNodes];
     return [...taskNodes, ...mergerNodes, {
-      id: publicationMergerCardId, type: "work", width: 236,
+      id: publicationMergerCardId, type: "work", width: NODE_WIDTH,
       position: { x: publicationPosition.x, y: publicationPosition.y },
       data: {
         name: t("publication merger"), task: t("合并最终回写结果冲突"),

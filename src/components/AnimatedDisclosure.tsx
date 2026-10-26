@@ -11,8 +11,11 @@ export function getConversationViewport(scroll: HTMLElement) {
   const scrollBottom = top + scroll.clientHeight;
   const composer = scroll.parentElement?.querySelector<HTMLElement>(".pane-bottom-chat");
   const overlay = composer?.getBoundingClientRect();
-  const bottom = overlay && overlay.height > 0 && overlay.bottom > top
-    ? Math.max(top, Math.min(scrollBottom, overlay.top)) : scrollBottom;
+  // A composer laid out above the scroller (or retained mid-transition) must
+  // not collapse the visible viewport to zero and turn any expansion into a
+  // scroll across the whole conversation.
+  const bottom = overlay && overlay.height > 0 && overlay.top > top && overlay.top < scrollBottom
+    ? overlay.top : scrollBottom;
   return { top, bottom, height: bottom - top };
 }
 
@@ -21,10 +24,6 @@ interface AnimatedDisclosureProps {
   /** Wrapper whose bottom edge is revealed while the height grows. */
   panelRef: React.RefObject<HTMLElement | null>;
   scrollContainerRef?: React.RefObject<HTMLElement | null>;
-  /** Whether expanding may scroll the conversation to reveal the added body.
-   * A list opens in place so the reader keeps their current position; only the
-   * session details need the viewport to follow their short body. */
-  revealOnOpen?: boolean;
   onBeforeToggle?: () => void;
   onAfterToggle?: () => void;
   children: React.ReactNode;
@@ -33,7 +32,7 @@ interface AnimatedDisclosureProps {
 /** One shared height/opacity disclosure used by the session details and the
  * file-change list, so both expand and collapse identically. */
 export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
-  open, panelRef, scrollContainerRef, revealOnOpen = true, onBeforeToggle, onAfterToggle, children,
+  open, panelRef, scrollContainerRef, onBeforeToggle, onAfterToggle, children,
 }) => {
   const animatorRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -69,7 +68,7 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
     cleanupListenersRef.current = null;
     onBeforeToggle?.();
 
-    if (container && open && revealOnOpen) {
+    if (container && open) {
       const viewport = getConversationViewport(container);
       // The changes list is a disclosure nested beside the session-details
       // trigger; keep that enclosing trigger row visible, not just the list's
@@ -113,7 +112,7 @@ export const AnimatedDisclosure: React.FC<AnimatedDisclosureProps> = ({
       onAfterToggle?.();
     };
     rafIdRef.current = requestAnimationFrame(tick);
-  }, [open, onAfterToggle, onBeforeToggle, panelRef, revealOnOpen, scrollContainerRef]);
+  }, [open, onAfterToggle, onBeforeToggle, panelRef, scrollContainerRef]);
 
   return <div
     ref={animatorRef}

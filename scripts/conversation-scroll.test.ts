@@ -187,6 +187,21 @@ test("a disclosure taller than the viewport stops at its anchor", () => {
   assert.equal(anchored, 0);
 });
 
+test("a reveal never exceeds one viewport when the anchor measurement is stale", () => {
+  // A stale anchor or collapsed composer must not turn a short disclosure into
+  // a scroll across the middle of a long conversation.
+  const delta = calculateWorkspaceDetailsScrollDelta(
+    true, // nextOpen = true
+    0,    // current animator height
+    5000, // target height
+    10000, // stale anchor far below the viewport
+    10050, // panel bottom before expand
+    0,    // visible top
+    800,  // visible bottom
+  );
+  assert.equal(delta, 800);
+});
+
 test("workspace details panel re-expand mid-animation does not double-count height", () => {
   // Suppose animator is partially open at height 100 with target height 180.
   // panelBottom already includes the current 100px (e.g. 500px).

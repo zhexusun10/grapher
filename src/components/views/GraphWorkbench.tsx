@@ -694,7 +694,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
     return state.runId || state.graph.originalGoal || "initial";
   }, [state.runId, state.graph.originalGoal]);
-  const conversationViewKey = `${currentRunKey}:${routeType}:${selected || "planner"}`;
+  // A Serial run has one conversation regardless of which graph node is
+  // inspected. Keeping `selected` in its key made node selection capture the
+  // serial scroll offset and restore it later, leaving the conversation stuck
+  // mid-history after switching views or history pages.
+  const conversationViewKey = `${currentRunKey}:${routeType}:${routeType === "graph" ? selected || "planner" : "main"}`;
   const composerDraftKey = JSON.stringify([selected, selectedMerger?.id ?? ""]);
   // Remounting on epoch bumps is the only way to push restored text into the
   // uncontrolled composer without making every keystroke controlled.
@@ -976,6 +980,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const saved = conversationScrollStateRef.current.get(conversationViewKey);
     isUserScrolledUpRef.current = saved?.isUserScrolledUp ?? false;
     historyReadingRef.current = false;
+    if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
     suppressAutoScrollRef.current = false;
     isPreparingConversationRef.current = true;
     readyExecutionIdsRef.current.clear();
