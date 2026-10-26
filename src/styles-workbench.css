@@ -338,10 +338,6 @@
   white-space: nowrap;
 }
 
-.node-task-badge-icon {
-  flex-shrink: 0;
-}
-
 .node-task-name {
   font-size: 12px;
   font-weight: 500;

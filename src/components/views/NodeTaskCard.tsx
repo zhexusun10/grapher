@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { Check, Copy, Pencil, X, Sparkles, ChevronLeft, ChevronRight } from "lucide-react";
+import { Check, Copy, Pencil, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { t } from "../../i18n";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import type { ChatMessageVersion } from "../../types";
@@ -115,7 +115,6 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
       <div className="node-task-card-header">
         <div className="node-task-header-left">
           <div className="node-task-badge">
-            <Sparkles size={12} className="node-task-badge-icon" />
             <span>{badgeText || t("节点任务目标")}</span>
           </div>
           {versions && versions.length > 1 && onSwitchVersion && (
