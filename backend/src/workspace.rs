@@ -3102,8 +3102,9 @@ pub(crate) fn collection_excluded(
     is_generated_artifact(relative) && !tracked.contains(&relative.to_string_lossy().replace('\\', "/"))
 }
 
-/// Git pathspecs that exclude generated artifacts from a forced `git add`.
-fn generated_artifact_pathspecs() -> Vec<String> {
+/// Git pathspecs that exclude generated artifacts from a forced `git add` or
+/// from a live untracked-file listing.
+pub(crate) fn generated_artifact_pathspecs() -> Vec<String> {
     let mut specs = Vec::new();
     for dir in GENERATED_ARTIFACT_DIRS {
         specs.push(format!(":(exclude,glob,icase)**/{dir}"));

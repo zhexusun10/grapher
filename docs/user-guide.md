@@ -52,6 +52,7 @@ Review nodes can send bounded feedback to their graph-defined target. The target
 | --- | --- |
 | App/process interruption or an explicit pause | Inspect the retained output, then use **Continue** when offered. Startup does not silently resume model calls. |
 | Provider credentials expired | Re-authenticate in Settings, then use **Continue** for the affected conversation. |
+| Provider connection failure (`Connection error.`, connection reset/refused) | Check your network or proxy if it persists, then use **Continue** for the affected conversation. It resumes the unfinished turn in the same session. |
 | Other task/provider failure | Inspect the error and intervene on the node, or save changed Node Agent model/thinking settings for that conversation and then use **Continue**. |
 | Conflict while combining parent results | Inspect the node's Merger conversation and retained workspace. Retry the node to re-attempt preparation; publication retry does not fix this conflict. |
 | Final publication failed | Inspect the publication panel and any publication Merger, then retry publication. It reuses retained results rather than rerunning the graph. A changed branch is not silently written; interrupted-checkout recovery may require restoring the captured branch. Staged changes in excluded environment/runtime scopes stay staged and are not published; commit or unstage them explicitly. |

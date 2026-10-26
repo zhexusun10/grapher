@@ -1490,6 +1490,30 @@ impl Snapshot {
             .collect()
     }
 
+    /// Failed nodes whose latest attempt lost its Provider connection before the
+    /// turn could change the task. Pi has already spent its automatic retry
+    /// budget, so an explicit Continue is the manual recovery path for the same
+    /// session, exactly like a credential failure.
+    pub fn transport_retry_nodes(&self) -> Vec<String> {
+        self.nodes
+            .iter()
+            .filter_map(|(name, node)| {
+                if node.status != "failed" || !node.error.as_deref().is_some_and(is_transport_error) {
+                    return None;
+                }
+                self.executions
+                    .iter()
+                    .rev()
+                    .find(|execution| {
+                        execution.node == *name
+                            && !self.superseded_execution_ids.contains(&execution.id)
+                    })
+                    .filter(|execution| execution.status == "failed")
+                    .map(|_| name.clone())
+            })
+            .collect()
+    }
+
     pub fn model_retry_nodes(&self) -> Vec<String> {
         self.nodes.iter().filter_map(|(name, node)| {
             if node.status != "failed" || node.model_config.is_none()
@@ -1573,6 +1597,7 @@ impl Snapshot {
             && (!self.interrupted_nodes().is_empty()
                 || !self.model_retry_nodes().is_empty()
                 || !self.credential_retry_nodes().is_empty()
+                || !self.transport_retry_nodes().is_empty()
                 || !self.preparation_failed_nodes().is_empty())
     }
 
@@ -1781,6 +1806,57 @@ pub fn is_credential_error(error: &str) -> bool {
         || lower.contains("unauthenticated")
         || lower.contains("authentication failed")
         || lower.contains("unauthorized")
+}
+
+/// Provider transport failures (DNS/TCP/TLS/socket/proxy) end the turn before
+/// the task or its Pi session changed. Pi has already spent its automatic retry
+/// budget, so an explicit Continue may resume the unfinished turn instead of
+/// demanding a fabricated intervention message. Permanent or deterministic
+/// causes are deliberately excluded so Continue cannot loop on an unchanged
+/// failure: certificate validation, authentication, quota and context overflow
+/// keep their ordinary-failure or dedicated recovery paths.
+pub fn is_transport_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if is_credential_error(error)
+        || lower.contains("certificate")
+        || lower.contains("cert_")
+        || lower.contains("x509")
+        || lower.contains("unable to verify")
+        || lower.contains("context length")
+        || lower.contains("context_length")
+        || lower.contains("context window")
+        || lower.contains("maximum context")
+        || lower.contains("insufficient balance")
+        || lower.contains("quota")
+    {
+        return false;
+    }
+    lower.starts_with("connection error")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("connection lost")
+        || lower.contains("connection closed")
+        || lower.contains("client network socket disconnected")
+        || lower.contains("peer connection was lost")
+        || lower.contains("socket hang up")
+        || lower.contains("socket connection was closed")
+        || lower.contains("network error")
+        || lower.contains("fetch failed")
+        || lower.contains("failed to fetch")
+        || lower.contains("tls handshake failed")
+        || lower.contains("ssl handshake failed")
+        || lower.contains("premature close")
+        || lower.contains("unexpected eof")
+        || lower.contains("econnreset")
+        || lower.contains("econnrefused")
+        || lower.contains("econnaborted")
+        || lower.contains("etimedout")
+        || lower.contains("enotfound")
+        || lower.contains("eai_again")
+        || lower.contains("und_err_")
+        || lower.contains("err_network_changed")
+        || lower.contains("err_http2_")
+        || lower.contains("err_stream_")
 }
 
 pub fn now() -> u64 {
@@ -2222,6 +2298,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     && (node.model_config.is_some()
                         || node.error.as_deref().is_some_and(|error| {
                             is_interrupted_error(error) || is_credential_error(error)
+                                || is_transport_error(error)
                         }));
                 // A failed multi-source repair has a queued user continuation
                 // that duplicates the node instruction. Claim it so the retry

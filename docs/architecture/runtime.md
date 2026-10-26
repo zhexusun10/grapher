@@ -296,10 +296,16 @@ After interruption:
   Ordinary failures require an explicit node intervention, or a changed Node
   Agent model/thinking selection saved for the current conversation followed
   by Continue. A Provider credential failure (OAuth refresh/`invalid_grant`,
-  credential-store, API-key or not-authenticated errors) is the one exception:
+  credential-store, API-key or not-authenticated errors) is one exception:
   it leaves the task and session untouched, so after re-authenticating in
   Settings the same Continue control resumes that session through the same
-  continuity turn instead of demanding an intervention message. Alongside
+  continuity turn instead of demanding an intervention message. A Provider
+  transport failure (DNS/TCP/TLS/socket/proxy errors such as `Connection
+  error.`, connection reset/refused, `ECONNRESET` or `socket hang up`) is the
+  same exception: Pi has already spent its automatic retry budget, so an
+  explicit Continue resumes the unfinished turn. Deterministic causes
+  (certificate validation, authentication, quota and context overflow) stay
+  ordinary failures or keep their dedicated recovery path. Alongside
   never-started nodes, saving with that Run ID records
   per-node settings for its currently failed nodes; it keeps their failure/error
   evidence and does not dispatch work. Continue resumes those unfinished turns

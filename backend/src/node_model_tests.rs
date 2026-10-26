@@ -513,6 +513,71 @@ fn header_invalid_credentials_enable_continue_without_a_synthetic_message() {
 }
 
 #[test]
+fn provider_transport_failure_enables_continue_without_a_synthetic_message() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let failed = runtime.jobs().unwrap().remove(0);
+    // Pi already exhausted its automatic transport retries; the session and
+    // workspace are intact, so Continue must be the manual retry path.
+    runtime.finish(&failed.execution, Err("Connection error.".into())).unwrap();
+    runtime.jobs().unwrap();
+    assert_eq!(runtime.state.phase, "needs_attention");
+    assert!(
+        !runtime.state.can_resume_interrupted(),
+        "a transport failure is not a user pause"
+    );
+    assert!(runtime.state.can_resume(), "Continue offers the unfinished turn");
+    assert_eq!(
+        crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"],
+        true,
+        "the browser's Continue button follows the same recovery hint"
+    );
+    runtime.pause(false).unwrap();
+    assert_eq!(runtime.state.nodes["task"].status, "waiting");
+    assert!(runtime.state.nodes["task"].continuation);
+    let resumed = runtime.jobs().unwrap();
+    assert_eq!(resumed.len(), 1);
+    assert!(resumed[0].continuation);
+    assert!(resumed[0].task.is_empty(), "do not add a synthetic user message");
+    assert_eq!(resumed[0].execution.session_id, failed.execution.session_id);
+    assert_eq!(resumed[0].execution.worktree, failed.execution.worktree);
+    assert_eq!(
+        resumed[0].resume_execution_id.as_deref(),
+        Some(failed.execution.id.as_str())
+    );
+    assert!(!runtime.state.can_resume(), "a queued recovery is no longer offered twice");
+}
+
+#[test]
+fn transport_recovery_classification_stays_narrow() {
+    for error in [
+        "Connection error.",
+        "Connection error. This may be caused by passing an undici dispatcher",
+        "read ECONNRESET",
+        "socket hang up",
+        "fetch failed",
+        "TLS handshake failed: stream closed",
+    ] {
+        assert!(crate::model::is_transport_error(error), "{error}");
+        assert!(!crate::model::is_interrupted_error(error), "{error}");
+    }
+    for error in [
+        "Provider quota exhausted",
+        "boom",
+        "user paused",
+        "application stopped during this execution",
+        "Authentication failed",
+        "OAuth refresh failed for openai: invalid_grant",
+        "context length exceeded",
+        "context_length_exceeded",
+        "TLS handshake failed: certificate has expired",
+        "insufficient balance",
+    ] {
+        assert!(!crate::model::is_transport_error(error), "{error}");
+    }
+}
+
+#[test]
 fn credential_recovery_classification_stays_narrow() {
     for error in [
         "OAuth refresh failed for openai: OpenAI OAuth token request failed (400): { \"error\": \"invalid_grant\" }",

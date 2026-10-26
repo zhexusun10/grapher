@@ -1095,49 +1095,71 @@ pub fn compute_git_changes(
         );
     }
 
-    // If comparing against live working tree (`after` is None), also collect untracked files
+    // If comparing against live working tree (`after` is None), also collect untracked files.
+    // Ignored ordinary project files are force-added to graph snapshots, so they are
+    // still reported; generated dependency/cache trees are not part of a snapshot and
+    // must stay out. The ignored listing uses the collector's artifact pathspecs so
+    // Git skips an inherited node_modules tree instead of materializing it here.
     if after.is_none() {
-        if let Ok(untracked) = run_git(&["ls-files", "--others", "-z"]) {
-            for raw in untracked.split('\0') {
-                if raw.is_empty() {
-                    continue;
-                }
-                let path = normalize_slashes(raw);
-                if crate::path_identity::is_runtime_metadata_path(Path::new(&path))
-                    || path == ".git"
-                    || path.starts_with(".git/")
-                    || path.ends_with("/.DS_Store")
-                    || path == ".DS_Store"
-                {
-                    continue;
-                }
-                if !items_map.contains_key(&path) {
-                    let full = repo_or_worktree.join(&path);
-                    let additions = fs::metadata(&full)
-                        .ok()
-                        .filter(|m| m.is_file() && m.len() <= 256 * 1024)
-                        .and_then(|_| fs::read_to_string(&full).ok())
-                        .map(|content| content.lines().count())
-                        .unwrap_or(0);
-                    items_map.insert(
-                        path.clone(),
-                        FileChangeItem {
-                            path,
-                            old_path: None,
-                            status: "added".into(),
-                            additions,
-                            deletions: 0,
-                            is_running: false,
-                            nodes: if node.is_empty() { vec![] } else { vec![node.into()] },
-                            execution_ids: if execution_id.is_empty() {
-                                vec![]
-                            } else {
-                                vec![execution_id.into()]
-                            },
-                            source: Some("git".into()),
+        let mut untracked = run_git(&["ls-files", "--others", "--exclude-standard", "-z"])
+            .unwrap_or_default();
+        let mut ignored_args: Vec<String> = [
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ]
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect();
+        ignored_args.extend(crate::workspace::generated_artifact_pathspecs());
+        let ignored_refs: Vec<&str> = ignored_args.iter().map(String::as_str).collect();
+        if let Ok(ignored) = run_git(&ignored_refs) {
+            untracked.push_str(&ignored);
+        }
+        for raw in untracked.split('\0') {
+            if raw.is_empty() {
+                continue;
+            }
+            let path = normalize_slashes(raw);
+            if crate::workspace::is_generated_artifact(Path::new(&path))
+                || crate::path_identity::is_runtime_metadata_path(Path::new(&path))
+                || path == ".git"
+                || path.starts_with(".git/")
+                || path.ends_with("/.DS_Store")
+                || path == ".DS_Store"
+            {
+                continue;
+            }
+            if !items_map.contains_key(&path) {
+                let full = repo_or_worktree.join(&path);
+                let additions = fs::metadata(&full)
+                    .ok()
+                    .filter(|m| m.is_file() && m.len() <= 256 * 1024)
+                    .and_then(|_| fs::read_to_string(&full).ok())
+                    .map(|content| content.lines().count())
+                    .unwrap_or(0);
+                items_map.insert(
+                    path.clone(),
+                    FileChangeItem {
+                        path,
+                        old_path: None,
+                        status: "added".into(),
+                        additions,
+                        deletions: 0,
+                        is_running: false,
+                        nodes: if node.is_empty() { vec![] } else { vec![node.into()] },
+                        execution_ids: if execution_id.is_empty() {
+                            vec![]
+                        } else {
+                            vec![execution_id.into()]
                         },
-                    );
-                }
+                        source: Some("git".into()),
+                    },
+                );
             }
         }
     }
@@ -2123,5 +2145,36 @@ mod tests {
         assert_eq!(committed_summary.modified_count, 1);
         assert_eq!(committed_summary.deleted_count, 1);
 
+    }
+
+    #[test]
+    fn live_changes_keep_ignored_project_files_but_drop_generated_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        crate::workspace::git(&repo, &["init", "-q"]).unwrap();
+        crate::workspace::git(&repo, &["config", "user.email", "test@example.com"]).unwrap();
+        crate::workspace::git(&repo, &["config", "user.name", "Test"]).unwrap();
+
+        fs::write(repo.join(".gitignore"), "dist/\n").unwrap();
+        fs::write(repo.join("kept.txt"), "base\n").unwrap();
+        crate::workspace::git(&repo, &["add", "-A"]).unwrap();
+        crate::workspace::git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
+        let before = crate::workspace::git(&repo, &["rev-parse", "HEAD"]).unwrap();
+
+        // Ignored ordinary files are force-added to graph snapshots, so `dist/` is a
+        // live project change. `node_modules/` is not listed in .gitignore, so only the
+        // collector's generated-artifact boundary can keep it out. Both are present
+        // in inherited workspaces; the dependency tree must not become node changes.
+        fs::create_dir_all(repo.join("dist")).unwrap();
+        fs::write(repo.join("dist/bundle.js"), "generated\n").unwrap();
+        fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
+        fs::write(repo.join("node_modules/pkg/index.js"), "dependency\n").unwrap();
+        fs::write(repo.join("src.ts"), "export const value = 1;\n").unwrap();
+
+        let live = compute_git_changes(&repo, &before, None, "worker", "exec-live").unwrap();
+        let paths: Vec<&str> = live.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, vec!["dist/bundle.js", "src.ts"], "authored files stay: {paths:?}");
+        assert_eq!(live.added_count, 2);
     }
 }

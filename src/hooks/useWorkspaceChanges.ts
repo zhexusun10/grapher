@@ -28,6 +28,12 @@ export interface WorkspaceChangesViewModel {
 const EMPTY_NODES: string[] = [];
 const REFRESH_INTERVAL_MS = 2_000;
 
+/** Polling often returns byte-identical summaries; keeping the previous state
+ * avoids re-rendering the whole workbench (and its transcript) every 2s. */
+function sameSummary(a: FileChangeSummary, b: FileChangeSummary): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
+
 /**
  * File changes are authoritative only in the backend summary: Git compares the
  * real snapshots, while tool-transcript parsing is an approximation (it misses
@@ -64,7 +70,11 @@ export function useWorkspaceChanges({
       try {
         const result = await runtimeService.getFileChanges(runId, scopedIds ?? undefined, abort.signal);
         if (abort.signal.aborted) return null;
-        setFetched({ key: scopeKey, summary: result.summary });
+        setFetched(previous => !previous || previous.key !== scopeKey
+          ? { key: scopeKey, summary: result.summary }
+          : sameSummary(previous.summary, result.summary)
+            ? previous
+            : { key: scopeKey, summary: result.summary });
         nextReadAt = Date.now() + REFRESH_INTERVAL_MS;
         return isWorking ? REFRESH_INTERVAL_MS : Infinity;
       } catch {

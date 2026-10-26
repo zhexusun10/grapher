@@ -1689,6 +1689,7 @@ impl Runtime {
         let mut roots = self.state.interrupted_nodes();
         roots.extend(self.state.model_retry_nodes());
         roots.extend(self.state.credential_retry_nodes());
+        roots.extend(self.state.transport_retry_nodes());
         roots.extend(self.state.preparation_failed_nodes());
         roots.sort();
         roots.dedup();

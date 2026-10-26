@@ -1878,11 +1878,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [conversationViewKey]);
 
   const inNodeScope = !!selectedNode && routeType === "graph";
-  const activeScopeExecutions = useMemo(() => (
-    inNodeScope
-      ? nodeTurns.flatMap((turn) => turn.executions)
-      : []
-  ), [inNodeScope, nodeTurns]);
 
   const isCurrentViewWorking =
     selectedNode && routeType === "graph"
@@ -1901,8 +1896,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // Node/Merger conversations show only their own executions; the main view
     // uses the run-level projection, which also covers Planner and publication.
     // A waiting node scopes to an empty execution list, which must not fall back
-    // to that run aggregate.
-    scopedExecutions: inNodeScope ? activeScopeExecutions : null,
+    // to that run aggregate. `attempts` is stable from the snapshot, whereas
+    // `nodeTurns` grows while transcript history loads and would re-scope the
+    // panel several times (empty -> first attempt -> all attempts).
+    scopedExecutions: inNodeScope ? attempts : null,
     isWorking: isCurrentViewWorking,
   });
 
