@@ -638,6 +638,11 @@ export default function App() {
       };
       if (delivery === "steered" && executionId) {
         const clean = nodeInstructionText(textToRecord);
+        const inlineAccepted = state.events.filter(event => event.type === "steered" && event.execution_id === executionId &&
+          nodeInstructionText(event.instruction ?? "") === clean).length;
+        message.inlineSteerOrdinal = Math.max(inlineAccepted, ...sessionEntries.filter(entry => entry.delivery === "steered" &&
+          entry.executionId === executionId && nodeInstructionText(entry.text) === clean)
+          .map(entry => (entry.inlineSteerOrdinal ?? -1) + 1));
         const accepted = state.events.filter(event => event.type === "steered" && event.execution_id === executionId && !event.images?.length &&
           nodeInstructionText(event.instruction ?? "") === clean).length;
         message.steerOrdinal = Math.max(accepted, ...sessionEntries.filter(entry => entry.delivery === "steered" && !entry.images?.length && !entry.files?.length &&

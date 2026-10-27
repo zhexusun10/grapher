@@ -1,5 +1,5 @@
 import React, { memo, useCallback } from "react";
-import type { ImageAttachment, TranscriptItem } from "../types";
+import type { FileAttachment, ImageAttachment, TranscriptItem } from "../types";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
@@ -7,12 +7,13 @@ import { AnimatedUserTurn } from "./AnimatedUserTurn";
 import { motion } from "motion/react";
 
 export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExpandedChange, editing, draft,
-  onDraftChange, onStartEdit, onCancelEdit, onEditUser }: {
+  onDraftChange, onStartEdit, onCancelEdit, onEditUser, steerAttachments }: {
   item: TranscriptItem; expanded?: boolean;
   onExpandedChange: (id: string, expanded: boolean, card?: HTMLElement) => void;
   editing: boolean; draft: string; onDraftChange: (text: string) => void;
   onStartEdit: (id: string, text: string) => void; onCancelEdit: () => void;
   onEditUser?: (text: string, replacement: string, userTurnOffset?: number, images?: ImageAttachment[]) => boolean | void | Promise<unknown>;
+  steerAttachments?: { images?: ImageAttachment[]; files?: FileAttachment[] };
 }) {
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
   // Keep execution rows in the exact same layout as the Planner transcript:
@@ -26,11 +27,11 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
     <span className={`system-pill${item.isError && item.role === "assistant" ? " conversation-error-message" : ""}`}>{item.content}</span>
   </div>;
   if (item.role === "user") return <AnimatedUserTurn id={item.id} animateAppear={item.animateAppear}
-    className="chat-message-row user planner-user-turn"><EditableUserBubble text={item.content || ""} images={item.images}
+    className="chat-message-row user planner-user-turn"><EditableUserBubble text={item.content || ""} images={item.images?.length ? item.images : steerAttachments?.images} files={steerAttachments?.files}
     editing={editing} draft={draft} onDraftChange={onDraftChange}
     onEdit={onEditUser ? () => onStartEdit(item.id, item.content || "") : undefined}
     onCancel={onCancelEdit} onSend={onEditUser ? text => {
-      return Promise.resolve(onEditUser(item.content || "", text, item.userTurnOffset, item.images)).then(accepted => {
+      return Promise.resolve(onEditUser(item.content || "", text, item.userTurnOffset, item.images?.length ? item.images : steerAttachments?.images)).then(accepted => {
         if (accepted !== false) onCancelEdit();
         return accepted === false ? false : true;
       });

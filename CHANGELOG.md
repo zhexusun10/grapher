@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Newly sent Serial and Graph node/Merger Steers now stay after the existing output until their transcript row appears, rather than briefly jumping below the previous user message. Repeated instructions, partially loaded history, attachments and execution settlement during the handoff retain their correct display order; historical fallback cards and pause recovery remain separate from this presentation state.
+
 ## [1.3.2] - 2026-10-28
 
 ### Added

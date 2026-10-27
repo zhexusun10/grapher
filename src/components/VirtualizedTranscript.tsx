@@ -10,6 +10,7 @@ import { shareJson } from "../services/structuralSharing";
 import { VirtualizedList } from "./VirtualizedList";
 import { TranscriptRow } from "./TranscriptRow";
 import { TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
+import type { LiveSteerMarker } from "../lib/pendingSteers";
 
 interface VirtualizedTranscriptProps {
   output: string;
@@ -43,7 +44,9 @@ interface VirtualizedTranscriptProps {
   /** Reports the user turns actually present in the transcript, and whether the
    * loaded window starts at the transcript's first byte. Steer bubbles outside
    * the transcript stay visible until their inline copy is parsed. */
-  onInlineUserTurnsChange?: (texts: string[], complete: boolean) => void;
+  onInlineUserTurnsChange?: (texts: string[], complete: boolean, turns: { text: string; offset?: number }[], end?: number) => void;
+  outputEndOffset?: number;
+  liveSteers?: readonly LiveSteerMarker[];
 }
 
 function MeasuredRow({ id, measure, children }: { id: string; measure: (id: string, height: number) => void; children: React.ReactNode }) {
@@ -201,6 +204,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   onReachTop,
   onCompactingChange,
   onInlineUserTurnsChange,
+  outputEndOffset,
+  liveSteers,
 }) => {
   const [editingUser, setEditingUser] = useState<string | null>(null);
   const [userDraft, setUserDraft] = useState("");
@@ -683,16 +688,34 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   // text explains itself instead of disappearing from the transcript.
   const items = useMemo(() => (settled ? settleInterruptedItems(parsedItems) : parsedItems),
     [parsedItems, settled]);
+  const liveSteerRows = useMemo(() => {
+    const rows = new Map<string, LiveSteerMarker>();
+    for (const steer of liveSteers ?? []) {
+      const matches = items.filter(item => item.role === "user" && item.content === steer.text &&
+        item.userTurnOffset !== undefined && item.userTurnOffset >= steer.afterOffset);
+      const item = matches[steer.occurrence - 1];
+      if (item) rows.set(item.id, steer);
+    }
+    return rows;
+  }, [items, liveSteers]);
+  // Pause recovery counts text-only turns; an attachment with the same text
+  // must not make a later unread text steer look consumed.
   const inlineUserTurns = useMemo(() => items
-    .filter(item => item.role === "user")
-    .map(item => item.content || ""), [items]);
+    .filter(item => {
+      const marker = liveSteerRows.get(item.id);
+      return item.role === "user" && !marker?.images?.length && !marker?.files?.length;
+    })
+    .map(item => item.content || ""), [items, liveSteerRows]);
   const inlineUserTurnsKey = inlineUserTurns.join("\u0000");
   // A window that starts at byte 0 is a complete view of the conversation; a
   // tail page cannot prove which repeated turns Pi already consumed.
   const inlineUserTurnsComplete = startOffset === 0;
-  useEffect(() => {
-    if (showUserTurns) onInlineUserTurnsChangeRef.current?.(inlineUserTurns, inlineUserTurnsComplete);
-  }, [inlineUserTurnsKey, showUserTurns, inlineUserTurnsComplete]);
+  const inlineTurnsWithOffsets = useMemo(() => items.filter(item => item.role === "user")
+    .map(item => ({ text: item.content || "", offset: item.userTurnOffset })), [items]);
+  const inlineOffsetsKey = inlineTurnsWithOffsets.map(turn => `${turn.offset ?? ""}:${turn.text}`).join("\u0000");
+  useLayoutEffect(() => {
+    onInlineUserTurnsChangeRef.current?.(inlineUserTurns, inlineUserTurnsComplete, inlineTurnsWithOffsets, outputEndOffset);
+  }, [inlineUserTurnsKey, inlineOffsetsKey, showUserTurns, inlineUserTurnsComplete, outputEndOffset]);
 
   const lastScrollTopRef = useRef(0);
   const prevItemsVersionRef = useRef(itemsVersion);
@@ -909,8 +932,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const renderRow = useCallback((item: TranscriptItem) => <TranscriptRow item={item}
     expanded={expandedRows.current.get(item.id)} onExpandedChange={handleExpandedChange}
     editing={editingUser === item.id} draft={editingUser === item.id ? userDraft : ""}
-    onDraftChange={setUserDraft} onStartEdit={startEdit} onCancelEdit={cancelEdit} onEditUser={onEditUser} />,
-    [handleExpandedChange, editingUser, userDraft, startEdit, cancelEdit, onEditUser]);
+    onDraftChange={setUserDraft} onStartEdit={startEdit} onCancelEdit={cancelEdit} onEditUser={onEditUser}
+    steerAttachments={liveSteerRows.get(item.id)} />,
+    [handleExpandedChange, editingUser, userDraft, startEdit, cancelEdit, onEditUser, liveSteerRows]);
 
   return (
     <div className={`virtualized-transcript-container ${inline ? "transcript-inline" : ""} ${compact ? "transcript-compact" : ""} ${className}`}>

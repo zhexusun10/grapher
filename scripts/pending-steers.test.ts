@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isPendingSteer, isUncommittedSteer, nodeInstructionText, numberSteers, steerRollbackKey, type InlineUserTurnWindow } from "../src/lib/pendingSteers.ts";
+import { inlineSteerKey, isPendingSteer, isUncommittedSteer, liveSteerConsumed, nodeInstructionText, numberSteers, steerFallbackPosition, steerRollbackKey, type InlineUserTurnWindow, type LiveSteerMarker } from "../src/lib/pendingSteers.ts";
 import type { ChatMessage } from "../src/types.ts";
 
 const steer = (id: string, text: string, executionId: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({
@@ -62,6 +62,53 @@ test("an earlier identical Steer does not commit or roll back a later unread occ
   const accepted = numberSteers([steer("event-1", "again", "exec-1"), steer("event-2", "again", "exec-1")]);
   assert.equal(steerRollbackKey(messages[1]), steerRollbackKey(accepted[1]));
   assert.equal(isUncommittedSteer(accepted[1], window(["again", "again"])), false);
+});
+
+test("live unread steers follow the transcript until their inline turn appears", () => {
+  const messages = numberSteers([steer("event-1", "again", "exec-1"), steer("msg-2", "again", "exec-1")]);
+  assert.equal(steerFallbackPosition(messages[1], {}, true), "after");
+  assert.equal(steerFallbackPosition(messages[0], window(["again"]), true), null);
+  assert.equal(steerFallbackPosition(messages[1], window(["again"]), true), "after");
+  assert.equal(steerFallbackPosition(messages[1], window(["again", "again"]), true), null);
+  assert.equal(steerFallbackPosition(messages[1], window(["again"]), false), "after",
+    "settling before the transcript catches up must not move the queued card above the output");
+  assert.equal(steerFallbackPosition(messages[1], {}, false), "before",
+    "an unloaded settled transcript remains a historical fallback");
+  assert.equal(steerFallbackPosition(messages[1], window(["again"]), true, false), "before");
+});
+
+test("unloaded history and attachment cards retain their fallback position", () => {
+  const message = steer("event-1", "older", "exec-1");
+  assert.equal(steerFallbackPosition(message, window(["other"], false), true), "before");
+  assert.equal(steerFallbackPosition(message, window(["older"], false), true), null);
+  const attached = steer("msg-2", "inspect", "exec-1", { files: [{ name: "a.ts" }] });
+  assert.equal(steerFallbackPosition(attached, {}, true), "before");
+  assert.equal(steerFallbackPosition(attached, {}, false), "before");
+});
+
+test("live cursors distinguish new repeated turns from partial history and survive settlement", () => {
+  const [first, second] = numberSteers([steer("msg-1", "again", "exec-1"), steer("msg-2", "again", "exec-1")]);
+  const marker: LiveSteerMarker = { key: inlineSteerKey(second)!, executionId: "exec-1", text: "again", afterOffset: 100, occurrence: 2 };
+  const partial = { "exec-1": { complete: false, texts: ["again"], end: 100, turns: [{ text: "again", offset: 40 }] } };
+  assert.equal(steerFallbackPosition(second, partial, true, true, marker), "after");
+  assert.equal(steerFallbackPosition(second, partial, false, true, marker), "after");
+  const oneNew = { "exec-1": { ...partial["exec-1"], turns: [...partial["exec-1"].turns, { text: "again", offset: 100 }] } };
+  assert.equal(liveSteerConsumed(marker, oneNew["exec-1"]), false);
+  const twoNew = { "exec-1": { ...oneNew["exec-1"], turns: [...oneNew["exec-1"].turns, { text: "again", offset: 130 }] } };
+  assert.equal(steerFallbackPosition(second, twoNew, false, true, marker), null);
+  assert.notEqual(inlineSteerKey(first), inlineSteerKey(second));
+});
+
+test("live attachments use inline cursors without changing text-only rollback ordinals", () => {
+  const [image, text] = numberSteers([
+    steer("image", "inspect", "exec-1", { images: [{ type: "image", mimeType: "image/png", data: "abc" }] }),
+    steer("text", "inspect", "exec-1"),
+  ]);
+  assert.equal(text.steerOrdinal, 0);
+  assert.equal(text.inlineSteerOrdinal, 1);
+  const marker: LiveSteerMarker = { key: inlineSteerKey(image)!, executionId: "exec-1", text: "inspect", afterOffset: 20, occurrence: 1 };
+  assert.equal(steerFallbackPosition(image, {}, true, true, marker), "after");
+  assert.equal(steerFallbackPosition(image, { "exec-1": { complete: false, texts: ["inspect"], turns: [{ text: "inspect", offset: 21 }] } }, false, true, marker), null);
 });
 
 test("the rollback key is shared by the optimistic card and the durable event", () => {

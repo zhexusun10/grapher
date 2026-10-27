@@ -14,6 +14,7 @@ import { TranscriptHistoryStatus } from "./TranscriptHistoryStatus";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { useTranscriptReader } from "../hooks/useTranscriptReader";
 import { useAutoTranscriptHistory } from "../hooks/useAutoTranscriptHistory";
+import type { LiveSteerMarker } from "../lib/pendingSteers";
 export { executionTranscriptCache } from "../services/transcriptCache";
 
 type Props = {
@@ -27,7 +28,8 @@ type Props = {
   /** Render only these steer turns inline; the surrounding chat owns the task
    * and continuation turns. */
   inlineUserTurnTexts?: readonly string[];
-  onInlineUserTurnsChange?: (texts: string[], complete: boolean) => void;
+  onInlineUserTurnsChange?: (texts: string[], complete: boolean, turns: { text: string; offset?: number }[], end?: number) => void;
+  liveSteers?: readonly LiveSteerMarker[];
   onEditUser?: (text: string, replacement: string, userTurnOffset?: number, images?: ImageAttachment[]) => boolean | void | Promise<unknown>;
 };
 
@@ -44,7 +46,7 @@ export function ExecutionTranscriptPlaceholder() {
   </div>;
 }
 
-function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUserResize, onInitialOutputReady, onCompactingChange, inlineUserTurnTexts, onInlineUserTurnsChange, onEditUser }: Props) {
+function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUserResize, onInitialOutputReady, onCompactingChange, inlineUserTurnTexts, onInlineUserTurnsChange, onEditUser, liveSteers }: Props) {
   const cacheKey = `${runId}:${execution.id}${endOffset !== undefined ? `:${endOffset}` : ""}`;
   const paged = execution.outputBytes !== undefined;
   const settled = endOffset !== undefined || execution.status !== "running";
@@ -59,7 +61,7 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
   const announcedRef = useRef(false);
   const lifetime = useTranscriptReader("execution", cacheKey);
   const notifyLoading = useStableCallback((loading: boolean) => onLoadingChange?.(loading));
-  const notifyInlineUserTurns = useStableCallback((texts: string[], complete: boolean) => onInlineUserTurnsChange?.(texts, complete));
+  const notifyInlineUserTurns = useStableCallback((texts: string[], complete: boolean, turns: { text: string; offset?: number }[], end?: number) => onInlineUserTurnsChange?.(texts, complete, turns, end));
   const hasOlder = ready && Boolean(window?.start);
   const displayedText = paged ? (window ? renderTranscriptWindow(window) : "") : endOffset === undefined ? execution.output :
     new TextDecoder().decode(new TextEncoder().encode(execution.output).subarray(0, endOffset));
@@ -167,6 +169,8 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
     </div> : <VirtualizedTranscript compact output={displayedText} startOffset={window?.start ?? 0} settled={settled}
       showUserTurns={!!inlineUserTurnTexts?.length}
       userTurnTexts={inlineUserTurnTexts}
+      liveSteers={liveSteers}
+      outputEndOffset={paged ? window?.end : new TextEncoder().encode(displayedText).length}
       onEditUser={onEditUser}
       onInlineUserTurnsChange={notifyInlineUserTurns}
       onReachTop={window?.start && !error ? () => { void loadOlder(); } : undefined}

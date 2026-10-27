@@ -280,6 +280,8 @@ export interface ChatMessage {
   pendingExecution?: boolean;
   delivery?: "node_messaged" | "steered";
   steerOrdinal?: number;
+  /** Display identity across attachment and text steers with the same text. */
+  inlineSteerOrdinal?: number;
   versions?: ChatMessageVersion[];
   currentVersionIndex?: number;
   /** A just-sent or just-appended turn; one-shot entrance animation only. */
