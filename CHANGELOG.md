@@ -7,13 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-10-28
+
 ### Changed
 
 - Graph review nodes can now apply up to 5 feedback rounds per source/target edge instead of 3, so a reviewer can request a few more repair cycles before feedback is recorded as exhausted. The approval summary states the new bound.
-- Topology cards now use a taller row pitch, so execution layers keep a clear vertical gap and side-routed or long edges have room to read, instead of the graph bunching every layer near the top of the pane.
+- Execution graph cards have been redesigned with larger, more readable titles and task descriptions, a cleaner status footer, and wider cards. More vertical space between execution layers keeps long and side-routed edges readable.
+- The execution graph pane can now be collapsed by dragging the divider deliberately past its minimum width, and reopened with the edge control at its previous width. The divider also supports keyboard resizing and Enter to collapse; conversation drafts and focus are preserved through the transition.
 
 ### Fixed
 
+- Provider API keys containing non-ASCII or control characters are now rejected with an actionable message before they are saved, rather than failing later when used as HTTP headers.
+- Interrupted Planner turns retain their saved history and no longer leave stale activity indicators running. A post-task review interrupted by a backend restart now directs the user to continue with a follow-up instead of starting a new plan.
 - Opening the workspace file-change list now keeps the expansion's scroll reveal bounded: it stops once the trigger row reaches the viewport edge and never travels more than one viewport. A short list in a long node conversation therefore no longer jumps toward the middle of the history while the disclosure still animates into view.
 - A Serial conversation no longer treats selecting or clearing a graph node as a conversation switch. That transient selection used to capture the serial scroll offset and restore it later, leaving the Node Agent stuck mid-history after switching views or history pages. A view change also clears a stale history-reading marker on the shared scroller.
 - Entering a Node Agent conversation no longer ghost-fades the whole tool-card transcript after its loading state ends: the measured frame is revealed at full opacity, so a heavy history with several attempts no longer makes every card flash through a 250ms opacity transition.
