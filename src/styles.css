@@ -236,7 +236,7 @@ h3 {
   flex-shrink: 0;
   margin: 12px 0 12px 12px;
   box-sizing: border-box;
-  border-radius: 18px;
+  border-radius: var(--radius-surface);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
@@ -726,7 +726,9 @@ a,
   color: var(--text-primary);
   width: 100%;
   justify-content: flex-start;
-  transition: background 0.1s, color 0.1s;
+  /* Cross-fading the foreground and background makes the label disappear
+     briefly when their intermediate colors converge. */
+  transition: none;
   cursor: pointer;
   border: none;
   background: transparent;
@@ -736,6 +738,11 @@ a,
 .context-menu-item:hover {
   background: var(--brand-default);
   color: #FFFFFF;
+}
+
+/* Do not add a separate brightness layer to the menu highlight. */
+.context-menu .context-menu-item:hover {
+  filter: none;
 }
 
 .context-menu-item.danger {
@@ -839,7 +846,7 @@ a,
   font-family: inherit;
   font-size: 12px;
   font-weight: 500;
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 6px 14px;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -890,7 +897,7 @@ a,
   background: var(--status-danger);
   color: #FFFFFF;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 6px 14px;
   font-size: 12px;
   font-weight: 500;
@@ -1442,7 +1449,7 @@ a,
   display: grid;
   place-items: center;
   color: var(--text-secondary);
-  border-radius: 6px;
+  border-radius: 8px;
   transition: background 0.15s, color 0.15s;
 }
 
@@ -1454,7 +1461,7 @@ a,
 /* 按钮基础通用规范 */
 .secondary {
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 7px 12px;
   background: var(--bg-canvas);
   font-size: 11px;
@@ -1472,7 +1479,7 @@ a,
   background: var(--brand-default);
   color: var(--text-inverse);
   border: 1px solid var(--brand-default);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 8px 14px;
   font-size: 11px;
   font-weight: 550;

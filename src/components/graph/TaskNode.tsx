@@ -3,6 +3,7 @@ import React from "react";
 import { Handle, Position, type NodeProps, type Node } from "@xyflow/react";
 import { type FeedbackExhaustion, type Status } from "../../types";
 
+// Execution records retain uppercase labels; topology cards capitalize the status value.
 export const statusText: Record<Status, string> = {
   waiting: "WAITING",
   running: "RUNNING",
@@ -60,7 +61,7 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
       </div>
       <p>{data.task}</p>
       <div className="node-footer">
-        <span className={`status ${data.status}`}>{statusText[data.status]}</span>
+        <span className={`status ${data.status}`}>{data.status.charAt(0).toUpperCase() + data.status.slice(1)}</span>
         <span className="node-attempts-badge">
           {data.attempts > 0 ? t("#{0} 尝试", data.attempts) : t("尚未执行")}
         </span>

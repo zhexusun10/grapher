@@ -1400,15 +1400,20 @@ for (const approved of [false, true]) {
 }
 
 for (const wireStatus of ["completed", "done"]) {
-  test(`topology cards display COMPLETED for ${wireStatus} backend status`, { timeout: 30_000 }, async () => {
+  test(`topology cards capitalize statuses for ${wireStatus} backend completion`, { timeout: 30_000 }, async () => {
     const config = { repository: "/mock/status-label", model: "test/old", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
     const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
       plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+    const statuses = { waiting: "Waiting", running: "Running", paused: "Paused", blocked: "Blocked", failed: "Failed", dirty: "Dirty" };
+    const names = ["task", ...Object.keys(statuses)];
+    const merger = (id, node, status) => ({ id, node, status, revision: 1, attempt: 1, sessionId: id,
+      worktree: config.repository, before: "", after: null, output: "", startedAt: 1, completedAt: 2 });
     const snapshot = { ...empty, runId: `status-${wireStatus}`, config, planType: "graph", approved: true, phase: "needs_attention",
-      graph: { originalGoal: "Show authoritative node statuses", nodes: ["task", "waiting", "failed"].map(name => ({ name, task: `Task ${name}` })), edges: [] },
-      nodes: Object.fromEntries(["task", "waiting", "failed"].map(name => [name, {
+      graph: { originalGoal: "Show authoritative node statuses", nodes: names.map(name => ({ name, task: `Task ${name}` })), edges: [] },
+      nodes: Object.fromEntries(names.map(name => [name, {
         status: name === "task" ? wireStatus : name, revision: 1, head: null, instruction: "", error: name === "failed" ? "Mock failure" : null,
-      }])) };
+      }])),
+      mergers: [merger("node-merger", "merge:blocked", "failed"), merger("publication-merger", "merger", "completed")] };
     const info = { path: config.repository, name: "Status labels", branch: "main", head: "", clean: true };
     const errors = [];
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
@@ -1439,7 +1444,7 @@ for (const wireStatus of ["completed", "done"]) {
       const card = page.locator('.graph-canvas .task-node[data-node-name="task"]');
       await card.waitFor();
       const label = card.locator(".node-footer .status");
-      assert.equal(await label.innerText(), "COMPLETED", "backend completion must never leave the card label empty");
+      assert.equal(await label.innerText(), "Completed", "backend completion must render a capitalized card label");
       // The graph entrance can still be fading the new node when the label
       // first exists; checkVisibility below deliberately includes opacity.
       await page.waitForFunction(() => {
@@ -1450,8 +1455,11 @@ for (const wireStatus of ["completed", "done"]) {
       const bounds = await label.boundingBox(), cardBounds = await card.boundingBox();
       assert.ok(bounds && cardBounds && bounds.width > 0 && bounds.height > 0 && bounds.x >= cardBounds.x &&
         bounds.x + bounds.width <= cardBounds.x + cardBounds.width, "the full status label fits inside the visible card");
-      assert.equal(await page.locator('.task-node[data-node-name="waiting"] .status').innerText(), "WAITING");
-      assert.equal(await page.locator('.task-node[data-node-name="failed"] .status').innerText(), "FAILED");
+      for (const [status, expected] of Object.entries(statuses)) {
+        assert.equal(await page.locator(`.task-node[data-node-name="${status}"] .status`).innerText(), expected);
+      }
+      assert.equal(await page.locator('.task-node[data-node-name="merger · blocked"] .status').innerText(), "Failed");
+      assert.equal(await page.locator('.task-node[data-node-name="publication merger"] .status').innerText(), "Completed");
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });
@@ -1513,10 +1521,10 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
       nodes: { ...current.nodes, task: { ...current.nodes.task, status: "paused", error: "Execution paused by the user" } },
       executions: current.executions.map(item => item.id === "first" ? { ...item, status: "paused", completedAt: 2000 } : item) };
     await bottom.getByRole("button", { name: "Resume", exact: true }).waitFor();
-    await page.locator('[data-node-name="task"] .status', { hasText: "PAUSED" }).waitFor();
-    await page.locator('[data-node-name="broken"] .status', { hasText: "FAILED" }).waitFor();
+    await page.locator('[data-node-name="task"] .status', { hasText: "Paused" }).waitFor();
+    await page.locator('[data-node-name="broken"] .status', { hasText: "Failed" }).waitFor();
     await bottom.getByRole("button", { name: "Resume", exact: true }).click();
-    await page.locator('[data-node-name="task"] .status', { hasText: "RUNNING" }).waitFor();
+    await page.locator('[data-node-name="task"] .status', { hasText: "Running" }).waitFor();
     assert.deepEqual(actions.map(action => action.action), ["pause", "resume"]);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }

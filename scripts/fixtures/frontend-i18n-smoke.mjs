@@ -120,7 +120,7 @@ try {
     }
     if (name === "TaskNode") {
       assert.doesNotMatch(html, /\stitle=/, "nodes and feedback warnings must not show native hover tooltips");
-      assert.ok(html.includes("COMPLETED"));
+      assert.ok(html.includes(">Completed</span>"));
       assert.ok(html.includes(t("反馈预算耗尽 {0}/{1}", 3, 3)));
       assert.ok(html.includes(t("反馈次数耗尽，本次反馈未应用；未向 {0} 反馈，后续节点继续执行。", "owner")));
       const plain = renderToStaticMarkup(taskNodeCanvas(module[name], { ...props.data, feedbackExhaustion: undefined }));

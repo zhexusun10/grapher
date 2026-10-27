@@ -11,7 +11,8 @@
   --bg-surface: #F7F7F8;
   --bg-surface-hover: #F1F5F9;
 
-  /* 边框与分割线 */
+  /* 边框、分割线与容器圆角 */
+  --radius-surface: 18px;
   --border-default: #E2E8F0;
   --border-subtle: #F1F5F9;
   --border-focus: #2563EB;

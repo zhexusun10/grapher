@@ -9,8 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.3.2] - 2026-10-28
 
+### Added
+
+- The conversation sidebar's context menu can copy a Run's full original prompt without opening the conversation. Saved Runs are read from the backend rather than a potentially stale sidebar label.
+
 ### Changed
 
+- Upgrade the bundled `pi-better-web-search` extension from 0.1.5 to 0.1.6: oversized search and URL results remain valid JSON, with shortened fields and affected paths reported in `_truncation`. The default output budget remains configurable with `PI_BETTER_WEB_SEARCH_MAX_CHARS`.
+- Unified corner radii across the sidebar, execution graph cards, settings, dialogs and other interface surfaces, with consistent styling for smaller controls.
+- Session details and graph card status labels use more consistent capitalization; native hover tooltips were removed from session details and graph resize controls while retaining keyboard-accessible guidance.
 - Graph review nodes can now apply up to 5 feedback rounds per source/target edge instead of 3, so a reviewer can request a few more repair cycles before feedback is recorded as exhausted. The approval summary states the new bound.
 - Execution graph cards have been redesigned with larger, more readable titles and task descriptions, a cleaner status footer, and wider cards. More vertical space between execution layers keeps long and side-routed edges readable.
 - The execution graph pane can now be collapsed by dragging the divider deliberately past its minimum width, and reopened with the edge control at its previous width. The divider also supports keyboard resizing and Enter to collapse; conversation drafts and focus are preserved through the transition.

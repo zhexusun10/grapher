@@ -295,7 +295,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               {t("取消")}
             </button>
             <button type="button" className="primary save-config-btn" disabled={saving || catalogBusy} onClick={() => void save()}>
-              <Check size={18} />{t(" 保存设置")}
+              <Check size={18} />{t("保存")}
             </button>
           </footer>
         </div>

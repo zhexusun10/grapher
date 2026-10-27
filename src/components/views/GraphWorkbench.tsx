@@ -2231,18 +2231,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                   onAfterToggle={handleWorkspaceDetailsAfterToggle}
                 >
-                  <p>workspace: {execution?.worktree || config.repository || "preparing workspace…"}</p>
-                  <p>session id: {execution?.sessionId || "waiting for initialization…"}</p>
-                  <p>commit before: {execution?.before || "not snapshotted"}</p>
-                  <p>commit after: {execution ? (execution.after === "" ? "direct modification (no snapshot)" : execution.after ?? "pending") : "pending"}</p>
+                  <p>Workspace: {execution?.worktree || config.repository || "preparing workspace…"}</p>
+                  <p>Session id: {execution?.sessionId || "waiting for initialization…"}</p>
+                  <p>Commit before: {execution?.before || "not snapshotted"}</p>
+                  <p>Commit after: {execution ? (execution.after === "" ? "direct modification (no snapshot)" : execution.after ?? "pending") : "pending"}</p>
                   <div className="session-details-row">
-                    <p>start time: {formatSessionStartTime(executionSession.startedAt ?? execution?.startedAt)}</p>
-                    <p>time took: <ExecutionTimeTookText execution={execution} priorDurationSeconds={executionSession.priorDurationSeconds} /></p>
+                    <p>Start time: {formatSessionStartTime(executionSession.startedAt ?? execution?.startedAt)}</p>
+                    <p>Time took: <ExecutionTimeTookText execution={execution} priorDurationSeconds={executionSession.priorDurationSeconds} /></p>
                   </div>
                   {snapshotModelInfo && (
                     <div className="session-details-row">
-                      <p>model: {snapshotModelInfo.model}</p>
-                      <p>thinking level: {snapshotModelInfo.thinkingLevel}</p>
+                      <p>Model: {snapshotModelInfo.model}</p>
+                      <p>Thinking level: {snapshotModelInfo.thinkingLevel}</p>
                     </div>
                   )}
                   {(showExecutionTokenUsage || executionContext) && (
@@ -2445,16 +2445,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                       onAfterToggle={handleWorkspaceDetailsAfterToggle}
                     >
-                      <p>workspace: {serialExecution?.worktree || config.repository || repoInfo?.name || "preparing workspace…"}</p>
-                      <p>session id: {serialExecution?.sessionId || "waiting for initialization…"}</p>
+                      <p>Workspace: {serialExecution?.worktree || config.repository || repoInfo?.name || "preparing workspace…"}</p>
+                      <p>Session id: {serialExecution?.sessionId || "waiting for initialization…"}</p>
                       <div className="session-details-row">
-                        <p>start time: {formatSessionStartTime(serialSession.startedAt ?? serialExecution?.startedAt)}</p>
-                        <p>time took: <ExecutionTimeTookText execution={serialExecution} priorDurationSeconds={serialSession.priorDurationSeconds} /></p>
+                        <p>Start time: {formatSessionStartTime(serialSession.startedAt ?? serialExecution?.startedAt)}</p>
+                        <p>Time took: <ExecutionTimeTookText execution={serialExecution} priorDurationSeconds={serialSession.priorDurationSeconds} /></p>
                       </div>
                       {serialModelInfo && (
                         <div className="session-details-row">
-                          <p>model: {serialModelInfo.model}</p>
-                          <p>thinking level: {serialModelInfo.thinkingLevel}</p>
+                          <p>Model: {serialModelInfo.model}</p>
+                          <p>Thinking level: {serialModelInfo.thinkingLevel}</p>
                         </div>
                       )}
                       {(showSerialTokenUsage || serialContext) && (
@@ -2636,14 +2636,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
                     onAfterToggle={handleWorkspaceDetailsAfterToggle}
                   >
-                    <p>workspace: {plannerWorkspace || config.repository || "preparing workspace…"}</p>
+                    <p>Workspace: {plannerWorkspace || config.repository || "preparing workspace…"}</p>
                     <div className="session-details-row">
-                      <p>start time: {formatSessionStartTime(plannerStartTime)}</p>
-                      <p>time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerLiveTurnStart} durationSeconds={plannerRole?.durationSeconds} priorDurationSeconds={plannerSession.priorDurationSeconds} /></p>
+                      <p>Start time: {formatSessionStartTime(plannerStartTime)}</p>
+                      <p>Time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerLiveTurnStart} durationSeconds={plannerRole?.durationSeconds} priorDurationSeconds={plannerSession.priorDurationSeconds} /></p>
                     </div>
                     <div className="session-details-row">
-                      <p>model: {plannerModelInfo.model}</p>
-                      <p>thinking level: {plannerModelInfo.thinkingLevel}</p>
+                      <p>Model: {plannerModelInfo.model}</p>
+                      <p>Thinking level: {plannerModelInfo.thinkingLevel}</p>
                     </div>
                     {(showPlannerTokenUsage || displayedPlannerContext) && (
                       <SessionTokenUsage usage={plannerUsage} context={displayedPlannerContext}
@@ -2664,7 +2664,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     boxSizing: "border-box",
                     padding: "8px 12px",
                     background: "#ffffff",
-                    borderRadius: 6,
+                    borderRadius: 8,
                     color: "#b91c1c",
                     fontSize: 12,
                     display: "flex",
@@ -2754,7 +2754,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           type="button"
           className="graph-pane-expand"
           ref={focusGraphPaneToggle}
-          title={t("展开执行拓扑图")}
           aria-label={t("展开执行拓扑图")}
           aria-expanded={false}
           onClick={expandGraphPane}
@@ -2778,11 +2777,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               tabIndex={0}
               aria-orientation="vertical"
               aria-label={t("调整执行拓扑图宽度")}
+              aria-description={t("左右拖动调整宽度，继续向右拖动可收起；双击恢复默认，Enter 收起")}
               aria-valuenow={Math.round((1 - splitRatio) * 100)}
               onPointerDown={handleStartResize}
               onKeyDown={handleResizeKeyDown}
               onDoubleClick={handleResetResizer}
-              title={t("左右拖动调整宽度，继续向右拖动可收起；双击恢复默认，Enter 收起")}
             >
               <div className="resizer-handle" />
             </motion.div>

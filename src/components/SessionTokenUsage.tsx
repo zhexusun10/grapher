@@ -22,19 +22,19 @@ export function SessionTokenUsage({ usage, context, showTokens = true }: {
   return <>
     {showTokens && <>
       <div className="session-details-row">
-        <p title="Cumulative new tokens across every model call in this session; cache reads are excluded. This is not the current prompt size.">cumulative tokens: {formatTokenCount(consumedTokenCount(usage))}</p>
-        <p>input: {formatTokenCount(usage?.input)}</p>
-        <p>output: {formatTokenCount(usage?.output)}</p>
+        <p>Cumulative tokens: {formatTokenCount(consumedTokenCount(usage))}</p>
+        <p>Input: {formatTokenCount(usage?.input)}</p>
+        <p>Output: {formatTokenCount(usage?.output)}</p>
       </div>
       <div className="session-details-row">
-        <p>cache read: {formatTokenCount(usage?.cacheRead)}</p>
-        <p>cache write: {formatTokenCount(usage?.cacheWrite)}</p>
-        <p>reasoning: {formatTokenCount(usage?.reasoning)}</p>
+        <p>Cache read: {formatTokenCount(usage?.cacheRead)}</p>
+        <p>Cache write: {formatTokenCount(usage?.cacheWrite)}</p>
+        <p>Reasoning: {formatTokenCount(usage?.reasoning)}</p>
       </div>
     </>}
     <div className="session-details-row">
-      <p title="Context window advertised by the model used for this turn.">context window: {formatContextWindow(context)}</p>
-      <p title="Entire conversation prompt the latest model call received, including all retained session history after compaction, with its share of the model window.">current context: {formatContextUsed(context)}</p>
+      <p>Context window: {formatContextWindow(context)}</p>
+      <p>Current context: {formatContextUsed(context)}</p>
     </div>
   </>;
 }

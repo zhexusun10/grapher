@@ -431,7 +431,7 @@ test("saving a Node Agent model synchronizes the failed Run and enables explicit
     assert.equal(current.config.model, "test/old", "the original Run config remains historical evidence");
     await continueButton.click(); await until(() => resumes === 1);
     await page.locator('.graph-canvas .react-flow__node[data-id="task"]').click();
-    await page.getByText("model: test/new", { exact: true }).waitFor();
+    await page.getByText("Model: test/new", { exact: true }).waitFor();
     assert.equal(calls.filter(call => call.command === "detect_repository").length, 0);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }

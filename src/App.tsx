@@ -142,6 +142,7 @@ export default function App() {
   }, [selected]);
   const [modal, setModal] = useState<"settings" | "editor" | "approval" | null>(null);
   const [error, setError] = useState("");
+  const copyPromptRequestRef = useRef(0);
   const [busy, setBusy] = useState(false);
   const [isOpeningProject, setIsOpeningProject] = useState(false);
   const foregroundGeneration = useRef(0);
@@ -3196,8 +3197,59 @@ export default function App() {
     !failedPlanning &&
     state.phase !== "planning_failed";
 
+  const handleCopyRunPrompt = async (runId: string, provisionalPrompt?: string) => {
+    const request = ++copyPromptRequestRef.current;
+    const loadError = t("获取对话提示词失败，请稍后重试。");
+    const emptyError = t("此对话没有可复制的提示词。");
+    const clipboardError = t("复制提示词失败，请检查剪贴板权限。");
+    setError(previous => [loadError, emptyError, clipboardError].includes(previous) ? "" : previous);
+
+    const clipboard = navigator.clipboard;
+    if (!clipboard || (!clipboard.write && !clipboard.writeText)) {
+      setError(clipboardError);
+      return;
+    }
+    const promptPromise = (async () => {
+      let prompt = provisionalPrompt;
+      if (!runId.startsWith("pending-")) {
+        try {
+          // Labels are display caches and may be stale. Read the selected Run
+          // without switching conversations or falling back to a cached title.
+          const snapshot = await runtimeService.history(runId);
+          if (snapshot.runId !== runId) throw new Error("Run identity mismatch");
+          prompt = snapshot.graph.originalGoal;
+        } catch {
+          throw new Error(loadError);
+        }
+      }
+      // A slower request must not overwrite a newer prompt selection.
+      if (request !== copyPromptRequestRef.current) throw new Error("Copy superseded");
+      if (!prompt) throw new Error(emptyError);
+      return prompt;
+    })();
+    // ClipboardItem lets the browser receive the write during the user gesture,
+    // even if reading the backend takes longer than transient activation lasts.
+    try {
+      if (clipboard.write && typeof ClipboardItem !== "undefined") {
+        const blob = promptPromise.then(prompt => new Blob([prompt], { type: "text/plain" }));
+        // A synchronous ClipboardItem/write failure can occur before Promise.all
+        // subscribes; still consume a later backend rejection in that case.
+        void blob.catch(() => {});
+        await Promise.all([promptPromise, clipboard.write([new ClipboardItem({ "text/plain": blob })])]);
+      } else {
+        await clipboard.writeText(await promptPromise);
+      }
+    } catch (error) {
+      if (request === copyPromptRequestRef.current) {
+        setError(error instanceof Error && (error.message === loadError || error.message === emptyError) ? error.message : clipboardError);
+      }
+    }
+  };
+
   const actions = {
     selectProject: useStableCallback(handleSelectProject), openProject: useStableCallback(handleOpenProject),
+    copyRunPrompt: useStableCallback(handleCopyRunPrompt),
+    cancelPromptCopy: useStableCallback(() => { copyPromptRequestRef.current += 1; }),
     removeProject: useStableCallback(handleRemoveWorkspaceConfirm), deleteRun: useStableCallback(handleDeleteRunConfirm),
     newConversation: useStableCallback(handleNewConversation), send: useStableCallback(handleSendMessage),
     edit: useStableCallback(handleEditMessageSubmit), switchVersion: useStableCallback(handleSwitchMessageVersion),
@@ -3306,6 +3358,8 @@ export default function App() {
             loadingRunId={loadingRunId}
             runIndicators={runIndicators}
             onLoadRun={handleLoadRun}
+            onCopyRunPrompt={actions.copyRunPrompt}
+            onCancelPendingPromptCopy={actions.cancelPromptCopy}
             onDeleteRun={actions.deleteRun}
             onNewConversation={actions.newConversation}
             onOpenSettings={actions.openSettings}

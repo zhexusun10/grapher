@@ -2,7 +2,6 @@
    PromptBox 智能补全与联想弹窗（@ 文件/智能体，/ Skills）
    ============================================================================= */
 .prompt-box-suggestions-popover {
-  --prompt-suggestions-radius: 14px;
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
@@ -10,7 +9,7 @@
   max-height: 320px;
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: var(--prompt-suggestions-radius);
+  border-radius: inherit;
   box-shadow: inherit;
   display: flex;
   flex-direction: column;
@@ -55,16 +54,9 @@
 }
 
 .suggestions-header-hints .key-hint {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: #ffffff;
-  border: 1px solid #cbd5e1;
   color: #334155;
   font-family: inherit;
   font-size: 10px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 .suggestions-header-close-btn {
@@ -75,7 +67,7 @@
   border: none;
   padding: 2px 4px;
   margin: -2px -4px;
-  border-radius: 6px;
+  border-radius: 8px;
   cursor: pointer;
   color: #64748b;
   font-family: inherit;
@@ -113,7 +105,7 @@
   display: flex;
   align-items: center;
   padding: 8px 12px;
-  border-radius: var(--prompt-suggestions-radius);
+  border-radius: 14px;
   cursor: pointer;
   background: transparent;
   transition: background 0.12s ease;
@@ -334,7 +326,7 @@
   background: var(--brand-subtle, #EFF6FF);
   border: 1px solid var(--brand-border, #BFDBFE);
   padding: 2px 7px;
-  border-radius: 6px;
+  border-radius: 8px;
   white-space: nowrap;
 }
 
@@ -359,7 +351,7 @@
   gap: 3px;
   background: transparent;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 1px 4px;
 }
 
@@ -407,7 +399,7 @@
   gap: 4px;
   padding: 3px 8px;
   height: 26px;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary, #64748B);
@@ -499,6 +491,10 @@
   border: 1px solid var(--border-default, #E2E8F0);
   border-radius: 8px;
   resize: vertical;
+  outline: none;
+}
+
+.node-task-edit-textarea:focus-visible {
   outline: none;
 }
 
@@ -640,7 +636,7 @@
   pointer-events: none;
   width: 26px;
   height: 26px;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid var(--border-default, #E2E8F0);
   background: var(--bg-surface, #F7F7F8);
   color: var(--text-secondary, #64748B);
@@ -929,7 +925,7 @@ button.session-label-toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-radius: 6px;
+  border-radius: 8px;
   box-sizing: border-box;
   transition: background-color 0.15s ease, opacity 0.15s ease;
 }
@@ -1009,7 +1005,7 @@ button.session-label-toggle:focus-visible {
   box-sizing: border-box;
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
-  border-radius: 10px;
+  border-radius: var(--radius-surface);
   padding: 14px 16px;
 }
 
@@ -1039,7 +1035,7 @@ button.session-label-toggle:focus-visible {
   text-align: center;
   background: var(--bg-surface);
   padding: 8px 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-surface);
   border: 1px solid var(--border-subtle);
 }
 
@@ -1082,7 +1078,7 @@ button.session-label-toggle:focus-visible {
   padding: 4px 9px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 11px;
   color: var(--text-primary);
   cursor: pointer;
@@ -1536,7 +1532,7 @@ button.session-label-toggle:focus-visible {
   flex-direction: column;
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-surface);
   box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
   transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -1730,7 +1726,7 @@ button.session-label-toggle:focus-visible {
 .react-flow__controls {
   box-shadow: none;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: 8px;
   overflow: hidden;
   bottom: 40px;
   left: 9px;
@@ -1898,7 +1894,7 @@ button.session-label-toggle:focus-visible {
   justify-content: center;
   width: 26px;
   height: 26px;
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--status-danger-subtle, #fef2f2);
   border: 1px solid var(--status-danger-border, #fecaca);
   color: #ef4444;
@@ -1928,7 +1924,7 @@ button.session-label-toggle:focus-visible {
   width: 24px;
   height: 24px;
   padding: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   border: none;
   color: #94a3b8;
@@ -2105,7 +2101,7 @@ button.session-label-toggle:focus-visible {
   color: var(--status-danger-text);
   background: var(--status-danger-subtle);
   border: 1px solid var(--status-danger-border);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 10px 12px;
   margin: 8px 0;
   white-space: pre-wrap;
@@ -2234,7 +2230,7 @@ button.session-label-toggle:focus-visible {
   resize: vertical;
   width: 100%;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 15px;
   background: var(--bg-surface);
   font-family: ui-monospace, monospace;
@@ -2306,7 +2302,7 @@ button.session-label-toggle:focus-visible {
   flex-direction: column;
   padding: 0;
   overflow: hidden;
-  border-radius: 12px;
+  border-radius: var(--radius-surface);
   border: 1px solid var(--border-default);
   box-shadow: 0 16px 36px -4px rgba(15, 23, 42, 0.16), 0 4px 12px -2px rgba(15, 23, 42, 0.06);
 }
@@ -2387,7 +2383,7 @@ button.session-label-toggle:focus-visible {
 
 .settings-modal-footer .settings-cancel-btn {
   border: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 9px 16px;
   background: transparent;
   color: var(--text-secondary);
@@ -2418,7 +2414,7 @@ button.session-label-toggle:focus-visible {
   max-width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--bg-canvas);
   color: var(--text-primary);
   font-size: 12px;
@@ -2447,7 +2443,7 @@ button.session-label-toggle:focus-visible {
 .settings-card {
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-surface);
   padding: 10px 16px;
 }
 
@@ -2631,7 +2627,7 @@ button.session-label-toggle:focus-visible {
   height: 28px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 0 10px;
   font-size: 12px;
   color: var(--text-primary);

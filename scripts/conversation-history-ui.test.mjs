@@ -43,9 +43,9 @@ before(async () => {
 });
 after(async () => { streamResponse?.destroy(); await browser?.close(); await server?.close(); });
 
-async function newPage(handler) {
+async function newPage(handler, language = "en") {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
-  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  await context.addInitScript(value => localStorage.setItem("grapher_language_v1", value), language);
   const errors = [];
   await context.route("**/api/*", handler);
   const page = await context.newPage(); page.setDefaultTimeout(12_000);
@@ -313,16 +313,103 @@ for (const role of ["node", "planner"]) {
   });
 }
 
+for (const mode of ["graph", "serial", "planner", "merger", "node-merger"]) {
+  test(`${mode}: workspace and session details are tooltip-free`, { timeout: 30_000 }, async () => {
+    for (const language of ["en", "zh-CN"]) {
+      const { context, page, errors } = await newPage(route => route.fulfill({ json: {
+        result: route.request().url().endsWith("/get_merger_prompt") ? { prompt: "Merge the completed work." } : {},
+      } }), language);
+      try {
+        await page.goto(`${origin}/__workspace-footer?mode=${mode}`, { waitUntil: "domcontentloaded" });
+        await page.waitForFunction(() => !!window.audit?.startExecution);
+        if (mode !== "planner") await page.evaluate(() => { window.audit.startExecution(); window.audit.finish(); });
+        const name = language === "en"
+          ? (mode === "planner" ? "Planning session details" : "Workspace and session details")
+          : (mode === "planner" ? "规划会话信息" : "工作区与会话信息");
+        await page.getByRole("button", { name, exact: true }).click();
+        const details = page.locator(".workspace-details");
+        await details.getByText("Cumulative tokens: —", { exact: true }).waitFor();
+        await details.getByText("Context window: —", { exact: true }).waitFor();
+        await details.getByText("Current context: —", { exact: true }).waitFor();
+        assert.equal(await page.locator(".workspace-details[title], .workspace-details [title]").count(), 0);
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    }
+  });
+}
+
+test("graph resize and expand controls are tooltip-free and remain keyboard accessible", { timeout: 30_000 }, async () => {
+  for (const language of ["en", "zh-CN"]) {
+    const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }), language);
+    try {
+      await page.goto(`${origin}/__workspace-footer?mode=graph`, { waitUntil: "domcontentloaded" });
+      const splitter = page.getByRole("separator", { name: language === "en" ? "Resize execution graph" : "调整执行拓扑图宽度", exact: true });
+      await splitter.waitFor();
+      assert.equal(await splitter.getAttribute("title"), null);
+      assert.equal(await splitter.locator("[title]").count(), 0);
+      assert.match(await splitter.getAttribute("aria-description"), /Enter/);
+      const originalWidth = await splitter.getAttribute("aria-valuenow");
+      await splitter.press("ArrowLeft");
+      await page.waitForFunction(value => document.querySelector(".workbench-resizer")?.getAttribute("aria-valuenow") !== value, originalWidth);
+      const resizedWidth = await splitter.getAttribute("aria-valuenow");
+      await splitter.press("Enter");
+      const expand = page.getByRole("button", { name: language === "en" ? "Expand execution graph" : "展开执行拓扑图", exact: true });
+      await expand.waitFor();
+      assert.equal(await expand.getAttribute("title"), null);
+      await expand.press("Enter");
+      await splitter.waitFor();
+      assert.equal(await splitter.getAttribute("aria-valuenow"), resizedWidth);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  }
+});
+
+for (const mode of ["graph", "serial", "planner"]) {
+  test(`${mode}: session detail attributes use capitalized initials`, { timeout: 30_000 }, async () => {
+    for (const language of ["en", "zh-CN"]) {
+      const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }), language);
+      try {
+        await page.goto(`${origin}/__workspace-footer?mode=${mode}`, { waitUntil: "domcontentloaded" });
+        await page.waitForFunction(() => !!window.audit?.startExecution);
+        if (mode !== "planner") await page.evaluate(() => { window.audit.startExecution(); window.audit.finish(); });
+        const name = language === "en"
+          ? (mode === "planner" ? "Planning session details" : "Workspace and session details")
+          : (mode === "planner" ? "规划会话信息" : "工作区与会话信息");
+        await page.getByRole("button", { name, exact: true }).click();
+        const details = page.locator(".workspace-details-body");
+        await details.getByText("Current context: —", { exact: true }).waitFor();
+        const labels = (await details.locator("p").allTextContents()).map(text => text.split(":")[0]);
+        for (const label of labels) assert.match(label, /^[A-Z]/, `${mode}: ${label}`);
+        for (const label of [
+          "Workspace", ...(mode === "planner" ? [] : ["Session id"]),
+          ...(mode === "graph" ? ["Commit before", "Commit after"] : []),
+          "Start time", "Time took", "Model", "Thinking level",
+          "Cumulative tokens", "Input", "Output", "Cache read", "Cache write", "Reasoning", "Context window", "Current context",
+        ]) assert.ok(labels.includes(label), `${mode}: missing ${label}`);
+        await details.getByText("Workspace: /mock", { exact: true }).waitFor();
+        await details.getByText("Model: test/model", { exact: true }).waitFor();
+        await details.getByText(`Thinking level: ${mode === "planner" ? "high" : "low"}`, { exact: true }).waitFor();
+        if (mode !== "planner") await details.getByText("Session id: session", { exact: true }).waitFor();
+        if (mode === "graph") {
+          await details.getByText("Commit before: not snapshotted", { exact: true }).waitFor();
+          await details.getByText("Commit after: direct modification (no snapshot)", { exact: true }).waitFor();
+        }
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    }
+  });
+}
+
 test("Planner details show the backend-selected cwd for every turn", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
   try {
     await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: "Planning session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
-    await details.getByText("workspace: /mock", { exact: true }).waitFor();
+    await details.getByText("Workspace: /mock", { exact: true }).waitFor();
     for (const worktree of ["/worktrees/run/root", "/worktrees/run/right", "/mock"]) {
       await page.evaluate(path => window.audit.selectPlannerWorkspace(path), worktree);
-      await details.getByText(`workspace: ${worktree}`, { exact: true }).waitFor();
+      await details.getByText(`Workspace: ${worktree}`, { exact: true }).waitFor();
     }
     assert.equal(await details.getByText("workspace history", { exact: true }).count(), 0);
     assert.doesNotMatch(await details.innerText(), /\/worktrees\/run\/(?:root|right)/,
@@ -448,7 +535,7 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
       if (mode !== "planner") await page.evaluate(() => { window.audit.startExecution(); window.audit.finish(); });
       await page.getByRole("button", { name: mode === "planner" ? "Planning session details" : "Workspace and session details", exact: true }).click();
       const details = page.locator(".workspace-details-body");
-      const labels = ["cumulative tokens", "input", "output", "cache read", "cache write", "reasoning", "context window", "current context"];
+      const labels = ["Cumulative tokens", "Input", "Output", "Cache read", "Cache write", "Reasoning", "Context window", "Current context"];
       for (const label of labels) await details.getByText(`${label}: —`, { exact: true }).waitFor();
       const update = (usage, context) => page.evaluate(({ mode, usage, context }) => {
         const metrics = {
@@ -479,8 +566,8 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
       // After compaction only the smaller current prompt is shown; the
       // session's high-water mark is not part of the panel.
       await update(heavy, { tokens: 40_000, peak: 90_000 });
-      await details.getByText(`context window: ${contextWindow}`, { exact: true }).waitFor();
-      await details.getByText(`current context: ${mode === "planner" ? "40k" : "40k (40%)"}`, { exact: true }).waitFor();
+      await details.getByText(`Context window: ${contextWindow}`, { exact: true }).waitFor();
+      await details.getByText(`Current context: ${mode === "planner" ? "40k" : "40k (40%)"}`, { exact: true }).waitFor();
       assert.equal(await details.getByText(/^peak:/).count(), 0);
       await update(heavy, { tokens: 40_000, peak: 40_000 });
       const positions = await details.locator("p").evaluateAll(elements => elements.map(element => {
@@ -488,7 +575,7 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
         return { text: element.textContent, top: rect.top, left: rect.left, right: rect.right };
       }));
       let previousTop = -Infinity;
-      for (const group of [["start time", "time took"], labels.slice(0, 3), labels.slice(3, 6), labels.slice(6)]) {
+      for (const group of [["Start time", "Time took"], labels.slice(0, 3), labels.slice(3, 6), labels.slice(6)]) {
         const fields = group.map(label => positions.find(item => item.text.startsWith(`${label}: `)));
         assert.ok(fields.every(Boolean), `missing session fields: ${group.join(", ")}`);
         assert.ok(fields[0].top > previousTop, "timing, totals and cache details occupy successive rows");
@@ -504,8 +591,8 @@ for (const mode of ["serial", "graph", "planner", "merger", "node-merger"]) {
       await update({ totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, consumedTokens: 0 });
       for (const label of labels.slice(0, 6)) await details.getByText(`${label}: 0k`, { exact: true }).waitFor();
       // No context counters means unknown, not a zero-token prompt.
-      await details.getByText("context window: —", { exact: true }).waitFor();
-      await details.getByText("current context: —", { exact: true }).waitFor();
+      await details.getByText("Context window: —", { exact: true }).waitFor();
+      await details.getByText("Current context: —", { exact: true }).waitFor();
       await update(null);
       for (const label of labels) await details.getByText(`${label}: —`, { exact: true }).waitFor();
       assert.deepEqual(errors, []);
@@ -534,9 +621,9 @@ test("a resumed session keeps earlier attempts in the session token totals", { t
     await page.getByRole("button", { name: "Workspace and session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
     for (const text of [
-      "cumulative tokens: 17.2k", "input: 15k", "output: 2k", "cache read: 19k",
+      "Cumulative tokens: 17.2k", "Input: 15k", "Output: 2k", "Cache read: 19k",
       // Context follows the newest turn of the resumed session, not the sum.
-      "context window: 100k", "current context: 19k (19%)",
+      "Context window: 100k", "Current context: 19k (19%)",
     ]) await details.getByText(text, { exact: true }).waitFor();
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
@@ -568,8 +655,8 @@ test("the Planner session keeps its first start and accumulates time took across
     }, { firstStart, secondStart });
     await page.getByRole("button", { name: "Planning session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
-    await details.getByText(`start time: ${sessionStamp(firstStart)}`, { exact: true }).waitFor();
-    await details.getByText("time took: 1m 30s", { exact: true }).waitFor();
+    await details.getByText(`Start time: ${sessionStamp(firstStart)}`, { exact: true }).waitFor();
+    await details.getByText("Time took: 1m 30s", { exact: true }).waitFor();
     // An edited Planner conversation forks the Pi session: the new branch does
     // not inherit the abandoned branch's clock.
     await page.evaluate(({ secondStart }) => {
@@ -581,8 +668,8 @@ test("the Planner session keeps its first start and accumulates time took across
       window.audit.setPlannerRoles({ planner: role("old-session", secondStart + 60_000, 5) }, 0);
       window.audit.setPlannerRoles({ planner: role("planner-session", secondStart, 30) }, 1);
     }, { secondStart });
-    await details.getByText(`start time: ${sessionStamp(secondStart)}`, { exact: true }).waitFor();
-    await details.getByText("time took: 30s", { exact: true }).waitFor();
+    await details.getByText(`Start time: ${sessionStamp(secondStart)}`, { exact: true }).waitFor();
+    await details.getByText("Time took: 30s", { exact: true }).waitFor();
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -607,7 +694,7 @@ test("a Planner turn recorded before session tracking keeps its usage", { timeou
     });
     await page.getByRole("button", { name: "Planning session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
-    await details.getByText("cumulative tokens: 8k", { exact: true }).waitFor();
+    await details.getByText("Cumulative tokens: 8k", { exact: true }).waitFor();
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -633,17 +720,17 @@ test("an older attempt shows usage only through that attempt", { timeout: 30_000
     await page.getByRole("button", { name: "Workspace and session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
     // The newest attempt keeps the whole resumed session's total.
-    await details.getByText("cumulative tokens: 3.3k", { exact: true }).waitFor();
+    await details.getByText("Cumulative tokens: 3.3k", { exact: true }).waitFor();
     // Selecting the first attempt must not inherit the later attempt's usage.
     await page.evaluate(() => window.audit.selectMerger("previous"));
-    await details.getByText("cumulative tokens: 1.1k", { exact: true }).waitFor();
-    assert.equal(await details.getByText("cumulative tokens: 3.3k", { exact: true }).count(), 0);
+    await details.getByText("Cumulative tokens: 1.1k", { exact: true }).waitFor();
+    assert.equal(await details.getByText("Cumulative tokens: 3.3k", { exact: true }).count(), 0);
     // A missing attempt usage makes the prefix unknowable; show no token row
     // rather than a partial or whole-session total.
     await page.evaluate(() => window.audit.setExecutionMetrics(null, "previous"));
     await page.waitForTimeout(100);
-    assert.equal(await details.getByText(/cumulative tokens:/).count(), 0);
-    assert.equal(await details.getByText(/^input:/).count(), 0);
+    assert.equal(await details.getByText(/Cumulative tokens:/).count(), 0);
+    assert.equal(await details.getByText(/^Input:/).count(), 0);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -666,8 +753,8 @@ test("a resumed node session keeps its first start and accumulates time took", {
     }, { firstStart, secondStart });
     await page.getByRole("button", { name: "Workspace and session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
-    await details.getByText(`start time: ${sessionStamp(firstStart)}`, { exact: true }).waitFor();
-    await details.getByText("time took: 1m 30s", { exact: true }).waitFor();
+    await details.getByText(`Start time: ${sessionStamp(firstStart)}`, { exact: true }).waitFor();
+    await details.getByText("Time took: 1m 30s", { exact: true }).waitFor();
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

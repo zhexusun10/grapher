@@ -33,6 +33,8 @@ For Graph, inspect tasks and dependencies, then choose **Approve**. Independent 
 | Guide a running task | Send an instruction to that node's live conversation. |
 | Add work to a completed node | Send a follow-up; it starts another execution using that node's own conversation. After publication, it edits the source directly. |
 | Change the overall plan | Send a Graph follow-up without selecting a node; the Planner revises the graph. |
+| Copy a conversation's original prompt | Right-click it in the sidebar and choose **Copy prompt**; saved conversations use the backend's original goal. |
+| Collapse or reopen the Graph | Drag the divider past the graph's minimum width to collapse it; use the edge arrow to reopen it at the previous width. You can also focus the divider and press Enter. |
 | Pause Graph node work | Use the topology's **Pause**; it interrupts active node processes and stops new dispatches for that Run. Wait for pausing to finish before **Continue**. It does not stop the Planner or other Runs. |
 | Stop just one conversation | Use that node conversation's **Stop**. Global Stop/cancel also cancels planning. |
 

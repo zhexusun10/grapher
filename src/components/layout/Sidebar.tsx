@@ -66,6 +66,8 @@ interface SidebarProps {
   activeBackendPhase?: string | null;
   runIndicators: Record<string, { unread: boolean; phase: string }>;
   onLoadRun: (runId: string) => void;
+  onCopyRunPrompt: (runId: string, provisionalPrompt?: string) => void;
+  onCancelPendingPromptCopy: () => void;
   onDeleteRun: (runId: string) => void;
   onNewConversation: () => void;
   onOpenSettings: () => void;
@@ -90,6 +92,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   activeBackendPhase,
   runIndicators,
   onLoadRun,
+  onCopyRunPrompt,
+  onCancelPendingPromptCopy,
   onDeleteRun,
   onNewConversation,
   onOpenSettings,
@@ -121,7 +125,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   };
 
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; project: ProjectItem } | null>(null);
-  const [runContextMenu, setRunContextMenu] = useState<{ x: number; y: number; runId: string } | null>(null);
+  const [runContextMenu, setRunContextMenu] = useState<{ x: number; y: number; runId: string; provisionalPrompt?: string } | null>(null);
   const reduceMotion = useReducedMotion() ?? false;
 
   React.useEffect(() => {
@@ -190,7 +194,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           e.preventDefault();
           e.stopPropagation();
           setProjectContextMenu(null);
-          setRunContextMenu({ x: e.clientX, y: e.clientY, runId: id });
+          setRunContextMenu({
+            x: e.clientX, y: e.clientY, runId: id,
+            // The durable ID may replace a pending card while its menu is open.
+            provisionalPrompt: id.startsWith("pending-") ? runLabels[id] : undefined,
+          });
         }}
       >
         {isThisRunActive ? (
@@ -330,6 +338,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <button
             className="context-menu-item"
             onClick={() => {
+              onCancelPendingPromptCopy();
               navigator.clipboard?.writeText(normalizeWorkspacePath(projectContextMenu.project.path));
               setProjectContextMenu(null);
             }}
@@ -359,19 +368,31 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             className="context-menu"
             style={{
               left: Math.min(runContextMenu.x, window.innerWidth - 180),
-              top: Math.min(runContextMenu.y, window.innerHeight - 120),
+              top: Math.max(0, Math.min(runContextMenu.y, window.innerHeight - 150)),
             }}
             onClick={(e) => e.stopPropagation()}
           >
           <button
             className="context-menu-item"
             onClick={() => {
+              onCancelPendingPromptCopy();
               navigator.clipboard?.writeText(runContextMenu.runId);
               setRunContextMenu(null);
             }}
           >
             <Copy size={14} />
             <span>{t("复制快照 ID")}</span>
+          </button>
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const { runId, provisionalPrompt } = runContextMenu;
+              setRunContextMenu(null);
+              onCopyRunPrompt(runId, provisionalPrompt);
+            }}
+          >
+            <Copy size={14} />
+            <span>{t("复制提示词")}</span>
           </button>
           <div className="context-menu-divider" />
           <button
