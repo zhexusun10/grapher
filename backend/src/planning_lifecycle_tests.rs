@@ -328,3 +328,36 @@ fn run_started_is_published_after_persistence_and_commit_reuses_its_id() {
     assert_eq!(snapshot(&service_for_run(&primary, &id, false).unwrap()).unwrap().phase, "awaiting_approval");
     invalidate_service_cache(&root, None);
 }
+
+#[test]
+fn restart_preserves_the_review_failure_context_in_the_durable_summary() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = service(temp.path());
+    let id = Uuid::new_v4().to_string();
+    let (directory, _) = attempt(temp.path(), &id, false, true);
+    let request_path = directory.join("request.json");
+    let mut request: serde_json::Value = serde_json::from_slice(&fs::read(&request_path).unwrap()).unwrap();
+    request["backgroundReview"] = serde_json::json!(true);
+    fs::write(&request_path, request.to_string()).unwrap();
+
+    recover_plannings(&primary).unwrap();
+    let summary: PlanningSummary = serde_json::from_slice(
+        &fs::read(directory.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary.status.as_deref(), Some("failed"));
+    let error = summary.error.as_deref().unwrap();
+    assert!(error.contains("post-task Planner review"), "{error}");
+    assert!(error.contains("send a follow-up to continue"), "{error}");
+    assert!(!error.contains("start a new planning attempt"), "{error}");
+
+    // Sidecars written by the older recovery path retain the foreground
+    // wording. Loading them repairs the diagnostic without touching the event.
+    let generic = "Backend stopped during planning. Saved output is preserved; start a new planning attempt.";
+    let mut stale = summary;
+    stale.error = Some(generic.into());
+    fs::write(directory.join("summary.json"), serde_json::to_vec(&stale).unwrap()).unwrap();
+    recover_plannings(&primary).unwrap();
+    let repaired: PlanningSummary = serde_json::from_slice(
+        &fs::read(directory.join("summary.json")).unwrap()).unwrap();
+    assert!(repaired.error.as_deref().unwrap().contains("send a follow-up to continue"));
+    assert!(!repaired.error.as_deref().unwrap().contains("start a new planning attempt"));
+}

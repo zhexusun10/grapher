@@ -9,6 +9,8 @@ import {
   getStoredRatio,
   persistRatio,
   clampSplitRatio,
+  GRAPH_COLLAPSE_OVERSHOOT_PX,
+  shouldCollapseGraphPane,
 } from "../src/hooks/useWorkbenchResizer.ts";
 
 test("getStoredRatio returns default ratio when storage is empty", () => {
@@ -81,6 +83,21 @@ test("clampSplitRatio ensures minimum left and right widths for different contai
   assert.equal(clampSplitRatio(0.1, 2000), MIN_SPLIT_RATIO);
   assert.equal(clampSplitRatio(0.5, 2000), 0.5);
   assert.equal(clampSplitRatio(0.84, 2000), 0.84);
+});
+
+test("graph collapse requires deliberate overshoot beyond the rendered minimum width", () => {
+  for (const [width, boundary] of [[480, 160], [680, 360], [1000, 680], [2000, 1680], [4000, 3400]]) {
+    assert.equal(shouldCollapseGraphPane(boundary, width), false, `${width}: minimum width remains resizable`);
+    assert.equal(shouldCollapseGraphPane(boundary + GRAPH_COLLAPSE_OVERSHOOT_PX - 1, width), false);
+    assert.equal(shouldCollapseGraphPane(boundary + GRAPH_COLLAPSE_OVERSHOOT_PX, width), true);
+    assert.equal(shouldCollapseGraphPane(boundary - 100, width), false);
+  }
+});
+
+test("graph collapse ignores invalid or unmeasured pointer geometry", () => {
+  for (const [pointer, width] of [[900, 0], [900, -1], [900, NaN], [900, Infinity], [NaN, 1000], [Infinity, 1000]]) {
+    assert.equal(shouldCollapseGraphPane(pointer, width), false);
+  }
 });
 
 test("storage exceptions do not throw and fall back to default", () => {

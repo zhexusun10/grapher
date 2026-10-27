@@ -573,6 +573,8 @@ const POST_TASK_REVIEW_PROMPT: &str = "All tasks you assigned are completed. Con
 /// Both consume the same durable one-shot marker.
 /// Runtime enforces the same rule in `revision_affected` regardless.
 const PLANNER_REWORK_NOTE: &str = "Modifying a completed node's task re-runs that node in a fresh session and invalidates all its downstream dependents (they re-run their previous tasks with the updated dependencies' workspace states); unrelated branches keep their work.";
+const BACKEND_STOPPED_PLANNING_ERROR: &str = "Backend stopped during planning. Saved output is preserved; start a new planning attempt.";
+const BACKEND_STOPPED_REVIEW_ERROR: &str = "Backend stopped during post-task Planner review. Saved output is preserved; send a follow-up to continue.";
 
 fn post_task_review_task(include_rework_note: bool) -> String {
     if include_rework_note {
@@ -784,7 +786,7 @@ fn bootstrap_projection(
             #[cfg(feature = "fixture")]
             pi_args: vec![entrypoint.to_string_lossy().into()],
         });
-    config.max_feedback = config.max_feedback.min(3);
+    config.max_feedback = config.max_feedback.min(5);
     // Settings are future-Run defaults, not an environment selection surface.
     // Historical Run/descriptor policies remain in their immutable projections.
     config.environment = None;
@@ -970,7 +972,7 @@ fn save_config_projection(
 ) -> Result<Bootstrap, String> {
     config.environment = None; // Native admission is Runtime-owned, never a UI default.
     config.validate_model_settings()?;
-    config.max_feedback = 3;
+    config.max_feedback = 5;
     let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
     if let Some(run_id) = &run_id {
         if runtime.state.run_id != *run_id {
@@ -1755,7 +1757,7 @@ fn plan_goal_internal_with_started(
         return Err(("Enter a goal".into(), None));
     }
     let mut config = config;
-    config.max_feedback = config.max_feedback.min(3);
+    config.max_feedback = config.max_feedback.min(5);
     #[cfg(feature = "fixture")]
     if config.engine != "pi" {
         return Err((
@@ -2620,6 +2622,10 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
             || directory.file_name().and_then(|s| s.to_str()) != Some(&summary.planning_id)
         { continue; }
         let recorded = primary.store.run_for_planning_id(&summary.planning_id)?;
+        let request = fs::read(directory.join("request.json")).ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let background_review = request.as_ref()
+            .is_some_and(|request| request["backgroundReview"].as_bool() == Some(true));
         let interrupted = summary.status.as_deref() == Some("running");
         if interrupted {
             // The graph commit may have reached SQLite just before shutdown,
@@ -2633,11 +2639,20 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
                 }
             }
             summary.status = Some("failed".into());
-            summary.error = Some("Backend stopped during planning. Saved output is preserved; start a new planning attempt.".into());
+            summary.error = Some(if background_review {
+                BACKEND_STOPPED_REVIEW_ERROR
+            } else {
+                BACKEND_STOPPED_PLANNING_ERROR
+            }.into());
+        } else if background_review
+            && summary.status.as_deref() == Some("failed")
+            && summary.error.as_deref() == Some(BACKEND_STOPPED_PLANNING_ERROR)
+        {
+            // A review interrupted before this fix was persisted with the
+            // foreground planning wording. Repair the sidecar while loading it.
+            summary.error = Some(BACKEND_STOPPED_REVIEW_ERROR.into());
         }
         if summary.status.as_deref() != Some("failed") { continue; }
-        let request = fs::read(directory.join("request.json")).ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
         if let Some(request) = &request {
             if let Ok(config) = argument::<Config>(request, "config") {
                 // Interrupted summaries used to retain zero metrics despite saved JSONL.
@@ -2691,6 +2706,11 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
                         }
                     }
                 }
+                // A review that reached this point never recorded its start
+                // (an interrupted one is recovered through its live candidate by
+                // `open_run`), so record the terminal history turn the same way
+                // as any other aborted revision: the conversation replay keeps
+                // the durable output without touching the graph or phase.
                 recovered.emit(EventKind::PlannerTurnAborted { planning: summary })?;
                 if primary.state.run_id == run_id {
                     primary.state = recovered.state;

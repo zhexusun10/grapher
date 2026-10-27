@@ -1,7 +1,6 @@
 import { t } from "../../i18n";
 import React from "react";
 import { Handle, Position, type NodeProps, type Node } from "@xyflow/react";
-import { ShieldCheck, Code2, LoaderCircle, Check, Circle, AlertTriangle, Pause } from "lucide-react";
 import { type FeedbackExhaustion, type Status } from "../../types";
 
 export const statusText: Record<Status, string> = {
@@ -57,25 +56,11 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
       <Handle id="top" type="target" position={Position.Top}
         className={`react-flow__handle ${data.hasTop ? "connected" : ""}`} />
       <div className="node-heading">
-        <span className={`node-icon ${data.reviewer ? "review" : ""}`}>
-          {data.reviewer ? <ShieldCheck size={16} /> : <Code2 size={16} />}
-        </span>
         <strong>{data.name}</strong>
       </div>
       <p>{data.task}</p>
       <div className="node-footer">
-        <span className={`status ${data.status}`}>
-          {data.status === "running" ? (
-            <LoaderCircle className="spin" size={10} />
-          ) : data.status === "paused" ? (
-            <Pause size={10} />
-          ) : data.status === "completed" ? (
-            <Check size={11} />
-          ) : (
-            <Circle size={7} fill="currentColor" />
-          )}
-          {statusText[data.status]}
-        </span>
+        <span className={`status ${data.status}`}>{statusText[data.status]}</span>
         <span className="node-attempts-badge">
           {data.attempts > 0 ? t("#{0} 尝试", data.attempts) : t("尚未执行")}
         </span>
@@ -83,8 +68,7 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
       {data.feedbackExhaustion && (
         <div className="node-feedback-exhausted" role="note"
           aria-label={t("反馈次数耗尽，本次反馈未应用；未向 {0} 反馈，后续节点继续执行。", data.feedbackExhaustion.to)}>
-          <AlertTriangle size={12} />
-          <span>{t("反馈预算耗尽 {0}/{1}", data.feedbackExhaustion.count, data.feedbackExhaustion.limit)}</span>
+          {t("反馈预算耗尽 {0}/{1}", data.feedbackExhaustion.count, data.feedbackExhaustion.limit)}
         </div>
       )}
       <Handle id="bottom" type="source" position={Position.Bottom}

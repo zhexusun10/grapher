@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { activePlannerOutput, plannerConversationEdits, plannerHistoryIds, plannerTurnIds } from '../src/lib/plannerOutput.ts';
+import { recoveredPlanningForDisplay } from '../src/services/planningRecovery.ts';
 
 const source = (id: string) => JSON.stringify({ type: 'grapher_planning_source', planningId: id });
 const user = (text: string) => JSON.stringify({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } });
@@ -78,4 +79,32 @@ test('aborted revision turns stay in the replayed Planner conversation', () => {
     { type: 'graph_revised', planning_id: 'b' },
     { type: 'planner_turn_aborted', planning: { planningId: 'c', createdAt: 5 } },
   ]), ['a', 'b', 'c']);
+});
+
+test('a newer live Planner turn retires the recovered snapshot instead of keeping it marked running', () => {
+  const running = {
+    planningId: 'review', roles: {}, totalPlanningDuration: 0, modelDuration: 0, status: 'running',
+  };
+  assert.equal(recoveredPlanningForDisplay(running, null, false, false)?.planningId, 'review');
+  // A poll can discover a turn before its Run snapshot has a planning summary;
+  // an absent snapshot summary must not erase that discovery.
+  assert.equal(recoveredPlanningForDisplay(null, running, false, false), undefined);
+  // A run switch can pair the previous run's terminal summary with the newly
+  // discovered running turn; the older snapshot must not erase it.
+  const previousRun = { ...running, planningId: 'old-run', status: 'failed', createdAt: 1 };
+  const discovered = { ...running, planningId: 'new-run', status: 'running', createdAt: 2 };
+  assert.equal(recoveredPlanningForDisplay(previousRun, discovered, false, false), undefined, 'keep the poll-discovered turn');
+  // The browser owns a new stream: its live transcript is authoritative.
+  assert.equal(recoveredPlanningForDisplay(running, running, true, false), null);
+  // A request is in flight: an existing recovery stays (no unmount flash),
+  // and a not-yet-adopted turn is not adopted mid-request.
+  assert.equal(recoveredPlanningForDisplay(running, running, false, true)?.planningId, 'review');
+  assert.equal(recoveredPlanningForDisplay(running, null, false, true), undefined);
+  // Terminal snapshots never remain a recovered live turn.
+  assert.equal(recoveredPlanningForDisplay({ ...running, status: 'failed' }, running, false, false), null);
+  // A newer snapshot supersedes the recovered ID (the stale-display bug).
+  const staleReview = { ...running, planningId: 'review', createdAt: 1 };
+  const continuation = { ...running, planningId: 'continue', createdAt: 2 };
+  assert.equal(recoveredPlanningForDisplay(continuation, staleReview, false, false)?.planningId, 'continue');
+  assert.equal(recoveredPlanningForDisplay(continuation, staleReview, true, false), null);
 });

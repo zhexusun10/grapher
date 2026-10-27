@@ -576,7 +576,7 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
         runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
         finish_wave(&mut runtime, "<ACCEPT>");
         finish_wave(&mut runtime, "<ACCEPT>");
-        let limit = configured_limit.min(3);
+        let limit = configured_limit.min(5);
         for _ in 0..limit {
             finish_wave(&mut runtime, "Earlier rework\n<FEEDBACK>");
             finish_wave(&mut runtime, "<ACCEPT>");

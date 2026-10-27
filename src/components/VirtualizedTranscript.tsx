@@ -30,6 +30,9 @@ interface VirtualizedTranscriptProps {
   userTurnTexts?: readonly string[];
   /** The source execution is terminal: unterminated live markers display as interrupted, not running. */
   settled?: boolean;
+  /** In a composed Planning transcript only this revision is still live. Older
+   * revisions' unterminated rows stay interrupted even while a new turn runs. */
+  liveSource?: string;
   onEditUser?: (text: string, replacement: string, userTurnOffset?: number, images?: ImageAttachment[]) => boolean | void | Promise<unknown>;
   /** Called when the user reaches the top of a shared history scroller. */
   onReachTop?: () => void;
@@ -193,6 +196,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   skipFirstUser = false,
   userTurnTexts,
   settled = false,
+  liveSource,
   onEditUser,
   onReachTop,
   onCompactingChange,
@@ -217,6 +221,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const inputStartRef = useRef(startOffset);
   const userTurnTextsKey = userTurnTexts?.join("\u0000") ?? "";
   const parseOptionsRef = useRef(`${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}`);
+  const settledRef = useRef(settled);
+  const liveSourceRef = useRef(liveSource);
   const sharedViewport = inline || compact;
   const inTagThinkingRef = useRef<boolean>(false);
   const seenFirstUserRef = useRef(false);
@@ -295,8 +301,13 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
     const parseOptions = `${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}`;
     // Steady-state renders hand back the identical string; skip all scanning.
+    // A changed live revision still rebuilds the composed rows from cached
+    // segment states so older turns can settle without re-reading their JSONL.
     if (rawOutput === lastRawOutputRef.current && parseOptions === parseOptionsRef.current &&
-      startOffset === inputStartRef.current) return false;
+      startOffset === inputStartRef.current && settled === settledRef.current &&
+      liveSource === liveSourceRef.current) return false;
+    settledRef.current = settled;
+    liveSourceRef.current = liveSource;
 
     const segments = splitPlanningSegments(rawOutput);
     if (segments) {
@@ -311,6 +322,13 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       for (const source of states.keys()) if (!live.has(source)) states.delete(source);
       let changed = false;
       const combined: TranscriptItem[] = [];
+      // A composed transcript is durable history. Once the caller is live, a
+      // segment that is not named by the live revision has already ended; an
+      // as-yet-unknown live revision (undefined) leaves every segment settled
+      // because the live transcript is rendered separately.
+      const segmentItems = (state: SegmentParseState) =>
+        settled || liveSource === undefined || state.source !== liveSource
+          ? settleInterruptedItems(state.items) : state.items;
       const parseFresh = (segment: PlanningSegment, segmentOptions: TranscriptParseOptions) => {
         const state = freshSegmentState(segment);
         states.set(segment.source, state);
@@ -342,7 +360,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           segment.startOffset === state.startOffset && segment.text.startsWith(state.text);
         if (!state || (!unchanged && !prependable && !appendable)) {
           // Fresh revision, or a window we cannot relate to the cache: re-parse.
-          combined.push(...parseFresh(segment, segmentOptions).items);
+          const fresh = parseFresh(segment, segmentOptions);
+          combined.push(...segmentItems(fresh));
           return;
         }
         if (unchanged) {
@@ -360,7 +379,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           }
           const lastNewline = chunkToProcess.lastIndexOf("\n");
           if (lastNewline === -1) {
-            combined.push(...parseFresh(segment, segmentOptions).items);
+            const fresh = parseFresh(segment, segmentOptions);
+            combined.push(...segmentItems(fresh));
             return;
           }
           const previousItems = state.items;
@@ -412,7 +432,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           state.startOffset = segment.startOffset;
           state.text = segment.text;
         }
-        for (const item of state.items) combined.push(item);
+        for (const item of segmentItems(state)) combined.push(item);
       });
       const shared = shareJson(itemsRef.current, combined);
       itemsRef.current = shared;
@@ -619,7 +639,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     itemsRef.current = shareJson(previousItems, currentItems);
     lastRawOutputRef.current = rawOutput;
     return itemsRef.current !== previousItems;
-  }, [showUserTurns, skipFirstUser, userTurnTextsKey, startOffset, settled, inline]);
+  }, [showUserTurns, skipFirstUser, userTurnTextsKey, startOffset, settled, liveSource, inline]);
 
   const computeCompacting = (): boolean => {
     if (segmentedRef.current) {

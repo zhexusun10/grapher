@@ -19,7 +19,7 @@ import { providerAuth } from "./services/providerAuth";
 import { applyModelConfig, modelRoles, planningModelRoles, roleModelConfig } from "./modelConfig";
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
-import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay } from "./services/planningRecovery";
+import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay, recoveredPlanningForDisplay } from "./services/planningRecovery";
 import { executionIdForMessage, executionIdForVersion, nodeConversationExecutions } from "./services/conversationBranch";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./services/thinkingTranscript";
 import { appendItemDelta } from "./services/transcriptUpdates";
@@ -90,12 +90,12 @@ export default function App() {
     }
   });
   const [config, setConfig] = useState<Config>(() => {
-    let initialConfig: Config = { ...defaultConfig, maxFeedback: 3 };
+    let initialConfig: Config = { ...defaultConfig, maxFeedback: 5 };
     try {
       const savedConfig = localStorage.getItem("grapher_config");
       if (savedConfig) {
         const parsed = JSON.parse(savedConfig);
-        initialConfig = { ...initialConfig, ...parsed, model: "", maxFeedback: 3 };
+        initialConfig = { ...initialConfig, ...parsed, model: "", maxFeedback: 5 };
       }
     } catch { }
     try {
@@ -110,7 +110,7 @@ export default function App() {
         }
       }
     } catch { }
-    return { ...initialConfig, repository: normalizeWorkspacePath(initialConfig.repository), maxFeedback: 3 };
+    return { ...initialConfig, repository: normalizeWorkspacePath(initialConfig.repository), maxFeedback: 5 };
   });
   // Model defaults for new conversations. A settings save inside a conversation
   // records a conversation override instead of replacing these defaults.
@@ -867,14 +867,14 @@ export default function App() {
     let nextConfigObj: Config = {
       ...(accepted ?? data.config),
       repository: activeRepository,
-      maxFeedback: 3,
+      maxFeedback: 5,
     };
     // A settings save accepted while this bootstrap was in flight wins over the
     // disk snapshot it was based on.
     if (acceptedSettingsRef.current !== acceptedAtStart && acceptedSettingsRef.current) {
-      nextConfigObj = { ...acceptedSettingsRef.current, repository: activeRepository, maxFeedback: 3 };
+      nextConfigObj = { ...acceptedSettingsRef.current, repository: activeRepository, maxFeedback: 5 };
     } else {
-      setDefaultSettings({ ...data.config, maxFeedback: 3 });
+      setDefaultSettings({ ...data.config, maxFeedback: 5 });
     }
     setConfig(nextConfigObj);
     hasConversationSummariesRef.current = Array.isArray(data.conversations);
@@ -1464,7 +1464,7 @@ export default function App() {
     const repoPath = normalizeWorkspacePath(config.repository.trim());
     const info = repoInfo && workspaceKey(repoInfo.path) === workspaceKey(repoPath) ? repoInfo : null;
     if (generation !== foregroundGeneration.current) return false;
-    const nextConfig = { ...draftConfig, repository: repoPath, maxFeedback: 3 };
+    const nextConfig = { ...draftConfig, repository: repoPath, maxFeedback: 5 };
     try {
       const boot = await runtimeService.saveConfig(nextConfig, state.runId || undefined);
       if (generation !== foregroundGeneration.current) return false;
@@ -1482,7 +1482,7 @@ export default function App() {
         } catch { }
       }
       if (boot.envOverrides) setEnvOverrides(boot.envOverrides);
-      setDefaultSettings({ ...boot.config, maxFeedback: 3 });
+      setDefaultSettings({ ...boot.config, maxFeedback: 5 });
     } catch (error) {
       throw new Error(t("保存设置失败：{0}", String(error)));
     }
@@ -3116,22 +3116,19 @@ export default function App() {
   // The snapshot itself is durable enough to re-attach immediately. This is
   // the fast path after an SSE drop: show the persisted running turn instead
   // of waiting for a listPlannings round trip (or leaving a stale error).
+  // Mirror the snapshot instead of only clearing on an ID match: a newer live
+  // turn (or a different saved Run) must retire the previous recovered ID.
   useEffect(() => {
-    const running = state.planning?.status === "running" ? state.planning : null;
-    if (running && !isPlanning && !busy) {
-      if (!recoveredPlanning || recoveredPlanning.planningId !== running.planningId ||
-        recoveredPlanning.status !== "running") {
-        setRecoveredPlanning(running);
-        // The durable turn is now visible; do not keep a stale transport error
-        // above the recovered Planner conversation.
-        setError("");
-        setSelected("");
-      }
-      return;
-    }
-    if (recoveredPlanning?.planningId === state.planning?.planningId &&
-      state.planning?.status !== "running") {
-      setRecoveredPlanning(null);
+    const next = recoveredPlanningForDisplay(state.planning, recoveredPlanning, isPlanning, busy);
+    // The recovery poll owns a turn discovered before its Run snapshot exists.
+    if (next === undefined) return;
+    if (next?.planningId === recoveredPlanning?.planningId && next?.status === recoveredPlanning?.status) return;
+    setRecoveredPlanning(next);
+    if (next) {
+      // The durable turn is now visible; do not keep a stale transport error
+      // above the recovered Planner conversation.
+      setError("");
+      setSelected("");
     }
   }, [state.planning, isPlanning, busy, recoveredPlanning]);
 

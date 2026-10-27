@@ -31,12 +31,17 @@ async function expectCollapsed(page, trigger) {
   })).toBe(0);
 }
 
-async function fixture(mode, viewport = { width: 1280, height: 850 }, getFileChanges) {
+async function fixture(mode, viewport = { width: 1280, height: 850 }, getFileChanges, getExecutionOutput) {
   const context = await browser.newContext({ viewport, locale: "en-US", reducedMotion: "reduce" });
   await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
   const errors = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "get_execution_output" && getExecutionOutput) {
+      const result = await getExecutionOutput(route.request().postDataJSON());
+      await route.fulfill({ json: { result } }).catch(() => {});
+      return;
+    }
     if (command === "get_file_changes" && getFileChanges) {
       const body = route.request().postDataJSON();
       let result;
@@ -55,7 +60,7 @@ async function fixture(mode, viewport = { width: 1280, height: 850 }, getFileCha
   const page = await context.newPage();
   page.on("pageerror", error => errors.push(String(error)));
   page.setDefaultTimeout(10_000);
-  await page.goto(`${origin}/__changes?mode=${mode}`, { waitUntil: "networkidle" });
+  await page.goto(`${origin}/__changes?mode=${mode}`, { waitUntil: getExecutionOutput ? "domcontentloaded" : "networkidle" });
   await page.locator(".initial-query-scroll.conversation-ready").waitFor();
   return { page, context, errors };
 }
@@ -489,6 +494,99 @@ test("a short change list reveals in place without jumping through a long node c
     assert.equal(after.triggerFits, true, JSON.stringify(after));
     assert.ok(after.firstTop >= after.triggerBottom - 1, JSON.stringify(after));
     assert.ok(after.firstTop >= 0, JSON.stringify(after));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const withConnectionError of [false, true]) {
+  test(`file changes stay anchored when older Node history arrives during expansion (connection error: ${withConnectionError})`, { timeout: 20_000 }, async () => {
+    const line = event => JSON.stringify(event) + "\n";
+    const assistant = text => line({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } });
+    const connectionError = withConnectionError ? line({ type: "message_end", message: {
+      role: "assistant", content: [], stopReason: "error", errorMessage: "Connection error.",
+    } }) : "";
+    const prefix = Array.from({ length: 100 }, (_, i) => assistant(`OLDER_CHANGE_HISTORY_${i}`) + (i === 35 ? connectionError : "")).join("");
+    const tail = assistant(Array.from({ length: 15 }, (_, i) => `Paragraph ${i}: the implementation and changed files are ready for inspection.\n\n`).join(""));
+    const data = Buffer.from(prefix + tail), split = Buffer.byteLength(prefix);
+    let releaseOlder;
+    const { page, context, errors } = await fixture(`node&bytes=${data.length}`, undefined, undefined, async body => {
+      if (body.before !== undefined) await new Promise(resolve => { releaseOlder = resolve; });
+      const start = body.before === undefined ? split : 0, end = body.before ?? data.length;
+      return { runId: body.runId, executionId: body.executionId, content: data.subarray(start, end).toString(),
+        startOffset: start, nextOffset: end, totalBytes: data.length, complete: end === data.length, status: "running" };
+    });
+    try {
+      const trigger = page.getByTestId("workspace-changes-trigger");
+      await page.locator(".initial-query-scroll").evaluate(element => { element.scrollTop = element.scrollHeight; });
+      await page.waitForTimeout(300);
+      for (let i = 0; i < 100 && !releaseOlder; i++) await page.waitForTimeout(10);
+      assert.ok(releaseOlder, "the initial short history window is still being filled");
+      await page.evaluate(() => {
+        window.changesPrependFrames = [];
+        window.sampleChangesPrepend = true;
+        // Sample after the frame's layout/ResizeObserver corrections, not the
+        // transient DOM between a history commit and its pre-paint anchoring.
+        const sample = () => requestAnimationFrame(() => setTimeout(() => {
+          const scroll = document.querySelector(".initial-query-scroll"), viewport = scroll.getBoundingClientRect();
+          const trigger = document.querySelector('[data-testid="workspace-changes-trigger"]').getBoundingClientRect();
+          const composer = scroll.parentElement.querySelector(".pane-bottom-chat").getBoundingClientRect();
+          window.changesPrependFrames.push({ triggerTop: trigger.top - viewport.top,
+            triggerBottom: trigger.bottom - viewport.top, visibleBottom: composer.top - viewport.top,
+            distanceFromBottom: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight, viewportHeight: scroll.clientHeight });
+          if (window.sampleChangesPrepend) sample();
+        }, 0));
+        sample();
+      });
+      const box = await trigger.boundingBox();
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await page.waitForTimeout(60);
+      releaseOlder(); releaseOlder = undefined;
+      await page.waitForFunction(() => document.querySelector('[data-execution-id="execution"]').getAttribute("aria-busy") === "false");
+      await page.waitForTimeout(450);
+      const frames = await page.evaluate(() => { window.sampleChangesPrepend = false; return window.changesPrependFrames; });
+      assert.ok(frames.length >= 3, "sample the history arrival and disclosure animation together");
+      assert.ok(frames.every(frame => frame.triggerTop >= -2 && frame.triggerBottom <= frame.visibleBottom + 2),
+        `history fill must keep the clicked file-change entry visible: ${JSON.stringify(frames.filter(frame => frame.triggerTop < -2 || frame.triggerBottom > frame.visibleBottom + 2).slice(0, 4))}`);
+      assert.ok(frames.every(frame => frame.distanceFromBottom <= frame.viewportHeight),
+        "opening file changes must not land in the middle of the conversation");
+      await expect(trigger).toHaveAttribute("aria-expanded", "true");
+      await expect(page.getByTestId("changed-file-item")).toHaveCount(6);
+      assert.deepEqual(errors, []);
+    } finally { releaseOlder?.(); await context.close(); }
+  });
+}
+
+test("overlapping footer reveals keep the entry reachable and yield to manual scrolling", { timeout: 20_000 }, async () => {
+  const { page, context, errors } = await fixture("node&long=1&many=1");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await page.locator(".initial-query-scroll").evaluate(element => { element.scrollTop = element.scrollHeight; });
+    await page.waitForTimeout(300);
+    await trigger.evaluate(button => {
+      button.click();
+      setTimeout(() => button.closest(".workspace-details-summary").querySelector(".workspace-details-trigger").click(), 60);
+    });
+    await page.waitForTimeout(450);
+    assert.equal(await trigger.evaluate(button => {
+      const scroll = button.closest(".initial-query-scroll"), rect = button.getBoundingClientRect();
+      const composer = scroll.parentElement.querySelector(".pane-bottom-chat").getBoundingClientRect();
+      return rect.top >= scroll.getBoundingClientRect().top - 2 && rect.bottom <= composer.top + 2;
+    }), true, "a newer session-details reveal must not fight the file-change reveal");
+    await trigger.evaluate(button => {
+      button.click();
+      button.closest(".workspace-details-summary").querySelector(".workspace-details-trigger").click();
+    });
+    await expectCollapsed(page, trigger);
+    await trigger.evaluate(button => button.click());
+    await page.waitForTimeout(60);
+    const manualTop = await page.locator(".initial-query-scroll").evaluate(element => {
+      element.dispatchEvent(new WheelEvent("wheel", { deltaY: -120, bubbles: true }));
+      element.scrollTop = Math.max(0, element.scrollTop - 120);
+      return element.scrollTop;
+    });
+    await page.waitForTimeout(400);
+    assert.ok(await page.locator(".initial-query-scroll").evaluate(element => element.scrollTop) <= manualTop + 3,
+      "manual upward input must stop the disclosure's scroll following");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

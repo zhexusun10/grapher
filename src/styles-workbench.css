@@ -1252,9 +1252,16 @@ button.session-label-toggle:focus-visible {
   position: relative;
   transition: background 0.15s;
   flex-shrink: 0;
+  touch-action: none;
+}
+
+.workbench-resizer:focus-visible {
+  outline: 2px solid var(--brand-default);
+  outline-offset: -2px;
 }
 
 .workbench-resizer:hover,
+.workbench-resizer:focus-visible,
 .workbench-resizer.active {
   background: var(--brand-subtle);
 }
@@ -1268,6 +1275,7 @@ button.session-label-toggle:focus-visible {
 }
 
 .workbench-resizer:hover .resizer-handle,
+.workbench-resizer:focus-visible .resizer-handle,
 .workbench-resizer.active .resizer-handle {
   background: var(--brand-default);
   height: 52px;
@@ -1520,8 +1528,12 @@ button.session-label-toggle:focus-visible {
 
 .task-node {
   position: relative;
-  width: 236px;
-  padding: 14px 14px 11px;
+  box-sizing: border-box;
+  width: 260px;
+  min-height: 196px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
   border-radius: 8px;
@@ -1568,38 +1580,15 @@ button.session-label-toggle:focus-visible {
   gap: 8px;
 }
 
-.node-icon {
-  width: 27px;
-  height: 27px;
-  display: grid;
-  place-items: center;
-  border-radius: 5px;
-  background: var(--bg-surface);
-  color: var(--brand-default);
-}
-
-.node-icon.review {
-  background: var(--graph-edge-feedback-bg);
-  color: var(--graph-edge-feedback-text);
-}
-
 .node-heading strong {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  font-weight: 600;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.25;
   flex: 1;
   color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-
-.task-node p {
-  font-size: 10px;
-  line-height: 1.6;
-  color: var(--text-secondary);
-  margin: 10px 0 12px;
+  overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
@@ -1607,38 +1596,55 @@ button.session-label-toggle:focus-visible {
   overflow: hidden;
 }
 
+
+.task-node p {
+  min-height: 5.1em;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  margin: 12px 0 18px;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .node-footer {
+  margin-top: auto;
   border-top: 1px solid var(--border-subtle);
-  padding-top: 9px;
+  padding-top: 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+}
+
+.node-footer .status {
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
 .node-attempts-badge {
-  font-size: 9px;
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1.5;
   color: var(--text-secondary);
-  background: var(--bg-surface);
-  padding: 2px 5px;
-  border-radius: 4px;
+  white-space: nowrap;
 }
 
 
 .node-feedback-exhausted {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 8px;
-  padding: 6px 8px;
-  border-radius: 4px;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 5px;
   background: var(--status-warning-subtle);
   color: var(--status-warning);
-  font-size: 9px;
-  line-height: 1.4;
-}
-
-.node-feedback-exhausted svg {
-  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .react-flow__handle {

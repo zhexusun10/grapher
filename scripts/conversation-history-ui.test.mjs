@@ -1682,6 +1682,86 @@ test("actual App preserves scrollback and releases RAM on Node/Conversation navi
   } finally { releaseOlder?.(); await context.close(); }
 });
 
+test("Node navigation keeps history painted after the fade while older pages fill", { timeout: 30_000 }, async () => {
+  const config = { repository: "/mock/node-reveal", model: "test/old", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const prefix = Array.from({ length: 65 }, (_, i) => startTool(`reveal-tool-${i}`, `echo ${i}`) +
+    endTool(`reveal-tool-${i}`, `Result ${i}`) + assistant(`OLDER_REVEAL_${i}`)).join("");
+  const tail = startTool("reveal-tail", "echo tail") + endTool("reveal-tail", "x".repeat(4000)) + assistant("NODE_REVEAL_BOTTOM");
+  const data = Buffer.from(prefix + tail), split = Buffer.byteLength(prefix);
+  const snapshot = { ...empty, runId: "node-reveal", config, planType: "graph", phase: "completed", approved: true,
+    graph: { originalGoal: "Node reveal regression", nodes: ["short", "paged"].map(name => ({ name, task: `Task ${name}` })), edges: [] },
+    nodes: Object.fromEntries(["short", "paged"].map(name => [name, { status: "completed", revision: 1, instruction: "", error: null }])),
+    executions: ["short", "paged"].map(name => ({ id: name, node: name, status: "completed", output: "",
+      outputBytes: name === "paged" ? data.length : Buffer.byteLength(assistant("SHORT_NODE_REPLY")),
+      revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: `session-${name}`, worktree: "/mock", before: "", after: "" })) };
+  let releaseOlder;
+  const { context, page, errors } = await newPage(async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], repositoryInfo: { path: config.repository, name: "Node reveal", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = snapshot; break;
+      case "snapshot_if_changed": result = { version: "1", snapshot: null }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_execution_output": {
+        if (body.before !== undefined) await new Promise(resolve => { releaseOlder = resolve; });
+        const bytes = body.executionId === "paged" ? data : Buffer.from(assistant("SHORT_NODE_REPLY"));
+        const start = body.executionId === "paged" && body.before === undefined ? split : 0;
+        const end = body.before ?? bytes.length;
+        result = { runId: body.runId, executionId: body.executionId, content: bytes.subarray(start, end).toString(),
+          startOffset: start, nextOffset: end, totalBytes: bytes.length, complete: end === bytes.length, status: "completed" }; break;
+      }
+      default: throw new Error(`Unexpected API ${command}`);
+    }
+    try { await route.fulfill({ json: { result } }); } catch { /* Node navigation can abort its reader. */ }
+  });
+  try {
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.locator(`[data-run-id="${snapshot.runId}"]`).click();
+    for (const reducedMotion of ["no-preference", "reduce"]) {
+      await page.emulateMedia({ reducedMotion });
+      await page.locator('.react-flow__node[data-id="short"]').click();
+      await page.getByText("SHORT_NODE_REPLY", { exact: true }).waitFor();
+      await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) > 0.99);
+      await page.locator('.react-flow__node[data-id="paged"]').click();
+      await page.getByText("NODE_REVEAL_BOTTOM", { exact: true }).waitFor();
+      await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) === 1);
+      for (let i = 0; i < 100 && !releaseOlder; i++) await page.waitForTimeout(10);
+      assert.ok(releaseOlder, "the short tail requests older history after its first visible page");
+      await page.evaluate(() => {
+        window.nodeRevealFrames = [];
+        window.sampleNodeReveal = true;
+        const sample = () => {
+          const scroll = document.querySelector(".initial-query-scroll"), rect = scroll.getBoundingClientRect();
+          const rows = [...scroll.querySelectorAll("[data-transcript-id]")];
+          window.nodeRevealFrames.push({
+            distanceFromBottom: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+            visibleRows: rows.filter(row => { const bounds = row.getBoundingClientRect(); return bounds.bottom > rect.top && bounds.top < rect.bottom; }).length,
+          });
+          if (window.sampleNodeReveal) requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      });
+      releaseOlder(); releaseOlder = undefined;
+      await page.waitForFunction(() => document.querySelector('[data-execution-id="paged"]').getAttribute("aria-busy") === "false");
+      await page.waitForTimeout(400);
+      const frames = await page.evaluate(() => { window.sampleNodeReveal = false; return window.nodeRevealFrames; });
+      assert.ok(frames.length >= 3, "sample the visible history fill, not just its final frame");
+      assert.ok(frames.every(frame => frame.visibleRows > 0),
+        `${reducedMotion}: filling older history must not paint a blank viewport: ${JSON.stringify(frames.filter(frame => !frame.visibleRows))}`);
+      assert.ok(frames.every(frame => frame.distanceFromBottom <= 35),
+        `${reducedMotion}: history must not flash back to the top after the fade: ${JSON.stringify(frames.filter(frame => frame.distanceFromBottom > 35))}`);
+    }
+    assert.deepEqual(errors, []);
+  } finally { releaseOlder?.(); await context.close(); }
+});
+
 test("actual App stop preserves a sent Planner follow-up and the next unsent draft", { timeout: 45_000 }, async () => {
   const config = { repository: "/mock/stop", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},

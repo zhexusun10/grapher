@@ -982,7 +982,7 @@ impl Runtime {
             return Err("Unknown test actuator".into());
         }
         let mut config = config;
-        config.max_feedback = config.max_feedback.min(3);
+        config.max_feedback = config.max_feedback.min(5);
         // max_parallel = 0 uses the default node worker limit.
         #[cfg(feature = "fixture")]
         if config.engine == "pi" && config.pi_command.trim().is_empty() {
@@ -1500,7 +1500,7 @@ impl Runtime {
         if !known_engine(&config.engine) {
             return Err("Unknown test actuator".into());
         }
-        config.max_feedback = config.max_feedback.min(3);
+        config.max_feedback = config.max_feedback.min(5);
         // max_parallel = 0 uses the default node worker limit.
         #[cfg(not(feature = "fixture"))]
         crate::native::require_graph_execution()?;
@@ -2227,7 +2227,7 @@ impl Runtime {
             .state
             .config
             .as_ref()
-            .map(|config| config.max_feedback.min(3))
+            .map(|config| config.max_feedback.min(5))
             .unwrap_or(0);
         self.state
             .feedback_counts
@@ -3885,7 +3885,7 @@ impl Runtime {
                     execution_id: member.execution_id.clone(),
                     count: self.state.feedback_counts.get(&format!("{}->{}", member.from, member.to))
                         .copied().unwrap_or(0),
-                    limit: self.state.config.as_ref().ok_or("Missing config")?.max_feedback.min(3),
+                    limit: self.state.config.as_ref().ok_or("Missing config")?.max_feedback.min(5),
                 });
             } else {
                 disposition = if member.accepted { "accepted" } else { "applied" };

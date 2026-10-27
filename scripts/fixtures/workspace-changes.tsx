@@ -67,7 +67,8 @@ function Fixture() {
     id: "execution", node: "worker", revision: 0, attempt: 1,
     sessionId: "session", worktree: "/project", before: "", after: "",
     status: running ? "running" : "completed", startedAt: repeatedAttempts ? 2 : 1, completedAt: running ? null : 3,
-    output: params.get("long") === "1" ? longConversationOutput
+    ...(params.has("bytes") ? { outputBytes: Number(params.get("bytes")) } : {}),
+    output: params.has("bytes") ? "" : params.get("long") === "1" ? longConversationOutput
       : JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The implementation is ready for review." }] } }) + "\n",
     fileChanges: metadata ? undefined : summary,
   };

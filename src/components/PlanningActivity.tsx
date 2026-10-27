@@ -28,6 +28,8 @@ type Props = {
   onEditUser?: (text: string, replacement: string) => boolean | void | Promise<unknown>;
   edits?: Array<{ old_instruction?: string; nextPlanningId?: string }>;
   running?: boolean;
+  /** The only composed revision that is still live; older turns stay settled. */
+  livePlanningId?: string;
   onCompactingChange?: (compacting: boolean) => void;
 };
 
@@ -45,7 +47,7 @@ export const PlanningActivity = memo(function PlanningActivity(props: Props) {
 });
 
 function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onLoadingChange, showUserTurns = false,
-  skipFirstUser = false, onUserResize, onEditUser, edits = [], running = false, onCompactingChange }: Props) {
+  skipFirstUser = false, onUserResize, onEditUser, edits = [], running = false, livePlanningId, onCompactingChange }: Props) {
   const key = planningIds.join(":");
   const [initialSegments] = useState(() => {
     const loaded = new Map<string, TranscriptWindow>();
@@ -198,6 +200,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         onReachTop={hasOlder && !error ? () => { void loadOlder(); } : undefined}
         showUserTurns={showUserTurns} skipFirstUser={skipInitialUser} onUserResize={onUserResize}
         settled={!running}
+        liveSource={running ? livePlanningId : undefined}
         onCompactingChange={onCompactingChange}
         onEditUser={onEditUser ? editUser : undefined} />
     </div>}

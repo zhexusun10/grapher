@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Graph review nodes can now apply up to 5 feedback rounds per source/target edge instead of 3, so a reviewer can request a few more repair cycles before feedback is recorded as exhausted. The approval summary states the new bound.
 - Topology cards now use a taller row pitch, so execution layers keep a clear vertical gap and side-routed or long edges have room to read, instead of the graph bunching every layer near the top of the pane.
 
 ### Fixed

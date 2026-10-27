@@ -6,7 +6,7 @@ import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   Code2, ArrowLeft,
   Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2, ChevronRight,
-  AlertCircle, PanelRightClose, PanelRightOpen
+  AlertCircle, ChevronLeft
 } from "lucide-react";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
@@ -33,6 +33,7 @@ import { ExecutionTimeTookText, PlannerTimeTookText, formatSessionStartTime } fr
 import { SessionTokenUsage } from "../SessionTokenUsage";
 import { formatTokenCount, formatCacheHitRate, consumedTokenCount, attemptSessionContext, sessionContext, sessionTokenUsage } from "../../utils/tokenUsage";
 import { ExecutionTranscript, ExecutionTranscriptPlaceholder } from "../ExecutionTranscript";
+import { settleInterruptedItems } from "../../services/transcriptSettle";
 import { activePlannerOutput } from "../PlanningActivity";
 import { plannerConversationEdits, plannerHistoryIds } from "../../lib/plannerOutput";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
@@ -821,6 +822,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     // canonical bubble instead of rendering it twice.
     return withoutLiveFirstTurn(items, plannerMessages[0]?.id);
   }, [plannerStream.items, plannerMessages]);
+  const plannerActivityRunning = isPlanning || !!recoveredPlanningId;
+  // The persisted running summary is the most recent turn. A foreground
+  // Planner that has not emitted it yet must not borrow a previous turn's ID.
+  const livePlanningId = plannerActivityRunning
+    ? (state.planning?.status === "running" ? state.planning.planningId : recoveredPlanningId)
+    : undefined;
+  // Stale live rows outlive a dropped stream. Once this browser no longer owns
+  // a live turn, an unterminated call can only have been interrupted; never
+  // leave its spinner running forever while saved history is still loading.
+  const displayedLivePlannerItems = useMemo(() => plannerActivityRunning
+    ? livePlannerItems : settleInterruptedItems(livePlannerItems),
+    [plannerActivityRunning, livePlannerItems]);
   // The history is also what tells the saved replay to skip the turn already
   // rendered as the conversation header. A header-only conversation still has
   // one persisted turn, so this must not short-circuit to an empty list or the
@@ -876,23 +889,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const hidePlannerResultCards = isPlanning || !!recoveredPlanningId ||
     plannerStream.stage === "planning" || plannerStream.plannerThinkingActive ||
     Boolean(plannerStream.compacting);
-  const { workbenchRef, isResizing, splitRatio, handleStartResize, handleResetResizer } = useWorkbenchResizer();
   const [graphPane, setGraphPane] = useState({ collapsed: false, generation: 0 });
   const graphPaneCollapsed = graphPane.collapsed;
   const graphPaneNeedsFocus = useRef(false);
-  const toggleGraphPane = useCallback(() => {
+  const collapseGraphPane = useCallback(() => {
     graphPaneNeedsFocus.current = true;
-    setGraphPane(current => ({
-      collapsed: !current.collapsed,
-      generation: current.generation + (current.collapsed ? 1 : 0),
-    }));
+    setGraphPane(current => ({ ...current, collapsed: true }));
   }, []);
-  const focusGraphPaneToggle = useCallback((button: HTMLButtonElement | null) => {
-    if (button && graphPaneNeedsFocus.current) {
-      button.focus({ preventScroll: true });
+  const expandGraphPane = useCallback(() => {
+    graphPaneNeedsFocus.current = true;
+    setGraphPane(current => ({ collapsed: false, generation: current.generation + 1 }));
+  }, []);
+  const focusGraphPaneToggle = useCallback((control: HTMLElement | null) => {
+    if (control && graphPaneNeedsFocus.current) {
+      control.focus({ preventScroll: true });
       graphPaneNeedsFocus.current = false;
     }
   }, []);
+  const { workbenchRef, isResizing, splitRatio, handleStartResize, handleResizeKeyDown, handleResetResizer } =
+    useWorkbenchResizer({ onCollapse: collapseGraphPane });
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const expandedCardObserverRef = useRef<ResizeObserver | null>(null);
   const expandedCardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -917,13 +932,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const conversationGenerationRef = useRef(0);
   const isScrollingToBottomRef = useRef(false);
   const latestScrollRef = useRef<(() => void) | null>(null);
-  const setUserScrolledUp = useCallback((scrolledUp: boolean) => {
+  const setUserScrolledUp = useStableCallback((scrolledUp: boolean) => {
     isUserScrolledUpRef.current = scrolledUp;
     const el = chatScrollRef.current;
     if (!el) return;
-    if (scrolledUp || !isPreparingConversationRef.current) delete el.dataset.transcriptPreparing;
+    // The first page may already be visible while older history is still
+    // filling. Keep the virtualizer bottom-pinned throughout that fill; a
+    // programmatic scroll must not clear the declarative preparation flag.
+    if (scrolledUp || (!isPreparingConversationRef.current && !initialFillPending)) delete el.dataset.transcriptPreparing;
     else el.dataset.transcriptPreparing = "true";
-  }, []);
+  });
   const stopLatestScroll = useCallback(() => {
     if (latestScrollRef.current) {
       latestScrollRef.current();
@@ -2510,7 +2528,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           planningIds={savedPlannerIds}
                           showUserTurns={savedPlannerShowsUserTurns}
                           skipFirstUser={plannerMessages.length > 0 && skipFirstPersistedTurn}
-                          running={isPlanning || !!recoveredPlanningId}
+                          running={plannerActivityRunning}
+                          livePlanningId={livePlanningId}
                           onCompactingChange={setPlannerHistoryCompacting}
                           onLoadingChange={setPlannerHistoryLoading}
                           onReady={() => {
@@ -2569,7 +2588,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                     {/* Planner 顺序流式记录：严格按实际发生时序呈现用户追加消息、工具调用、思维链与输出文字 */}
                     {renderLivePlanner && livePlannerItems.length > 0 ? (
-                      <PlannerTranscript items={livePlannerItems} isPlanning={isPlanning} locked={locked}
+                      <PlannerTranscript items={displayedLivePlannerItems} isPlanning={isPlanning} locked={locked}
                         editingMessage={editingMessage} draft={editPrefillText ?? ""}
                         onDraftChange={onEditPrefillTextChange ?? (() => { })} onEditMessage={onEditMessage}
                         onCancelEdit={onCancelEditMessage} onEditSubmit={onEditMessageSubmit}
@@ -2738,9 +2757,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           title={t("展开执行拓扑图")}
           aria-label={t("展开执行拓扑图")}
           aria-expanded={false}
-          onClick={toggleGraphPane}
+          onClick={expandGraphPane}
         >
-          <PanelRightOpen size={16} />
+          <ChevronLeft size={18} strokeWidth={1.6} aria-hidden="true" />
         </button>
       )}
 
@@ -2754,9 +2773,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               animate={{ opacity: 1 }}
               exit={{ opacity: 0, transition: { duration: reduceMotion ? 0 : 0.45 } }}
               transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
-              onMouseDown={handleStartResize}
+              ref={focusGraphPaneToggle}
+              role="separator"
+              tabIndex={0}
+              aria-orientation="vertical"
+              aria-label={t("调整执行拓扑图宽度")}
+              aria-valuenow={Math.round((1 - splitRatio) * 100)}
+              onPointerDown={handleStartResize}
+              onKeyDown={handleResizeKeyDown}
               onDoubleClick={handleResetResizer}
-              title={t("按住左右拖动调节宽度，双击恢复默认")}
+              title={t("左右拖动调整宽度，继续向右拖动可收起；双击恢复默认，Enter 收起")}
             >
               <div className="resizer-handle" />
             </motion.div>
@@ -2775,17 +2801,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   <strong>{t("执行拓扑图")}</strong>
                 </div>
                 <div className="toolbar-right">
-                  <button
-                    type="button"
-                    className="icon-button"
-                    ref={focusGraphPaneToggle}
-                    title={t("收起执行拓扑图")}
-                    aria-label={t("收起执行拓扑图")}
-                    aria-expanded={true}
-                    onClick={toggleGraphPane}
-                  >
-                    <PanelRightClose size={16} />
-                  </button>
                   <button
                     type="button"
                     className="icon-button"

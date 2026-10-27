@@ -257,6 +257,70 @@ async function assertFitted(page, rows) {
     `automatic fit matches the Fit View button: ${JSON.stringify({ automatic, manual })}`);
 }
 
+test("graph splitter preserves ordinary resizing, cancellation, keyboard control and reset", { timeout: 20_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
+  await context.addInitScript(() => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_workbench_split_ratio", "0.55");
+  });
+  const errors = [];
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const result = command === "list_files" ? { files: [] } : command === "list_skills" ? { skills: [] } : null;
+    if (result === null) errors.push(`Unexpected API: ${command}`);
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => !!window.graphFixture);
+    await page.evaluate(() => window.graphFixture.update({ phase: "awaiting_approval",
+      graph: { originalGoal: "Resize regression", nodes: [{ name: "worker", task: "Task" }], edges: [] } }, false));
+    const splitter = page.getByRole("separator", { name: "Resize execution graph", exact: true });
+    await splitter.waitFor();
+    const savedRatio = () => page.evaluate(() => Number(localStorage.getItem("grapher_workbench_split_ratio")));
+    const beginDrag = async delta => {
+      await splitter.evaluate(element => element.addEventListener("pointerdown", event => { window.resizePointerId = event.pointerId; }, { once: true }));
+      const bounds = await splitter.boundingBox();
+      await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(bounds.x + bounds.width / 2 + delta, bounds.y + bounds.height / 2, { steps: 4 });
+    };
+    await beginDrag(-64);
+    await page.mouse.up();
+    const resized = await savedRatio();
+    assert.ok(resized < 0.55 && resized > 0.3, "ordinary drags still resize and persist the split");
+    assert.equal(await page.locator(".workbench.resizing").count(), 0);
+
+    await beginDrag(-48);
+    await page.evaluate(() => window.dispatchEvent(new PointerEvent("pointercancel", { pointerId: window.resizePointerId })));
+    await page.mouse.up();
+    assert.equal(await savedRatio(), resized, "a cancelled gesture must not overwrite the saved width");
+    assert.ok(await page.locator(".workbench").evaluate((element, ratio) =>
+      Math.abs(Number(element.style.getPropertyValue("--workbench-split-ratio")) - ratio) < 0.0001, resized));
+    assert.equal(await page.locator(".workbench.resizing").count(), 0);
+
+    await beginDrag(-24);
+    await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await page.mouse.up();
+    const blurred = await savedRatio();
+    assert.ok(blurred < resized, "leaving the window ends and saves a normal resize");
+    assert.equal(await page.locator(".workbench.resizing").count(), 0);
+
+    await splitter.press("ArrowRight");
+    assert.ok(await savedRatio() > blurred, "keyboard arrows adjust the split without dragging");
+    await splitter.press("End");
+    const maximum = await savedRatio();
+    assert.equal(await page.locator(".workbench.graph-collapsed").count(), 0, "keyboard resizing to the minimum graph width does not hide it");
+    await splitter.press("Home");
+    assert.ok(await savedRatio() < maximum);
+    await splitter.dblclick();
+    assert.equal(await savedRatio(), 0.6, "double-click still restores the default split");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 for (const reducedMotion of ["no-preference", "reduce"]) {
   test(`Planner layouts settle centered at Fit View scale (${reducedMotion})`, { timeout: 35_000 }, async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion });

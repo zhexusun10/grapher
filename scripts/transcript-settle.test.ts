@@ -83,3 +83,29 @@ test("settleInterruptedItems rewrites only running items and keeps array identit
   assert.equal(settledItems[2].status, "success");
   assert.equal(running[0].status, "running", "the caller's items are not mutated");
 });
+
+test("a composed Planner replay settles older turns while the newest one is live", () => {
+  const composed = [
+    { type: "grapher_planning_source", planningId: "review" },
+    start(),
+    // The killed review persisted only the start of its last tool call.
+    { type: "message_update", assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, id: "review-edge", toolName: "edge" } },
+    { type: "grapher_planning_source", planningId: "next" },
+    start(),
+    { type: "tool_execution_start", toolCallId: "next-node", toolName: "node", args: { nodes: [] } },
+  ].map(line).join("");
+  const html = renderToStaticMarkup(createElement(VirtualizedTranscript, {
+    output: composed, inline: true, liveSource: "next",
+  }));
+  assert.equal((html.match(/tool-status interrupted/g) || []).length, 1, "the dead review keeps its interruption");
+  assert.equal((html.match(/tool-status running/g) || []).length, 1, "only the live revision still executes");
+  assert.ok(html.indexOf("tool-status interrupted") < html.indexOf("tool-status running"),
+    "the terminated review is rendered before the live turn");
+  // Before the backend names the new revision, the saved composition contains
+  // only ended turns; its live transcript is rendered separately.
+  const unnamed = renderToStaticMarkup(createElement(VirtualizedTranscript, {
+    output: composed, inline: true, settled: false,
+  }));
+  assert.equal((unnamed.match(/tool-status running/g) || []).length, 0);
+  assert.equal((unnamed.match(/tool-status interrupted/g) || []).length, 2);
+});

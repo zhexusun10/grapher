@@ -176,6 +176,20 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         const draft = await page.locator(".pane-bottom-chat textarea").inputValue();
         const originalWidth = (await pane.boundingBox()).width;
         const storedRatio = await page.evaluate(() => localStorage.getItem("grapher_workbench_split_ratio"));
+        assert.equal(await page.getByRole("button", { name: "Collapse execution graph", exact: true }).count(), 0,
+          "the graph toolbar no longer has a collapse button");
+        const splitter = page.getByRole("separator", { name: "Resize execution graph", exact: true });
+        const handle = await splitter.boundingBox(), bounds = await page.locator(".workbench").boundingBox();
+        const boundary = Math.max(0.5, Math.min(0.85, (bounds.width - 320) / bounds.width)) * bounds.width;
+        const dragY = handle.y + handle.height / 2;
+        await page.mouse.move(handle.x + handle.width / 2, dragY);
+        await page.mouse.down();
+        await page.mouse.move(bounds.x + boundary, dragY, { steps: 6 });
+        assert.equal(await page.locator(".workbench.graph-collapsed").count(), 0,
+          "reaching minimum graph width does not accidentally collapse it");
+        await page.mouse.move(bounds.x + boundary + 16, dragY, { steps: 3 });
+        assert.equal(await page.locator(".workbench.graph-collapsed").count(), 0,
+          "small overshoots leave room to stop or reverse the drag");
         await page.evaluate(() => {
           window.collapseFrames = [];
           window.sampleCollapse = true;
@@ -195,8 +209,11 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
           };
           requestAnimationFrame(sample);
         });
-        await page.getByRole("button", { name: "Collapse execution graph", exact: true }).click();
+        await page.mouse.move(bounds.x + boundary + 64, dragY, { steps: 4 });
+        await page.mouse.up();
         await page.getByRole("button", { name: "Expand execution graph", exact: true }).waitFor();
+        assert.equal(await page.locator(".workbench.resizing").count(), 0,
+          "automatic collapse ends the active drag and releases its listeners");
         await page.locator(".graph-pane").waitFor({ state: "detached" });
         assert.equal(await page.locator(".graph-pane, .workbench-resizer").count(), 0,
           "collapse removes both the graph and its minimum-width splitter");
@@ -222,13 +239,13 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         assert.equal(await page.evaluate(() => localStorage.getItem("grapher_workbench_split_ratio")), storedRatio,
           "reopening preserves the saved split ratio");
         assert.equal(await page.locator(".pane-bottom-chat textarea").inputValue(), draft);
-        assert.equal(await page.getByRole("button", { name: "Collapse execution graph", exact: true }).evaluate(button =>
-          button === document.activeElement), true, "keyboard focus returns to the collapse control");
-        // Toggle without waiting for a pane exit animation: the remounted canvas
-        // must still initialize instead of remaining transparent indefinitely.
-        await page.getByRole("button", { name: "Collapse execution graph", exact: true }).click();
+        assert.equal(await splitter.evaluate(element => element === document.activeElement), true,
+          "keyboard focus returns to the resizable separator");
+        // The separator retains keyboard access without a toolbar collapse icon.
+        // Reopen before its exit ends: exactly one fresh canvas must initialize.
+        await splitter.press("Enter");
         await page.keyboard.press("Enter");
-        await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Collapse execution graph");
+        await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Resize execution graph");
         await assertGraphVisible(id);
         assert.equal(await page.locator(".graph-pane").count(), 1,
           "interrupting an exit mounts exactly one fresh, visible graph");

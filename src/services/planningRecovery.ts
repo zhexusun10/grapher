@@ -23,6 +23,34 @@ export function planningRecoveryDelay(planningId: string | undefined, idleAttemp
   return planningId ? 1500 : idleAttempts === 0 ? 15000 : 30000;
 }
 
+/** The snapshot's persisted running Planner is only a display recovery while no
+ * live turn owns the browser stream. A new turn (or a final status) must retire
+ * it; otherwise its ID keeps the whole conversation marked as running.
+ *
+ * `undefined` means "keep the current recovery": a durable `list_plannings`
+ * poll can discover a running turn whose run snapshot has no planning summary
+ * yet, and erasing that discovery would stop its transcript from mounting. */
+export function recoveredPlanningForDisplay(
+  planning: PlanningSummary | null | undefined,
+  recovered: PlanningSummary | null,
+  live: boolean,
+  busy: boolean,
+): PlanningSummary | null | undefined {
+  if (!planning) return live ? null : undefined;
+  const same = recovered?.planningId === planning.planningId;
+  // A run switch can briefly pair a poll-discovered newer turn with the
+  // previous run's terminal summary. Do not let the older snapshot erase it.
+  if (recovered && !same && (planning.createdAt ?? 0) <= (recovered.createdAt ?? 0)) return undefined;
+  if (planning.status !== "running") return null;
+  // A live stream owns the turn; retire the display-only recovery instead of
+  // letting its ID keep the conversation marked as running.
+  if (live) return null;
+  // A request is already in flight: keep an existing recovery instead of
+  // clearing (unmount flash) or adopting a new one mid-request.
+  if (busy) return same ? planning : undefined;
+  return planning;
+}
+
 type Scope = { repository?: string; generation: number };
 type Service = {
   listPlannings(repository?: string): Promise<PlanningSummary[]>;

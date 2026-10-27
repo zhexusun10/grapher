@@ -22,9 +22,12 @@ for running work. Cards appear centered as soon as they are measured; edge edits
 animate the layout while the viewport follows its center. Draft edits invalidate
 old displayed execution batches, and durable polling must not restore them over
 the live preview. A commit, failure or abort discards the draft and restores the
-committed topology instead of leaving a preview that never commits. This
-visualization does not approve, dispatch, or complete any work; approved
-revisions still commit atomically in Rust. Backend evidence:
+committed topology instead of leaving a preview that never commits. A composed
+Planner conversation settles each recorded attempt independently, so an earlier
+failed or interrupted attempt's unterminated tool/thinking rows stay interrupted
+while a later attempt streams; only the recovered or live attempt keeps its
+spinner. This visualization does not approve, dispatch, or complete any work;
+approved revisions still commit atomically in Rust. Backend evidence:
 [planner review and draft projection](../../backend/src/planner_review_tests.rs);
 browser regressions:
 [Planner streaming and auto-fit](../../scripts/graph-planning-fit.test.mjs).

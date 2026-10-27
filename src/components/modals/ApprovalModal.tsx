@@ -70,7 +70,7 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
               {t("Graph 模式的节点在用户仓库旁的 .grapher-worktrees 中执行，完成后以文件形式写回用户仓库。")}</li>
             <li>{t("Planner 已直接修改源项目；拒绝计划不会撤销这些修改。")}</li>
             <li>{t("批准会先生成私有源快照，不会暂存、提交或移动你的分支与索引；节点结果最终以文件形式写回源目录，不创建提交。Git/Grapher 内部文件除外。")}</li>
-            <li>{t("每个节点分配独立隔离会话；验证失败最多自动反馈重试 3 次。")}</li>
+            <li>{t("每个节点分配独立隔离会话；验证失败最多自动反馈重试 5 次。")}</li>
             <li>{t("节点执行期间在隔离工作区内修改文件；整图完成后会将结果写回 {0}。", state.config?.repository || config.repository)}</li>
             <li className="warning">
               {t("Execution Instance 可执行 shell 指令并调用模型，请审视节点任务定义后再行批准。")}</li>

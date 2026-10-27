@@ -7,12 +7,12 @@ import { tokens } from "../tokens";
 import type { WorkNode } from "../components/graph/TaskNode";
 
 // Topology geometry. Column pitch leaves a full card of horizontal room for the
-// side edge lanes; the taller row pitch keeps a generous gap between layers so
-// long edges stay readable and the graph uses the canvas height instead of
-// crowding every card into a narrow band.
-const NODE_WIDTH = 236;
+// side edge lanes; the row pitch leaves room for the taller cards while keeping
+// a generous gap between layers so long edges stay readable and the graph uses
+// the canvas height instead of crowding every card into a narrow band.
+const NODE_WIDTH = 260;
 const COLUMN_PITCH = 300;
-const ROW_PITCH = 260;
+const ROW_PITCH = 320;
 const PADDING_X = 160;
 const PADDING_Y = 24;
 

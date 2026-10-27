@@ -340,7 +340,7 @@ impl Config {
 }
 
 fn default_max_feedback() -> usize {
-    3
+    5
 }
 
 pub(crate) fn default_thinking_level() -> String {

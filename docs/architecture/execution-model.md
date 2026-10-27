@@ -105,10 +105,11 @@ or stopped review retains its logs and source writes but discards its uncommitte
 candidate. Restart never silently repeats an interrupted model turn; it records
 failure and preserves the committed graph, requiring approval if committed work
 remains. Every Planner turn on an existing Run that ends without committing a
-graph — a failed or stopped review, an interrupted follow-up revision included —
-is recorded once as a `planner_turn_aborted` history event, so the conversation
-replay keeps its durable output without touching the graph, phase or approval
-state. Publication completion remains distinct from review success.
+graph is recorded once: a started review through its terminal review event, and
+any other interrupted turn (including a review that never recorded its start) as
+a `planner_turn_aborted` history event. The conversation replay therefore keeps
+the durable output without touching the graph, phase or approval state.
+Publication completion remains distinct from review success.
 
 Focused evidence: [runtime review regressions](../../backend/src/planner_review_tests.rs).
 

@@ -1,8 +1,11 @@
-import { useCallback, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useStableCallback } from "./useStableCallback";
 
 export const DEFAULT_SPLIT_RATIO = 0.6;
 export const MIN_SPLIT_RATIO = 0.15;
 export const MAX_SPLIT_RATIO = 0.85;
+export const GRAPH_COLLAPSE_OVERSHOOT_PX = 48;
+const MIN_GRAPH_PANE_WIDTH = 320;
 
 export const SPLIT_RATIO_STORAGE_KEY = "grapher_workbench_split_ratio";
 export const LEGACY_WIDTH_STORAGE_KEY = "grapher_pane_width";
@@ -46,7 +49,7 @@ export function persistRatio(ratio: number, storage?: Pick<Storage, "setItem">):
 export function clampSplitRatio(ratio: number, containerWidth?: number): number {
   if (containerWidth && containerWidth > 0) {
     const minLeftWidth = 280;
-    const minRightWidth = 320;
+    const minRightWidth = MIN_GRAPH_PANE_WIDTH;
     const minRatio = Math.min(0.5, Math.max(MIN_SPLIT_RATIO, minLeftWidth / containerWidth));
     const maxRatio = Math.max(0.5, Math.min(MAX_SPLIT_RATIO, (containerWidth - minRightWidth) / containerWidth));
     return Math.max(minRatio, Math.min(maxRatio, ratio));
@@ -54,8 +57,18 @@ export function clampSplitRatio(ratio: number, containerWidth?: number): number 
   return Math.max(MIN_SPLIT_RATIO, Math.min(MAX_SPLIT_RATIO, ratio));
 }
 
+/** Require deliberate overshoot past the actual minimum graph width. */
+export function shouldCollapseGraphPane(pointerX: number, containerWidth: number): boolean {
+  if (!Number.isFinite(pointerX) || !Number.isFinite(containerWidth) || containerWidth <= 0) return false;
+  // Match .conversation-pane.split's CSS max-width even in a narrow window,
+  // where its 320px graph minimum takes precedence over a balanced 50/50 split.
+  const boundary = Math.min(MAX_SPLIT_RATIO * containerWidth, Math.max(0, containerWidth - MIN_GRAPH_PANE_WIDTH));
+  return pointerX >= boundary + GRAPH_COLLAPSE_OVERSHOOT_PX;
+}
+
 /** Resize via CSS variable percentage so dragging does not trigger React re-renders, while maintaining split ratio across container resizing. */
-export function useWorkbenchResizer() {
+export function useWorkbenchResizer({ onCollapse }: { onCollapse?: () => void } = {}) {
+  const collapse = useStableCallback(() => onCollapse?.());
   const workbenchRef = useRef<HTMLDivElement>(null);
   const [splitRatio, setSplitRatio] = useState<number>(getStoredRatio);
   const currentRatioRef = useRef(splitRatio);
@@ -70,41 +83,81 @@ export function useWorkbenchResizer() {
     return () => removeDragListenersRef.current?.();
   }, []);
 
-  const handleStartResize = useCallback((e: ReactMouseEvent) => {
+  const applyRatio = useCallback((ratio: number) => {
+    currentRatioRef.current = ratio;
+    workbenchRef.current?.style.setProperty("--workbench-split-ratio", String(ratio));
+    workbenchRef.current?.style.setProperty("--workbench-left-width", `${ratio * 100}%`);
+  }, []);
+
+  const handleStartResize = useCallback((e: ReactPointerEvent) => {
+    if (e.button !== 0 || !e.isPrimary) return;
     e.preventDefault();
     removeDragListenersRef.current?.();
+    const startRatio = currentRatioRef.current;
+    const pointerId = e.pointerId;
     setIsResizing(true);
 
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      if (!workbenchRef.current) return;
+    const finish = (restore: boolean) => {
+      removeListeners();
+      setIsResizing(false);
+      // Collapsing is not a saved resize: reopening restores the useful width
+      // from before this gesture rather than leaving the graph at its minimum.
+      if (restore) applyRatio(startRatio);
+      const finalRatio = currentRatioRef.current;
+      setSplitRatio(finalRatio);
+      if (!restore) persistRatio(finalRatio);
+    };
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId || !workbenchRef.current) return;
       const rect = workbenchRef.current.getBoundingClientRect();
       if (rect.width <= 0) return;
-
       const pointerX = moveEvent.clientX - rect.left;
-      const clampedRatio = clampSplitRatio(pointerX / rect.width, rect.width);
-      currentRatioRef.current = clampedRatio;
-      workbenchRef.current.style.setProperty("--workbench-split-ratio", String(clampedRatio));
-      workbenchRef.current.style.setProperty("--workbench-left-width", `${clampedRatio * 100}%`);
+      if (onCollapse && shouldCollapseGraphPane(pointerX, rect.width)) {
+        finish(true);
+        collapse();
+        return;
+      }
+      applyRatio(clampSplitRatio(pointerX / rect.width, rect.width));
     };
-
+    const onPointerUp = (event: PointerEvent) => {
+      if (event.pointerId === pointerId) finish(false);
+    };
+    const onPointerCancel = (event: PointerEvent) => {
+      if (event.pointerId === pointerId) finish(true);
+    };
+    const onBlur = () => finish(false);
     const removeListeners = () => {
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerCancel);
+      window.removeEventListener("blur", onBlur);
       removeDragListenersRef.current = null;
     };
 
-    const onMouseUp = () => {
-      removeListeners();
-      setIsResizing(false);
-      const finalRatio = currentRatioRef.current;
-      setSplitRatio(finalRatio);
-      persistRatio(finalRatio);
-    };
-
     removeDragListenersRef.current = removeListeners;
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-  }, []);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
+    window.addEventListener("blur", onBlur);
+  }, [applyRatio, collapse, onCollapse]);
+
+  const handleResizeKeyDown = useCallback((event: ReactKeyboardEvent) => {
+    const width = workbenchRef.current?.getBoundingClientRect().width;
+    if (!width) return;
+    if (event.key === "Enter" && onCollapse) {
+      event.preventDefault();
+      collapse();
+      return;
+    }
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const ratio = event.key === "Home" ? 0 : event.key === "End" ? 1
+      : currentRatioRef.current + (event.key === "ArrowRight" ? 24 : -24) / width;
+    const next = clampSplitRatio(ratio, width);
+    applyRatio(next);
+    setSplitRatio(next);
+    persistRatio(next);
+  }, [applyRatio, collapse, onCollapse]);
 
   const handleResetResizer = useCallback(() => {
     currentRatioRef.current = DEFAULT_SPLIT_RATIO;
@@ -122,6 +175,7 @@ export function useWorkbenchResizer() {
     splitRatio,
     initialWidth: Math.round(splitRatio * 1200),
     handleStartResize,
+    handleResizeKeyDown,
     handleResetResizer,
   };
 }
