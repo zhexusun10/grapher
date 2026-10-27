@@ -5,6 +5,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2 } from "lucide-react";
 import { ProjectItem } from "../../types";
 import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
+import { workspacePathDisplay } from "./workspacePathDisplay";
 
 export { normalizeWorkspacePath } from "../../services/workspaceConversations";
 
@@ -161,7 +162,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           <div className="proj-name-row">
             <strong>{proj.name}</strong>
           </div>
-          <small className="proj-path-text">{normalizeWorkspacePath(proj.path)}</small>
+          <small className="proj-path-text">{workspacePathDisplay(proj.path)}</small>
         </div>
       </motion.div>
     );
