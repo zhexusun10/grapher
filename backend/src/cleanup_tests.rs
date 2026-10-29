@@ -754,6 +754,56 @@ fn cleanup_unlinks_directory_links_without_following_their_targets() {
 
 #[cfg(windows)]
 #[test]
+fn cleanup_reports_locked_child_and_retries_after_restart() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let (temp, _source, mut runtime) = setup();
+    let id = runtime.state.run_id.clone();
+    let root = runtime.root.clone();
+    let workspace = temp.path().join(".grapher-worktrees").join(&id);
+    directory(&workspace);
+    let file = workspace.join("nested/dependencies/file").canonicalize().unwrap();
+    let directory = file.parent().unwrap();
+    let mut permissions = fs::metadata(directory).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(directory, permissions).unwrap();
+    let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&file).unwrap();
+
+    runtime.delete_run(&id).unwrap();
+    let task = runtime.store.cleanup_task(&id).unwrap().unwrap();
+    let error = task.last_error.unwrap();
+    assert!(error.contains(&file.to_string_lossy().to_string()), "{error}");
+    assert!(error.contains("Cannot "), "{error}");
+    drop(runtime);
+
+    let runtime = Runtime::open_lazy(&root).unwrap();
+    runtime.retry_deleted_cleanups().unwrap();
+    assert!(runtime.store.cleanup_task(&id).unwrap().is_some());
+    drop(lock);
+    runtime.retry_deleted_cleanups().unwrap();
+    assert!(!workspace.exists());
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn cleanup_removes_readonly_directories_instead_of_retrying_forever() {
+    let (temp, _source, mut runtime) = setup();
+    let id = runtime.state.run_id.clone();
+    let workspace = temp.path().join(".grapher-worktrees").join(&id);
+    directory(&workspace);
+    for path in [&workspace, &workspace.join("nested/dependencies")] {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+    runtime.delete_run(&id).unwrap();
+    assert!(!workspace.exists());
+    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+}
+
+#[cfg(windows)]
+#[test]
 fn cleanup_removes_readonly_files_instead_of_retrying_forever() {
     let (temp, _source, mut runtime) = setup();
     let id = runtime.state.run_id.clone();

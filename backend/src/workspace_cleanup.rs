@@ -175,23 +175,59 @@ pub(crate) fn remove_tree(path: &Path) -> std::io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
+        Err(error) => return Err(cleanup_error("inspect", path, error)),
     };
     if is_link_or_reparse(&metadata) {
         // Never follow a link to clear the target's attributes; the link itself
         // (junctions, symlinks) is removed without needing that.
-        return remove_link(path, &metadata);
+        return remove_link(path, &metadata).map_err(|error| cleanup_error("unlink", path, error));
     }
     if metadata.is_dir() {
-        for entry in fs::read_dir(path)? {
-            remove_tree(&entry?.path())?;
+        let entries = fs::read_dir(path).map_err(|error| cleanup_error("list", path, error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| cleanup_error("list entry in", path, error))?;
+            remove_tree(&entry.path())?;
         }
-        // A directory's read-only attribute does not block `remove_dir`, and
-        // mutating it could fail where plain removal would have succeeded.
-        fs::remove_dir(path)
+        remove_directory(path, &metadata).map_err(|error| cleanup_error("remove directory", path, error))
     } else {
-        clear_readonly(path, &metadata)?;
-        fs::remove_file(path)
+        clear_readonly(path, &metadata).map_err(|error| cleanup_error("clear read-only attribute on", path, error))?;
+        fs::remove_file(path).map_err(|error| cleanup_error("remove file", path, error))
+    }
+}
+
+fn cleanup_error(operation: &str, path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("Cannot {operation} {}: {error}", path.display()))
+}
+
+/// Try plain removal first. Windows can reject a read-only directory with
+/// access denied, even when its ACL permits deletion.
+fn remove_directory(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
+    match fs::remove_dir(path) {
+        #[cfg(windows)]
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && metadata.permissions().readonly() => {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+            const FILE_SHARE_ALL: u32 = 0x7;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
+            // Open the directory itself, never a substituted link's target.
+            let directory = fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .share_mode(FILE_SHARE_ALL)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)
+                .map_err(|error| cleanup_error("open directory to clear read-only attribute on", path, error))?;
+            let mut permissions = directory.metadata()?.permissions();
+            permissions.set_readonly(false);
+            directory.set_permissions(permissions)
+                .map_err(|error| cleanup_error("clear read-only attribute on", path, error))?;
+            drop(directory);
+            fs::remove_dir(path)
+        }
+        result => {
+            let _ = metadata;
+            result
+        }
     }
 }
 
