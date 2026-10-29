@@ -1401,12 +1401,12 @@ fn running_output_exposes_live_session_metrics_before_completion() {
     assert_eq!(metrics.model.as_deref(), Some("p/m"));
     assert_eq!(metrics.usage.input, 100);
     assert_eq!(metrics.usage.consumed_tokens, 110);
-    assert_eq!(metrics.context_tokens, 1_000);
+    assert_eq!(metrics.context_tokens, 1_010);
 
     let run = runtime.state.run_metrics.as_ref().expect("Run totals refresh with live output");
     assert_eq!(run.session_usage[&session_id].input, 100);
     assert_eq!(run.session_usage[&session_id].consumed_tokens, 110);
-    assert_eq!(run.session_context[&session_id].tokens, 1_000);
+    assert_eq!(run.session_context[&session_id].tokens, 1_010);
 }
 
 #[test]

@@ -17,9 +17,11 @@ interface ExecutionMetrics {
   tools: number;
   toolErrors: number;
   usage: TokenUsage;
-  /** Prompt size of the last assistant message, and its high-water mark. */
+  /** Last measured context and its high-water mark (legacy snapshots may omit output). */
   contextTokens?: number;
   contextPeak?: number;
+  /** Pi's projected context, including trailing messages and the actual model window. */
+  contextUsage?: SessionContext;
   /** Actual model/thinking this Execution's Pi session selected. */
   model?: string;
   thinkingLevel?: string;
@@ -101,9 +103,10 @@ export interface PlanningRoleMetrics {
   tools: number;
   toolErrors: number;
   usage: TokenUsage;
-  /** Prompt size of this turn's last assistant message, and its peak. */
+  /** Last measured context of this turn and its peak. */
   contextTokens?: number;
   contextPeak?: number;
+  contextUsage?: SessionContext;
 }
 
 export interface PlanningSummary {

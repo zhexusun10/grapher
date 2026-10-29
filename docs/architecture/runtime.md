@@ -194,6 +194,19 @@ omitted; tool identity and complete arguments remain in start/end records.
 `message_end` retains final usage, model, errors and full assistant content.
 This changes only new display-log bytes, never existing cursors or Pi sessions.
 
+Serial, Graph nodes, Mergers and Planner use the same context accounting. The
+engine requests Pi's `get_session_stats` at session/message, tool, compaction,
+context-edit and settlement boundaries, coalescing concurrent requests. Only
+Pi's projected context estimate and actual model window enter the output log and
+backend metrics; provider totals remain cumulative usage, not session context.
+Pi's estimate includes trailing messages and reflects edits and compaction; an
+explicit unknown after compaction replaces the earlier reading. Unavailable RPC
+stats never block execution. Older logs can recover the last successful model
+call's total from an already requested bounded tail, but cannot reconstruct all
+trailing messages; their model window falls back to Pi's provider catalog or
+installed model files. The browser displays these backend projections without
+maintaining a separate context counter.
+
 Grapher's tool-output display log is a projection, not a raw Pi-session dump. The
 [engine projection](../../backend/src/engine/tool_output.rs) retains at most
 100 KiB of UTF-8 text per tool-result body and per tool-call argument value
@@ -262,11 +275,11 @@ resumes timer polling when it errors or closes, and recreates a stream the
 `EventSource` gave up on. A missed push therefore costs latency, not a frozen
 transcript or status. Streamed text/thinking deltas emit `output_available`
 alone; a chunk that actually moves the live metrics projection (assistant
-`message_end` usage, context, model/thinking change, or tool start/end) also
+`message_end` usage, Pi context estimates, model/thinking change, or tool start/end) also
 emits `snapshot_changed`, so session token details refresh at message and tool
 boundaries instead of waiting for the watchdog poll. An in-flight Planner turn
 publishes its usage and context as a `planner_turn_progress` event at
-assistant-message boundaries (history only; the committed summary replaces it),
+assistant-message and context-estimate boundaries (history only; the committed summary replaces it),
 so its session panel refreshes before the turn settles. See
 [runtimeEvents.ts](../../src/services/runtimeEvents.ts) and
 [ExecutionTranscript.tsx](../../src/components/ExecutionTranscript.tsx).

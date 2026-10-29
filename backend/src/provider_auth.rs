@@ -221,7 +221,10 @@ impl Transport {
 }
 
 pub fn request(body: Value) -> Result<Value, String> {
-    TRANSPORT.get_or_init(Transport::new).request(body)
+    let catalog = body["operation"] == "catalog";
+    let result = TRANSPORT.get_or_init(Transport::new).request(body)?;
+    if catalog { crate::model_window::remember_catalog(&result); }
+    Ok(result)
 }
 
 /// Import-only readiness. Does not enumerate/check credentials or call a model.

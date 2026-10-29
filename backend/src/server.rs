@@ -1119,16 +1119,18 @@ fn accumulate_planning_role_line(metrics: &mut PlanningRoleMetrics, line: &str) 
         "message_end" => {
             if let Some(msg) = value.get("message") {
                 if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                    if let Some(id) = msg.get("model").and_then(|v| v.as_str()).filter(|id| !id.is_empty()) {
+                        let next = msg.get("provider").and_then(|v| v.as_str()).filter(|v| !v.is_empty())
+                            .map_or_else(|| id.to_string(), |provider| format!("{provider}/{id}"));
+                        let mut model = (!metrics.model.is_empty()).then(|| metrics.model.clone());
+                        crate::model::record_context_model(&mut model, &mut metrics.context_usage, next);
+                        metrics.model = model.unwrap_or_default();
+                    }
                     metrics.assistant_messages += 1;
                     if let Some(u) = msg.get("usage") {
                         let message = TokenUsage::from_message_usage(u);
-                        // An aborted turn reports usage without a prompt; keep
-                        // the last turn that actually read a context.
-                        let prompt = message.context_tokens();
-                        if prompt > 0 {
-                            metrics.context_tokens = prompt;
-                            metrics.context_peak = metrics.context_peak.max(prompt);
-                        }
+                        crate::model::record_assistant_context(msg, &message, &mut metrics.context_tokens,
+                            &mut metrics.context_peak, &mut metrics.context_usage);
                         metrics.usage.accumulate(&message);
                     }
                     return true;
@@ -1136,6 +1138,8 @@ fn accumulate_planning_role_line(metrics: &mut PlanningRoleMetrics, line: &str) 
             }
             false
         }
+        "grapher_context_usage" => crate::model::record_context_usage(
+            &value, &mut metrics.context_tokens, &mut metrics.context_peak, &mut metrics.context_usage),
         "tool_execution_start" => {
             metrics.tools += 1;
             false
@@ -4431,31 +4435,32 @@ fn get_execution_output(
             runtime.touch();
         }
     }
-    // Metrics written before context counters existed only carry totals, and a
-    // finished session's context is its newest prompt: at the end of the log.
-    // Recover it from whichever page reaches that end instead of re-reading
-    // whole historical logs during load.
+    // Recover legacy context counters from the requested tail. Older counters
+    // omitted output tokens; new Pi snapshots also account for trailing tools,
+    // compaction and context edits. Never scan historical logs at Store::load.
     if end == total && status != "running" && page.complete {
         let stale = |metrics: &Option<ExecutionMetrics>| metrics.as_ref()
-            .is_some_and(|metrics| metrics.context_tokens == 0 && metrics.assistant_messages > 0);
+            .is_some_and(|metrics| metrics.context_usage.is_none() && metrics.assistant_messages > 0);
         if runtime.state.executions.iter().chain(&runtime.state.mergers)
             .any(|e| e.id == execution_id && stale(&e.metrics)) {
             let mut recovered = crate::model::parse_context_from_tail(&page.content);
-            if recovered == 0 {
+            if recovered.is_none() {
                 // A long failed tail can exceed the delivered page. Look back one
                 // bounded window instead of charging a full log to every read.
                 const BACKFILL_WINDOW: usize = 1024 * 1024;
                 recovered = runtime.store
                     .execution_log_tail_page(&run_id, &execution_id, page.total_bytes, BACKFILL_WINDOW)
-                    .map(|wide| crate::model::parse_context_from_tail(&wide.content))
-                    .unwrap_or(0);
+                    .ok().and_then(|wide| crate::model::parse_context_from_tail(&wide.content));
             }
-            if recovered > 0 {
+            if let Some(mut recovered) = recovered {
                 let state = &mut runtime.state;
                 let target = state.executions.iter_mut().chain(state.mergers.iter_mut())
                     .find(|e| e.id == execution_id && stale(&e.metrics));
                 if let Some(metrics) = target.and_then(|e| e.metrics.as_mut()) {
-                    metrics.context_tokens = recovered;
+                    metrics.context_tokens = recovered.tokens;
+                    metrics.context_peak = metrics.context_peak.max(recovered.peak);
+                    recovered.peak = metrics.context_peak;
+                    metrics.context_usage = Some(recovered);
                     state.run_metrics = Some(state.compute_run_metrics());
                     runtime.touch();
                 }

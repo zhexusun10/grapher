@@ -25,6 +25,7 @@ use std::{
 
 mod tool_output;
 mod output_buffer;
+mod context_stats;
 
 #[cfg(not(feature = "fixture"))]
 pub(crate) mod prewarm;
@@ -1274,6 +1275,7 @@ fn run_pi_with_timeout(
     let outcome = run_turn(
         request.role,
         rpc_agent,
+        rpc_agent && !cfg!(feature = "fixture"),
         &initial_rpc_id,
         timeout,
         started,
@@ -1320,6 +1322,7 @@ struct TurnOutcome {
 fn run_turn(
     role: PiRole,
     rpc_agent: bool,
+    report_context: bool,
     initial_rpc_id: &str,
     timeout: Option<Duration>,
     started: Instant,
@@ -1340,6 +1343,8 @@ fn run_turn(
     let mut first_output_ms = None;
     let mut tool_output = tool_output::ToolOutputProjection::default();
     let mut output_buffer = output_buffer::OutputBuffer::default();
+    let mut context_stats = context_stats::ContextStats::new(report_context);
+    context_stats.changed(channels.rpc_sender.as_ref());
     loop {
         output_buffer.flush_due(&mut *on_output)?;
         // Planners/nodes need a steer handoff window. The Partitioner has no
@@ -1353,7 +1358,10 @@ fn run_turn(
             let pending_empty = channels.rpc_pending
                 .as_ref()
                 .is_some_and(|p| p.lock().is_ok_and(|p| p.is_empty()));
-            if pending_empty {
+            // Allow the final Pi projection to arrive, but never let an
+            // unsupported or stalled stats request hold a settled process.
+            if pending_empty && (!context_stats.waiting()
+                || agent_ended.is_some_and(|t| t.elapsed() > handoff + Duration::from_secs(1))) {
                 break;
             }
         }
@@ -1390,6 +1398,15 @@ fn run_turn(
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
                         raw_stdout_lines.push(trimmed.to_string());
+                    }
+                }
+                if let Some(current) = event.as_ref() {
+                    if let Some(response) = context_stats.response(current, channels.rpc_sender.as_ref()) {
+                        // Do not persist Pi's entire session stats/cost payload.
+                        let Some(response) = response else { continue };
+                        event = Some(response);
+                    } else if context_stats::ContextStats::advances(current) {
+                        context_stats.changed(channels.rpc_sender.as_ref());
                     }
                 }
                 if let Some(event) = event.as_ref() {
@@ -1882,6 +1899,7 @@ fn run_resumed(
     let rpc_guard = Some(NodeRpcGuard(id));
     let outcome = run_turn(
         request.role,
+        true,
         true,
         &initial_rpc_id,
         timeout,

@@ -61,10 +61,16 @@ export function sessionContext(
 /** Context recorded by one attempt. A session-level context always describes
  * its newest turn, so an older attempt must use this instead. */
 export function attemptSessionContext(
-  metrics?: { contextTokens?: number; contextPeak?: number } | null,
+  metrics?: { contextTokens?: number; contextPeak?: number; contextUsage?: SessionContext } | null,
 ): SessionContext | undefined {
   const safe = (value?: number) => Number.isSafeInteger(value) && (value as number) >= 0
     ? value as number : undefined;
+  if (metrics?.contextUsage) {
+    const tokens = safe(metrics.contextUsage.tokens) ?? 0;
+    const peak = safe(metrics.contextUsage.peak) ?? 0;
+    const window = safe(metrics.contextUsage.window);
+    return { tokens, peak: Math.max(tokens, peak), ...(window ? { window } : {}) };
+  }
   const tokens = safe(metrics?.contextTokens);
   const peak = safe(metrics?.contextPeak);
   // Older checkpoints carry no context counters; do not invent a zero entry.
@@ -82,10 +88,9 @@ export function formatContextWindow(context?: SessionContext | null): string {
 }
 
 /**
- * The entire retained conversation prompt the session's newest model call read
- * (after any compaction), not a per-turn delta. Cumulative totals cannot answer
- * this: every call re-reads the same growing prefix. A prompt of zero or a
- * missing reading is unknown, never a rendered zero.
+ * Pi's estimate of the retained session context, including trailing messages
+ * and context edits. Older logs only have the last model call's usage. This is
+ * not cumulative: each call re-reads the prefix. Zero or missing is unknown.
  */
 export function formatContextUsed(context?: SessionContext | null): string {
   const tokens = context?.tokens;

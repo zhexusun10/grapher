@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Serial, Graph, Planner and Merger session details now use Pi's actual model window and projected context estimate, including trailing messages and context edits. Dynamically loaded models no longer show an unknown window solely because they are absent from the bundled catalog, and compaction can temporarily report an unknown context instead of a stale value. Older logs fall back to the last available model-call usage.
 - Newly sent Serial and Graph node/Merger Steers now stay after the existing output until their transcript row appears, rather than briefly jumping below the previous user message. Repeated instructions, partially loaded history, attachments and execution settlement during the handoff retain their correct display order; historical fallback cards and pause recovery remain separate from this presentation state.
 
 ## [1.3.2] - 2026-10-28

@@ -109,12 +109,17 @@ impl TokenUsage {
         }
     }
 
-    /// Prompt size of one turn: everything the model had to read. This is the
-    /// context the session held, not a value that can be summed across turns.
+    /// Pi uses the provider total (including output) as the last measured
+    /// context, falling back to the individual counters when it is absent.
+    /// This is a snapshot, not a value to sum across model calls.
     pub(crate) fn context_tokens(&self) -> usize {
-        self.input
-            .saturating_add(self.cache_read)
-            .saturating_add(self.cache_write)
+        if self.total_tokens > 0 {
+            self.total_tokens
+        } else {
+            self.input.saturating_add(self.output)
+                .saturating_add(self.cache_read)
+                .saturating_add(self.cache_write)
+        }
     }
 
     /// Older checkpoints predate `consumed_tokens`; derive it from the counters
@@ -169,12 +174,15 @@ pub struct PlanningRoleMetrics {
     pub tools: usize,
     pub tool_errors: usize,
     pub usage: TokenUsage,
-    /// Prompt size on this turn's last assistant message, and the largest one
-    /// seen. Context is a snapshot, so it never accumulates like `usage`.
+    /// Latest context estimate and its high-water mark. Context is a snapshot,
+    /// so it never accumulates like `usage`.
     #[serde(default)]
     pub context_tokens: usize,
     #[serde(default)]
     pub context_peak: usize,
+    /// Pi's projected session context, including trailing messages and edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<SessionContext>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
@@ -384,15 +392,17 @@ pub struct ExecutionMetrics {
     pub tool_errors: usize,
     #[serde(default)]
     pub usage: TokenUsage,
-    /// Prompt size of the last assistant message: the context this Execution's
-    /// Pi session held on its newest turn. Unlike `usage` it is a snapshot, not
-    /// a sum, so cache re-reads of older turns are not counted again.
+    /// Latest context estimate, not a sum of repeated model calls. Legacy
+    /// checkpoints may instead contain only the last prompt's input tokens.
     #[serde(default)]
     pub context_tokens: usize,
-    /// Largest prompt size seen in this Execution. It exceeds `context_tokens`
-    /// once Pi compacted the context.
+    /// Largest context estimate seen in this Execution; it may exceed the
+    /// current value after compaction or a context edit.
     #[serde(default)]
     pub context_peak: usize,
+    /// Pi's projected session context and actual model window, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<SessionContext>,
     /// Actual model/thinking selected by this Execution's Pi session. Kept
     /// separately from mutable Node Agent settings so session details never
     /// claim that a finished run used the model newly configured for a retry.
@@ -414,7 +424,7 @@ pub struct RunMetrics {
     pub total_usage: TokenUsage,
     pub planning_usage: TokenUsage,
     pub execution_usage: TokenUsage,
-    /// Context the session's newest turn had to read, plus its high-water mark.
+    /// Pi's latest projected session context, plus its high-water mark.
     /// Context is a per-turn snapshot; summing turns would count cached prompt
     /// re-reads and overstate the window a session actually occupied.
     #[serde(default)]
@@ -434,7 +444,7 @@ pub struct SessionContext {
     pub tokens: usize,
     #[serde(default)]
     pub peak: usize,
-    /// Window of the model that turn used, when the catalog knows it.
+    /// Actual Pi model window, or a catalog fallback for older sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<usize>,
 }
@@ -447,21 +457,80 @@ fn record_session_context(
     session_id: &str,
     tokens: usize,
     peak: usize,
+    snapshot: Option<&SessionContext>,
     stamp: u64,
     model: Option<&str>,
 ) {
-    // Older checkpoints carry no context counters; do not invent a zero entry.
-    if tokens == 0 && peak == 0 {
+    // A Pi snapshot can explicitly say the count is unknown (e.g. immediately
+    // after compaction). A legacy missing counter must not erase a prior turn.
+    if snapshot.is_none() && tokens == 0 && peak == 0 {
         return;
     }
     let entry = contexts.entry(session_id.to_string()).or_default();
-    entry.peak = entry.peak.max(peak).max(tokens);
-    // Missing values come from older checkpoints; never leak them over a
-    // recorded context from a previous turn of the same session.
-    if tokens > 0 && stamp >= stamps.get(session_id).copied().unwrap_or(0) {
-        entry.tokens = tokens;
-        entry.window = model.and_then(crate::model_window::context_window);
+    entry.peak = entry.peak.max(peak).max(tokens).max(snapshot.map_or(0, |context| context.peak));
+    if (snapshot.is_some() || tokens > 0) && stamp >= stamps.get(session_id).copied().unwrap_or(0) {
+        entry.tokens = snapshot.map_or(tokens, |context| context.tokens);
+        entry.window = snapshot.and_then(|context| context.window)
+            .or_else(|| model.and_then(crate::model_window::context_window));
         stamps.insert(session_id.to_string(), stamp);
+    }
+}
+
+/// Apply an explicitly reported Pi session estimate. Null tokens mean unknown,
+/// not the previous pre-compaction value; a missing window stays unknown.
+pub(crate) fn record_context_usage(
+    value: &serde_json::Value,
+    tokens: &mut usize,
+    peak: &mut usize,
+    snapshot: &mut Option<SessionContext>,
+) -> bool {
+    if value.get("type").and_then(|v| v.as_str()) != Some("grapher_context_usage") {
+        return false;
+    }
+    let count = |key: &str| value.get(key).and_then(|v| v.as_u64())
+        .and_then(|v| usize::try_from(v).ok());
+    *tokens = count("tokens").unwrap_or(0);
+    *peak = (*peak).max(*tokens);
+    *snapshot = Some(SessionContext {
+        tokens: *tokens,
+        peak: *peak,
+        window: count("window").filter(|window| *window > 0),
+    });
+    true
+}
+
+/// A capacity observed for one model must not be reused after a model change.
+pub(crate) fn record_context_model(
+    model: &mut Option<String>, snapshot: &mut Option<SessionContext>, next: String,
+) {
+    if model.as_ref().is_some_and(|previous| previous != &next) {
+        if let Some(context) = snapshot { context.window = None; }
+    }
+    *model = Some(next);
+}
+
+/// Until the next Pi projection arrives, use the last successful assistant's
+/// provider total as an approximation. Do not count failed or incomplete turns.
+pub(crate) fn record_assistant_context(
+    message: &serde_json::Value,
+    usage: &TokenUsage,
+    tokens: &mut usize,
+    peak: &mut usize,
+    snapshot: &mut Option<SessionContext>,
+) {
+    let stop = message.get("stopReason").and_then(|v| v.as_str());
+    if matches!(stop, Some("error" | "aborted"))
+        || (stop.is_none() && usage.output > 0 && usage.input == 0
+            && usage.cache_read == 0 && usage.cache_write == 0) {
+        return;
+    }
+    let count = usage.context_tokens();
+    if count == 0 { return; }
+    *tokens = count;
+    *peak = (*peak).max(count);
+    if let Some(context) = snapshot {
+        context.tokens = count;
+        context.peak = *peak;
     }
 }
 
@@ -1187,13 +1256,11 @@ pub fn parse_execution_metrics(
     let mut usage = TokenUsage::default();
     let mut context_tokens = 0;
     let mut context_peak = 0;
+    let mut context_usage = None;
     let mut model = None;
     let mut thinking_level = None;
-    // Pi's stream only emits `model_change`/`thinking_level_change` when the
-    // session switches after startup, never for the model selected at launch.
-    // Assistant messages carry the model that actually answered, so keep the
-    // last observed one as a fallback for durable session details.
-    let mut observed_model = None;
+    // Pi may omit the initial model/thinking change. Assistant messages carry
+    // the selected model, and later observations must win in stream order.
     let mut observed_thinking = None;
 
     for line in output.lines() {
@@ -1220,15 +1287,11 @@ pub fn parse_execution_metrics(
                                 .and_then(|v| v.as_str())
                                 .filter(|model_id| !model_id.is_empty())
                             {
-                                observed_model = Some(
-                                    msg.get("provider")
-                                        .and_then(|v| v.as_str())
-                                        .filter(|provider| !provider.is_empty())
-                                        .map_or_else(
-                                            || model_id.to_string(),
-                                            |provider| format!("{provider}/{model_id}"),
-                                        ),
-                                );
+                                let next = msg.get("provider")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|provider| !provider.is_empty())
+                                    .map_or_else(|| model_id.to_string(), |provider| format!("{provider}/{model_id}"));
+                                record_context_model(&mut model, &mut context_usage, next);
                             }
                             if let Some(level) = msg
                                 .get("thinkingLevel")
@@ -1241,27 +1304,24 @@ pub fn parse_execution_metrics(
                                 assistant_messages += 1;
                                 if let Some(u) = msg.get("usage") {
                                     let message = TokenUsage::from_message_usage(u);
-                                    // Each turn re-reads the session's prefix, so this
-                                    // snapshot is the context size; `usage` accumulates.
-                                    // A failed or aborted turn can report usage without
-                                    // a prompt, and must not reset a known context.
-                                    let prompt = message.context_tokens();
-                                    if prompt > 0 {
-                                        context_tokens = prompt;
-                                        context_peak = context_peak.max(prompt);
-                                    }
+                                    record_assistant_context(msg, &message, &mut context_tokens,
+                                        &mut context_peak, &mut context_usage);
                                     usage.accumulate(&message);
                                 }
                             }
                         }
                     }
                 }
+                "grapher_context_usage" => {
+                    record_context_usage(&value, &mut context_tokens, &mut context_peak, &mut context_usage);
+                }
                 "model_change" => {
                     let model_id = value.get("modelId").and_then(|v| v.as_str());
                     if let Some(model_id) = model_id {
-                        model = Some(value.get("provider").and_then(|v| v.as_str())
+                        let next = value.get("provider").and_then(|v| v.as_str())
                             .filter(|provider| !provider.is_empty())
-                            .map_or_else(|| model_id.to_string(), |provider| format!("{provider}/{model_id}")));
+                            .map_or_else(|| model_id.to_string(), |provider| format!("{provider}/{model_id}"));
+                        record_context_model(&mut model, &mut context_usage, next);
                     }
                 }
                 "thinking_level_change" => {
@@ -1303,15 +1363,15 @@ pub fn parse_execution_metrics(
         usage,
         context_tokens,
         context_peak,
-        model: model.or(observed_model),
+        context_usage,
+        model,
         thinking_level: thinking_level.or(observed_thinking),
     }
 }
 
-/// Last prompt a log actually read. Checkpoints written before context counters
-/// existed only carry totals, and recovery needs the log tail alone: the newest
-/// turn sits at the end, not the whole historical transcript.
-pub fn parse_context_from_tail(output: &str) -> usize {
+/// Recover a legacy checkpoint from a bounded log tail. Prefer Pi's projection;
+/// older logs can only approximate it with the last successful provider total.
+pub fn parse_context_from_tail(output: &str) -> Option<SessionContext> {
     for line in output.lines().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("[stderr]") {
@@ -1319,6 +1379,12 @@ pub fn parse_context_from_tail(output: &str) -> usize {
         }
         // A tail fragment may begin mid-record; unparsable lines are skipped.
         let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else { continue };
+        let mut tokens = 0;
+        let mut peak = 0;
+        let mut snapshot = None;
+        if record_context_usage(&value, &mut tokens, &mut peak, &mut snapshot) {
+            return snapshot;
+        }
         if value.get("type").and_then(|value| value.as_str()) != Some("message_end") {
             continue;
         }
@@ -1327,12 +1393,13 @@ pub fn parse_context_from_tail(output: &str) -> usize {
             continue;
         }
         let Some(usage) = msg.get("usage") else { continue };
-        let prompt = TokenUsage::from_message_usage(usage).context_tokens();
-        if prompt > 0 {
-            return prompt;
+        record_assistant_context(msg, &TokenUsage::from_message_usage(usage),
+            &mut tokens, &mut peak, &mut snapshot);
+        if tokens > 0 {
+            return Some(SessionContext { tokens, peak, window: None });
         }
     }
-    0
+    None
 }
 
 /// Completion replaces the pre-launch model placeholder with parsed live
@@ -1691,6 +1758,7 @@ impl Snapshot {
                         session_id,
                         metrics.context_tokens,
                         metrics.context_peak,
+                        metrics.context_usage.as_ref(),
                         stamp,
                         Some(metrics.model.as_str()),
                     );
@@ -1722,6 +1790,7 @@ impl Snapshot {
                         &exec.session_id,
                         metrics.context_tokens,
                         metrics.context_peak,
+                        metrics.context_usage.as_ref(),
                         exec.completed_at.unwrap_or(exec.started_at),
                         metrics.model.as_deref(),
                     );
@@ -1869,7 +1938,8 @@ pub fn now() -> u64 {
 /// Record types the live metrics projection folds in. A line carrying none of
 /// them cannot move usage, model/thinking or tool counters, so it can skip JSON
 /// parsing even when it is a large tool payload.
-const LIVE_METRIC_MARKERS: [&str; 6] = [
+const LIVE_METRIC_MARKERS: [&str; 7] = [
+    "\"grapher_context_usage\"",
     "\"message_start\"",
     "\"message_end\"",
     "\"model_change\"",
@@ -1915,11 +1985,11 @@ fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
                     .and_then(|model| model.as_str())
                     .filter(|model| !model.is_empty())
                 {
-                    metrics.model = Some(message
-                        .get("provider")
+                    let next = message.get("provider")
                         .and_then(|provider| provider.as_str())
                         .filter(|provider| !provider.is_empty())
-                        .map_or_else(|| model.to_string(), |provider| format!("{provider}/{model}")));
+                        .map_or_else(|| model.to_string(), |provider| format!("{provider}/{model}"));
+                    record_context_model(&mut metrics.model, &mut metrics.context_usage, next);
                 }
                 if let Some(level) = message
                     .get("thinkingLevel")
@@ -1934,14 +2004,14 @@ fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
                 metrics.assistant_messages += 1;
                 if let Some(usage) = message.get("usage") {
                     let turn = TokenUsage::from_message_usage(usage);
-                    // Context is the latest prompt, not a sum across turns.
-                    let prompt = turn.context_tokens();
-                    if prompt > 0 {
-                        metrics.context_tokens = prompt;
-                        metrics.context_peak = metrics.context_peak.max(prompt);
-                    }
+                    record_assistant_context(message, &turn, &mut metrics.context_tokens,
+                        &mut metrics.context_peak, &mut metrics.context_usage);
                     metrics.usage.accumulate(&turn);
                 }
+            }
+            "grapher_context_usage" => {
+                record_context_usage(&value, &mut metrics.context_tokens,
+                    &mut metrics.context_peak, &mut metrics.context_usage);
             }
             "model_change" => {
                 if let Some(model) = value
@@ -1949,11 +2019,11 @@ fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
                     .and_then(|model| model.as_str())
                     .filter(|model| !model.is_empty())
                 {
-                    metrics.model = Some(value
-                        .get("provider")
+                    let next = value.get("provider")
                         .and_then(|provider| provider.as_str())
                         .filter(|provider| !provider.is_empty())
-                        .map_or_else(|| model.to_string(), |provider| format!("{provider}/{model}")));
+                        .map_or_else(|| model.to_string(), |provider| format!("{provider}/{model}"));
+                    record_context_model(&mut metrics.model, &mut metrics.context_usage, next);
                 }
             }
             "thinking_level_change" => {
@@ -3143,8 +3213,8 @@ mod metrics_tests {
             "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":0,\"output\":7,\"totalTokens\":7}}}\n",
         );
         let metrics = parse_execution_metrics(output, 0, 0);
-        assert_eq!(metrics.context_tokens, 500);
-        assert_eq!(metrics.context_peak, 2_000);
+        assert_eq!(metrics.context_tokens, 505);
+        assert_eq!(metrics.context_peak, 2_010);
 
         // Totals stay additive: they count cache re-reads the context cannot.
         assert_eq!(metrics.usage.input, 540);
@@ -3192,14 +3262,14 @@ mod metrics_tests {
         assert_eq!(metrics.usage.cache_write, 50);
         assert_eq!(metrics.usage.output, 15);
         assert_eq!(metrics.usage.consumed_tokens, 175);
-        assert_eq!(metrics.context_tokens, 2_000);
-        assert_eq!(metrics.context_peak, 2_000);
+        assert_eq!(metrics.context_tokens, 2_005);
+        assert_eq!(metrics.context_peak, 2_005);
 
         // Session details read these buckets while the terminal event is absent.
         let run = state.run_metrics.as_ref().expect("live metrics must refresh Run totals");
         assert_eq!(run.session_usage["session-a"].input, 110);
         assert_eq!(run.session_usage["session-a"].consumed_tokens, 175);
-        assert_eq!(run.session_context["session-a"].tokens, 2_000);
+        assert_eq!(run.session_context["session-a"].tokens, 2_005);
         assert_eq!(run.total_usage.consumed_tokens, 175);
         // Streaming chunks still must not become business history.
         assert!(state.events.is_empty());
@@ -3215,9 +3285,9 @@ mod metrics_tests {
             "\n{\"type\":\"grapher_process_exited\",\"elapsedMs\":10}",
             "\n[stderr] prefer the last real prompt\n",
         );
-        assert_eq!(parse_context_from_tail(tail), 2_000);
-        assert_eq!(parse_context_from_tail(""), 0);
-        assert_eq!(parse_context_from_tail("not json\n{}"), 0);
+        assert_eq!(parse_context_from_tail(tail), Some(SessionContext { tokens: 2_010, peak: 2_010, window: None }));
+        assert_eq!(parse_context_from_tail(""), None);
+        assert_eq!(parse_context_from_tail("not json\n{}"), None);
     }
 
     #[test]

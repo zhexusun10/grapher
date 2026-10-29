@@ -3519,9 +3519,9 @@ fn planning_metrics_parsing_and_persistence() {
     assert_eq!(metrics.usage.output, 300);
     assert_eq!(metrics.usage.total_tokens, 500);
     assert_eq!(metrics.usage.consumed_tokens, 500);
-    // Context is the prompt Pi read on the turn, not the provider total.
-    assert_eq!(metrics.context_tokens, 250);
-    assert_eq!(metrics.context_peak, 250);
+    // Without a projected snapshot Pi uses the last provider total, including output.
+    assert_eq!(metrics.context_tokens, 500);
+    assert_eq!(metrics.context_peak, 500);
 
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();

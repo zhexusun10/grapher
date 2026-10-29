@@ -1,15 +1,43 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 type FileWindows = BTreeMap<String, usize>;
 
-/// Context window Pi reports for `provider/model`, read from the model catalog
-/// the engine ships plus the user's agent `models.json`. Session details compare
-/// the newest prompt against it; a model neither source knows simply has no
-/// capacity reading, so nothing is guessed from the model name.
+/// Fallback for legacy sessions without an actual Pi context snapshot. Prefer
+/// the latest Pi provider catalog, then installed/user model files; never guess
+/// capacity from a model name. Active sessions report their own window directly.
 pub(crate) fn context_window(model: &str) -> Option<usize> {
-    catalog().get(model).copied()
+    dynamic_catalog().read().ok().and_then(|windows| windows.get(model).copied())
+        .or_else(|| catalog().get(model).copied())
+}
+
+fn dynamic_catalog() -> &'static RwLock<BTreeMap<String, usize>> {
+    static WINDOWS: OnceLock<RwLock<BTreeMap<String, usize>>> = OnceLock::new();
+    WINDOWS.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
+
+/// Provider/Auth already enumerates Pi's runtime models for preflight/settings.
+/// Preserve that backend result for old sessions, including network models that
+/// do not occur in the shipped files. This cache never overrides live snapshots.
+pub(crate) fn remember_catalog(value: &serde_json::Value) {
+    let Some(windows) = catalog_models(value) else { return };
+    if let Ok(mut catalog) = dynamic_catalog().write() { *catalog = windows; }
+}
+
+fn catalog_models(value: &serde_json::Value) -> Option<BTreeMap<String, usize>> {
+    let models = value.get("models").and_then(|models| models.as_array())?;
+    let mut windows = BTreeMap::new();
+    for model in models {
+        let (Some(provider), Some(id), Some(window)) = (
+            model.get("provider").and_then(|v| v.as_str()).filter(|v| !v.is_empty()),
+            model.get("id").and_then(|v| v.as_str()).filter(|v| !v.is_empty()),
+            model.get("contextWindow").and_then(|v| v.as_u64())
+                .and_then(|v| usize::try_from(v).ok()).filter(|v| *v > 0),
+        ) else { continue };
+        windows.insert(format!("{provider}/{id}"), window);
+    }
+    Some(windows)
 }
 
 fn catalog() -> &'static BTreeMap<String, usize> {

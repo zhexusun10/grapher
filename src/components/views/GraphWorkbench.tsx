@@ -753,7 +753,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   })();
   // Summaries persisted before contexts were recorded still show their turn.
   const plannerContext = sessionContext(state.runMetrics?.sessionContext, plannerRole?.sessionId)
-    ?? (plannerRole?.contextTokens ? { tokens: plannerRole.contextTokens, peak: plannerRole.contextPeak ?? 0 } : undefined);
+    ?? attemptSessionContext(plannerRole);
   // Keep the session's first start aligned with the accumulated `time took`:
   // Planner follow-ups resume one Pi session instead of starting a new clock.
   const plannerTurnHistory = useMemo(() => mergePlannerTurns(
