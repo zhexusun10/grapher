@@ -52,7 +52,7 @@ function parseEditString(value: unknown): unknown[] | undefined {
     const parsed: unknown = JSON.parse(value);
     if (Array.isArray(parsed)) return parsed;
     if (isRecord(parsed)) return [parsed];
-  } catch {}
+  } catch { }
   return undefined;
 }
 
@@ -236,7 +236,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     // Pi normalizes nullable optional edit fields before local validation.
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     description:
-      "Create, replace, or delete graph nodes. Provide a nonempty nodes array; use one element for a single edit. Each nodes[].name must be unique within the call. Replacing a node updates its task and preserves its edges. Deleting a node removes its connected edges. A node's first execution starts a fresh session with its task and completed dependencies' workspace states. Edits are applied in order and validated together. If validation fails, the saved graph is unchanged.",
+      "Create, replace, or delete graph nodes. Provide a nonempty nodes array; use one element for a single edit. Each nodes[].name must be unique within the call. Replacing a node updates its task and preserves its edges. Deleting a node removes its connected edges. A node's first execution starts a fresh session with its task and completed dependencies' workspace states.",
     parameters: Type.Object({
       nodes: Type.Array(Type.Object({
         name: Type.String({ description: "Stable node name" }),
@@ -257,7 +257,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     name: "edge", label: "Graph edge",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     description:
-      "Create, replace, or delete directed edges between existing nodes. Provide a nonempty edges array; use one element for a single edit. Each ordered (from, to) pair must be unique within the call. Only one edge is stored per ordered pair. With feedback omitted or false, A -> B means B depends on A. B waits for A to complete successfully and receives A's workspace state. Multiple dependencies' workspace states are merged before B runs. Dependency edges must form a DAG. With feedback: true, B -> A lets B optionally send an additional feedback to A, which must be an ancestor of B in the dependency DAG. Each feedback source may have only one feedback target. When feedback is applied, A receives B's completed workspace state and feedback, and continues from A's own conversation history to improve its previous work. A's dependency descendants wait for the updated states; those that have already completed run again using updated dependency inputs. Other branches remain valid. Feedback edges do not affect dependency ordering or cycle detection. Edits are applied in order and validated together. If validation fails, the saved graph is unchanged.",
+      "Create, replace, or delete directed edges between existing nodes. Provide a nonempty edges array; use one element for a single edit. Each ordered (from, to) pair must be unique within the call. Only one edge is stored per ordered pair. With feedback omitted or false, A -> B means B depends on A. B waits for A to complete successfully and receives A's workspace state. Multiple dependencies' workspace states are merged before B runs. Dependency edges must form a DAG. With feedback: true, B -> A lets B optionally send an additional feedback to A, which must be an ancestor of B in the dependency DAG. Each feedback source may have only one feedback target. When feedback is applied, A receives B's completed workspace state and feedback, and continues from A's own conversation history to improve its previous work. A's dependency descendants wait for the updated states; those that have already completed run again using updated dependency inputs. Other branches remain valid.",
     parameters: Type.Object({
       edges: Type.Array(Type.Object({
         from: Type.String({ description: "Source node name (must exist)" }),
