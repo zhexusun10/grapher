@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Upgrade the bundled `pi-better-web-search` extension from 0.1.6 to 0.1.7: URL/URI/link and title/name/ID fields in oversized results are kept intact instead of being cut mid-link, entries that cannot fit are omitted, the default model-facing output limit rises from 64,000 to 96,000 code points (still overridable with `PI_BETTER_WEB_SEARCH_MAX_CHARS`), and truncation is reported with a single `[truncated]` line rather than per-field metadata.
+
 ### Fixed
 
 - Serial, Graph, Planner and Merger session details now use Pi's actual model window and projected context estimate, including trailing messages and context edits. Dynamically loaded models no longer show an unknown window solely because they are absent from the bundled catalog, and compaction can temporarily report an unknown context instead of a stale value. Older logs fall back to the last available model-call usage.
