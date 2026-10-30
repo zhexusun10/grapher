@@ -7,12 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-10-31
+
 ### Changed
 
+- Refine the Planner and Partitioner system prompts and the Planner's `node` and `edge` tool schema descriptions, with clearer task, workspace, dependency and feedback guidance.
+- Normalize workspace path display in the sidebar and refine workbench shadows.
 - Upgrade the bundled `pi-better-web-search` extension from 0.1.6 to 0.1.7: URL/URI/link and title/name/ID fields in oversized results are kept intact instead of being cut mid-link, entries that cannot fit are omitted, the default model-facing output limit rises from 64,000 to 96,000 code points (still overridable with `PI_BETTER_WEB_SEARCH_MAX_CHARS`), and truncation is reported with a single `[truncated]` line rather than per-field metadata.
 
 ### Fixed
 
+- Windows workspace cleanup can now remove read-only directories, with clearer errors when cleanup fails.
 - Serial, Graph, Planner and Merger session details now use Pi's actual model window and projected context estimate, including trailing messages and context edits. Dynamically loaded models no longer show an unknown window solely because they are absent from the bundled catalog, and compaction can temporarily report an unknown context instead of a stale value. Older logs fall back to the last available model-call usage.
 - Newly sent Serial and Graph node/Merger Steers now stay after the existing output until their transcript row appears, rather than briefly jumping below the previous user message. Repeated instructions, partially loaded history, attachments and execution settlement during the handoff retain their correct display order; historical fallback cards and pause recovery remain separate from this presentation state.
 
