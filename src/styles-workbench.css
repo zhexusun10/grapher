@@ -1206,7 +1206,7 @@ button.session-label-toggle:focus-visible {
   background: var(--bg-canvas);
   border-radius: 18px;
   overflow: hidden;
-  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+  box-shadow: var(--surface-card-shadow);
   position: relative;
 }
 

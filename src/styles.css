@@ -1,6 +1,7 @@
 @import "./tokens.css";
 
 :root {
+  --surface-card-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
   font-family: "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   color: var(--text-primary);
   background: var(--bg-canvas);
@@ -239,7 +240,7 @@ h3 {
   border-radius: var(--radius-surface);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
-  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+  box-shadow: var(--surface-card-shadow);
   padding: 18px 14px 16px;
   display: flex;
   flex-direction: column;
@@ -1376,7 +1377,8 @@ a,
   min-width: 0;
   min-height: 0;
   position: relative;
-  overflow: hidden;
+  /* Let the workbench shadow reach the main area's padding; .main clips it. */
+  overflow: visible;
   isolation: isolate;
 }
 
