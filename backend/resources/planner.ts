@@ -236,10 +236,10 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     // Pi normalizes nullable optional edit fields before local validation.
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     description:
-      "Create, replace, or delete graph nodes. Provide a nonempty nodes array; use one element for a single edit. Each nodes[].name must be unique within the call. Replacing a node updates its task and preserves its edges. Deleting a node removes its connected edges. A node's first execution starts a fresh session with its task and completed dependencies' workspace states.",
+      "Create, replace, or delete graph nodes.",
     parameters: Type.Object({
       nodes: Type.Array(Type.Object({
-        name: Type.String({ description: "Stable node name" }),
+        name: Type.String({ description: "Stable unique node name" }),
         task: Type.Optional(Type.String({ description: "Task to execute (required unless deleting)" })),
         delete: Type.Optional(Type.Boolean({ description: "Delete the node and its connected edges (default: false)" })),
       }, { additionalProperties: false }), { minItems: 1, description: "One or more node edits, applied in order" }),
@@ -257,11 +257,11 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     name: "edge", label: "Graph edge",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     description:
-      "Create, replace, or delete directed edges between existing nodes. Provide a nonempty edges array; use one element for a single edit. Each ordered (from, to) pair must be unique within the call. Only one edge is stored per ordered pair. With feedback omitted or false, A -> B means B depends on A. B waits for A to complete successfully and receives A's workspace state. Multiple dependencies' workspace states are merged before B runs. Dependency edges must form a DAG. With feedback: true, B -> A lets B optionally send an additional feedback to A, which must be an ancestor of B in the dependency DAG. Each feedback source may have only one feedback target. When feedback is applied, A receives B's completed workspace state and feedback, and continues from A's own conversation history to improve its previous work. A's dependency descendants wait for the updated states; those that have already completed run again using updated dependency inputs. Other branches remain valid.",
+      "Create, replace, or delete directed edges between existing nodes. Only one edge per ordered pair. By default, A -> B makes B depend on A. B waits for A to complete and receives A's workspace state. Multiple dependencies' workspace states are merged before B runs. With feedback: true, B -> A lets B optionally send a feedback message to A, which must be an ancestor of B. Each feedback source has at most one target. When feedback is sent, A receives B's completed workspace state and feedback, and continues from A's own context to improve its previous work. A's descendants wait and run again using updated workspace state.",
     parameters: Type.Object({
       edges: Type.Array(Type.Object({
-        from: Type.String({ description: "Source node name (must exist)" }),
-        to: Type.String({ description: "Target node name (must exist and differ from source)" }),
+        from: Type.String({ description: "Source node name" }),
+        to: Type.String({ description: "Target node name (differ from source)" }),
         feedback: Type.Optional(Type.Boolean({ description: "True for a feedback edge (default: false)" })),
         delete: Type.Optional(Type.Boolean({ description: "Delete the edge (default: false)" })),
       }, { additionalProperties: false }), { minItems: 1, description: "One or more edge edits, applied in order" }),
