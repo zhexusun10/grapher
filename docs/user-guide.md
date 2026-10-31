@@ -37,6 +37,7 @@ For Graph, inspect tasks and dependencies, then choose **Approve**. Independent 
 | Collapse or reopen the Graph | Drag the divider past the graph's minimum width to collapse it; use the edge arrow to reopen it at the previous width. You can also focus the divider and press Enter. |
 | Pause Graph node work | Use the topology's **Pause**; it interrupts active node processes and stops new dispatches for that Run. Wait for pausing to finish before **Continue**. It does not stop the Planner or other Runs. |
 | Stop just one conversation | Use that node conversation's **Stop**. Global Stop/cancel also cancels planning. |
+| Inspect a changed file | Open the file-change list and click a row. The file opens in your system default application from its execution workspace, Planner workspace or the source repository. Deleted files remain listed but are not clickable. |
 
 A completed Serial task stays resident: its agent process — and any server it started, such as a dev server — keeps running for as long as the Grapher backend runs, so you can open the running app and follow up in the same session. It is stopped only when you delete the Run or remove its workspace, or when you stop the backend. Planner turns and Graph node agents are reclaimed at the end of their turn as usual. See [Process lifecycle](architecture/filesystem-isolation.md#parked-serial-shells).
 
@@ -50,16 +51,18 @@ Review nodes can send bounded feedback to their graph-defined target. The target
 
 ## Recover without starting over
 
+The **Continue** control below is available in Graph. In Serial, after fixing the cause, send a follow-up in the conversation to retry the task.
+
 | Situation | What to do |
 | --- | --- |
 | App/process interruption or an explicit pause | Inspect the retained output, then use **Continue** when offered. Startup does not silently resume model calls. |
 | Provider credentials expired | Re-authenticate in Settings, then use **Continue** for the affected conversation. |
 | Provider connection failure (`Connection error.`, connection reset/refused) | Check your network or proxy if it persists, then use **Continue** for the affected conversation. It resumes the unfinished turn in the same session. |
-| Other task/provider failure | Inspect the error and intervene on the node, or save changed Node Agent model/thinking settings for that conversation and then use **Continue**. |
+| Other task/provider failure, including an unrecognized error | Inspect and fix the cause, then use **Continue** to retry the failed tasks. You can also intervene on a node or change its Node Agent model/thinking settings first. |
 | Conflict while combining parent results | Inspect the node's Merger conversation and retained workspace. Retry the node to re-attempt preparation; publication retry does not fix this conflict. |
 | Final publication failed | Inspect the publication panel and any publication Merger, then retry publication. It reuses retained results rather than rerunning the graph. A changed branch is not silently written; interrupted-checkout recovery may require restoring the captured branch. Staged changes in excluded environment/runtime scopes stay staged and are not published; commit or unstage them explicitly. |
 
-Retained workspaces preserve partial work for recovery. Missing or changed recovery evidence may require explicit repair; Grapher does not silently reset it. Editing an old message branches conversation history: in Serial it does **not** rewind project files; Graph history edits retain Git rollback semantics.
+In Graph, Continue first resumes paused or queued work without retrying unrelated failures. Once that work settles, use Continue again to retry the failed nodes in that Run; completed branches are left intact. Retained workspaces preserve partial work for recovery. Missing or changed recovery evidence may require explicit repair; Grapher does not silently reset it. Editing an old message branches conversation history: in Serial it does **not** rewind project files; Graph history edits retain Git rollback semantics.
 
 ## Know when the result is delivered
 

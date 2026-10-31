@@ -10,7 +10,7 @@ import {
   type RuntimeActivity,
   type PlanningSummary, type PlanMode, type ChatMessage,
   type ImageAttachment, type FileAttachment, type ChatMessageVersion,
-  type ConversationModelConfig
+  type ConversationModelConfig, type OpenWorkspaceFileRequest
 } from "./types";
 import { parseMessageAttachmentsAndText } from "./utils/attachmentUtils";
 import { tokens } from "./tokens";
@@ -670,7 +670,7 @@ export default function App() {
           runId: state.runId, node: nodeOverride ?? targetNodeName, executionId, instruction: text, images: options?.images,
         });
         // Once accepted, resuming the originating Run is independent of navigation.
-        if (snapshot.paused) snapshot = await runtimeService.control("resume", { runId: snapshot.runId });
+        if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
         const applied = applyForegroundSnapshot(snapshot, generation);
         if (applied) onAccepted?.(snapshot);
         return applied;
@@ -2443,7 +2443,7 @@ export default function App() {
     const acceptNodeEdit = async (snapshot: Snapshot) => {
       if (!applyForegroundSnapshot(snapshot, generation)) return false;
       if (!snapshot.paused) return true;
-      const resumed = await runtimeService.control("resume", { runId: snapshot.runId });
+      const resumed = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
       return applyForegroundSnapshot(resumed, generation);
     };
     const reportEditError = (error: unknown) => {
@@ -2539,7 +2539,7 @@ export default function App() {
             instruction: selectedText,
             images: selectedVersionData.images,
           });
-          if (snapshot.paused) snapshot = await runtimeService.control("resume", { runId: snapshot.runId });
+          if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
           if (!applyForegroundSnapshot(snapshot, generation)) return false;
           const base = sessionEntries.length > 0 ? sessionEntries : effectiveMessages;
           const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, "").trim();
@@ -2854,7 +2854,7 @@ export default function App() {
             instruction: cleanText,
             images: targetMsg.images,
           });
-          if (snapshot.paused) snapshot = await runtimeService.control("resume", { runId: snapshot.runId });
+          if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
           if (!applyForegroundSnapshot(snapshot, generation)) return false;
           setSessionEntries(rolledBackEntries);
           const nextMerger = (snapshot.mergers ?? []).filter(item => item.node === targetMerger.node).at(-1);
@@ -2977,7 +2977,9 @@ export default function App() {
         if (!await acceptNodeEdit(snap)) return false;
         // Cursor edits are projected from durable events and retained log
         // prefixes, never from a text-matched optimistic version of that row.
-        if (targetMsg.userTurnOffset !== undefined) {
+        if (targetMsg.userTurnOffset !== undefined || targetMsg.id === `task-${targetNodeName}`) {
+          // The task card is the opening prompt, not an optimistic chat turn.
+          // Its replacement and the discarded suffix come from the snapshot.
           setSessionEntries(prev => prev.filter(entry => entry.node !== targetNodeName));
         } else setSessionEntries(rolledBackEntries);
         setEditingMessage(null);
@@ -3251,6 +3253,15 @@ export default function App() {
     }
   };
 
+  const handleOpenFile = useStableCallback(async (request: OpenWorkspaceFileRequest) => {
+    try {
+      await runtimeService.openWorkspaceFile(request);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setError(t("无法打开文件：{0}", localizeError(detail)));
+    }
+  });
+
   const actions = {
     selectProject: useStableCallback(handleSelectProject), openProject: useStableCallback(handleOpenProject),
     copyRunPrompt: useStableCallback(handleCopyRunPrompt),
@@ -3261,6 +3272,7 @@ export default function App() {
     control: useStableCallback(control), save: useStableCallback(save),
     openSettings: useStableCallback(handleOpenSettings), openEditor: useStableCallback(() => setModal("editor")),
     openApproval: useStableCallback(() => setModal("approval")), retryPublication: useStableCallback(() => control("retry_publication")),
+    openFile: handleOpenFile,
     plan: useStableCallback(async (val: string, options?: Parameters<typeof handlePlanGoal>[1]) => (await handlePlanGoal(val, options)) !== false),
   };
   const publicationMergers = useMemo(() => (state.mergers ?? []).filter(merger => merger.node === "merger"), [state.mergers]);
@@ -3481,6 +3493,7 @@ export default function App() {
                     onSave={actions.save}
                     onOpenEditor={actions.openEditor}
                     onOpenApproval={actions.openApproval}
+                    onOpenFile={actions.openFile}
                     repoInfo={repoInfo}
                     config={config}
                     active={active}

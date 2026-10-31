@@ -1,16 +1,12 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { Check, Copy, Pencil, X, ChevronLeft, ChevronRight } from "lucide-react";
+import { Check, Copy, Pencil, X } from "lucide-react";
 import { t } from "../../i18n";
 import { MarkdownRenderer } from "../MarkdownRenderer";
-import type { ChatMessageVersion } from "../../types";
 
 export interface NodeTaskCardProps {
   nodeName: string;
   taskText: string;
   badgeText?: string;
-  versions?: ChatMessageVersion[];
-  currentVersionIndex?: number;
-  onSwitchVersion?: (targetIndex: number) => void;
   editing: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
@@ -41,9 +37,6 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
   nodeName,
   taskText,
   badgeText,
-  versions,
-  currentVersionIndex = 0,
-  onSwitchVersion,
   editing,
   draft,
   onDraftChange,
@@ -117,33 +110,6 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
           <div className="node-task-badge">
             <span>{badgeText || t("节点任务目标")}</span>
           </div>
-          {versions && versions.length > 1 && onSwitchVersion && (
-            <div className="node-task-version-switcher" role="group" aria-label={t("版本历史")}>
-              <button
-                type="button"
-                className="node-task-version-btn"
-                disabled={currentVersionIndex <= 0}
-                onClick={() => onSwitchVersion(currentVersionIndex - 1)}
-                title={t("上一版本")}
-                aria-label={t("上一版本")}
-              >
-                <ChevronLeft size={12} />
-              </button>
-              <span className="node-task-version-text">
-                v{currentVersionIndex + 1}/{versions.length}
-              </span>
-              <button
-                type="button"
-                className="node-task-version-btn"
-                disabled={currentVersionIndex >= versions.length - 1}
-                onClick={() => onSwitchVersion(currentVersionIndex + 1)}
-                title={t("下一版本")}
-                aria-label={t("下一版本")}
-              >
-                <ChevronRight size={12} />
-              </button>
-            </div>
-          )}
         </div>
 
         <div className="node-task-card-tools">

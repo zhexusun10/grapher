@@ -300,8 +300,8 @@ test("full paths and backend counts update live; switching scope keeps one entry
     ]);
     await expect(panel.getByRole("searchbox")).toHaveCount(0);
     await expect(panel.locator("select")).toHaveCount(0);
-    // Rows are read-only: no patch disclosure, copy button or filter chrome.
-    await expect(panel.getByRole("button")).toHaveCount(0);
+    // Rows expose an open action: no patch disclosure, copy button or filter chrome.
+    await expect(panel.getByRole("button")).toHaveCount(6);
     await expect(trigger.locator(".change-diff-stats")).toHaveCount(0);
     const buttonStats = panel.locator('[data-file-path="src/components/Button.tsx"] .diff-stat-add');
     await expect(buttonStats).toHaveText("+2");
@@ -317,6 +317,38 @@ test("full paths and backend counts update live; switching scope keeps one entry
     await expectCollapsed(page, trigger);
     await trigger.click();
     await expect(panel.getByTestId("changed-file-item")).toHaveCount(6);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("clicking a changed file opens its scoped path; deleted files stay inert", { timeout: 30_000 }, async () => {
+  const { page, context, errors } = await fixture("node");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    const panel = page.getByTestId("workspace-changes-panel");
+    await trigger.click();
+    await panel.locator('[data-file-path="src/components/Button.tsx"] .changed-file-row').click();
+    await expect.poll(() => page.evaluate(() => window.changesAudit.openRequests.length)).toBe(1);
+    const scoped = await page.evaluate(() => window.changesAudit.openRequests[0]);
+    assert.deepEqual(scoped, {
+      runId: "changes-run", path: "src/components/Button.tsx",
+      executionIds: ["execution"], nodes: ["worker"],
+    });
+
+    // A deleted path has no surviving file to hand to the opener.
+    await expect(panel.locator('[data-file-path="src/legacy.ts"] .changed-file-row')).toBeDisabled();
+
+    // The main view still opens the file but does not claim a node scope.
+    await page.evaluate(() => window.changesAudit.select(""));
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await trigger.click();
+    await panel.locator('[data-file-path="src/components/Button.tsx"] .changed-file-row').click();
+    await expect.poll(() => page.evaluate(() => window.changesAudit.openRequests.length)).toBe(2);
+    const aggregate = await page.evaluate(() => window.changesAudit.openRequests[1]);
+    assert.equal(aggregate.runId, "changes-run");
+    assert.equal(aggregate.path, "src/components/Button.tsx");
+    assert.equal("executionIds" in aggregate, false);
+    assert.deepEqual(aggregate.nodes, ["worker"]);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -361,7 +393,7 @@ test("trigger matches the session disclosure; totals stay out of it", { timeout:
     await expect(zeroFile.locator(".changed-file-path")).toHaveText("src/hooks/useChat.ts");
     await expect(zeroFile.locator(".diff-stat-add")).toHaveText("+0");
     await expect(zeroFile.locator(".diff-stat-del")).toHaveText("−0");
-    assert.equal(await panel.locator("button").evaluateAll(buttons => buttons.some(button => button.hasAttribute("title"))), false);
+    assert.equal(await panel.locator("button.changed-file-row").evaluateAll(buttons => buttons.every(button => button.hasAttribute("title"))), true);
     const colors = await panel.evaluate(element => {
       const tokens = getComputedStyle(document.documentElement);
       return { add: getComputedStyle(element.querySelector(".diff-stat-add")).color, del: getComputedStyle(element.querySelector(".diff-stat-del")).color,

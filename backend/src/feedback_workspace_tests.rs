@@ -487,6 +487,39 @@ fn failed_feedback_repair_adopts_its_committed_residue_on_retry() {
 
 #[cfg(feature = "fixture")]
 #[test]
+fn continue_recovers_feedback_that_failed_before_its_session_fork() {
+    let (_temp, _source, mut runtime) = configured(&["owner", "review"], 1);
+    let owner = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &owner);
+    history(&runtime, &owner, "OWNER HISTORY MUST SURVIVE");
+    let review = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &review);
+    let failed = runtime.jobs().unwrap().remove(0);
+    assert!(failed.session_fork.is_some());
+    // Workspace preparation failed before the fork was written or Pi started.
+    runtime.finish(&failed.execution, Err("unrecognized preparation error".into())).unwrap();
+    runtime.jobs().unwrap();
+    let root = runtime.root.clone();
+    drop(runtime);
+    let mut runtime = Runtime::open(&root).unwrap();
+    assert!(runtime.state.can_resume());
+    runtime.pause(false).unwrap();
+    let retry = runtime.jobs().unwrap().remove(0);
+    assert!(!retry.initial_recovery);
+    assert!(!retry.continuation);
+    assert_eq!(retry.task, failed.task, "the original feedback is delivered exactly once");
+    assert_eq!(retry.session_fork.as_ref().unwrap().id, owner.execution.id);
+    assert_eq!(retry.feedback_workspace.as_ref().unwrap().source_execution_id, review.execution.id);
+    execute(&mut runtime, &retry);
+    assert_eq!(runtime.state.nodes["owner"].status, "completed");
+    assert_eq!(fs::read_to_string(Path::new(&retry.execution.worktree).join("owner.txt")).unwrap().trim(), "fixed");
+    let fork = root.join("sessions").join(&retry.execution.id)
+        .join(format!("grapher_{}.jsonl", retry.execution.session_id));
+    assert!(fs::read_to_string(fork).unwrap().contains("OWNER HISTORY MUST SURVIVE"));
+}
+
+#[cfg(feature = "fixture")]
+#[test]
 fn adoption_survives_a_failed_attempt_without_a_persisted_session() {
     // Mirrors the production wedge: the failed attempt died before or without
     // persisting its Pi session, so the retry's resume falls back to the

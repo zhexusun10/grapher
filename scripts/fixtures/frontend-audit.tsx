@@ -194,7 +194,7 @@ function LatestScrollFixture() {
   return mounted ? <div style={{ height: 800, display: "flex" }}>
     <GraphWorkbench state={state} routeType={nodeView ? "graph" : "serial"} selected={nodeView ? "task" : ""} setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
       effectiveMessages={[]} isPlanning={false} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
-      onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
+      onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop} repoInfo={null} config={config}
       active={live} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
       nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
   </div> : <p>Conversation closed</p>;
@@ -217,7 +217,7 @@ function UnrunNodeFixture() {
   return <div style={{ height: "calc(100vh - 64px)", display: "flex" }}>
     <GraphWorkbench state={state} routeType="graph" selected={selected} setSelected={setSelected} selectedMergerId="" setSelectedMergerId={noop}
       effectiveMessages={[]} isPlanning={false} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
-      onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
+      onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop} repoInfo={null} config={config}
       active={false} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
       nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
   </div>;

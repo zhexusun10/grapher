@@ -1,5 +1,12 @@
 use super::*;
 
+fn record_session(runtime: &Runtime, execution: &Execution) {
+    let directory = runtime.root.join("sessions").join(&execution.id);
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join(format!("test_{}.jsonl", execution.session_id)),
+        format!("{}\n", serde_json::json!({"type": "session", "id": execution.session_id, "cwd": execution.worktree}))).unwrap();
+}
+
 fn replacement(config: &Config) -> Config {
     let mut config = config.clone();
     config.model = "legacy/unused".into();
@@ -18,6 +25,7 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
             runtime.set_route(route).unwrap();
             runtime.approve().unwrap();
             let failed = runtime.jobs().unwrap().remove(0);
+            record_session(&runtime, &failed.execution);
             if route == "graph" {
                 workspace::prepare(&source, Path::new(&failed.execution.worktree),
                     &failed.execution.before, &[]).unwrap();
@@ -29,7 +37,7 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
             fs::write(&partial, "keep unfinished work").unwrap();
             runtime.finish(&failed.execution, Err("Provider quota exhausted".into())).unwrap();
             runtime.jobs().unwrap();
-            assert!(!runtime.state.can_resume());
+            assert!(runtime.state.can_resume(), "retry is available even before changing settings");
             if paused { runtime.pause(true).unwrap(); }
             let original = serde_json::to_value(&runtime.state.config).unwrap();
             let config = replacement(runtime.state.config.as_ref().unwrap());
@@ -194,12 +202,13 @@ fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_complet
     assert_eq!(runtime.state.nodes["pending"].status, "blocked");
     runtime.pause(false).unwrap();
     let retry = runtime.jobs().unwrap();
-    assert_eq!(retry.len(), 1);
-    assert_eq!(retry[0].execution.node, "failed");
-    assert_eq!(retry[0].config.node_agent_settings(), settings.node_agent_settings());
+    assert_eq!(retry.len(), 2, "explicit Continue retries both failed roots");
+    let retried_failed = retry.iter().find(|job| job.execution.node == "failed").unwrap();
+    let retried_running = retry.iter().find(|job| job.execution.node == "running").unwrap();
+    assert_eq!(retried_failed.config.node_agent_settings(), settings.node_agent_settings());
+    assert_eq!(retried_running.config.node_agent_settings(), config.node_agent_settings());
     assert_eq!(runtime.state.nodes["after"].status, "waiting");
-    assert_eq!(runtime.state.nodes["running"].status, "failed");
-    assert_eq!(runtime.state.nodes["pending"].status, "blocked");
+    assert_eq!(runtime.state.nodes["pending"].status, "waiting");
     assert_eq!(runtime.state.nodes["completed"].status, "completed");
 }
 
@@ -249,7 +258,7 @@ fn unstarted_node_models_follow_settings_in_drafts_and_before_dispatch() {
 }
 
 #[test]
-fn prestart_model_settings_do_not_opt_later_failures_into_continue() {
+fn prestart_model_settings_are_retained_when_a_later_failure_is_retried() {
     let (_temp, _source, mut runtime) = setup(true, single());
     let mut config = replacement(runtime.state.config.as_ref().unwrap());
     runtime.update_node_models(&config).unwrap();
@@ -257,16 +266,18 @@ fn prestart_model_settings_do_not_opt_later_failures_into_continue() {
     let job = runtime.jobs().unwrap().remove(0);
     runtime.finish(&job.execution, Err("Provider quota exhausted".into())).unwrap();
     runtime.jobs().unwrap();
-    assert!(!runtime.state.can_resume());
+    assert!(runtime.state.can_resume());
     let root = runtime.root.clone();
     drop(runtime);
     let mut runtime = Runtime::open(&root).unwrap();
-    assert!(!runtime.state.can_resume(), "a prestart save is not a post-failure recovery decision");
+    assert!(runtime.state.can_resume(), "failure recovery survives restart");
+    assert_eq!(runtime.state.nodes["task"].model_retry, Some(false));
     runtime.update_node_models(&config).unwrap();
-    assert!(!runtime.state.can_resume(), "an unchanged save cannot opt in to recovery");
+    assert_eq!(runtime.state.nodes["task"].model_retry, Some(false), "an unchanged save does not rewrite the override");
     config.role_models.get_mut("nodeAgent").unwrap().thinking_level = Some("low".into());
     runtime.update_node_models(&config).unwrap();
-    assert!(runtime.state.can_resume(), "changed settings while failed still enable Continue");
+    assert_eq!(runtime.state.nodes["task"].model_retry, Some(true));
+    assert!(runtime.state.can_resume());
 }
 
 #[test]
@@ -311,7 +322,7 @@ fn legacy_failed_node_model_events_and_snapshots_keep_continue_recovery() {
 }
 
 #[test]
-fn unrelated_settings_do_not_opt_provider_failures_into_continue() {
+fn unrelated_settings_do_not_retarget_failed_node_retries() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
@@ -325,9 +336,8 @@ fn unrelated_settings_do_not_opt_provider_failures_into_continue() {
     config.auto_approve = true;
     runtime.update_node_models(&config).unwrap();
     assert_ne!(runtime.snapshot_version(), version, "the conversation records its planner settings");
-    assert!(!runtime.state.can_resume(), "a planner-only change does not opt a failed node into Continue");
-    runtime.pause(false).unwrap();
-    assert!(runtime.jobs().unwrap().is_empty());
+    assert!(runtime.state.can_resume(), "failure recovery is independent of the planner setting");
+    assert!(runtime.state.nodes["task"].model_config.is_none(), "a planner-only change does not retarget the node");
     assert_eq!(runtime.state.nodes["task"].status, "failed");
 
     // Legacy defaults and thinking-only changes are also effective node settings.
@@ -335,6 +345,9 @@ fn unrelated_settings_do_not_opt_provider_failures_into_continue() {
     runtime.update_node_models(&config).unwrap();
     assert!(runtime.state.can_resume());
     assert_eq!(runtime.state.nodes["task"].model_config, Some(config.node_agent_settings()));
+    runtime.pause(false).unwrap();
+    let retried = runtime.jobs().unwrap().remove(0);
+    assert_eq!(retried.config.node_agent_settings(), config.node_agent_settings());
 }
 
 #[test]
@@ -426,6 +439,7 @@ fn credential_failure_is_continued_without_a_synthetic_message() {
     let (_temp, source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
+    record_session(&runtime, &failed.execution);
     workspace::prepare(
         &source,
         Path::new(&failed.execution.worktree),
@@ -519,6 +533,7 @@ fn provider_transport_failure_enables_continue_without_a_synthetic_message() {
     let failed = runtime.jobs().unwrap().remove(0);
     // Pi already exhausted its automatic transport retries; the session and
     // workspace are intact, so Continue must be the manual retry path.
+    record_session(&runtime, &failed.execution);
     runtime.finish(&failed.execution, Err("Connection error.".into())).unwrap();
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.phase, "needs_attention");

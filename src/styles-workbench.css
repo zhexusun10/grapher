@@ -345,47 +345,6 @@
   max-width: 200px;
 }
 
-.node-task-version-switcher {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  background: transparent;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  padding: 1px 4px;
-}
-
-.node-task-version-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary, #64748B);
-  cursor: pointer;
-  border-radius: 3px;
-  padding: 0;
-}
-
-.node-task-version-btn:hover:not(:disabled) {
-  background: var(--bg-surface-hover, #F1F5F9);
-  color: var(--text-primary, #0F172A);
-}
-
-.node-task-version-btn:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-
-.node-task-version-text {
-  font-size: 11px;
-  color: var(--text-secondary, #64748B);
-  font-family: var(--font-mono, monospace);
-  padding: 0 2px;
-}
-
 .node-task-card-tools {
   display: inline-flex;
   align-items: center;

@@ -37,7 +37,7 @@ function Fixture() {
       plannerStream={{ runId: snapshot.runId, stage: planning ? "planning" : "completed", plannerText: "",
         items: [{ id: "node-tool", type: "tool_call", toolName: "node", args: {}, status: "success" }] }}
       onSendMessage={noop} onRequestConfirmation={noop} onControl={noop} onSave={noop}
-      onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
+      onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop} repoInfo={null} config={config}
       active={false} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
       nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} tokens={tokens} />
   </div>;

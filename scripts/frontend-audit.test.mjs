@@ -1498,9 +1498,12 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
         assert.equal(body.runId, current.runId);
         assert.equal(body.node, undefined, "topology controls stay global even with a node selected");
         current = body.action === "pause" ? { ...current, paused: true, phase: "paused" }
-          : { ...current, paused: false, canResume: false, phase: "running",
+          : current.nodes.task.status === "paused" ? { ...current, paused: false, canResume: false, phase: "running",
             nodes: { ...current.nodes, task: { ...current.nodes.task, status: "running", error: null } },
-            executions: [...current.executions, { ...execution("second", "task", "running"), attempt: 2 }] };
+            executions: [...current.executions, { ...execution("second", "task", "running"), attempt: 2 }] }
+          : { ...current, paused: false, canResume: false, phase: "running",
+            nodes: { ...current.nodes, broken: { ...current.nodes.broken, status: "running", error: null } },
+            executions: [...current.executions, { ...execution("broken-second", "broken", "running"), attempt: 2 }] };
         result = current; break;
       default: errors.push(`Unexpected API: ${command}`); return route.fulfill({ status: 400, json: { error: command } });
     }
@@ -1523,9 +1526,17 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
     await bottom.getByRole("button", { name: "Resume", exact: true }).waitFor();
     await page.locator('[data-node-name="task"] .status', { hasText: "Paused" }).waitFor();
     await page.locator('[data-node-name="broken"] .status', { hasText: "Failed" }).waitFor();
+    await bottom.getByText("Continue first resumes paused tasks; retry other failed nodes afterward.").waitFor();
     await bottom.getByRole("button", { name: "Resume", exact: true }).click();
     await page.locator('[data-node-name="task"] .status', { hasText: "Running" }).waitFor();
-    assert.deepEqual(actions.map(action => action.action), ["pause", "resume"]);
+    await page.locator('[data-node-name="broken"] .status', { hasText: "Failed" }).waitFor();
+    current = { ...current, canResume: true, phase: "needs_attention",
+      nodes: { ...current.nodes, task: { ...current.nodes.task, status: "completed" } },
+      executions: current.executions.map(item => item.id === "second" ? { ...item, status: "completed", completedAt: 3000 } : item) };
+    await bottom.getByRole("button", { name: "Resume", exact: true }).waitFor();
+    await bottom.getByRole("button", { name: "Resume", exact: true }).click();
+    await page.locator('[data-node-name="broken"] .status', { hasText: "Running" }).waitFor();
+    assert.deepEqual(actions.map(action => action.action), ["pause", "resume", "resume"]);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -1886,6 +1897,111 @@ for (const planType of ["graph", "serial"]) {
     } finally { await context.close(); }
   });
 }
+
+test("editing a node objective replaces the opening turn without creating a chat message", { timeout: 45_000 }, async () => {
+  const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };
+  const output = text => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
+  const execution = (id, attempt, text) => ({ id, node: "task", status: "completed", revision: attempt, attempt, sessionId: "s", worktree: "/a", before: "", after: "", startedAt: attempt * 10, completedAt: attempt * 10 + 1, output: output(text) });
+  const first = execution("first", 1, "First response"), second = execution("second", 2, "Second response");
+  let current = { runId: "objective-run", config, planType: "graph", approved: true, paused: false, phase: "completed",
+    graph: { originalGoal: "Goal", nodes: [{ name: "task", task: "Original objective" }], edges: [] },
+    nodes: { task: { status: "completed", revision: 1, head: "", instruction: "", error: null } },
+    executions: [first, second], events: [
+      { type: "started", sequence: 1, timestamp: 10, execution: first, message_sequences: [] },
+      { type: "invalidated", sequence: 2, timestamp: 15, target: "task", instruction: "Follow-up", human: true },
+      { type: "started", sequence: 3, timestamp: 20, execution: second, message_sequences: [2] },
+    ], plan: null, base: "", feedbackCounts: {} };
+  const empty = { ...current, runId: "", config: null, approved: false, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [], events: [] };
+  const errors = [], edits = [];
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "history": case "snapshot": result = current; break;
+      case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
+      case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = catalog; break;
+      case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+      case "get_execution_output": {
+        const item = current.executions.find(item => item.id === body.executionId), bytes = Buffer.from(item.output);
+        const end = Math.min(body.endOffset ?? bytes.length, bytes.length);
+        const start = body.tail ? Math.max(0, (body.before ?? end) - (body.limit ?? end)) : body.offset;
+        const next = Math.min(end, start + (body.limit ?? end));
+        result = { runId: current.runId, executionId: item.id, content: bytes.subarray(start, next).toString(), startOffset: start, nextOffset: next, totalBytes: end, complete: next === end, status: item.status }; break;
+      }
+      case "control": {
+        assert.equal(body.action, "intervene");
+        const followup = execution("after-edit", 4, "Response after edit");
+        current = { ...current, executions: [...current.executions, followup], events: [...current.events,
+          { type: "invalidated", sequence: 6, timestamp: 35, target: "task", instruction: body.instruction, human: true },
+          { type: "started", sequence: 7, timestamp: 40, execution: followup, message_sequences: [6] }] };
+        result = current; break;
+      }
+      case "edit_node": {
+        edits.push(body);
+        if (edits.length === 1) return route.fulfill({ status: 400, json: { error: "Objective edit rejected" } });
+        const replacement = execution("replacement", 3, "Replacement response");
+        current = { ...current, graph: { ...current.graph, nodes: [{ name: "task", task: body.instruction }] }, supersededExecutionIds: ["first", "second"],
+          executions: [...current.executions, replacement], events: [...current.events,
+            { type: "conversation_edited", sequence: 4, timestamp: 25, target: "task", nodes: ["task"], first_turn: true, instruction: body.instruction, old_instruction: body.oldText, from_execution_id: "first", from_event_sequence: 1 },
+            { type: "started", sequence: 5, timestamp: 30, execution: replacement, message_sequences: [] }] };
+        result = current; break;
+      }
+      default: errors.push(`Unexpected API: ${command}`); return route.fulfill({ status: 400, json: { error: command } });
+    }
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage(); page.setDefaultTimeout(10_000);
+  page.on("pageerror", error => errors.push(String(error)));
+  const open = async () => { await page.locator('[data-run-id="objective-run"]').click(); await page.locator('[data-node-name="task"]').click(); };
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" }); await open();
+    await page.getByText("Second response", { exact: true }).waitFor();
+    const order = await page.evaluate(() => {
+      const first = document.querySelector('[data-execution-id="first"]');
+      const follow = [...document.querySelectorAll('.chat-message-row.user')].find(row => row.textContent.includes('Follow-up'));
+      const second = document.querySelector('[data-execution-id="second"]');
+      return !!first && !!follow && !!second && !!(first.compareDocumentPosition(follow) & Node.DOCUMENT_POSITION_FOLLOWING) && !!(follow.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    assert.ok(order, "each attempt follows the prompt that produced it");
+    await page.locator('.node-task-tool-btn.edit').click();
+    await page.locator('.node-task-edit-textarea').fill('Updated objective');
+    await page.locator('.node-task-tool-btn.save').click();
+    await page.getByRole('alert').filter({ hasText: 'Objective edit rejected' }).waitFor();
+    assert.equal(await page.locator('.node-task-edit-textarea').inputValue(), 'Updated objective');
+    assert.equal(await page.locator('.chat-message-row.user', { hasText: 'Follow-up' }).count(), 1, 'a rejected edit keeps the existing conversation');
+    await page.locator('.node-task-tool-btn.save').click();
+    await page.getByText('Replacement response', { exact: true }).waitFor();
+    assert.equal(edits.length, 2);
+    assert.equal(edits[1].executionId, 'first');
+    assert.equal(await page.locator('.node-task-content').innerText(), 'Updated objective');
+    assert.equal(await page.locator('.chat-message-row.user', { hasText: 'Updated objective' }).count(), 0);
+    assert.equal(await page.locator('.chat-message-row.user', { hasText: 'Follow-up' }).count(), 0);
+    assert.equal(await page.locator('.node-task-card').getByRole('group', { name: 'Version history' }).count(), 0);
+    const composer = page.locator('.pane-bottom-chat textarea');
+    await composer.fill('New follow-up'); await composer.press('Enter');
+    await page.getByText('Response after edit', { exact: true }).waitFor();
+    const editedOrder = await page.evaluate(() => {
+      const first = document.querySelector('[data-execution-id="replacement"]');
+      const follow = [...document.querySelectorAll('.chat-message-row.user')].find(row => row.textContent.includes('New follow-up'));
+      const second = document.querySelector('[data-execution-id="after-edit"]');
+      return !!first && !!follow && !!second && !!(first.compareDocumentPosition(follow) & Node.DOCUMENT_POSITION_FOLLOWING) && !!(follow.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    assert.ok(editedOrder, 'the replacement attempt remains before the later follow-up and its attempt');
+    await page.reload({ waitUntil: 'networkidle' }); await open();
+    await page.getByText('Response after edit', { exact: true }).waitFor();
+    assert.equal(await page.locator('.node-task-content').innerText(), 'Updated objective');
+    assert.equal(await page.locator('.chat-message-row.user', { hasText: 'Updated objective' }).count(), 0);
+    assert.equal(await page.locator('.node-task-card').getByRole('group', { name: 'Version history' }).count(), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 for (const planType of ["graph", "serial"]) {
   test(`${planType}: Steers clear the composer before acknowledgement and remain editable inline after reload`, { timeout: 45_000 }, async () => {

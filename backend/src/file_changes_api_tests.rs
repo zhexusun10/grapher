@@ -195,3 +195,181 @@ fn historical_run_routes_to_its_own_projection_while_the_active_run_is_busy() {
     assert_eq!(value["runId"], historical_id);
     assert_eq!(value["summary"]["totalFiles"], 1, "historical read returned the active or empty Run");
 }
+
+fn open_file_state(repository: &std::path::Path) -> Snapshot {
+    let mut state = Snapshot::default();
+    state.config = Some(
+        serde_json::from_value(serde_json::json!({
+            "repository": repository.to_string_lossy(), "model": "test", "maxParallel": 1
+        }))
+        .unwrap(),
+    );
+    state
+}
+
+fn open_file_execution(id: &str, worktree: &std::path::Path, started_at: u64) -> Execution {
+    Execution {
+        id: id.into(), node: "task".into(), revision: 1, attempt: 1,
+        session_id: id.into(), worktree: worktree.to_string_lossy().into(),
+        before: String::new(), workspace_lineage: vec![], after: None, input: None,
+        result: None, status: "completed".into(), output: String::new(), output_bytes: 0,
+        pid: None, started_at, completed_at: Some(started_at + 1), metrics: None,
+    }
+}
+
+fn write_open_file(root: &std::path::Path, relative: &str, text: &str) -> PathBuf {
+    let path = root.join(relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, text).unwrap();
+    path
+}
+
+fn assert_open_target(state: &Snapshot, execution_ids: Option<&[String]>, nodes: &[String], expected: &std::path::Path) {
+    let context = open_file_context(state);
+    let roots = open_file_roots(&context, execution_ids, nodes).unwrap();
+    assert_eq!(
+        resolve_open_file_target(&roots, "src/lib.rs").unwrap(),
+        expected.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn file_open_resolution_uses_newest_attempt_then_repository_fallback() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    let repo_file = write_open_file(&repository, "src/lib.rs", "repository");
+    let first_file = write_open_file(&first, "src/lib.rs", "first");
+    let second_file = write_open_file(&second, "src/lib.rs", "second");
+
+    let mut state = open_file_state(&repository);
+    state.executions = vec![
+        open_file_execution("first", &first, 1),
+        open_file_execution("second", &second, 2),
+    ];
+    assert_open_target(&state, Some(&["first".into(), "second".into()]), &[], &second_file);
+    assert_open_target(&state, None, &[], &second_file);
+
+    // A cleaned newest attempt falls through to the next retained workspace.
+    fs::remove_dir_all(&second).unwrap();
+    assert_open_target(&state, Some(&["first".into(), "second".into()]), &[], &first_file);
+    // A node view whose workspaces no longer exist reads the published/source
+    // file instead of failing.
+    fs::remove_dir_all(&first).unwrap();
+    assert_open_target(&state, Some(&["first".into(), "second".into()]), &[], &repo_file);
+
+    let context = open_file_context(&state);
+    assert!(open_file_roots(&context, Some(&["unknown".into()]), &[]).is_err());
+    assert!(resolve_open_file_target(&[repository], "missing.rs").is_err());
+}
+
+#[test]
+fn file_open_resolution_prefers_the_repository_after_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    let workspace = temp.path().join("workspace");
+    let repo_file = write_open_file(&repository, "src/lib.rs", "published");
+    write_open_file(&workspace, "src/lib.rs", "workspace");
+
+    let mut state = open_file_state(&repository);
+    state.executions = vec![open_file_execution("execution", &workspace, 1)];
+    state.publication = Some(Publication {
+        repository: repository.to_string_lossy().into(),
+        heads: vec![], status: "completed".into(), head: None, error: None,
+        started_at: 1, completed_at: Some(2),
+    });
+    assert_open_target(&state, None, &[], &repo_file);
+
+    // An explicit node view still prefers its own execution while it exists.
+    assert_open_target(&state, Some(&["execution".into()]), &[], &workspace.join("src/lib.rs"));
+}
+
+#[test]
+fn file_open_resolution_prefers_a_planner_only_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    let planning = temp.path().join("planning");
+    let workspace = temp.path().join("workspace");
+    write_open_file(&repository, "src/lib.rs", "base");
+    let planning_file = write_open_file(&planning, "src/lib.rs", "planned");
+    let workspace_file = write_open_file(&workspace, "src/lib.rs", "base copy");
+
+    let mut state = open_file_state(&repository);
+    state.executions = vec![open_file_execution("execution", &workspace, 1)];
+    state.planning = Some(PlanningSummary {
+        planning_id: "planning".into(),
+        worktree: Some(planning.to_string_lossy().into()),
+        ..Default::default()
+    });
+    assert_open_target(&state, None, &["planner".into()], &planning_file);
+    assert_open_target(&state, None, &["worker".into()], &workspace_file);
+    assert_open_target(&state, None, &["planner".into(), "worker".into()], &workspace_file);
+}
+
+#[test]
+fn file_open_resolution_rejects_traversal_absolute_paths_and_missing_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    write_open_file(&repository, "src/lib.rs", "content");
+    let roots = vec![repository.clone()];
+
+    for unsafe_path in ["../outside.rs", "/etc/passwd", "src/../lib.rs", ""] {
+        assert!(
+            resolve_open_file_target(&roots, unsafe_path).is_err(),
+            "open target must reject {unsafe_path:?}"
+        );
+    }
+    assert!(resolve_open_file_target(&roots, "src/missing.rs").is_err());
+    assert_eq!(
+        resolve_open_file_target(&roots, "src/lib.rs").unwrap(),
+        repository.join("src/lib.rs").canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn open_workspace_file_rejects_missing_files_and_unknown_executions_without_launching() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    let mut runtime = Runtime::open(temp.path()).unwrap();
+    let run = Uuid::new_v4().to_string();
+    runtime.state.run_id = run.clone();
+    runtime.emit(EventKind::Created {
+        graph: Graph {
+            original_goal: "open file".into(),
+            nodes: vec![Node { name: "task".into(), task: "test".into() }],
+            edges: vec![],
+        },
+        config: serde_json::from_value(serde_json::json!({
+            "repository": source, "model": "test", "maxParallel": 1
+        }))
+        .unwrap(),
+        planning_id: None, planning: None,
+    }).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: PathBuf::new(),
+    });
+
+    let missing = open_workspace_file(
+        &serde_json::json!({ "runId": run, "path": "missing.rs" }),
+        &service,
+    )
+    .unwrap_err();
+    assert!(missing.contains("文件已不在"));
+    let unknown = open_workspace_file(
+        &serde_json::json!({ "runId": run, "path": "missing.rs", "executionIds": ["unknown"] }),
+        &service,
+    )
+    .unwrap_err();
+    assert!(unknown.contains("找不到所选执行"));
+    assert!(open_workspace_file(
+        &serde_json::json!({ "runId": run, "path": "missing.rs", "executionId": "a", "executionIds": ["a"] }),
+        &service,
+    )
+    .is_err());
+}

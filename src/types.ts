@@ -78,6 +78,16 @@ export interface FileChangeSummary {
   activeFilePath?: string;
 }
 
+/** A changed file plus the conversation scope that owns it. The backend uses
+ * the execution IDs first, then the owning nodes, before falling back to the
+ * Run's source repository. */
+export interface OpenWorkspaceFileRequest {
+  runId: string;
+  path: string;
+  executionIds?: string[];
+  nodes?: string[];
+}
+
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null; fileChanges?: FileChangeSummary | null }
 export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Pick<Execution, "id" | "node">; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; requested_node?: string; actual_node?: string; reason?: string; message_sequences?: number[]; from_execution_id?: string; from_event_sequence?: number; from_output_offset?: number; old_instruction?: string; first_turn?: boolean; fresh_restart?: boolean; selected_version?: number; human?: boolean; planning_id?: string; planning?: PlanningSummary; plan_type?: string; planType?: string }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }

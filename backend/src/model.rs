@@ -660,14 +660,16 @@ pub struct NodeState {
     /// Running/completed nodes and the Run's original config stay unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_config: Option<RoleModelConfig>,
-    /// Only changes saved while failed opt the node into model-change recovery.
-    /// Legacy snapshots omit this flag and used model_config as the retry hint.
+    /// Legacy record of model changes saved while failed. Explicit Continue
+    /// can retry regardless; old snapshots omit this flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_retry: Option<bool>,
-    /// Continue this node's Pi session directly after an interruption or model change.
-    /// This is not a human intervention and does not add a new task instruction.
+    /// Continue this node's Pi session without adding a new task instruction.
     #[serde(default)]
     pub continuation: bool,
+    /// This queued continuation belongs to a source-direct follow-up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_direct_recovery: bool,
     /// Continue this node's conversation in the current terminal workspace
     /// without invalidating already-completed descendants.
     #[serde(default)]
@@ -717,6 +719,7 @@ impl Default for NodeState {
             model_config: None,
             model_retry: None,
             continuation: false,
+            source_direct_recovery: false,
             shared_workspace: false,
             baseline_head: None,
             feedback_workspace: None,
@@ -939,6 +942,11 @@ pub enum EventKind {
         nodes: Vec<String>,
         #[serde(default)]
         continuation_nodes: Vec<String>,
+        /// Older events only continued specifically classified failures.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resume_failed: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        source_direct_nodes: Vec<String>,
     },
     StopRequested,
     /// Explicit user interruption, pinned to attempts rather than a whole Run.
@@ -1532,59 +1540,11 @@ impl Snapshot {
         self.recovery_is_idle() && !self.interrupted_nodes().is_empty()
     }
 
-    /// Failed nodes whose latest attempt only lost its Provider authorization.
-    /// Continue resumes them as a continuity turn, exactly like an interrupted
-    /// node, because re-authenticating already removed the root cause.
-    pub fn credential_retry_nodes(&self) -> Vec<String> {
-        self.nodes
-            .iter()
-            .filter_map(|(name, node)| {
-                if node.status != "failed"
-                    || !node.error.as_deref().is_some_and(is_credential_error)
-                {
-                    return None;
-                }
-                self.executions
-                    .iter()
-                    .rev()
-                    .find(|execution| {
-                        execution.node == *name
-                            && !self.superseded_execution_ids.contains(&execution.id)
-                    })
-                    .filter(|execution| execution.status == "failed")
-                    .map(|_| name.clone())
-            })
-            .collect()
-    }
-
-    /// Failed nodes whose latest attempt lost its Provider connection before the
-    /// turn could change the task. Pi has already spent its automatic retry
-    /// budget, so an explicit Continue is the manual recovery path for the same
-    /// session, exactly like a credential failure.
-    pub fn transport_retry_nodes(&self) -> Vec<String> {
-        self.nodes
-            .iter()
-            .filter_map(|(name, node)| {
-                if node.status != "failed" || !node.error.as_deref().is_some_and(is_transport_error) {
-                    return None;
-                }
-                self.executions
-                    .iter()
-                    .rev()
-                    .find(|execution| {
-                        execution.node == *name
-                            && !self.superseded_execution_ids.contains(&execution.id)
-                    })
-                    .filter(|execution| execution.status == "failed")
-                    .map(|_| name.clone())
-            })
-            .collect()
-    }
-
-    pub fn model_retry_nodes(&self) -> Vec<String> {
+    /// Explicit Continue can retry a failed attempt even when its error is not
+    /// recognized. Never treat a superseded or non-terminal attempt as a root.
+    pub fn failed_retry_nodes(&self) -> Vec<String> {
         self.nodes.iter().filter_map(|(name, node)| {
-            if node.status != "failed" || node.model_config.is_none()
-                || node.model_retry == Some(false) {
+            if node.status != "failed" {
                 return None;
             }
             self.executions.iter().rev()
@@ -1595,10 +1555,6 @@ impl Snapshot {
         }).collect()
     }
 
-    /// Failed managed-environment nodes whose latest attempt never reached
-    /// `Prepared` (for example a workspace/environment preparation conflict).
-    /// There is no conversation to intervene in, so Continue is their recovery
-    /// path; provider/model failures after preparation keep their own recovery.
     /// A failed attempt that never reached `Prepared` and produced no output:
     /// a workspace/environment preparation failure, not a model turn. A session
     /// that could not be opened/resumed is the same situation: no conversation
@@ -1634,15 +1590,11 @@ impl Snapshot {
         ))
     }
 
+    /// A node's own composition failure is projected as blocked, even without
+    /// a managed environment. Distinguish it from a descendant blocked by an
+    /// upstream failure using the adjacent, attempt-scoped Failed/Blocked pair.
     pub fn preparation_failed_nodes(&self) -> Vec<String> {
-        if self
-            .config
-            .as_ref()
-            .and_then(|config| config.environment.as_ref())
-            .is_none()
-        {
-            return Vec::new();
-        }
+        let managed = self.config.as_ref().and_then(|config| config.environment.as_ref()).is_some();
         self.nodes
             .iter()
             .filter_map(|(name, node)| {
@@ -1653,7 +1605,16 @@ impl Snapshot {
                     execution.node == *name
                         && !self.superseded_execution_ids.contains(&execution.id)
                 })?;
-                self.execution_is_preparation_only(latest).then(|| name.clone())
+                let own_blocked_failure = node.status == "blocked" && latest.status == "failed"
+                    && self.events.windows(2).any(|pair| matches!(
+                        (&pair[0].kind, &pair[1].kind),
+                        (EventKind::Failed { node: failed_node, execution_id: Some(id), error: failed_error, .. },
+                         EventKind::Blocked { node: blocked_node, error: blocked_error })
+                            if failed_node == name && blocked_node == name && id == &latest.id
+                                && failed_error == blocked_error && node.error.as_ref() == Some(blocked_error)
+                    ));
+                (own_blocked_failure || (managed && self.execution_is_preparation_only(latest)))
+                    .then(|| name.clone())
             })
             .collect()
     }
@@ -1661,10 +1622,7 @@ impl Snapshot {
     /// Backend-owned recovery hint; neither a retry nor a completion claim.
     pub fn can_resume(&self) -> bool {
         self.recovery_is_idle()
-            && (!self.interrupted_nodes().is_empty()
-                || !self.model_retry_nodes().is_empty()
-                || !self.credential_retry_nodes().is_empty()
-                || !self.transport_retry_nodes().is_empty()
+            && (!self.failed_retry_nodes().is_empty()
                 || !self.preparation_failed_nodes().is_empty())
     }
 
@@ -2356,7 +2314,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 }
             }
         }
-        EventKind::RecoveryQueued { nodes, continuation_nodes } => {
+        EventKind::RecoveryQueued { nodes, continuation_nodes, resume_failed, source_direct_nodes } => {
             for name in nodes {
                 let Some(node) = state.nodes.get_mut(name) else {
                     continue;
@@ -2365,7 +2323,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     continue;
                 }
                 let continuation = node.pending_messages.is_empty() && continuation_nodes.contains(name)
-                    && (node.model_config.is_some()
+                    && (*resume_failed || node.model_config.is_some()
                         || node.error.as_deref().is_some_and(|error| {
                             is_interrupted_error(error) || is_credential_error(error)
                                 || is_transport_error(error)
@@ -2390,6 +2348,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.error = None;
                 node.baseline_head = None;
                 node.continuation = continuation;
+                node.source_direct_recovery = continuation && source_direct_nodes.contains(name);
             }
         }
         EventKind::Rejected => {
@@ -2398,10 +2357,12 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::Started { execution, message_sequences, fresh_restart } => {
             let node = state.nodes.get_mut(&execution.node).unwrap();
-            let source_direct = node.pending_messages.iter().any(|message| message.source_direct
-                && message_sequences.as_ref().is_none_or(|sequences| sequences.contains(&message.sequence)));
+            let source_direct = (node.continuation && node.source_direct_recovery)
+                || node.pending_messages.iter().any(|message| message.source_direct
+                    && message_sequences.as_ref().is_none_or(|sequences| sequences.contains(&message.sequence)));
             node.pending_messages.retain(|message| message_sequences.as_ref()
                 .is_some_and(|sequences| !sequences.contains(&message.sequence)));
+            node.source_direct_recovery = false;
             if source_direct { state.phase = "followup".into(); }
             // Live work owns the displayed topology; provisional draft edits
             // must never pass for a running graph.

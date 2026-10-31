@@ -119,6 +119,12 @@ pub(crate) fn collect_source_snapshot(
     workspace::git(repository, &["--git-dir", git_dir, "rev-parse", "HEAD"])
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecoveryScope {
+    AllFailed,
+    InterruptedOnly,
+}
+
 pub struct Runtime {
     pub store: Store,
     pub state: Snapshot,
@@ -1640,9 +1646,8 @@ impl Runtime {
         })
     }
 
-    /// Synchronize this conversation's model selection to unstarted nodes and
-    /// opt failed nodes into explicit Continue recovery. Never dispatch jobs,
-    /// rewrite results/history, or touch another Run's settings.
+    /// Synchronize this conversation's model selection to unstarted and failed
+    /// nodes. Never dispatch jobs, rewrite history, or touch another Run's settings.
     pub fn update_node_models(&mut self, config: &Config) -> Result<(), String> {
         config.validate_model_settings()?;
         let Some(original) = self.state.config.as_ref() else {
@@ -1685,25 +1690,70 @@ impl Runtime {
         self.emit(EventKind::ConversationModelsUpdated { settings, nodes })
     }
 
-    fn queue_node_recovery(&mut self) -> Result<(), String> {
-        let mut roots = self.state.interrupted_nodes();
-        roots.extend(self.state.model_retry_nodes());
-        roots.extend(self.state.credential_retry_nodes());
-        roots.extend(self.state.transport_retry_nodes());
-        roots.extend(self.state.preparation_failed_nodes());
+    /// Prove source ownership from the message claim or a prior recovery event,
+    /// not merely from a workspace path that happens to alias the source.
+    fn execution_was_source_direct(&self, execution: &Execution) -> bool {
+        let Some((index, sequences)) = self.state.events.iter().enumerate().rev().find_map(|(index, event)| {
+            match &event.kind {
+                EventKind::Started { execution: started, message_sequences, .. } if started.id == execution.id =>
+                    Some((index, message_sequences.as_ref())),
+                _ => None,
+            }
+        }) else { return false; };
+        if sequences.is_some_and(|sequences| self.state.events[..index].iter().any(|event| {
+            sequences.contains(&event.sequence) && matches!(&event.kind,
+                EventKind::Invalidated { target, source_direct: true, .. } if target == &execution.node)
+        })) {
+            return true;
+        }
+        for event in self.state.events[..index].iter().rev() {
+            match &event.kind {
+                EventKind::RecoveryQueued { nodes, source_direct_nodes, .. } if nodes.contains(&execution.node) =>
+                    return source_direct_nodes.contains(&execution.node),
+                EventKind::Started { execution: previous, .. } if previous.node == execution.node => return false,
+                EventKind::Invalidated { target, source_direct, .. }
+                    if sequences.is_none() && target == &execution.node => return *source_direct,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn queue_node_recovery(&mut self, scope: RecoveryScope) -> Result<(), String> {
+        let mut roots = if scope == RecoveryScope::InterruptedOnly {
+            self.state.interrupted_nodes()
+        } else {
+            self.state.failed_retry_nodes()
+        };
+        if scope == RecoveryScope::AllFailed {
+            roots.extend(self.state.preparation_failed_nodes());
+        }
         roots.sort();
         roots.dedup();
         if roots.is_empty() {
             return Ok(());
         }
         let continuation_nodes = roots.clone();
+        // A post-publication follow-up may have failed in the source directory.
+        // Record that ownership so replay does not turn its retry into a Graph
+        // workspace or publish the source-direct turn a second time.
+        let source_direct_nodes = if !self.is_serial()
+            && self.state.config.as_ref().is_some_and(|config| config.environment.is_none()) {
+            let repository = resolve_repository(&self.root, self.state.config.as_ref().unwrap())?;
+            roots.iter().filter(|name| self.state.executions.iter().rev().find(|execution| {
+                execution.node == **name && !self.state.superseded_execution_ids.contains(&execution.id)
+            }).is_some_and(|execution| execution.status == "failed"
+                && Self::same_workspace_path(Path::new(&execution.worktree), &repository)
+                && self.execution_was_source_direct(execution)))
+                .cloned().collect()
+        } else { Vec::new() };
 
         let mut recovery = BTreeSet::new();
         for root in roots {
             recovery.extend(downstream(&self.state.graph, &root));
         }
-        // Do not disturb a completed branch. Only explicitly recoverable failures
-        // and the blocked/failed work that depends on them are eligible for retry.
+        // Do not disturb a completed branch. Retry the selected failed attempts
+        // and unblock the failed/blocked work that depends on them.
         recovery.retain(|name| {
             self.state
                 .nodes
@@ -1716,6 +1766,8 @@ impl Runtime {
         self.emit(EventKind::RecoveryQueued {
             nodes: recovery.into_iter().collect(),
             continuation_nodes,
+            resume_failed: scope == RecoveryScope::AllFailed,
+            source_direct_nodes,
         })
     }
 
@@ -1735,6 +1787,28 @@ impl Runtime {
     }
 
     pub fn pause(&mut self, paused: bool) -> Result<(), String> {
+        // Resuming interrupted or queued work must not silently retry an
+        // unrelated failure. Once that work settles, Continue remains
+        // available for an explicit retry of the failed nodes.
+        let paused_work = !self.state.interrupted_nodes().is_empty()
+            || (self.state.paused && self.state.nodes.values()
+                .any(|node| matches!(node.status.as_str(), "waiting" | "dirty")));
+        let scope = if paused_work { RecoveryScope::InterruptedOnly } else { RecoveryScope::AllFailed };
+        self.set_paused(paused, Some(scope))
+    }
+
+    /// Undo an internal scheduling-only pause without retrying failed work.
+    pub fn resume_scheduling(&mut self) -> Result<(), String> {
+        self.set_paused(false, None)
+    }
+
+    /// A message to one node may unpause the Run, but is not an explicit
+    /// request to retry any unrelated failure.
+    pub fn resume_after_intervention(&mut self) -> Result<(), String> {
+        self.set_paused(false, Some(RecoveryScope::InterruptedOnly))
+    }
+
+    fn set_paused(&mut self, paused: bool, recovery: Option<RecoveryScope>) -> Result<(), String> {
         if matches!(
             self.state.phase.as_str(),
             "publishing" | "merging" | "publication_failed"
@@ -1753,7 +1827,9 @@ impl Runtime {
                 &self.root,
                 self.state.config.as_ref().ok_or("Missing config")?,
             )?;
-            self.queue_node_recovery()?;
+            if let Some(scope) = recovery {
+                self.queue_node_recovery(scope)?;
+            }
         }
         self.emit(EventKind::Paused { paused })
     }
@@ -2429,6 +2505,8 @@ impl Runtime {
             && !workspace::is_standard_git(&resolved_repository)
             && self.job_source_is_fresh(&resolved_repository)?;
         for node in ready {
+            let source_direct_run = source_direct_run || (self.state.nodes[&node.name].continuation
+                && self.state.nodes[&node.name].source_direct_recovery);
             let id = Uuid::new_v4().to_string();
             // Dependency nodes normally take over their parent's physical workspace.
             let source_head = if self.is_serial() {
@@ -2483,6 +2561,7 @@ impl Runtime {
                         execution.node == node.name
                             && execution.status == "failed"
                             && execution.completed_at.is_some()
+                            && !self.state.superseded_execution_ids.contains(&execution.id)
                     })
             } else if self.state.nodes[&node.name].human_instruction {
                 let anchor = self.state.nodes[&node.name].edit_execution_id.as_deref();
@@ -2526,20 +2605,69 @@ impl Runtime {
                     || self.state.nodes[&node.name].human_instruction
                     || self.state.nodes[&node.name].feedback_workspace.as_ref().is_some_and(|input| !input.additional_sources.is_empty())
                     || self.state.executions.iter().any(|execution| execution.node == node.name
-                        && (execution.pid.is_some() || execution.status == "completed")) {
+                        && (execution.pid.is_some() || execution.output_bytes > 0 || execution.status == "completed")) {
                     return false;
                 }
                 session_missing(previous)
             });
+            // A missing file alone does not prove Pi never ran: a session can
+            // have been removed after tools executed. Fail closed if any attempt
+            // in that session has launch/output evidence or a completed turn.
+            let no_unfinished_activity = |previous: &Execution| self.state.executions.iter().rev()
+                .filter(|execution| execution.node == previous.node && execution.session_id == previous.session_id)
+                .take_while(|execution| execution.status != "completed")
+                .all(|execution| execution.pid.is_none() && execution.output_bytes == 0);
+            let no_session_activity = |previous: &Execution| no_unfinished_activity(previous)
+                && !self.state.executions.iter().any(|execution| {
+                    execution.node == previous.node && execution.session_id == previous.session_id
+                        && execution.status == "completed"
+                });
+            let has_completed_history = |previous: &Execution| self.state.executions.iter().any(|execution| {
+                execution.node == previous.node && execution.status == "completed"
+                    && !self.state.superseded_execution_ids.contains(&execution.id)
+            });
+            // A feedback or source-direct follow-up can fail before its fork
+            // was created. Resume the original completed node session and send
+            // the already-recorded follow-up, rather than losing its history.
+            let fallback_anchor = if continuation && resume.is_some_and(|previous|
+                session_missing(previous) && no_session_activity(previous)) {
+                let node_state = &self.state.nodes[&node.name];
+                let anchor = if let Some(input) = &node_state.feedback_workspace {
+                    self.state.executions.iter().find(|execution| execution.id == input.target_execution_id)
+                } else if source_direct_run {
+                    self.state.executions.iter().rev().find(|execution| {
+                        execution.node == node.name && execution.status == "completed"
+                            && !self.state.superseded_execution_ids.contains(&execution.id)
+                    })
+                } else { None };
+                anchor.filter(|execution| execution.status == "completed"
+                    && !self.state.superseded_execution_ids.contains(&execution.id)
+                    && !session_missing(execution))
+            } else { None };
+            // A fork can be written before Pi receives its follow-up. In that
+            // case the session exists but the recorded instruction still needs
+            // to be sent, rather than invoking an empty continuation turn.
+            let unstarted_followup = continuation && self.state.nodes[&node.name].human_instruction
+                && !self.state.nodes[&node.name].instruction.is_empty()
+                && resume.is_some_and(|previous| !session_missing(previous)
+                    && no_unfinished_activity(previous) && has_completed_history(previous));
             let failed_before_session = self.state.nodes[&node.name].human_instruction
-                && resume.is_some_and(|previous| previous.status == "failed" && session_missing(previous));
-            // A preparation-only failure never had a conversation to resume, so
-            // dispatching it must not validate or rebind a missing session.
+                && resume.is_some_and(|previous| previous.status == "failed" && session_missing(previous)
+                    && no_session_activity(previous) && !has_completed_history(previous));
             let preparation_recovery = self.state.config.as_ref()
                 .and_then(|config| config.environment.as_ref()).is_some()
-                && resume.is_some_and(|previous| self.state.execution_is_preparation_only(previous));
-            let initial_recovery = stopped_recovery || failed_before_session || preparation_recovery;
-            let continuation = continuation && !initial_recovery;
+                && resume.is_some_and(|previous| self.state.execution_is_preparation_only(previous)
+                    && session_missing(previous) && no_session_activity(previous) && !has_completed_history(previous));
+            let missing_initial_session = continuation && resume.is_some_and(|previous| {
+                let interrupted = self.state.execution_stop_requests.contains(&previous.id)
+                    || self.state.events.iter().any(|event| matches!(&event.kind,
+                        EventKind::Failed { execution_id: Some(id), error, .. }
+                            if id == &previous.id && is_interrupted_error(error)));
+                !interrupted && session_missing(previous)
+                    && no_session_activity(previous) && !has_completed_history(previous)
+            });
+            let initial_recovery = stopped_recovery || failed_before_session || preparation_recovery || missing_initial_session;
+            let continuation = continuation && !initial_recovery && fallback_anchor.is_none() && !unstarted_followup;
             let preserved_workspace = resume
                 .filter(|previous| {
                     previous.status == "failed"
@@ -2753,11 +2881,12 @@ impl Runtime {
             let workspace_lineage: Vec<_> = workspace_lineage.into_iter().collect();
             // A prepared failed attempt continues in its retained tree without
             // forking: the Pi session already lives at that cwd.
-            let session_fork = resume
-                .filter(|previous| Some(previous.worktree.as_str()) != Some(worktree.as_str())
-                    || feedback_workspace.as_ref().is_some_and(|input| {
-                        input.additional_sources.is_empty() || preserved_workspace.is_none()
-                    }))
+            let session_fork = fallback_anchor.or(resume)
+                .filter(|previous| fallback_anchor.is_some() || (!initial_recovery
+                    && (Some(previous.worktree.as_str()) != Some(worktree.as_str())
+                        || feedback_workspace.as_ref().is_some_and(|input| {
+                            input.additional_sources.is_empty() || preserved_workspace.is_none()
+                        }))))
                 .map(|previous| {
                     let mut source = previous.clone();
                     source.id = self
@@ -2815,9 +2944,14 @@ impl Runtime {
             // details can show what this attempt will actually use. Completion
             // replaces this placeholder with parsed live metrics.
             let node_settings = self.state.nodes[&node.name].model_config.clone().or_else(|| {
-                (execution.attempt == 1)
-                    .then(|| self.state.model_config.as_ref().map(RunModelConfig::node_agent_settings))
-                    .flatten()
+                if execution.attempt == 1 {
+                    self.state.model_config.as_ref().map(RunModelConfig::node_agent_settings)
+                } else {
+                    // An already-started node without an override retains the
+                    // Run's original settings, even if the conversation changed
+                    // models while this attempt was still running.
+                    self.state.config.as_ref().map(Config::node_agent_settings)
+                }
             });
             if let Some(settings) = &node_settings {
                 execution.metrics = Some(ExecutionMetrics {
@@ -2838,7 +2972,11 @@ impl Runtime {
                     .find(|execution| execution.node == anchor.node && execution.session_id == anchor.session_id)
                     .is_some_and(|first| first.id == anchor.id)
             });
-            let task = if failed_before_session {
+            let task = if fallback_anchor.is_some() || unstarted_followup {
+                // The failed follow-up never started; deliver its original
+                // instruction to the node's retained session instead.
+                state.instruction.clone()
+            } else if failed_before_session {
                 // The failed attempt never sent anything to Pi, so the retained
                 // session slot starts with the node task, followed by the
                 // accepted human turn(s).
@@ -3086,7 +3224,7 @@ impl Runtime {
                 copy_from_workspace,
                 history_edit,
                 feedback_source,
-                materialize_source,
+                materialize_source: materialize_source && !source_direct_run,
                 source_direct: source_direct_run,
                 expected_source_head: source_head,
                 environment_input,

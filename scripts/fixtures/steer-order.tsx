@@ -38,7 +38,7 @@ function Fixture() {
       setEvents(previous => [...previous, { type: "steered", sequence: previous.length + 1, timestamp: Date.now(),
         node: "task", execution_id: "exec", instruction: text, images: options?.images }]);
       return true;
-    }} onRequestConfirmation={noop} onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop}
+    }} onRequestConfirmation={noop} onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop}
     repoInfo={null} config={config} active={running} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
     nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} /></div>;
 }

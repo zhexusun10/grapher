@@ -1,18 +1,2 @@
-## Instruction scope
-
-- Keep `AGENTS.md` files limited to constraints applicable within their directory scope. Put task maps, background, and procedures in [docs/index.md](docs/index.md).
-- Do not bulk-scan `docs/`; read only documentation relevant to the current task.
-
-## Global Redlines
-
-- Do not bulk-scan or edit `pi/`. Never hand-edit `pi-lock.json`, `model-data/`, or `pi-dependencies/`. 
-- Frontend interaction state and caches must not become an independent source of truth for backend-persisted runtime state.
-- Never stop running services, delete runtime/workspace data, or migrate SQLite without explicit user authorization.
-- Always invoke Cargo via `node scripts/cargo.mjs`.
-
-## Verification
-
-- Verify with the targeted check only; never run full/aggregated suites (`test:backend`, `test:isolated`, `test:temporary`, `pi:upgrade-check`).
-- Commands, scope, and prerequisites live in [Testing](docs/development/testing.md).
-
-Once complete, review your work for potential regressions and unintended side effects.
+Use [docs/index.md](docs/index.md) as the documentation index and navigation entry point; keep task maps there and put background and procedures in the relevant linked documents. Do not bulk-scan `docs/`; read only documentation relevant to the current task.
+Review your work for potential regressions and unintended side effects once complete.

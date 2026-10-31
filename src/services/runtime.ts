@@ -2,7 +2,7 @@ import { t } from "../i18n";
 import { invalidateTranscriptCaches } from "./transcriptCache";
 import { enableRuntimeEvents } from "./runtimeEvents";
 import { RequestTimeoutError, withRequestTimeout } from "./requestTimeout";
-import type { Bootstrap, Config, FileChangeSummary, Graph, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
+import type { Bootstrap, Config, FileChangeSummary, Graph, OpenWorkspaceFileRequest, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
 
 const filesCache = new Map<string, string[]>();
 const skillsCache = new Map<string, SkillItem[]>();
@@ -22,6 +22,7 @@ const boundedCommands = new Set([
   "bootstrap", "history", "snapshot", "snapshot_if_changed", "save_config",
   "detect_repository", "repository_status", "get_planning", "list_plannings",
   "get_planning_snapshot", "get_execution_output", "get_planning_output", "get_file_changes",
+  "open_workspace_file",
   "provider_auth", "pi_extensions", "list_skills", "list_files",
   "get_merger_prompt",
 ]);
@@ -252,6 +253,8 @@ export const runtimeService = {
     }
     return result;
   },
+  openWorkspaceFile: (input: OpenWorkspaceFileRequest) =>
+    request<{ path: string }>("open_workspace_file", { ...input }),
   getMergerPrompt: async (runId: string, executionId: string, signal?: AbortSignal): Promise<string> => {
     const res = await request<{ runId: string; executionId: string; prompt: string }>(
       "get_merger_prompt", { runId, executionId }, signal

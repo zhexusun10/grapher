@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { GraphWorkbench } from "../../src/components/views/GraphWorkbench";
 import { buildSummaryFromFiles } from "../../src/services/fileChanges";
-import { defaultConfig, emptySnapshot, publicationMergerCardId, type Execution, type FileChangeItem, type Snapshot } from "../../src/types";
+import { defaultConfig, emptySnapshot, publicationMergerCardId, type Execution, type FileChangeItem, type OpenWorkspaceFileRequest, type Snapshot } from "../../src/types";
 import { tokens } from "../../src/tokens";
 import "../../src/styles.css";
 import "../../src/styles-workbench.css";
@@ -44,6 +44,8 @@ const mixedFiles: FileChangeItem[] = [
 const longConversationOutput = Array.from({ length: 80 }, (_, index) => JSON.stringify({
   type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `Review message ${index}: the implementation is ready for inspection.` }] },
 })).join("\n") + "\n";
+
+const openRequests: OpenWorkspaceFileRequest[] = [];
 
 function Fixture() {
   const params = new URLSearchParams(location.search);
@@ -89,6 +91,7 @@ function Fixture() {
   (window as any).changesAudit = {
     settle: () => setRunning(false), empty: () => setEmpty(true),
     update: () => setRevision(value => value + 1), select: setSelected,
+    openRequests,
   };
 
   return <div style={{ height: "100dvh", display: "flex", padding: "12px", boxSizing: "border-box" }}>
@@ -97,6 +100,7 @@ function Fixture() {
       effectiveMessages={[]} isPlanning={mode === "planner" && running} plannerStream={{ items: [] }}
       onSendMessage={noop} onRequestConfirmation={noop} onControl={noop} onSave={noop}
       onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
+      onOpenFile={request => { openRequests.push(request); }}
       active={running} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
       nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
   </div>;

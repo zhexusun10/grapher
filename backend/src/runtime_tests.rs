@@ -4,6 +4,9 @@ use tempfile::TempDir;
 #[path = "node_model_tests.rs"]
 mod node_models;
 
+#[path = "failure_recovery_tests.rs"]
+mod failure_recovery;
+
 #[path = "node_message_queue_tests.rs"]
 mod node_message_queue;
 
@@ -1366,15 +1369,30 @@ fn manual_node_pause_is_replayable_and_does_not_disguise_an_unrelated_failure() 
     ).unwrap();
     assert_eq!(checkpoint.execution_stop_requests, vec![left.id.clone()]);
     assert_eq!(crate::snapshot_view::snapshot_metadata(&checkpoint).unwrap()["executions"][0]["status"], "paused");
+    // Give both attempts their persisted conversations before continuing them.
+    for execution in [left, right] {
+        let directory = runtime.root.join("sessions").join(&execution.id);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(format!("test_{}.jsonl", execution.session_id)), "{}\n").unwrap();
+    }
     runtime.pause(false).unwrap();
     let resumed = runtime.jobs().unwrap();
-    assert_eq!(resumed.len(), 1);
-    assert_eq!(resumed[0].execution.node, "left");
-    assert!(resumed[0].continuation);
-    assert_eq!(resumed[0].execution.session_id, left.session_id);
-    assert_eq!(resumed[0].execution.worktree, left.worktree);
-    assert_eq!(resumed[0].resume_execution_id.as_deref(), Some(left.id.as_str()));
+    assert_eq!(resumed.len(), 1, "Continue first resumes only interrupted work");
+    let continued_left = &resumed[0];
+    assert_eq!(continued_left.execution.node, "left");
+    assert!(continued_left.continuation);
+    assert_eq!(continued_left.execution.session_id, left.session_id);
+    assert_eq!(continued_left.execution.worktree, left.worktree);
+    assert_eq!(continued_left.resume_execution_id.as_deref(), Some(left.id.as_str()));
     assert_eq!(runtime.state.nodes["right"].status, "failed");
+    runtime.finish(&continued_left.execution, Ok((runtime.state.base.clone(), "resumed".into()))).unwrap();
+    runtime.jobs().unwrap();
+    assert!(runtime.state.can_resume(), "the unrelated failure still offers Continue");
+    runtime.pause(false).unwrap();
+    let retry = runtime.jobs().unwrap();
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].execution.node, "right");
+    assert!(retry[0].continuation);
 }
 
 #[test]
@@ -1436,7 +1454,11 @@ fn scheduling_only_pause_does_not_reclassify_provider_failure() {
     let view = crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap();
     assert_eq!(view["nodes"]["task"]["status"], "failed");
     assert_eq!(view["executions"][0]["status"], "failed");
-    assert!(!runtime.state.can_resume());
+    assert!(runtime.state.can_resume(), "a failed attempt can still be explicitly retried");
+    runtime.resume_scheduling().unwrap();
+    assert_eq!(runtime.state.nodes["task"].status, "failed", "internal unpause does not retry it");
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.store.load(&runtime.state.run_id).unwrap().nodes["task"].status, "failed");
 }
 
 #[test]

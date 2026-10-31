@@ -104,6 +104,48 @@ fn reopening_a_paused_run_does_not_append_pause_events() {
     }
 }
 
+#[cfg(feature = "fixture")]
+#[test]
+fn intervention_unpause_control_does_not_retry_unknown_failure() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+    runtime.state.run_id = Uuid::new_v4().to_string();
+    runtime.emit(EventKind::Created {
+        graph: Graph { original_goal: "test".into(), nodes: vec![Node {
+            name: "task".into(), task: "test".into(),
+        }], edges: vec![] },
+        config: serde_json::from_value(serde_json::json!({
+            "repository": source, "model": "test", "maxParallel": 1,
+        })).unwrap(),
+        planning_id: None, planning: None,
+    }).unwrap();
+    runtime.set_route("serial").unwrap();
+    runtime.emit(EventKind::Approved { base: String::new() }).unwrap();
+    let failed = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&failed.execution, Err("unrecognized failure".into())).unwrap();
+    runtime.pause(true).unwrap();
+    let run_id = runtime.state.run_id.clone();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        // Prevent an asynchronous driver from racing the returned snapshots.
+        driving: AtomicBool::new(true),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let snapshot = control("resume_after_intervention".into(), None, None,
+        Some(run_id.clone()), None, None, &service).unwrap();
+    assert!(!snapshot.paused);
+    assert_eq!(snapshot.nodes["task"].status, "failed");
+    assert!(snapshot.can_resume());
+    let snapshot = control("resume".into(), None, None, Some(run_id), None, None, &service).unwrap();
+    assert_eq!(snapshot.nodes["task"].status, "waiting");
+    assert!(snapshot.nodes["task"].continuation);
+    assert_eq!(snapshot.executions[0].status, "failed");
+}
+
 #[test]
 fn completed_node_message_control_does_not_wait_for_planner_or_start_driver() {
     let temp = tempfile::TempDir::new().unwrap();

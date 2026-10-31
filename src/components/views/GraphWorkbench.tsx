@@ -12,7 +12,7 @@ import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   Snapshot, PlanRouteType, PlanMode, RepositoryInfo, Config,
   Graph, GraphNode, Execution, Status, PlanningSummary, TranscriptItem,
-  ChatMessage, ImageAttachment, RuntimeActivity, publicationMergerCardId
+  ChatMessage, ImageAttachment, RuntimeActivity, OpenWorkspaceFileRequest, publicationMergerCardId
 } from "../../types";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { ConfirmModalState } from "../modals/ConfirmModal";
@@ -123,6 +123,7 @@ interface GraphWorkbenchProps {
   onSave: (graph: Graph) => void;
   onOpenEditor: () => void;
   onOpenApproval: () => void;
+  onOpenFile: (request: OpenWorkspaceFileRequest) => void;
   repoInfo: RepositoryInfo | null;
   config: Config;
   envOverrides?: Record<string, string>;
@@ -303,6 +304,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   onSave,
   onOpenEditor,
   onOpenApproval,
+  onOpenFile,
   repoInfo,
   config,
   envOverrides = {},
@@ -490,17 +492,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [selectedNode?.name]);
   const selectedMergerContinuable = !!selectedMerger && !selectedMergerRunning &&
     (selectedMerger.node === "merger" || selectedMerger.status === "failed");
-  const initialTaskEdit = useMemo(() => {
-    if (!selectedNode) return undefined;
-    return [...state.events].reverse().find(event => event.type === "conversation_edited" &&
-      event.target === selectedNode.name && event.first_turn);
-  }, [selectedNode?.name, state.events]);
-  const initialTaskVersions = useMemo(() => {
-    return initialTaskEdit ? versionsForEdit(state, initialTaskEdit) : undefined;
-  }, [initialTaskEdit, state.events]);
   const nodeMessages = useMemo(() => {
     if (!selectedNode) return [];
-    const localMessages = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === conversationNode && msg.runId === state.runId);
+    // Older clients could persist the synthetic task-card edit as a chat turn.
+    const localMessages = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === conversationNode && msg.runId === state.runId && msg.id !== `task-${conversationNode}`);
     const latestEdit = [...state.events].reverse().find((event) =>
       event.type === "conversation_edited" && event.target === conversationNode && event.nodes?.includes(conversationNode));
     const local = latestEdit?.old_instruction
@@ -1740,9 +1735,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const isMainViewCompacting = isMainViewWorking &&
     ((showLivePlanner && !!plannerStream?.compacting) || plannerHistoryCompacting);
   const completed = Object.values(state.nodes).filter((n) => n.status === "completed").length;
+  const hasPausedNodes = Object.values(state.nodes).some((node) => node.status === "paused");
+  const resumingPausedWork = hasPausedNodes || (state.paused && Object.values(state.nodes)
+    .some((node) => node.status === "waiting" || node.status === "dirty"));
+  const hasOtherFailures = Object.values(state.nodes).some((node) => node.status === "failed" || node.status === "blocked");
   // A poll can return the old draft while the Planner is revising it. The
-  // backend also exposes recoverable interruption state for Runs whose last
-  // node failed due to interruption or has an explicitly updated model.
+  // backend also exposes when failed nodes can be explicitly continued.
   const canContinue = !publishing && !publicationFailed &&
     (state.paused || state.canResume === true);
   const graphPhase = resolveGraphPhase({
@@ -1980,6 +1978,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     scrollContainerRef={chatScrollRef}
     onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
     onAfterToggle={handleWorkspaceDetailsAfterToggle}
+    onOpenFile={(item) => onOpenFile({
+      runId: state.runId,
+      path: item.path,
+      ...(inNodeScope ? { executionIds: attempts.map(execution => execution.id) } : {}),
+      ...(item.nodes?.length ? { nodes: item.nodes } : {}),
+    })}
   />;
 
   const plannerResultCards = <>
@@ -2096,22 +2100,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   nodeName={selectedNode.name}
                   taskText={nodeTaskText}
                   badgeText={isNodeMergerSelected || publicationMergerSelected ? t("Merger 系统提示词") : undefined}
-                  versions={initialTaskVersions}
-                  currentVersionIndex={initialTaskVersions ? (initialTaskEdit?.selected_version ?? initialTaskVersions.length - 1) : undefined}
-                  onSwitchVersion={(index) => {
-                    const version = initialTaskVersions?.[index];
-                    const first = attempts[0];
-                    if (version && first && onEditMessageSubmit) {
-                      void onEditMessageSubmit({
-                        id: `task-${selectedNode.name}`,
-                        role: "user",
-                        text: version.text,
-                        node: selectedNode.name,
-                        executionId: version.executionId ?? first.id,
-                        runId: state.runId,
-                      }, version.text, index);
-                    }
-                  }}
                   editing={editingTaskNode === selectedNode.name}
                   draft={taskDraft}
                   onDraftChange={setTaskDraft}
@@ -2900,8 +2888,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           : graphPhase === "followup" ? t("源目录直改中（无快照）")
                             : graphPhase === "needs_attention" ? t("执行已停止，请检查失败或阻塞节点")
                               : graphPhase === "pausing" ? t("正在停止运行中的节点…")
-                                : graphPhase === "paused" ? (state.paused
-                                  ? t("执行已暂停，点击继续可恢复")
+                                : graphPhase === "paused" ? (resumingPausedWork
+                                  ? (hasOtherFailures ? t("继续将先恢复暂停的任务；其他失败节点可稍后重试。") : t("执行已暂停，点击继续可恢复"))
                                   : t("执行已停止，点击继续恢复失败节点（不会追加消息）"))
                                   : graphPhase === "completed" ? t("运行已完成 - 本次消耗 Token:{0} Cached:{1}",
                                     // Task tokens exclude cache reads but include
@@ -2929,8 +2917,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           // A settled run with nothing running or paused has no
                           // pause/resume semantics: pausing is a no-op and the
                           // following 继续 would just un-pause it without
-                          // continuing any node. Failed nodes are continued
-                          // from their conversation (介入指令), not here.
+                          // continuing any node. The backend recovery hint
+                          // identifies failed attempts that Continue can retry.
                           disabled={locked || publishing || publicationFailed || state.phase === "completed" || graphPhase === "pausing"
                             || (graphPhase === "needs_attention" && !canContinue)}
                           title={graphPhase === "needs_attention" && !canContinue ? t("执行已停止；请在失败节点的对话中发送介入指令以继续") : undefined}

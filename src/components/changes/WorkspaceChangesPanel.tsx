@@ -49,12 +49,13 @@ interface WorkspaceChangesPanelProps {
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
   onBeforeToggle?: () => void;
   onAfterToggle?: () => void;
+  onOpenFile?: (item: FileChangeItem) => void;
 }
 
 /** Expands in the same slot and width as the session-details body, using the
  * same height/opacity transition and bounded scroll follow. */
 export const WorkspaceChangesPanel = React.memo(function WorkspaceChangesPanel({
-  id, summary, open, scrollContainerRef, onBeforeToggle, onAfterToggle,
+  id, summary, open, scrollContainerRef, onBeforeToggle, onAfterToggle, onOpenFile,
 }: WorkspaceChangesPanelProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const orderedFiles = useMemo(
@@ -78,7 +79,7 @@ export const WorkspaceChangesPanel = React.memo(function WorkspaceChangesPanel({
         data-testid="workspace-changes-panel" role="region" aria-label={t("文件变更列表")}>
         {summary.files.length
           ? <>
-              {visibleFiles.map(item => <ChangedFileRow key={item.path} item={item} />)}
+              {visibleFiles.map(item => <ChangedFileRow key={item.path} item={item} onOpen={onOpenFile} />)}
               {truncated && <div className="changes-panel-truncated" data-testid="workspace-changes-truncated">
                 {t("… 其余 {0} 个文件变更已省略", Math.max(0, summary.totalFiles - MAX_RENDERED_FILE_CHANGES))}
               </div>}

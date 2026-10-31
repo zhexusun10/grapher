@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Changed-file rows are now actionable. Clicking a file in the workspace file-change list opens it from its owning execution workspace, Planner workspace or the source repository in the system default application. Deleted files stay listed but cannot be opened, and a cleaned or missing file reports the failure in the existing error banner.
+
+### Changed
+
+- Graph recovery is now explicit and two-stage. **Continue** first resumes paused, interrupted or queued work without retrying unrelated failures; once that work settles, a further **Continue** retries the Run's failed nodes. Sending a message or editing a turn to unpause a Run also no longer retries failures, the topology states when Continue will resume paused tasks before failures can be retried, and restart never dispatches a queued retry automatically. In Serial, after fixing the cause, send a follow-up instead.
+- Every idle failed node attempt can now be retried with **Continue**, regardless of whether its error is recognized: credential, transport, quota, protocol and unknown failures share the same explicit recovery path, reuse the retained session, workspace and partial work, and leave completed branches untouched. A node whose own preparation or composition failed is recoverable even when composition marks it blocked, including unmanaged Runs; a node merely blocked by an upstream failure is not a separate recovery root.
+- Editing a node objective now replaces the opening prompt instead of being appended as a new chat message, and the task card's version switcher was removed. The replacement attempt and discarded suffix come from the Run snapshot, so a rejected edit keeps the draft and the existing conversation, and that conversation remains in order after reload.
+
+### Fixed
+
+- Continuing an interrupted turn preserves completed assistant turns and settled tool calls with their results instead of dropping the last assistant message and re-running tools whose side effects already happened. A missing result in an interrupted tool batch becomes an explicit context-only error stating that its side effects are unknown; malformed current tool-call identities and their orphan results are omitted. The repair is a context projection reconstructed on later node turns and reload without editing the stored Pi session.
+- A failed follow-up that never started now retries by delivering its recorded instruction to the node's retained session instead of forking the session or resending the original task. Session presence alone no longer marks a failed attempt as fresh: missing history fails explicitly once launch, output or completed-turn evidence exists.
+- A failed post-publication source-direct follow-up now retries in the source directory and settles without republishing. Source ownership is proven from the recorded message claim or an earlier source-direct recovery rather than inferred from a workspace path, and a superseded failed attempt is no longer used as a recovery root.
+- A retried attempt now previews the Node Agent settings it will actually use: with no conversation-scoped override it keeps the Run's original settings instead of inheriting a model selection saved while the attempt was running.
+
 ## [1.3.3] - 2026-10-31
 
 ### Changed

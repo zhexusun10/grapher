@@ -17,14 +17,25 @@
 .changed-file-row {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 6px;
+  width: 100%;
   min-width: 0;
   padding: 1px 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
   color: var(--text-secondary);
   font-family: inherit;
   font-size: inherit;
   line-height: inherit;
+  text-align: left;
 }
+.changed-file-row:not(:disabled) { cursor: pointer; }
+.changed-file-row:not(:disabled):hover { color: var(--text-primary); }
+.changed-file-row:not(:disabled):hover .changed-file-path { text-decoration: underline; text-underline-offset: 2px; }
+.changed-file-row:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 1px; }
+.changed-file-row:disabled { cursor: default; opacity: 1; }
 .changed-file-icon-chip {
   display: inline-flex;
   align-items: center;

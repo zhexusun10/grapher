@@ -387,11 +387,11 @@ test("a stalled settings save releases busy state, preserves its draft and can r
   } finally { await context.close(); }
 });
 
-test("saving a Node Agent model synchronizes the failed Run and enables explicit Continue", { timeout: 30_000 }, async () => {
+test("saving a Node Agent model synchronizes the failed Run before explicit Continue", { timeout: 30_000 }, async () => {
   const failedExecution = { id: "old-attempt", node: "task", revision: 1, attempt: 1, sessionId: "same-session",
     worktree: "/same-workspace", before: "base", after: null, status: "failed", output: "", outputBytes: 0,
     startedAt: 1, completedAt: 2 };
-  let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, phase: "needs_attention", canResume: false,
+  let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, phase: "needs_attention", canResume: true,
     graph: { originalGoal: "Recover with another model", nodes: [{ name: "task", task: "Finish the task" }], edges: [] },
     plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
     nodes: { task: { status: "failed", revision: 1, head: null, instruction: "", error: "Provider quota exhausted" } },
@@ -420,7 +420,7 @@ test("saving a Node Agent model synchronizes the failed Run and enables explicit
   try {
     await page.locator('[data-run-id="fast"]').click();
     await page.locator('.graph-canvas .react-flow__node[data-id="task"]').waitFor();
-    assert.equal(await page.getByRole("button", { name: "Resume", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Resume", exact: true }).isEnabled(), true);
     await openSettings(page); await nodeModel(page).selectOption("test/new");
     await page.locator(".save-config-btn").click();
     await page.locator(".settings-modal").waitFor({ state: "detached" });
@@ -433,6 +433,129 @@ test("saving a Node Agent model synchronizes the failed Run and enables explicit
     await page.locator('.graph-canvas .react-flow__node[data-id="task"]').click();
     await page.getByText("Model: test/new", { exact: true }).waitFor();
     assert.equal(calls.filter(call => call.command === "detect_repository").length, 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const planType of ["graph", "serial"]) {
+ test(`${planType}: ${planType === "graph" ? "an unrecognized failure offers Continue" : "no Continue button is shown for a failure"}`, { timeout: 30_000 }, async () => {
+  const failed = { id: "unknown-attempt", node: "task", revision: 1, attempt: 1, sessionId: "session",
+    worktree: "/workspace", before: "base", after: null, status: "failed", output: "", outputBytes: 0,
+    startedAt: 1, completedAt: 2 };
+  let current = { ...empty, runId: "fast", config, planType, approved: true, phase: "needs_attention", canResume: true,
+    graph: { originalGoal: "Recover unknown failure", nodes: [{ name: "task", task: "Finish the task" }], edges: [] },
+    plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
+    nodes: { task: { status: "failed", revision: 1, head: null, instruction: "", error: "Unrecognized frobnicator error #843" } },
+    executions: [failed] };
+  let resumes = 0;
+  const { context, page, errors } = await app(async (route, command, body) => {
+    let result;
+    if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
+    else if (command === "history" || command === "snapshot" || command === "load_run") result = current;
+    else if (command === "control") {
+      assert.equal(body.action, "resume"); assert.equal(body.runId, "fast"); assert.equal(body.node, undefined);
+      resumes++;
+      current = { ...current, canResume: false, phase: "running", nodes: { task: { ...current.nodes.task, status: "running", error: null } },
+        executions: [...current.executions, { ...failed, id: "retry", attempt: 2, status: "running", startedAt: 3, completedAt: null }] };
+      result = current;
+    } else if (command === "get_execution_output") {
+      result = { runId: "fast", executionId: body.executionId, content: "", startOffset: 0, nextOffset: 0, totalBytes: 0,
+        complete: body.executionId === failed.id, status: body.executionId === failed.id ? "failed" : "running" };
+    } else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').click();
+    if (planType === "serial") {
+      await page.locator(".pane-bottom-chat textarea").waitFor();
+      assert.equal(await page.getByRole("button", { name: "Resume", exact: true }).count(), 0);
+      assert.equal(resumes, 0);
+      assert.deepEqual(errors, []);
+      return;
+    }
+    await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Failed" }).waitFor();
+    const button = page.getByRole("button", { name: "Resume", exact: true });
+    assert.equal(await button.isEnabled(), true);
+    assert.equal(resumes, 0, "loading a failure never resumes it automatically");
+    await button.click();
+    await until(() => resumes === 1);
+    await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Running" }).waitFor();
+    assert.equal(current.executions[0].status, "failed");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+ });
+}
+
+test("serial paused execution does not display a Continue button", { timeout: 30_000 }, async () => {
+  const execution = { id: "worker", node: "task", revision: 1, attempt: 1, sessionId: "session", worktree: "/workspace",
+    before: "", after: null, status: "running", output: "", outputBytes: 0, startedAt: 1, completedAt: null };
+  let current = { ...empty, runId: "fast", config, planType: "serial", approved: true, paused: true, phase: "paused", canResume: false,
+    graph: { originalGoal: "Pause safely", nodes: [{ name: "task", task: "Work" }], edges: [] },
+    nodes: { task: { status: "running", revision: 1, head: null, instruction: "", error: null } }, executions: [execution] };
+  let polls = 0;
+  const { context, page, errors } = await app(async (route, command) => {
+    let result;
+    if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
+    else if (command === "history" || command === "snapshot" || command === "load_run") result = current;
+    else if (command === "snapshot_if_changed") { polls++; result = { version: JSON.stringify(current), snapshot: current }; }
+    else if (command === "get_execution_output") result = { runId: "fast", executionId: "worker", content: "", startOffset: 0,
+      nextOffset: 0, totalBytes: 0, complete: current.executions[0].status !== "running", status: current.executions[0].status };
+    else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').click();
+    await page.locator(".pane-bottom-chat textarea").waitFor();
+    assert.equal(await page.getByRole("button", { name: "Resume", exact: true }).count(), 0);
+    current = { ...current, canResume: true, nodes: { task: { ...current.nodes.task, status: "paused", error: "Execution paused by the user" } },
+      executions: [{ ...execution, status: "paused", completedAt: 2 }] };
+    await page.clock.runFor(5_000);
+    await until(() => polls > 0);
+    assert.equal(await page.getByRole("button", { name: "Resume", exact: true }).count(), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a paused node intervention does not automatically retry an unrelated unknown failure", { timeout: 30_000 }, async () => {
+  const execution = (id, node, status) => ({ id, node, revision: 1, attempt: 1, sessionId: id,
+    worktree: "/workspace", before: "base", after: null, status, output: "", outputBytes: 0, startedAt: 1, completedAt: 2 });
+  let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, paused: true, phase: "paused", canResume: true,
+    graph: { originalGoal: "Recover one node", nodes: [{ name: "task", task: "Work" }, { name: "other", task: "Other" }], edges: [] },
+    plan: { executionBatches: [["task", "other"]], roots: ["task", "other"], terminals: ["task", "other"], warnings: [] },
+    nodes: { task: { status: "paused", revision: 1, head: null, instruction: "", error: "Execution paused by the user" },
+      other: { status: "failed", revision: 1, head: null, instruction: "", error: "Unrecognized failure" } },
+    executions: [execution("stopped", "task", "paused"), execution("failed", "other", "failed")] };
+  const actions = [];
+  const { context, page, errors } = await app(async (route, command, body) => {
+    let result;
+    if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
+    else if (command === "history" || command === "snapshot" || command === "load_run") result = current;
+    else if (command === "control") {
+      actions.push(body.action);
+      if (body.action === "intervene") {
+        assert.equal(body.node, "task");
+        current = { ...current, nodes: { ...current.nodes, task: { ...current.nodes.task, status: "dirty", error: null } } };
+      } else {
+        assert.equal(body.action, "resume_after_intervention");
+        current = { ...current, paused: false, canResume: false, phase: "running",
+          nodes: { ...current.nodes, task: { ...current.nodes.task, status: "running" } },
+          executions: [...current.executions, { ...execution("retry", "task", "running"), attempt: 2, completedAt: null }] };
+      }
+      result = current;
+    } else if (command === "get_execution_output") {
+      result = { runId: "fast", executionId: body.executionId, content: "", startOffset: 0, nextOffset: 0, totalBytes: 0,
+        complete: body.executionId !== "retry", status: current.executions.find(item => item.id === body.executionId)?.status };
+    } else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').click();
+    await page.locator('.task-node[data-node-name="task"]').click();
+    const composer = page.locator('.pane-bottom-chat textarea');
+    await composer.fill("Continue this node"); await composer.press("Enter");
+    await until(() => actions.length === 2);
+    assert.deepEqual(actions, ["intervene", "resume_after_intervention"]);
+    assert.equal(current.nodes.other.status, "failed");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

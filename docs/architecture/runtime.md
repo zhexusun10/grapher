@@ -82,11 +82,10 @@ workspace and session slot receive the node task and the follow-up turn instead
 of failing with `Cannot resume node session`. Retrying or editing a message from
 such an attempt also skips the missing JSONL branch: an edited opening turn
 replaces the node task, and an edited follow-up is appended to it.
-A managed-environment node that failed during preparation (before `Prepared`,
-with no conversation) is also Continue-recoverable: the recovery hint is
-`canResume`, and Continue re-dispatches it as a fresh attempt instead of
-resuming a missing session. Provider/model failures that reached preparation
-keep their separate model/credential recovery paths.
+A node whose own preparation or composition failed can be Continue-recoverable
+even if composition marked it blocked, including unmanaged Runs. A dependency
+blocked only by an upstream failure is not a separate recovery root. The
+`canResume` hint and retry use the persisted attempt and block evidence.
 A node conversation's Stop interrupts only that node; global
 Stop/cancel also cancels planning. Internal scheduling-only pauses used to drain
 an affected branch for a Planner revision still let active calls finish.
@@ -98,8 +97,12 @@ or feedback from the stopped attempt. Windows termination's exit code 1 alone
 is **not** evidence of a user pause. The persisted failure/recovery schema stays
 compatible: stopped attempts retain terminal `Failed` evidence, while API node
 and execution projections expose `paused` for known interruptions. Checkpoints
-retain the attempt-scoped stop requests; Continue does not silently retry an
-unrelated ordinary failure.
+retain the attempt-scoped stop requests. Continue first resumes interrupted or
+queued paused work without retrying unrelated failures. Once that work settles,
+a further explicit Continue retries the eligible failed attempts. Undoing an
+internal scheduling-only pause does not retry failures. Automatically unpausing after
+a node message resumes interrupted work but never retries unrelated failures;
+those remain available for a later explicit Continue.
 
 Saving changed Node Agent model/thinking settings from a conversation records
 per-node overrides for every node that has never had an execution, including
@@ -109,8 +112,8 @@ settings. Saving does not dispatch work, approve a draft, unpause a Run, or
 rewrite its original configuration. Nodes that have already executed retain
 their settings, except for the explicit failed-node recovery below; a
 waiting/dirty status alone does not make a node never-started.
-Overrides survive replay and repeated saves update the previous override. A
-pre-dispatch override does not opt a later provider failure into Continue recovery.
+Overrides survive replay and repeated saves update the previous override.
+Failure recovery remains available regardless of whether settings were changed.
 Model selections are conversation-scoped: a save made inside a Run records
 that conversation's override, including nodes the Planner adds later. Other
 conversations keep their own creation or saved selection, so their running and
@@ -245,6 +248,12 @@ The main view follows actual running executions/Mergers even when the Run phase
 stays `completed` for a standalone Merger or is `followup` for source-direct work;
 it suspends timer reads once those writers settle.
 
+Clicking a row calls `open_workspace_file`, which resolves the path in the owning
+execution's worktree (newest attempt first), a Planner-only workspace, then the
+Run repository. Resolution uses the same real-child safety boundary, so
+traversal, absolute paths and symlinked descendants are rejected; deleted rows
+are not actionable.
+
 Snapshot/history/list requests are metadata-oriented. Node logs load on demand by
 `(runId, executionId, byteOffset)`; planning revisions have their own cursor.
 Execution-log pages default to 256 KiB and are capped at 1 MiB; planning forward
@@ -301,37 +310,42 @@ After interruption:
 - Interrupted executions retain terminal failure evidence internally and project
   as `paused` when the interruption is recognized; the Run remains paused or
   recoverable rather than claiming completion.
-- If the failed execution is identified as an application/process interruption,
-  the saved projection exposes a recoverable Continue action. Continue queues
-  those interrupted nodes and their failed/blocked dependency descendants, then
-  starts new Execution Instances. For an interrupted node, the new instance keeps the
-  same Pi session/workspace and uses the bundled `pi-continuity` public session
-  boundary to continue the unfinished turn; it does not resend the original
-  task or inject a synthetic “continue” user message. It does not mark a
-  provider failure as successful or silently retry an ordinary failed node.
-  Ordinary failures require an explicit node intervention, or a changed Node
-  Agent model/thinking selection saved for the current conversation followed
-  by Continue. A Provider credential failure (OAuth refresh/`invalid_grant`,
-  credential-store, API-key or not-authenticated errors) is one exception:
-  it leaves the task and session untouched, so after re-authenticating in
-  Settings the same Continue control resumes that session through the same
-  continuity turn instead of demanding an intervention message. A Provider
-  transport failure (DNS/TCP/TLS/socket/proxy errors such as `Connection
-  error.`, connection reset/refused, `ECONNRESET` or `socket hang up`) is the
-  same exception: Pi has already spent its automatic retry budget, so an
-  explicit Continue resumes the unfinished turn. Deterministic causes
-  (certificate validation, authentication, quota and context overflow) stay
-  ordinary failures or keep their dedicated recovery path. Alongside
-  never-started nodes, saving with that Run ID records
-  per-node settings for its currently failed nodes; it keeps their failure/error
-  evidence and does not dispatch work. Continue resumes those unfinished turns
-  with the new settings and unblocks their dependency descendants without
-  disturbing completed or unrelated branches. The override is replayable across restart and retained
-  for that node's subsequent attempts; environment overrides still take
-  precedence. Running/completed nodes, previously executed non-failed nodes,
-  other Runs, and the Run's original configuration remain unchanged.
-  See [model recovery regressions](../../backend/src/node_model_tests.rs) and
-  [settings browser tests](../../scripts/bootstrap-settings-ui.test.mjs).
+- The saved projection exposes `canResume` for idle failed node attempts regardless
+  of whether their errors are recognized, including credential, transport, quota,
+  protocol and unknown failures. Graph surfaces Continue in its topology; Serial
+  uses a conversation follow-up instead. After paused or queued work drains and
+  the cause is addressed, an explicit Continue queues eligible failed nodes and
+  their failed/blocked dependency descendants, then starts new Execution Instances;
+  it never claims that the original failure succeeded. Each root keeps its own
+  Pi session and workspace and uses the bundled `pi-continuity` boundary to
+  continue the unfinished turn without a synthetic user message. Completed
+  assistant turns and settled tool tails retain their tool-call/result pairs.
+  Missing results in an interrupted tool batch become explicit context-only
+  errors stating that side effects are unknown. Those warnings are reconstructed
+  on later node turns and reload without changing stored sessions; malformed
+  current tool-call identities and their orphan results are omitted
+  ([context regressions](../../scripts/continuation-context.test.ts)).
+  A first attempt is restarted without a session only when no launch, output or
+  completed-history evidence exists;
+  otherwise missing history fails explicitly rather than repeating the task.
+  A follow-up that never started reuses the completed node's session and sends
+  its recorded instruction; an absent initial session is never forked.
+  Completed branches remain untouched. Recovery decisions are
+  durable, while older recovery events retain their original replay semantics.
+  A failed post-publication source-direct follow-up continues in the source
+  directory and settles without republishing; source ownership must be proven
+  by its recorded message claim or earlier source-direct recovery, not inferred
+  from a workspace path alone.
+- Alongside never-started nodes, saving model/thinking settings with that Run ID
+  records per-node settings for its currently failed nodes; it retains failure
+  evidence and does not dispatch work. Continue uses those settings for the
+  unfinished turn. The override is replayable across restart and retained for
+  subsequent attempts; environment overrides still take precedence. Running or
+  completed nodes, previously executed non-failed nodes, other Runs, and the
+  Run's original configuration remain unchanged. See [failure recovery
+  regressions](../../backend/src/failure_recovery_tests.rs), [model recovery
+  regressions](../../backend/src/node_model_tests.rs) and [settings browser
+  tests](../../scripts/bootstrap-settings-ui.test.mjs).
 - A continued or retried execution reuses the last prepared attempt's physical
   working tree as-is: its committed HEAD (including agent commits made before
   the interruption) and all uncommitted work—including files matching

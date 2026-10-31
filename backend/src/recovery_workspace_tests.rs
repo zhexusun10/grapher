@@ -130,6 +130,103 @@ fn interrupted_resume_preserves_dirty_files_index_and_agent_commits_after_restar
     }
 }
 
+fn check_unknown_failure_in_source_direct_followup(standard_git: bool) {
+    let (temp, source, mut runtime) = setup(standard_git, single());
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    runtime.finish(&first.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    runtime.emit(EventKind::PublicationCompleted { head: runtime.state.base.clone() }).unwrap();
+    runtime.intervene("task", "follow up").unwrap();
+    let failed = runtime.jobs().unwrap().remove(0);
+    assert!(failed.source_direct);
+    assert_eq!(Path::new(&failed.execution.worktree), source.as_path());
+    let partial = source.join("direct-partial.txt");
+    fs::write(&partial, "keep source work").unwrap();
+    runtime.emit(EventKind::Prepared { execution_id: failed.execution.id.clone(), head: String::new() }).unwrap();
+    let session = runtime.root.join("sessions").join(&failed.execution.id);
+    fs::create_dir_all(&session).unwrap();
+    fs::write(session.join(format!("test_{}.jsonl", failed.execution.session_id)), "{}\n").unwrap();
+    runtime.emit_outputs(vec![EventKind::Output {
+        execution_id: failed.execution.id.clone(), text: "{\"type\":\"grapher_process_started\",\"pid\":1234}\n".into(),
+    }]).unwrap();
+    runtime.finish(&failed.execution, Err("unknown source-direct failure".into())).unwrap();
+    runtime.jobs().unwrap();
+    assert!(runtime.state.can_resume());
+    runtime.pause(false).unwrap();
+    let replay = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert!(replay.nodes["task"].source_direct_recovery);
+    let checkpoint: Snapshot = serde_json::from_value(crate::snapshot_view::checkpoint_projection(&runtime.state)).unwrap();
+    assert!(checkpoint.nodes["task"].source_direct_recovery, "checkpoint keeps the source-direct decision");
+    let root = runtime.root.clone();
+    drop(runtime);
+    let mut runtime = Runtime::open(&root).unwrap();
+    assert!(runtime.state.nodes["task"].source_direct_recovery);
+    runtime.pause(false).unwrap();
+    let publications = runtime.state.events.iter().filter(|event| matches!(event.kind, EventKind::PublicationStarted { .. })).count();
+    let mut retry = runtime.jobs().unwrap().remove(0);
+    assert!(retry.continuation);
+    assert!(retry.source_direct);
+    assert!(!retry.materialize_source, "direct recovery must not recreate a shadow snapshot");
+    assert!(retry.preserved_workspace.is_none());
+    assert_eq!(Path::new(&retry.execution.worktree), source.as_path());
+    assert_eq!(runtime.state.phase, "followup");
+    // A second failure has no new human message claim; its source ownership
+    // must instead come from the preceding durable recovery event.
+    runtime.finish(&retry.execution, Err("still failing".into())).unwrap();
+    runtime.jobs().unwrap();
+    runtime.pause(false).unwrap();
+    retry = runtime.jobs().unwrap().remove(0);
+    assert!(retry.source_direct);
+    assert_eq!(runtime.state.phase, "followup");
+    local_agent(&mut retry, &temp);
+    let result = perform(&retry, &root, &[], |_| {}, |_| Ok(()));
+    runtime.finish(&retry.execution, result.clone()).unwrap();
+    result.expect("source-direct recovery must be able to continue in the original workspace");
+    assert_eq!(fs::read_to_string(partial).unwrap(), "keep source work");
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "completed");
+    assert_eq!(runtime.state.events.iter().filter(|event| matches!(event.kind, EventKind::PublicationStarted { .. })).count(), publications);
+}
+
+#[test]
+fn unknown_failure_in_source_direct_followup_can_continue_without_resetting_source() {
+    for standard_git in [true, false] {
+        check_unknown_failure_in_source_direct_followup(standard_git);
+    }
+}
+
+#[test]
+fn unknown_failure_continue_preserves_and_commits_partial_workspace_after_restart() {
+    let (temp, _source, mut runtime, worker) = prepared_worker(true);
+    let path = PathBuf::from(&worker.execution.worktree);
+    let head = workspace::git(&path, &["rev-parse", "HEAD"]).unwrap();
+    dirty_workspace(&path);
+    let session = runtime.root.join("sessions").join(&worker.execution.id);
+    fs::create_dir_all(&session).unwrap();
+    fs::write(session.join(format!("test_{}.jsonl", worker.execution.session_id)), "{}\n").unwrap();
+    runtime.finish(&worker.execution, Err("unrecognized failure after partial work".into())).unwrap();
+    runtime.jobs().unwrap();
+    let root = runtime.root.clone();
+    drop(runtime);
+    let mut runtime = Runtime::open(&root).unwrap();
+    assert!(runtime.state.can_resume());
+    runtime.pause(false).unwrap();
+    let mut retry = runtime.jobs().unwrap().remove(0);
+    assert!(retry.continuation);
+    assert!(retry.preserved_workspace.is_some());
+    local_agent(&mut retry, &temp);
+    let result = perform(&retry, &root, &[], |_| {}, |prepared| {
+        assert_eq!(prepared, head);
+        assert_partial_work(&path);
+        runtime.emit(EventKind::Prepared { execution_id: retry.execution.id.clone(), head: prepared })
+    });
+    runtime.finish(&retry.execution, result.clone()).unwrap();
+    result.expect("an explicit retry must preserve the failed attempt's partial work");
+    assert_partial_work(&path);
+    assert_eq!(runtime.state.nodes["worker"].status, "completed");
+    assert_eq!(runtime.state.executions.iter().find(|execution| execution.id == worker.execution.id).unwrap().status, "failed");
+}
+
 #[test]
 fn failed_preparation_retry_recovers_the_last_prepared_attempt_in_the_same_session() {
     let (temp, _source, mut runtime, worker) = prepared_worker(true);

@@ -144,7 +144,7 @@ function WorkspaceFooterFixture() {
       selected={mode === "merger" ? publicationMergerCardId : mode === "node-merger" ? "merger:task" : graph && !planner ? "task" : ""}
       setSelected={noop} selectedMergerId={mergerId} setSelectedMergerId={setMergerId}
       effectiveMessages={messages} isPlanning={planning} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
-      onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} repoInfo={null} config={config}
+      onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop} repoInfo={null} config={config}
       active={status !== "completed"} locked={false} pendingRequest={pending} publishing={false} publicationFailed={false}
       nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
   </div>;
