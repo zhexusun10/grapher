@@ -136,11 +136,21 @@ export default async function () {
     const explicit = await bash.execute('physical-input', { command: `cat ${quote(join(cwd, 'mapped.txt'))}` });
     assert.ok(!JSON.stringify(explicit).includes(cwd), 'metadata must not leak raw physical command');
     assert.ok(!JSON.stringify(updates).includes(cwd));
-    const context = await hooks.get('context')![0]({ messages: [{ role: 'user', content: `Read ${cwd}/mapped.txt` }] });
+    // Pi runs every context handler in registration order; the repair hook and
+    // the workspace-path projection are separate extensions of one request.
+    const applyContext = async (messages: any[]) => {
+      let current = messages;
+      for (const handler of hooks.get('context') || []) {
+        const result = await handler({ messages: current });
+        if (result?.messages) current = result.messages;
+      }
+      return current;
+    };
+    const context = await applyContext([{ role: 'user', content: `Read ${cwd}/mapped.txt` }]);
     assert.ok(!JSON.stringify(context).includes(cwd));
     const opaque = { type: 'thinking', thinking: cwd, signature: cwd };
-    const preserved = await hooks.get('context')![0]({ messages: [opaque] });
-    assert.deepEqual(preserved.messages[0], opaque);
+    const preserved = await applyContext([opaque]);
+    assert.deepEqual(preserved[0], opaque);
     writeFileSync(join(cwd, 'launcher-tools-passed'), label);
     process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: `native-tools-passed-${label}` }] } }) + '\n');
     process.exit(0);

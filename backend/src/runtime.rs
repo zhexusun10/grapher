@@ -2646,10 +2646,14 @@ impl Runtime {
             } else { None };
             // A fork can be written before Pi receives its follow-up. In that
             // case the session exists but the recorded instruction still needs
-            // to be sent, rather than invoking an empty continuation turn.
+            // to be sent, rather than invoking an empty continuation turn. Only
+            // an attempt that never crossed the durable Prepared boundary is
+            // unstarted; an interruption after Prepared must continue without
+            // resending the user prompt.
             let unstarted_followup = continuation && self.state.nodes[&node.name].human_instruction
                 && !self.state.nodes[&node.name].instruction.is_empty()
                 && resume.is_some_and(|previous| !session_missing(previous)
+                    && self.state.execution_is_preparation_only(previous)
                     && no_unfinished_activity(previous) && has_completed_history(previous));
             let failed_before_session = self.state.nodes[&node.name].human_instruction
                 && resume.is_some_and(|previous| previous.status == "failed" && session_missing(previous)
