@@ -1,5 +1,6 @@
-//! Supplemental filesystem metadata. Bytes in named streams/xattrs are part of
-//! the sealed metadata evidence, never silently discarded by a copy fallback.
+//! Supplemental filesystem metadata. Project-owned bytes in named streams/xattrs
+//! are part of the sealed metadata evidence, never silently discarded by a copy
+//! fallback; host-managed markers are excluded below.
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
@@ -45,6 +46,18 @@ impl Extra {
             && self.owner == other.owner
             && self.efs == other.efs
     }
+
+    /// macOS assigns this marker to new files and refuses user-process changes,
+    /// so the source and its private copy can legitimately differ. It is host
+    /// bookkeeping, not project metadata, and must not affect view identity,
+    /// materialization or verification. Legacy records may still contain it.
+    pub(crate) fn strip_system_managed(&mut self) {
+        self.attributes.retain(|(name, _)| !is_system_managed(name));
+    }
+}
+
+fn is_system_managed(name: &str) -> bool {
+    cfg!(target_os = "macos") && name == "com.apple.provenance"
 }
 
 pub(crate) fn capture(path: &Path, _metadata: &fs::Metadata) -> Result<Extra, String> {
@@ -260,11 +273,11 @@ mod platform {
                 return Err(std::io::Error::last_os_error().to_string());
             }
             bytes.truncate(count as usize);
-            attributes.push((
-                String::from_utf8(name.to_vec())
-                    .map_err(|_| "Non-UTF-8 xattr name is unsupported")?,
-                bytes,
-            ));
+            let name = String::from_utf8(name.to_vec())
+                .map_err(|_| "Non-UTF-8 xattr name is unsupported")?;
+            if !is_system_managed(&name) {
+                attributes.push((name, bytes));
+            }
         }
         attributes.sort();
         Ok(Extra {
@@ -737,6 +750,31 @@ mod platform {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+
+    #[test]
+    fn macos_provenance_is_not_project_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        fs::write(&file, "project bytes").unwrap();
+
+        let captured = capture(&file, &fs::symlink_metadata(&file).unwrap()).unwrap();
+        assert!(!captured
+            .attributes
+            .iter()
+            .any(|(name, _)| name == "com.apple.provenance"));
+
+        let mut legacy = captured.clone();
+        legacy
+            .attributes
+            .push(("com.apple.provenance".into(), vec![1, 2, 3]));
+        legacy.strip_system_managed();
+        assert_eq!(legacy, captured);
     }
 }
 

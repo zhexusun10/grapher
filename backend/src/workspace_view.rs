@@ -64,6 +64,41 @@ impl PartialEq for View {
 }
 impl Eq for View {}
 
+fn strip_entry_system_managed(entry: &mut Entry) {
+    match entry {
+        Entry::Directory { extra, .. }
+        | Entry::File { extra, .. }
+        | Entry::Special { extra, .. }
+        | Entry::Link { extra, .. } => extra.strip_system_managed(),
+    }
+}
+
+impl View {
+    /// Legacy view records may contain host-managed metadata that is not part
+    /// of the project. Normalize after checksum validation so old evidence
+    /// remains loadable while comparisons use the stable project identity.
+    fn strip_system_managed(&mut self) {
+        self.root_extra.strip_system_managed();
+        for entry in self
+            .entries
+            .values_mut()
+            .chain(self.git_entries.iter_mut().flat_map(|entries| entries.values_mut()))
+        {
+            strip_entry_system_managed(entry);
+        }
+        for extra in [&mut self.git_file_metadata, &mut self.git_link_metadata]
+            .into_iter()
+            .flatten()
+            .map(|(_, extra)| extra)
+        {
+            extra.strip_system_managed();
+        }
+        for repository in self.repositories.values_mut() {
+            repository.strip_system_managed();
+        }
+    }
+}
+
 fn mode(metadata: &fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
@@ -954,7 +989,7 @@ fn save(path: &Path, view: &View) -> Result<(), String> {
 fn load(path: &Path) -> Result<View, String> {
     let bytes = fs::read(path.join("view.json")).map_err(|e| format!("Missing complete project-view evidence: {e}; start a new Run (existing workspace retained)"))?;
     let expected = fs::read_to_string(path.join("checksum")).map_err(|e| e.to_string())?;
-    let view: View = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let mut view: View = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     if git2::Oid::hash_object(git2::ObjectType::Blob, &normalized_bytes(&view)?)
         .map_err(|e| e.to_string())?
         .to_string()
@@ -976,6 +1011,7 @@ fn load(path: &Path) -> Result<View, String> {
             return Err("Unsafe project-view entry".into());
         }
     }
+    view.strip_system_managed();
     Ok(view)
 }
 fn restore_git_metadata(target: &Path, entries: &BTreeMap<String, Entry>) -> Result<(), String> {
@@ -2404,11 +2440,26 @@ pub(crate) fn node_identity_scoped(
         .transpose()
 }
 pub(crate) fn record_matches(source: &Path, head: &str, identity: &str) -> bool {
-    record_path(source, head)
-        .ok()
-        .and_then(|path| fs::read_to_string(path.join("checksum")).ok())
-        .as_deref()
-        == Some(identity)
+    let Ok(path) = record_path(source, head) else {
+        return false;
+    };
+    if fs::read_to_string(path.join("checksum")).ok().as_deref() == Some(identity) {
+        return true;
+    }
+    // A legacy record may have been saved before a host-managed metadata
+    // exclusion existed. The immutable view is still valid; compare its
+    // normalized identity instead of forcing a redundant snapshot commit.
+    load(&path).ok().is_some_and(|view| {
+        normalized_bytes(&view)
+            .ok()
+            .and_then(|bytes| {
+                git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
+                    .ok()
+                    .map(|oid| oid.to_string())
+            })
+            .as_deref()
+            == Some(identity)
+    })
 }
 
 pub(crate) fn capture_node_scoped(

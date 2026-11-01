@@ -21,7 +21,7 @@ export const WorkspaceChangesTrigger = React.memo(function WorkspaceChangesTrigg
   return <button type="button" className="workspace-details-trigger workspace-changes-trigger" data-testid="workspace-changes-trigger"
     onClick={onToggle} aria-expanded={isOpen} aria-controls={isOpen ? panelId : undefined}>
     <span>{summary.totalFiles > 0 ? t("{0} 个文件变更", summary.totalFiles) : t("暂无文件变更")}</span>
-    <ChevronRight size={11} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} aria-hidden="true" />
+    <ChevronRight size={12} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} aria-hidden="true" />
   </button>;
 });
 

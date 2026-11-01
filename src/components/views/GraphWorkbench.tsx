@@ -249,7 +249,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
           aria-expanded={isOpen}
         >
           <span>{label ?? t("工作区与会话信息")}</span>
-          <ChevronRight size={11} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} />
+          <ChevronRight size={12} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} />
         </button>
         {summaryAction}
       </div>

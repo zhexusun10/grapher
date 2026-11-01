@@ -42,7 +42,11 @@ retained alternates into a mixed object store.
 
 Linux user inode flags are captured/restored with native ioctl (subject to real
 filesystem privileges); macOS ACLs/flags and Windows ACLs/ADS retain their native
-checks. Windows EFS encryption state is recreated for the private entry; a
+checks. macOS can assign its system-managed `com.apple.provenance` xattr to the
+private copy even when the source lacks it, and rejects user-process changes; it
+is host bookkeeping rather than project metadata, so it is omitted from capture,
+view identity and materialization verification (including legacy view records).
+Windows EFS encryption state is recreated for the private entry; a
 destination volume without EFS fails the preparation explicitly rather than
 silently writing plaintext.
 

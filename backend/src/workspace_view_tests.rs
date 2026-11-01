@@ -510,6 +510,52 @@ fn metadata_materialization_requires_full_equality_and_never_hides_a_restore() {
     ));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn legacy_provenance_metadata_is_ignored_after_load() {
+    let temp = tempfile::tempdir().unwrap();
+    let legacy_extra: crate::workspace_metadata::Extra = serde_json::from_value(serde_json::json!({
+        "attributes": [["com.apple.provenance", [1, 2, 3]]],
+        "security": [], "protected": false, "flags": 0, "owner": null, "efs": false
+    }))
+    .unwrap();
+    let view = View {
+        schema: 5,
+        source: "/legacy/source".into(),
+        root_mode: 0o755,
+        root_extra: legacy_extra.clone(),
+        entries: BTreeMap::from([(
+            "legacy".into(),
+            Entry::Directory {
+                mode: 0o755,
+                extra: legacy_extra,
+            },
+        )]),
+        hardlinks: Default::default(),
+        repositories: BTreeMap::new(),
+        git_entries: None,
+        git_file: false,
+        git_file_metadata: None,
+        git_link: false,
+        git_link_metadata: None,
+        git_config: vec![],
+        git_files: BTreeMap::new(),
+        git_global: vec![],
+    };
+    save(temp.path(), &view).unwrap();
+
+    let loaded = load(temp.path()).unwrap();
+    assert_eq!(
+        loaded.root_extra,
+        crate::workspace_metadata::Extra::default()
+    );
+    assert!(matches!(
+        loaded.entries.get("legacy"),
+        Some(Entry::Directory { extra, .. })
+            if *extra == crate::workspace_metadata::Extra::default()
+    ));
+}
+
 #[test]
 fn sha256_repository_prepares_and_materializes_project_bytes() {
     let temp = tempfile::tempdir().unwrap();
