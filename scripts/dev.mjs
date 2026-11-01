@@ -92,12 +92,16 @@ export async function runDev({
   const completed = new Promise(resolve => { finish = resolve; });
   const onInterrupt = () => { void stop(130); };
   const onTerminate = () => { void stop(143); };
+  // Closing the terminal window sends SIGHUP. Treat it like other shutdown
+  // signals so detached backend/Vite process groups are not left running.
+  const onHangup = process.platform === 'win32' ? null : () => { void stop(129); };
   async function stop(code = 0) {
     if (stopPromise) return stopPromise;
     stopping = true;
     controller.abort();
     signals.off('SIGINT', onInterrupt);
     signals.off('SIGTERM', onTerminate);
+    if (onHangup) signals.off('SIGHUP', onHangup);
     stopPromise = Promise.all([...children].map(child => new Promise(resolve => {
       if (child.exitCode !== null || child.signalCode !== null || !child.pid) return resolve();
       const timer = setTimeout(() => { terminateChild(child, true); resolve(); }, 5000);
@@ -108,6 +112,7 @@ export async function runDev({
   }
   signals.on('SIGINT', onInterrupt);
   signals.on('SIGTERM', onTerminate);
+  if (onHangup) signals.on('SIGHUP', onHangup);
   const handle = { stop, completed };
   try {
     const env = loadDevEnvironment(installationRoot, baseEnv);

@@ -69,6 +69,7 @@ test('cold compilation is outside the server readiness timeout; frontend starts 
   assert.equal(await dev.completed, 0);
   assert.equal(f.signals.listenerCount('SIGINT'), 0);
   assert.equal(f.signals.listenerCount('SIGTERM'), 0);
+  assert.equal(f.signals.listenerCount('SIGHUP'), 0);
 });
 
 test('setup and build errors fail closed without starting backend/frontend', async t => {
@@ -104,6 +105,16 @@ test('unexpected frontend exit stops the owned backend', async t => {
   const dev = await f.start();
   assert.equal(await dev.completed, 3);
   assert.ok(f.children.every(child => child.exitCode !== null || child.signalCode !== null));
+});
+
+test('closing the terminal stops owned backend and frontend', { skip: process.platform === 'win32', timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const dev = await f.start();
+  assert.deepEqual(f.phases, ['build', 'run', 'frontend']);
+  f.signals.emit('SIGHUP');
+  assert.equal(await dev.completed, 129);
+  assert.ok(f.children.every(child => child.exitCode !== null || child.signalCode !== null));
+  assert.equal(f.signals.listenerCount('SIGHUP'), 0);
 });
 
 for (const phase of ['setup', 'build']) {
