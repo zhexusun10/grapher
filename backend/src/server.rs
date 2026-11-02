@@ -221,17 +221,28 @@ fn invalidate_service_cache(root: &std::path::Path, id: Option<&str>) {
 
 static SOURCE_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
     OnceLock::new();
-static CANCELLED_PLANNING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+/// Run IDs with a pending Planner cancellation. The value distinguishes the
+/// Planner conversation's Stop (`true`) from a run-wide Stop/cancel (`false`),
+/// so only the former may undo the turn's internal scheduling-only pause.
+static CANCELLED_PLANNING: OnceLock<Mutex<std::collections::HashMap<String, bool>>> = OnceLock::new();
 
 struct PlanningCancellationGuard(String);
 impl PlanningCancellationGuard {
+    fn clear_owner_stop(&self) {
+        crate::process_control::clear_owner_stop(&crate::process_control::planning_owner(&self.0));
+    }
     fn finish(&mut self, planning: &AtomicBool) {
         if let Ok(mut cancelled) = CANCELLED_PLANNING.get_or_init(Default::default).lock() {
             planning.store(false, Ordering::SeqCst);
             cancelled.remove(&self.0);
+            // Keep the cancellation lock while retiring the late-registration
+            // stop flag. A Stop request serializes on the same lock, so it can
+            // never poison a subsequent Planner turn for this Run.
+            self.clear_owner_stop();
             self.0.clear();
         } else {
             planning.store(false, Ordering::SeqCst);
+            self.clear_owner_stop();
         }
     }
 }
@@ -239,6 +250,7 @@ impl Drop for PlanningCancellationGuard {
     fn drop(&mut self) {
         if let Ok(mut cancelled) = CANCELLED_PLANNING.get_or_init(Default::default).lock() {
             cancelled.remove(&self.0);
+            self.clear_owner_stop();
         }
     }
 }
@@ -248,11 +260,23 @@ fn check_planning_cancelled(run_id: &str) -> Result<(), String> {
             .get_or_init(Default::default)
             .lock()
             .map_err(|e| e.to_string())?
-            .contains(run_id)
+            .contains_key(run_id)
     {
         return Err("Planning was stopped for this Run".into());
     }
     Ok(())
+}
+fn planner_conversation_stopped(run_id: &str) -> Result<bool, String> {
+    if run_id.is_empty() {
+        return Ok(false);
+    }
+    Ok(CANCELLED_PLANNING
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(run_id)
+        .copied()
+        .unwrap_or(false))
 }
 
 fn source_lock(repository: &std::path::Path) -> Result<Arc<Mutex<()>>, String> {
@@ -1803,7 +1827,7 @@ fn plan_goal_internal_with_started(
         }
     };
     let mut cancellation_guard = PlanningCancellationGuard(owner.clone());
-    let result = crate::process_control::with_owner(&owner, || {
+    let result = crate::process_control::with_owner(&crate::process_control::planning_owner(&owner), || {
         (|| {
             let original_graph = if let Some(ref run_id) = revision_run_id {
                 if mode != Some("graph") {
@@ -2567,9 +2591,14 @@ fn plan_goal_internal_with_started(
         })()
     });
     let cancelled = check_planning_cancelled(&owner).is_err();
-    if resume_after && !cancelled {
+    let planner_only_stop = planner_conversation_stopped(&owner).unwrap_or(false);
+    // A Planner conversation Stop aborts only the turn. Any internal
+    // scheduling-only pause taken to drain a revision's affected writers must
+    // be undone, and deferred jobs must resume; a run-wide Stop keeps both.
+    let continue_scheduling = !cancelled || planner_only_stop;
+    if resume_after && continue_scheduling {
         if let Ok(mut runtime) = service.runtime.lock() {
-            if check_planning_cancelled(&owner).is_ok()
+            if !runtime.state.stop_requested
                 && runtime.state.approved
                 && runtime.state.paused
                 && runtime.state.phase == "paused"
@@ -2578,12 +2607,12 @@ fn plan_goal_internal_with_started(
             }
         }
     }
-    if !cancelled
+    if continue_scheduling
         && revision_run_id.is_some()
         && service
             .runtime
             .lock()
-            .map(|runtime| runtime.state.phase == "running" && !runtime.state.paused)
+            .map(|runtime| !runtime.state.stop_requested && runtime.state.phase == "running" && !runtime.state.paused)
             .unwrap_or(false)
     {
         drive(service.clone());
@@ -3609,6 +3638,29 @@ fn control(
         }
         return Ok(snapshot);
     }
+    if action == "stop_planner" {
+        // The Planner conversation's Stop owns only its in-flight turn. Node
+        // agents, mergers and the Run's pause state stay untouched.
+        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+        let active_id = runtime.state.run_id.clone();
+        let snapshot = runtime.state.clone();
+        drop(runtime);
+        if !active_id.is_empty() {
+            let mut cancelled = CANCELLED_PLANNING
+                .get_or_init(Default::default)
+                .lock()
+                .map_err(|e| e.to_string())?;
+            // The flag is cleared under this lock when the turn settles. Check
+            // it here so a Stop that loses the completion race cannot cancel
+            // the next Planner turn for the same Run. The late-registration
+            // stop flag stays covered until the finishing turn removes both.
+            if service.planning.load(Ordering::SeqCst) {
+                cancelled.insert(active_id.clone(), true);
+                crate::engine::stop_planning(&active_id)?;
+            }
+        }
+        return Ok(snapshot);
+    }
     if matches!(action.as_str(), "stop" | "cancel") {
         let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
         let active_id = runtime.state.run_id.clone();
@@ -3629,7 +3681,7 @@ fn control(
                 .get_or_init(Default::default)
                 .lock()
                 .map_err(|e| e.to_string())?
-                .insert(active_id.clone());
+                .insert(active_id.clone(), false);
         }
         if runtime.state.approved {
             let _ = runtime.pause(true);
@@ -5815,7 +5867,7 @@ fn api_service(
             } else if command == "control"
                 && matches!(
                     body.get("action").and_then(serde_json::Value::as_str),
-                    Some("stop" | "cancel" | "steer_planner")
+                    Some("stop" | "cancel" | "stop_planner" | "steer_planner")
                 )
             {
                 active_planning_service(primary)

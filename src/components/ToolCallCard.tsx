@@ -75,11 +75,13 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
     const isError = item.isError || status === "error" || (exitCode !== null && exitCode !== 0);
 
-    // Detect if output was truncated in either the result body or its arguments
+    // Only the tool's own result truncation matters here. Bounded previews for
+    // display (the 100 KiB result/argument cap) are an implementation detail and
+    // must not present the tool call as truncated.
     const isTruncated = useMemo(() => {
-      return !!(item.truncated || item.argsTruncated || resultPreview.truncated || argsText.truncated ||
+      return !!(item.truncated ||
         resultText.includes("[Showing lines") || resultText.includes("Full output:"));
-    }, [item.truncated, item.argsTruncated, resultPreview.truncated, argsText.truncated, resultText]);
+    }, [item.truncated, resultText]);
 
     // Detect masked subcommand step errors or real test failures (avoiding false positives from mere word FAIL)
     const hasSubcommandWarning = useMemo(() => {
@@ -316,7 +318,7 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
 
             {Object.keys(args).length > 0 && (
               <div className="tool-args-section">
-                <div className="section-label">{t("参数 (Arguments)")}{item.argsTruncated && ` · ${t("已截断")}`}</div>
+                <div className="section-label">{t("参数 (Arguments)")}</div>
                 <pre className="tool-args-code">
                   {argsText.text}
                 </pre>

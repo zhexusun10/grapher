@@ -159,18 +159,19 @@ test("giant tool arguments keep their card and shape, but only render a bounded 
   assert.equal(item.argsTruncated, true);
   assert.ok(new TextEncoder().encode(item.args?.content).byteLength <= TOOL_OUTPUT_PREVIEW_BYTES);
   const html = renderToStaticMarkup(createElement(ToolCallCard, { item, defaultExpanded: true }));
-  assert.ok(html.includes("tool-truncated-pill"), "truncated arguments render the truncation pill");
+  assert.ok(!html.includes("tool-truncated-pill"), "display-only argument previews do not claim truncation");
   assert.ok(html.includes("ARGS_HEAD"), "the bounded preview keeps its head");
   assert.ok(html.includes("src/big.ts"), "small argument values remain readable");
-  assert.ok(html.includes(t("已截断")), "the truncation pill uses the active locale");
+  assert.ok(!html.includes(t("已截断")), "display-only argument previews show no truncation label");
   assert.ok(!html.includes("HUGE_ARGS_TAIL"), "the bounded preview drops the giant tail");
-  // The runtime projection marks already-cut arguments; the card must still say so.
+  // The runtime projection marks already-cut arguments; that marker is still a
+  // display preview, not a tool-report truncation.
   const marked = renderToStaticMarkup(createElement(ToolCallCard, {
     item: { ...item, args: { path: "src/big.ts", content: "preview\n..." }, argsTruncated: true },
     defaultExpanded: true,
   }));
-  assert.ok(marked.includes("tool-truncated-pill"), "runtime-marked arguments also show the pill");
-  assert.ok(marked.includes(t("已截断")), "runtime-marked truncation uses the active locale");
+  assert.ok(!marked.includes("tool-truncated-pill"), "runtime-marked argument previews keep the pill hidden");
+  assert.ok(!marked.includes(t("已截断")), "runtime-marked argument previews show no truncation label");
 });
 
 test("a giant tool result keeps its card and failure metadata, but only renders a bounded preview", () => {
@@ -188,20 +189,54 @@ test("a giant tool result keeps its card and failure metadata, but only renders 
   assert.equal(item.exitCode, 2);
   assert.equal(item.durationMs, 1234);
   assert.equal(item.status, "error");
-  assert.equal(item.truncated, true);
+  assert.equal(item.truncated, false, "a bounded display preview is not tool-result truncation");
   assert.ok(new TextEncoder().encode(item.result).byteLength <= TOOL_OUTPUT_PREVIEW_BYTES);
   const html = renderToStaticMarkup(createElement(ToolCallCard, { item, defaultExpanded: true }));
   assert.equal(toolCount(html), 1);
-  assert.ok(html.includes("tool-truncated-pill") || html.includes("PREVIEW_HEAD"), "the result preview is bounded");
+  assert.ok(!html.includes("tool-truncated-pill"), "display-only result previews do not claim truncation");
+  assert.ok(html.includes("PREVIEW_HEAD"), "the result preview is bounded");
   assert.ok(html.includes("tool-result-code error"), "failed results keep their error presentation");
   assert.ok(html.includes("..."), "truncated output shows an ellipsis");
   assert.ok(!html.includes("HUGE_OUTPUT_TAIL"), "the bounded result drops the giant tail");
   // Direct/live card callers have the same cap, even without parsing first.
   const direct = renderToStaticMarkup(createElement(ToolCallCard, { item: { ...item, result: text, truncated: false }, defaultExpanded: true }));
-  assert.ok(direct.includes("tool-truncated-pill"), "direct callers show the truncation pill");
+  assert.ok(!direct.includes("tool-truncated-pill"), "direct callers do not label display previews as truncation");
   assert.ok(direct.includes("PREVIEW_HEAD"), "direct callers keep the preview head");
   assert.ok(!direct.includes("HUGE_OUTPUT_TAIL"), "direct callers drop the giant tail");
   assert.ok(direct.length < TOOL_OUTPUT_PREVIEW_BYTES + 20_000);
+});
+
+test("tool-reported result truncation still marks the card", () => {
+  const result = parseTranscriptChunkLines([line({ type: "tool_execution_end", toolCallId: "tool-truncated", toolName: "bash",
+    result: { content: [{ type: "text", text: "partial output\n\n[Showing lines 1-10 of 20. Full output: /tmp/out]" }],
+      details: { exitCode: 0, truncation: { truncated: true } } },
+  }).trimEnd()], [], new Map(), {
+    source: "output", byteOffset: 0, leadingFragment: false, inTagThinking: false, inFinalResponse: false,
+    finalResponseSuppressed: false, seenFirstUser: false, pendingUserStart: false, assistantStartIndex: 0,
+    userMessageStarts: new Set(), compacting: false,
+  }, { showUserTurns: false, skipFirstUser: false });
+  const item = result.currentItems[0];
+  assert.equal(item.truncated, true);
+  const html = renderToStaticMarkup(createElement(ToolCallCard, { item, defaultExpanded: true }));
+  assert.ok(html.includes("tool-truncated-pill"), "tool-reported truncation renders the truncation pill");
+  assert.ok(html.includes(t("已截断")), "the truncation pill uses the active locale");
+  assert.ok(html.includes(t("已截断 (Truncated)")), "the bash output status reflects tool truncation");
+});
+
+test("display projection markers do not present a truncated tool call", () => {
+  const result = parseTranscriptChunkLines([line({ type: "tool_execution_end", toolCallId: "projected-tool", toolName: "bash",
+    result: { content: [{ type: "text", text: "bounded display preview\n..." }],
+      details: { exitCode: 0, truncated: true, displayTruncated: true } },
+  }).trimEnd()], [], new Map(), {
+    source: "output", byteOffset: 0, leadingFragment: false, inTagThinking: false, inFinalResponse: false,
+    finalResponseSuppressed: false, seenFirstUser: false, pendingUserStart: false, assistantStartIndex: 0,
+    userMessageStarts: new Set(), compacting: false,
+  }, { showUserTurns: false, skipFirstUser: false });
+  const item = result.currentItems[0];
+  assert.equal(item.truncated, false);
+  const html = renderToStaticMarkup(createElement(ToolCallCard, { item, defaultExpanded: true }));
+  assert.ok(!html.includes("tool-truncated-pill"), "projection-only cuts show no truncation pill");
+  assert.ok(html.includes(t("完整 (Complete)")), "the bash output status stays complete");
 });
 
 test("a leading split JSONL record is buffered, not rendered as assistant plaintext", () => {

@@ -848,6 +848,27 @@
   margin-bottom: 0;
 }
 
+/* Links are part of the answer, not chrome: keep them visibly distinct from
+   prose and give keyboard users the same focus treatment as other controls. */
+.markdown-content a {
+  color: var(--brand-default, #2563EB);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.markdown-content a:hover {
+  color: var(--brand-hover, #1D4ED8);
+  text-decoration-thickness: 2px;
+}
+
+.markdown-content a:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 .markdown-content h1,
 .markdown-content h2,
 .markdown-content h3,

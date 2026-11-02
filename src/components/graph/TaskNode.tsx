@@ -33,6 +33,8 @@ export const phaseText: Record<string, string> = {
 export type WorkNode = Node<{
   name: string;
   task: string;
+  /** Merger cards are execution helpers, not planner tasks, and use compact geometry. */
+  kind?: "task" | "merger";
   status: Status;
   attempts: number;
   hint: string;
@@ -46,13 +48,15 @@ export type WorkNode = Node<{
   hasLeftSource: boolean;
   hasRightTarget: boolean;
   hasRightSource: boolean;
+  /** Side a Merger card occupies relative to its downstream node. */
+  mergerSide?: "left" | "right";
 }, "work">;
 
 export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
   return (
     <div
       data-node-name={data.name}
-      className={`task-node ${data.selected ? "selected" : ""} ${data.status}`}
+      className={`task-node ${data.kind === "merger" ? "merger" : ""} ${data.selected ? "selected" : ""} ${data.status}`}
     >
       <Handle id="top" type="target" position={Position.Top}
         className={`react-flow__handle ${data.hasTop ? "connected" : ""}`} />
@@ -82,6 +86,22 @@ export const TaskNode = React.memo(({ data }: NodeProps<WorkNode>) => {
         className={`react-flow__handle ${data.hasRightTarget ? "connected feedback" : ""}`} />
       <Handle id="right-source" type="source" position={Position.Right} style={{ top: "65%" }}
         className={`react-flow__handle ${data.hasRightSource ? "connected feedback" : ""}`} />
+      {data.kind === "merger" && data.mergerSide === "left" && (
+        <Handle id="merger-right-source" type="source" position={Position.Right} style={{ top: "50%" }}
+          className="react-flow__handle connected" />
+      )}
+      {data.kind === "merger" && data.mergerSide === "right" && (
+        <Handle id="merger-left-source" type="source" position={Position.Left} style={{ top: "50%" }}
+          className="react-flow__handle connected" />
+      )}
+      {data.kind !== "merger" && data.mergerSide === "left" && (
+        <Handle id="merger-left-target" type="target" position={Position.Left} style={{ top: "50%" }}
+          className="react-flow__handle connected" />
+      )}
+      {data.kind !== "merger" && data.mergerSide === "right" && (
+        <Handle id="merger-right-target" type="target" position={Position.Right} style={{ top: "50%" }}
+          className="react-flow__handle connected" />
+      )}
     </div>
   );
 });

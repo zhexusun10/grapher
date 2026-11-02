@@ -86,8 +86,12 @@ A node whose own preparation or composition failed can be Continue-recoverable
 even if composition marked it blocked, including unmanaged Runs. A dependency
 blocked only by an upstream failure is not a separate recovery root. The
 `canResume` hint and retry use the persisted attempt and block evidence.
-A node conversation's Stop interrupts only that node; global
-Stop/cancel also cancels planning. Internal scheduling-only pauses used to drain
+A node conversation's Stop interrupts only that node. A Planner conversation's
+Stop cancels only its in-flight Planner/Partitioner turn; it does not pause the
+Run or interrupt node agents. If that turn had temporarily paused dispatch to
+drain affected writers, the Stop undoes that scheduling-only pause and lets
+deferred work resume. Run-wide Stop/cancel also cancels planning.
+Internal scheduling-only pauses used to drain
 an affected branch for a Planner revision still let active calls finish.
 
 `ExecutionStopRequested` records the affected execution IDs before termination,
@@ -215,11 +219,13 @@ maintaining a separate context counter.
 Grapher's tool-output display log is a projection, not a raw Pi-session dump. The
 [engine projection](../../backend/src/engine/tool_output.rs) retains at most
 100 KiB of UTF-8 text per tool-result body and per tool-call argument value
-(`write`/`edit` carry whole file bodies), marks the owner with
-`truncated`/`argsTruncated`, and suppresses redundant cumulative
-`tool_execution_update.partialResult` bodies. Pi's own session, model context and
-actual tool result are untouched; `full=true` exports the retained display log
-and does not bypass producer-side truncation.
+(`write`/`edit` carry whole file bodies), marks projection-only cuts with
+`displayTruncated`/`argsTruncated`, and suppresses redundant cumulative
+`tool_execution_update.partialResult` bodies. These markers describe the display
+log, not a tool truncating its own result; the UI keeps the truncation status for
+the latter only. Pi's own session, model context and actual tool result are
+untouched; `full=true` exports the retained display log and does not bypass
+producer-side truncation.
 
 The sidebar uses backend-owned conversation summaries, prewarmed without
 transcripts or runtime locks. Settled cards do not require snapshots; live work

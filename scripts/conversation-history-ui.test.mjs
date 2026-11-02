@@ -288,7 +288,7 @@ for (const role of ["node", "planner"]) {
 }
 
 for (const role of ["node", "planner"]) {
-  test(`${role}: giant output stays inside one normal tool card with a small truncated body`, { timeout: 30_000 }, async () => {
+  test(`${role}: giant output stays inside one normal tool card with a small display-bounded body`, { timeout: 30_000 }, async () => {
     const output = startTool("bounded-output-tool", "long-running-command") + endTool("bounded-output-tool", "PREVIEW_HEAD\n" + "x".repeat(400_000) + "HUGE_OUTPUT_TAIL");
     const total = Buffer.byteLength(output);
     const { context, page, errors } = await newPage(async route => {
@@ -305,7 +305,8 @@ for (const role of ["node", "planner"]) {
       if (role === "planner") await page.evaluate(() => { window.audit.setPlanningIds(["planner-latest"]); window.audit.selectHistory("planner"); });
       const card = page.locator('[data-transcript-id="bounded-output-tool"] .tool-call-card');
       await card.waitFor();
-      await card.locator(".tool-truncated-pill").waitFor();
+      assert.equal(await card.locator(".tool-truncated-pill").count(), 0,
+        "a bounded display preview is not tool-reported truncation");
       assert.equal(await card.count(), 1, "keep the tool card, not just an ellipsis in place of it");
       await card.locator(".tool-call-header").click();
       await card.locator(".tool-result-code").waitFor();
@@ -1888,9 +1889,8 @@ test("actual App stop preserves a sent Planner follow-up and the next unsent dra
       }
       case "control":
         controls.push(body);
-        if (body.action === "stop") {
+        if (body.action === "stop_planner") {
           stopped = true;
-          saved.paused = true;
         } else {
           assert.equal(body.action, "steer_planner");
           assert.equal(body.instruction, "STEER_BEFORE_STOP");
@@ -1918,7 +1918,8 @@ test("actual App stop preserves a sent Planner follow-up and the next unsent dra
     assert.equal(await input.inputValue(), "UNSENT_DRAFT_AFTER_STOP 中文🚀");
     assert.equal(await page.locator('.chat-bubble-user', { hasText: "SENT_BEFORE_STOP" }).count(), 1);
     assert.equal(await page.locator('.chat-bubble-user', { hasText: "STEER_BEFORE_STOP" }).count(), 1);
-    assert.equal(controls.filter(item => item.action === "stop").length, 1);
+    assert.equal(controls.filter(item => item.action === "stop_planner").length, 1,
+      "the Planner conversation stops only its own turn");
     assert.deepEqual(errors, []);
   } finally { streamResponse?.destroy(); streamResponse = undefined; await context.close(); }
 });

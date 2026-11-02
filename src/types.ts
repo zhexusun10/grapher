@@ -336,6 +336,7 @@ export interface TranscriptItem {
   isError?: boolean;
   status?: "running" | "success" | "error" | "interrupted";
   exitCode?: number | null;
+  /** Tool-reported result truncation, never the bounded UI display preview. */
   truncated?: boolean;
   // Monotonic tool duration measured by the runtime (Pi) and relayed by the
   // backend: `tool_execution_end.durationMs`, or the `toolResult` message field.

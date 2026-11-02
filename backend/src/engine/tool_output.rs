@@ -76,7 +76,8 @@ fn limit_result(result: &mut Value) {
     let Some(object) = result.as_object_mut() else { return; };
     let details = object.entry("details").or_insert_with(|| json!({}));
     if !details.is_object() { *details = json!({}); }
-    details["truncated"] = true.into();
+    // This is a display-log projection, not the tool's own truncation signal.
+    details["displayTruncated"] = true.into();
 }
 
 /// Bound every `args`/`arguments` subtree in place and mark its owner so the UI
@@ -196,7 +197,7 @@ mod tests {
         let preview = event["result"]["content"][0]["text"].as_str().unwrap();
         assert!(preview.len() <= PREVIEW_BYTES);
         assert!(preview.ends_with("\n..."));
-        assert_eq!(event["result"]["details"]["truncated"], true);
+        assert_eq!(event["result"]["details"]["displayTruncated"], true);
         assert_eq!(event["result"]["details"]["exitCode"], 2);
         assert_eq!(event["result"]["details"]["other"], "retained");
         assert_eq!(event["durationMs"], 1234);
@@ -270,7 +271,7 @@ mod tests {
             let text = message["content"].as_str().unwrap();
             assert_eq!(text.len(), PREVIEW_BYTES);
             assert!(text.ends_with("\n..."));
-            assert_eq!(message["details"]["truncated"], true);
+            assert_eq!(message["details"]["displayTruncated"], true);
             assert_eq!(message["isError"], true);
         }
         assert_eq!(event["messages"][1], assistant);
@@ -285,7 +286,7 @@ mod tests {
             assert!(ToolOutputProjection::default().project(&mut event));
             if original["result"]["content"].is_array() && original["result"]["content"].as_array().unwrap().len() == 2 {
                 assert!(event["result"]["content"][0]["text"].as_str().unwrap().len() <= PREVIEW_BYTES);
-                assert_eq!(event["result"]["details"]["truncated"], true);
+                assert_eq!(event["result"]["details"]["displayTruncated"], true);
             } else { assert_eq!(event, original); }
         }
     }

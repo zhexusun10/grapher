@@ -444,6 +444,12 @@ pub fn terminate_node(run_id: &str, node: &str) {
     process_control::terminate_node(run_id, node);
 }
 
+/// Cancel only the active Planner/Partitioner turn. A stopped planning owner
+/// also rejects a process that reaches registration after the request.
+pub fn stop_planning(run_id: &str) -> Result<(), String> {
+    process_control::stop_owner(&process_control::planning_owner(run_id))
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PiRole {
     Partitioner,
@@ -2307,7 +2313,7 @@ sys.stdin.read()
         let preview = tool["result"]["content"][0]["text"].as_str().unwrap();
         assert!(preview.len() <= 100 * 1024);
         assert!(preview.ends_with("\n..."));
-        assert_eq!(tool["result"]["details"]["truncated"], true);
+        assert_eq!(tool["result"]["details"]["displayTruncated"], true);
         assert_eq!(tool["result"]["details"]["exitCode"], 0);
         assert_eq!(tool["durationMs"], 42);
         assert!(output.len() < 400 * 1024, "repeated progress and aggregate copies must not restore giant output");

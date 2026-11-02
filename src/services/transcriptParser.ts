@@ -153,7 +153,11 @@ export function parseTranscriptChunkLines(
       ...matched,
       result: resultText,
       exitCode,
-      truncated: !!(preview.truncated || result?.details?.truncation?.truncated || result?.details?.truncated ||
+      // Only the tool's own truncation (or its visible truncation notice)
+      // belongs here. A bounded UI/log preview and the projection's
+      // `details.truncated` marker must not imply the tool result itself was
+      // truncated.
+      truncated: !!(result?.details?.truncation?.truncated ||
         resultText.includes("[Showing lines") || resultText.includes("Full output:")),
       isError: !!failed,
       status: failed ? "error" as const : "success" as const,

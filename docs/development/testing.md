@@ -37,6 +37,7 @@ Choose a suite only when its scope is relevant. Invoke npm scripts with `npm run
 | --- | --- |
 | `test:frontend` | Frontend state, projection, and transcript logic. |
 | `test:ui` | Mocked-API browser flows; needs Chromium or `GRAPHER_BROWSER_CHANNEL` (Edge on Windows). |
+| `test:macos-browser` | macOS browser → production backend → pinned Pi/Seatbelt → Graph publication and Serial follow-up, using a local model and disposable project; needs Chromium or `GRAPHER_BROWSER_CHANNEL`. Use `npm run test:temporary -- test:macos-browser` to isolate the build. |
 | `test:pi`, `test:extensions` | CLI/SDK transport and [Grapher role/tool contracts](pi-integration.md#role-loading-policy). |
 | `test:native`, `test:prewarm`, `test:planner-bash` | Native launchers, preparation, paths, and Bash semantics. |
 | `test:hardening`, `test:windows-native` | Production HTTP/filesystem checks and Windows local-response execution. |

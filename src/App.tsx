@@ -2095,7 +2095,6 @@ export default function App() {
               const isErr = !!(pEvent.isError || pEvent.result?.isError || (exitCode !== null && exitCode !== 0));
               const truncated = !!(
                 pEvent.result?.details?.truncation?.truncated ||
-                pEvent.result?.details?.truncated ||
                 resText.includes("[Showing lines") ||
                 resText.includes("Full output:")
               );
@@ -3155,12 +3154,27 @@ export default function App() {
       planningAbortControllerRef.current = null;
     }
     try {
-      const runId = state.runId || plannerStream.runId;
-      const payload: Record<string, unknown> = runId ? { runId } : {};
+      // Prefer a durable identity when the provisional conversation has already
+      // received one, so Stop can still address the intended Planner when more
+      // than one Planner is running.
+      const runId = [state.runId, plannerStream.runId]
+        .find(id => id && !id.startsWith("pending-")) || state.runId || plannerStream.runId;
+      const stoppingPlanner = !targetNode && routeType !== "serial" && (isPlanning || backendPlanning);
+      // An initial Planner turn publishes its Run identity before the browser
+      // sees it. The provisional id cannot address that service, so let the
+      // backend pick the active Planner instead of failing the Stop lookup.
+      const payload: Record<string, unknown> = runId && !(stoppingPlanner && runId.startsWith("pending-"))
+        ? { runId }
+        : {};
       if (targetNode) {
         payload.node = targetNode;
       }
-      await runtimeService.control("stop", payload);
+      // The Planner conversation owns only its planning turn. Stopping a node
+      // conversation still interrupts that node; a run-wide pause remains the
+      // topology control. Durable/live recovery can report the Planner without
+      // the local stream flag, so include both sources.
+      const action = stoppingPlanner ? "stop_planner" : "stop";
+      await runtimeService.control(action, payload);
     } catch (e) {
       if (generation === foregroundGeneration.current) console.warn("Stop command failed:", e);
     }
@@ -3173,7 +3187,7 @@ export default function App() {
         stage: "error",
       }));
     }
-  }, [isPlanning, state.runId, plannerStream.runId]);
+  }, [backendPlanning, isPlanning, routeType, state.runId, plannerStream.runId]);
 
   const { nodes, edges } = useGraphElements(
     state,

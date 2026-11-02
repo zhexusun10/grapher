@@ -745,6 +745,41 @@ test("expanding a thinking card while following keeps the conversation at the bo
   } finally { await context.close(); }
 });
 
+test("a tall live thinking card stays at the newest reasoning when the conversation pane resizes", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=live-tool", undefined, "reduce");
+  try {
+    const scroller = page.locator(".initial-query-scroll");
+    await page.getByText("Virtualized message 79", { exact: true }).waitFor();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: Array.from({ length: 40 }, (_, index) => `LIVE_REASONING_${index}\n\n`).join("") } },
+    ]));
+    const card = page.locator(".thinking-card");
+    await card.locator(".thinking-card-body").waitFor();
+    await page.waitForTimeout(200);
+    assert.ok(await scroller.evaluate(scroll => scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight) <= 2,
+      "the live reasoning starts at the bottom");
+    // A shorter conversation pane reflows the card without appending more
+    // reasoning. A follower must move to the new bottom, not stay anchored on
+    // the card header that happened to be at the old viewport top.
+    await page.locator(".workbench").evaluate(element => { element.parentElement.style.height = "540px"; });
+    await page.waitForTimeout(300);
+    const state = await scroller.evaluate(scroll => {
+      const card = scroll.querySelector(".thinking-card");
+      const cardBounds = card.getBoundingClientRect();
+      const scrollBounds = scroll.getBoundingClientRect();
+      return { bottomGap: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+        cardTop: cardBounds.top - scrollBounds.top, cardHeight: cardBounds.height, clientHeight: scroll.clientHeight };
+    });
+    assert.ok(state.bottomGap <= 2, `the resize must keep the newest reasoning visible: ${JSON.stringify(state)}`);
+    assert.ok(state.cardTop < 0,
+      `the newest reasoning, not the card header, must be the focus after the resize: ${JSON.stringify(state)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("Planner and Node Agent tool history both render cards in headless browser", { timeout: 30_000 }, async () => {
   const line = event => JSON.stringify(event) + "\n";
   const toolEvents = [
@@ -1607,7 +1642,21 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
     await bottom.getByRole("button", { name: "Resume", exact: true }).waitFor();
     await bottom.getByRole("button", { name: "Resume", exact: true }).click();
     await page.locator('[data-node-name="broken"] .status', { hasText: "Running" }).waitFor();
-    assert.deepEqual(actions.map(action => action.action), ["pause", "resume", "resume"]);
+    // A paused Run can still project a completed phase after a restart. The
+    // explicit pause state must keep Continue usable instead of latching the
+    // terminal-phase disable rule.
+    current = { ...current, paused: true, canResume: false, phase: "completed",
+      nodes: { task: { ...current.nodes.task, status: "completed" }, broken: { ...current.nodes.broken, status: "completed" } },
+      executions: current.executions.map(item => item.status === "running" ? { ...item, status: "completed", completedAt: 4000 } : item) };
+    const restartContinue = bottom.getByRole("button", { name: "Resume", exact: true });
+    await restartContinue.waitFor();
+    await page.waitForFunction(() => {
+      const button = [...document.querySelectorAll(".graph-bottom button")].find(item => item.textContent?.trim() === "Resume");
+      return button && !button.disabled;
+    });
+    await restartContinue.click();
+    await waitFor(() => actions.length === 4);
+    assert.deepEqual(actions.map(action => action.action), ["pause", "resume", "resume", "resume"]);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

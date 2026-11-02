@@ -135,11 +135,13 @@ test("a publication merger is a card below the terminal layer", () => {
   const card = idle.nodes.find(node => node.id === "merger:publication");
   assert.ok(card, "publication merger card must exist once invoked");
   assert.equal(card!.data.name, "publication merger");
+  assert.equal(card!.data.kind, "merger");
   assert.equal(card!.data.status, "completed");
   assert.equal(card!.data.selected, false);
   // The publication card sits below the last execution layer and receives the
-  // terminal edges only.
+  // terminal edges only. Merger executions use the compact card geometry.
   const terminal = idle.nodes.find(node => node.id === "b")!;
+  assert.ok(card!.width! < terminal.width!);
   assert.ok(card!.position.y > terminal.position.y);
   assert.equal(terminal.data.hasBottom, true);
   const publicationEdges = idle.edges.filter(edge => edge.target === "merger:publication");
@@ -162,7 +164,19 @@ test("a node-composition merger is a selectable card in the topology", () => {
   const state = mergerState();
   const idle = projectGraph(state, "");
   assert.deepEqual(idle.nodes.map(node => node.id).sort(), ["join", "merger:join"]);
-  assert.equal(idle.nodes.find(node => node.id === "merger:join")!.data.status, "failed");
+  const nodeCard = idle.nodes.find(node => node.id === "join")!;
+  const mergerCard = idle.nodes.find(node => node.id === "merger:join")!;
+  assert.equal(mergerCard.data.kind, "merger");
+  assert.equal(mergerCard.data.status, "failed");
+  assert.ok(mergerCard.width! < nodeCard.width!);
+  // Both cards use their vertical midpoint as the node origin, so the compact
+  // merger card is horizontally level with its downstream node's midpoint.
+  assert.deepEqual(mergerCard.origin, nodeCard.origin);
+  assert.equal(mergerCard.position.y, nodeCard.position.y);
+  // The merger edge joins the two card midpoints, so it stays a horizontal line.
+  const mergerEdge = idle.edges.find(edge => edge.id === "merger:join->join")!;
+  assert.equal(mergerEdge.sourceHandle, "merger-right-source");
+  assert.equal(mergerEdge.targetHandle, "merger-left-target");
 
   // Selecting the merger card highlights it without highlighting the node card.
   const mergerSelected = projectGraph(state, "join", "merger-1");
@@ -178,6 +192,19 @@ test("a node-composition merger is a selectable card in the topology", () => {
   const publication = mergerState();
   publication.mergers![0].node = "merger";
   assert.deepEqual(projectGraph(publication, "").nodes.map(node => node.id).sort(), ["join", "merger:publication"]);
+});
+
+test("a merger lane keeps task cards and the merger card from overlapping", () => {
+  const state = mergerState();
+  state.graph = { originalGoal: "merge", nodes: [
+    { name: "a", task: "a" }, { name: "join", task: "join" }, { name: "b", task: "b" },
+  ], edges: [] };
+  const { nodes } = projectGraph(state, "");
+  const byName = new Map(nodes.map(node => [node.id, node]));
+  const a = byName.get("a")!, join = byName.get("join")!, b = byName.get("b")!, merger = byName.get("merger:join")!;
+  assert.ok(a.position.x + a.width! <= merger.position.x, "the previous task keeps its own column");
+  assert.ok(merger.position.x + merger.width! <= join.position.x, "the merger sits between its neighbors");
+  assert.ok(join.position.x + join.width! <= b.position.x, "the downstream task keeps its own column");
 });
 
 test("stale, superseded, invalidated, and removed-route warnings are hidden", () => {

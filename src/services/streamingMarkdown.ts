@@ -1,4 +1,4 @@
-import { marked, type Token } from "marked";
+import { marked, type Token, type Tokens } from "marked";
 import sanitize from "sanitize-html";
 import { shareJson } from "./structuralSharing";
 
@@ -8,7 +8,7 @@ export function sanitizeHtml(html: string): string {
   return sanitize(html, {
     allowedTags: [...sanitize.defaults.allowedTags, "img", "details", "summary", "input"],
     allowedAttributes: {
-      a: ["href", "title"],
+      a: ["href", "title", "target", "rel"],
       img: ["src", "alt", "title", "width", "height"],
       code: ["class"],
       th: ["align"],
@@ -21,6 +21,15 @@ export function sanitizeHtml(html: string): string {
     allowedSchemesByTag: { img: ["http", "https"] },
     allowProtocolRelative: false,
     transformTags: {
+      // A model link must not navigate the Grapher tab away from the current
+      // Run. Open absolute web links outside the app and never trust a
+      // model-supplied target/rel pair; relative links stay in the document.
+      a: (_tag, attributes) => {
+        const { target: _target, rel: _rel, ...attribs } = attributes;
+        return /^https?:\/\//i.test(attribs.href || "")
+          ? { tagName: "a", attribs: { ...attribs, target: "_blank", rel: "noopener noreferrer" } }
+          : { tagName: "a", attribs };
+      },
       // Preserve GFM task lists without allowing interactive HTML inputs.
       input: (_tag, attributes) => ({ tagName: "input", attribs: {
         type: "checkbox", disabled: "",
@@ -29,6 +38,64 @@ export function sanitizeHtml(html: string): string {
     },
   });
 }
+
+// Marked's GFM autolink consumes every non-space character. In Chinese prose
+// that turns the sentence punctuation and following words into the URL. Stop at
+// Unicode punctuation/symbols, and at CJK text unless it continues a raw path
+// or query segment (for example /wiki/中文 or ?q=中文).
+const unicodeLinkBoundary = /[\p{P}\p{S}\p{Z}]/u;
+const unicodeSegmentDelimiter = /[/=?&#.]/;
+
+function trimBareAutolink(token: Tokens.Link): Tokens.Link {
+  if (!token.autolink) return token;
+  const raw = token.raw;
+  let end = raw.length;
+  let inUnicodeSegment = false;
+  for (let index = 0; index < raw.length;) {
+    const codePoint = raw.codePointAt(index)!;
+    if (codePoint < 0x80) { index++; continue; }
+    const char = String.fromCodePoint(codePoint);
+    if (unicodeLinkBoundary.test(char)) { end = index; break; }
+    if (!inUnicodeSegment && unicodeSegmentDelimiter.test(raw[index - 1] ?? "")) inUnicodeSegment = true;
+    if (!inUnicodeSegment) { end = index; break; }
+    index += char.length;
+  }
+  if (end === raw.length) return token;
+  const text = raw.slice(0, end);
+  if (!/^(?:https?:\/\/|ftp:\/\/|www\.)/i.test(text)) return token;
+  const prefix = token.href.endsWith(raw) ? token.href.slice(0, -raw.length) : "";
+  return { ...token, raw: text, text, href: prefix + text, tokens: [{ type: "text", raw: text, text }] };
+}
+
+// Keep GFM autolinks intact for Latin prose, but give Chinese sentences a real
+// boundary. The cache and a full marked parse share this tokenizer so streaming
+// output remains byte-for-byte identical to a one-shot render.
+function tokenizeBareLink(this: InstanceType<typeof marked.Tokenizer<string, string>>, src: string): Tokens.Link | undefined {
+  const match = this.rules.inline.url.exec(src);
+  if (!match) return;
+  let text = match[0];
+  let href: string;
+  if (match[2] === "@") {
+    href = "mailto:" + text;
+  } else {
+    // Reproduce marked's trailing-ASCII-punctuation backpedal.
+    let previous: string;
+    do {
+      previous = match[0];
+      match[0] = this.rules.inline._backpedal.exec(match[0])?.[0] ?? "";
+    } while (previous !== match[0]);
+    text = match[0];
+    const prefix = match[1] === "www." ? "http://" : "";
+    const bounded = trimBareAutolink({ type: "link", raw: text, text, href: prefix + text, autolink: true,
+      tokens: [{ type: "text", raw: text, text }] });
+    text = bounded.text;
+    href = bounded.href;
+  }
+  if (!text) return;
+  return { type: "link", raw: text, text, href, autolink: true, tokens: [{ type: "text", raw: text, text }] };
+}
+
+marked.use({ tokenizer: { url: tokenizeBareLink } });
 
 export function repairStreamingMarkdown(text: string): string {
   const fences = /^(\s*)(`{3,}|~{3,})/mg;

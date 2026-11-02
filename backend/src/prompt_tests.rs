@@ -393,6 +393,51 @@ fn topology_pause_and_node_stop_recover_unlaunched_workers_without_a_phantom_ses
 
 #[cfg(feature = "fixture")]
 #[test]
+fn planner_conversation_stop_does_not_pause_running_nodes_and_restart_offers_continue() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = crate::fixture::repository(temp.path()).unwrap();
+    let root = temp.path().join("runtime");
+    let mut runtime = Runtime::open(&root).unwrap();
+    runtime.create(Graph {
+        original_goal: "keep nodes running".into(),
+        nodes: ["left", "right"].into_iter().map(|name| Node {
+            name: name.into(), task: name.into(),
+        }).collect(),
+        edges: vec![],
+    }, serde_json::from_value(serde_json::json!({
+        "repository": repository, "model": "mock/model", "engine": "fixture",
+        "maxParallel": 2, "maxFeedback": 0,
+    })).unwrap()).unwrap();
+    runtime.approve().unwrap();
+    assert_eq!(runtime.jobs().unwrap().len(), 2);
+    let run_id = runtime.state.run_id.clone();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(true), extension: temp.path().join("unused.ts"),
+    });
+    let stopped = control("stop_planner".into(), None, None, Some(run_id.clone()), None, None, &service).unwrap();
+    assert!(!stopped.paused, "stopping the Planner conversation must not pause the Run");
+    assert!(!stopped.stop_requested, "it is not a run-wide stop");
+    assert!(stopped.execution_stop_requests.is_empty(), "node agents keep running");
+    assert!(stopped.nodes.values().all(|node| node.status == "running"));
+    assert!(service.planning.load(Ordering::SeqCst), "the owning Planner turn observes cancellation and clears its own flag");
+    crate::process_control::clear_owner_stop(&crate::process_control::planning_owner(&run_id));
+    drop(service);
+
+    // Restart interrupts the still-running node attempts. The Run remains a
+    // recoverable paused conversation, so Continue is offered rather than
+    // being stranded without a failed or paused recovery root.
+    let reopened = Runtime::open(&root).unwrap();
+    assert_eq!(reopened.state.run_id, run_id);
+    assert!(reopened.state.paused);
+    assert!(reopened.state.can_resume(), "restart keeps Continue available");
+    assert!(reopened.state.nodes.values().all(|node| node.status == "failed"));
+    CANCELLED_PLANNING.get_or_init(Default::default).lock().unwrap().remove(&run_id);
+}
+
+#[cfg(feature = "fixture")]
+#[test]
 fn failed_node_instruction_control_starts_a_new_running_execution() {
     for route in ["graph", "serial"] {
         let temp = tempfile::TempDir::new().unwrap();

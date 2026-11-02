@@ -482,3 +482,80 @@ fn interrupted_planner_workspace_is_snapshotted_once_before_recovery() {
     assert_eq!(runtime.state.events.iter().filter(|e| matches!(e.kind, EventKind::PlannerWorkspaceSnapshotted { .. })).count(), 1);
     assert_eq!(runtime.state.events.iter().filter(|e| matches!(e.kind, EventKind::PlannerTurnAborted { .. })).count(), 1);
 }
+
+#[test]
+fn planner_conversation_stop_undoes_a_revision_drain_pause_and_keeps_scheduling() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("source");
+    fs::create_dir(&repo).unwrap();
+    fs::write(repo.join("base.txt"), "source").unwrap();
+    crate::workspace::git(&repo, &["init", "-q"]).unwrap();
+    crate::workspace::git(&repo, &["add", "-A"]).unwrap();
+    crate::workspace::git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
+    let script = temp.path().join("planner.mjs");
+    fs::write(&script, r#"
+import fs from 'node:fs';
+for await (const _ of process.stdin) {}
+fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({
+  originalGoal: 'frontier',
+  nodes: [{ name: 'root', task: 'root revised' }, { name: 'join', task: 'join' }],
+  edges: [{ from: 'root', to: 'join', feedback: false }],
+}));
+console.log(JSON.stringify({ type: 'message_end', message: {
+  role: 'assistant', content: [{ type: 'text', text: 'revised' }],
+} }));
+"#).unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repo, "engine": "pi", "piCommand": "node", "piArgs": [script],
+        "model": "mock/workspace", "maxParallel": 2, "postTaskReview": false,
+    })).unwrap();
+    let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+    runtime.create(Graph {
+        original_goal: "frontier".into(),
+        nodes: ["root", "join"].into_iter()
+            .map(|name| Node { name: name.into(), task: name.into() }).collect(),
+        edges: vec![Edge { from: "root".into(), to: "join".into(), feedback: false }],
+    }, config.clone()).unwrap();
+    runtime.set_route("graph").unwrap();
+    runtime.approve().unwrap();
+    let running = runtime.jobs().unwrap().remove(0);
+    crate::workspace::prepare(&repo, Path::new(&running.execution.worktree), &running.execution.before, &[]).unwrap();
+    runtime.emit(EventKind::Prepared {
+        execution_id: running.execution.id.clone(), head: running.execution.before.clone(),
+    }).unwrap();
+    let run_id = runtime.state.run_id.clone();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime), driving: AtomicBool::new(true),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()), planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let planning_service = service.clone();
+    let planning_run = run_id.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let planner = std::thread::spawn(move || {
+        let result = plan_goal_internal("revise root".into(), config, Some("graph"), None,
+            Some(planning_run), &planning_service, |_| {}, |_| {}, |_| {});
+        let _ = result_tx.send(result.err().map(|error| error.0));
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Ok(error) = result_rx.try_recv() {
+            panic!("Planner revision ended before the drain pause: {error:?}");
+        }
+        let paused = service.runtime.lock().unwrap().state.paused;
+        if paused { break; }
+        assert!(std::time::Instant::now() < deadline, "Planner revision never paused to drain the running node");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    control("stop_planner".into(), None, None, Some(run_id.clone()), None, None, &service).unwrap();
+    service.runtime.lock().unwrap().finish(&running.execution, Err("node interrupted by test".into())).unwrap();
+    let _ = planner.join().unwrap();
+    assert!(result_rx.recv().unwrap().is_some(), "Stop must abort the revision before it commits");
+    let runtime = service.runtime.lock().unwrap();
+    assert!(!runtime.state.paused, "Planner conversation Stop must undo the internal drain pause");
+    assert!(!runtime.state.stop_requested);
+    assert_eq!(runtime.state.nodes["root"].status, "failed");
+    drop(runtime);
+    assert!(!service.planning.load(Ordering::SeqCst));
+    assert!(!planner_conversation_stopped(&run_id).unwrap());
+}

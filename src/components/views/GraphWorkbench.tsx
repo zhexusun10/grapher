@@ -923,6 +923,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const shouldFollowOutput = useStableCallback(() => !isUnrunNode && !isUserScrolledUpRef.current);
   const lastScrollTopRef = useRef(0);
   const prevScrollHeightRef = useRef(0);
+  // A pane resize changes how much of the newest output is visible without
+  // changing scrollHeight. Followers must re-pin the bottom instead of leaving
+  // a tall streaming card anchored at its header.
+  const prevViewportRef = useRef<{ width: number; height: number } | null>(null);
   const prevViewKeyRef = useRef("");
   const suppressAutoScrollRef = useRef(false);
   const resetChatScrollFrameRef = useRef<number | null>(null);
@@ -1497,6 +1501,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       if (!el) return;
 
       const currentScrollHeight = el.scrollHeight;
+      const viewport = { width: el.clientWidth, height: el.clientHeight };
+      const previousViewport = prevViewportRef.current;
+      const viewportResized = previousViewport !== null &&
+        (previousViewport.width !== viewport.width || previousViewport.height !== viewport.height);
+      prevViewportRef.current = viewport;
       const heightGrew = currentScrollHeight > prevScrollHeightRef.current + 2;
       const heightShrankWhilePreparing = isPreparingConversationRef.current &&
         currentScrollHeight < prevScrollHeightRef.current - 2;
@@ -1506,8 +1515,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
       // Keep the newest output visible while content arrives. This includes the
       // initial preparation window: returning early there left a freshly opened
-      // history stuck at the top until the user scrolled manually.
-      if ((heightGrew || heightShrankWhilePreparing) && !latestScrollRef.current && (shouldFollowOutput() || isScrollingToBottomRef.current)) {
+      // history stuck at the top until the user scrolled manually. A viewport
+      // resize re-wraps rows without changing scrollHeight, so a follower must
+      // be re-pinned here as well; otherwise a tall streaming card can remain
+      // anchored at its title after the conversation pane changes size.
+      if ((heightGrew || heightShrankWhilePreparing || viewportResized) && !latestScrollRef.current &&
+          (shouldFollowOutput() || isScrollingToBottomRef.current)) {
         el.scrollTop = currentScrollHeight;
         lastScrollTopRef.current = el.scrollTop;
       } else if (!isUserScrolledUpRef.current && !latestScrollRef.current) {
@@ -2986,7 +2999,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           // following 继续 would just un-pause it without
                           // continuing any node. The backend recovery hint
                           // identifies failed attempts that Continue can retry.
-                          disabled={locked || publishing || publicationFailed || state.phase === "completed" || graphPhase === "pausing"
+                          disabled={locked || publishing || publicationFailed || (state.phase === "completed" && !canContinue) || graphPhase === "pausing"
                             || (graphPhase === "needs_attention" && !canContinue)}
                           title={graphPhase === "needs_attention" && !canContinue ? t("执行已停止；请在失败节点的对话中发送介入指令以继续") : undefined}
                           onClick={() => {

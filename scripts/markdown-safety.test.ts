@@ -48,3 +48,23 @@ test("Markdown allowlist preserves useful formatting, code, links, images and in
   assert.match(output, /type="checkbox" disabled/);
   assert.equal(sanitizeHtml('<input type="text" autofocus onfocus="evil()">'), '<input type="checkbox" disabled />');
 });
+
+test("Markdown links open outside the app and cannot be retargeted by model HTML", () => {
+  const cache = new StreamingMarkdownCache();
+  const output = cache.render('[文档](https://example.com/docs "标题") and [local](/workspace/file.md)', false);
+  assert.match(output, /<a href="https:\/\/example.com\/docs" title="标题" target="_blank" rel="noopener noreferrer">文档<\/a>/);
+  assert.match(output, /<a href="\/workspace\/file.md">local<\/a>/);
+  assert.equal(sanitizeHtml('<a href="https://example.com" target="_self" rel="opener">x</a>'),
+    '<a href="https://example.com" target="_blank" rel="noopener noreferrer">x</a>');
+});
+
+test("GFM autolinks stop before Chinese punctuation and prose while keeping raw URL paths", () => {
+  const cache = new StreamingMarkdownCache();
+  const output = cache.render("参考 https://example.com/path。下一句，详见https://example.com/a即可使用\n\n"
+    + "https://zh.wikipedia.org/wiki/中文。\n\nwww.example.com，更多", false);
+  assert.match(output, /<a href="https:\/\/example.com\/path"[^>]*>https:\/\/example.com\/path<\/a>。下一句/);
+  assert.match(output, /<a href="https:\/\/example.com\/a"[^>]*>https:\/\/example.com\/a<\/a>即可使用/);
+  assert.match(output, /href="https:\/\/zh.wikipedia.org\/wiki\/%E4%B8%AD%E6%96%87"/);
+  assert.match(output, /<a href="http:\/\/www.example.com"[^>]*>www.example.com<\/a>，更多/);
+  assert.doesNotMatch(output, /%E3%80%82|%EF%BC%8C|%E5%8D%B3%E5%8F%AF/);
+});

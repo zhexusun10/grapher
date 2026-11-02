@@ -1600,6 +1600,37 @@ button.session-label-toggle:focus-visible {
   white-space: nowrap;
 }
 
+/* Merger executions are auxiliary topology cards. Keep them readable without
+   reserving the full planner-task card body for their short summary. */
+.task-node.merger {
+  width: 220px;
+  min-height: 0;
+  padding: 13px 15px;
+}
+
+.task-node.merger .node-heading strong {
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.task-node.merger p {
+  min-height: 0;
+  margin: 6px 0 10px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.task-node.merger .node-footer {
+  padding-top: 8px;
+}
+
+.task-node.merger .node-footer .status,
+.task-node.merger .node-attempts-badge {
+  font-size: 11px;
+  line-height: 1.4;
+}
 
 .node-feedback-exhausted {
   margin-top: 12px;

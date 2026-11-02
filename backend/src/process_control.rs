@@ -110,6 +110,12 @@ fn stopped_owners() -> &'static Mutex<BTreeSet<String>> {
 pub(crate) fn execution_owner(run: &str, node: &str, execution: &str) -> String {
     format!("{run}:node:{node}:execution:{execution}")
 }
+/// Planning owns a dedicated process boundary. Cancelling one conversation's
+/// Planner turn must not terminate node agents or mergers. Run-wide cleanup
+/// still matches the `{run}:` prefix used by `terminate_owner`.
+pub(crate) fn planning_owner(run: &str) -> String {
+    format!("{run}:planner")
+}
 pub(crate) fn stop_owner(owner: &str) -> Result<(), String> {
     stopped_owners().lock().map_err(|e| e.to_string())?.insert(owner.into());
     terminate_owner(owner);
@@ -905,6 +911,42 @@ mod tests {
         assert!(second.try_wait().unwrap().is_none());
         second_tree.terminate();
         let _ = second.wait();
+    }
+
+    #[test]
+    fn stopping_planning_owner_leaves_node_execution_running() {
+        let spawn = |owner: &str| {
+            let mut command = if cfg!(windows) {
+                let mut command = Command::new("cmd");
+                command.args(["/C", "ping 127.0.0.1 -n 10 > NUL"]);
+                command
+            } else {
+                let mut command = Command::new("sh");
+                command.args(["-c", "sleep 10"]);
+                command
+            };
+            configure_command(&mut command);
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let child = command.spawn().unwrap();
+            let tree = with_owner(owner, || track(&child).unwrap());
+            (child, tree)
+        };
+        let run = "planning-owner-test";
+        let planning = planning_owner(run);
+        let execution = execution_owner(run, "worker", "attempt");
+        let (mut planner, _planner_tree) = spawn(&planning);
+        let (mut worker, worker_tree) = spawn(&execution);
+        stop_owner(&planning).unwrap();
+        assert!(!planner.wait().unwrap().success());
+        assert!(worker.try_wait().unwrap().is_none(), "planning cancellation must not touch a node agent");
+        // A run-wide termination still matches the planning owner by prefix.
+        terminate_owner(run);
+        assert!(!worker.wait().unwrap().success());
+        worker_tree.terminate();
+        clear_owner_stop(&planning);
     }
 
     #[test]

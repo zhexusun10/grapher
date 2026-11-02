@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -34,9 +34,13 @@ test('backend Planner target rebinds cwd, HOME/cache/Git and native Bash togethe
     configurePlannerWorkspace(a, project, project, JSON.stringify({ b: {
       requestedNode: 'b', actualNode: 'b', executionId: 'execution-b', workspace: b, runtimeEnvironment: be,
     }, broken: { requestedNode: 'broken', actualNode: 'broken', executionId: 'broken', workspace: a } }));
-    switchPlannerWorkspace('b');
-    assert.equal(process.cwd(), b);
-    assert.equal(plannerWorkspaceState().workspace, b);
+    // Keep the target's original spelling as input. On macOS /var is an
+    // alias for /private/var, while Pi and the switch use the real cwd.
+    const actualB = realpathSync.native(b);
+    const target = switchPlannerWorkspace('b');
+    assert.equal(target.workspace, actualB);
+    assert.equal(process.cwd(), actualB);
+    assert.equal(plannerWorkspaceState().workspace, actualB);
     assert.equal(readFileSync('project-file', 'utf8'), 'b', 'arbitrary filesystem APIs follow the selection');
     const env = managedBashOptions({ env: { ...process.env, HOME: project, XDG_CACHE_HOME: project, GIT_CONFIG_GLOBAL: 'wrong' } }).env;
     for (const [key, value] of Object.entries(be)) assert.equal(env[key], value);
@@ -49,7 +53,7 @@ test('backend Planner target rebinds cwd, HOME/cache/Git and native Bash togethe
     assert.equal(output.status, 0, output.stderr);
     assert.equal(output.stdout.trim(), 'b');
     assert.throws(() => switchPlannerWorkspace('broken'), /Invalid backend workspace runtime binding/);
-    assert.equal(process.cwd(), b, 'a refused binding must not partially switch cwd');
+    assert.equal(process.cwd(), actualB, 'a refused binding must not partially switch cwd');
     assert.equal(process.env.HOME, be.HOME);
   } finally {
     process.chdir(original);
