@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useReducedMotion } from "motion/react";
 
 /** 唯一的速度表，单位 ms/字。队列越积压越快，空闲时逐字慢打。 */
@@ -8,10 +8,6 @@ const MAX_STREAM_PER_FRAME = 6;
 /** 后端结束后每帧最多清空的积压字符数（收尾档，比流式略快但仍逐段打出）。 */
 const DRAIN_PER_FRAME = 20;
 
-// 客户端用 layout effect 在首帧绘制前把已存在的流式内容重置为空；服务端渲染
-// （测试里的 renderToStaticMarkup）不执行 effect，因此首帧仍包含完整文本。
-const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
-
 /**
  * 打字机式逐字揭示流式模型输出：生产者-消费者模型。
  *
@@ -19,7 +15,7 @@ const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : us
  * 消费者：requestAnimationFrame 循环，按队列积压量弹性调速取字。
  *
  * 关键点：
- * - 内容进入时从空开始逐字打出，而不是整段蹦出；
+ * - 挂载时已经存在的内容立即显示（历史记录不重播打字机），只逐字揭示之后新增的字符；
  * - 队列积压时自动加速（流式最高 6 字/帧），空闲时放慢（15ms/字）；
  * - 后端结束后继续以 20 字/帧清空剩余字符，绝不在结束时直接跳到完整文本，
  *   因此不会出现收尾时的整屏闪烁；
@@ -33,14 +29,13 @@ export function useSmoothStreamText(targetText: string, isStreaming: boolean, en
   const displayedRef = useRef(targetText);
   const queueRef = useRef<string[]>([]);
   const queueIndexRef = useRef(0);
-  const enqueuedRef = useRef(isStreaming ? "" : targetText);
+  const enqueuedRef = useRef(targetText);
   const targetRef = useRef(targetText);
   const streamingRef = useRef(isStreaming);
   const enabledRef = useRef(enabled);
   const reduceMotionRef = useRef(Boolean(reduceMotion));
   const rafRef = useRef<number | null>(null);
   const lastTickRef = useRef(0);
-  const initializedRef = useRef(false);
 
   targetRef.current = targetText;
   streamingRef.current = isStreaming;
@@ -139,24 +134,6 @@ export function useSmoothStreamText(targetText: string, isStreaming: boolean, en
       ensureLoop();
     }
   }, [targetText, ensureLoop]);
-
-  // 挂载时如果已经是流式中（组件可能带着首批内容挂载），从空开始逐字打出。
-  // StrictMode 会 setup→cleanup→setup，用 ref 保证只初始化一次，避免重复入队。
-  useIsomorphicLayoutEffect(() => {
-    if (initializedRef.current) return;
-    initializedRef.current = true;
-    if (!streamingRef.current || reduceMotionRef.current) return;
-    queueRef.current = [];
-    queueIndexRef.current = 0;
-    enqueuedRef.current = "";
-    displayedRef.current = "";
-    setDisplayedText("");
-    if (targetRef.current) {
-      for (const char of targetRef.current) queueRef.current.push(char);
-      enqueuedRef.current = targetRef.current;
-      ensureLoop();
-    }
-  }, [ensureLoop]);
 
   // 可见性 / 减少动态效果开关。
   useEffect(() => {

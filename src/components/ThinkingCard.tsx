@@ -128,8 +128,17 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       userScrolledUpRef.current = true;
     };
 
+    // Only lock the inner follow when this gesture can actually move the card
+    // body. A short card forwards the same wheel/touch/key event to the
+    // conversation; locking here would then suppress the card's own follow long
+    // after the reader returned to the conversation bottom.
+    const cardBodyCanScroll = () => {
+      const body = bodyRef.current;
+      return !!body && body.scrollHeight > body.clientHeight + 1;
+    };
+
     const handleWheel = (event: React.WheelEvent) => {
-      if (event.deltaY < -0.5) stopFollowingInsideCard();
+      if (event.deltaY < -0.5 && cardBodyCanScroll()) stopFollowingInsideCard();
     };
 
     const handleTouchStart = (event: React.TouchEvent) => {
@@ -140,13 +149,13 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       const touch = event.touches[0];
       if (!touch) return;
       // Finger moving down scrolls the reasoning viewport toward older lines.
-      if (touch.clientY > lastTouchYRef.current + 1) stopFollowingInsideCard();
+      if (touch.clientY > lastTouchYRef.current + 1 && cardBodyCanScroll()) stopFollowingInsideCard();
       lastTouchYRef.current = touch.clientY;
     };
 
     const handleKeyDown = (event: React.KeyboardEvent) => {
-      if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) {
-        stopFollowingInsideCard();
+      if ((event.key === " " && event.shiftKey) || ["ArrowUp", "PageUp", "Home"].includes(event.key)) {
+        if (cardBodyCanScroll()) stopFollowingInsideCard();
       }
     };
 

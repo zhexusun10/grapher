@@ -1236,9 +1236,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     };
     const onContentGrowth = () => {
       if (suppressAutoScrollRef.current || latestScrollRef.current || !shouldFollowOutput()) return;
-      el.scrollTop = el.scrollHeight;
+      const height = el.scrollHeight;
+      if (height - el.scrollTop - el.clientHeight <= 2) return;
+      el.scrollTop = height;
       lastScrollTopRef.current = el.scrollTop;
-      prevScrollHeightRef.current = el.scrollHeight;
+      prevScrollHeightRef.current = height;
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.target as HTMLElement).closest("input, textarea, [contenteditable=true]")) return;

@@ -878,6 +878,36 @@ test("streamed reasoning cannot override an inner reading gesture before its scr
   } finally { await context.close(); }
 });
 
+test("scrolling over a short reasoning card does not leave its future content unfollowed", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node", undefined, "reduce");
+  try {
+    await page.getByText("Virtualized message 79", { exact: true }).waitFor();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "SHORT_REASONING" } },
+    ]));
+    const body = page.locator(".thinking-card-body");
+    await body.waitFor();
+    await page.waitForTimeout(150);
+    assert.ok(await body.evaluate(element => element.scrollHeight <= element.clientHeight + 1),
+      "the initial card is too short to scroll internally");
+    await body.hover();
+    await page.mouse.wheel(0, -160);
+    await page.waitForTimeout(200);
+    // The wheel moved the conversation, not the short card. It must not lock
+    // the card's own follow once more reasoning makes the body scrollable.
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: Array.from({ length: 60 }, (_, index) => `LATER_REASONING_${index}\n\n`).join("") } },
+    ]));
+    await page.waitForTimeout(300);
+    const gap = await body.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
+    assert.ok(gap <= 2, `the card must resume following its own newest reasoning: ${gap}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("final text after a reasoning card becomes the conversation's bottom focus", { timeout: 45_000 }, async () => {
   const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node", undefined, "no-preference");
   try {
@@ -923,6 +953,36 @@ test("final text after a reasoning card becomes the conversation's bottom focus"
     assert.equal(state.finalVisible, true, `the final answer must be visible: ${JSON.stringify(state)}`);
     assert.equal(state.workingVisible, true, `the working footer must stay visible: ${JSON.stringify(state)}`);
     assert.equal(state.workingAboveComposer, true, `the working footer must stay above the composer: ${JSON.stringify(state)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a live transcript with accumulated reasoning shows it without replaying the typewriter", { timeout: 30_000 }, async () => {
+  const history = Array.from({ length: 80 }, (_, index) => JSON.stringify({ type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: `Virtualized message ${index}` }] } }) + "\n").join("");
+  const reasoning = Array.from({ length: 120 }, (_, index) => `ACCUMULATED_REASONING_${index} existing detail`).join("\n");
+  const content = history +
+    JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } }) + "\n" +
+    JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: reasoning } }) + "\n";
+  const total = Buffer.byteLength(content);
+  const { context, page, errors } = await fixture("latestScroll&layout=live-paged&view=node", async (route, command, body) => {
+    if (command !== "get_execution_output") return false;
+    await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+      content: (body.offset ?? 0) === 0 ? content : "", startOffset: body.offset ?? 0,
+      nextOffset: total, totalBytes: total, complete: false, status: "running" } } });
+    return true;
+  }, "no-preference");
+  try {
+    const body = page.locator(".thinking-card-body");
+    await body.waitFor();
+    const first = await body.evaluate(element => element.innerText.length);
+    await page.waitForTimeout(900);
+    const later = await body.evaluate(element => element.innerText.length);
+    assert.ok(first > reasoning.length * 0.8,
+      `accumulated reasoning must render immediately, not type from empty: ${first}/${reasoning.length}`);
+    assert.ok(later <= first + 5,
+      `existing history must not keep typing after mount: ${first} -> ${later}`);
+    assert.match(await page.locator(".thinking-card").getAttribute("class"), /streaming/);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-02
+
 ### Added
 
 - Right-click empty space in a Graph's execution topology to add a node directly, including optional predecessor, target and feedback edges. The backend validates and persists the change in the same Run; connecting completed work requires confirmation before affected results can be rerun, and paused Runs remain paused.
@@ -14,12 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Upgrade the bundled `pi-better-web-search` extension from 0.1.7 to 0.1.9: DeepSeek now rejects queries over its 128-character limit with an actionable error instead of silently shortening them, provider diversity and failure cooldowns are applied before the 12-search/6-fetch attempt caps, model-access 403s fall back to sibling models while transport failures keep provider-wide handling, and provider error bodies and model-facing error text are bounded.
+- Merger executions now use compact cards in a reserved lane beside their target, with execution rows aligned on their midpoints so Merger cards, feedback handles and their connecting edges no longer overlap neighboring task cards.
 
 ### Fixed
 
 - Stopping the Planner conversation now cancels only its in-flight Planner/Partitioner turn; running node agents and mergers keep working, and the Run is not paused. A temporary dispatch pause taken to drain a revision is undone so deferred work resumes. A Run that is explicitly paused remains able to use **Continue** after a backend restart even when its projected phase is already `completed`.
 - Markdown replies now show hyperlinks as links and open absolute web links in a new tab with `noopener noreferrer` instead of navigating the Grapher tab away. GFM bare URLs in Chinese prose stop before sentence punctuation or following text, while percent-encoded and raw CJK URL paths remain intact.
 - While a tall expanded Chain of Thought card is streaming, its own viewport and the surrounding conversation now scroll independently: the card body follows its latest reasoning line, while the conversation stays at the bottom of the page instead of being dragged along by inner text or a resize. Wheel, touch and keyboard scrolling inside the card no longer counts as scrolling the conversation up, and an upward reading gesture inside the card pauses the card's own follow before the next streamed line can snap the reader back to the latest reasoning. Every streamed reasoning line re-checks the conversation's working footer, and the final answer arriving after a reasoning card explicitly re-pins the conversation, so the card cannot remain the focus or leave the working footer below the viewport; a reader who deliberately scrolls the conversation itself up is still left in place.
+- Reopening a transcript whose last row is a Chain of Thought card no longer replays the already-recorded reasoning through the typewriter from empty. Existing history renders immediately, and only characters streamed after mount use the typewriter effect.
+- Tool cards no longer mark a result or argument block as truncated merely because the UI retained its bounded 100 KiB display preview; the truncated state now reflects truncation reported by the tool itself.
+- Feedback instructions delivered to a feedback target no longer include a synthetic sender-node prefix; the target receives the review text and its own copy of the applicable project results.
 
 ## [1.3.4] - 2026-11-02
 
