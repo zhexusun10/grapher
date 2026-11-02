@@ -5,6 +5,7 @@ import type { ChatMessageVersion, ImageAttachment, FileAttachment } from "../../
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { parseMessageAttachmentsAndText, AttachmentCard } from "../../utils/attachmentUtils";
+import { notifyTranscriptContentGrowth } from "../../services/transcriptScroll";
 
 function copyFallback(text: string, onSuccess: () => void) {
   try {
@@ -28,7 +29,17 @@ function copyFallback(text: string, onSuccess: () => void) {
 export const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: boolean }> = React.memo(
   ({ content, isStreaming }) => {
     const smoothText = useSmoothStreamText(content, isStreaming);
-    return <MarkdownRenderer content={smoothText} isStreaming={isStreaming} />;
+    const bubbleRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+      if (!smoothText && !isStreaming) return;
+      // The final answer can start below a settled reasoning card whose row is
+      // already at its measured height. Explicitly re-check the conversation's
+      // bottom so the answer, not the card above it, becomes the visible focus.
+      notifyTranscriptContentGrowth(bubbleRef.current);
+    }, [smoothText, isStreaming]);
+    return <div ref={bubbleRef} style={{ display: "contents" }}>
+      <MarkdownRenderer content={smoothText} isStreaming={isStreaming} />
+    </div>;
   }
 );
 StreamingAssistantBubble.displayName = "StreamingAssistantBubble";

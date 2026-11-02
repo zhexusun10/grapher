@@ -958,6 +958,41 @@ fn save_graph(
     Ok(runtime.state.clone())
 }
 
+fn add_manual_node(
+    run_id: String,
+    request: crate::runtime::ManualNodeRequest,
+    service: &Arc<Service>,
+) -> Result<Snapshot, String> {
+    // Match the source-lock -> Run-lock ordering used by Planner revisions.
+    // The source snapshot is captured atomically with the graph event.
+    let repository = {
+        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+        if runtime.state.run_id != run_id {
+            return Err("Run changed while adding the node".into());
+        }
+        runtime.source_repository()?.ok_or("Missing config")?
+    };
+    let lock = source_lock(&repository)?;
+    let _source_guard = lock.lock().map_err(|error| error.to_string())?;
+    // Planner claims its flag before acquiring this mutex to read the graph.
+    // Checking it under the mutex either rejects an active turn or commits
+    // before a newly starting Planner can capture its revision base.
+    let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+    if service.planning.load(Ordering::SeqCst) {
+        return Err("Wait for the Planner to finish before adding a node".into());
+    }
+    if runtime.state.run_id != run_id || runtime.source_repository()?.as_ref() != Some(&repository) {
+        return Err("Run changed while adding the node".into());
+    }
+    runtime.add_manual_node(request)?;
+    let snapshot = runtime.state.clone();
+    drop(runtime);
+    if snapshot.approved && !snapshot.paused && snapshot.phase == "running" {
+        drive(service.clone());
+    }
+    Ok(snapshot)
+}
+
 #[cfg(test)]
 fn save_config(config: Config, service: &Arc<Service>) -> Result<Bootstrap, String> {
     save_config_projection(config, None, service, false)
@@ -5284,6 +5319,9 @@ pub fn dispatch(
                 argument(&body, "runId")?,
                 service,
             )?),
+            "add_manual_node" => Some(add_manual_node(
+                argument(&body, "runId")?, argument(&body, "request")?, service,
+            )?),
             "plan_goal" => Some(plan_goal(
                 argument(&body, "goal")?,
                 argument(&body, "config")?,
@@ -5408,6 +5446,9 @@ pub fn dispatch(
             argument(&body, "config")?,
             argument(&body, "runId")?,
             service,
+        )?),
+        "add_manual_node" => to_value(add_manual_node(
+            argument(&body, "runId")?, argument(&body, "request")?, service,
         )?),
         "save_config" => to_value(save_config_projection(
             argument(&body, "config")?,
@@ -5535,6 +5576,7 @@ pub fn dispatch(
                 | "history"
                 | "load_run"
                 | "save_graph"
+                | "add_manual_node"
                 | "plan_goal"
                 | "control"
                 | "reset_workspace"
@@ -5843,6 +5885,7 @@ fn api_service(
         | "edit_node"
         | "edit_planner"
         | "save_graph"
+        | "add_manual_node"
         | "save_config"
         | "delete_run"
         | "get_execution_output"

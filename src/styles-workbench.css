@@ -280,6 +280,45 @@
   min-height: 0;
 }
 
+.create-node-form {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 24px 28px;
+}
+
+.create-node-form .form-field input,
+.create-node-form .form-field select,
+.create-node-form .form-field textarea {
+  background: #fff;
+}
+
+.create-node-form .form-field input,
+.create-node-form .form-field select {
+  box-sizing: border-box;
+  height: 36px;
+}
+
+.create-node-form .form-field textarea {
+  box-sizing: border-box;
+  min-height: 120px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.create-node-description, .create-node-hint, .create-node-error {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.create-node-error { color: var(--status-danger); }
+.create-node-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
 /* 节点系统任务目标卡片 (Node Task Directive Card) */
 .node-task-card {
   width: 100%;

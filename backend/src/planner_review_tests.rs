@@ -11,6 +11,14 @@ fn wait(service: &Arc<Service>, predicate: impl Fn(&Snapshot) -> bool) -> Snapsh
     }
 }
 
+fn wait_for_driver_exit(service: &Arc<Service>) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while service.driving.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "driver did not settle");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn setup(enabled: bool, auto: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>) {
     let temp = tempfile::tempdir().unwrap();
     let repo = crate::fixture::repository(temp.path()).unwrap();
@@ -68,6 +76,52 @@ if (process.env.GRAPHER_MODE === 'planner') {
         extension: temp.path().join("unused.ts"),
     });
     (temp, repo, service)
+}
+
+#[test]
+fn manual_node_after_publication_reuses_the_run_and_drives_with_fresh_source() {
+    let (_temp, repo, service) = setup(false, false);
+    drive(service.clone());
+    let before = wait(&service, |state| state.phase == "completed" && state.nodes["first"].status == "completed");
+    fs::write(repo.join("review.txt"), "fresh source").unwrap();
+    let revised = dispatch(&service, "add_manual_node", serde_json::json!({
+        "runId": before.run_id, "detail": "metadata",
+        "request": { "node": { "name": "second", "task": "second" }, "from": "first",
+            "to": null, "feedback": false, "confirmedCompleted": [] }
+    })).unwrap();
+    assert_eq!(revised["runId"], before.run_id);
+    assert_eq!(revised["planningId"].as_str(), before.planning_id.as_deref());
+    let completed = wait(&service, |state| state.phase == "completed" && state.nodes.get("second")
+        .is_some_and(|node| node.status == "completed"));
+    assert_eq!(fs::read_to_string(repo.join("second.txt")).unwrap(), "continued");
+    assert_eq!(completed.executions.iter().filter(|execution| execution.node == "first").count(), 1);
+    assert_eq!(completed.executions.iter().filter(|execution| execution.node == "second").count(), 1);
+    let replay = service.runtime.lock().unwrap().store.load(&completed.run_id).unwrap();
+    assert_eq!(replay.nodes["second"].status, "completed");
+    assert_eq!(replay.planning_id, before.planning_id);
+    wait_for_driver_exit(&service);
+}
+
+#[test]
+fn manual_node_to_completed_target_reruns_that_target_after_confirmation() {
+    let (_temp, _repo, service) = setup(false, false);
+    drive(service.clone());
+    let before = wait(&service, |state| state.phase == "completed" && state.nodes["first"].status == "completed");
+    let result = &before.nodes["first"];
+    let revised = dispatch(&service, "add_manual_node", serde_json::json!({
+        "runId": before.run_id,
+        "request": { "node": { "name": "prerequisite", "task": "prerequisite" }, "from": null,
+            "to": "first", "feedback": false, "confirmedCompleted": [{
+                "name": "first", "revision": result.revision, "head": result.head,
+            }] }
+    })).unwrap();
+    assert_eq!(revised["nodes"]["first"]["status"], "dirty");
+    let completed = wait(&service, |state| state.phase == "completed" && state.nodes.get("prerequisite")
+        .is_some_and(|node| node.status == "completed"));
+    assert_eq!(completed.executions.iter().filter(|execution| execution.node == "first").count(), 2);
+    assert_eq!(completed.executions.iter().filter(|execution| execution.node == "prerequisite").count(), 1);
+    assert_eq!(completed.nodes["first"].status, "completed");
+    wait_for_driver_exit(&service);
 }
 
 fn planner_tasks(temp: &tempfile::TempDir) -> Vec<String> {

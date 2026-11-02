@@ -135,10 +135,12 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
       setRunContextMenu(null);
     };
     window.addEventListener("click", handleClose);
-    window.addEventListener("contextmenu", handleClose);
+    // Capture before another menu's handler stops propagation, so only the
+    // newly opened context menu stays visible across the sidebar and graph.
+    window.addEventListener("contextmenu", handleClose, true);
     return () => {
       window.removeEventListener("click", handleClose);
-      window.removeEventListener("contextmenu", handleClose);
+      window.removeEventListener("contextmenu", handleClose, true);
     };
   }, []);
 

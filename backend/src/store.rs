@@ -58,6 +58,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::ResultExecutionFailed { .. } => "result_execution_failed",
         EventKind::WorkspaceFilesChanged { .. } => "workspace_files_changed",
         EventKind::GraphRevised { .. } => "graph_revised",
+        EventKind::ManualGraphRevised { .. } => "manual_graph_revised",
         EventKind::DraftEdited { .. } => "draft_edited",
         EventKind::Paused { .. } => "paused",
         EventKind::FailedNodeModelsUpdated { .. } => "failed_node_models_updated",

@@ -96,7 +96,7 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
     assert_eq!(repair.execution.node, "owner");
     assert_eq!(repair.execution.worktree, review.execution.worktree);
     assert!(repair.session_fork.is_some());
-    assert_eq!(repair.task, "Feedback from review:\nRead reports/audit.json.");
+    assert_eq!(repair.task, "Feedback:\nRead reports/audit.json.");
     execute(&mut runtime, &repair);
     let directory = runtime.root.join("sessions").join(&repair.execution.id);
     let text = fs::read_to_string(directory.join(format!("grapher_{}.jsonl", repair.execution.session_id))).unwrap();
@@ -147,7 +147,7 @@ fn pending_feedback_survives_restart_and_replays_its_exact_output_range() {
     recovered.pause(false).unwrap();
     let repair = recovered.jobs().unwrap().remove(0);
     assert_eq!(repair.execution.worktree, review.execution.worktree);
-    assert_eq!(repair.task, "Feedback from review:\nRead reports/audit.json.");
+    assert_eq!(repair.task, "Feedback:\nRead reports/audit.json.");
     assert!(!repair.task.contains("streamed 中文"));
     assert!(!repair.task.contains("<FEEDBACK>"));
     assert!(recovered.state.pending_feedback.is_empty());
@@ -173,9 +173,8 @@ fn parallel_feedback_merges_only_feedback_senders_and_forks_owner_history() {
     assert_eq!(repair.execution.node, "owner");
     assert!(reviews.iter().all(|review| review.execution.worktree != repair.execution.worktree));
     assert_eq!(repair.feedback_workspace.as_ref().unwrap().additional_sources.len(), 1);
-    assert!(repair.task.contains("Feedback from review_one:\nRead reports/audit.json."));
-    assert!(repair.task.contains("Feedback from review_two:\nRead reports/audit.json."));
-    assert!(!repair.task.contains("Feedback from review_accept"));
+    assert_eq!(repair.task.matches("Feedback:").count(), 2);
+    assert_eq!(repair.task.matches("Feedback:\nRead reports/audit.json.").count(), 2);
     assert_eq!(runtime.state.feedback_counts.len(), 2);
     assert!(runtime.state.pending_feedback.is_empty());
     assert_eq!(runtime.state.events.iter().filter(|event| matches!(&event.kind,
@@ -679,7 +678,7 @@ fi
     assert_eq!(runtime.state.pending_feedback.len(), 1);
     let repair = runtime.jobs().unwrap().remove(0);
     assert_eq!(repair.execution.node, "owner");
-    assert_eq!(repair.task, "Feedback from review:\nRestated verdict");
+    assert_eq!(repair.task, "Feedback:\nRestated verdict");
 }
 
 #[test]
@@ -752,7 +751,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     assert_eq!(runtime.state.nodes["related"].status, "failed");
     let repair = runtime.jobs().unwrap().remove(0);
     assert_eq!(repair.execution.node, "owner");
-    assert_eq!(repair.task, "Feedback from review:\nReview notes");
+    assert_eq!(repair.task, "Feedback:\nReview notes");
     assert_eq!(runtime.state.feedback_counts.get("review->owner"), Some(&1));
     assert_eq!(runtime.state.nodes["related"].status, "dirty", "the stopped sibling is invalidated for recomputation, not resumed");
     assert!(runtime.state.pending_feedback.is_empty());

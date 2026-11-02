@@ -32,3 +32,13 @@ export function isNestedScrollGesture(event: Event, scroller: HTMLElement | null
   }
   return false;
 }
+
+/** Tell the conversation that streamed card content grew. The owner can pin a
+ * following viewport even when no row or scrollHeight change is observed by
+ * its generic resize path (for example while a thinking body scrolls inside a
+ * fixed-height card). */
+export const TRANSCRIPT_CONTENT_GROWTH_EVENT = "grapher:transcript-content-growth";
+
+export function notifyTranscriptContentGrowth(element: HTMLElement | null): void {
+  transcriptScrollParent(element)?.dispatchEvent(new Event(TRANSCRIPT_CONTENT_GROWTH_EVENT));
+}

@@ -736,9 +736,14 @@ a,
   text-align: left;
 }
 
-.context-menu-item:hover {
+.context-menu-item:hover:not(:disabled) {
   background: var(--brand-default);
   color: #FFFFFF;
+}
+
+.context-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Do not add a separate brightness layer to the menu highlight. */

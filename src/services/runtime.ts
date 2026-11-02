@@ -2,7 +2,7 @@ import { t } from "../i18n";
 import { invalidateTranscriptCaches } from "./transcriptCache";
 import { enableRuntimeEvents } from "./runtimeEvents";
 import { RequestTimeoutError, withRequestTimeout } from "./requestTimeout";
-import type { Bootstrap, Config, FileChangeSummary, Graph, OpenWorkspaceFileRequest, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
+import type { Bootstrap, Config, FileChangeSummary, Graph, ManualNodeRequest, OpenWorkspaceFileRequest, Plan, PlanningSummary, RepositoryInfo, SkillItem, Snapshot, RuntimeActivity } from "../types";
 
 const filesCache = new Map<string, string[]>();
 const skillsCache = new Map<string, SkillItem[]>();
@@ -11,7 +11,7 @@ const skillsRequests = new Map<string, number>();
 // Share only requests in flight; settled history is never cached as authoritative state.
 const historyRequests = new Map<string, Promise<Snapshot>>();
 const snapshotMutations = new Set([
-  "save_graph", "save_config", "plan_goal", "control", "edit_planner", "edit_node",
+  "save_graph", "add_manual_node", "save_config", "plan_goal", "control", "edit_planner", "edit_node",
   "load_run", "reset_workspace", "clear_history", "delete_run", "delete_workspace",
 ]);
 
@@ -138,6 +138,7 @@ export const runtimeService = {
   },
   compileGraph: (graph: Graph) => request<Plan>("compile_graph", { graph }),
   saveGraph: (graph: Graph, config: Config, runId?: string) => request<Snapshot>("save_graph", { graph, config, runId }),
+  addManualNode: (runId: string, node: ManualNodeRequest) => request<Snapshot>("add_manual_node", { runId, request: node }),
   saveConfig: (config: Config, runId?: string) => request<Bootstrap>("save_config", { config, ...(runId ? { runId } : {}) }),
   planGoal: (goal: string, config: Config, mode?: string) => request<Snapshot>("plan_goal", { goal, config, mode }),
   async planGoalStream(

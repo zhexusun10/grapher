@@ -1,17 +1,18 @@
 import { t, localizeError } from "../../i18n";
 import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { GraphCanvas } from "../graph/GraphCanvas";
 import { useGraphViewport } from "../../hooks/useGraphViewport";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   Code2, ArrowLeft,
   Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2, ChevronRight,
-  AlertCircle, ChevronLeft
+  AlertCircle, ChevronLeft, Plus
 } from "lucide-react";
 import { motion, AnimatePresence, useReducedMotion } from "motion/react";
 import {
   Snapshot, PlanRouteType, PlanMode, RepositoryInfo, Config,
-  Graph, GraphNode, Execution, Status, PlanningSummary, TranscriptItem,
+  Graph, GraphNode, ManualNodeRequest, Execution, Status, PlanningSummary, TranscriptItem,
   ChatMessage, ImageAttachment, RuntimeActivity, OpenWorkspaceFileRequest, publicationMergerCardId
 } from "../../types";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
@@ -19,6 +20,7 @@ import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { EditableUserBubble, StreamingAssistantBubble } from "./ChatBubbles";
 import { NodeTaskCard } from "./NodeTaskCard";
+import { CreateNodeForm } from "./CreateNodeForm";
 import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
 import { shouldShowRouteBadge } from "../../services/executionRoute";
@@ -37,7 +39,7 @@ import { settleInterruptedItems } from "../../services/transcriptSettle";
 import { activePlannerOutput } from "../PlanningActivity";
 import { plannerConversationEdits, plannerHistoryIds } from "../../lib/plannerOutput";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
-import { HISTORY_PREPEND_EVENT, isNestedScrollGesture } from "../../services/transcriptScroll";
+import { HISTORY_PREPEND_EVENT, TRANSCRIPT_CONTENT_GROWTH_EVENT, isNestedScrollGesture } from "../../services/transcriptScroll";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
 import { plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
 import { executionSessionTiming, executionSessionUsageThrough, mergePlannerTurns, plannerLegacyUsage, plannerSessionTiming, plannerSessionUsageThrough, plannerTurnSummaries, addTokenUsage } from "../../services/sessionMetrics";
@@ -121,6 +123,7 @@ interface GraphWorkbenchProps {
   onCancelFollowUp?: (id: string) => void;
   onControl: (action: string, extra?: Record<string, unknown>) => void;
   onSave: (graph: Graph) => void;
+  onAddManualNode: (runId: string, request: ManualNodeRequest) => Promise<boolean>;
   onOpenEditor: () => void;
   onOpenApproval: () => void;
   onOpenFile: (request: OpenWorkspaceFileRequest) => void;
@@ -302,6 +305,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   onCancelFollowUp,
   onControl,
   onSave,
+  onAddManualNode,
   onOpenEditor,
   onOpenApproval,
   onOpenFile,
@@ -323,6 +327,32 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const [collapsedAttemptIds, setCollapsedAttemptIds] = useState<Set<string>>(new Set());
   const [editingTaskNode, setEditingTaskNode] = useState("");
   const [taskDraft, setTaskDraft] = useState("");
+  const [creatingNode, setCreatingNode] = useState(false);
+  const creationRunRef = useRef("");
+  const [graphMenu, setGraphMenu] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    creationRunRef.current = "";
+    setCreatingNode(false);
+    setGraphMenu(null);
+  }, [state.runId]);
+  useEffect(() => {
+    const close = () => setGraphMenu(null);
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
+    window.addEventListener("click", close);
+    // Sidebar menu handlers stop bubbling; close this menu in capture first.
+    window.addEventListener("contextmenu", close, true);
+    window.addEventListener("keydown", escape);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close, true);
+      window.removeEventListener("keydown", escape);
+    };
+  }, []);
+  const openGraphMenu = useStableCallback((event: React.MouseEvent | MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setGraphMenu({ x: event.clientX, y: event.clientY });
+  });
   // Auto-compaction visibility per parsed execution transcript; the working
   // labels swap to "Compacting…" while the node's own session compresses.
   const [compactingAttempts, setCompactingAttempts] = useState<Record<string, boolean>>({});
@@ -1204,6 +1234,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       setUserScrolledUp(true);
       isScrollingToBottomRef.current = false;
     };
+    const onContentGrowth = () => {
+      if (suppressAutoScrollRef.current || latestScrollRef.current || !shouldFollowOutput()) return;
+      el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
+      prevScrollHeightRef.current = el.scrollHeight;
+    };
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.target as HTMLElement).closest("input, textarea, [contenteditable=true]")) return;
       if (isNestedScrollGesture(event, el)) return;
@@ -1220,6 +1256,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
     };
     el.addEventListener(HISTORY_PREPEND_EVENT, onHistoryPrepend);
+    el.addEventListener(TRANSCRIPT_CONTENT_GROWTH_EVENT, onContentGrowth);
     el.addEventListener("pointerdown", stopLatestScroll);
     el.addEventListener("keydown", onKeyDown);
     el.addEventListener("wheel", onWheel, { passive: true });
@@ -1228,13 +1265,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
     return () => {
       el.removeEventListener(HISTORY_PREPEND_EVENT, onHistoryPrepend);
+      el.removeEventListener(TRANSCRIPT_CONTENT_GROWTH_EVENT, onContentGrowth);
       el.removeEventListener("pointerdown", stopLatestScroll);
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("touchstart", onTouchStart);
       el.removeEventListener("touchmove", onTouchMove);
     };
-  }, [conversationViewKey, stopLatestScroll, setUserScrolledUp]);
+  }, [conversationViewKey, stopLatestScroll, setUserScrolledUp, shouldFollowOutput]);
 
   const handleExpandableContentChange = useCallback((expanded?: boolean, card?: HTMLElement) => {
     // Expanding a card while the reader is already following the newest output
@@ -1982,6 +2020,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const selectGraphNode = useStableCallback((id: string) => {
     if (!id) { setSelected(""); setSelectedMergerId(""); return; }
+    creationRunRef.current = "";
+    setCreatingNode(false);
     if (narrowGraphVisible) {
       setNarrowGraphVisible(false);
       // Only the narrow layout exposes this button; desktop focus is unchanged.
@@ -2158,7 +2198,22 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         className={`conversation-pane ${showGraphPane ? "split" : "full-width"}`}
         style={showGraphPane ? undefined : { width: "100%", maxWidth: "100%" }}
       >
-        {selectedNode && routeType === "graph" ? (
+        {creatingNode && routeType === "graph" ? (
+          <CreateNodeForm key={state.runId} state={state} busy={locked || isPlanning || publishing || publicationFailed || state.phase === "launching_result"}
+            onCancel={() => { creationRunRef.current = ""; setCreatingNode(false); }}
+            onRequestConfirmation={onRequestConfirmation}
+            onSave={async (request) => {
+              const runId = state.runId;
+              const accepted = await onAddManualNode(runId, request);
+              if (accepted && creationRunRef.current === runId) {
+                creationRunRef.current = "";
+                setCreatingNode(false);
+                setSelectedMergerId("");
+                setSelected(request.node.name);
+              }
+              return accepted;
+            }} />
+        ) : selectedNode && routeType === "graph" ? (
           <div className="initial-query-view">
             <div className="conversation-heading">
               <div className="heading-title-col">
@@ -2906,6 +2961,27 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         </button>
       )}
 
+      {graphMenu && createPortal(
+        <div className="context-menu" role="menu" style={{
+          left: Math.max(0, Math.min(graphMenu.x, window.innerWidth - 180)),
+          top: Math.max(0, Math.min(graphMenu.y, window.innerHeight - 50)),
+        }} onClick={event => event.stopPropagation()}>
+          <button type="button" role="menuitem" className="context-menu-item"
+            disabled={!state.runId || state.runId.startsWith("pending-") || locked || isPlanning || publishing || publicationFailed
+              || state.phase === "followup" || state.phase === "launching_result" || (state.mergers ?? []).some(merger => merger.status === "running")
+              || (!state.approved && !["awaiting_approval", "rejected"].includes(state.phase))}
+            onClick={() => {
+              setGraphMenu(null);
+              creationRunRef.current = state.runId;
+              setSelected("");
+              setSelectedMergerId("");
+              setCreatingNode(true);
+              setNarrowGraphVisible(false);
+            }}>
+            <Plus size={14} /><span>{t("新建节点")}</span>
+          </button>
+        </div>, document.body,
+      )}
       <AnimatePresence mode="wait">
         {showGraphPane && (
           <React.Fragment key={graphViewportKey}>
@@ -2958,7 +3034,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               <div className="graph-canvas" ref={graphCanvasRef}>
                 <GraphCanvas runKey={graphViewportKey} ready={isGraphReadyForRun}
                   nodes={animatedNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} tokens={tokens}
-                  onInit={centerGraph} onSelect={selectGraphNode} onLayout={synchronizeGraph} />
+                  onInit={centerGraph} onSelect={selectGraphNode} onLayout={synchronizeGraph} onPaneContextMenu={openGraphMenu} />
 
                 {state.graph.nodes.length > 0 && (
                   <div className="graph-note">

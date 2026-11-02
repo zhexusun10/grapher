@@ -63,8 +63,8 @@ fn exhausted_sender_is_not_merged_or_forwarded_with_applicable_feedback() {
     runtime.emit(EventKind::Feedback { from: "review_two".into(), to: "owner".into(), accepted: false }).unwrap();
     let repair = runtime.jobs().unwrap().remove(0);
     assert!(repair.feedback_workspace.as_ref().unwrap().additional_sources.is_empty());
-    assert!(repair.task.contains("Feedback from review_one"));
-    assert!(!repair.task.contains("Feedback from review_two"));
+    assert_eq!(repair.task.matches("Feedback:").count(), 1);
+    assert!(repair.task.contains("Feedback:\nRead reports/audit.json."));
     assert_eq!(runtime.state.feedback_counts["review_two->owner"], 1);
     execute(&mut runtime, &repair);
     let path = Path::new(&repair.execution.worktree);

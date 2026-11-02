@@ -8,6 +8,7 @@ import { useSmoothStreamText } from "../hooks/useSmoothStreamText";
 import { CollapsibleCardBody } from "./CollapsibleCardBody";
 import { useCardAppear } from "../services/cardAnimations";
 import { useAutoExpandCot } from "../services/displayPreferences";
+import { notifyTranscriptContentGrowth } from "../services/transcriptScroll";
 
 interface ThinkingCardProps {
   item?: TranscriptItem;
@@ -55,6 +56,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const contentRef = useRef<HTMLDivElement>(null);
     const userScrolledUpRef = useRef(false);
     const lastScrollTopRef = useRef(0);
+    const lastTouchYRef = useRef(0);
     const wasStreamingRef = useRef(isStreaming);
 
     // Auto-scroll within the thinking box while text is still being revealed if
@@ -68,6 +70,10 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
         bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
         lastScrollTopRef.current = bodyRef.current.scrollTop;
       }
+      // The card body can be capped while the conversation still has a working
+      // footer below it. Re-check that footer on every streamed line so a
+      // following conversation never leaves it outside the viewport.
+      if (isStreaming || stillTyping) notifyTranscriptContentGrowth(cardRef.current);
     }, [smoothContent, isStreaming, isExpanded, stillTyping]);
 
     // Content can grow without changing `smoothContent`: Markdown layout,
@@ -79,7 +85,9 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       const content = contentRef.current;
       if (!isExpanded || !body || !content) return;
       const followContent = () => {
-        if (userScrolledUpRef.current || !(isStreaming || stillTyping)) return;
+        if (!(isStreaming || stillTyping)) return;
+        notifyTranscriptContentGrowth(cardRef.current);
+        if (userScrolledUpRef.current) return;
         const target = body.scrollHeight - body.clientHeight;
         if (body.scrollTop < target - 1) {
           body.scrollTop = target;
@@ -109,6 +117,45 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       // Only lock scrolled-up if the user actually scrolled upwards (scrollTop decreased)
       if (scrollTop < prevScrollTop - 1 && distFromBottom > 32) {
         userScrolledUpRef.current = true;
+      }
+    };
+
+    // Lock the inner auto-follow as soon as the reader starts scrolling up,
+    // before the next streamed line can pin the body back to the bottom. The
+    // scroll event itself can arrive after that update, so waiting for
+    // handleScroll to notice the direction would lose the race.
+    const stopFollowingInsideCard = () => {
+      userScrolledUpRef.current = true;
+    };
+
+    const handleWheel = (event: React.WheelEvent) => {
+      if (event.deltaY < -0.5) stopFollowingInsideCard();
+    };
+
+    const handleTouchStart = (event: React.TouchEvent) => {
+      if (event.touches[0]) lastTouchYRef.current = event.touches[0].clientY;
+    };
+
+    const handleTouchMove = (event: React.TouchEvent) => {
+      const touch = event.touches[0];
+      if (!touch) return;
+      // Finger moving down scrolls the reasoning viewport toward older lines.
+      if (touch.clientY > lastTouchYRef.current + 1) stopFollowingInsideCard();
+      lastTouchYRef.current = touch.clientY;
+    };
+
+    const handleKeyDown = (event: React.KeyboardEvent) => {
+      if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) {
+        stopFollowingInsideCard();
+      }
+    };
+
+    const handlePointerDown = (event: React.PointerEvent) => {
+      const body = bodyRef.current;
+      if (!body) return;
+      const scrollbarWidth = body.offsetWidth - body.clientWidth;
+      if (scrollbarWidth > 0 && event.clientX >= body.getBoundingClientRect().right - scrollbarWidth) {
+        stopFollowingInsideCard();
       }
     };
 
@@ -207,6 +254,11 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
             ref={bodyRef}
             className="thinking-card-body"
             onScroll={handleScroll}
+            onWheel={handleWheel}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onKeyDown={handleKeyDown}
+            onPointerDown={handlePointerDown}
           >
             {hasVisibleContent ? (
               <div ref={contentRef} className="thinking-content-container">

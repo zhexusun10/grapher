@@ -911,6 +911,13 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_head: Option<String>,
     },
+    /// A user-added node in an approved graph, without a synthetic Planner turn.
+    ManualGraphRevised {
+        graph: Graph,
+        invalidated: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_head: Option<String>,
+    },
     /// A manual edit of an unapproved draft. Keep its Run and Planner history.
     DraftEdited {
         graph: Graph,
@@ -2178,20 +2185,17 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.base = base.clone();
             state.phase = "running".into();
         }
-        EventKind::GraphRevised {
-            graph,
-            planning_id,
-            planning,
-            invalidated,
-            ..
-        } => {
-            state.stop_requested = false;
+        EventKind::GraphRevised { graph, invalidated, .. }
+        | EventKind::ManualGraphRevised { graph, invalidated, .. } => {
+            if let EventKind::GraphRevised { planning_id, planning, .. } = &event.kind {
+                state.stop_requested = false;
+                state.planning_id = Some(planning_id.clone());
+                state.planning = Some(planning.clone());
+            }
             let changed = state.graph != *graph;
             state.graph = graph.clone();
             state.preview_graph = None;
             state.plan = crate::compiler::compile_legacy(graph, true).ok();
-            state.planning_id = Some(planning_id.clone());
-            state.planning = Some(planning.clone());
             state
                 .nodes
                 .retain(|name, _| graph.nodes.iter().any(|node| node.name == *name));

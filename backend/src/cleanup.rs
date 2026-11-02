@@ -214,7 +214,8 @@ pub(crate) fn remember_event(
         EventKind::Approved { .. }
         | EventKind::Started { .. }
         | EventKind::MergerStarted { .. }
-        | EventKind::GraphRevised { .. } => state.config.as_ref(),
+        | EventKind::GraphRevised { .. }
+        | EventKind::ManualGraphRevised { .. } => state.config.as_ref(),
         _ => None,
     };
     if let Some(config) = config {
@@ -509,7 +510,8 @@ fn protected_shadow_objects(store: &Store, excluded: &str) -> Result<BTreeSet<St
                 EventKind::GraphRevised {
                     source_head: Some(head),
                     ..
-                } => add(head),
+                }
+                | EventKind::ManualGraphRevised { source_head: Some(head), .. } => add(head),
                 _ => {}
             }
         }

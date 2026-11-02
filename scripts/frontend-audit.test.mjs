@@ -746,7 +746,7 @@ test("expanding a thinking card while following keeps the conversation at the bo
 });
 
 test("a tall live thinking card stays at the newest reasoning when the conversation pane resizes", { timeout: 30_000 }, async () => {
-  const { context, page, errors } = await fixture("latestScroll&layout=live-tool", undefined, "reduce");
+  const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node", undefined, "reduce");
   try {
     const scroller = page.locator(".initial-query-scroll");
     await page.getByText("Virtualized message 79", { exact: true }).waitFor();
@@ -769,16 +769,26 @@ test("a tall live thinking card stays at the newest reasoning when the conversat
     const state = await scroller.evaluate(scroll => {
       const card = scroll.querySelector(".thinking-card");
       const body = card.querySelector(".thinking-card-body");
+      const working = scroll.querySelector(".workspace-details .working-indicator");
+      const composer = card.closest(".initial-query-view").querySelector(".pane-bottom-chat");
       const cardBounds = card.getBoundingClientRect();
       const scrollBounds = scroll.getBoundingClientRect();
+      const workingBounds = working?.getBoundingClientRect();
+      const composerBounds = composer?.getBoundingClientRect();
       return { bottomGap: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
         bodyGap: body ? body.scrollHeight - body.scrollTop - body.clientHeight : null,
-        cardTop: cardBounds.top - scrollBounds.top, cardHeight: cardBounds.height, clientHeight: scroll.clientHeight };
+        cardTop: cardBounds.top - scrollBounds.top, cardHeight: cardBounds.height, clientHeight: scroll.clientHeight,
+        workingVisible: !!workingBounds && workingBounds.top >= scrollBounds.top && workingBounds.bottom <= scrollBounds.bottom,
+        workingAboveComposer: !!workingBounds && (!composerBounds || workingBounds.bottom <= composerBounds.top) };
     });
     assert.ok(state.bottomGap <= 2, `the resize must keep the newest reasoning visible: ${JSON.stringify(state)}`);
     assert.ok(state.bodyGap <= 2, `the card body must follow its own latest line: ${JSON.stringify(state)}`);
     assert.ok(state.cardTop < 0,
       `the newest reasoning, not the card header, must be the focus after the resize: ${JSON.stringify(state)}`);
+    assert.equal(state.workingVisible, true,
+      `the conversation's working footer must stay in view: ${JSON.stringify(state)}`);
+    assert.equal(state.workingAboveComposer, true,
+      `the working footer must stay above the composer: ${JSON.stringify(state)}`);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -807,6 +817,19 @@ test("scrolling inside a live thinking card leaves the conversation following it
     assert.ok(innerAfter < innerBefore.top - 20, `the wheel must move only the inner reasoning viewport: ${innerAfter}`);
     assert.ok(await scroller.evaluate(scroll => scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight) <= 2,
       "an inner scroll must not turn off the conversation's bottom follow state");
+    // More reasoning keeps streaming while the reader is scrolled inside the
+    // card. The card must not snap the reader back to the latest line.
+    for (let chunk = 0; chunk < 4; chunk++) {
+      await page.evaluate(chunk => window.audit.appendToolEvents([{
+        type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+          delta: `INNER_SCROLL_MORE_${chunk} ` + "reasoning detail ".repeat(20) },
+      }]), chunk);
+      await page.waitForTimeout(80);
+    }
+    const innerWhileStreaming = await body.evaluate(element => ({
+      top: element.scrollTop, bottomGap: element.scrollHeight - element.scrollTop - element.clientHeight }));
+    assert.ok(innerWhileStreaming.bottomGap > 100,
+      `streaming must not force an inner reader back to the latest line: ${JSON.stringify(innerWhileStreaming)}`);
     await page.evaluate(() => window.audit.appendToolEvents([{
       type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "AFTER_INNER_CARD_SCROLL" }] },
     }]));
@@ -820,6 +843,86 @@ test("scrolling inside a live thinking card leaves the conversation following it
     });
     assert.ok(state.bottomGap <= 2, `outer output must keep following after an inner scroll: ${JSON.stringify(state)}`);
     assert.equal(state.markerVisible, true, `the new bottom row must be visible: ${JSON.stringify(state)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("streamed reasoning cannot override an inner reading gesture before its scroll event", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=live-tool", undefined, "reduce");
+  try {
+    await page.getByText("Virtualized message 79", { exact: true }).waitFor();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: Array.from({ length: 60 }, (_, index) => `GESTURE_REASONING_${index}\n\n`).join("") } },
+    ]));
+    const body = page.locator(".thinking-card-body");
+    await body.waitFor();
+    await page.waitForTimeout(200);
+    assert.ok(await body.evaluate(element => element.scrollHeight - element.clientHeight > 200));
+    await body.evaluate(element => {
+      // The next streamed line can commit before the browser dispatches this
+      // gesture's scroll event. The intent must still lock the inner viewport.
+      element.dispatchEvent(new WheelEvent("wheel", { deltaY: -160, bubbles: true }));
+      element.scrollTop = Math.max(0, element.scrollTop - 160);
+      window.audit.appendToolEvents([{
+        type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+          delta: "GESTURE_MORE_REASONING " + "detail ".repeat(80) },
+      }]);
+    });
+    await page.waitForTimeout(250);
+    const gap = await body.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
+    assert.ok(gap > 100, `the reading gesture must not be snapped to the latest line: ${gap}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("final text after a reasoning card becomes the conversation's bottom focus", { timeout: 45_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node", undefined, "no-preference");
+  try {
+    await page.getByText("Virtualized message 79", { exact: true }).waitFor();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: Array.from({ length: 50 }, (_, index) => `FINAL_COT_REASON_${index}\n\n`).join("") } },
+    ]));
+    await page.locator(".thinking-card-body").waitFor();
+    await page.waitForTimeout(400);
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } },
+    ]));
+    for (let i = 0; i < 20; i++) {
+      await page.evaluate(i => window.audit.appendToolEvents([
+        { type: "message_update", assistantMessageEvent: { type: "text_delta",
+          delta: `FINAL_ANSWER_LINE_${i} ` + "visible final answer text ".repeat(8) + "\n\n" } },
+      ]), i);
+      await page.waitForTimeout(100);
+    }
+    await page.getByText(/FINAL_ANSWER_LINE_19/).waitFor();
+    await page.waitForTimeout(300);
+    const state = await page.evaluate(() => {
+      const scroll = document.querySelector(".initial-query-scroll");
+      const card = scroll.querySelector(".thinking-card");
+      const final = [...scroll.querySelectorAll(".chat-message-assistant")]
+        .find(element => element.textContent?.includes("FINAL_ANSWER_LINE_0"));
+      const working = scroll.querySelector(".workspace-details .working-indicator");
+      const composer = scroll.closest(".initial-query-view").querySelector(".pane-bottom-chat");
+      const bounds = element => element?.getBoundingClientRect();
+      const view = bounds(scroll), cardBounds = bounds(card), finalBounds = bounds(final);
+      const workingBounds = bounds(working), composerBounds = bounds(composer);
+      return { bottomGap: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+        cardAboveFinal: !!cardBounds && !!finalBounds && cardBounds.bottom <= finalBounds.top + 1,
+        finalVisible: !!finalBounds && finalBounds.bottom > view.top && finalBounds.top < view.bottom,
+        workingVisible: !!workingBounds && workingBounds.top >= view.top && workingBounds.bottom <= view.bottom,
+        workingAboveComposer: !!workingBounds && (!composerBounds || workingBounds.bottom <= composerBounds.top) };
+    });
+    assert.ok(state.bottomGap <= 2, `the conversation must follow the final answer: ${JSON.stringify(state)}`);
+    assert.equal(state.cardAboveFinal, true, `the reasoning card stays above the final answer: ${JSON.stringify(state)}`);
+    assert.equal(state.finalVisible, true, `the final answer must be visible: ${JSON.stringify(state)}`);
+    assert.equal(state.workingVisible, true, `the working footer must stay visible: ${JSON.stringify(state)}`);
+    assert.equal(state.workingAboveComposer, true, `the working footer must stay above the composer: ${JSON.stringify(state)}`);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

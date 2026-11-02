@@ -14,6 +14,26 @@ use std::{
 };
 use uuid::Uuid;
 
+/// Confirmation is tied to the completed result the user actually reviewed.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualNodeConfirmation {
+    pub name: String,
+    pub revision: usize,
+    pub head: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualNodeRequest {
+    pub node: Node,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub feedback: bool,
+    #[serde(default)]
+    pub confirmed_completed: Vec<ManualNodeConfirmation>,
+}
+
 #[derive(Clone)]
 pub struct Job {
     pub execution: Execution,
@@ -1096,6 +1116,7 @@ impl Runtime {
                     source_head: Some(head),
                     ..
                 }
+                | EventKind::ManualGraphRevised { source_head: Some(head), .. }
                 | EventKind::SourceSnapshotted { head }
                 | EventKind::PublicationCompleted { head } => Some(head.as_str()),
                 EventKind::Approved { base } => Some(base.as_str()),
@@ -1536,6 +1557,99 @@ impl Runtime {
             invalidated: vec![],
             source_head: None,
         })
+    }
+
+    /// Add exactly one node to the current graph, preserving Planner history.
+    /// The caller holds the Run mutex and excludes concurrent Planner turns.
+    pub fn add_manual_node(&mut self, mut request: ManualNodeRequest) -> Result<(), String> {
+        self.require_current_file_contract()?;
+        if self.state.run_id.is_empty() || self.is_serial() {
+            return Err("Manual nodes require an existing Graph run".into());
+        }
+        // A launched published result owns a physical workspace and commits its
+        // own phase when it finishes. A concurrent revision could otherwise
+        // dispatch a second writer or have its phase overwritten on settlement.
+        if self.state.phase == "launching_result"
+            || self.state.result_execution.as_ref().is_some_and(|execution| execution.status == "running")
+        {
+            return Err("Wait for the published result to finish before adding a node".into());
+        }
+        if matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed" | "followup")
+            || self.state.mergers.iter().any(|merger| merger.status == "running")
+            || self.state.nodes.values().any(|node| node.source_direct_recovery
+                || node.pending_messages.iter().any(|message| message.source_direct))
+        {
+            return Err("Wait for publication or the active follow-up to finish before adding a node".into());
+        }
+        request.node.name = request.node.name.trim().to_string();
+        if request.feedback && request.to.as_deref().unwrap_or("").is_empty() {
+            return Err("A feedback edge requires a target node".into());
+        }
+        let mut graph = self.state.graph.clone();
+        if let (Some(from), Some(to)) = (&request.from, &request.to) {
+            if !request.feedback {
+                // Inserting into an existing direct dependency replaces that
+                // edge; otherwise it becomes redundant under compiler policy.
+                graph.edges.retain(|edge| edge.feedback || edge.from != *from || edge.to != *to);
+            }
+        }
+        if let Some(from) = &request.from {
+            graph.edges.push(Edge { from: from.clone(), to: request.node.name.clone(), feedback: false });
+        }
+        if let Some(to) = &request.to {
+            graph.edges.push(Edge { from: request.node.name.clone(), to: to.clone(), feedback: request.feedback });
+        }
+        graph.nodes.push(request.node);
+        compile(&graph, true).map_err(|errors| errors.into_iter()
+            .map(|error| format!("{}: {}", error.code, error.message))
+            .collect::<Vec<_>>().join("\n"))?;
+
+        let affected = self.revision_affected(&graph);
+        let mut confirmation_scope = affected.clone();
+        if request.feedback {
+            if let Some(to) = &request.to {
+                // Feedback does not invalidate immediately, but an applied
+                // verdict can later re-run the target and its descendants.
+                confirmation_scope.extend(downstream(&graph, to));
+            }
+        }
+        for name in &confirmation_scope {
+            if let Some(node) = self.state.nodes.get(name).filter(|node| node.status == "completed") {
+                if !request.confirmed_completed.iter().any(|confirmed|
+                    confirmed.name == *name && confirmed.revision == node.revision && confirmed.head == node.head)
+                {
+                    return Err("Completed results changed or require confirmation; review the graph and confirm again".into());
+                }
+            }
+        }
+        if self.state.executions.iter().any(|execution|
+            execution.status == "running" && affected.contains(&execution.node))
+        {
+            return Err("Pause or wait for affected running nodes before adding this node".into());
+        }
+        if !self.state.approved {
+            if !matches!(self.state.phase.as_str(), "rejected" | "awaiting_approval") {
+                return Err("Only an unapproved graph draft can be edited in place".into());
+            }
+            if self.state.executions.is_empty() {
+                return self.edit_draft_graph(graph, self.state.config.clone().ok_or("Missing config")?);
+            }
+            // Post-task review can revoke approval while retaining completed
+            // work. DraftEdited would reset every node and discard those heads.
+        }
+        let invalidated = affected.into_iter().filter(|name|
+            graph.nodes.iter().any(|node| node.name == *name)).collect();
+        // As with Planner revisions, include source edits made since approval
+        // or publication. A reclaimed plain-directory shadow remains lazy.
+        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        let source_head = if !self.state.approved || (!workspace::is_standard_git(&repository)
+            && workspace::shadow_repo_if_exists(&repository)?.is_none())
+        {
+            None
+        } else {
+            Some(workspace::snapshot_repository_scoped(&repository, &self.exclusions()?)?)
+        };
+        self.emit(EventKind::ManualGraphRevised { graph, invalidated, source_head })
     }
 
     /// Nodes whose work or dependencies change, plus consumers of those nodes.
@@ -4091,7 +4205,7 @@ impl Runtime {
                     let source = self.state.executions.iter().find(|execution| {
                         execution.id == member.execution_id
                     }).ok_or("Missing feedback execution")?;
-                    instructions.push(format!("Feedback from {}:\n{body}", member.from));
+                    instructions.push(format!("Feedback:\n{body}"));
                     sources.push(FeedbackSource {
                         source_execution_id: source.id.clone(),
                         worktree: source.worktree.clone(), head: member.source_head.clone(),

@@ -5,7 +5,7 @@ import { motion, AnimatePresence, LayoutGroup } from "motion/react";
 
 import {
   defaultConfig, emptyGraph, emptySnapshot, publicationMergerCardId,
-  type Config, type Graph, type ProjectItem, type RepositoryInfo,
+  type Config, type Graph, type ManualNodeRequest, type ProjectItem, type RepositoryInfo,
   type Snapshot, type PlanRouteType, type TranscriptItem,
   type RuntimeActivity,
   type PlanningSummary, type PlanMode, type ChatMessage,
@@ -1535,6 +1535,13 @@ export default function App() {
       });
     }
     setSelected("");
+  });
+
+  const addManualNode = (runId: string, request: ManualNodeRequest) => run(async () => {
+    if (!runId || state.runId !== runId) return false;
+    const generation = foregroundGeneration.current;
+    const snapshot = await runtimeService.addManualNode(runId, request);
+    return applyForegroundSnapshot(snapshot, generation);
   });
 
   const closeRunningThinkingItem = closeThinkingItems;
@@ -3283,7 +3290,7 @@ export default function App() {
     removeProject: useStableCallback(handleRemoveWorkspaceConfirm), deleteRun: useStableCallback(handleDeleteRunConfirm),
     newConversation: useStableCallback(handleNewConversation), send: useStableCallback(handleSendMessage),
     edit: useStableCallback(handleEditMessageSubmit), switchVersion: useStableCallback(handleSwitchMessageVersion),
-    control: useStableCallback(control), save: useStableCallback(save),
+    control: useStableCallback(control), save: useStableCallback(save), addManualNode: useStableCallback(addManualNode),
     openSettings: useStableCallback(handleOpenSettings), openEditor: useStableCallback(() => setModal("editor")),
     openApproval: useStableCallback(() => setModal("approval")), retryPublication: useStableCallback(() => control("retry_publication")),
     openFile: handleOpenFile,
@@ -3505,6 +3512,7 @@ export default function App() {
                     onRequestConfirmation={setConfirmModal}
                     onControl={actions.control}
                     onSave={actions.save}
+                    onAddManualNode={actions.addManualNode}
                     onOpenEditor={actions.openEditor}
                     onOpenApproval={actions.openApproval}
                     onOpenFile={actions.openFile}

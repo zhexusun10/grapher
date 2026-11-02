@@ -3,6 +3,14 @@ export type Status = "waiting" | "running" | "paused" | "blocked" | "completed" 
 export interface GraphNode { name: string; task: string }
 export interface GraphEdge { from: string; to: string; feedback: boolean }
 export interface Graph { originalGoal: string; nodes: GraphNode[]; edges: GraphEdge[] }
+export interface ManualNodeConfirmation { name: string; revision: number; head: string | null }
+export interface ManualNodeRequest {
+  node: GraphNode;
+  from: string | null;
+  to: string | null;
+  feedback: boolean;
+  confirmedCompleted: ManualNodeConfirmation[];
+}
 export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ModelRole = "partitioner" | "planner" | "nodeAgent";

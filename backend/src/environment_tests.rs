@@ -819,7 +819,7 @@ else { const version=fs.readFileSync(process.env.GTEST_STATE+'/.env/version','ut
         repair.environment_input.as_ref().unwrap().environment_ref,
         b0.environment_ref
     );
-    assert_eq!(repair.task, "Feedback from B:\nReview proof.");
+    assert_eq!(repair.task, "Feedback:\nReview proof.");
     run(&mut runtime, &repair);
     let text = fs::read_to_string(
         runtime

@@ -10,10 +10,11 @@ function RenderedLayout({ onLayout }: { onLayout: () => void }) {
 }
 
 /** Streaming conversation changes do not need to resubscribe/render the graph canvas. */
-export const GraphCanvas = memo(function GraphCanvas({ runKey, ready, nodes, edges, nodeTypes, edgeTypes, tokens, onInit, onSelect, onLayout }: {
+export const GraphCanvas = memo(function GraphCanvas({ runKey, ready, nodes, edges, nodeTypes, edgeTypes, tokens, onInit, onSelect, onLayout, onPaneContextMenu }: {
   runKey: string; ready: boolean; nodes: Node[]; edges: Edge[]; nodeTypes: NodeTypes; edgeTypes: EdgeTypes;
   tokens: { graphEdgeDefault: string; graphEdgeFeedback: string; graphGridDot: string };
   onInit: (instance: ReactFlowInstance, key: string) => void; onSelect: (id: string) => void; onLayout: () => void;
+  onPaneContextMenu: (event: React.MouseEvent | MouseEvent) => void;
 }) {
   // These are controlled nodes. React Flow reports measured dimensions via
   // onNodesChange; retain them when streamed edits/animation replace a node.
@@ -65,7 +66,7 @@ export const GraphCanvas = memo(function GraphCanvas({ runKey, ready, nodes, edg
     <ReactFlow key={runKey} fitView fitViewOptions={graphFitOptions} onInit={initialize}
       style={{ opacity: ready ? 1 : 0, pointerEvents: ready ? "auto" : "none" }}
       nodes={measuredNodes} onNodesChange={onNodesChange} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
-      onNodeClick={select} onPaneClick={clear} minZoom={0.3} maxZoom={1.6}
+      onNodeClick={select} onPaneClick={clear} onPaneContextMenu={onPaneContextMenu} minZoom={0.3} maxZoom={1.6}
       nodesDraggable={false} nodesConnectable={false} elementsSelectable={false} proOptions={{ hideAttribution: true }}>
       <RenderedLayout onLayout={onLayout} />
       <Background color={tokens.graphGridDot} gap={20} size={1} />

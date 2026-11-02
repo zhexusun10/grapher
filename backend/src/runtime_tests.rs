@@ -4,6 +4,9 @@ use tempfile::TempDir;
 #[path = "node_model_tests.rs"]
 mod node_models;
 
+#[path = "manual_node_tests.rs"]
+mod manual_node;
+
 #[path = "failure_recovery_tests.rs"]
 mod failure_recovery;
 
@@ -2451,7 +2454,7 @@ fn feedback_transfers_the_review_workspace_and_forks_the_owner_history() {
     assert_eq!(rework.session_fork.as_ref().unwrap().id, owner_id);
     assert_eq!(rework.execution.worktree, review.execution.worktree);
     assert_eq!(rework.execution.before, review_head);
-    assert_eq!(rework.task, "Feedback from review:\nplease adjust");
+    assert_eq!(rework.task, "Feedback:\nplease adjust");
     assert!(!rework.task.contains("<FEEDBACK>"));
     let before = workspace::prepare_with_merger_expected_for_run(&source, review_path, &rework.execution.before,
         &rework.parent_heads, &runtime.state.base, Some(&runtime.state.run_id), || Err("unexpected merge".into())).unwrap();
