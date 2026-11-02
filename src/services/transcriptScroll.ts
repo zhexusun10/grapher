@@ -16,3 +16,19 @@ export function markTranscriptPrepend(element: HTMLElement | null): void {
   parent.dataset.transcriptHistoryReading = "true";
   parent.dispatchEvent(new Event(HISTORY_PREPEND_EVENT));
 }
+
+/** True when a wheel, touch or key gesture belongs to a nested scroll area
+ * inside the conversation scroller. Scrolling a thinking card or tool output
+ * must move only that inner viewport; it is not a conversation scroll-up and
+ * must not turn off the conversation's bottom follow state. */
+export function isNestedScrollGesture(event: Event, scroller: HTMLElement | null): boolean {
+  if (!scroller || typeof getComputedStyle !== "function") return false;
+  let node = event.target as HTMLElement | null;
+  if (!node || typeof node.closest !== "function") return false;
+  for (; node && node !== scroller; node = node.parentElement) {
+    const overflowY = getComputedStyle(node).overflowY;
+    if ((overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
+        node.scrollHeight > node.clientHeight + 1) return true;
+  }
+  return false;
+}

@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { estimateTranscriptRowHeight, retainedRowAnchor, rowAt, rowOffsets, visibleRows } from "../services/transcriptLayout";
 import { shareJson } from "../services/structuralSharing";
-import { FOLLOW_LATEST_EVENT } from "../services/transcriptScroll";
+import { FOLLOW_LATEST_EVENT, isNestedScrollGesture } from "../services/transcriptScroll";
 
 export function scrollParent(element: HTMLElement | null): HTMLElement | null {
   for (let parent = element?.parentElement; parent; parent = parent.parentElement) {
@@ -96,6 +96,13 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     ? offsets[anchorIndex] - (anchor.visualTop - parent.getBoundingClientRect().top - parent.clientTop) : null;
   const preparingBottom = !followingLatest && !readingHistory &&
     parent?.dataset.transcriptPreparing === "true";
+  // The conversation reports whether it is following the newest output. A
+  // follower must move with every measured row change, not just during the
+  // initial fill; otherwise a tall streaming reasoning card can become the
+  // de facto scroll anchor once it reaches the middle of the viewport.
+  const followingOutput = !followingLatest && !readingHistory &&
+    parent?.dataset.transcriptFollowing === "true";
+  const pinnedToBottom = preparingBottom || followingOutput;
   const updateViewport = useCallback(() => {
     const element = ref.current, parent = parentRef.current;
     if (!element || !parent) {
@@ -123,6 +130,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       restoredScrollTop.current = null;
     };
     const onUserScrollGesture = (e: Event) => {
+      if (parent && isNestedScrollGesture(e, parent)) return;
       if (stabilizingAnchorRef.current && parent && restoredScrollTop.current !== null) {
         // If the user scrolled during stabilization, adjust the anchor's expected visualTop
         // by the user's scroll movement so stabilization preserves the user's manual progress.
@@ -176,6 +184,13 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     const parent = parentRef.current;
     const hasResize = resizedMeasuredRowsRef.current;
     resizedMeasuredRowsRef.current = false;
+    // Follow state is also updated imperatively from scroll handlers without a
+    // React render. Re-read it at commit time so a reader who just scrolled up
+    // is never pulled back by this frame's row measurement.
+    const followingLatestNow = parent?.dataset.transcriptScrollMode === "latest";
+    const readingHistoryNow = !followingLatestNow && parent?.dataset.transcriptHistoryReading === "true";
+    const bottomPinnedNow = !followingLatestNow && !readingHistoryNow &&
+      (parent?.dataset.transcriptPreparing === "true" || parent?.dataset.transcriptFollowing === "true");
 
     readingAnchor.current = anchor;
     if (anchor && parent) {
@@ -192,7 +207,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         stabilizingAnchorRef.current = false;
       }
       updateViewport();
-    } else if (preparingBottom && parent) {
+    } else if (bottomPinnedNow && parent) {
       if (before !== offsets) parent.scrollTop = parent.scrollHeight;
       updateViewport();
     }
@@ -211,11 +226,11 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     }
     previousOffsets.current = offsets;
     previousOffsetIds.current = ids;
-  }, [offsets, ids, viewport.top, anchor, followingLatest, preparingBottom, updateViewport]);
+  }, [offsets, ids, viewport.top, anchor, followingLatest, updateViewport]);
   const virtual = typeof window !== "undefined" && viewport.hasScroller && items.length > 35;
   const height = parent?.clientHeight || viewport.height;
   const totalHeight = offsets.at(-1) ?? 0;
-  const top = anchorTop ?? (preparingBottom ? Math.max(viewport.top, totalHeight - height) : viewport.top);
+  const top = anchorTop ?? (pinnedToBottom ? Math.max(viewport.top, totalHeight - height) : viewport.top);
   const range = virtual ? visibleRows(offsets, top, height, 16)
     : { start: 0, end: items.length, paddingTop: 0, paddingBottom: 0 };
   return <div ref={ref} style={{ display: "flex", flexDirection: "column", gap,

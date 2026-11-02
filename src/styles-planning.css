@@ -347,6 +347,9 @@
   max-height: 420px;
   overflow-y: auto;
   overflow-anchor: none;
+  /* Keep wheel/touch scrolling inside the reasoning viewport. Chaining it to
+     the conversation would turn an inner read into an outer scroll-up. */
+  overscroll-behavior: contain;
   border-top: 1px solid rgba(139, 92, 246, 0.1);
   background: #fdfdfe;
 }
@@ -817,6 +820,7 @@
   border-radius: 8px;
   overflow-x: auto;
   max-height: 220px;
+  overscroll-behavior: contain;
   border: 1px solid rgba(255, 255, 255, 0.05);
   margin: 0;
   white-space: pre-wrap;

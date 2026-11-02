@@ -52,6 +52,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const [isCopied, setIsCopied] = useState(false);
     const cardRef = useRef<HTMLDivElement>(null);
     const bodyRef = useRef<HTMLDivElement>(null);
+    const contentRef = useRef<HTMLDivElement>(null);
     const userScrolledUpRef = useRef(false);
     const lastScrollTopRef = useRef(0);
     const wasStreamingRef = useRef(isStreaming);
@@ -68,6 +69,29 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
         lastScrollTopRef.current = bodyRef.current.scrollTop;
       }
     }, [smoothContent, isStreaming, isExpanded, stillTyping]);
+
+    // Content can grow without changing `smoothContent`: Markdown layout,
+    // images and the point where the body starts its own scrollbar all resize
+    // after the text effect runs. Keep the body pinned while the reasoning is
+    // still being revealed so its latest line, not its header, stays in view.
+    useEffect(() => {
+      const body = bodyRef.current;
+      const content = contentRef.current;
+      if (!isExpanded || !body || !content) return;
+      const followContent = () => {
+        if (userScrolledUpRef.current || !(isStreaming || stillTyping)) return;
+        const target = body.scrollHeight - body.clientHeight;
+        if (body.scrollTop < target - 1) {
+          body.scrollTop = target;
+          lastScrollTopRef.current = target;
+        }
+      };
+      const observer = new ResizeObserver(followContent);
+      observer.observe(content);
+      observer.observe(body);
+      followContent();
+      return () => observer.disconnect();
+    }, [isExpanded, isStreaming, stillTyping]);
 
     const handleScroll = () => {
       const el = bodyRef.current;
@@ -185,7 +209,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
             onScroll={handleScroll}
           >
             {hasVisibleContent ? (
-              <div className="thinking-content-container">
+              <div ref={contentRef} className="thinking-content-container">
                 <MarkdownRenderer
                   content={smoothContent}
                   isStreaming={isStreaming}

@@ -3,6 +3,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallba
 import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
 import { type ImageAttachment, TranscriptItem } from "../types";
 import { closeThinkingItems } from "../services/thinkingTranscript";
+import { isNestedScrollGesture } from "../services/transcriptScroll";
 import { parseTranscriptChunkLines, type ParseTranscriptChunkState, type TranscriptParseOptions } from "../services/transcriptParser";
 import { settleInterruptedItems } from "../services/transcriptSettle";
 import { Terminal } from "lucide-react";
@@ -841,6 +842,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     
     const onScroll = () => syncScrollState();
     const onWheel = (e: WheelEvent) => {
+      if (isNestedScrollGesture(e, scrollParent)) return;
       const distanceFromBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight;
       if (e.deltaY < -0.5 && distanceFromBottom > 20) {
         isUserScrolledUpRef.current = true;
@@ -849,9 +851,11 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     };
     let lastTouchY = 0;
     const onTouchStart = (e: TouchEvent) => {
+      if (isNestedScrollGesture(e, scrollParent)) return;
       if (e.touches[0]) lastTouchY = e.touches[0].clientY;
     };
     const onTouchMove = (e: TouchEvent) => {
+      if (isNestedScrollGesture(e, scrollParent)) return;
       if (e.touches[0]) {
         const curY = e.touches[0].clientY;
         const delta = curY - lastTouchY;

@@ -37,7 +37,7 @@ import { settleInterruptedItems } from "../../services/transcriptSettle";
 import { activePlannerOutput } from "../PlanningActivity";
 import { plannerConversationEdits, plannerHistoryIds } from "../../lib/plannerOutput";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
-import { HISTORY_PREPEND_EVENT } from "../../services/transcriptScroll";
+import { HISTORY_PREPEND_EVENT, isNestedScrollGesture } from "../../services/transcriptScroll";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
 import { plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
 import { executionSessionTiming, executionSessionUsageThrough, mergePlannerTurns, plannerLegacyUsage, plannerSessionTiming, plannerSessionUsageThrough, plannerTurnSummaries, addTokenUsage } from "../../services/sessionMetrics";
@@ -927,6 +927,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // changing scrollHeight. Followers must re-pin the bottom instead of leaving
   // a tall streaming card anchored at its header.
   const prevViewportRef = useRef<{ width: number; height: number } | null>(null);
+  const lastChatViewportRef = useRef<{ width: number; height: number } | null>(null);
   const prevViewKeyRef = useRef("");
   const suppressAutoScrollRef = useRef(false);
   const resetChatScrollFrameRef = useRef<number | null>(null);
@@ -948,6 +949,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     isUserScrolledUpRef.current = scrolledUp;
     const el = chatScrollRef.current;
     if (!el) return;
+    // Drive the virtualizer's bottom pin imperatively as well: follow state can
+    // change from a scroll event without a React render, and a measured row in
+    // a tall streaming card must not remain the de facto scroll anchor.
+    if (!scrolledUp && !isUnrunNode) el.dataset.transcriptFollowing = "true";
+    else delete el.dataset.transcriptFollowing;
     // The first page may already be visible while older history is still
     // filling. Keep the virtualizer bottom-pinned throughout that fill; a
     // programmatic scroll must not clear the declarative preparation flag.
@@ -1022,6 +1028,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const { scrollTop, scrollHeight, clientHeight } = chatScrollRef.current;
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
     const showLatest = !isUnrunNode && distanceFromBottom > clientHeight / 2;
+    // A pane resize can move scrollTop while the browser reflows rows. That is
+    // not a reader gesture, and mistaking it for one would stop following just
+    // as a tall streaming reasoning card reaches the middle of the viewport.
+    const viewport = { width: chatScrollRef.current.clientWidth, height: clientHeight };
+    const previousViewport = lastChatViewportRef.current;
+    const viewportChanged = previousViewport !== null &&
+      (previousViewport.width !== viewport.width || previousViewport.height !== viewport.height);
+    lastChatViewportRef.current = viewport;
     const prevScrollTop = lastScrollTopRef.current;
     lastScrollTopRef.current = scrollTop;
 
@@ -1056,6 +1070,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
 
     if (isScrollingUp && distanceFromBottom > CONVERSATION_BOTTOM_THRESHOLD) {
+      if (viewportChanged) {
+        setScrollBottomVisible(isUserScrolledUpRef.current && showLatest);
+        return;
+      }
       setUserScrolledUp(true);
       setScrollBottomVisible(showLatest);
       return;
@@ -1142,6 +1160,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
+      if (isNestedScrollGesture(e, el)) return;
       stopLatestScroll();
       if (e.deltaY > 0.5) {
         historyReadingRef.current = false;
@@ -1156,10 +1175,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
     let lastTouchY = 0;
     const onTouchStart = (e: TouchEvent) => {
+      if (isNestedScrollGesture(e, el)) return;
       stopLatestScroll();
       if (e.touches[0]) lastTouchY = e.touches[0].clientY;
     };
     const onTouchMove = (e: TouchEvent) => {
+      if (isNestedScrollGesture(e, el)) return;
       if (e.touches[0]) {
         const curY = e.touches[0].clientY;
         const delta = curY - lastTouchY;
@@ -1185,6 +1206,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.target as HTMLElement).closest("input, textarea, [contenteditable=true]")) return;
+      if (isNestedScrollGesture(event, el)) return;
       const up = ["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey);
       const down = ["ArrowDown", "PageDown", "End"].includes(event.key) || (event.key === " " && !event.shiftKey);
       if (up || down) stopLatestScroll();
@@ -2156,6 +2178,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             <div
               className={`initial-query-scroll ${isConversationReady ? "conversation-ready" : "conversation-preparing"}`}
               data-transcript-preparing={(!isConversationReady || initialFillPending) && !isUserScrolledUpRef.current ? "true" : undefined}
+              data-transcript-following={!isUnrunNode && !isUserScrolledUpRef.current ? "true" : undefined}
               ref={chatScrollRef}
               onScroll={handleChatScroll}
               style={conversationRevealStyle}
@@ -2438,6 +2461,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             <div
               className={`initial-query-scroll ${isConversationReady ? "conversation-ready" : "conversation-preparing"}`}
               data-transcript-preparing={(!isConversationReady || initialFillPending) && !isUserScrolledUpRef.current ? "true" : undefined}
+              data-transcript-following={!isUnrunNode && !isUserScrolledUpRef.current ? "true" : undefined}
               ref={chatScrollRef}
               onScroll={handleChatScroll}
               style={conversationRevealStyle}

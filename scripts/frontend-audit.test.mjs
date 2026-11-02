@@ -768,14 +768,58 @@ test("a tall live thinking card stays at the newest reasoning when the conversat
     await page.waitForTimeout(300);
     const state = await scroller.evaluate(scroll => {
       const card = scroll.querySelector(".thinking-card");
+      const body = card.querySelector(".thinking-card-body");
       const cardBounds = card.getBoundingClientRect();
       const scrollBounds = scroll.getBoundingClientRect();
       return { bottomGap: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+        bodyGap: body ? body.scrollHeight - body.scrollTop - body.clientHeight : null,
         cardTop: cardBounds.top - scrollBounds.top, cardHeight: cardBounds.height, clientHeight: scroll.clientHeight };
     });
     assert.ok(state.bottomGap <= 2, `the resize must keep the newest reasoning visible: ${JSON.stringify(state)}`);
+    assert.ok(state.bodyGap <= 2, `the card body must follow its own latest line: ${JSON.stringify(state)}`);
     assert.ok(state.cardTop < 0,
       `the newest reasoning, not the card header, must be the focus after the resize: ${JSON.stringify(state)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("scrolling inside a live thinking card leaves the conversation following its own bottom", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=live-tool", undefined, "reduce");
+  try {
+    const scroller = page.locator(".initial-query-scroll");
+    await page.getByText("Virtualized message 79", { exact: true }).waitFor();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: Array.from({ length: 60 }, (_, index) => `INNER_SCROLL_REASONING_${index}\n\n`).join("") } },
+    ]));
+    const body = page.locator(".thinking-card-body");
+    await body.waitFor();
+    await page.waitForTimeout(200);
+    const innerBefore = await body.evaluate(element => ({ top: element.scrollTop,
+      max: element.scrollHeight - element.clientHeight }));
+    assert.ok(innerBefore.max > 200, `the reasoning body must have its own scroll range: ${JSON.stringify(innerBefore)}`);
+    await body.hover();
+    await page.mouse.wheel(0, -240);
+    await page.waitForTimeout(250);
+    const innerAfter = await body.evaluate(element => element.scrollTop);
+    assert.ok(innerAfter < innerBefore.top - 20, `the wheel must move only the inner reasoning viewport: ${innerAfter}`);
+    assert.ok(await scroller.evaluate(scroll => scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight) <= 2,
+      "an inner scroll must not turn off the conversation's bottom follow state");
+    await page.evaluate(() => window.audit.appendToolEvents([{
+      type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "AFTER_INNER_CARD_SCROLL" }] },
+    }]));
+    await page.getByText("AFTER_INNER_CARD_SCROLL", { exact: true }).waitFor();
+    await page.waitForTimeout(250);
+    const state = await scroller.evaluate(scroll => {
+      const marker = [...scroll.querySelectorAll("*")].find(element => element.textContent === "AFTER_INNER_CARD_SCROLL");
+      const bounds = marker?.getBoundingClientRect(), view = scroll.getBoundingClientRect();
+      return { bottomGap: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+        markerVisible: !!bounds && bounds.bottom > view.top && bounds.top < view.bottom };
+    });
+    assert.ok(state.bottomGap <= 2, `outer output must keep following after an inner scroll: ${JSON.stringify(state)}`);
+    assert.equal(state.markerVisible, true, `the new bottom row must be visible: ${JSON.stringify(state)}`);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

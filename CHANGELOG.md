@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Stopping the Planner conversation now cancels only its in-flight Planner/Partitioner turn; running node agents and mergers keep working, and the Run is not paused. A temporary dispatch pause taken to drain a revision is undone so deferred work resumes. A Run that is explicitly paused remains able to use **Continue** after a backend restart even when its projected phase is already `completed`.
 - Markdown replies now show hyperlinks as links and open absolute web links in a new tab with `noopener noreferrer` instead of navigating the Grapher tab away. GFM bare URLs in Chinese prose stop before sentence punctuation or following text, while percent-encoded and raw CJK URL paths remain intact.
-- Entering a conversation or resizing its pane while a tall expanded Chain of Thought card is still streaming now keeps following the newest reasoning instead of leaving the card header as the focal point. A viewport resize re-pins the bottom without overriding a reader who deliberately scrolled up.
+- While a tall expanded Chain of Thought card is streaming, its own viewport and the surrounding conversation now scroll independently: the card body follows its latest reasoning line, while the conversation stays at the bottom of the page instead of being dragged along by inner text or a resize. Wheel, touch and keyboard scrolling inside the card no longer counts as scrolling the conversation up; a reader who deliberately scrolls the conversation itself up is still left in place.
 
 ## [1.3.4] - 2026-11-02
 
