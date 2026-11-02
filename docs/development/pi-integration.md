@@ -21,7 +21,7 @@ Settings Add/Remove changes Grapher's selection, not installed global files. Cha
 
 External resources default to `~/.pi/agent` (`GRAPHER_GLOBAL_PI_AGENT_DIR` overrides it). Grapher credentials and selection overrides use `PI_CODING_AGENT_DIR`, normally `~/.grapher/pi-agent`. Dedicated resources shadow external copies; bundled copies are deduplicated against both. [global-extensions.ts](../../engine/global-extensions.ts) owns discovery, identity, and precedence.
 
-`pi-trim` is mandatory for every role. `pi-continuity` is enabled by default for Planner/Node/Merger and can be disabled. `pi-better-web-search` is off by default for Planner/Node and must be enabled in Settings; before enabling, confirm at least one configured provider supports the `web_search` API. It registers search only for supported available providers. Exact releases and integrity belong in `package.json` and `package-lock.json`, not a second version list here.
+`pi-trim` is mandatory for every role and recognizes both the Pi 1.4 and Pi 1.5 default identities. `pi-continuity` is enabled by default for Planner/Node/Merger and can be disabled. `pi-better-web-search` is off by default for Planner/Node and must be enabled in Settings; before enabling, confirm at least one configured provider supports the `web_search` API. It registers search only for supported available providers. Exact releases and integrity belong in `package.json` and `package-lock.json`, not a second version list here.
 
 ### MCP project overrides
 
@@ -45,6 +45,6 @@ Baseline upgrades are separate, explicitly requested maintenance, not part of ro
 
 1. Agree the reviewed exact target and authorize affected restarts. [pi-baseline.mjs](../../scripts/pi-baseline.mjs) owns adoption/setup/build; [pi-dependencies.mjs](../../scripts/pi-dependencies.mjs) owns the reviewed dependency profile. Review generated gitlink, manifest, catalog, and dependency changes together; do not hand-edit frozen inputs.
 2. Adoption requires a clean target and valid model data. `pi:verify` currently only prints the recorded commit (`verifyBaseline()` is a no-op); it does not prove checkout cleanliness or baseline integrity.
-3. Select affected adapter, bundled-extension, and platform checks from [Testing](testing.md). Existing processes keep loaded code, so coordinate restarts before accepting the upgraded runtime.
+3. Select affected adapter, bundled-extension, and platform checks from [Testing](testing.md). Existing processes keep loaded code, so stop the backend, provider host, and every prewarmed Partition/Planner/Node worker before accepting the upgraded runtime; restart the whole application rather than only retrying planning. A process that survives the upgrade can mix an old cached module with new source and fail with a missing-export error such as `ownedSlice`.
 
 Bundled extensions can be updated independently using exact project dependency pins and matching lockfile changes, validated against the current baseline's [SDK contracts](../../scripts/pi-compat.test.ts). A global Pi/package update does not replace Grapher's bundled copy.

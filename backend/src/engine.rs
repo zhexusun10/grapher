@@ -120,16 +120,22 @@ fn startup_session_hash(
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_slice(line).map_err(|e| e.to_string()))
         .collect::<Result<_, _>>()?;
-    let (provider, model_id) = model.split_once('/').unwrap_or(("", model));
     if changes.len() > 2
         || changes
             .iter()
             .enumerate()
             .any(|(index, event)| match index {
                 0 => {
+                    // Provider ids may contain "/" (for example URL-derived
+                    // llama.cpp providers), so compare the event's complete
+                    // provider/model key instead of splitting the configured
+                    // model at its first slash.
+                    let provider = event["provider"].as_str().unwrap_or_default();
+                    let model_id = event["modelId"].as_str().unwrap_or_default();
                     event["type"] != "model_change"
-                        || event["provider"] != provider
-                        || event["modelId"] != model_id
+                        || provider.is_empty()
+                        || model_id.is_empty()
+                        || format!("{provider}/{model_id}") != model
                 }
                 1 => event["type"] != "thinking_level_change" || event["thinkingLevel"] != thinking,
                 _ => true,
@@ -2169,6 +2175,27 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
                 assert_eq!(captured, task);
             }
         }
+    }
+
+    #[cfg(not(feature = "fixture"))]
+    #[test]
+    fn prewarm_session_hash_accepts_provider_ids_with_slashes() {
+        let provider = "http://127.0.0.1:8080/v1";
+        let model = format!("{provider}/local");
+        let before = b"{}\n";
+        let appended = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "model_change", "provider": provider, "modelId": "local"
+            }),
+            serde_json::json!({
+                "type": "thinking_level_change", "thinkingLevel": "high"
+            })
+        );
+        let mut after = before.to_vec();
+        after.extend_from_slice(appended.as_bytes());
+        assert!(startup_session_hash(before, &after, &model, "high").is_ok());
+        assert!(startup_session_hash(before, &after, &format!("{provider}/other"), "high").is_err());
     }
 
     #[cfg(not(feature = "fixture"))]

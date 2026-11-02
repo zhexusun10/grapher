@@ -76,8 +76,8 @@ test('bundled pi-trim replaces Grapher prompt trimming', async () => {
   assert.match(sanitized, /<cwd>[\s\S]*<\/cwd>/);
 });
 
-test('pi-trim handles Pi 1.0 prompt sections and mid-turn updates without altering tools, project context or stored messages', async () => {
-  const identity = 'You are an expert coding assistant operating inside pi, a coding agent harness.';
+test('pi-trim handles Pi 1.5 prompt sections and mid-turn updates without altering tools, project context or stored messages', async () => {
+  const identity = 'You are a coding assistant running inside pi, a coding agent harness.';
   const environmentRule = '- You can inspect PI_* environment variables for current model and session details.';
   const projectText = `${identity}\n<docs>\nPi documentation (read only for this project)\n</docs>\n${environmentRule}`;
   const state = buildSystemPromptState({
@@ -103,7 +103,7 @@ test('pi-trim handles Pi 1.0 prompt sections and mid-turn updates without alteri
   const result = await hook({ type: 'context_with_system', messages } as any, {} as any) as any;
   assert.deepEqual(messages, snapshot, 'request-time trimming must not mutate stored transcript data');
   assert.equal(result.messages[0].sections.docs, null);
-  assert.match(result.messages[0].sections.preamble, /^You are an expert coding assistant\./);
+  assert.match(result.messages[0].sections.preamble, /^You are a coding assistant\./);
   assert.ok(!result.messages[0].sections.rules.includes(environmentRule));
   for (const name of ['tools', 'project_context', 'skills', 'mcp_servers', 'cwd', 'addendum']) {
     assert.equal(result.messages[0].sections[name], state.sections![name], `preserve ${name}`);
@@ -111,7 +111,7 @@ test('pi-trim handles Pi 1.0 prompt sections and mid-turn updates without alteri
   const delta = result.messages[3];
   assert.equal(delta.sections.docs, null);
   assert.equal(delta.sections.obsolete, null);
-  assert.equal(delta.content[0].text, 'You are an expert coding assistant.');
+  assert.equal(delta.content[0].text, 'You are a coding assistant.');
   assert.deepEqual(delta.content[0].cacheControl, { type: 'ephemeral' });
   assert.match(delta.sections.rules, /Keep task instructions/);
   assert.ok(!delta.sections.rules.includes(environmentRule));
@@ -213,14 +213,22 @@ test('refreshed catalog exposes reviewed API changes and does not resurrect reti
     ['openai-codex', 'gpt-5.3-codex-spark'],
     ['azure', 'gpt-5.2-chat-latest'],
     ['openai', 'gpt-5.3-chat-latest'],
+    // Retired while moving to the Pi 1.5.0 snapshot: the OpenCode Go Gemini
+    // contributor slot moved to the direct `gemini-4-argon` id, the free
+    // minimax/longcat previews and several legacy OpenRouter models disappeared.
+    ['opencode-go', 'gemini-4-argon-contributor'],
+    ['opencode-go', 'minimax-m3.1-flash-free'],
+    ['opencode', 'deepseek-v4-flash'],
+    ['openrouter', 'openai/gpt-4-turbo'],
+    ['google-vertex', 'gemini-3.1-flash-lite-image'],
   ]) {
     assert.equal(runtime.getModel(provider, id), undefined, `${provider}/${id}: saved selections need replacement`);
   }
   assert.equal(runtime.getModel('openrouter', 'inclusionai/ling-3.0-flash')?.api, 'openai-completions');
   // OpenCode Go moved to the opencode.ai inference endpoints in 1.3.0 and gained
   // Google Generative AI support, while its Qwen models stay on Anthropic Messages.
-  assert.equal(runtime.getModel('opencode-go', 'gemini-4-argon-contributor')?.api, 'google-generative-ai');
-  assert.match(runtime.getModel('opencode-go', 'gemini-4-argon-contributor')?.baseUrl ?? '', /^https:\/\/opencode\.ai\/inference\/go\/v1$/);
+  assert.equal(runtime.getModel('opencode-go', 'gemini-4-argon')?.api, 'google-generative-ai');
+  assert.match(runtime.getModel('opencode-go', 'gemini-4-argon')?.baseUrl ?? '', /^https:\/\/opencode\.ai\/inference\/go\/google\/v1beta$/);
   // OpenRouter router models report a negative placeholder price; the snapshot must use 0, not -$1,000,000.
   assert.deepEqual(runtime.getModel('openrouter', 'openrouter/auto')?.cost,
     { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
@@ -230,4 +238,9 @@ test('refreshed catalog exposes reviewed API changes and does not resurrect reti
   const miniMax = runtime.getModel('minimax', 'MiniMax-M3.1-Flash');
   assert.deepEqual(getModelThinkingCapabilities(miniMax!).thinkingLevels, ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.ok(getModelThinkingCapabilities(runtime.getModel('xai', 'grok-4.3')!).thinkingLevels.includes('xhigh'));
+  // Pi 1.5.0 adds the direct OpenCode Go Gemini endpoint and the GPT-6.1
+  // Terra/Grok 4.7 catalog entries while keeping the provider APIs stable.
+  assert.equal(runtime.getModel('opencode-go', 'minimax-m3.1-flash')?.api, 'openai-completions');
+  assert.equal(runtime.getModel('openai', 'gpt-6.1-terra')?.api, 'openai-responses');
+  assert.equal(runtime.getModel('xai', 'grok-4.7')?.api, 'openai-responses');
 });

@@ -91,14 +91,15 @@ test('Pi package builds follow workspace dependency order', t => {
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const internal = (name) => `@earendil-works/${name}`;
   const dependencies = {
-    chord: ['telemetry'],
+    chord: ['schema', 'telemetry'],
     tui: [],
     telemetry: [],
+    schema: [],
     codemode: [],
     mcp: [],
-    ai: ['telemetry'],
-    durable: ['chord', 'ai', 'codemode', 'telemetry'],
-    agent: ['ai'],
+    ai: ['schema', 'telemetry'],
+    durable: ['chord', 'ai', 'codemode', 'schema', 'telemetry'],
+    agent: ['ai', 'schema'],
     'coding-agent': ['agent', 'ai', 'codemode', 'mcp', 'tui'],
   };
   for (const name of corePackages) {

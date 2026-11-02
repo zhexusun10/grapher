@@ -1,6 +1,7 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
-import { Background, Controls, ReactFlow, useNodes, type ReactFlowInstance, type Node, type Edge, type NodeChange, type NodeTypes, type EdgeTypes } from "@xyflow/react";
-import { graphFitOptions } from "../../hooks/useGraphViewport";
+import { Background, ControlButton, Controls, ReactFlow, useNodes, useReactFlow, useStore, useStoreApi, type ReactFlowInstance, type Node, type Edge, type NodeChange, type NodeTypes, type EdgeTypes } from "@xyflow/react";
+import { Maximize } from "lucide-react";
+import { graphFitOptions, runningViewportForGraph } from "../../lib/graphFit";
 
 /** Synchronize the viewport with the committed React Flow positions before paint. */
 function RenderedLayout({ onLayout }: { onLayout: () => void }) {
@@ -9,11 +10,28 @@ function RenderedLayout({ onLayout }: { onLayout: () => void }) {
   return null;
 }
 
+/** Read the rendered geometry and latest status at the moment the button is pressed. */
+function FitGraphButton({ onFitStart }: { onFitStart: () => void }) {
+  const instance = useReactFlow();
+  const store = useStoreApi();
+  const label = useStore(state => state.ariaLabelConfig["controls.fitView.ariaLabel"]);
+  const fit = () => {
+    onFitStart();
+    const { width, height } = store.getState();
+    const viewport = runningViewportForGraph(instance, width, height);
+    if (viewport) void instance.setViewport(viewport);
+    else void instance.fitView(graphFitOptions);
+  };
+  return <ControlButton className="react-flow__controls-fitview" title={label} aria-label={label} onClick={fit}>
+    <Maximize style={{ fill: "none" }} />
+  </ControlButton>;
+}
+
 /** Streaming conversation changes do not need to resubscribe/render the graph canvas. */
-export const GraphCanvas = memo(function GraphCanvas({ runKey, ready, nodes, edges, nodeTypes, edgeTypes, tokens, onInit, onSelect, onLayout, onPaneContextMenu }: {
+export const GraphCanvas = memo(function GraphCanvas({ runKey, ready, nodes, edges, nodeTypes, edgeTypes, tokens, onInit, onSelect, onLayout, onFitStart, onPaneContextMenu }: {
   runKey: string; ready: boolean; nodes: Node[]; edges: Edge[]; nodeTypes: NodeTypes; edgeTypes: EdgeTypes;
   tokens: { graphEdgeDefault: string; graphEdgeFeedback: string; graphGridDot: string };
-  onInit: (instance: ReactFlowInstance, key: string) => void; onSelect: (id: string) => void; onLayout: () => void;
+  onInit: (instance: ReactFlowInstance, key: string) => void; onSelect: (id: string) => void; onLayout: () => void; onFitStart: () => void;
   onPaneContextMenu: (event: React.MouseEvent | MouseEvent) => void;
 }) {
   // These are controlled nodes. React Flow reports measured dimensions via
@@ -66,11 +84,13 @@ export const GraphCanvas = memo(function GraphCanvas({ runKey, ready, nodes, edg
     <ReactFlow key={runKey} fitView fitViewOptions={graphFitOptions} onInit={initialize}
       style={{ opacity: ready ? 1 : 0, pointerEvents: ready ? "auto" : "none" }}
       nodes={measuredNodes} onNodesChange={onNodesChange} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
-      onNodeClick={select} onPaneClick={clear} onPaneContextMenu={onPaneContextMenu} minZoom={0.3} maxZoom={1.6}
+      onNodeClick={select} onPaneClick={clear} onPaneContextMenu={onPaneContextMenu} minZoom={graphFitOptions.minZoom} maxZoom={graphFitOptions.maxZoom}
       nodesDraggable={false} nodesConnectable={false} elementsSelectable={false} proOptions={{ hideAttribution: true }}>
       <RenderedLayout onLayout={onLayout} />
       <Background color={tokens.graphGridDot} gap={20} size={1} />
-      <Controls showInteractive={false} fitViewOptions={graphFitOptions} />
+      <Controls showInteractive={false} showFitView={false}>
+        <FitGraphButton onFitStart={onFitStart} />
+      </Controls>
     </ReactFlow>
   </>;
 });

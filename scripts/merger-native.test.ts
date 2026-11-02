@@ -92,7 +92,7 @@ test('production Planner writes source directly; Merger repairs node and publica
       } else if (merger) {
         const system = messages.filter((message: any) => message.role === 'system')
           .map((message: any) => JSON.stringify(message.content)).join('\n');
-        assert.ok(system.includes('You are an expert coding assistant'), 'Merger must retain the default coding prompt');
+        assert.ok(system.includes('You are a coding assistant.'), 'Merger must retain the default coding prompt');
         assert.ok(system.includes('<tools>') && system.includes('<rules>'), 'Merger must retain Pi tool guidance and rules');
         const pathGuideline = 'Use project-root-relative paths in Bash commands and project files.';
         assert.ok(system.includes(pathGuideline), 'all Merger turns retain the shared path convention');

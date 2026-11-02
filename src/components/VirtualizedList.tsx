@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { estimateTranscriptRowHeight, retainedRowAnchor, rowAt, rowOffsets, visibleRows } from "../services/transcriptLayout";
 import { shareJson } from "../services/structuralSharing";
-import { FOLLOW_LATEST_EVENT, isNestedScrollGesture } from "../services/transcriptScroll";
+import { FOLLOW_LATEST_EVENT, TRANSCRIPT_SCROLL_ADJUSTED_EVENT, isNestedScrollGesture } from "../services/transcriptScroll";
 
 export function scrollParent(element: HTMLElement | null): HTMLElement | null {
   for (let parent = element?.parentElement; parent; parent = parent.parentElement) {
@@ -70,6 +70,10 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   // new rows initially use estimated heights, then drag the reader on the next
   // microtask when those estimates are replaced by actual heights.
   const readingAnchor = useRef<{ id: string; visualTop: number } | null>(null);
+  // Preserve the row the reader actually scrolled over, not necessarily the
+  // row at the viewport's top. A still-draining CoT above the answer can grow
+  // while both are visible and otherwise push the answer out of the pane.
+  const gestureRowAnchor = useRef<{ id: string; visualTop: number; scrollTop: number; awaitingScroll: boolean } | null>(null);
   const restoredScrollTop = useRef<number | null>(null);
   const stabilizingAnchorRef = useRef(false);
   const beforeIds = previousOffsetIds.current;
@@ -129,8 +133,61 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       readingAnchor.current = null;
       restoredScrollTop.current = null;
     };
+    let gestureTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelGestureTimer = () => {
+      if (gestureTimer !== null) clearTimeout(gestureTimer);
+      gestureTimer = null;
+    };
+    const clearGestureAnchor = () => {
+      cancelGestureTimer();
+      gestureRowAnchor.current = null;
+      releaseAnchor();
+    };
+    const captureGestureAnchor = (row: HTMLElement | null | undefined, awaitingScroll = false) => {
+      cancelGestureTimer();
+      const id = row?.dataset.transcriptId;
+      const anchor = parent && id && ref.current?.contains(row)
+        ? { id, visualTop: row.getBoundingClientRect().top, scrollTop: parent.scrollTop, awaitingScroll } : null;
+      gestureRowAnchor.current = anchor;
+      if (anchor?.awaitingScroll) {
+        // Do not write scrollTop before the browser has applied a wheel/touch
+        // gesture: doing so can cancel the user's actual scroll. A gesture at
+        // a boundary may never generate a scroll event, so retry once later.
+        gestureTimer = setTimeout(() => {
+          gestureTimer = null;
+          if (gestureRowAnchor.current !== anchor || !anchor.awaitingScroll) return;
+          anchor.awaitingScroll = false;
+          if (mounted.current) setHeightVersion(value => value + 1);
+        }, 160);
+      }
+    };
+    const visibleBounds = () => {
+      if (!parent) return null;
+      const bounds = parent.getBoundingClientRect();
+      const composer = parent.closest(".initial-query-view")?.querySelector<HTMLElement>(".pane-bottom-chat");
+      return { top: bounds.top, bottom: Math.min(bounds.bottom, composer?.getBoundingClientRect().top ?? bounds.bottom) };
+    };
+    const visibleRowsInConversation = () => {
+      const bounds = visibleBounds();
+      if (!parent || !bounds) return [];
+      return [...parent.querySelectorAll<HTMLElement>("[data-transcript-id]")].filter(row => {
+        const rect = row.getBoundingClientRect();
+        return rect.bottom > bounds.top && rect.top < bounds.bottom;
+      });
+    };
     const onUserScrollGesture = (e: Event) => {
       if (parent && isNestedScrollGesture(e, parent)) return;
+      const target = e.target instanceof Element ? e.target : null;
+      let row = target?.closest<HTMLElement>("[data-transcript-id]");
+      if (!row) {
+        const y = e.type === "wheel" ? (e as WheelEvent).clientY : (e as TouchEvent).touches[0]?.clientY;
+        row = visibleRowsInConversation().find(candidate => {
+          const bounds = candidate.getBoundingClientRect();
+          return y !== undefined && y >= bounds.top && y <= bounds.bottom;
+        });
+      }
+      const mayScroll = e.type === "touchstart" || Math.abs((e as WheelEvent).deltaY) > 0.5;
+      captureGestureAnchor(row, mayScroll);
       if (stabilizingAnchorRef.current && parent && restoredScrollTop.current !== null) {
         // If the user scrolled during stabilization, adjust the anchor's expected visualTop
         // by the user's scroll movement so stabilization preserves the user's manual progress.
@@ -143,7 +200,56 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       }
       releaseAnchor();
     };
+    let scrollbarPointer: number | null = null;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!parent || isNestedScrollGesture(event, parent)) return;
+      releaseAnchor();
+      const width = parent.offsetWidth - parent.clientWidth;
+      const bounds = parent.getBoundingClientRect();
+      const onScrollbar = width > 0 ? event.clientX >= bounds.right - width :
+        event.target === parent && event.clientX >= bounds.right - 14;
+      if (onScrollbar) {
+        scrollbarPointer = event.pointerId;
+        captureGestureAnchor(visibleRowsInConversation().at(-1));
+      } else {
+        gestureRowAnchor.current = null;
+      }
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (scrollbarPointer !== event.pointerId) return;
+      scrollbarPointer = null;
+      captureGestureAnchor(visibleRowsInConversation().at(-1));
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (parent && isNestedScrollGesture(event, parent)) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const scrollKey = ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key) ||
+        (event.key === " " && !target?.closest("button, [role=button]"));
+      if (!scrollKey || target?.closest("input, textarea, [contenteditable=true]")) {
+        clearGestureAnchor();
+        return;
+      }
+      captureGestureAnchor(target?.closest<HTMLElement>("[data-transcript-id]") ?? visibleRowsInConversation().at(-1), true);
+      releaseAnchor();
+    };
     const schedule = () => {
+      const gesture = gestureRowAnchor.current;
+      const bounds = visibleBounds();
+      if (gesture && parent && bounds) {
+        if (gesture.awaitingScroll && Math.abs(parent.scrollTop - gesture.scrollTop) > 0.5) {
+          gesture.awaitingScroll = false;
+          cancelGestureTimer();
+        }
+        const row = ref.current?.querySelector<HTMLElement>(`[data-transcript-id="${gesture.id.replace(/["\\]/g, "\\$&")}"]`);
+        const expectedTop = gesture.visualTop - (parent.scrollTop - gesture.scrollTop);
+        // Release an anchor the reader deliberately scrolled past. Use its
+        // expected position without reflow: the actual row can temporarily be
+        // outside the viewport precisely because the CoT above it grew.
+        if (!row || expectedTop >= bounds.bottom || expectedTop + row.getBoundingClientRect().height <= bounds.top) {
+          cancelGestureTimer();
+          gestureRowAnchor.current = null;
+        }
+      }
       if (!stabilizingAnchorRef.current && parent && restoredScrollTop.current !== null && Math.abs(parent.scrollTop - restoredScrollTop.current) > 1) releaseAnchor();
       if (frame.current === null) {
         frame.current = requestAnimationFrame(() => {
@@ -154,22 +260,27 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     };
     const observer = new ResizeObserver(updateViewport);
     if (parent) {
-      parent.addEventListener(FOLLOW_LATEST_EVENT, releaseAnchor);
+      parent.addEventListener(FOLLOW_LATEST_EVENT, clearGestureAnchor);
       parent.addEventListener("scroll", schedule, { passive: true });
       parent.addEventListener("wheel", onUserScrollGesture, { passive: true });
       parent.addEventListener("touchstart", onUserScrollGesture, { passive: true });
-      parent.addEventListener("pointerdown", releaseAnchor, { passive: true });
-      parent.addEventListener("keydown", releaseAnchor);
+      parent.addEventListener("pointerdown", onPointerDown, { passive: true });
+      parent.addEventListener("keydown", onKeyDown);
+      window.addEventListener("pointerup", onPointerUp);
+      window.addEventListener("pointercancel", onPointerUp);
       observer.observe(parent);
     }
     return () => {
       mounted.current = false;
-      parent?.removeEventListener(FOLLOW_LATEST_EVENT, releaseAnchor);
+      parent?.removeEventListener(FOLLOW_LATEST_EVENT, clearGestureAnchor);
       parent?.removeEventListener("scroll", schedule);
       parent?.removeEventListener("wheel", onUserScrollGesture);
       parent?.removeEventListener("touchstart", onUserScrollGesture);
-      parent?.removeEventListener("pointerdown", releaseAnchor);
-      parent?.removeEventListener("keydown", releaseAnchor);
+      parent?.removeEventListener("pointerdown", onPointerDown);
+      parent?.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      cancelGestureTimer();
       observer.disconnect();
       if (frame.current !== null) cancelAnimationFrame(frame.current);
       frame.current = null;
@@ -200,6 +311,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         const visualDelta = row.getBoundingClientRect().top - retained.visualTop;
         if (Math.abs(visualDelta) >= 1) {
           parent.scrollTop += visualDelta;
+          parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
         }
       }
       restoredScrollTop.current = parent.scrollTop;
@@ -211,16 +323,40 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       if (before !== offsets) parent.scrollTop = parent.scrollHeight;
       updateViewport();
     }
-    // Ordinary measurements retain the reading anchor too, without confusing
-    // first measurements during a scroll with a history prepend.
-    else if (!followingLatest && hasResize && parent && viewport.top > 0 && before !== offsets && before.length > 1 &&
+    // Keep the row under the user's gesture steady as rows above it resize.
+    // The viewport top may still be in an older row while the user is reading
+    // the answer lower down, so anchoring only that top row is insufficient.
+    else if (!followingLatestNow && parent && before !== offsets && before.length > 1 &&
         previousOffsetIds.current[0] === ids[0]) {
-      const index = viewport.top >= before.at(-1)! ? before.length - 1 : rowAt(before, viewport.top);
-      if (index < offsets.length) {
-        const delta = offsets[index] - before[index];
-        const distFromBottom = parent.scrollHeight - parent.scrollTop - parent.clientHeight;
-        if (Math.abs(delta) > 1 && distFromBottom > 40) {
-          parent.scrollTop += delta;
+      const gesture = gestureRowAnchor.current;
+      const row = gesture && ref.current?.querySelector<HTMLElement>(
+        `[data-transcript-id="${gesture.id.replace(/["\\]/g, "\\$&")}"]`);
+      if (gesture && row) {
+        if (gesture.awaitingScroll && Math.abs(parent.scrollTop - gesture.scrollTop) > 0.5) {
+          gesture.awaitingScroll = false;
+        }
+        if (!gesture.awaitingScroll) {
+          // The snapshot is taken before the gesture moves scrollTop. Compare
+          // actual geometry rather than cached heights so a measurement already
+          // pending at that moment is not compensated twice.
+          const expectedTop = gesture.visualTop - (parent.scrollTop - gesture.scrollTop);
+          const delta = row.getBoundingClientRect().top - expectedTop;
+          if (Math.abs(delta) > 1) {
+            parent.scrollTop += delta;
+            parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
+          }
+          gesture.visualTop = row.getBoundingClientRect().top;
+          gesture.scrollTop = parent.scrollTop;
+        }
+      } else if (hasResize && viewport.top > 0) {
+        const index = viewport.top >= before.at(-1)! ? before.length - 1 : rowAt(before, viewport.top);
+        if (index < offsets.length) {
+          const delta = offsets[index] - before[index];
+          const distFromBottom = parent.scrollHeight - parent.scrollTop - parent.clientHeight;
+          if (Math.abs(delta) > 1 && distFromBottom > 40) {
+            parent.scrollTop += delta;
+            parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
+          }
         }
       }
     }

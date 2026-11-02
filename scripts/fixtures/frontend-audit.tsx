@@ -119,6 +119,19 @@ function PlannerTranscriptFixture() {
   </div>;
 }
 
+function TranscriptOutputFixture() {
+  const line = (event: unknown) => JSON.stringify(event) + "\n";
+  const marker = (startOffset: number) => line({ type: "grapher_planning_source", planningId: "planner-live", startOffset });
+  const answer = (text: string) => line({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } });
+  const [state, setState] = useState(() => ({ offset: 100, text: answer("PLANNER_TAIL"), live: true }));
+  audit.prependPlannerHistory = () => setState(previous => ({ ...previous, offset: 0, text: answer("PLANNER_PREPENDED") + previous.text }));
+  audit.appendPlannerOutput = (finish = false) => setState(previous => ({ ...previous, live: !finish,
+    text: previous.text + answer(finish ? "PLANNER_FINAL" : "PLANNER_APPEND") }));
+  return <div className="initial-query-scroll" data-transcript-events style={{ height: 300, overflowY: "auto" }}>
+    <VirtualizedTranscript inline output={marker(state.offset) + state.text} liveSource={state.live ? "planner-live" : undefined} />
+  </div>;
+}
+
 function HistoryStatusFixture() {
   const [loading, setLoading] = useState(false);
   const [mounted, setMounted] = useState(true);
@@ -167,11 +180,12 @@ function HistoryRegressionFixture() {
 function LatestScrollFixture() {
   const layout = new URLSearchParams(location.search).get("layout");
   const pagedLive = layout === "live-paged";
-  const live = layout === "live-tool" || pagedLive;
+  const live = layout === "live-tool" || layout === "live-empty" || pagedLive;
   const nodeView = live && new URLSearchParams(location.search).get("view") === "node";
   const assistant = (text: string) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
   const [output, setOutput] = useState(() => {
     if (layout === "long") return assistant(Array.from({ length: 300 }, (_, index) => `Paragraph ${index}: long message 中文🚀 with enough text to span the viewport.\n\n`).join("")) + assistant("LATEST_VISIBLE_MARKER");
+    if (layout === "live-empty") return "";
     const history = Array.from({ length: 80 }, (_, index) => assistant(`Virtualized message ${index}`)).join("");
     if (live) return history;
     const content = Array.from({ length: 30 }, (_, index) => `Card output line ${index}`).join("\n\n");
@@ -347,7 +361,7 @@ const cases: Record<string, React.ComponentType> = {
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
-  polling: PollingFixture, historyStatus: HistoryStatusFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
+  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
   timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture,
 };

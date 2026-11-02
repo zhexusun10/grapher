@@ -279,7 +279,6 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
               className="tool-copy-btn"
               onClick={handleCopy}
               aria-label={t("复制调用参数与结果")}
-              title={t("复制调用参数与结果")}
             >
               {isCopied ? <Check size={12} className="copy-icon-check" /> : <Copy size={12} className="copy-icon-copy" />}
             </button>

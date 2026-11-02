@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-03
+
+### Changed
+
+- The execution graph's **Fit View** now prioritizes running task and Merger cards when the whole graph cannot fit at minimum zoom, including during layout animations. If running cards are too far apart, it focuses a visible group; graphs that fit or have no running cards retain the whole-graph view.
+- Upgrade the pinned Pi engine from 1.4.0 to the official 1.5.0 release (`f9a26365568127461c47a07a37dcb42c140a3ac5`), refresh the checksummed model catalog and reviewed dependency profile, build the new `pi-schema` workspace package in dependency order, follow Pi's replacement of `shx` packaging scripts, and restore the `moderate` dependency audit gate now that upstream pins `vitest` 4.1.12.
+- Upgrade the bundled `pi-trim` from 0.2.0 to 0.2.2, which recognizes both the Pi 1.4 and Pi 1.5 default identities and trims the Pi 1.5 preamble to `You are a coding assistant.`. This removes the temporary request-time identity normalization from the workspace adapter.
+- The refreshed catalog retires `opencode-go/gemini-4-argon-contributor`, the free MiniMax/LongCat previews and several legacy OpenRouter/Google model IDs, while `opencode-go/gemini-4-argon` and the new GPT-6.1 Terra and Grok 4.7 entries are available; saved selections on retired IDs need an available replacement.
+- Native hover tooltips were removed from tool-call cards and Chain of Thought cards, including their copy buttons; the buttons retain accessible labels.
+
+### Fixed
+
+- Model preflight and session prewarm now match the complete `provider/model` key, so provider IDs containing a slash, such as URL-derived llama.cpp providers, no longer skip the authentication check or reject a valid warmed session.
+- Markdown replies now render inline `$...$` and display `$$...$$` math with KaTeX, including multi-line formulas, while code spans, fenced or indented code, escaped dollars and currency-like prose remain literal.
+- Conversation following now rechecks the bottom as assistant output arrives or finishes, including combined reasoning and answer chunks. If a completed thinking card is still revealing its backlog, its growth no longer pushes the answer being read out of view. Keyboard navigation and scrollbar interactions preserve intentional reading, while stationary scrollbar clicks no longer disable following; scrolling inside a thinking card remains independent.
+
 ## [1.4.0] - 2026-11-02
 
 ### Added

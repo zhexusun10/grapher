@@ -4462,6 +4462,20 @@ fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
     assert!(error.contains(&partitioner_model));
     assert_eq!(calls.get(), 1);
 
+    let slash_provider = "http://127.0.0.1:8080/v1";
+    let slash_model = format!("{slash_provider}/local");
+    let slash_catalog = std::cell::OnceCell::new();
+    let unauthenticated_slash = || {
+        Some(serde_json::json!({
+            "result": { "providers": [{ "id": slash_provider, "configured": false }] }
+        }))
+    };
+    let error = validate_role_model_preflight(
+        PiRole::NodeAgent, &slash_model, &slash_catalog, &unauthenticated_slash,
+    ).unwrap_err();
+    assert!(error.contains("not authenticated"));
+    assert!(error.contains(slash_provider));
+
     let catalog = std::cell::OnceCell::new();
     validate_role_model_preflight(PiRole::Partitioner, "invalid", &catalog, &fetch).unwrap_err();
     assert!(catalog.get().is_none()); // Invalid format still fails before the lookup.

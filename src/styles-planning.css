@@ -993,6 +993,25 @@
   display: block;
 }
 
+/* Math can be wider than a chat bubble; keep the formula readable without
+   forcing the whole transcript to scroll horizontally. */
+.markdown-content .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+
+.markdown-content .katex {
+  font-size: 1.05em;
+}
+
+.markdown-content .math-error {
+  font-family: var(--font-mono, monospace);
+  color: #dc2626;
+  overflow-wrap: anywhere;
+}
+
 .markdown-content blockquote {
   margin: 8px 0;
   padding: 4px 12px;

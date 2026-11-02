@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, type Config } from "../src/types.ts";
-import { applyModelConfig, defaultRoleThinkingLevel, normalizeModelThinkingLevels, planningModelRoles, resolveExecutionModelAndThinking, resolveRetryModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
+import { applyModelConfig, defaultRoleThinkingLevel, normalizeModelThinkingLevels, planningModelRoles, providerIdForModel, resolveExecutionModelAndThinking, resolveRetryModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
 import { providerAuth, hasUnsupportedCredentialCharacters, type ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
@@ -28,6 +28,13 @@ const catalog: ProviderCatalog = {
 };
 
 const legacy: Config = { ...defaultConfig, model: "example/default", thinkingLevel: "high" };
+
+test("provider matching uses the longest known id for slash-containing providers", () => {
+  const providers = [{ id: "http:" }, { id: "http://127.0.0.1:8080/v1" }];
+  assert.equal(providerIdForModel("http://127.0.0.1:8080/v1/local", providers), "http://127.0.0.1:8080/v1");
+  assert.equal(providerIdForModel("example/default", catalog.providers), "example");
+  assert.equal(providerIdForModel("unknown/model", catalog.providers), "unknown");
+});
 
 test("conversation selections replace each other without changing non-model settings", () => {
   const base: Config = { ...legacy, autoApprove: true, maxParallel: 4, roleModels: { planner: { model: "example/default", thinkingLevel: "high" } } };

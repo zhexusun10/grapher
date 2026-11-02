@@ -1307,6 +1307,21 @@ fn validate_planning_models_preflight(
     Ok(())
 }
 
+fn provider_for_model<'a>(providers: &'a [serde_json::Value], model: &str) -> Option<&'a str> {
+    // Provider ids may contain "/" themselves, so match known ids longest
+    // first instead of taking the first path segment. This mirrors Pi's own
+    // --model resolution and keeps a URL-derived provider authenticated once.
+    providers
+        .iter()
+        .filter_map(|provider| provider.get("id").and_then(|id| id.as_str()))
+        .filter(|id| {
+            model.strip_prefix(id).is_some_and(|rest| {
+                rest.starts_with('/') && rest.len() > 1
+            })
+        })
+        .max_by_key(|id| id.len())
+}
+
 fn validate_role_model_preflight(
     role: PiRole,
     model: &str,
@@ -1329,8 +1344,8 @@ fn validate_role_model_preflight(
             trimmed
         ));
     }
-    let provider_id = trimmed.split('/').next().unwrap_or("");
-    if provider_id.is_empty() {
+    let fallback_provider = trimmed.split('/').next().unwrap_or("");
+    if fallback_provider.is_empty() {
         return Err(format!(
             "Pre-flight check failed: Invalid model identifier '{}'.",
             trimmed
@@ -1346,6 +1361,7 @@ fn validate_role_model_preflight(
                 .and_then(|r| r.get("providers"))
                 .and_then(|p| p.as_array())
             {
+                let provider_id = provider_for_model(providers, trimmed).unwrap_or(fallback_provider);
                 if let Some(prov) = providers
                     .iter()
                     .find(|p| p.get("id").and_then(|i| i.as_str()) == Some(provider_id))

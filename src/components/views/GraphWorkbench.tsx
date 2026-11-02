@@ -39,7 +39,7 @@ import { settleInterruptedItems } from "../../services/transcriptSettle";
 import { activePlannerOutput } from "../PlanningActivity";
 import { plannerConversationEdits, plannerHistoryIds } from "../../lib/plannerOutput";
 import { cachedPlanningOutput } from "../../services/transcriptCache";
-import { HISTORY_PREPEND_EVENT, TRANSCRIPT_CONTENT_GROWTH_EVENT, isNestedScrollGesture } from "../../services/transcriptScroll";
+import { HISTORY_PREPEND_EVENT, TRANSCRIPT_CONTENT_GROWTH_EVENT, TRANSCRIPT_FINAL_OUTPUT_EVENT, TRANSCRIPT_SCROLL_ADJUSTED_EVENT, isNestedScrollGesture } from "../../services/transcriptScroll";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
 import { plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
 import { executionSessionTiming, executionSessionUsageThrough, mergePlannerTurns, plannerLegacyUsage, plannerSessionTiming, plannerSessionUsageThrough, plannerTurnSummaries, addTokenUsage } from "../../services/sessionMetrics";
@@ -950,6 +950,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const expandedCardObserverRef = useRef<ResizeObserver | null>(null);
   const expandedCardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isUserScrolledUpRef = useRef(false);
+  // Distinguish a real reader gesture from a layout-induced scroll-up. Only a
+  // gesture should prevent later final output from reclaiming the bottom.
+  const userScrolledAwayRef = useRef(false);
   const shouldFollowOutput = useStableCallback(() => !isUnrunNode && !isUserScrolledUpRef.current);
   const lastScrollTopRef = useRef(0);
   const prevScrollHeightRef = useRef(0);
@@ -962,6 +965,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const suppressAutoScrollRef = useRef(false);
   const resetChatScrollFrameRef = useRef<number | null>(null);
   const revealChatFrameRef = useRef<number | null>(null);
+  const contentGrowthFrameRef = useRef<number | null>(null);
   const [readyConversationKey, setReadyConversationKey] = useState("");
   const isConversationReady = readyConversationKey === conversationViewKey;
   const reduceMotion = useReducedMotion();
@@ -977,6 +981,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const latestScrollRef = useRef<(() => void) | null>(null);
   const setUserScrolledUp = useStableCallback((scrolledUp: boolean) => {
     isUserScrolledUpRef.current = scrolledUp;
+    if (!scrolledUp) userScrolledAwayRef.current = false;
     const el = chatScrollRef.current;
     if (!el) return;
     // Drive the virtualizer's bottom pin imperatively as well: follow state can
@@ -1000,6 +1005,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [setUserScrolledUp]);
   const userGestureUpRef = useRef(false);
   const historyReadingRef = useRef(false);
+  const focusScrollPendingRef = useRef(false);
+  const scrollbarGestureRef = useRef<{
+    pointerId: number; startTop: number; wasFollowing: boolean; wasScrolledUp: boolean;
+    wasAway: boolean; wasGestureUp: boolean; movedUp: boolean;
+  } | null>(null);
+  const resumeFollowingAfterLayoutScroll = useStableCallback(() => {
+    if (isUserScrolledUpRef.current && !userScrolledAwayRef.current && !historyReadingRef.current) {
+      userGestureUpRef.current = false;
+      setUserScrolledUp(false);
+    }
+  });
   const isPreparingConversationRef = useRef(true);
   const readyExecutionIdsRef = useRef(new Set<string>());
   // The first-byte reveal must not let the viewport jump when older pages are
@@ -1045,6 +1061,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     conversationGenerationRef.current += 1;
     const saved = conversationScrollStateRef.current.get(conversationViewKey);
     isUserScrolledUpRef.current = saved?.isUserScrolledUp ?? false;
+    userScrolledAwayRef.current = saved?.isUserScrolledUp ?? false;
     historyReadingRef.current = false;
     if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
     suppressAutoScrollRef.current = false;
@@ -1075,6 +1092,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       setScrollBottomVisible(showLatest);
       return;
     }
+    const scrollbarGesture = scrollbarGestureRef.current;
+    if (scrollbarGesture) {
+      if (isScrollingUp) scrollbarGesture.movedUp = true;
+      // Keep the gesture locked until pointerup, including the first few
+      // pixels inside the bottom threshold and output arriving during a drag.
+      setScrollBottomVisible(isUserScrolledUpRef.current && showLatest);
+      return;
+    }
+    if (focusScrollPendingRef.current && isScrollingUp && distanceFromBottom > CONVERSATION_BOTTOM_THRESHOLD) {
+      userScrolledAwayRef.current = true;
+      userGestureUpRef.current = true;
+    }
 
     // When near bottom, definitely lock to bottom state (prevent elastic bounce from locking scrolled-up)
     if (distanceFromBottom <= CONVERSATION_BOTTOM_THRESHOLD && !userGestureUpRef.current) {
@@ -1084,7 +1113,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       return;
     }
 
-    if (distanceFromBottom <= CONVERSATION_BOTTOM_THRESHOLD && userGestureUpRef.current && scrollTop >= prevScrollTop) {
+    if (distanceFromBottom <= CONVERSATION_BOTTOM_THRESHOLD && userGestureUpRef.current && scrollTop > prevScrollTop + 0.5) {
       userGestureUpRef.current = false;
       setUserScrolledUp(false);
       isScrollingToBottomRef.current = false;
@@ -1144,6 +1173,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     historyReadingRef.current = false;
     if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
     setUserScrolledUp(false);
+    userScrolledAwayRef.current = false;
     userGestureUpRef.current = false;
     isScrollingToBottomRef.current = true;
     setScrollBottomVisible(false);
@@ -1189,14 +1219,31 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const el = chatScrollRef.current;
     if (!el) return;
 
+    const stopLatestForReader = () => {
+      const interrupted = latestScrollRef.current !== null;
+      stopLatestScroll();
+      if (interrupted) {
+        userScrolledAwayRef.current = true;
+        userGestureUpRef.current = true;
+      }
+    };
+    // An upward input on an empty/short conversation cannot move the reader
+    // away. Do not let it disable following before the first output arrives.
+    const canReadEarlier = () => el.scrollTop > 1 ||
+      el.scrollHeight - el.scrollTop - el.clientHeight > CONVERSATION_BOTTOM_THRESHOLD;
     const onWheel = (e: WheelEvent) => {
       if (isNestedScrollGesture(e, el)) return;
-      stopLatestScroll();
+      stopLatestForReader();
       if (e.deltaY > 0.5) {
         historyReadingRef.current = false;
         delete el.dataset.transcriptHistoryReading;
+        if (el.scrollHeight - el.scrollTop - el.clientHeight <= 2) {
+          userGestureUpRef.current = false;
+          setUserScrolledUp(false);
+        }
       }
-      if (e.deltaY < -0.5) {
+      if (e.deltaY < -0.5 && canReadEarlier()) {
+        userScrolledAwayRef.current = true;
         userGestureUpRef.current = true;
         isScrollingToBottomRef.current = false;
         setUserScrolledUp(true);
@@ -1206,7 +1253,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     let lastTouchY = 0;
     const onTouchStart = (e: TouchEvent) => {
       if (isNestedScrollGesture(e, el)) return;
-      stopLatestScroll();
+      stopLatestForReader();
       if (e.touches[0]) lastTouchY = e.touches[0].clientY;
     };
     const onTouchMove = (e: TouchEvent) => {
@@ -1218,8 +1265,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         if (delta < -1) {
           historyReadingRef.current = false;
           delete el.dataset.transcriptHistoryReading;
+          if (el.scrollHeight - el.scrollTop - el.clientHeight <= 2) {
+            userGestureUpRef.current = false;
+            setUserScrolledUp(false);
+          }
         }
-        if (delta > 1) {
+        if (delta > 1 && canReadEarlier()) {
+          userScrolledAwayRef.current = true;
           userGestureUpRef.current = true;
           isScrollingToBottomRef.current = false;
           setUserScrolledUp(true);
@@ -1230,36 +1282,141 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const onHistoryPrepend = () => {
       stopLatestScroll();
       historyReadingRef.current = true;
+      userScrolledAwayRef.current = true;
       userGestureUpRef.current = true;
       setUserScrolledUp(true);
       isScrollingToBottomRef.current = false;
     };
-    const onContentGrowth = () => {
-      if (suppressAutoScrollRef.current || latestScrollRef.current || !shouldFollowOutput()) return;
+    const pinContentBottom = (recoverLayoutScroll = false) => {
+      if (suppressAutoScrollRef.current || latestScrollRef.current) return;
+      if (recoverLayoutScroll) resumeFollowingAfterLayoutScroll();
+      if (!shouldFollowOutput()) return;
       const height = el.scrollHeight;
       if (height - el.scrollTop - el.clientHeight <= 2) return;
       el.scrollTop = height;
       lastScrollTopRef.current = el.scrollTop;
       prevScrollHeightRef.current = height;
     };
+    let recoverOnContentFrame = false;
+    const scheduleContentPin = (recoverLayoutScroll: boolean) => {
+      // A final-output event may follow a normal growth event in the same
+      // frame. Preserve the stronger recovery request when coalescing them.
+      recoverOnContentFrame ||= recoverLayoutScroll;
+      if (contentGrowthFrameRef.current === null) {
+        contentGrowthFrameRef.current = requestAnimationFrame(() => {
+          contentGrowthFrameRef.current = null;
+          const recover = recoverOnContentFrame;
+          recoverOnContentFrame = false;
+          pinContentBottom(recover);
+        });
+      }
+    };
+    const onContentGrowth = () => {
+      pinContentBottom();
+      scheduleContentPin(false);
+    };
+    const onFinalOutput = () => {
+      // The answer is the newest information. Recover a layout-induced scroll
+      // up here, but leave a real reader gesture alone.
+      pinContentBottom(true);
+      scheduleContentPin(true);
+    };
+    // Row-height compensation is not the reader scrolling down. Record its
+    // position before the browser dispatches the resulting scroll event.
+    const onTranscriptScrollAdjusted = () => { lastScrollTopRef.current = el.scrollTop; };
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.target as HTMLElement).closest("input, textarea, [contenteditable=true]")) return;
       if (isNestedScrollGesture(event, el)) return;
       const up = ["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey);
       const down = ["ArrowDown", "PageDown", "End"].includes(event.key) || (event.key === " " && !event.shiftKey);
-      if (up || down) stopLatestScroll();
-      if (up) {
+      if (up || down) stopLatestForReader();
+      if (up && canReadEarlier()) {
+        userScrolledAwayRef.current = true;
         userGestureUpRef.current = true;
         setUserScrolledUp(true);
         isScrollingToBottomRef.current = false;
       } else if (down) {
         historyReadingRef.current = false;
         delete el.dataset.transcriptHistoryReading;
+        if (el.scrollHeight - el.scrollTop - el.clientHeight <= 2) {
+          userGestureUpRef.current = false;
+          setUserScrolledUp(false);
+        }
+      }
+    };
+    let focusFrame: number | null = null;
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || target === el) return;
+      if (latestScrollRef.current) stopLatestForReader();
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      // Browsers can scroll the focused element into view before focusin and
+      // dispatch the outer scroll event afterwards. That is reader navigation,
+      // not a layout shift, even though no wheel or arrow key was involved.
+      if (el.scrollTop < lastScrollTopRef.current - 1 && distance > CONVERSATION_BOTTOM_THRESHOLD) {
+        userScrolledAwayRef.current = true;
+        userGestureUpRef.current = true;
+        isScrollingToBottomRef.current = false;
+        setUserScrolledUp(true);
+      } else if (target.getBoundingClientRect().top < el.getBoundingClientRect().top) {
+        // Some browsers scroll after focusin. Lock only if a scroll actually
+        // occurs; focus({ preventScroll: true }) must not disable following.
+        focusScrollPendingRef.current = true;
+        if (focusFrame !== null) cancelAnimationFrame(focusFrame);
+        focusFrame = requestAnimationFrame(() => {
+          focusFrame = null;
+          focusScrollPendingRef.current = false;
+        });
+      }
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      stopLatestForReader();
+      if (isNestedScrollGesture(event, el) || scrollbarGestureRef.current) return;
+      const scrollbarWidth = el.offsetWidth - el.clientWidth;
+      const bounds = el.getBoundingClientRect();
+      // Overlay scrollbars have no layout width; only count that narrow band
+      // when the scroller itself is the event target, not a right-edge button.
+      const onScrollbar = scrollbarWidth > 0
+        ? event.clientX >= bounds.right - scrollbarWidth
+        : event.target === el && event.clientX >= bounds.right - 14;
+      if (onScrollbar) {
+        scrollbarGestureRef.current = { pointerId: event.pointerId, startTop: el.scrollTop,
+          wasFollowing: shouldFollowOutput(), wasScrolledUp: isUserScrolledUpRef.current,
+          wasAway: userScrolledAwayRef.current, wasGestureUp: userGestureUpRef.current, movedUp: false };
+        // Pause immediately so row measurements cannot fight a scrollbar drag.
+        // A stationary click will restore the previous state on pointerup.
+        userScrolledAwayRef.current = true;
+        userGestureUpRef.current = true;
+        setUserScrolledUp(true);
+      }
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      const gesture = scrollbarGestureRef.current;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      scrollbarGestureRef.current = null;
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const movedUp = gesture.movedUp || el.scrollTop < gesture.startTop - 1;
+      const reachedBottom = el.scrollTop > gesture.startTop + 1 && distance <= CONVERSATION_BOTTOM_THRESHOLD;
+      if ((gesture.wasFollowing && !movedUp) || reachedBottom) {
+        historyReadingRef.current = false;
+        delete el.dataset.transcriptHistoryReading;
+        userGestureUpRef.current = false;
+        setUserScrolledUp(false);
+        if (gesture.wasFollowing) pinContentBottom();
+      } else if (!movedUp) {
+        userScrolledAwayRef.current = gesture.wasAway;
+        userGestureUpRef.current = gesture.wasGestureUp;
+        setUserScrolledUp(gesture.wasScrolledUp);
       }
     };
     el.addEventListener(HISTORY_PREPEND_EVENT, onHistoryPrepend);
     el.addEventListener(TRANSCRIPT_CONTENT_GROWTH_EVENT, onContentGrowth);
-    el.addEventListener("pointerdown", stopLatestScroll);
+    el.addEventListener(TRANSCRIPT_FINAL_OUTPUT_EVENT, onFinalOutput);
+    el.addEventListener(TRANSCRIPT_SCROLL_ADJUSTED_EVENT, onTranscriptScrollAdjusted);
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("focusin", onFocusIn);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
     el.addEventListener("keydown", onKeyDown);
     el.addEventListener("wheel", onWheel, { passive: true });
     el.addEventListener("touchstart", onTouchStart, { passive: true });
@@ -1268,13 +1425,25 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     return () => {
       el.removeEventListener(HISTORY_PREPEND_EVENT, onHistoryPrepend);
       el.removeEventListener(TRANSCRIPT_CONTENT_GROWTH_EVENT, onContentGrowth);
-      el.removeEventListener("pointerdown", stopLatestScroll);
+      el.removeEventListener(TRANSCRIPT_FINAL_OUTPUT_EVENT, onFinalOutput);
+      el.removeEventListener(TRANSCRIPT_SCROLL_ADJUSTED_EVENT, onTranscriptScrollAdjusted);
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("focusin", onFocusIn);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      scrollbarGestureRef.current = null;
+      focusScrollPendingRef.current = false;
+      if (focusFrame !== null) cancelAnimationFrame(focusFrame);
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("touchstart", onTouchStart);
       el.removeEventListener("touchmove", onTouchMove);
+      if (contentGrowthFrameRef.current !== null) {
+        cancelAnimationFrame(contentGrowthFrameRef.current);
+        contentGrowthFrameRef.current = null;
+      }
     };
-  }, [conversationViewKey, stopLatestScroll, setUserScrolledUp, shouldFollowOutput]);
+  }, [conversationViewKey, resumeFollowingAfterLayoutScroll, stopLatestScroll, setUserScrolledUp, shouldFollowOutput]);
 
   const handleExpandableContentChange = useCallback((expanded?: boolean, card?: HTMLElement) => {
     // Expanding a card while the reader is already following the newest output
@@ -1897,7 +2066,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const animatedNodes = useAnimatedNodes(nodes, state.runId);
   const graphViewportKey = `${currentRunKey}:${graphPane.generation}`;
-  const { ready: isGraphReadyForRun, initialize: centerGraph, synchronize: synchronizeGraph } = useGraphViewport(
+  const { ready: isGraphReadyForRun, initialize: centerGraph, synchronize: synchronizeGraph, manualFit: manualGraphFit } = useGraphViewport(
     // Keep the exiting canvas painted; a new generation initializes a fresh
     // viewport on reopen, including when the user interrupts the exit animation.
     graphViewportKey, hasGraphPane, nodes, edges, isPlanning, graphCanvasRef,
@@ -3036,7 +3205,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               <div className="graph-canvas" ref={graphCanvasRef}>
                 <GraphCanvas runKey={graphViewportKey} ready={isGraphReadyForRun}
                   nodes={animatedNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} tokens={tokens}
-                  onInit={centerGraph} onSelect={selectGraphNode} onLayout={synchronizeGraph} onPaneContextMenu={openGraphMenu} />
+                  onInit={centerGraph} onSelect={selectGraphNode} onLayout={synchronizeGraph} onFitStart={manualGraphFit} onPaneContextMenu={openGraphMenu} />
 
                 {state.graph.nodes.length > 0 && (
                   <div className="graph-note">

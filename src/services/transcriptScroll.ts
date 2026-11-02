@@ -1,5 +1,8 @@
 export const HISTORY_PREPEND_EVENT = "grapher:history-prepend";
 export const FOLLOW_LATEST_EVENT = "grapher:follow-latest";
+/** A virtualized row-height correction moved the outer viewport; it is not a
+ * reader scrolling back down to the latest output. */
+export const TRANSCRIPT_SCROLL_ADJUSTED_EVENT = "grapher:transcript-scroll-adjusted";
 
 export function transcriptScrollParent(element: HTMLElement | null): HTMLElement | null {
   for (let parent = element?.parentElement; parent; parent = parent.parentElement) {
@@ -41,4 +44,13 @@ export const TRANSCRIPT_CONTENT_GROWTH_EVENT = "grapher:transcript-content-growt
 
 export function notifyTranscriptContentGrowth(element: HTMLElement | null): void {
   transcriptScrollParent(element)?.dispatchEvent(new Event(TRANSCRIPT_CONTENT_GROWTH_EVENT));
+}
+
+/** New or visibly growing assistant output, including an already-completed
+ * forward read. Its owner may recover a layout-induced scroll-up without
+ * mistaking the initial mount of historical text for new output. */
+export const TRANSCRIPT_FINAL_OUTPUT_EVENT = "grapher:transcript-final-output";
+
+export function notifyTranscriptFinalOutput(element: HTMLElement | null): void {
+  transcriptScrollParent(element)?.dispatchEvent(new Event(TRANSCRIPT_FINAL_OUTPUT_EVENT));
 }

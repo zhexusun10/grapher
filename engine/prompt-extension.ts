@@ -1,4 +1,3 @@
-import { Type } from './pi-compat.ts';
 import { createWorkspacePaths } from './workspace-paths.mjs';
 import { registerWorkspaceTools } from './workspace-tools.ts';
 import { configurePlannerWorkspace, onPlannerWorkspaceChanged, plannerWorkspaceState, switchPlannerWorkspace } from './planner-workspace.ts';
@@ -6,6 +5,8 @@ import { managedLaunch, managedBashOptions, managedBashCommand } from './launch-
 import {
   createBashToolDefinition,
   createLocalBashOperations,
+  obj,
+  str,
   type BashOperations,
   type ExtensionAPI,
 } from './pi-compat.ts';
@@ -114,9 +115,9 @@ export default function (pi: ExtensionAPI) {
       name: 'switch_workspace',
       label: 'switch workspace',
       description: "Switch to the latest valid workspace state for a graph node. The result tells you the actual node and workspace state selected.",
-      parameters: Type.Object({
-        node: Type.String({ description: 'Node whose latest workspace state you want to inspect or modify' }),
-      }, { additionalProperties: false }),
+      parameters: obj({
+        node: str({ description: 'Node whose latest workspace state you want to inspect or modify' }),
+      }),
       promptSnippet: 'Switch Planner workspace',
       async execute(_id: string, params: { node: string }) {
         const target = switchPlannerWorkspace(params.node);

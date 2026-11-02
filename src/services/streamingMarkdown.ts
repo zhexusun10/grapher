@@ -1,22 +1,25 @@
-import { marked, type Token, type Tokens } from "marked";
+import katex from "katex";
+import { marked, type Token, type Tokens, type TokenizerAndRendererExtension } from "marked";
 import sanitize from "sanitize-html";
 import { shareJson } from "./structuralSharing";
 
 // Model output and replayed transcripts are untrusted HTML. Parse with an
 // allowlist rather than trying to recognize executable markup with regexes.
 export function sanitizeHtml(html: string): string {
-  return sanitize(html, {
+  const clean = sanitize(html, {
     allowedTags: [...sanitize.defaults.allowedTags, "img", "details", "summary", "input"],
     allowedAttributes: {
       a: ["href", "title", "target", "rel"],
       img: ["src", "alt", "title", "width", "height"],
       code: ["class"],
+      span: ["class"],
+      div: ["class"],
       th: ["align"],
       td: ["align"],
       ol: ["start"],
       input: ["type", "checked", "disabled"],
     },
-    allowedClasses: { code: ["language-*"] },
+    allowedClasses: { code: ["language-*"], span: ["grapher-math"], div: ["grapher-math-block"] },
     allowedSchemes: ["http", "https", "mailto", "tel"],
     allowedSchemesByTag: { img: ["http", "https"] },
     allowProtocolRelative: false,
@@ -37,7 +40,171 @@ export function sanitizeHtml(html: string): string {
       } }),
     },
   });
+  return renderMathPlaceholders(clean);
 }
+
+// Math is replaced with a plain placeholder during Markdown parsing, then
+// rendered from the decoded TeX after the untrusted HTML allowlist has run.
+// This keeps KaTeX's MathML/SVG output out of the general HTML allowlist.
+const mathHtmlCache = new Map<string, string>();
+
+function encodeMathSource(source: string): string {
+  try {
+    return encodeURIComponent(source);
+  } catch {
+    // A lone surrogate cannot be URI-encoded. Replacing it keeps rendering
+    // deterministic instead of failing the whole Markdown block.
+    return encodeURIComponent(source.replace(/[\uD800-\uDFFF]/g, "\uFFFD"));
+  }
+}
+
+function escapeMathSource(source: string): string {
+  return source
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function mathPlaceholder(source: string, displayMode: boolean, tag: "span" | "div"): string {
+  const className = tag === "span" ? "grapher-math" : "grapher-math-block";
+  return `<${tag} class="${className}">${displayMode ? "1" : "0"}${encodeMathSource(source)}</${tag}>`;
+}
+
+function renderMath(source: string, displayMode: boolean): string {
+  const tex = source.trim();
+  if (!tex) return "";
+  const key = `${displayMode ? "1" : "0"}${tex}`;
+  const cached = mathHtmlCache.get(key);
+  if (cached !== undefined) return cached;
+  let html: string;
+  try {
+    html = katex.renderToString(tex, {
+      displayMode,
+      throwOnError: false,
+      strict: "ignore",
+      trust: false,
+      maxSize: 50,
+      maxExpand: 1000,
+    });
+  } catch {
+    html = `<span class="math-error">${escapeMathSource(tex)}</span>`;
+  }
+  // Formula-heavy transcripts are long-lived; keep the hot set bounded.
+  if (mathHtmlCache.size >= 256) mathHtmlCache.clear();
+  mathHtmlCache.set(key, html);
+  return html;
+}
+
+function renderMathPlaceholders(html: string): string {
+  if (!html.includes("grapher-math")) return html;
+  const replace = (payload: string): string => {
+    if (!/^[01]/.test(payload)) return "";
+    try {
+      return renderMath(decodeURIComponent(payload.slice(1)), payload[0] === "1");
+    } catch {
+      return "";
+    }
+  };
+  return html
+    .replace(/<span class="grapher-math">([^<]*)<\/span>/g, (_match, payload: string) => replace(payload))
+    .replace(/<div class="grapher-math-block">([^<]*)<\/div>/g, (_match, payload: string) => replace(payload));
+}
+
+function findUnescapedDelimiter(src: string, from: number, delimiter: string): number {
+  for (let index = from; index < src.length; index++) {
+    if (src[index] === "\\") { index++; continue; }
+    if (src.startsWith(delimiter, index)) return index;
+  }
+  return -1;
+}
+
+function tokenizeMathBlock(src: string): Tokens.Generic | undefined {
+  const opening = /^ {0,3}\$\$/.exec(src);
+  if (!opening) return;
+  const start = opening[0].length;
+  const close = findUnescapedDelimiter(src, start, "$$");
+  if (close === -1) return;
+  const end = close + 2;
+  const lineEnd = src.indexOf("\n", end);
+  const trailing = src.slice(end, lineEnd === -1 ? undefined : lineEnd);
+  // A block delimiter owns the rest of its line. Mid-line $$...$$ stays
+  // inline so surrounding prose keeps its paragraph.
+  if (!/^[ \t]*$/.test(trailing)) return;
+  const text = src.slice(start, close);
+  if (!text.trim()) return;
+  return {
+    type: "mathBlock",
+    raw: lineEnd === -1 ? src : src.slice(0, lineEnd + 1),
+    text,
+    displayMode: true,
+  };
+}
+
+function startMathBlock(src: string): number | undefined {
+  const lineStart = /(?:^|\n) {0,3}\$\$/g;
+  const match = lineStart.exec(src);
+  if (!match) return;
+  return match.index + match[0].lastIndexOf("$$");
+}
+
+function tokenizeMathInline(src: string): Tokens.Generic | undefined {
+  if (src[0] !== "$") return;
+  if (src.startsWith("$$")) {
+    const close = findUnescapedDelimiter(src, 2, "$$");
+    if (close === -1) return;
+    const text = src.slice(2, close);
+    if (!text.trim()) return;
+    return {
+      type: "mathInline",
+      raw: src.slice(0, close + 2),
+      text,
+      displayMode: true,
+    };
+  }
+  // Single-dollar math follows the common Markdown convention: no leading or
+  // trailing whitespace and no closing delimiter before a digit (currencies).
+  if (src.length < 3 || /\s/.test(src[1])) return;
+  for (let index = 1; index < src.length; index++) {
+    const char = src[index];
+    if (char === "\\") { index++; continue; }
+    if (char === "\n" || char === "$" && (/\s/.test(src[index - 1]) || /\d/.test(src[index + 1] ?? ""))) return;
+    if (char !== "$") continue;
+    return {
+      type: "mathInline",
+      raw: src.slice(0, index + 1),
+      text: src.slice(1, index),
+      displayMode: false,
+    };
+  }
+}
+
+function startMathInline(src: string): number | undefined {
+  for (let index = 0; index < src.length; index++) {
+    if (src[index] === "\\") { index++; continue; }
+    if (src[index] === "$") return index;
+  }
+}
+
+const mathExtensions: TokenizerAndRendererExtension[] = [
+  {
+    name: "mathBlock",
+    level: "block",
+    start: startMathBlock,
+    tokenizer: tokenizeMathBlock,
+    renderer(token) { return mathPlaceholder(String(token.text), true, "div"); },
+  },
+  {
+    name: "mathInline",
+    level: "inline",
+    start: startMathInline,
+    tokenizer: tokenizeMathInline,
+    renderer(token) { return mathPlaceholder(String(token.text), Boolean(token.displayMode), "span"); },
+  },
+];
+
+marked.use({ extensions: mathExtensions });
 
 // Marked's GFM autolink consumes every non-space character. In Chinese prose
 // that turns the sentence punctuation and following words into the URL. Stop at

@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { getViewportForBounds, type Edge, type FitViewOptions, type Node, type ReactFlowInstance } from "@xyflow/react";
+import { getViewportForBounds, type Edge, type Node, type ReactFlowInstance } from "@xyflow/react";
+import { graphFitOptions, runningViewportForGraph } from "../lib/graphFit";
 
-// Match the Controls button, including React Flow's default fit padding.
-export const graphFitOptions = { padding: 0.1, minZoom: 0.3, maxZoom: 1.6 } satisfies FitViewOptions;
 const LAYOUT_SETTLE_MS = 80;
 
 /** Keep the measured, currently rendered layout centered throughout a topology change. */
@@ -15,7 +14,9 @@ export function useGraphViewport(runKey: string, visible: boolean, nodes: Node[]
   targets.current = nodes;
   const activeKey = useRef(runKey);
   const synchronizeRef = useRef<(() => void) | null>(null);
+  const manualFitRef = useRef<(() => void) | null>(null);
   const synchronize = useCallback(() => synchronizeRef.current?.(), []);
+  const manualFit = useCallback(() => manualFitRef.current?.(), []);
 
   // Text tokens, selection, measurements and execution status must not restart
   // automatic fitting (or undo a user's pan/zoom after the layout has settled).
@@ -42,6 +43,7 @@ export function useGraphViewport(runKey: string, visible: boolean, nodes: Node[]
     let cancelled = false;
     let frame: number | null = null;
     let tracking = true;
+    let preferRunning = false;
     let previousLayout = "";
     let stableSince = 0;
 
@@ -70,8 +72,9 @@ export function useGraphViewport(runKey: string, visible: boolean, nodes: Node[]
       // Recenter in the same animation, rather than waiting and then panning a
       // second time. The first measured node can be revealed immediately.
       const bounds = instance.getNodesBounds(rendered);
-      const viewport = getViewportForBounds(bounds, canvas.clientWidth, canvas.clientHeight,
-        graphFitOptions.minZoom, graphFitOptions.maxZoom, graphFitOptions.padding);
+      const viewport = (preferRunning && runningViewportForGraph(instance, canvas.clientWidth, canvas.clientHeight)) ||
+        getViewportForBounds(bounds, canvas.clientWidth, canvas.clientHeight,
+          graphFitOptions.minZoom, graphFitOptions.maxZoom, graphFitOptions.padding);
       void instance.setViewport(viewport, { duration: 0 });
       setReadyKey(current => current === runKey ? current : runKey);
 
@@ -82,7 +85,7 @@ export function useGraphViewport(runKey: string, visible: boolean, nodes: Node[]
       }
       // Stability ends the tracking loop; it never gates the initial reveal.
       if (!layout || now - stableSince < LAYOUT_SETTLE_MS) schedule();
-      else tracking = false;
+      else { tracking = false; preferRunning = false; }
     };
     // React Flow commits animated positions after the animation's RAF callback.
     // Fit in that commit's layout effect too, so the camera never lags a frame
@@ -94,16 +97,20 @@ export function useGraphViewport(runKey: string, visible: boolean, nodes: Node[]
       fitRenderedLayout(performance.now());
     };
     synchronizeRef.current = synchronizeLayout;
+    // If Fit View is pressed mid-animation, keep following its running focus
+    // until the cards settle instead of replacing it with a whole-graph fit.
+    manualFitRef.current = () => { if (tracking) preferRunning = true; };
     const resize = new ResizeObserver(() => { previousLayout = ""; tracking = true; schedule(); });
     resize.observe(canvas);
     schedule();
     return () => {
       cancelled = true;
       synchronizeRef.current = null;
+      manualFitRef.current = null;
       resize.disconnect();
       if (frame !== null) cancelAnimationFrame(frame);
     };
   }, [flow, runKey, visible, layoutKey, planning, canvasRef]);
 
-  return { ready, initialize, synchronize };
+  return { ready, initialize, synchronize, manualFit };
 }

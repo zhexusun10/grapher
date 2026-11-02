@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { Node, ReactFlowInstance } from "@xyflow/react";
 import { computeExecutionLayers, graphEdgeId, indexFeedbackExhaustion, indexGraphInputs, useGraphElements } from "../src/hooks/useGraphElements.ts";
+import { runningGraphFitViewport, runningViewportForGraph } from "../src/lib/graphFit.ts";
 import { emptySnapshot, type Execution, type Graph, type Plan, type RuntimeActivity, type Snapshot } from "../src/types.ts";
 
 const graph: Graph = {
@@ -10,6 +12,51 @@ const graph: Graph = {
   nodes: ["a", "b", "c"].map(name => ({ name, task: name })),
   edges: [{ from: "a", to: "b", feedback: false }, { from: "b", to: "c", feedback: false }],
 };
+
+test("running focus only replaces whole-graph fit when the minimum zoom actually clips nodes", () => {
+  const running = [{ x: 800, y: 0, width: 100, height: 100 }];
+  assert.equal(runningGraphFitViewport({ x: 0, y: 0, width: 1000, height: 100 }, running, 300, 300), null);
+  assert.equal(runningGraphFitViewport({ x: 0, y: 0, width: 2000, height: 100 }, [], 300, 300), null);
+  assert.equal(runningGraphFitViewport({ x: 0, y: 0, width: 2000, height: 100 }, running, 0, 300), null);
+  assert.deepEqual(runningGraphFitViewport({ x: 0, y: 0, width: 2000, height: 100 }, running, 300, 300),
+    { x: -105, y: 135, zoom: 0.3 });
+  assert.deepEqual(runningGraphFitViewport({ x: 0, y: 0, width: 100, height: 2000 },
+    [{ x: 0, y: 1500, width: 100, height: 100 }], 300, 300), { x: 135, y: -315, zoom: 0.3 });
+});
+
+test("running focus uses only visible, measured cards", () => {
+  const nodes: Node[] = [
+    { id: "a", position: { x: 0, y: 0 }, data: { status: "waiting" } },
+    { id: "b", position: { x: 2000, y: 0 }, data: { status: "completed" } },
+    { id: "hidden", position: { x: 4000, y: 0 }, data: { status: "running" }, hidden: true },
+    { id: "unmeasured", position: { x: 5000, y: 0 }, data: { status: "running" } },
+  ];
+  const instance = {
+    getNodes: () => nodes,
+    getInternalNode: (id: string) => ({ measured: { width: id === "unmeasured" ? 0 : 100, height: 100 } }),
+    getNodesBounds: (items: Node[]) => {
+      const left = Math.min(...items.map(node => node.position.x)), right = Math.max(...items.map(node => node.position.x + 100));
+      return { x: left, y: 0, width: right - left, height: 100 };
+    },
+  } as unknown as ReactFlowInstance;
+  assert.equal(runningViewportForGraph(instance, 300, 300), null, "hidden and unmeasured running cards are ignored");
+  nodes[1].data.status = "running";
+  assert.deepEqual(runningViewportForGraph(instance, 300, 300), { x: -465, y: 135, zoom: 0.3 });
+  nodes[1].position.x = 500;
+  assert.equal(runningViewportForGraph(instance, 300, 300), null, "hidden and unmeasured cards do not make the graph overflow");
+});
+
+test("running focus fits all nearby cards or a visible cluster when they are far apart", () => {
+  const bounds = { x: 0, y: 0, width: 5000, height: 100 };
+  const left = { x: 0, y: 0, width: 100, height: 100 };
+  const near = { x: 1600, y: 0, width: 100, height: 100 };
+  const right = { x: 2000, y: 0, width: 100, height: 100 };
+  assert.deepEqual(runningGraphFitViewport(bounds, [near, right], 300, 300), { x: -405, y: 135, zoom: 0.3 });
+  assert.deepEqual(runningGraphFitViewport(bounds, [left, near, right], 300, 300), { x: -405, y: 135, zoom: 0.3 });
+  // Even an individually oversized card is centered instead of disappearing.
+  assert.deepEqual(runningGraphFitViewport(bounds, [{ x: 0, y: 0, width: 1200, height: 100 }], 300, 300),
+    { x: -30, y: 135, zoom: 0.3 });
+});
 
 test("edge identities are unambiguous and distinguish feedback", () => {
   const edges = [

@@ -257,6 +257,149 @@ async function assertFitted(page, rows) {
     `automatic fit matches the Fit View button: ${JSON.stringify({ automatic, manual })}`);
 }
 
+async function waitForSettledGraph(page, count) {
+  await page.evaluate(() => { window.lastGraphSample = null; });
+  await page.waitForFunction(count => {
+    const flow = document.querySelector(".graph-canvas .react-flow");
+    const nodes = [...(flow?.querySelectorAll(".react-flow__node") ?? [])];
+    if (!flow || +getComputedStyle(flow).opacity < 1 || nodes.length !== count ||
+        nodes.some(node => !node.checkVisibility({ checkVisibilityCSS: true }))) return false;
+    const sample = JSON.stringify([getComputedStyle(flow.querySelector(".react-flow__viewport")).transform,
+      ...nodes.map(node => node.getBoundingClientRect().toJSON())]);
+    if (window.lastGraphSample?.sample !== sample) window.lastGraphSample = { sample, since: performance.now() };
+    return performance.now() - window.lastGraphSample.since > 200;
+  }, count, { timeout: 10_000 });
+}
+
+async function assertFocused(page, ids) {
+  await page.waitForFunction(ids => {
+    const flow = document.querySelector(".graph-canvas .react-flow");
+    const nodes = ids.map(id => flow?.querySelector(`.react-flow__node[data-id="${id}"]`));
+    if (!flow || nodes.some(node => !node)) return false;
+    const canvas = flow.getBoundingClientRect(), rects = nodes.map(node => node.getBoundingClientRect());
+    const left = Math.min(...rects.map(rect => rect.left)), right = Math.max(...rects.map(rect => rect.right));
+    const top = Math.min(...rects.map(rect => rect.top)), bottom = Math.max(...rects.map(rect => rect.bottom));
+    return left >= canvas.left - 1 && right <= canvas.right + 1 && top >= canvas.top - 1 && bottom <= canvas.bottom + 1 &&
+      Math.abs((left + right - canvas.left - canvas.right) / 2) < 2 &&
+      Math.abs((top + bottom - canvas.top - canvas.bottom) / 2) < 2;
+  }, ids, { timeout: 5000 });
+  assert.ok(Math.abs((await viewport(page)).zoom - 0.3) < 0.001, "large graphs retain the whole-graph minimum zoom");
+}
+
+function assertSameViewport(actual, expected) {
+  assert.ok(Math.abs(actual.x - expected.x) < 1 && Math.abs(actual.y - expected.y) < 1 && Math.abs(actual.zoom - expected.zoom) < 0.001,
+    `expected the same viewport: ${JSON.stringify({ actual, expected })}`);
+}
+
+test("Fit View prioritizes current running cards only when the graph cannot fit", { timeout: 35_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  const errors = [];
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const result = command === "list_files" ? { files: [] } : command === "list_skills" ? { skills: [] } : null;
+    if (result === null) errors.push(`Unexpected API: ${command}`);
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  const update = patch => page.evaluate(patch => window.graphFixture.update(patch, false), patch);
+  const state = status => ({ status, revision: 1, head: null, instruction: "", error: null });
+  const fit = () => page.getByRole("button", { name: "Fit View", exact: true }).click();
+  const nodes = Array.from({ length: 24 }, (_, i) => ({ name: `n${i}`, task: `Task ${i}` }));
+  const graph = edges => ({ originalGoal: "Large viewport regression", nodes, edges });
+  try {
+    await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => !!window.graphFixture);
+    await update({ runId: "horizontal-fit", phase: "running", approved: true, graph: graph([]), nodes: {} });
+    await waitForSettledGraph(page, 24);
+    await fit(); await page.waitForTimeout(100);
+    const wholeGraph = await viewport(page);
+
+    // A status update alone does not recenter; an explicit fit uses the latest status.
+    await update({ nodes: { n23: state("running") } });
+    await page.locator('.react-flow__node[data-id="n23"] .task-node.running').waitFor();
+    await page.waitForTimeout(250);
+    assertSameViewport(await viewport(page), wholeGraph);
+    await fit();
+    await assertFocused(page, ["n23"]);
+
+    // A distant running card must not make the camera center on empty space;
+    // favor the two nearby cards instead of the first isolated one.
+    const previous = await viewport(page);
+    await update({ nodes: { n1: state("running"), n22: state("running"), n23: state("running") } });
+    await page.locator('.react-flow__node[data-id="n1"] .task-node.running').waitFor();
+    await page.waitForTimeout(200);
+    assertSameViewport(await viewport(page), previous);
+    await fit();
+    await assertFocused(page, ["n22", "n23"]);
+
+    await update({ nodes: { n1: state("running"), n22: state("completed"), n23: state("completed") } });
+    await page.locator('.react-flow__node[data-id="n23"] .task-node.completed').waitFor();
+    await page.getByRole("button", { name: "Fit View", exact: true }).press("Enter");
+    await assertFocused(page, ["n1"]);
+    await update({ nodes: { n1: state("completed") } });
+    await page.locator('.react-flow__node[data-id="n1"] .task-node.completed').waitFor();
+    await fit(); await page.waitForTimeout(100);
+    assertSameViewport(await viewport(page), wholeGraph);
+
+    // Repeat with vertical overflow and an independently running publication Merger.
+    const edges = nodes.slice(1).map((node, i) => ({ from: nodes[i].name, to: node.name, feedback: false }));
+    await update({ runId: "vertical-fit", graph: graph(edges), nodes: { n23: state("running") } });
+    await waitForSettledGraph(page, 24);
+    await fit(); await assertFocused(page, ["n23"]);
+    await page.setViewportSize({ width: 1000, height: 650 });
+    await waitForSettledGraph(page, 24);
+    await fit(); await assertFocused(page, ["n23"]);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await waitForSettledGraph(page, 24);
+    await update({ nodes: {}, mergers: [{ id: "publish", node: "merger", revision: 1, attempt: 1, sessionId: "publish",
+      worktree: "/mock", before: "", after: null, status: "running", output: "", startedAt: 1, completedAt: null }] });
+    await waitForSettledGraph(page, 25);
+    await fit(); await assertFocused(page, ["merger:publication"]);
+
+    // If everything fits, a running card must not replace the ordinary full-graph fit.
+    const small = nodes.slice(0, 3);
+    await update({ runId: "small-fit", graph: { ...graph([]), nodes: small }, mergers: [], nodes: { n2: state("running") } });
+    await assertFitted(page, [["n0", "n1", "n2"]]);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("manual Fit View follows running cards through an ongoing layout animation", { timeout: 20_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "no-preference" });
+  await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+  const errors = [];
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const result = command === "list_files" ? { files: [] } : command === "list_skills" ? { skills: [] } : null;
+    if (result === null) errors.push(`Unexpected API: ${command}`);
+    await route.fulfill({ json: { result } });
+  });
+  const page = await context.newPage();
+  page.on("pageerror", error => errors.push(String(error)));
+  const nodes = Array.from({ length: 16 }, (_, i) => ({ name: `a${i}`, task: `Task ${i}` }));
+  const edges = nodes.slice(1).map((node, i) => ({ from: nodes[i].name, to: node.name, feedback: false }));
+  try {
+    await page.goto(`${origin}/__graph-planning`, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => !!window.graphFixture);
+    await page.evaluate(nodes => window.graphFixture.update({ runId: "animated-fit", phase: "running", approved: true,
+      graph: { originalGoal: "Animated fit", nodes, edges: [] }, nodes: { a15: { status: "running" } } }, false), nodes);
+    await waitForSettledGraph(page, nodes.length);
+    const movingNode = page.locator('.react-flow__node[data-id="a15"]');
+    const start = await movingNode.getAttribute("style");
+    await page.evaluate(({ nodes, edges }) => window.graphFixture.update({ graph: { originalGoal: "Animated fit", nodes, edges } }, false), { nodes, edges });
+    await page.waitForFunction(start => document.querySelector('.react-flow__node[data-id="a15"]')?.getAttribute("style") !== start, start);
+    await page.getByRole("button", { name: "Fit View", exact: true }).click();
+    const position = await movingNode.getAttribute("style");
+    await page.waitForTimeout(180);
+    assert.notEqual(await movingNode.getAttribute("style"), position, "nodes continue moving after the manual fit");
+    await waitForSettledGraph(page, nodes.length);
+    await assertFocused(page, ["a15"]);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("graph splitter preserves ordinary resizing, cancellation, keyboard control and reset", { timeout: 20_000 }, async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
   await context.addInitScript(() => {

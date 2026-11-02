@@ -63,6 +63,17 @@ export function applyModelConfig(config: Config, settings: ConversationModelConf
   };
 }
 
+/** Resolve the provider id in a `provider/model` key, including provider
+ * ids that contain a slash. Unknown providers fall back to the first segment. */
+export function providerIdForModel(model: string, providers: ReadonlyArray<{ id: string }>): string {
+  return providers
+    .map(provider => provider.id)
+    .filter(id => !!id && model.startsWith(`${id}/`))
+    .sort((left, right) => right.length - left.length)[0]
+    ?? model.split("/")[0]
+    ?? "";
+}
+
 export function roleModelConfig(config: Config, role: ModelRole, envOverrides: Record<string, string> = {}): Required<RoleModelConfig> {
   const settings = config.roleModels?.[role];
   const envLevel = envOverrides[`${role}Thinking`];

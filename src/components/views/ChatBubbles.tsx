@@ -5,7 +5,7 @@ import type { ChatMessageVersion, ImageAttachment, FileAttachment } from "../../
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { useSmoothStreamText } from "../../hooks/useSmoothStreamText";
 import { parseMessageAttachmentsAndText, AttachmentCard } from "../../utils/attachmentUtils";
-import { notifyTranscriptContentGrowth } from "../../services/transcriptScroll";
+import { notifyTranscriptContentGrowth, notifyTranscriptFinalOutput } from "../../services/transcriptScroll";
 
 function copyFallback(text: string, onSuccess: () => void) {
   try {
@@ -30,12 +30,16 @@ export const StreamingAssistantBubble: React.FC<{ content: string; isStreaming: 
   ({ content, isStreaming }) => {
     const smoothText = useSmoothStreamText(content, isStreaming);
     const bubbleRef = useRef<HTMLDivElement>(null);
+    const previousTextRef = useRef(smoothText);
     useEffect(() => {
+      const textChanged = smoothText !== previousTextRef.current;
+      previousTextRef.current = smoothText;
       if (!smoothText && !isStreaming) return;
-      // The final answer can start below a settled reasoning card whose row is
-      // already at its measured height. Explicitly re-check the conversation's
-      // bottom so the answer, not the card above it, becomes the visible focus.
-      notifyTranscriptContentGrowth(bubbleRef.current);
+      // A mounted bubble can keep revealing queued text after message_end.
+      // Treat those actual changes as output, but not the initial mount of an
+      // old row when the user scrolls through virtualized history.
+      if (isStreaming || textChanged) notifyTranscriptFinalOutput(bubbleRef.current);
+      else notifyTranscriptContentGrowth(bubbleRef.current);
     }, [smoothText, isStreaming]);
     return <div ref={bubbleRef} style={{ display: "contents" }}>
       <MarkdownRenderer content={smoothText} isStreaming={isStreaming} />

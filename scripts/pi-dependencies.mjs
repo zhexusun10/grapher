@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symli
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const corePackages = ['chord', 'tui', 'telemetry', 'codemode', 'mcp', 'ai', 'durable', 'agent', 'coding-agent'];
+export const corePackages = ['chord', 'tui', 'telemetry', 'schema', 'codemode', 'mcp', 'ai', 'durable', 'agent', 'coding-agent'];
 const excludedPackages = new Set(['shx', 'shelljs', 'fast-glob', 'micromatch', 'braces', 'node-forge', '@earendil-works/gondolin']);
 const json = path => JSON.parse(readFileSync(path, 'utf8'));
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -37,12 +37,6 @@ export function dependencyManifest(root) {
   }
   add('typescript', upstream.devDependencies.typescript);
   add('@types/node', upstream.devDependencies['@types/node']);
-  // Security patch on top of Pi's own pins: Pi 1.4.0's core packages still
-  // declare `undici` 8.10.2, which now carries high-severity advisories
-  // (GHSA-4qv8-2p9j-2685, GHSA-f72v-6w45-q472, GHSA-xjj6-f33q-929c; fixed in
-  // 8.12.3) and fails the `pi:setup` audit gate. Pin the patched 8.12.x until
-  // upstream Pi bumps it.
-  dependencies.undici = '8.12.3';
   return {
     name: 'grapher-pi-dependencies', version, private: true, type: 'module',
     description: 'Pinned dependencies for the unmodified Pi source runtime; no example workspaces or shelljs build chain.',
@@ -139,7 +133,7 @@ export function installPiDependencies(root, runNpm) {
   // clean install and CI job. High and critical advisories still block, which
   // matches the dedicated security-audit workflow; restore
   // `--audit-level=moderate` once upstream Pi bumps vitest.
-  runNpm(profile, 'audit', '--audit-level=high');
+  runNpm(profile, 'audit', '--audit-level=moderate');
   const source = join(root, 'pi');
   const modules = join(source, 'node_modules');
   rmSync(modules, { recursive: true, force: true });

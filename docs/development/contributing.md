@@ -47,6 +47,10 @@ Keep Pi unmodified unless deliberately updating the pinned baseline. Do not patc
 
 A proposed runtime change should identify affected invariants and include regressions for failure as well as the happy path.
 
+## Graph viewport
+
+Automatic fitting tracks measured layout changes until they settle, but status and log updates do not recenter a user's view. The Fit View button reads the current visible, measured cards (including running Merger cards). If the whole graph fits at the minimum zoom, or no card is running, it uses the normal whole-graph fit. Otherwise it keeps the minimum zoom and centers a fitting group of running cards; if they are too far apart, at least one is shown. If pressed during a layout animation, tracking follows that focus until the cards settle. See [graphFit.ts](../../src/lib/graphFit.ts), [useGraphViewport.ts](../../src/hooks/useGraphViewport.ts), and [browser regressions](../../scripts/graph-planning-fit.test.mjs).
+
 ## Before submitting a change
 
 Select relevant checks from [Testing](testing.md); include integration/platform checks when the changed behavior needs them. Report actual commands and results, plus relevant validation gaps—not a list of unrelated suites that were not run.

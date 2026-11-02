@@ -128,7 +128,7 @@ test('pi-trim transforms actual provider requests for every role without removin
       response.end('Audit server failed');
     }
   });
-  const identity = 'You are an expert coding assistant operating inside pi, a coding agent harness.';
+  const identity = 'You are a coding assistant running inside pi, a coding agent harness.';
   const opaqueUser = `${identity}\n<docs>\nPi documentation (read only in user content)\n</docs>`;
   const text = content => typeof content === 'string' ? content : (content ?? []).map(block => block.text ?? '').join('\n');
   const run = (role, args, user) => new Promise((resolve, reject) => {
@@ -198,7 +198,7 @@ test('pi-trim transforms actual provider requests for every role without removin
       assert.ok(body.messages.some(message => message.role === 'user' && text(message.content) === user), `${role}: preserve user text`);
       if (role === 'partition' || role === 'planner') assert.ok(system.includes(custom), `${role}: preserve role policy and nested docs`);
       else {
-        assert.ok(system.includes('You are an expert coding assistant.'), `${role}: trim Pi identity; provider roles=${body.messages.map(message => message.role)}\n${system}`);
+        assert.ok(system.includes('You are a coding assistant.'), `${role}: trim Pi identity; provider roles=${body.messages.map(message => message.role)}\n${system}`);
         assert.ok(!system.includes(identity), `${role}: no Pi identity in provider system prompt`);
         assert.ok(!system.includes('Pi documentation (read only'), `${role}: no Pi docs in provider system prompt`);
         assert.ok(system.includes('<tools>') && system.includes('<rules>'), `${role}: retain tool and rule sections`);

@@ -1,7 +1,7 @@
 import { t, localizeError, languagePreference, restartFrontendWithLanguage, type LanguagePreference } from "../../i18n";
 import React, { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Settings2, RotateCcw, Terminal, ShieldCheck, Check, X, Copy, GitBranch, Languages, RefreshCw, FilePenLine, Brain } from "lucide-react";
+import { Settings2, RotateCcw, Terminal, Cpu, Check, X, Copy, GitBranch, Languages, RefreshCw, FilePenLine, Brain } from "lucide-react";
 import { Config } from "../../types";
 import { normalizeModelThinkingLevels } from "../../modelConfig";
 import { providerAuth, type ProviderCatalog } from "../../services/providerAuth";
@@ -141,7 +141,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
           <div className="settings-sections">
             <section className="settings-card" aria-labelledby="provider-settings-title">
               <div className="settings-card-title">
-                <ShieldCheck size={16} />
+                <Cpu size={16} />
                 <h4 id="provider-settings-title">{t("模型与 Provider")}</h4>
               </div>
               <ProviderSettings onCatalogChange={setCatalog} onBusyChange={setCatalogBusy} />

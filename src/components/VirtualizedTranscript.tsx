@@ -3,7 +3,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallba
 import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
 import { type ImageAttachment, TranscriptItem } from "../types";
 import { closeThinkingItems } from "../services/thinkingTranscript";
-import { isNestedScrollGesture } from "../services/transcriptScroll";
+import { isNestedScrollGesture, notifyTranscriptFinalOutput } from "../services/transcriptScroll";
 import { parseTranscriptChunkLines, type ParseTranscriptChunkState, type TranscriptParseOptions } from "../services/transcriptParser";
 import { settleInterruptedItems } from "../services/transcriptSettle";
 import { Terminal } from "lucide-react";
@@ -188,6 +188,14 @@ function cloneSegmentTail(items: TranscriptItem[]): TranscriptItem[] {
     (item.type === "tool_call" && item.status === "running") ? { ...item } : item);
 }
 
+/** Detect output arriving in a forward read, including a delta and message_end
+ * in the same chunk. Historical mounts and prepends must not reclaim follow. */
+function hasNewAssistantText(previous: TranscriptItem[], current: TranscriptItem[]): boolean {
+  const before = new Map(previous.map(item => [item.id, item.content]));
+  return current.some(item => item.type === "text" && item.role === "assistant" && !item.rawOutput &&
+    Boolean(item.content) && item.content !== before.get(item.id));
+}
+
 export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React.memo(({
   output,
   startOffset = 0,
@@ -239,6 +247,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const finalResponseSuppressedRef = useRef<boolean>(false);
   const lastRawOutputRef = useRef("");
   const itemsVersionRef = useRef(0);
+  const liveTextVersionRef = useRef(0);
   const liveThinkingIdsRef = useRef<Set<string>>(new Set());
   const liveThinkingKeysRef = useRef<Set<string>>(new Set());
   // Per-revision parse cache for composed planning transcripts: paging re-parses
@@ -312,6 +321,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     if (rawOutput === lastRawOutputRef.current && parseOptions === parseOptionsRef.current &&
       startOffset === inputStartRef.current && settled === settledRef.current &&
       liveSource === liveSourceRef.current) return false;
+    const previousLiveSource = liveSourceRef.current;
     settledRef.current = settled;
     liveSourceRef.current = liveSource;
 
@@ -367,6 +377,9 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         if (!state || (!unchanged && !prependable && !appendable)) {
           // Fresh revision, or a window we cannot relate to the cache: re-parse.
           const fresh = parseFresh(segment, segmentOptions);
+          const forward = lastRawOutputRef.current.length > 0 && rawOutput.startsWith(lastRawOutputRef.current);
+          if (forward && (segment.source === liveSource || segment.source === previousLiveSource) &&
+              hasNewAssistantText(state?.items ?? [], fresh.items)) liveTextVersionRef.current += 1;
           combined.push(...segmentItems(fresh));
           return;
         }
@@ -433,6 +446,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
             state.parsedChars += chunk.length;
             state.items = annotateSegmentItems(parsed.currentItems, previousItems, "live", settled, inline,
               liveThinkingIdsRef.current, liveThinkingKeysRef.current);
+            if ((state.source === liveSource || state.source === previousLiveSource) &&
+                hasNewAssistantText(previousItems, state.items)) liveTextVersionRef.current += 1;
             changed = true;
           }
           state.startOffset = segment.startOffset;
@@ -642,6 +657,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       return { ...item, defaultExpanded };
     });
 
+    if (isIncrementalLive && hasNewAssistantText(previousItems, currentItems)) liveTextVersionRef.current += 1;
     itemsRef.current = shareJson(previousItems, currentItems);
     lastRawOutputRef.current = rawOutput;
     return itemsRef.current !== previousItems;
@@ -683,6 +699,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   // then replace it in a nested layout update, breaking the scroll anchor.
   if (parseAvailableOutput(output)) itemsVersionRef.current += 1;
   const itemsVersion = itemsVersionRef.current;
+  const liveTextVersion = liveTextVersionRef.current;
+  useLayoutEffect(() => {
+    if (liveTextVersion > 0) notifyTranscriptFinalOutput(containerRef.current);
+  }, [liveTextVersion]);
 
   const parsedItems = itemsRef.current;
   // Empty thinking blocks keep their card so a settled COT without visible

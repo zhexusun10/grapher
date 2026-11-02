@@ -14,18 +14,19 @@ export function verifyBuildScripts(directory) {
     chord: { build: 'tsc -p tsconfig.build.json' },
     tui: { build: 'tsc -p tsconfig.build.json' },
     telemetry: { build: 'tsc -p tsconfig.build.json' },
+    schema: { build: 'tsc -p tsconfig.build.json' },
     codemode: { build: 'tsc -p tsconfig.build.json' },
     mcp: { build: 'tsc -p tsconfig.build.json' },
     ai: {
       build: 'npm run generate-models && npm run build:offline',
-      'build:offline': 'npm run check:model-data && tsc -p tsconfig.build.json && shx rm -rf dist/providers/data && shx cp -r src/providers/data dist/providers/data',
+      'build:offline': 'npm run check:model-data && tsc -p tsconfig.build.json && node ../../scripts/package-files.mjs clean dist/providers/data && node ../../scripts/package-files.mjs copy src/providers/data dist/providers',
     },
     durable: { build: 'tsc -p tsconfig.build.json' },
     agent: { build: 'tsc -p tsconfig.build.json' },
     'coding-agent': {
       build: 'npm run build:unbundled && node ../../scripts/build-coding-agent-bundle.mjs',
-      'build:unbundled': 'tsc -p tsconfig.build.json && shx chmod +x dist/cli.js dist/rpc-entry.js && npm run copy-assets',
-      'copy-assets': 'shx mkdir -p dist/modes/interactive/theme && shx cp src/modes/interactive/theme/*.json dist/modes/interactive/theme/ && shx mkdir -p dist/modes/interactive/assets && shx cp src/modes/interactive/assets/*.png dist/modes/interactive/assets/ && shx mkdir -p dist/core/export-html/vendor && shx cp src/core/export-html/template.html src/core/export-html/template.css src/core/export-html/template.js dist/core/export-html/ && shx cp src/core/export-html/vendor/*.js dist/core/export-html/vendor/',
+      'build:unbundled': 'tsc -p tsconfig.build.json && node ../../scripts/package-files.mjs executable dist/cli.js dist/rpc-entry.js && npm run copy-assets',
+      'copy-assets': 'node ../../scripts/package-files.mjs copy "src/modes/interactive/theme/*.json" dist/modes/interactive/theme && node ../../scripts/package-files.mjs copy "src/modes/interactive/assets/*.png" dist/modes/interactive/assets && node ../../scripts/package-files.mjs copy src/core/export-html/template.html src/core/export-html/template.css src/core/export-html/template.js dist/core/export-html && node ../../scripts/package-files.mjs copy "src/core/export-html/vendor/*.js" dist/core/export-html/vendor',
     },
   };
   for (const name of corePackages) {

@@ -214,7 +214,6 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
               toggleExpand();
             }
           }}
-          title={isExpanded ? t("点击折叠思维链") : t("点击展开思维链")}
         >
           <div className="thinking-header-left">
             <span className="thinking-expand-icon">
@@ -250,7 +249,6 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
                 className="thinking-copy-btn"
                 onClick={handleCopy}
                 aria-label={t("复制思维链内容")}
-                title={t("复制思维链内容")}
               >
                 {isCopied ? <Check size={12} className="copy-icon-check" /> : <Copy size={12} className="copy-icon-copy" />}
               </button>

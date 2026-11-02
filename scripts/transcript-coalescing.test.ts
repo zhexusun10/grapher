@@ -48,6 +48,14 @@ test("coalesced mixed inline thinking tags keep their original ordering", () => 
   }
 });
 
+test("inline reasoning followed by live text is independent of delta boundaries", () => {
+  const combined = parse([start(), update("text_delta", 0, { delta: "<think>reason</think>Answer" })]);
+  const split = parse([start(), update("text_delta", 0, { delta: "<think>reason</think>" }),
+    update("text_delta", 0, { delta: "Answer" })]);
+  assert.deepEqual(combined, split);
+  assert.deepEqual(combined.map(item => [item.type, item.content]), [["thinking", "reason"], ["text", "Answer"]]);
+});
+
 test("omitting tool argument fragments preserves the complete tool card and result", () => {
   const prefix = [start(), update("toolcall_start", 0, { id: "tool", toolName: "bash" })];
   const suffix = [update("toolcall_end", 0, { toolCall: { id: "tool", name: "bash", arguments: { command: "echo ok" } } }),

@@ -16,7 +16,7 @@ import { parseMessageAttachmentsAndText } from "./utils/attachmentUtils";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
 import { providerAuth } from "./services/providerAuth";
-import { applyModelConfig, modelRoles, planningModelRoles, roleModelConfig } from "./modelConfig";
+import { applyModelConfig, modelRoles, planningModelRoles, providerIdForModel, roleModelConfig } from "./modelConfig";
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay, recoveredPlanningForDisplay } from "./services/planningRecovery";
@@ -1769,7 +1769,7 @@ export default function App() {
         try {
           const cat = await providerAuth.catalog();
           for (const { label, model } of requiredModels) {
-            const providerId = model.split("/")[0];
+            const providerId = providerIdForModel(model, cat.providers);
             const prov = cat.providers.find(p => p.id === providerId);
             if (prov && !prov.configured) {
               setModal("settings");
