@@ -109,10 +109,12 @@ per-node overrides for every node that has never had an execution, including
 unapproved drafts, nodes waiting for dependencies or blocked before their first
 attempt, and nodes the Planner adds later. Their first dispatch uses those
 settings. Saving does not dispatch work, approve a draft, unpause a Run, or
-rewrite its original configuration. Nodes that have already executed retain
-their settings, except for the explicit failed-node recovery below; a
-waiting/dirty status alone does not make a node never-started.
-Overrides survive replay and repeated saves update the previous override.
+rewrite its original configuration. A running attempt keeps its original
+settings; if it subsequently fails or is interrupted, its next attempt uses the
+conversation's latest Node Agent selection, even when the save happened before
+the failure. A successful node retains its settings; a waiting/dirty status alone
+does not make an executed node never-started. Overrides survive replay and
+repeated saves update the previous override.
 Failure recovery remains available regardless of whether settings were changed.
 Model selections are conversation-scoped: a save made inside a Run records
 that conversation's override, including nodes the Planner adds later. Other
@@ -337,12 +339,17 @@ After interruption:
   by its recorded message claim or earlier source-direct recovery, not inferred
   from a workspace path alone.
 - Alongside never-started nodes, saving model/thinking settings with that Run ID
-  records per-node settings for its currently failed nodes; it retains failure
-  evidence and does not dispatch work. Continue uses those settings for the
-  unfinished turn. The override is replayable across restart and retained for
-  subsequent attempts; environment overrides still take precedence. Running or
-  completed nodes, previously executed non-failed nodes, other Runs, and the
-  Run's original configuration remain unchanged. See [failure recovery
+  records per-node settings for its currently failed nodes, including their own
+  blocked composition/preparation failures (not downstream dependency blocks).
+  It retains failure evidence and does not dispatch work. A failed/interrupted
+  attempt also reconciles settings saved while it was still running. Before
+  Continue, intervention or a history edit, Runtime repairs older failed Runs
+  that missed this reconciliation. The retry uses those settings for the
+  unfinished turn. Session details distinguish the model for the retry from the
+  failed attempt's recorded model. The override is replayable across restart and
+  retained for subsequent attempts; environment overrides still take precedence.
+  Running or completed attempts, previously executed non-failed nodes, other
+  Runs, and the Run's original configuration remain unchanged. See [failure recovery
   regressions](../../backend/src/failure_recovery_tests.rs), [model recovery
   regressions](../../backend/src/node_model_tests.rs) and [settings browser
   tests](../../scripts/bootstrap-settings-ui.test.mjs).

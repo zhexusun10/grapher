@@ -266,7 +266,7 @@
 }
 
 .thinking-status {
-  font-size: 11px;
+  font-size: 12px;
   padding: 2px 7px;
   border-radius: 10px;
   display: inline-flex;
@@ -306,7 +306,7 @@
 
 .thinking-status.completed {
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .thinking-header-right {
@@ -367,7 +367,7 @@
 }
 
 .thinking-card-body .thinking-markdown code {
-  font-size: 11.5px;
+  font-size: 12px;
   padding: 1px 5px;
   border-radius: 4px;
   background: rgba(139, 92, 246, 0.08);
@@ -593,7 +593,7 @@
 .tool-badge {
   flex-shrink: 0;
   font-family: var(--font-mono, monospace);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   padding: 2px 6px;
   border-radius: 4px;
@@ -658,7 +658,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
 }
 
@@ -704,7 +704,7 @@
 }
 
 .tool-truncated-pill {
-  font-size: 9.5px;
+  font-size: 12px;
   padding: 1px 5px;
   border-radius: 4px;
   background: rgba(245, 158, 11, 0.15);
@@ -1048,7 +1048,7 @@
   display: inline-flex;
   align-items: center;
   box-sizing: border-box;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   color: var(--text-muted);
   background: rgba(255, 255, 255, 0.04);
@@ -1346,7 +1346,7 @@
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
   border-radius: 8px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-primary);
 }
 
@@ -1360,7 +1360,7 @@
 
 .compact-btn {
   padding: 5px 10px;
-  font-size: 11.5px;
+  font-size: 12px;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -1377,7 +1377,7 @@
 }
 
 .providers-grid-title small {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
   color: var(--text-secondary);
 }
@@ -1446,13 +1446,13 @@
 }
 
 .provider-id {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-secondary);
   font-family: var(--font-mono, monospace);
 }
 
 .provider-badge {
-  font-size: 10px;
+  font-size: 12px;
   padding: 2px 6px;
   border-radius: 4px;
   display: flex;
@@ -1487,7 +1487,7 @@
 }
 
 .card-action-btn {
-  font-size: 11px;
+  font-size: 12px;
   padding: 4px 8px;
   border-radius: 5px;
   display: flex;
@@ -1622,13 +1622,13 @@
 }
 
 .configured-id {
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--text-secondary);
   font-family: var(--font-mono, monospace);
 }
 
 .configured-type-badge {
-  font-size: 10px;
+  font-size: 12px;
   padding: 2px 7px;
   border-radius: 4px;
   font-weight: 500;
@@ -1759,13 +1759,13 @@
 }
 
 .target-provider-id {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary, #64748b);
   font-family: var(--font-mono, monospace);
 }
 
 .target-provider-source {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-secondary, #64748b);
   display: flex;
   align-items: center;
@@ -1773,7 +1773,7 @@
 }
 
 .source-tag {
-  font-size: 10.5px;
+  font-size: 12px;
   padding: 1px 6px;
   border-radius: 4px;
   font-weight: 500;
@@ -1845,7 +1845,7 @@
 }
 
 .env-only-hint {
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--text-secondary);
   font-style: italic;
 }
@@ -1906,7 +1906,7 @@
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
-  font-size: 11.5px;
+  font-size: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1940,7 +1940,7 @@
 }
 
 .device-code-label {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -1967,7 +1967,7 @@
   align-items: center;
   gap: 4px;
   padding: 5px 10px;
-  font-size: 11px;
+  font-size: 12px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: 4px;
@@ -2034,7 +2034,7 @@
 }
 
 .oauth-fallback-hint {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -2110,7 +2110,7 @@
   align-items: center;
   gap: 6px;
   margin: -2px 0 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--status-danger-text);
 }
 
@@ -2162,7 +2162,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-secondary);
   padding: 6px 0;
 }

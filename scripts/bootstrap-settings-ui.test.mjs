@@ -58,10 +58,18 @@ async function app(handler, projects = [{ id: repository, path: repository, name
     await route.fulfill({ headers: connectedEvents ? { "x-grapher-events": "1" } : {}, json: { result: defaults[command] ?? null } });
   });
   const page = await context.newPage(); page.setDefaultTimeout(8_000);
+  // Cold Vite transforms can be slower than an individual UI action when
+  // several browser suites run in parallel; this is not an app latency check.
+  page.setDefaultNavigationTimeout(20_000);
   page.on("pageerror", error => errors.push(String(error)));
-  await page.clock.install();
-  await page.goto(origin, { waitUntil: "domcontentloaded" });
-  return { context, page, errors, calls };
+  try {
+    await page.clock.install();
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    return { context, page, errors, calls };
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
 }
 const nodeModel = page => page.locator(".role-model-group").nth(0).locator("select").first();
 async function openSettings(page) {
@@ -390,7 +398,7 @@ test("a stalled settings save releases busy state, preserves its draft and can r
 test("saving a Node Agent model synchronizes the failed Run before explicit Continue", { timeout: 30_000 }, async () => {
   const failedExecution = { id: "old-attempt", node: "task", revision: 1, attempt: 1, sessionId: "same-session",
     worktree: "/same-workspace", before: "base", after: null, status: "failed", output: "", outputBytes: 0,
-    startedAt: 1, completedAt: 2 };
+    metrics: { model: "test/old", thinkingLevel: "off" }, startedAt: 1, completedAt: 2 };
   let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, phase: "needs_attention", canResume: true,
     graph: { originalGoal: "Recover with another model", nodes: [{ name: "task", task: "Finish the task" }], edges: [] },
     plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
@@ -404,12 +412,13 @@ test("saving a Node Agent model synchronizes the failed Run before explicit Cont
     else if (command === "save_config") {
       assert.equal(body.runId, "fast", "settings target the visible conversation, not a backend default selection");
       saved = body.config;
-      current = { ...current, canResume: true, nodes: { task: { ...current.nodes.task, modelConfig: saved.roleModels.nodeAgent } } };
+      current = { ...current, canResume: true, nodes: { task: { ...current.nodes.task, modelConfig: saved.roleModels.nodeAgent, modelRetry: true } } };
       result = { ...bootstrap, config: saved, snapshot: current };
     } else if (command === "control") {
       assert.equal(body.action, "resume"); assert.equal(body.runId, "fast"); resumes++;
       current = { ...current, canResume: false, phase: "running", nodes: { task: { ...current.nodes.task, status: "running", error: null } },
-        executions: [...current.executions, { ...failedExecution, id: "new-attempt", attempt: 2, status: "running", startedAt: 3, completedAt: null }] };
+        executions: [...current.executions, { ...failedExecution, id: "new-attempt", attempt: 2, status: "running",
+          metrics: { model: saved.model, thinkingLevel: saved.thinkingLevel }, startedAt: 3, completedAt: null }] };
       result = current;
     } else if (command === "get_execution_output") {
       result = { runId: "fast", executionId: body.executionId, content: "", startOffset: 0, nextOffset: 0, totalBytes: 0,
@@ -429,10 +438,49 @@ test("saving a Node Agent model synchronizes the failed Run before explicit Cont
     assert.equal(resumes, 0, "saving does not resume automatically");
     assert.equal(current.nodes.task.status, "failed");
     assert.equal(current.config.model, "test/old", "the original Run config remains historical evidence");
-    await continueButton.click(); await until(() => resumes === 1);
     await page.locator('.graph-canvas .react-flow__node[data-id="task"]').click();
+    await page.getByText("Model: test/old", { exact: true }).waitFor();
+    await page.getByText("Model for retry: test/new", { exact: true }).waitFor();
+    await page.getByText("Reasoning level for retry: low", { exact: true }).waitFor();
+    await continueButton.click(); await until(() => resumes === 1);
     await page.getByText("Model: test/new", { exact: true }).waitFor();
+    assert.equal(await page.getByText("Model for retry: test/new", { exact: true }).count(), 0);
     assert.equal(calls.filter(call => call.command === "detect_repository").length, 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("serial failure displays the saved retry model without rewriting the failed attempt", { timeout: 30_000 }, async () => {
+  const failedExecution = { id: "old-attempt", node: "task", revision: 1, attempt: 1, sessionId: "same-session",
+    worktree: repository, before: "base", after: null, status: "failed", output: "", outputBytes: 0,
+    metrics: { model: "test/old", thinkingLevel: "off" }, startedAt: 1, completedAt: 2 };
+  let current = { ...empty, runId: "fast", config, planType: "serial", approved: true, phase: "needs_attention", canResume: true,
+    graph: { originalGoal: "Retry serial", nodes: [{ name: "task", task: "Finish the task" }], edges: [] },
+    nodes: { task: { status: "failed", revision: 1, head: null, instruction: "", error: "Provider failure" } },
+    executions: [failedExecution] };
+  const { context, page, errors } = await app(async (route, command, body) => {
+    let result;
+    if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
+    else if (command === "history" || command === "snapshot" || command === "load_run") result = current;
+    else if (command === "save_config") {
+      assert.equal(body.runId, "fast");
+      current = { ...current, nodes: { task: { ...current.nodes.task, modelConfig: body.config.roleModels.nodeAgent, modelRetry: true } } };
+      result = { ...bootstrap, snapshot: current };
+    } else if (command === "get_execution_output") {
+      result = { runId: "fast", executionId: body.executionId, content: "", startOffset: 0, nextOffset: 0, totalBytes: 0,
+        complete: true, status: "failed" };
+    } else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').click();
+    await page.getByText("Model: test/old", { exact: true }).waitFor();
+    await openSettings(page); await nodeModel(page).selectOption("test/new");
+    await page.locator(".save-config-btn").click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    await page.getByText("Model for retry: test/new", { exact: true }).waitFor();
+    await page.getByText("Model: test/old", { exact: true }).waitFor();
+    assert.equal(current.executions.length, 1);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

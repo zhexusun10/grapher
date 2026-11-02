@@ -1,5 +1,5 @@
 import { t } from "./i18n";
-import type { Config, ConversationModelConfig, Execution, ModelRole, RoleModelConfig, ThinkingLevel } from "./types";
+import type { Config, ConversationModelConfig, Execution, ModelRole, NodeState, RoleModelConfig, ThinkingLevel } from "./types";
 import type { ProviderCatalog } from "./services/providerAuth";
 
 export const modelRoles: Array<{ id: ModelRole; label: string; description: string }> = [
@@ -149,6 +149,24 @@ export function normalizeModelThinkingLevels(config: Config, catalog?: ProviderC
 
 export function planningModelRoles(mode: "auto" | "serial" | "graph"): ModelRole[] {
   return mode === "serial" ? ["nodeAgent"] : mode === "graph" ? ["planner", "nodeAgent"] : ["partitioner", "planner", "nodeAgent"];
+}
+
+// A failed attempt's metrics remain historical evidence. Show its saved retry
+// selection separately, and only alongside the latest attempt of this node.
+export function resolveRetryModelAndThinking(
+  execution: Execution | undefined,
+  latestExecutionId: string | undefined,
+  node: NodeState | undefined,
+  config: Config,
+  envOverrides: Record<string, string> = {}
+): { model: string; thinkingLevel: ThinkingLevel } | null {
+  if (!execution || execution.id !== latestExecutionId || !node?.modelConfig || node.modelRetry === false ||
+      !["failed", "paused", "blocked"].includes(node.status) ||
+      !["failed", "paused"].includes(execution.status)) return null;
+  return roleModelConfig({
+    ...config,
+    roleModels: { ...config.roleModels, nodeAgent: node.modelConfig },
+  }, "nodeAgent", envOverrides);
 }
 
 export function resolveExecutionModelAndThinking(

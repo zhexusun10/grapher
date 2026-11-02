@@ -1,4 +1,5 @@
 import React, { useCallback, useState } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { SettingsModal } from "../../src/components/modals/SettingsModal";
 import { EditorModal } from "../../src/components/modals/EditorModal";
@@ -121,8 +122,9 @@ function PlannerTranscriptFixture() {
 function HistoryStatusFixture() {
   const [loading, setLoading] = useState(false);
   const [mounted, setMounted] = useState(true);
-  audit.setHistoryLoading = setLoading;
-  audit.unmountHistoryStatus = () => setMounted(false);
+  // Commit the prop and its effects before a paused test clock advances.
+  audit.setHistoryLoading = (value: boolean) => flushSync(() => setLoading(value));
+  audit.unmountHistoryStatus = () => flushSync(() => setMounted(false));
   return <div data-history-loading={loading}>
     {mounted && <TranscriptHistoryStatus loading={loading} />}
     <div data-history-anchor>History below the reserved status line</div>

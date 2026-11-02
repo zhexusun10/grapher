@@ -103,6 +103,9 @@ test("history status bridges page gaps without flashing for fast reads or moving
   try {
     await page.goto(`${origin}/__history?case=historyStatus`, { waitUntil: "networkidle" });
     await page.clock.install();
+    // install() alone keeps advancing with wall time between Playwright calls.
+    // Freeze it so a slow test runner cannot turn a 30 ms read into a slow one.
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 10_000));
     const status = page.locator(".transcript-history-status");
     const anchorTop = await page.locator("[data-history-anchor]").evaluate(element => element.getBoundingClientRect().top);
     await page.evaluate(() => {
@@ -114,11 +117,15 @@ test("history status bridges page gaps without flashing for fast reads or moving
       await page.evaluate(value => window.audit.setHistoryLoading(value), value);
       await page.waitForFunction(value => document.querySelector("[data-history-loading]").dataset.historyLoading === String(value), value);
     };
-    // A fast, isolated read should never paint a loading-text flash.
+    // A fast, isolated read should never paint a loading-text flash, even if
+    // the test driver is delayed between its two browser commands.
     await loading(true); await page.clock.runFor(30);
+    const pausedTime = await page.evaluate(() => Date.now());
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.equal(await page.evaluate(() => Date.now()), pausedTime);
     await loading(false); await page.clock.runFor(1000);
     assert.equal(await status.innerText(), "");
-    assert.ok((await page.evaluate(() => window.historyStatusTexts)).every(text => !text));
+    assert.deepEqual((await page.evaluate(() => window.historyStatusTexts)).filter(Boolean), [], "a fast read must never show the label");
     // Once loading is visible, short per-page idle gaps must not hide it.
     await loading(true); await page.clock.runFor(1000);
     assert.match(await status.innerText(), /Loading earlier records/);

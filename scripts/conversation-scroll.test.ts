@@ -3,6 +3,7 @@ import test from "node:test";
 import { smoothScrollToLatest } from "../src/services/smoothConversationScroll.ts";
 import {
   CONVERSATION_BOTTOM_THRESHOLD,
+  calculateExpandedCardScrollDelta,
   captureViewScrollState,
   distanceFromBottom,
   resolveViewScroll,
@@ -124,6 +125,107 @@ test("Latest cancellation stops frames and reduced-motion reaches the bottom wit
     assert.equal(element.scrollTop, element.scrollHeight - element.clientHeight);
     assert.equal(complete, 1);
   } finally { frames.restore(); }
+});
+
+test("expanding a tall card keeps an already-visible header in place", () => {
+  // A short conversation pane cannot show the whole card. Pulling its header
+  // to the top would drag the reader away from where they clicked.
+  const delta = calculateExpandedCardScrollDelta(
+    true,
+    { top: 320, bottom: 356 },
+    { top: 320, bottom: 950 },
+    100,
+    500,
+  );
+  assert.equal(delta, 0);
+});
+
+test("expanding a card reveals a header that opened below the visible area", () => {
+  const delta = calculateExpandedCardScrollDelta(
+    true,
+    { top: 510, bottom: 546 },
+    { top: 510, bottom: 990 },
+    100,
+    500,
+  );
+  // The header moves just above the composer; the tall body stays scrollable.
+  assert.equal(delta, 58);
+});
+
+test("a partially visible header is not pulled into view", () => {
+  const delta = calculateExpandedCardScrollDelta(
+    true,
+    { top: 480, bottom: 516 },
+    { top: 480, bottom: 960 },
+    100,
+    500,
+  );
+  assert.equal(delta, 0);
+});
+
+test("expanding a card never pulls an offscreen header back down", () => {
+  const delta = calculateExpandedCardScrollDelta(
+    true,
+    { top: 70, bottom: 106 },
+    { top: 70, bottom: 720 },
+    100,
+    500,
+  );
+  assert.equal(delta, 0);
+});
+
+test("a card that fits still reveals its body from the bottom", () => {
+  const delta = calculateExpandedCardScrollDelta(
+    true,
+    { top: 420, bottom: 456 },
+    { top: 420, bottom: 600 },
+    100,
+    500,
+  );
+  assert.equal(delta, 112);
+  // Revealing the body moves the header up but keeps it inside the viewport.
+  assert.ok(420 - delta >= 100 + 12);
+});
+
+test("a card that already fits fully does not scroll", () => {
+  const delta = calculateExpandedCardScrollDelta(
+    true,
+    { top: 200, bottom: 236 },
+    { top: 200, bottom: 380 },
+    100,
+    500,
+  );
+  assert.equal(delta, 0);
+});
+
+test("no card reveal is attempted without room for the header", () => {
+  const noViewport = calculateExpandedCardScrollDelta(
+    true,
+    { top: 480, bottom: 516 },
+    { top: 480, bottom: 960 },
+    500,
+    460,
+  );
+  assert.equal(noViewport, 0);
+
+  const noHeaderRoom = calculateExpandedCardScrollDelta(
+    true,
+    { top: 0, bottom: 36 },
+    { top: 0, bottom: 400 },
+    0,
+    30,
+  );
+  assert.equal(noHeaderRoom, 0);
+});
+
+test("collapsing a card never scrolls the conversation", () => {
+  assert.equal(calculateExpandedCardScrollDelta(
+    false,
+    { top: 320, bottom: 356 },
+    { top: 320, bottom: 950 },
+    100,
+    500,
+  ), 0);
 });
 
 test("workspace details panel toggle does not scroll on collapse", () => {

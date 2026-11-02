@@ -309,6 +309,74 @@ test('bundled continuity recovers capped provider turns only while selected for 
   }
 });
 
+test('a resumed Pi session honors a replacement model while retaining its conversation', { timeout: 60000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-model-retry-'));
+  const agent = join(directory, 'agent');
+  const global = join(directory, 'global');
+  const sessions = join(directory, 'sessions');
+  for (const path of [agent, global, sessions]) mkdirSync(path);
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    requests.push(body);
+    const chunk = (delta, finish_reason) => ({ id: 'model-retry', object: 'chat.completion.chunk', created: 1,
+      model: body.model, choices: [{ index: 0, delta, finish_reason }] });
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify(chunk({ role: 'assistant', content: 'recorded answer' }, null))}\n\ndata: ${JSON.stringify(chunk({}, 'stop'))}\n\ndata: [DONE]\n\n`);
+  });
+  const run = (model, message) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--mode', 'rpc', '--no-context-files',
+      '--no-skills', '--no-tools', '--model', model, '--thinking', 'off', '--session-id',
+      '6816076a-c027-4f14-aa58-17f22416754c', '--session-dir', sessions], {
+      cwd: directory, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PI_CODING_AGENT_DIR: agent,
+        GRAPHER_GLOBAL_PI_AGENT_DIR: global, GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_MODE: 'node',
+        GRAPHER_EXECUTION_KIND: 'source', PI_OFFLINE: '1' },
+    });
+    let stderr = '';
+    const events = [];
+    child.stderr.on('data', value => { stderr += value.toString(); });
+    child.stdin.on('error', () => {});
+    const lines = createInterface({ input: child.stdout });
+    lines.on('line', line => {
+      try {
+        const event = JSON.parse(line);
+        events.push(event);
+        if (event.type === 'agent_settled') settleRpc(child, 'node');
+      } catch {}
+    });
+    const timer = setTimeout(() => { child.kill(); reject(new Error(`Pi model retry timed out: ${stderr}`)); }, 20000);
+    child.once('error', error => { clearTimeout(timer); lines.close(); reject(error); });
+    child.once('close', code => {
+      clearTimeout(timer); lines.close();
+      if (code !== 0) reject(new Error(`Pi exited ${code}: ${stderr}`));
+      else resolve(events);
+    });
+    child.stdin.write(`${JSON.stringify({ id: 'turn', type: 'prompt', message })}\n`);
+  });
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    const provider = id => ({ baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions',
+      apiKey: 'local-audit-only', models: [{ id, reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] });
+    writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: {
+      'original-audit': provider('old'), 'replacement-audit': provider('new'),
+    } }));
+    await run('original-audit/old', 'Original task');
+    await run('replacement-audit/new', 'Continue task');
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].model, 'old');
+    assert.equal(requests[1].model, 'new');
+    assert.ok(JSON.stringify(requests[1].messages).includes('Original task'), 'the resumed session keeps its history');
+    assert.ok(JSON.stringify(requests[1].messages).includes('Continue task'));
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('Provider/Auth IPC returns a catalog after input EOF without exposing credentials', () => {
   const dir = mkdtempSync(join(tmpdir(), 'grapher-pi-provider-'));
   try {

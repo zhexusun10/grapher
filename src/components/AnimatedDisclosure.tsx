@@ -7,8 +7,12 @@ import { calculateWorkspaceDetailsScrollDelta } from "../services/conversationSc
  */
 export function getConversationViewport(scroll: HTMLElement) {
   const bounds = scroll.getBoundingClientRect();
-  const top = bounds.top + scroll.clientTop;
-  const scrollBottom = top + scroll.clientHeight;
+  const rawTop = bounds.top + scroll.clientTop;
+  // The conversation can extend outside the browser viewport when the page or
+  // an embedded layout scrolls. Reveal against the part the user can actually
+  // see, not an offscreen scroller edge.
+  const top = Math.max(0, rawTop);
+  const scrollBottom = Math.min(window.innerHeight, rawTop + scroll.clientHeight);
   const composer = scroll.parentElement?.querySelector<HTMLElement>(".pane-bottom-chat");
   const overlay = composer?.getBoundingClientRect();
   // A composer laid out above the scroller (or retained mid-transition) must

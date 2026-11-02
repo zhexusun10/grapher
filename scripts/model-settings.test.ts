@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, type Config } from "../src/types.ts";
-import { applyModelConfig, defaultRoleThinkingLevel, normalizeModelThinkingLevels, planningModelRoles, resolveExecutionModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
+import { applyModelConfig, defaultRoleThinkingLevel, normalizeModelThinkingLevels, planningModelRoles, resolveExecutionModelAndThinking, resolveRetryModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
 import { providerAuth, hasUnsupportedCredentialCharacters, type ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
@@ -503,6 +503,29 @@ test("failed-node model overrides provide the next attempt's fallback without re
   assert.equal(resolveExecutionModelAndThinking(execution, true, legacy, {}, replacement).model, legacy.model);
   execution.output = JSON.stringify({ type: "model_change", provider: "recorded", modelId: "original" });
   assert.equal(resolveExecutionModelAndThinking(execution, false, legacy, {}, replacement).model, "recorded/original");
+});
+
+test("retry selections are separate from historical attempts and respect environment overrides", () => {
+  const failed: Execution = {
+    id: "failed", node: "task", revision: 1, attempt: 1, sessionId: "session", worktree: "/worktree",
+    before: "base", after: null, status: "failed", output: "", startedAt: 1, completedAt: 2,
+  };
+  const node = { status: "failed" as const, revision: 1, head: null, instruction: "", error: "quota",
+    modelRetry: true, modelConfig: { model: "replacement/coder", thinkingLevel: "low" as const } };
+  assert.deepEqual(resolveRetryModelAndThinking(failed, failed.id, node, legacy), node.modelConfig);
+  assert.deepEqual(resolveRetryModelAndThinking(failed, failed.id, node, legacy, {
+    nodeAgent: "env/coder", nodeAgentThinking: "off",
+  }), { model: "env/coder", thinkingLevel: "off" });
+  assert.deepEqual(resolveRetryModelAndThinking(failed, failed.id, { ...node, status: "blocked" }, legacy), node.modelConfig);
+  assert.deepEqual(resolveRetryModelAndThinking({ ...failed, status: "paused" }, failed.id,
+    { ...node, status: "paused" }, legacy), node.modelConfig);
+  assert.deepEqual(resolveRetryModelAndThinking(failed, failed.id, { ...node, modelRetry: undefined }, legacy), node.modelConfig,
+    "legacy snapshots can lack the retry flag");
+  assert.equal(resolveRetryModelAndThinking(failed, "newer-attempt", node, legacy), null);
+  assert.equal(resolveRetryModelAndThinking(failed, failed.id, { ...node, modelRetry: false }, legacy), null);
+  assert.equal(resolveRetryModelAndThinking({ ...failed, status: "running" }, failed.id, node, legacy), null);
+  assert.equal(resolveRetryModelAndThinking(failed, failed.id, { ...node, status: "completed" }, legacy), null);
+  assert.equal(resolveRetryModelAndThinking(failed, failed.id, { ...node, modelConfig: undefined }, legacy), null);
 });
 
 test("execution metrics keep the actual model after a later settings change", () => {

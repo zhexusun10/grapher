@@ -516,7 +516,7 @@ fn legacy_provenance_metadata_is_ignored_after_load() {
     let temp = tempfile::tempdir().unwrap();
     let legacy_extra: crate::workspace_metadata::Extra = serde_json::from_value(serde_json::json!({
         "attributes": [["com.apple.provenance", [1, 2, 3]]],
-        "security": [], "protected": false, "flags": 0, "owner": null, "efs": false
+        "security": [], "protected": false, "flags": 64, "owner": null, "efs": false
     }))
     .unwrap();
     let view = View {

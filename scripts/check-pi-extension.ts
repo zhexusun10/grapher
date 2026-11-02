@@ -38,7 +38,7 @@ try {
   assert.match(bashDescription, /Execute a bash command/);
   assert.equal(extension.handlers.has("tool_call"), false, "Planner has no path or read guards");
   const edgeDescription = extension.tools.get("edge")!.definition.description;
-  assert.match(edgeDescription, /Each feedback source may have only one feedback target\./);
+  assert.match(edgeDescription, /feedback source (?:has at most one target|may have only one feedback target)/i);
   assert.doesNotMatch(edgeDescription, /maxFeedback|retry budget|reviewer|ignored|non-Git|drain|fork/i);
   const context = { cwd: repository, sessionManager: { getSessionId: () => "planner-test", getSessionFile: () => undefined } } as unknown as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {

@@ -151,9 +151,11 @@ A successful **Serial** turn stays resident. It **parks** its whole lifecycle
 boundary — the Pi process, its stdin/stdout channels and the tracked
 `ProcessTree` — in a backend-owned pool and re-keys it from the execution owner
 to `linger:<repository>:<session>`, instead of terminating it. The next turn of
-the same conversation **claims** the parked boundary and runs on the same
-process, so the conversation and any service it started (for example a dev
-server) stay alive. A dead entry is retired and that turn cold-launches instead.
+the same conversation **claims** a parked boundary with matching model and
+thinking settings and runs on the same process, so the conversation and any
+service it started (for example a dev server) stay alive. A dead or mismatched
+entry is retired and that turn cold-launches the persisted session instead;
+retirement stops the shell and any services it owns.
 
 Serial means a source-native Node Agent: its cwd is the bound source and it has
 no managed environment. A **Planner is never parked**, even when it runs in the
@@ -171,8 +173,8 @@ reclaims it. The turn's lifecycle guard terminates a boundary only when it is th
 turn's guard drops.
 
 A parked boundary has **no idle TTL and no browser-owned deadline**: a Serial
-conversation that ran in this backend stays warm for the whole backend process.
-It is retired only on explicit Run or workspace deletion, or on backend
+conversation that ran in this backend stays warm until a history edit, a turn
+with different model/thinking settings, Run/workspace deletion, or backend
 shutdown. There is no capacity eviction, so a long-lived backend accumulates one
 parked shell per Serial conversation that ran; this is bounded by the user's own
 activity, not by an idle timer.

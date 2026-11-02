@@ -35,7 +35,7 @@ External resources default to `~/.pi/agent` (`GRAPHER_GLOBAL_PI_AGENT_DIR` overr
 
 Source Partitioner/Planner/Serial roles prepare unbound processes without sessions, user extensions, project writes, or model calls. A matching request binds its own role/project/session before prompting; pending preparation is a cold-path miss, not a request-path wait. Claimed processes are not recycled across Runs. Serial may separately retain a verified continuation session.
 
-Provider/Auth readiness loads code without constructing a credential runtime, checking credentials, or initiating login. Private Graph nodes, private Planner turns, and Mergers cold-start through their platform launcher; an already-started source process cannot acquire that private sandbox later.
+Provider/Auth readiness loads code without constructing a credential runtime, checking credentials, or initiating login. A parked Serial shell must match the next turn's model and thinking settings; see [Process lifecycle](../architecture/filesystem-isolation.md#parked-serial-shells). Private Graph nodes, private Planner turns, and Mergers cold-start through their platform launcher; an already-started source process cannot acquire that private sandbox later.
 
 [process_prewarm.rs](../../backend/src/engine/process_prewarm.rs), [prepared-host.ts](../../engine/prepared-host.ts), and their tests own handshake/timing details. Shared engine copies contain code/dependencies, not Run state; cache ownership and reclamation belong to [Storage and cleanup](../architecture/storage.md#shared-pi-runtime-cache).
 

@@ -47,18 +47,29 @@ impl Extra {
             && self.efs == other.efs
     }
 
-    /// macOS assigns this marker to new files and refuses user-process changes,
-    /// so the source and its private copy can legitimately differ. It is host
-    /// bookkeeping, not project metadata, and must not affect view identity,
-    /// materialization or verification. Legacy records may still contain it.
+    /// Strip host-managed xattrs and flags that do not define project content.
+    /// macOS may assign provenance and revision/storage/security flags after a
+    /// copy, and Linux SELinux labels describe host policy; both sides of a
+    /// comparison ignore them. Legacy records may still contain these values.
     pub(crate) fn strip_system_managed(&mut self) {
         self.attributes.retain(|(name, _)| !is_system_managed(name));
+        self.flags &= !MACOS_HOST_MANAGED_FLAGS;
     }
 }
 
 fn is_system_managed(name: &str) -> bool {
-    cfg!(target_os = "macos") && name == "com.apple.provenance"
+    (cfg!(target_os = "macos") && name == "com.apple.provenance")
+        || (cfg!(target_os = "linux") && name == "security.selinux")
 }
+
+#[cfg(target_os = "macos")]
+// Storage/revision/security flags the host owns. Apple's copyfile also omits
+// UF_TRACKED, UF_DATAVAULT, SF_RESTRICTED and SF_NOUNLINK when copying stat
+// information; compression and dataless state describe the physical store.
+const MACOS_HOST_MANAGED_FLAGS: u32 =
+    0x0000_0020 | 0x0000_0040 | 0x0000_0080 | 0x0008_0000 | 0x0010_0000 | 0x4000_0000;
+#[cfg(not(target_os = "macos"))]
+const MACOS_HOST_MANAGED_FLAGS: u32 = 0;
 
 pub(crate) fn capture(path: &Path, _metadata: &fs::Metadata) -> Result<Extra, String> {
     platform::capture(path)
@@ -172,6 +183,54 @@ mod platform {
             -1
         }
     }
+    fn xattr_names(value: &Path) -> Result<Vec<String>, String> {
+        let p = path(value)?;
+        let size = unsafe { list(p.as_ptr(), std::ptr::null_mut(), 0) };
+        if size < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ENOTSUP)) {
+                return Ok(Vec::new());
+            }
+            return Err(format!(
+                "Cannot capture project metadata {}: {error}",
+                value.display()
+            ));
+        }
+        let mut names = vec![0u8; size as usize];
+        let count = unsafe { list(p.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+        if count < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let mut result = Vec::new();
+        for name in names[..count as usize]
+            .split(|b| *b == 0)
+            .filter(|name| !name.is_empty())
+        {
+            let name = String::from_utf8(name.to_vec())
+                .map_err(|_| "Non-UTF-8 xattr name is unsupported")?;
+            if !is_system_managed(&name) {
+                result.push(name);
+            }
+        }
+        Ok(result)
+    }
+    fn remove_xattr(value: &Path, name: &str) -> Result<(), String> {
+        let p = path(value)?;
+        let key = CString::new(name).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        let result = unsafe { libc::lremovexattr(p.as_ptr(), key.as_ptr()) };
+        #[cfg(target_os = "macos")]
+        let result = unsafe { libc::removexattr(p.as_ptr(), key.as_ptr(), 1) };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let result = -1;
+        if result != 0 {
+            return Err(format!(
+                "Cannot remove destination-only project xattr {name}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    }
     #[cfg(target_os = "linux")]
     fn linux_flags(value: &Path, desired: Option<u32>) -> Result<u32, String> {
         use std::os::fd::AsRawFd;
@@ -225,37 +284,13 @@ mod platform {
         #[cfg(target_os = "macos")]
         let flags = {
             use std::os::macos::fs::MetadataExt;
-            metadata.st_flags()
+            metadata.st_flags() & !MACOS_HOST_MANAGED_FLAGS
         };
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let flags = 0;
-        let size = unsafe { list(p.as_ptr(), std::ptr::null_mut(), 0) };
-        if size < 0 {
-            let error = std::io::Error::last_os_error();
-            if matches!(error.raw_os_error(), Some(libc::ENOTSUP)) {
-                return Ok(Extra {
-                    owner,
-                    security,
-                    flags,
-                    ..Extra::default()
-                });
-            }
-            return Err(format!(
-                "Cannot capture project metadata {}: {error}",
-                value.display()
-            ));
-        }
-        let mut names = vec![0u8; size as usize];
-        let count = unsafe { list(p.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
-        if count < 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
         let mut attributes = Vec::new();
-        for name in names[..count as usize]
-            .split(|b| *b == 0)
-            .filter(|name| !name.is_empty())
-        {
-            let key = CString::new(name).map_err(|e| e.to_string())?;
+        for name in xattr_names(value)? {
+            let key = CString::new(name.as_str()).map_err(|e| e.to_string())?;
             let size = unsafe { get(p.as_ptr(), key.as_ptr(), std::ptr::null_mut(), 0) };
             if size < 0 {
                 return Err(std::io::Error::last_os_error().to_string());
@@ -273,11 +308,7 @@ mod platform {
                 return Err(std::io::Error::last_os_error().to_string());
             }
             bytes.truncate(count as usize);
-            let name = String::from_utf8(name.to_vec())
-                .map_err(|_| "Non-UTF-8 xattr name is unsupported")?;
-            if !is_system_managed(&name) {
-                attributes.push((name, bytes));
-            }
+            attributes.push((name, bytes));
         }
         attributes.sort();
         Ok(Extra {
@@ -296,6 +327,15 @@ mod platform {
                     "Cannot preserve project ownership: {}",
                     std::io::Error::last_os_error()
                 ));
+            }
+        }
+        for name in xattr_names(value)? {
+            if !extra
+                .attributes
+                .iter()
+                .any(|(expected, _)| expected == &name)
+            {
+                remove_xattr(value, &name)?;
             }
         }
         for (name, data) in &extra.attributes {
@@ -364,11 +404,21 @@ mod platform {
                 .map_err(|e| e.to_string())?;
         }
         #[cfg(target_os = "macos")]
-        if unsafe { lchflags(p.as_ptr(), extra.flags) } != 0 {
-            return Err(format!(
-                "Cannot preserve macOS project flags: {}",
-                std::io::Error::last_os_error()
-            ));
+        {
+            use std::os::macos::fs::MetadataExt;
+            let current = fs::symlink_metadata(value)
+                .map_err(|e| e.to_string())?
+                .st_flags();
+            // Keep the destination's own host-managed flags (revision,
+            // compression, storage/security state) and materialize only the
+            // source's project-visible flags.
+            let desired = (current & MACOS_HOST_MANAGED_FLAGS) | extra.flags;
+            if unsafe { lchflags(p.as_ptr(), desired) } != 0 {
+                return Err(format!(
+                    "Cannot preserve macOS project flags: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
         }
         #[cfg(target_os = "linux")]
         {
@@ -391,7 +441,7 @@ mod platform {
 mod platform {
     use super::*;
     use crate::path_identity::windows_api_path as wide;
-    use std::ffi::c_void;
+    use std::{collections::BTreeSet, ffi::c_void};
     #[repr(C)]
     struct Stream {
         size: i64,
@@ -471,6 +521,61 @@ mod platform {
                 | u128::from(information[12]),
             u64::from(information[10]),
         ))
+    }
+    fn stream_keys(path: &Path) -> Result<Vec<String>, String> {
+        if crate::workspace_symlinks::is_link(
+            &fs::symlink_metadata(path).map_err(|e| e.to_string())?,
+        ) {
+            return Ok(Vec::new());
+        }
+        let name = wide(path)?;
+        let mut stream = Stream {
+            size: 0,
+            name: [0; 296],
+        };
+        let handle = unsafe { FindFirstStreamW(name.as_ptr(), 0, &mut stream, 0) };
+        if handle as isize == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(38) {
+                return Ok(Vec::new());
+            }
+            return Err(format!(
+                "Cannot enumerate project streams {}: {error}",
+                path.display()
+            ));
+        }
+        let result = (|| {
+            let mut keys = Vec::new();
+            loop {
+                let length = stream
+                    .name
+                    .iter()
+                    .position(|c| *c == 0)
+                    .unwrap_or(stream.name.len());
+                let key = String::from_utf16(&stream.name[..length])
+                    .map_err(|e| e.to_string())?;
+                if key != "::$DATA" {
+                    if !key.starts_with(':') || !key.ends_with(":$DATA") {
+                        return Err(format!(
+                            "Workspace capability gap: unsupported project stream {key}"
+                        ));
+                    }
+                    keys.push(key);
+                }
+                if unsafe { FindNextStreamW(handle, &mut stream) } == 0 {
+                    if std::io::Error::last_os_error().raw_os_error() != Some(38) {
+                        return Err(std::io::Error::last_os_error().to_string());
+                    }
+                    break;
+                }
+            }
+            keys.sort();
+            Ok(keys)
+        })();
+        unsafe {
+            FindClose(handle);
+        }
+        result
     }
     pub(super) fn set_encrypted(path: &Path, encrypted: bool) -> Result<(), String> {
         let name = wide(path)?;
@@ -600,59 +705,13 @@ mod platform {
         }
         let security = text.into_bytes();
         let mut attributes = Vec::new();
-        if !crate::workspace_symlinks::is_link(
-            &fs::symlink_metadata(path).map_err(|e| e.to_string())?,
-        ) {
-            let mut stream = Stream {
-                size: 0,
-                name: [0; 296],
-            };
-            let handle = unsafe { FindFirstStreamW(name.as_ptr(), 0, &mut stream, 0) };
-            if handle as isize == -1 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(38) {
-                    return Err(format!(
-                        "Cannot enumerate project streams {}: {error}",
-                        path.display()
-                    ));
-                }
-            } else {
-                let result = (|| {
-                    loop {
-                        let length = stream
-                            .name
-                            .iter()
-                            .position(|c| *c == 0)
-                            .unwrap_or(stream.name.len());
-                        let key = String::from_utf16(&stream.name[..length])
-                            .map_err(|e| e.to_string())?;
-                        if key != "::$DATA" {
-                            if !key.starts_with(':') || !key.ends_with(":$DATA") {
-                                return Err(format!(
-                                    "Workspace capability gap: unsupported project stream {key}"
-                                ));
-                            }
-                            let mut stream_path = path.as_os_str().to_os_string();
-                            stream_path.push(&key);
-                            attributes.push((
-                                key,
-                                fs::read(Path::new(&stream_path)).map_err(|e| e.to_string())?,
-                            ));
-                        }
-                        if unsafe { FindNextStreamW(handle, &mut stream) } == 0 {
-                            if std::io::Error::last_os_error().raw_os_error() != Some(38) {
-                                return Err(std::io::Error::last_os_error().to_string());
-                            }
-                            break;
-                        }
-                    }
-                    Ok(())
-                })();
-                unsafe {
-                    FindClose(handle);
-                }
-                result?;
-            }
+        for key in stream_keys(path)? {
+            let mut stream_path = path.as_os_str().to_os_string();
+            stream_path.push(&key);
+            attributes.push((
+                key,
+                fs::read(Path::new(&stream_path)).map_err(|e| e.to_string())?,
+            ));
         }
         attributes.sort();
         let flags = fs::symlink_metadata(path)
@@ -670,6 +729,20 @@ mod platform {
     }
     pub(super) fn restore(path: &Path, extra: &Extra, _mode: Option<u32>) -> Result<(), String> {
         let native_path = wide(path)?;
+        let expected: BTreeSet<&str> = extra
+            .attributes
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect();
+        for key in stream_keys(path)? {
+            if !expected.contains(key.as_str()) {
+                let mut name = path.as_os_str().to_os_string();
+                name.push(&key);
+                fs::remove_file(Path::new(&name)).map_err(|e| {
+                    format!("Cannot remove destination-only project stream {key}: {e}")
+                })?;
+            }
+        }
         for (key, bytes) in &extra.attributes {
             if !key.starts_with(':') || !key.ends_with(":$DATA") || key.contains(['/', '\\', '\0'])
             {
@@ -756,6 +829,38 @@ mod platform {
 #[cfg(all(test, target_os = "macos"))]
 mod macos_tests {
     use super::*;
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    fn c_path(path: &Path) -> CString {
+        CString::new(path.as_os_str().as_bytes()).unwrap()
+    }
+
+    fn set_xattr(path: &Path, name: &str, value: &[u8]) {
+        let path = c_path(path);
+        let name = CString::new(name).unwrap();
+        assert_eq!(
+            unsafe {
+                libc::setxattr(
+                    path.as_ptr(),
+                    name.as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                    0,
+                    1,
+                )
+            },
+            0
+        );
+    }
+
+    fn set_flags(path: &Path, flags: u32) {
+        assert_eq!(unsafe { libc::chflags(c_path(path).as_ptr(), flags) }, 0);
+    }
+
+    fn flags(path: &Path) -> u32 {
+        use std::os::macos::fs::MetadataExt;
+        fs::symlink_metadata(path).unwrap().st_flags()
+    }
 
     #[test]
     fn macos_provenance_is_not_project_metadata() {
@@ -775,6 +880,50 @@ mod macos_tests {
             .push(("com.apple.provenance".into(), vec![1, 2, 3]));
         legacy.strip_system_managed();
         assert_eq!(legacy, captured);
+    }
+
+    #[test]
+    fn macos_host_metadata_is_replaced_with_source_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::write(&source, "project bytes").unwrap();
+        fs::write(&target, "project bytes").unwrap();
+        set_xattr(&source, "com.example.project", b"project");
+        set_xattr(&target, "com.example.stale", b"stale");
+        set_flags(&target, 0x40); // UF_TRACKED, owned by the host
+
+        let expected = capture(&source, &fs::symlink_metadata(&source).unwrap()).unwrap();
+        assert!(!expected
+            .attributes
+            .iter()
+            .any(|(name, _)| name == "com.apple.provenance"));
+        assert_eq!(expected.flags & 0x40, 0);
+
+        restore(&target, &expected).unwrap();
+        let actual = capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual.attributes,
+            vec![("com.example.project".into(), b"project".to_vec())]
+        );
+        assert_ne!(flags(&target) & 0x40, 0, "host-managed flag was cleared");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+
+    #[test]
+    fn linux_security_context_is_not_project_metadata() {
+        let mut extra: Extra = serde_json::from_value(serde_json::json!({
+            "attributes": [["security.selinux", [1, 2, 3]]],
+            "security": [], "protected": false, "flags": 0, "owner": null, "efs": false
+        }))
+        .unwrap();
+        extra.strip_system_managed();
+        assert!(extra.attributes.is_empty());
     }
 }
 
@@ -807,11 +956,13 @@ mod tests {
         assert!(!expected.attributes.is_empty());
 
         fs::write(&target, "project bytes").unwrap();
+        fs::write(target.with_file_name("target.js:stale"), "stale stream").unwrap();
         restore(&target, &expected).unwrap();
         assert_eq!(
             capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap(),
             expected
         );
+        assert!(fs::read(target.with_file_name("target.js:stale")).is_err());
         assert_eq!(
             fs::read(target.with_file_name("target.js:business")).unwrap(),
             b"stream bytes"

@@ -46,7 +46,12 @@ checks. macOS can assign its system-managed `com.apple.provenance` xattr to the
 private copy even when the source lacks it, and rejects user-process changes; it
 is host bookkeeping rather than project metadata, so it is omitted from capture,
 view identity and materialization verification (including legacy view records).
-Windows EFS encryption state is recreated for the private entry; a
+Host-managed macOS storage/revision/security flags are omitted for the same
+reason while the private copy keeps its own, and destination-only xattrs/streams
+are cleared so inherited or stale host metadata cannot make an otherwise equal
+view fail. Linux SELinux labels are likewise host security policy rather than
+project metadata; file capabilities (`security.capability`) remain project
+metadata. Windows EFS encryption state is recreated for the private entry; a
 destination volume without EFS fails the preparation explicitly rather than
 silently writing plaintext.
 

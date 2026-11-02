@@ -27,7 +27,7 @@ node scripts/temporary-target.mjs -- node scripts/cargo.mjs <original-arguments>
 
 The wrapper creates and cleans its own temporary target. An existing `CARGO_TARGET_DIR` is reused and never deleted. A fresh target may need a cold build. Do not stop the backend or clean its build cache to run a check.
 
-For an already-selected npm suite, use `npm run test:temporary -- <script>`. `test:isolated` runs the full Rust fixture suite; it is not a substitute for a locked single-test run. Implementation and regressions: [temporary-target.mjs](../../scripts/temporary-target.mjs), [temporary-target.test.mjs](../../scripts/temporary-target.test.mjs).
+For an already-selected npm suite, use `npm run test:temporary -- <script>`. `test:isolated` runs the full Rust fixture suite; it is not a substitute for a locked single-test run. Release packaging also honors `CARGO_TARGET_DIR`; use the same target directory for the release build and [package-release.mjs](../../scripts/package-release.mjs). Implementation and regressions: [temporary-target.mjs](../../scripts/temporary-target.mjs), [temporary-target.test.mjs](../../scripts/temporary-target.test.mjs).
 
 ## Broader suites
 

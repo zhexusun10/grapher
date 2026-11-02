@@ -748,7 +748,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     >
                       {p.configured ? (
                         <>
-                          <CheckCircle2 size={11} />{t(" 已配置")}{p.authType ? ` (${p.authType})` : ""}
+                          <CheckCircle2 size={12} />{t(" 已配置")}{p.authType ? ` (${p.authType})` : ""}
                         </>
                       ) : (
                         t("未配置")

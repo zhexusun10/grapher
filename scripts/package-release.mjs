@@ -67,7 +67,7 @@ export function launcherScripts(platform, version) {
     ...(platform === 'macos'
       ? [
           '| macOS blocks the binary | Right-click `grapher` → Open, or run `xattr -dr com.apple.quarantine .` here |',
-          '| Wrong macOS download | `uname -m` shows `arm64` (Apple Silicon) or `x64` (Intel); pick the matching archive |',
+          '| Wrong macOS download | `uname -m` shows `arm64` (Apple Silicon) or `x86_64` (Intel); pick the `arm64` or `x64` archive respectively |',
         ]
       : platform === 'linux'
         ? ['| Wrong architecture | `uname -m` shows `x86_64` or `aarch64`; pick the matching archive |']
@@ -171,6 +171,11 @@ export function launcherScripts(platform, version) {
   return { files: { 'start.sh': sh, 'START-HERE.md': startHere }, executableScripts: ['start.sh'] };
 }
 
+export function releaseExecutable(platform, env = process.env) {
+  const target = env.CARGO_TARGET_DIR ? resolve(env.CARGO_TARGET_DIR) : join(root, 'backend/target');
+  return join(target, 'release', platform === 'windows' ? 'grapher.exe' : 'grapher');
+}
+
 export function packageRelease(platform, arch, artifact) {
   if (platform !== host || arch !== process.arch || !artifact) {
     throw new Error(`Package target must match host ${host}-${process.arch}`);
@@ -187,7 +192,7 @@ export function packageRelease(platform, arch, artifact) {
     }).trim();
     renameSync(runtime, destination);
     const executable = platform === 'windows' ? 'grapher.exe' : 'grapher';
-    cpSync(join(root, 'backend/target/release', executable), join(destination, executable));
+    cpSync(releaseExecutable(platform), join(destination, executable));
     cpSync(join(root, 'dist'), join(destination, 'dist'), { recursive: true });
     for (const file of ['README.md', 'LICENSE', 'SECURITY.md']) cpSync(join(root, file), join(destination, file));
     const { files, executableScripts } = launcherScripts(platform, version);

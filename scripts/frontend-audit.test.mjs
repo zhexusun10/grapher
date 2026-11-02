@@ -243,38 +243,6 @@ test("cancelled Provider login/respond replies cannot reopen the panel or replac
   } finally { loginGate.resolve(); responseGate.resolve(); await context.close(); }
 });
 
-test("reasoning auto-expand is committed by Save and discarded by Cancel", { timeout: 30_000 }, async () => {
-  const saves = [];
-  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
-    if (command !== "save_config") return false;
-    saves.push(body.config);
-    await route.fulfill({ json: { result: { config: body.config, snapshot: null, dataPath: "/mock" } } });
-    return true;
-  });
-  const toggle = () => page.getByLabel("Auto-expand chain of thought while running");
-  const stored = () => page.evaluate(() => localStorage.getItem("grapher_auto_expand_cot_v1"));
-  try {
-    assert.equal(await toggle().isChecked(), true, "display option starts checked by default");
-
-    // Cancel closes the modal without touching the stored preference.
-    await toggle().uncheck();
-    await page.getByRole("button", { name: "Cancel", exact: true }).click();
-    await page.locator(".settings-modal").waitFor({ state: "detached" });
-    assert.equal(await stored(), null);
-    await page.evaluate(() => window.audit.open());
-    assert.equal(await toggle().isChecked(), true, "reopening restores the unsaved draft");
-
-    // Save commits the display option alongside the backend settings.
-    await toggle().uncheck();
-    await page.getByRole("button", { name: /save settings/i }).click();
-    await page.waitForFunction(() => localStorage.getItem("grapher_auto_expand_cot_v1") === "0");
-    assert.equal(saves.length, 1, "the backend config save still runs");
-    await page.evaluate(() => window.audit.open());
-    assert.equal(await toggle().isChecked(), false, "the saved option survives reopening");
-    assert.deepEqual(errors, []);
-  } finally { await context.close(); }
-});
-
 test("polling graph metadata cannot overwrite an open editor draft", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("editor");
   try {
@@ -653,10 +621,15 @@ for (const type of ["tool", "thinking"]) {
         const card = page.locator(type === "tool" ? ".tool-call-card" : ".thinking-card");
         const header = card.locator('[aria-expanded]');
         const input = page.locator(".pane-bottom-chat textarea");
+        const scroller = page.locator(".initial-query-scroll");
         await card.waitFor();
         await page.locator(".workbench").evaluate((element, height) => { element.parentElement.style.height = `${height}px`; }, paneHeight);
         await input.fill(draft);
         await page.waitForTimeout(400);
+        // Read slightly above the newest output so this exercises the in-place
+        // reveal rather than the follow-to-bottom expansion covered separately.
+        await scroller.evaluate(scroll => { scroll.scrollTop = Math.max(0, scroll.scrollTop - 60); });
+        await page.waitForTimeout(100);
         await header.click();
         await page.waitForTimeout(450);
         const bounds = await assertCardAboveComposer(card);
@@ -673,6 +646,104 @@ for (const type of ["tool", "thinking"]) {
     }
   });
 }
+
+test("a tall thinking card expands without pulling its visible header on a short pane", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=thinking-card", undefined, "no-preference");
+  try {
+    const card = page.locator(".thinking-card");
+    const header = card.locator(".thinking-card-header");
+    const input = page.locator(".pane-bottom-chat textarea");
+    await card.waitFor();
+    await page.locator(".workbench").evaluate(element => { element.parentElement.style.height = "540px"; });
+    await input.fill(Array.from({ length: 12 }, (_, index) => `Unsent draft line ${index}`).join("\n"));
+    await page.waitForTimeout(400);
+    const geometry = () => card.evaluate(card => {
+      const scroll = card.closest(".initial-query-scroll").getBoundingClientRect();
+      const composer = card.closest(".initial-query-view").querySelector(".pane-bottom-chat").getBoundingClientRect();
+      const header = card.querySelector(".thinking-card-header").getBoundingClientRect();
+      return { top: header.top, bottom: header.bottom, height: card.getBoundingClientRect().height,
+        visibleTop: Math.max(0, scroll.top), visibleBottom: Math.min(window.innerHeight, composer.top) };
+    });
+    // Put read content below the card so it can sit mid-screen and away from
+    // the bottom while the reader is not following new output.
+    await page.evaluate(() => window.audit.appendToolEvents(Array.from({ length: 6 }, (_, index) => ({
+      type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `AFTER_COT_CONTENT_${index}` }] },
+    }))));
+    await page.getByText("AFTER_COT_CONTENT_5", { exact: true }).waitFor();
+    await page.waitForTimeout(200);
+    await card.evaluate(card => {
+      const scroll = card.closest(".initial-query-scroll");
+      const header = card.querySelector(".thinking-card-header").getBoundingClientRect();
+      scroll.scrollTop += header.top - (scroll.getBoundingClientRect().top + 100);
+    });
+    await page.waitForTimeout(100);
+    assert.equal(await card.evaluate(card => {
+      const scroll = card.closest(".initial-query-scroll");
+      return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 35;
+    }), true, "the reader starts scrolled away from the newest output");
+    const before = await geometry();
+    assert.ok(before.top >= before.visibleTop && before.bottom <= before.visibleBottom,
+      `the header starts visible: ${JSON.stringify(before)}`);
+    const box = await header.boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(450);
+    const after = await geometry();
+    assert.ok(after.height > after.visibleBottom - after.visibleTop,
+      "the expanded card is taller than the unobscured viewport");
+    assert.ok(Math.abs(after.top - before.top) <= 2,
+      `opening must keep the clicked header in place: ${JSON.stringify({ before, after })}`);
+    assert.ok(after.top >= after.visibleTop && after.bottom <= after.visibleBottom,
+      `the header remains visible: ${JSON.stringify(after)}`);
+    await header.evaluate(element => element.click());
+    await page.waitForTimeout(350);
+    await card.evaluate(card => {
+      const scroll = card.closest(".initial-query-scroll");
+      const header = card.querySelector(".thinking-card-header").getBoundingClientRect();
+      const composer = card.closest(".initial-query-view").querySelector(".pane-bottom-chat").getBoundingClientRect();
+      scroll.scrollTop += header.top - (composer.top - 8);
+    });
+    await page.waitForTimeout(50);
+    const partialBefore = await geometry();
+    assert.ok(partialBefore.top < partialBefore.visibleBottom && partialBefore.bottom > partialBefore.visibleBottom,
+      `the header starts partially visible: ${JSON.stringify(partialBefore)}`);
+    const partialBox = await header.boundingBox();
+    await page.mouse.click(partialBox.x + partialBox.width / 2, partialBefore.top + 4);
+    await page.waitForTimeout(450);
+    const partialAfter = await geometry();
+    assert.ok(Math.abs(partialAfter.top - partialBefore.top) <= 2,
+      `opening a partially visible header must not move it: ${JSON.stringify({ partialBefore, partialAfter })}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("expanding a thinking card while following keeps the conversation at the bottom", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=thinking-card", undefined, "no-preference");
+  try {
+    const card = page.locator(".thinking-card");
+    const header = card.locator(".thinking-card-header");
+    const input = page.locator(".pane-bottom-chat textarea");
+    const scroller = page.locator(".initial-query-scroll");
+    const bottomGap = () => scroller.evaluate(scroll => scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight);
+    await card.waitFor();
+    await page.locator(".workbench").evaluate(element => { element.parentElement.style.height = "540px"; });
+    await input.fill(Array.from({ length: 12 }, (_, index) => `Unsent draft line ${index}`).join("\n"));
+    await page.waitForTimeout(400);
+    await scroller.evaluate(scroll => { scroll.scrollTop = scroll.scrollHeight; });
+    await page.waitForTimeout(100);
+    assert.ok(await bottomGap() <= 2, "the reader starts at the newest output");
+    const box = await header.boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(450);
+    assert.ok(await bottomGap() <= 2, "opening the card keeps the expanded content visible at the bottom");
+    await page.evaluate(() => window.audit.appendToolEvents([{
+      type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "FOLLOW_AFTER_COT" }] },
+    }]));
+    await page.getByText("FOLLOW_AFTER_COT", { exact: true }).waitFor();
+    await page.waitForTimeout(300);
+    assert.ok(await bottomGap() <= 2, "new output still follows after the expansion");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 test("Planner and Node Agent tool history both render cards in headless browser", { timeout: 30_000 }, async () => {
   const line = event => JSON.stringify(event) + "\n";
@@ -1889,10 +1960,13 @@ for (const planType of ["graph", "serial"]) {
       await page.getByText("Second live Steer", { exact: true }).waitFor();
       assert.equal(await page.locator('[data-execution-id="queue-batch"]').count(), 1);
       assert.ok(await page.evaluate(() => {
-        const steer = [...document.querySelectorAll(".chat-message-row.user")].find(row => row.textContent.includes("First live Steer"));
+        const rows = [...document.querySelectorAll(".chat-message-row.user")];
+        const steers = rows.filter(row => row.textContent.includes("First live Steer") || row.textContent.includes("Second live Steer"));
         const output = document.querySelector('[data-execution-id="queue-batch"]');
-        return !!steer && !!output && !!(steer.compareDocumentPosition(output) & Node.DOCUMENT_POSITION_FOLLOWING);
-      }), "a historical Steer missing from the loaded transcript stays above its owning output, not at the bottom");
+        return steers.length === 2 && !!output &&
+          steers.every(steer => !!(output.compareDocumentPosition(steer) & Node.DOCUMENT_POSITION_FOLLOWING)) &&
+          !!(steers[0].compareDocumentPosition(steers[1]) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }), "unread historical Steers stay below the loaded output until their transcript turns are available");
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });
@@ -2146,6 +2220,8 @@ for (const planType of ["graph", "serial"]) {
 }
 
 test("pausing a node returns an unread steer to the composer and removes its card", { timeout: 45_000 }, async () => {
+  const gate = deferred();
+  let steerReceived = false;
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };
   const live = { id: "live-exec", node: "task", status: "running", revision: 1, attempt: 1, sessionId: "s", worktree: "/a", before: "", after: null, startedAt: 1, completedAt: null, output: "" };
   let current = { runId: "pause-steer-run", config, planType: "graph", approved: true, paused: false, phase: "running",
@@ -2173,6 +2249,10 @@ test("pausing a node returns an unread steer to the composer and removes its car
       case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
       case "get_execution_output": result = { runId: current.runId, executionId: body.executionId, content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, status: current.executions.find(item => item.id === body.executionId)?.status }; break;
       case "control": {
+        if (body.action === "steer") {
+          steerReceived = true;
+          await gate.promise;
+        }
         actions.push({ action: body.action, node: body.node });
         if (body.action === "steer") {
           const sequence = current.events.length + 1;
@@ -2198,14 +2278,20 @@ test("pausing a node returns an unread steer to the composer and removes its car
     await composer.fill("Unread steer instruction");
     await composer.press("Enter");
     await page.locator('.chat-message-row.user', { hasText: "Unread steer instruction" }).waitFor();
+    await waitFor(() => steerReceived);
+    assert.deepEqual(actions, [], "the optimistic card is visible before acknowledgement");
+    const interrupt = page.getByRole("button", { name: "Click to interrupt execution" });
+    assert.equal(await interrupt.isDisabled(), true, "the send must settle before interruption");
+    gate.resolve();
+    await waitFor(() => actions.length === 1);
     assert.deepEqual(actions, [{ action: "steer", node: "task" }]);
-    await page.getByRole("button", { name: "Click to interrupt execution" }).click();
+    await interrupt.click();
     await page.waitForFunction(() => document.querySelector(".pane-bottom-chat textarea")?.value === "Unread steer instruction");
     assert.equal(await page.locator('.chat-message-row.user', { hasText: "Unread steer instruction" }).count(), 0,
       "the unread steer card is removed");
     assert.deepEqual(actions, [{ action: "steer", node: "task" }, { action: "stop", node: "task" }]);
     assert.deepEqual(errors, []);
-  } finally { await context.close(); }
+  } finally { gate.resolve(); await context.close(); }
 });
 
 test("a partially loaded transcript never rolls back a repeated consumed steer", { timeout: 45_000 }, async () => {

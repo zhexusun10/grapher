@@ -778,10 +778,8 @@ fn run_pi_with_timeout(
     // session before any cold launch. Graph node agents are never parked, so
     // this is a miss for them.
     #[cfg(not(feature = "fixture"))]
-    if let Some(key) = serial_linger_key(&request) {
-        if let Some(host) = lingering_pool().claim(&key) {
-            return run_resumed(host, &request, on_output, timeout, launch_started);
-        }
+    if let Some(host) = claim_matching_serial(&request) {
+        return run_resumed(host, &request, on_output, timeout, launch_started);
     }
     // Production always runs the pinned, Grapher-owned entrypoint. Persisted
     // legacy command fields cannot select a different engine implementation.
@@ -1618,6 +1616,7 @@ fn finish_turn(
                     child,
                     tree: process_tree.clone(),
                     channels,
+                    selection: serial_selection(request),
                 },
             );
             return Ok(outcome.final_text);
@@ -1707,6 +1706,7 @@ struct ParkedSerial {
     child: std::process::Child,
     tree: process_control::ProcessTree,
     channels: SessionChannels,
+    selection: (String, Option<String>),
 }
 
 #[cfg(not(feature = "fixture"))]
@@ -1755,7 +1755,7 @@ pub(crate) fn park_test_shell(run_id: &str, session_id: &str) {
     lingering_pool().park(
         lingering::SessionKey { repository: PathBuf::new(), session_id: session_id.into() },
         run_id.into(),
-        ParkedSerial { child, tree, channels },
+        ParkedSerial { child, tree, channels, selection: (String::new(), None) },
     );
 }
 
@@ -1764,9 +1764,8 @@ pub(crate) fn parked_shell_count() -> usize {
     lingering_pool().len()
 }
 
-/// Stop every parked shell. A parked shell has no idle TTL: it lives for the
-/// whole backend process, so this is the one automatic exit (plus explicit Run
-/// or workspace deletion).
+/// Stop every parked shell. A parked shell has no idle TTL; it is also retired
+/// on Run/workspace deletion or when resuming with different model settings.
 #[cfg(not(feature = "fixture"))]
 pub fn stop_lingering() {
     if let Some(pool) = LINGER_POOL.get() {
@@ -1813,6 +1812,30 @@ fn serial_linger_key(request: &PiRequest<'_>) -> Option<lingering::SessionKey> {
         repository,
         session_id: session_id.to_string(),
     })
+}
+
+// A settled Serial shell can still be parked when later workspace/protocol
+// finalization fails. Do not resume it with stale model settings on retry.
+#[cfg(not(feature = "fixture"))]
+fn serial_selection(request: &PiRequest<'_>) -> (String, Option<String>) {
+    let thinking = request.extra_args.windows(2)
+        .find(|args| args[0] == "--thinking")
+        .map(|args| args[1].to_string());
+    (request.config.model.clone(), thinking)
+}
+
+#[cfg(not(feature = "fixture"))]
+fn claim_matching_serial(request: &PiRequest<'_>) -> Option<ParkedSerial> {
+    let key = serial_linger_key(request)?;
+    let host = lingering_pool().claim(&key)?;
+    if host.selection == serial_selection(request) {
+        Some(host)
+    } else {
+        // Reopen the same persisted Pi session with the requested model; never
+        // send a new turn to a process that still owns the previous selection.
+        host.retire();
+        None
+    }
 }
 
 #[cfg(not(feature = "fixture"))]
@@ -2360,7 +2383,7 @@ sys.stdin.read()
             planner_write_tools: true,
             environment: None,
         };
-        let request = PiRequest {
+        let mut request = PiRequest {
             role: PiRole::NodeAgent,
             config: &config,
             cwd: temp.path(),
@@ -2369,7 +2392,7 @@ sys.stdin.read()
             extension: None,
             tools: None,
             session_id: Some("linger-session"),
-            extra_args: vec![],
+            extra_args: vec!["--thinking", "medium"],
             environment: vec![],
             system_prompt: None,
             images: None,
@@ -2406,10 +2429,16 @@ sys.stdin.read()
         assert!(output.contains("grapher_session_parked"));
         assert_eq!(lingering_pool().len(), 1, "a settled Serial shell must be parked");
         let key = serial_linger_key(&request).expect("a parked Serial shell has a session key");
-        let claimed = lingering_pool()
-            .claim(&key)
-            .expect("the parked shell must be claimable");
-        claimed.retire();
+        let claimed = claim_matching_serial(&request)
+            .expect("the same selection must reuse the parked shell");
+        request.extra_args = vec!["--thinking", "high"];
+        assert_ne!(claimed.selection, serial_selection(&request), "thinking-only changes also require a fresh shell");
+        request.extra_args = vec!["--thinking", "medium"];
+        lingering_pool().park(key, "linger-run".into(), claimed);
+        let mut replacement = config.clone();
+        replacement.model = "replacement/model".into();
+        let changed = PiRequest { config: &replacement, ..request };
+        assert!(claim_matching_serial(&changed).is_none(), "a changed model must cold-launch the saved session");
         stop_lingering_for_run("linger-run");
         assert_eq!(lingering_pool().len(), 0);
     }

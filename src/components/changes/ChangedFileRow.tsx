@@ -24,11 +24,11 @@ export const ChangedFileRow = React.memo(function ChangedFileRow({ item, onOpen 
       onClick={() => onOpen?.(item)}
       aria-label={canOpen ? t("用默认应用打开 {0}", item.path) : undefined}
       title={canOpen ? t("用默认应用打开 {0}", item.path) : t("已删除的文件无法打开")}>
-      {/* A tinted chip gives the 11px glyph enough weight without bolding text. */}
+      {/* A tinted chip gives the 12px glyph enough weight without bolding text. */}
       <span className="changed-file-icon-chip" aria-hidden="true">
         {item.isRunning
-          ? <Loader2 size={11} strokeWidth={2.6} className="changed-file-icon spin" />
-          : <Icon size={11} strokeWidth={2.6} className="changed-file-icon" />}
+          ? <Loader2 size={12} strokeWidth={2.6} className="changed-file-icon spin" />
+          : <Icon size={12} strokeWidth={2.6} className="changed-file-icon" />}
       </span>
       <span className="changed-file-path">{path}</span>
       {/* Deleted files have no surviving lines to count, so the row omits stats. */}

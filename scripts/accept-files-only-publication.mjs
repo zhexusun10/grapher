@@ -54,7 +54,8 @@ const model = createServer(async (request, response) => {
         : text.includes('JOIN_BRANCHES') ? 'test "$(cat alpha.txt)" = alpha && test "$(cat beta.txt)" = beta && printf joined > joined.txt'
         : text.includes('WRITE_LEFT') ? 'printf "left\\n" > shared.txt'
         : text.includes('WRITE_RIGHT') ? 'printf "right\\n" > shared.txt'
-        : text.includes('VERIFY_MERGED') ? 'test "$(wc -l < shared.txt)" = 2 && printf verified > verified.txt'
+        // BSD wc pads its output on macOS, so compare the line count numerically.
+        : text.includes('VERIFY_MERGED') ? 'test "$(wc -l < shared.txt)" -eq 2 && printf verified > verified.txt'
         : undefined;
       assert.ok(command, `unknown task: ${text}`);
       tool = { name: 'bash', arguments: { command: projectView + command } };

@@ -118,6 +118,13 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
         <div
           className="thinking-card-header"
           onClick={toggleExpand}
+          onMouseDown={(e) => {
+            // Keep pointer focus from scrolling a short conversation to the card
+            // title. Clicking still toggles and the header stays keyboard-focusable.
+            if ((e.target as HTMLElement).closest("button")) return;
+            e.preventDefault();
+            e.currentTarget.focus({ preventScroll: true });
+          }}
           role="button"
           aria-expanded={isExpanded}
           tabIndex={0}

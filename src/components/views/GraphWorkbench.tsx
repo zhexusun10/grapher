@@ -23,7 +23,7 @@ import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
 import { shouldShowRouteBadge } from "../../services/executionRoute";
 import { activeNodeConversationEvents, nodeConversationExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit, type ConversationExecution } from "../../services/conversationBranch";
-import { captureViewScrollState, resolveViewScroll, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
+import { captureViewScrollState, resolveViewScroll, calculateExpandedCardScrollDelta, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
 import { isNodeWorking, nodeDependenciesCompleted } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
 import { inlineSteerKey, isUncommittedSteer, liveSteerConsumed, nodeInstructionText, numberSteers, steerFallbackPosition, steerRollbackKey, type InlineUserTurnWindow, type LiveSteerMarker } from "../../lib/pendingSteers";
@@ -48,7 +48,7 @@ import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
 import { computeExecutionLayers } from "../../hooks/useGraphElements";
 import { PublicationCompletedDetails } from "../PublicationCompletedDetails";
 import { PlannerTranscript } from "../PlannerTranscript";
-import { resolveExecutionModelAndThinking, roleModelConfig } from "../../modelConfig";
+import { resolveExecutionModelAndThinking, resolveRetryModelAndThinking, roleModelConfig } from "../../modelConfig";
 import { AnimatedUserTurn } from "../AnimatedUserTurn";
 import { useWorkspaceChanges } from "../../hooks/useWorkspaceChanges";
 import { WorkspaceChangesPanel, WorkspaceChangesTrigger } from "../changes/WorkspaceChangesPanel";
@@ -602,6 +602,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       state.nodes[execution.node]?.modelConfig
     );
   }, [execution, isMerger, state.nodes, state.config, config, envOverrides]);
+  const retryModelInfo = !isMerger
+    ? resolveRetryModelAndThinking(execution, attempts.at(-1)?.id, selectedState, state.config || config, envOverrides)
+    : null;
   const nodeTaskText = selectedNode?.task ?? "";
   const latestNodeMessage = nodeMessages.length > 0 ? nodeMessages[nodeMessages.length - 1] : undefined;
   // Keep each human turn in the same conversation as its Pi execution. A
@@ -892,6 +895,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     plannerStream.stage === "planning" || plannerStream.plannerThinkingActive ||
     Boolean(plannerStream.compacting);
   const [graphPane, setGraphPane] = useState({ collapsed: false, generation: 0 });
+  // Narrow workspaces show one pane at a time without unmounting either view.
+  const [narrowGraphVisible, setNarrowGraphVisible] = useState(false);
+  const conversationSwitchRef = useRef<HTMLButtonElement>(null);
   const graphPaneCollapsed = graphPane.collapsed;
   const graphPaneNeedsFocus = useRef(false);
   const collapseGraphPane = useCallback(() => {
@@ -1205,31 +1211,62 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [conversationViewKey, stopLatestScroll, setUserScrolledUp]);
 
   const handleExpandableContentChange = useCallback((expanded?: boolean, card?: HTMLElement) => {
+    // Expanding a card while the reader is already following the newest output
+    // must not turn that follow off; only a deliberately scrolled-up reader gets
+    // the in-place reveal. The follow state is read before suppression starts.
+    const followOutput = shouldFollowOutput();
     suppressAutoScrollRef.current = true;
-    setUserScrolledUp(true);
+    if (!followOutput) setUserScrolledUp(true);
     expandedCardObserverRef.current?.disconnect();
     expandedCardObserverRef.current = null;
     if (expandedCardTimerRef.current !== null) clearTimeout(expandedCardTimerRef.current);
     // Keep automatic bottom following paused for the full animation; resuming
     // after two frames would fight the reveal and push the header offscreen.
     const finishResize = () => {
-      if (chatScrollRef.current) prevScrollHeightRef.current = chatScrollRef.current.scrollHeight;
+      const scroll = chatScrollRef.current;
+      if (scroll) {
+        if (followOutput && shouldFollowOutput()) {
+          scroll.scrollTop = scroll.scrollHeight;
+          lastScrollTopRef.current = scroll.scrollTop;
+        }
+        prevScrollHeightRef.current = scroll.scrollHeight;
+      }
       suppressAutoScrollRef.current = false;
       handleChatScroll();
     };
 
-    // Follow the card during its opening animation, without jumping past the
-    // header when the expanded content is taller than the viewport.
+    // Follow the card during its opening animation without pulling a tall
+    // card's already-visible header to the top of a short conversation pane.
     if (expanded && card) {
       const reveal = () => {
         const scroll = chatScrollRef.current;
         if (!scroll || !scroll.contains(card)) return;
+        if (followOutput) {
+          // Keep the newest expanded content visible, just like streaming output.
+          // A user who scrolls up during the animation takes over immediately.
+          if (shouldFollowOutput()) {
+            scroll.scrollTop = scroll.scrollHeight;
+            lastScrollTopRef.current = scroll.scrollTop;
+          }
+          return;
+        }
         const viewport = getConversationViewport(scroll);
-        const bounds = card.getBoundingClientRect();
-        const available = viewport.height - 24;
-        const delta = bounds.height > available
-          ? bounds.top - viewport.top - 12
-          : bounds.bottom - viewport.bottom + 12;
+        const header = card.querySelector<HTMLElement>("[aria-expanded]") ?? card;
+        const headerBounds = header.getBoundingClientRect();
+        const cardBounds = card.getBoundingClientRect();
+        // The body's full height is available on the first animation frame even
+        // while its grid row is still clipped. Use that target height so a card
+        // that will end up taller than the viewport never scrolls partway while
+        // it briefly looks short enough.
+        const body = card.querySelector<HTMLElement>(".thinking-card-body, .tool-call-body");
+        const targetHeight = body
+          ? Math.max(cardBounds.height, headerBounds.height + body.offsetHeight + (card.offsetHeight - card.clientHeight))
+          : cardBounds.height;
+        const delta = calculateExpandedCardScrollDelta(
+          true, headerBounds,
+          { top: cardBounds.top, bottom: cardBounds.top + targetHeight },
+          viewport.top, viewport.bottom,
+        );
         if (delta > 0) scroll.scrollTop += delta;
       };
       const observer = new ResizeObserver(reveal);
@@ -1253,7 +1290,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         finishResize();
       }, 260);
     }
-  }, [handleChatScroll]);
+  }, [handleChatScroll, setUserScrolledUp, shouldFollowOutput]);
 
   const followExecutionExpansion = useCallback((panelEl: HTMLElement, hasExpandedBelow: boolean) => {
     if (expandedCardObserverRef.current) {
@@ -1560,6 +1597,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       serialNodeState?.modelConfig
     );
   }, [serialExecution, serialNodeState?.modelConfig, state.config, config, envOverrides]);
+  const serialRetryModelInfo = resolveRetryModelAndThinking(
+    serialExecution, serialExecutions.at(-1)?.id, serialNodeState, state.config || config, envOverrides
+  );
 
   const serialTurns = useMemo(() => {
     if (routeType !== "serial") return [];
@@ -1907,6 +1947,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const selectGraphNode = useStableCallback((id: string) => {
     if (!id) { setSelected(""); setSelectedMergerId(""); return; }
+    if (narrowGraphVisible) {
+      setNarrowGraphVisible(false);
+      // Only the narrow layout exposes this button; desktop focus is unchanged.
+      if (conversationSwitchRef.current?.getClientRects().length) conversationSwitchRef.current.focus();
+    }
     if (id === publicationMergerCardId) {
       const publicationMergers = (state.mergers ?? []).filter(item => item.node === "merger");
       const runningMerger = publicationMergers.find(item => item.status === "running");
@@ -2056,13 +2101,23 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     <section
       // Keep exit animations and split-width transitions within one Conversation.
       key={currentRunKey}
-      className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"} ${hasGraphPane && graphPaneCollapsed ? "graph-collapsed" : ""} ${isPlanning ? "planning-active" : "historical-settled"}`}
+      className={`workbench ${isResizing ? "resizing" : ""} ${showGraphPane ? "graph-mode" : "dialogue-only-mode"} ${hasGraphPane && graphPaneCollapsed ? "graph-collapsed" : ""} ${narrowGraphVisible && showGraphPane ? "narrow-graph-visible" : ""} ${isPlanning ? "planning-active" : "historical-settled"}`}
       ref={workbenchRef}
       style={{
         "--workbench-split-ratio": splitRatio,
         "--workbench-left-width": `${splitRatio * 100}%`,
       } as React.CSSProperties}
     >
+      {hasGraphPane && (
+        <div className="workbench-view-switcher" role="group" aria-label={t("工作台视图")}>
+          <button type="button" ref={conversationSwitchRef} aria-pressed={!narrowGraphVisible || graphPaneCollapsed}
+            onClick={() => setNarrowGraphVisible(false)}>{t("对话视图")}</button>
+          <button type="button" aria-pressed={narrowGraphVisible && !graphPaneCollapsed}
+            onClick={() => { setNarrowGraphVisible(true); if (graphPaneCollapsed) expandGraphPane(); }}>
+            {t("执行拓扑图")}
+          </button>
+        </div>
+      )}
       {/* 左侧/居中对话与日志面板 */}
       <motion.div
         className={`conversation-pane ${showGraphPane ? "split" : "full-width"}`}
@@ -2277,6 +2332,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     <div className="session-details-row">
                       <p>Model: {snapshotModelInfo.model}</p>
                       <p>Thinking level: {snapshotModelInfo.thinkingLevel}</p>
+                    </div>
+                  )}
+                  {retryModelInfo && (
+                    <div className="session-details-row">
+                      <p>{t("重试时使用的模型：{0}", retryModelInfo.model)}</p>
+                      <p>{t("重试时使用的思维等级：{0}", retryModelInfo.thinkingLevel)}</p>
                     </div>
                   )}
                   {(showExecutionTokenUsage || executionContext) && (
@@ -2495,6 +2556,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         <div className="session-details-row">
                           <p>Model: {serialModelInfo.model}</p>
                           <p>Thinking level: {serialModelInfo.thinkingLevel}</p>
+                        </div>
+                      )}
+                      {serialRetryModelInfo && (
+                        <div className="session-details-row">
+                          <p>{t("重试时使用的模型：{0}", serialRetryModelInfo.model)}</p>
+                          <p>{t("重试时使用的思维等级：{0}", serialRetryModelInfo.thinkingLevel)}</p>
                         </div>
                       )}
                       {(showSerialTokenUsage || serialContext) && (

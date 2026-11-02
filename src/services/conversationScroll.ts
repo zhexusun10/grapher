@@ -68,6 +68,44 @@ export function resolveViewScroll(
   return { restoreSaved: false, scrollTop: currentScrollHeight, isUserScrolledUp: false };
 }
 
+/** Calculate the scroll delta for revealing an expanded transcript card.
+ *
+ * A card taller than the unobscured viewport cannot show its header and body
+ * together. Pulling such a card to the viewport top would move the reader to
+ * the title even when the title was already visible, which is especially
+ * disruptive in a short conversation pane. Keep the reader's position in that
+ * case and only rescue a header that opened below the composer. Cards that fit
+ * still reveal their whole body from the bottom, and a header that is already
+ * above the viewport is never pulled back down.
+ */
+export function calculateExpandedCardScrollDelta(
+  expanded: boolean,
+  header: { top: number; bottom: number },
+  card: { top: number; bottom: number },
+  visibleTop: number,
+  visibleBottom: number,
+): number {
+  if (!expanded) return 0;
+  const viewportHeight = visibleBottom - visibleTop;
+  const margin = 12;
+  const headerHeight = header.bottom - header.top;
+  // Without room for the header itself, any reveal would be a guess that can
+  // scroll the title behind the composer or another overlay.
+  if (!(viewportHeight > 0) || headerHeight > viewportHeight - margin * 2) return 0;
+
+  const bottomMargin = visibleBottom - margin;
+  const cardHeight = Math.max(0, card.bottom - card.top);
+  const cardFits = cardHeight <= viewportHeight - margin * 2;
+  if (cardFits) return Math.max(0, card.bottom - bottomMargin);
+
+  // A tall card keeps any visible part of its header where it is. Only a header
+  // that opened entirely below the visible area is revealed; scrolling a
+  // partially visible tapped header would move the reader for no reason.
+  if (header.bottom > visibleTop && header.top < visibleBottom) return 0;
+  if (header.top < visibleTop) return 0;
+  return Math.max(0, header.bottom - bottomMargin);
+}
+
 /** Calculate the required scroll delta when toggling the workspace details panel.
  *
  * Expanding scrolls only the additional height required to reveal the panel if

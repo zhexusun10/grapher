@@ -28,7 +28,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  font-size: 11.5px;
+  font-size: 12.5px;
 }
 
 .pub-card-label {
@@ -36,7 +36,7 @@
   align-items: center;
   gap: 5px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
   flex-shrink: 0;
 }
 
@@ -51,7 +51,7 @@
 .pub-card-path {
   display: inline-block;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
-  font-size: 11px;
+  font-size: 12px;
   background: var(--bg-canvas);
   color: var(--text-primary);
   padding: 2px 6px;
@@ -88,7 +88,7 @@
 }
 
 .pub-card-time {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
   font-family: var(--font-mono, monospace);
 }
@@ -99,7 +99,7 @@
   border-radius: var(--radius-surface);
   background: var(--bg-surface);
   padding: 6px 10px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .pub-card-mergers-summary {
@@ -129,13 +129,13 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
 .pub-card-merger-select {
   padding: 2px 6px;
-  font-size: 11px;
+  font-size: 12px;
   border-radius: 4px;
   border: 1px solid var(--border-default);
   background: var(--bg-canvas);
@@ -145,7 +145,7 @@
 .pub-card-merger-info,
 .pub-card-merger-commits {
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
 

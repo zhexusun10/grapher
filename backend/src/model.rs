@@ -1590,6 +1590,26 @@ impl Snapshot {
         ))
     }
 
+    /// A blocked node belongs to its own failed attempt only when the
+    /// attempt-scoped Failed/Blocked pair still explains the current block.
+    /// Managed preparation failures can use different failure/block messages.
+    pub fn node_has_own_blocked_failure(&self, name: &str) -> bool {
+        let Some(node) = self.nodes.get(name).filter(|node| node.status == "blocked") else { return false; };
+        let Some(latest) = self.executions.iter().rev().find(|execution| {
+            execution.node == name && !self.superseded_execution_ids.contains(&execution.id)
+        }).filter(|execution| execution.status == "failed") else { return false; };
+        let managed_preparation = self.config.as_ref().and_then(|config| config.environment.as_ref()).is_some()
+            && self.execution_is_preparation_only(latest);
+        self.events.windows(2).any(|pair| matches!(
+            (&pair[0].kind, &pair[1].kind),
+            (EventKind::Failed { node: failed_node, execution_id: Some(id), error: failed_error, .. },
+             EventKind::Blocked { node: blocked_node, error: blocked_error })
+                if failed_node == name && blocked_node == name && id == &latest.id
+                    && node.error.as_ref() == Some(blocked_error)
+                    && (failed_error == blocked_error || managed_preparation)
+        ))
+    }
+
     /// A node's own composition failure is projected as blocked, even without
     /// a managed environment. Distinguish it from a descendant blocked by an
     /// upstream failure using the adjacent, attempt-scoped Failed/Blocked pair.
@@ -1605,14 +1625,7 @@ impl Snapshot {
                     execution.node == *name
                         && !self.superseded_execution_ids.contains(&execution.id)
                 })?;
-                let own_blocked_failure = node.status == "blocked" && latest.status == "failed"
-                    && self.events.windows(2).any(|pair| matches!(
-                        (&pair[0].kind, &pair[1].kind),
-                        (EventKind::Failed { node: failed_node, execution_id: Some(id), error: failed_error, .. },
-                         EventKind::Blocked { node: blocked_node, error: blocked_error })
-                            if failed_node == name && blocked_node == name && id == &latest.id
-                                && failed_error == blocked_error && node.error.as_ref() == Some(blocked_error)
-                    ));
+                let own_blocked_failure = self.node_has_own_blocked_failure(name);
                 (own_blocked_failure || (managed && self.execution_is_preparation_only(latest)))
                     .then(|| name.clone())
             })
@@ -2306,10 +2319,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 let never_executed = !state.executions.iter()
                     .any(|execution| execution.node == *name);
                 if let Some(node) = state.nodes.get_mut(name) {
-                    if node.status == "failed"
-                        || (never_executed && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")) {
+                    // The event's explicit node list is selected by Runtime:
+                    // an already-executed blocked node here is its own failed
+                    // preparation, not a dependency blocked by another node.
+                    let retry = node.status == "failed" || (node.status == "blocked" && !never_executed);
+                    if retry || (never_executed && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")) {
                         node.model_config = Some(node_settings.clone());
-                        node.model_retry = Some(node.status == "failed");
+                        node.model_retry = Some(retry);
                     }
                 }
             }

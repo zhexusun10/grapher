@@ -2,8 +2,10 @@
 // failures: prerequisite checks, the opened URL, and visible exit codes.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { launcherScripts, packageRelease } from './package-release.mjs';
+import { launcherScripts, packageRelease, releaseExecutable } from './package-release.mjs';
+import { root } from './pi-baseline.mjs';
 
 const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
@@ -65,12 +67,18 @@ test('in-package guide covers prerequisites, start, data and troubleshooting per
     assert.match(guide, /`.grapher\/`/);
     if (platform === 'macos') {
       assert.match(guide, /Wrong macOS download/);
-      assert.match(guide, /uname -m/);
+      assert.match(guide, /`uname -m` shows `arm64` \(Apple Silicon\) or `x86_64` \(Intel\); pick the `arm64` or `x64` archive respectively/);
     } else {
       assert.doesNotMatch(guide, /Wrong macOS download/, 'macOS-specific troubleshooting must not leak onto other platforms');
     }
     if (platform === 'linux') assert.match(guide, /Wrong architecture/);
   }
+});
+
+test('packaging locates release binaries in default or isolated Cargo targets', () => {
+  assert.equal(releaseExecutable('macos', {}), join(root, 'backend/target/release/grapher'));
+  assert.equal(releaseExecutable('linux', { CARGO_TARGET_DIR: 'isolated-target' }), resolve('isolated-target/release/grapher'));
+  assert.equal(releaseExecutable('windows', { CARGO_TARGET_DIR: 'isolated-target' }), resolve('isolated-target/release/grapher.exe'));
 });
 
 test('packaging rejects a target that does not match this host', () => {

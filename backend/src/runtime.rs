@@ -1660,7 +1660,9 @@ impl Runtime {
         let previous = self.state.model_config.clone()
             .unwrap_or_else(|| RunModelConfig::from_config(original));
         if settings == previous {
-            return Ok(());
+            // A previous save may have happened while a node was still running.
+            // Reconcile it once failed even when this save is otherwise unchanged.
+            return self.sync_failed_node_models(None);
         }
         let node_settings = settings.node_agent_settings();
         if node_settings.model.is_empty() {
@@ -1674,6 +1676,11 @@ impl Runtime {
         } else {
             let started: BTreeSet<_> = self.state.executions.iter()
                 .map(|execution| execution.node.as_str()).collect();
+            // A node's own composition failure is projected as blocked, unlike
+            // descendants blocked only by an upstream failure.
+            let preparation_failures: BTreeSet<_> = self.state.nodes.keys()
+                .filter(|name| self.state.node_has_own_blocked_failure(name))
+                .cloned().collect();
             self.state.nodes.iter().filter_map(|(name, node)| {
                 let unstarted = matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")
                     && !started.contains(name.as_str());
@@ -1682,11 +1689,35 @@ impl Runtime {
                         .find(|execution| execution.node == *name
                             && !self.state.superseded_execution_ids.contains(&execution.id))
                         .is_some_and(|execution| execution.status == "failed");
-                ((unstarted || failed)
+                ((unstarted || failed || preparation_failures.contains(name))
                     && node.model_config.as_ref().unwrap_or(&previous_node) != &node_settings)
                     .then(|| name.clone())
             }).collect()
         };
+        self.emit(EventKind::ConversationModelsUpdated { settings, nodes })?;
+        self.sync_failed_node_models(None)
+    }
+
+    /// A model change saved while an attempt was running must take effect if
+    /// that attempt later fails, but never alter a live or completed writer.
+    /// Reconciliation also repairs Runs saved by older backends before retry.
+    fn sync_failed_node_models(&mut self, only: Option<&[String]>) -> Result<(), String> {
+        let Some(settings) = self.state.model_config.clone() else { return Ok(()); };
+        let Some(original) = self.state.config.as_ref() else { return Ok(()); };
+        let node_settings = settings.node_agent_settings();
+        if node_settings.model.is_empty() { return Ok(()); }
+        let original_node = original.node_agent_settings();
+        let nodes: Vec<_> = self.state.nodes.iter().filter_map(|(name, node)| {
+            if only.is_some_and(|names| !names.contains(name)) { return None; }
+            let failed = node.status == "failed" && self.state.executions.iter().rev()
+                .find(|execution| execution.node == *name
+                    && !self.state.superseded_execution_ids.contains(&execution.id))
+                .is_some_and(|execution| execution.status == "failed");
+            ((failed || self.state.node_has_own_blocked_failure(name))
+                && node.model_config.as_ref().unwrap_or(&original_node) != &node_settings)
+                .then(|| name.clone())
+        }).collect();
+        if nodes.is_empty() { return Ok(()); }
         self.emit(EventKind::ConversationModelsUpdated { settings, nodes })
     }
 
@@ -1733,6 +1764,9 @@ impl Runtime {
         if roots.is_empty() {
             return Ok(());
         }
+        // Older Runs may already have failed after a settings save made while
+        // the writer was active. Retarget the roots before changing their state.
+        self.sync_failed_node_models(Some(&roots))?;
         let continuation_nodes = roots.clone();
         // A post-publication follow-up may have failed in the source directory.
         // Record that ownership so replay does not turn its retry into a Graph
@@ -1887,6 +1921,7 @@ impl Runtime {
         // Replies on a node's unique terminal workspace update that shared tree
         // directly, so completed descendants remain valid and stay completed.
         let shared_workspace = !source_direct && self.terminal_workspace_for(node).is_some();
+        self.sync_failed_node_models(Some(&[node.to_string()]))?;
         self.emit(EventKind::Invalidated {
             nodes: vec![node.into()],
             target: node.into(),
@@ -1935,6 +1970,7 @@ impl Runtime {
         // message becomes a new source-direct execution, not a worktree replay.
         if self.source_direct_context(node) {
             self.require_current_file_contract()?;
+            self.sync_failed_node_models(Some(&[node.to_string()]))?;
             return self.emit(EventKind::Invalidated {
                 nodes: vec![node.into()],
                 target: node.into(),
@@ -2086,6 +2122,7 @@ impl Runtime {
                 &self.state.run_id, node, &stopped_execution,
             ))?;
         }
+        self.sync_failed_node_models(Some(&[node.to_string()]))?;
         let branch = pending.map(|branch| branch.commit()).transpose()?;
         if let Err(error) = self.emit(EventKind::ConversationEdited {
             nodes: vec![node.into()],
@@ -3711,6 +3748,7 @@ impl Runtime {
                             output_bytes: 0,
                             metrics: None,
                         })?;
+                        self.sync_failed_node_models(Some(&[execution.node.clone()]))?;
                         return Ok(None);
                     }
                 }
@@ -3851,6 +3889,7 @@ impl Runtime {
                         error,
                     })?;
                 }
+                self.sync_failed_node_models(Some(&[execution.node.clone()]))?;
                 Ok(None)
             }
         }

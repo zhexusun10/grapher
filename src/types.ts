@@ -9,7 +9,7 @@ export type ModelRole = "partitioner" | "planner" | "nodeAgent";
 export interface RoleModelConfig { model: string; thinkingLevel?: ThinkingLevel }
 export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean; postTaskReview?: boolean; plannerWriteTools?: boolean }
 export interface ConversationModelConfig { model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>> }
-interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; modelConfig?: RoleModelConfig; pendingMessages?: Array<{ sequence: number; instruction: string; images?: ImageAttachment[] | null }> }
+export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; modelConfig?: RoleModelConfig; modelRetry?: boolean; pendingMessages?: Array<{ sequence: number; instruction: string; images?: ImageAttachment[] | null }> }
 export interface FeedbackExhaustion { from: string; to: string; count: number; limit: number }
 interface ExecutionMetrics {
   durationSeconds: number;

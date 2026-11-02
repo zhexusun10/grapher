@@ -108,9 +108,10 @@ export function isPendingSteer(
   return loadedOccurrences(message, window) <= (message.steerOrdinal ?? 0);
 }
 
-/** Place queued live turns after the output already visible. Historical fallback
- * cards (including turns outside a partial window) stay before the transcript,
- * since their actual position in the unloaded history is unknown. */
+/** Place a pending steer after the output already visible. A complete window
+ * that lacks the turn still proves it unread, so the card stays at the tail
+ * even after settlement. A partial window, or an unloaded settled transcript,
+ * cannot place the turn and falls back before the transcript. */
 export function steerFallbackPosition(
   message: ChatMessage,
   windows: Record<string, InlineUserTurnWindow>,

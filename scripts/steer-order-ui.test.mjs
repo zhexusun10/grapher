@@ -5,7 +5,7 @@ import { createServer } from "vite";
 
 let server, browser, origin;
 before(async () => {
-  server = await createServer({ cacheDir: "node_modules/.vite-steer-order", server: { host: "127.0.0.1", port: 0, hmr: false, watch: null },
+  server = await createServer({ cacheDir: "node_modules/.vite-steer-order", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null },
     plugins: [{ name: "steer-order", configureServer(vite) {
       vite.middlewares.use(async (req, res, next) => {
         if (!req.url.startsWith("/__steer")) return next();
