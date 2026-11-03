@@ -6121,6 +6121,9 @@ pub fn run() -> Result<(), String> {
         .parse()
         .map_err(|_| "Invalid GRAPHER_PORT")?;
     let server = Arc::new(Server::http(("127.0.0.1", port)).map_err(|error| error.to_string())?);
+    // Hold macOS sleep/screen-saver assertions only after this backend owns its
+    // port, so a failed second launch cannot keep the host awake.
+    crate::keep_awake::install();
     #[cfg(unix)]
     let mut signals = signal_hook::iterator::Signals::new([
         signal_hook::consts::SIGINT,

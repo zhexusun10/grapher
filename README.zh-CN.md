@@ -87,7 +87,7 @@ npm run dev
 
 `npm run dev` 会自动检查环境工具、初始化子模块、安装锁定依赖并编译后端。也可手动执行 `npm ci --ignore-scripts` 与 `npm run pi:setup` 分步准备。
 
-打开 **<http://127.0.0.1:1420>**。首次启动可能需要等待 Cargo 编译。
+打开 **<http://127.0.0.1:1420>**。首次启动可能需要等待 Cargo 编译。macOS 上后端运行期间会保持显示器和系统唤醒，避免长时间任务因空闲睡眠或屏幕保护锁定而中断；设置 `GRAPHER_KEEP_AWAKE=0` 可关闭。
 
 1. 在**设置**中选择本机项目，完成服务商认证并选择 `provider/model`。也可通过 `npm run pi` 登录。
 2. 输入编程目标。选择 **Serial** 使用单个 Pi Agent，选择 **Graph** 规划任务图，或让 **Auto** 由 Partitioner 判断路线。

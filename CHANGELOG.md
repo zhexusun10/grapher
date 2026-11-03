@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- On macOS, the backend now keeps the display and system awake while it runs and refreshes user activity so the screen saver cannot lock the session during a long Run. Set `GRAPHER_KEEP_AWAKE=0` to disable.
+
 ### Changed
 
 - Planner graph tools now return each node's direct dependencies, separate feedback routes, and the compiler's short list of nodes that inherit nothing, making inherited inputs and unintended extra roots visible without changing the Graph IR or scheduler.

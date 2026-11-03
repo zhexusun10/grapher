@@ -12,6 +12,7 @@ pub mod file_changes;
 #[cfg(feature = "fixture")]
 pub mod fixture;
 pub mod graph_merge;
+mod keep_awake;
 #[cfg(target_os = "linux")]
 pub mod linux_sandbox;
 pub mod maintenance;
