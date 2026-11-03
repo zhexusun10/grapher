@@ -1588,7 +1588,7 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
                 } else {
                     ' '
                 };
-                let path = entry.path().ok_or("Invalid Git path")?;
+                let path = entry.path().map_err(|_| "Invalid Git path")?;
                 if path
                     .chars()
                     .any(|ch| ch.is_control() || ch == '"' || ch == '\\')
