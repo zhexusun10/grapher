@@ -310,6 +310,11 @@ fn planner_workspace_uses_the_latest_running_frontier_without_waiting() {
     let jobs = runtime.jobs().unwrap();
     assert_eq!(jobs.len(), 2);
     assert!(jobs.iter().all(|job| runtime.state.nodes[&job.execution.node].status == "running"));
+    assert!(runtime.planner_workspace().unwrap_err().contains("preparation"));
+    let job = jobs.last().unwrap();
+    let head = crate::workspace::prepare(Path::new(&job.config.repository), Path::new(&job.execution.worktree),
+        &job.execution.before, &job.parent_heads).unwrap();
+    runtime.emit(EventKind::Prepared { execution_id: job.execution.id.clone(), head }).unwrap();
     let selected = runtime.planner_workspace().unwrap().expect("the latest workspace is mandatory");
     assert!(jobs.iter().any(|job| job.execution.id == selected.id),
         "an active frontier is selected directly instead of falling back to source");
@@ -356,6 +361,10 @@ fn planner_workspace_uses_a_running_writer_and_rejects_a_missing_frontier() {
     let (_temp, _repo, service, _config) = setup(false);
     let mut runtime = service.runtime.lock().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
+    assert!(runtime.planner_workspace().unwrap_err().contains("preparation"));
+    let head = crate::workspace::prepare(Path::new(&job.config.repository), Path::new(&job.execution.worktree),
+        &job.execution.before, &[]).unwrap();
+    runtime.emit(EventKind::Prepared { execution_id: job.execution.id.clone(), head }).unwrap();
     assert_eq!(runtime.planner_workspace().unwrap().unwrap().id, job.execution.id);
     assert!(runtime.capture_planner_workspace(&job.execution.id).unwrap_err().contains("active writer"));
     let root = complete(&mut runtime, job);
@@ -367,6 +376,143 @@ fn planner_workspace_uses_a_running_writer_and_rejects_a_missing_frontier() {
     assert!(runtime.planner_workspace().is_err());
     crate::path_safety::remove_directory_link(&path);
     fs::rename(saved, path).unwrap();
+}
+
+#[test]
+fn planner_omits_unready_optional_slots_and_rechecks_after_restart() {
+    let (temp, repo, mut service, config) = setup(false);
+    let (left, right) = {
+        let mut runtime = service.runtime.lock().unwrap();
+        let root = runtime.jobs().unwrap().remove(0);
+        complete(&mut runtime, root);
+        let mut jobs = runtime.jobs().unwrap();
+        let right_job = jobs.pop().unwrap();
+        let left = complete(&mut runtime, jobs.pop().unwrap());
+        let right = complete(&mut runtime, right_job);
+        (left, right)
+    };
+    assert_ne!(left.worktree, right.worktree);
+    let marker = crate::workspace_state::root(Path::new(&left.worktree)).unwrap().join("project-ready");
+    let saved = fs::read(&marker).unwrap();
+    fs::remove_file(&marker).unwrap();
+    {
+        let runtime = service.runtime.lock().unwrap();
+        assert!(runtime.planner_workspace_for_node("left").unwrap().is_none());
+        let targets = runtime.planner_workspace_targets(Some("right"), Path::new(&right.worktree)).unwrap();
+        assert!(targets.as_object().unwrap().values().all(|target| target["workspace"] != left.worktree));
+    }
+    let snapshot = turn(&service, &config).unwrap();
+    assert_eq!(snapshot.planning.unwrap().workspace_execution_id.as_deref(), Some(right.id.as_str()));
+    drop(service);
+    service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+        driving: AtomicBool::new(true), drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+    });
+    assert!(service.runtime.lock().unwrap().planner_workspace_for_node("left").unwrap().is_none());
+    fs::write(&marker, "not-the-prepared-head").unwrap();
+    assert!(service.runtime.lock().unwrap().planner_workspace_for_node("left").unwrap().is_none());
+    fs::write(&marker, saved).unwrap();
+    let runtime = service.runtime.lock().unwrap();
+    assert_eq!(runtime.planner_workspace_for_node("left").unwrap().unwrap().execution.id, left.id);
+    let targets = runtime.planner_workspace_targets(Some("right"), Path::new(&right.worktree)).unwrap();
+    assert_eq!(targets["left"]["executionId"], left.id);
+    assert!(runtime.planner_workspace_targets(None, &repo).unwrap().as_object().unwrap().is_empty(),
+        "a source-native Planner cannot grant private slots from another parent");
+}
+
+#[test]
+fn planner_rejects_a_reused_ready_marker_before_the_new_attempt_is_prepared() {
+    let (_temp, _repo, service, _config) = setup(false);
+    let mut runtime = service.runtime.lock().unwrap();
+    let root_job = runtime.jobs().unwrap().remove(0);
+    let root = complete(&mut runtime, root_job);
+    let jobs = runtime.jobs().unwrap();
+    let reused = jobs.iter().find(|job| job.execution.worktree == root.worktree)
+        .expect("one parallel child reuses the prepared root slot");
+    let marker = crate::workspace_state::root(Path::new(&reused.execution.worktree)).unwrap().join("project-ready");
+    assert!(marker.is_file(), "the old occupant's marker is still present");
+    assert!(runtime.planner_workspace_for_node(&reused.execution.node).unwrap().is_none(),
+        "an old marker is not Prepared evidence for the new occupant");
+}
+
+#[test]
+fn planner_does_not_offer_an_older_slot_when_the_latest_owner_is_missing() {
+    let (_temp, _repo, service, _config) = setup(false);
+    let mut runtime = service.runtime.lock().unwrap();
+    let root_job = runtime.jobs().unwrap().remove(0);
+    complete(&mut runtime, root_job);
+    let mut jobs = runtime.jobs().unwrap();
+    let right = jobs.pop().unwrap();
+    let left = complete(&mut runtime, jobs.pop().unwrap());
+    complete(&mut runtime, right);
+    assert!(runtime.planner_workspace_for_node("left").unwrap().is_some());
+    let mut missing = left.clone();
+    missing.id = Uuid::new_v4().to_string();
+    missing.worktree = Path::new(&left.worktree).with_file_name("missing-new-slot").to_string_lossy().into_owned();
+    missing.status = "running".into();
+    missing.after = None;
+    let id = missing.id.clone();
+    runtime.emit(EventKind::Started { execution: missing, message_sequences: None, fresh_restart: false }).unwrap();
+    assert!(runtime.planner_workspace_for_node("left").unwrap().is_none(),
+        "a previous execution must not masquerade as the node's latest workspace");
+    runtime.emit(EventKind::Failed { node: "left".into(), execution_id: Some(id),
+        error: "failed before preparation".into(), output_bytes: 0, metrics: None }).unwrap();
+    let error = runtime.planner_workspace().unwrap_err();
+    assert!(error.contains("Latest Planner workspace is missing"), "{error}");
+}
+
+#[test]
+fn planner_refuses_an_unready_latest_slot_without_snapshot_or_stale_fallback() {
+    let (_temp, _repo, service, config) = setup(false);
+    let (latest, selections, captures, sources) = {
+        let mut runtime = service.runtime.lock().unwrap();
+        let root = runtime.jobs().unwrap().remove(0);
+        complete(&mut runtime, root);
+        let mut jobs = runtime.jobs().unwrap();
+        let right = jobs.pop().unwrap();
+        complete(&mut runtime, jobs.pop().unwrap());
+        let latest = complete(&mut runtime, right);
+        let count = |predicate: fn(&EventKind) -> bool| runtime.state.events.iter().filter(|event| predicate(&event.kind)).count();
+        (latest, count(|kind| matches!(kind, EventKind::PlannerWorkspaceSelected { .. })),
+            count(|kind| matches!(kind, EventKind::PlannerWorkspaceSnapshotted { .. })),
+            count(|kind| matches!(kind, EventKind::SourceSnapshotted { .. })))
+    };
+    let marker = crate::workspace_state::root(Path::new(&latest.worktree)).unwrap().join("project-ready");
+    let saved = fs::read(&marker).unwrap();
+    fs::remove_file(&marker).unwrap();
+    let error = turn(&service, &config).unwrap_err().0;
+    assert!(error.contains("Latest Planner workspace") && error.contains("refusing to use stale"), "{error}");
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        let error = runtime.capture_planner_workspace(&latest.id).unwrap_err();
+        assert!(error.contains("unready Planner workspace"), "{error}");
+        assert_eq!(runtime.state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerWorkspaceSelected { .. })).count(), selections);
+        assert_eq!(runtime.state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerWorkspaceSnapshotted { .. })).count(), captures);
+        assert_eq!(runtime.state.events.iter().filter(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. })).count(), sources);
+    }
+    fs::write(marker, saved).unwrap();
+    assert_eq!(turn(&service, &config).unwrap().planning.unwrap().workspace_execution_id.as_deref(), Some(latest.id.as_str()));
+}
+
+#[test]
+fn planner_steering_cannot_add_ungranted_workspaces() {
+    let temp = tempfile::tempdir().unwrap();
+    let initial = temp.path().join("initial");
+    let allowed = temp.path().join("allowed");
+    let late = temp.path().join("late");
+    for path in [&initial, &allowed, &late] { fs::create_dir(path).unwrap(); }
+    let original = serde_json::json!({"allowed": {"workspace": allowed}});
+    let grants = planner_workspace_grants(&initial, &original);
+    let mut refreshed = serde_json::json!({
+        "back": {"workspace": initial}, "allowed": {"workspace": allowed}, "late": {"workspace": late},
+    });
+    restrict_planner_workspace_targets(&mut refreshed, &grants);
+    assert!(refreshed.get("back").is_some());
+    assert!(refreshed.get("allowed").is_some());
+    assert!(refreshed.get("late").is_none());
+    restrict_planner_workspace_targets(&mut refreshed, &[]);
+    assert!(refreshed.as_object().unwrap().is_empty());
 }
 
 #[test]

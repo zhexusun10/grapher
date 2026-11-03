@@ -68,11 +68,18 @@ test("actual App: node results render before Planner completion; edges rearrange
   const planner = event => send("planner", { event, raw: JSON.stringify(event) + "\n" });
   const startTool = (id, toolName, args) => planner({ type: "tool_execution_start", toolCallId: id, toolName, args });
   // Pi's end event intentionally has no args. The pairing must survive text updates and polls.
-  const endTool = (id, toolName, topology, isError = false) => planner({ type: "tool_execution_end", toolCallId: id, toolName, isError,
-    result: { content: [{ type: "text", text: JSON.stringify({ applied: !isError, topology }) }] } });
-  const tool = (id, toolName, args, topology, isError = false) => {
+  const endTool = (id, toolName, topology, isError = false, legacy = false) => {
+    const projection = legacy ? topology : {
+      directDependencies: Object.fromEntries(topology.nodes.map(name => [name,
+        topology.edges.filter(edge => !edge.feedback && edge.to === name).map(edge => edge.from)])),
+      feedbackTo: Object.fromEntries(topology.edges.filter(edge => edge.feedback).map(edge => [edge.from, edge.to])),
+    };
+    planner({ type: "tool_execution_end", toolCallId: id, toolName, isError,
+      result: { content: [{ type: "text", text: JSON.stringify({ applied: !isError, topology: projection }) }] } });
+  };
+  const tool = (id, toolName, args, topology, isError = false, legacy = false) => {
     startTool(id, toolName, args);
-    endTool(id, toolName, topology, isError);
+    endTool(id, toolName, topology, isError, legacy);
   };
   const nodes = ["a", "b", "c"].map(name => ({ name, task: `Task ${name}` }));
   const edges = [{ from: "a", to: "b", feedback: false }, { from: "b", to: "c", feedback: false }];
@@ -90,7 +97,8 @@ test("actual App: node results render before Planner completion; edges rearrange
     textTimer = setInterval(() => planner({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Still planning. " } }), 50);
 
     // A rejected first mutation must not open an empty topology pane.
-    tool("rejected-first", "node", { nodes: [{ name: "ghost", task: "Invalid edit" }] }, { nodes: [], edges: [] }, true);
+    // Older transcript events retain the previous topology shape.
+    tool("rejected-first", "node", { nodes: [{ name: "ghost", task: "Invalid edit" }] }, { nodes: [], edges: [] }, true, true);
     await page.locator(".tool-call-card.error").first().waitFor();
     assert.equal(await page.locator(".graph-pane").count(), 0, "a failed node call does not open the pane");
 

@@ -1178,7 +1178,36 @@ impl Runtime {
             .transpose()
     }
 
+    /// The latest workspace is mandatory: never silently fall back to an older
+    /// branch or the source when its current owner has not finished preparing.
     pub(crate) fn planner_workspace(&self) -> Result<Option<Execution>, String> {
+        let selected = self.planner_workspace_candidate()?;
+        if let Some(execution) = &selected {
+            let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+            self.validate_planner_workspace(execution, &repository).map_err(|error| format!(
+                "Latest Planner workspace for node '{}' is unavailable: {error}. Retry the node's workspace preparation; refusing to use stale project state", execution.node
+            ))?;
+        }
+        Ok(selected)
+    }
+
+    fn validate_planner_workspace(&self, execution: &Execution, repository: &Path) -> Result<(), String> {
+        let path = Path::new(&execution.worktree);
+        if Self::same_workspace_path(path, repository) {
+            return Ok(());
+        }
+        // A reused slot can still have the previous occupant's ready marker
+        // while its next execution is checking out. Only the current owner's
+        // Prepared event proves that marker belongs to this attempt.
+        if execution.status != "completed" && !self.state.events.iter().any(|event| matches!(
+            &event.kind, EventKind::Prepared { execution_id, .. } if execution_id == &execution.id
+        )) {
+            return Err("workspace preparation has not completed for this execution".into());
+        }
+        crate::workspace_view::validate_ready(path, repository)
+    }
+
+    fn planner_workspace_candidate(&self) -> Result<Option<Execution>, String> {
         let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
         // Retained published slots can be older than subsequent source edits.
         // Only work recorded since publication can supersede the source cwd.
@@ -1278,14 +1307,10 @@ impl Runtime {
                 continue;
             }
             if !path.is_dir() {
-                if self.state.events.iter().rev()
-                    .take_while(|event| !matches!(event.kind, EventKind::PublicationCompleted { .. }))
-                    .any(|event| matches!(&event.kind,
-                        EventKind::Prepared { execution_id, .. } | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. }
-                        if execution_id == &execution.id)) {
-                    return Err("Latest Planner workspace is missing; refusing to use stale source files".into());
-                }
-                continue;
+                // Even an attempt that failed before Prepared is the latest
+                // owner. Silently using an older branch or source would give
+                // Planner a different input without telling it.
+                return Err("Latest Planner workspace is missing; retry preparation instead of using stale source files".into());
             }
             // Only a recorded, real child of this Run may become a Planner cwd.
             let Some(actual) = crate::path_safety::real_child_path(&root, path, false)? else { continue; };
@@ -1316,6 +1341,15 @@ impl Runtime {
     }
 
     pub(crate) fn planner_workspace_for_node(&self, node: &str) -> Result<Option<PlannerWorkspaceResolution>, String> {
+        let Some(resolution) = self.planner_workspace_for_node_candidate(node)? else { return Ok(None); };
+        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        if self.validate_planner_workspace(&resolution.execution, &repository).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(resolution))
+    }
+
+    fn planner_workspace_for_node_candidate(&self, node: &str) -> Result<Option<PlannerWorkspaceResolution>, String> {
         let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
         let unpublished: BTreeSet<_> = self.state.events.iter().rev()
             .take_while(|event| !matches!(event.kind, EventKind::PublicationCompleted { .. }))
@@ -1334,7 +1368,7 @@ impl Runtime {
             let owner = self.planner_workspace_owner(requested).unwrap_or(requested);
             if self.state.superseded_execution_ids.contains(&owner.id)
                 || !Path::new(&owner.worktree).is_dir() {
-                continue;
+                return Ok(None);
             }
             let path = Path::new(&owner.worktree);
             let is_source = self.state.config.as_ref().is_some_and(|config|
@@ -1344,10 +1378,10 @@ impl Runtime {
                 owner.clone()
             } else {
                 let Some(actual) = crate::path_safety::real_child_path(&root, path, false)? else {
-                    continue;
+                    return Ok(None);
                 };
                 if !workspace::has_private_git(&actual) {
-                    continue;
+                    return Ok(None);
                 }
                 let mut selected = owner.clone();
                 selected.worktree = workspace::normalize_workspace_display_path(&actual);
@@ -1361,14 +1395,39 @@ impl Runtime {
         Ok(None)
     }
 
-    pub(crate) fn planner_workspace_targets(&self, current_node: Option<&str>) -> Result<serde_json::Value, String> {
+    pub(crate) fn planner_workspace_targets(&self, current_node: Option<&str>, current_workspace: &Path) -> Result<serde_json::Value, String> {
         let mut targets = serde_json::Map::new();
+        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        let mut checked = std::collections::BTreeMap::<String, Result<(), String>>::new();
         for node in &self.state.graph.nodes {
             if current_node == Some(node.name.as_str()) {
                 continue;
             }
-            let Some(resolution) = self.planner_workspace_for_node(&node.name)? else { continue; };
+            let resolution = match self.planner_workspace_for_node_candidate(&node.name) {
+                Ok(Some(resolution)) => resolution,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!("[Grapher] Planner workspace for '{}' is unavailable: {error}", node.name);
+                    continue;
+                }
+            };
             let path = Path::new(&resolution.execution.worktree);
+            // The native launcher grants only slots of the same physical Run.
+            // A source-direct execution cannot be a private switch target.
+            if Self::same_workspace_path(path, &repository)
+                || !path.parent().zip(current_workspace.parent())
+                    .is_some_and(|(target, current)| Self::same_workspace_path(target, current)) {
+                continue;
+            }
+            let id = resolution.execution.id.clone();
+            if !checked.contains_key(&id) {
+                let result = self.validate_planner_workspace(&resolution.execution, &repository);
+                if let Err(error) = &result {
+                    eprintln!("[Grapher] Planner workspace for '{}' is unavailable: {error}", resolution.execution.node);
+                }
+                checked.insert(id.clone(), result);
+            }
+            if checked[&id].is_err() { continue; }
             let runtime_environment = if crate::workspace_view::is_bound(path) {
                 Some(crate::native::workspace_environment(path)?)
             } else { None };
@@ -1395,6 +1454,8 @@ impl Runtime {
         crate::path_safety::real_child_path(&root, path, false)?
             .ok_or("Planner workspace is no longer owned by this Run")?;
         let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        self.validate_planner_workspace(&execution, &repository)
+            .map_err(|error| format!("Cannot capture an unready Planner workspace: {error}"))?;
         let expected = execution.after.as_deref().unwrap_or(&execution.before);
         workspace::verify_prepared_ancestor(path, expected)?;
         let head = workspace::snapshot_node_scoped(path, &repository, &execution.node,

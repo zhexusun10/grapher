@@ -628,6 +628,53 @@ fn generated_artifacts_are_not_collected_unless_tracked() {
 }
 
 #[test]
+fn reused_slot_prunes_ignored_leftover_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("plain");
+    fs::create_dir_all(source.join("src/pkg")).unwrap();
+    fs::write(source.join("src/pkg/mod.py"), "pkg\n").unwrap();
+    let first = workspace::materialize_shadow_repo(&source, &[]).unwrap();
+    let target = slot(&temp, "reused");
+    workspace::prepare(&source, &target, &first, &[]).unwrap();
+    assert_eq!(bytes(&target.join("src/pkg/mod.py")), b"pkg\n");
+
+    // An earlier execution in this slot left an ignored cache behind. Graph
+    // `checkout -f` rewrites tracked files only, so just the enclosing
+    // directory survives and the scan records it.
+    fs::create_dir_all(target.join("src/pkg/__pycache__")).unwrap();
+    fs::write(target.join("src/pkg/__pycache__/mod.cpython-312.pyc"), "cache\n").unwrap();
+
+    fs::remove_dir_all(source.join("src/pkg")).unwrap();
+    let second = workspace::materialize_shadow_repo(&source, &[]).unwrap();
+    workspace::prepare(&source, &target, &second, &[]).unwrap();
+    assert!(
+        !target.join("src/pkg").exists(),
+        "an ignored-only leftover directory must not block a reused slot"
+    );
+    validate_ready(&target, &source).unwrap();
+}
+
+#[test]
+fn reused_slot_keeps_unrecorded_project_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    fs::create_dir_all(source.join("src/pkg")).unwrap();
+    fs::write(source.join("src/pkg/mod.py"), "pkg\n").unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let target = slot(&temp, "unrecorded");
+    workspace::prepare(&source, &target, &base, &[]).unwrap();
+
+    // Caches are pruned, but an unrecorded authored file is never discarded.
+    fs::create_dir_all(target.join("src/pkg/__pycache__")).unwrap();
+    fs::write(target.join("src/pkg/__pycache__/mod.pyc"), "cache\n").unwrap();
+    fs::write(target.join("notes.md"), "authored\n").unwrap();
+    let error = workspace::prepare(&source, &target, &base, &[]).unwrap_err();
+    assert!(error.contains("notes.md") && error.contains("unexpected entry"), "{error}");
+    assert_eq!(bytes(&target.join("src/pkg/__pycache__/mod.pyc")), b"cache\n");
+    assert_eq!(bytes(&target.join("notes.md")), b"authored\n");
+}
+
+#[test]
 fn completed_view_check_tolerates_recorded_generated_artifacts() {
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);
@@ -1325,4 +1372,55 @@ fn missing_or_corrupt_view_evidence_fails_without_exposing_graph_git() {
         workspace::project_git(&source, &["log", "--format=%s"]).unwrap(),
         "project history"
     );
+}
+
+#[test]
+fn reused_slot_rebinds_project_git_to_the_new_base() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    fs::create_dir_all(source.join("src/pkg")).unwrap();
+    fs::write(source.join("src/pkg/mod.py"), "pkg\n").unwrap();
+    workspace::git(&source, &["add", "src/pkg/mod.py"]).unwrap();
+    workspace::git(&source, &["commit", "-qm", "add pkg"]).unwrap();
+    let first = workspace::snapshot_repository(&source).unwrap();
+    let target = slot(&temp, "reused-git");
+    workspace::prepare(&source, &target, &first, &[]).unwrap();
+    assert_eq!(
+        workspace::project_git(&target, &["rev-parse", "HEAD"]).unwrap(),
+        first
+    );
+
+    fs::create_dir_all(target.join("src/pkg/__pycache__")).unwrap();
+    fs::write(target.join("src/pkg/__pycache__/mod.cpython-312.pyc"), "cache\n").unwrap();
+    workspace::git(&source, &["rm", "-q", "-r", "src/pkg"]).unwrap();
+    workspace::git(&source, &["commit", "-qm", "drop pkg"]).unwrap();
+    let second = workspace::snapshot_repository(&source).unwrap();
+
+    // The slot's native project Git still stops at the previous base, which
+    // cannot describe this one. Reusing the slot must follow the new reference
+    // instead of failing staging composition on a missing tree object.
+    workspace::prepare(&source, &target, &second, &[]).unwrap();
+    assert_eq!(
+        workspace::project_git(&target, &["rev-parse", "HEAD"]).unwrap(),
+        second
+    );
+    assert!(!target.join("src/pkg").exists());
+    assert_eq!(
+        workspace::project_git(&target, &["status", "--porcelain"]).unwrap(),
+        ""
+    );
+    validate_ready(&target, &source).unwrap();
+
+    // Reusing the same slot for an ancestor base keeps the objects readable,
+    // but the native index must still describe the files on disk.
+    workspace::prepare(&source, &target, &first, &[]).unwrap();
+    assert_eq!(
+        workspace::project_git(&target, &["rev-parse", "HEAD"]).unwrap(),
+        first
+    );
+    assert_eq!(
+        workspace::project_git(&target, &["status", "--porcelain"]).unwrap(),
+        ""
+    );
+    assert_eq!(bytes(&target.join("src/pkg/mod.py")), b"pkg\n");
 }

@@ -631,7 +631,11 @@ for (const type of ["tool", "thinking"]) {
         await page.waitForTimeout(400);
         // Read slightly above the newest output so this exercises the in-place
         // reveal rather than the follow-to-bottom expansion covered separately.
-        await scroller.evaluate(scroll => { scroll.scrollTop = Math.max(0, scroll.scrollTop - 60); });
+        await scroller.evaluate(scroll => {
+          // Model a real reader: only a gesture takes over from following.
+          scroll.dispatchEvent(new WheelEvent("wheel", { deltaY: -60, bubbles: true }));
+          scroll.scrollTop = Math.max(0, scroll.scrollTop - 60);
+        });
         await page.waitForTimeout(100);
         await header.click();
         await page.waitForTimeout(450);
@@ -677,6 +681,7 @@ test("a tall thinking card expands without pulling its visible header on a short
     await card.evaluate(card => {
       const scroll = card.closest(".initial-query-scroll");
       const header = card.querySelector(".thinking-card-header").getBoundingClientRect();
+      scroll.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
       scroll.scrollTop += header.top - (scroll.getBoundingClientRect().top + 100);
     });
     await page.waitForTimeout(100);
@@ -703,6 +708,7 @@ test("a tall thinking card expands without pulling its visible header on a short
       const scroll = card.closest(".initial-query-scroll");
       const header = card.querySelector(".thinking-card-header").getBoundingClientRect();
       const composer = card.closest(".initial-query-view").querySelector(".pane-bottom-chat").getBoundingClientRect();
+      scroll.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
       scroll.scrollTop += header.top - (composer.top - 8);
     });
     await page.waitForTimeout(50);
@@ -1282,6 +1288,81 @@ test("a reader who scrolls past the answer is not anchored back to it while CoT 
   } finally { await context.close(); }
 });
 
+test("a layout clamp inside the thinking card resumes its newest reasoning", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node", undefined, "no-preference");
+  try {
+    await page.getByText("Virtualized message 79", { exact: true }).waitFor();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_start", message: { role: "assistant", content: [] } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: Array.from({ length: 200 }, (_, index) => `CLAMP_REASON_${index} ${"detail ".repeat(6)}\n\n`).join("") } },
+    ]));
+    const body = page.locator(".thinking-card-body");
+    await body.waitFor();
+    await page.waitForTimeout(400);
+    assert.ok(await body.evaluate(el => el.scrollTop > 1000), "the reasoning body starts at its newest line");
+    // A remount or reflow can move scrollTop to the top without any gesture.
+    await body.evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event("scroll")); });
+    await page.waitForTimeout(120);
+    const resumed = await body.evaluate(el => ({ top: el.scrollTop, max: el.scrollHeight - el.clientHeight }));
+    assert.ok(resumed.top >= resumed.max - 2, `a non-gesture clamp must not park the reasoning at its top: ${JSON.stringify(resumed)}`);
+    await page.evaluate(() => window.audit.appendToolEvents([{
+      type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: "CLAMP_MORE " + "reason ".repeat(200) + "\n\n" },
+    }]));
+    await page.waitForTimeout(300);
+    const after = await body.evaluate(el => ({ top: el.scrollTop, max: el.scrollHeight - el.clientHeight }));
+    assert.ok(after.top >= after.max - 2, `later reasoning must keep following its newest line: ${JSON.stringify(after)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a layout clamp of a live card keeps the conversation on the newest reasoning", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node", undefined, "no-preference");
+  try {
+    await page.getByText("Virtualized message 79", { exact: true }).waitFor();
+    await page.waitForTimeout(300);
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_start", message: { role: "assistant", content: [] } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: Array.from({ length: 200 }, (_, index) => `OUTER_CLAMP_${index} ${"detail ".repeat(6)}\n\n`).join("") } },
+    ]));
+    await page.locator(".thinking-card-body").waitFor();
+    await page.waitForTimeout(400);
+    const scroller = page.locator(".initial-query-scroll");
+    const state = () => scroller.evaluate(el => {
+      const card = el.querySelector(".thinking-card");
+      return { gap: el.scrollHeight - el.scrollTop - el.clientHeight, following: el.dataset.transcriptFollowing ?? null,
+        cardTop: Math.round(card.getBoundingClientRect().top), viewTop: Math.round(el.getBoundingClientRect().top) };
+    });
+    assert.ok((await state()).gap <= 2, "the conversation starts at the newest reasoning line");
+    // Rows above the viewport reflowing shrink scrollHeight and clamp scrollTop
+    // upwards without a reader gesture.
+    await scroller.evaluate(el => { el.scrollTop -= 420; el.dispatchEvent(new Event("scroll")); });
+    await page.waitForTimeout(150);
+    const restored = await state();
+    assert.ok(restored.gap <= 2 && restored.following === "true",
+      `a layout clamp must restore bottom-following instead of parking on a card title: ${JSON.stringify(restored)}`);
+    await page.evaluate(() => window.audit.appendToolEvents([{
+      type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: "OUTER_CLAMP_MORE " + "reason ".repeat(120) + "\n\n" },
+    }]));
+    await page.waitForTimeout(300);
+    const after = await scroller.evaluate(el => {
+      const body = el.querySelector(".thinking-card-body"), composer = el.closest(".initial-query-view").querySelector(".pane-bottom-chat");
+      return { gap: el.scrollHeight - el.scrollTop - el.clientHeight, following: el.dataset.transcriptFollowing ?? null,
+        bodyGap: body.scrollHeight - body.scrollTop - body.clientHeight,
+        bodyBottom: body.getBoundingClientRect().bottom, visibleBottom: Math.min(el.getBoundingClientRect().bottom, composer.getBoundingClientRect().top) };
+    });
+    assert.ok(after.gap <= 2 && after.following === "true" && after.bodyGap <= 2 && after.bodyBottom <= after.visibleBottom,
+      `reasoning output must keep following after the clamp: ${JSON.stringify(after)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("manual outer scrollback is preserved through streamed and completed output", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node");
   try {
@@ -1401,7 +1482,7 @@ test("clicking to interrupt Latest does not let new output resume it", { timeout
   } finally { await context.close(); }
 });
 
-test("a final-output notification upgrades a coalesced post-layout bottom pin", { timeout: 30_000 }, async () => {
+test("a reflow displacement never parks a follower, and a gesture still wins", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node");
   try {
     await page.getByText("Virtualized message 79", { exact: true }).waitFor();
@@ -1416,6 +1497,7 @@ test("a final-output notification upgrades a coalesced post-layout bottom pin", 
       const displaced = el.scrollHeight - el.scrollTop - el.clientHeight;
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const following = el.dataset.transcriptFollowing;
       // A real user gesture between notification and frame must win over the
       // same scheduled recovery, even if it was queued while following.
       el.dispatchEvent(new Event("grapher:transcript-final-output"));
@@ -1423,17 +1505,17 @@ test("a final-output notification upgrades a coalesced post-layout bottom pin", 
       el.scrollTop -= 120;
       el.dispatchEvent(new Event("scroll"));
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      return { displaced, gap, readingGap: el.scrollHeight - el.scrollTop - el.clientHeight };
+      return { displaced, gap, following, readingGap: el.scrollHeight - el.scrollTop - el.clientHeight };
     });
-    assert.ok(state.displaced > 100, `the simulated reflow moved the viewport: ${JSON.stringify(state)}`);
-    assert.ok(state.gap <= 2, `the coalesced frame must recover the bottom: ${JSON.stringify(state)}`);
+    assert.ok(state.gap <= 2 && state.following === "true",
+      `a gesture-free displacement must not park the follower: ${JSON.stringify(state)}`);
     assert.ok(state.readingGap > 100, `a user gesture must cancel the pending recovery: ${JSON.stringify(state)}`);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
 
 for (const kind of ["inline", "batched", "completed-only"]) {
-  test(`${kind} assistant output recovers a layout-displaced follower`, { timeout: 30_000 }, async () => {
+  test(`${kind} assistant output keeps a follower on the rendered last line after a reflow`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node");
     try {
       await page.getByText("Virtualized message 79", { exact: true }).waitFor();
@@ -1443,15 +1525,17 @@ for (const kind of ["inline", "batched", "completed-only"]) {
         el.scrollTop -= 160;
         el.dispatchEvent(new Event("scroll"));
         const displaced = el.scrollHeight - el.scrollTop - el.clientHeight;
+        const followingAfterReflow = el.dataset.transcriptFollowing;
         const answer = Array.from({ length: 20 }, (_, index) => `${kind.toUpperCase()}_OUTPUT_${index} ${"detail ".repeat(20)}\n\n`).join("");
         const events = [{ type: "message_start", message: { role: "assistant", content: [] } }];
         if (kind !== "completed-only") events.push({ type: "message_update", assistantMessageEvent: { type: "text_delta",
           delta: kind === "inline" ? `<think>reason</think>${answer}` : answer } });
         if (kind !== "inline") events.push({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: answer }] } });
         window.audit.appendToolEvents(events);
-        return displaced;
+        return { displaced, followingAfterReflow };
       }, kind);
-      assert.ok(initial > 100, `the layout simulation moved the follower: ${initial}`);
+      assert.ok(initial.displaced <= 2 && initial.followingAfterReflow === "true",
+        `a reflow must not disable following: ${JSON.stringify(initial)}`);
       await page.getByText(new RegExp(`${kind.toUpperCase()}_OUTPUT_19`)).waitFor({ state: "attached" });
       await page.waitForTimeout(300);
       const state = await scroller.evaluate((el, kind) => {

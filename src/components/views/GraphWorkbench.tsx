@@ -1006,6 +1006,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const userGestureUpRef = useRef(false);
   const historyReadingRef = useRef(false);
   const focusScrollPendingRef = useRef(false);
+  // A held pointer (text selection, autoscroll, scrollbar drag) owns the scroll
+  // position; only layout without any held pointer may reclaim the bottom.
+  const pointerHeldRef = useRef(false);
   const scrollbarGestureRef = useRef<{
     pointerId: number; startTop: number; wasFollowing: boolean; wasScrolledUp: boolean;
     wasAway: boolean; wasGestureUp: boolean; movedUp: boolean;
@@ -1017,6 +1020,30 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   });
   const isPreparingConversationRef = useRef(true);
+  const recoverOnContentFrameRef = useRef(false);
+  const pinContentBottom = useStableCallback((recoverLayoutScroll = false) => {
+    const el = chatScrollRef.current;
+    if (!el || suppressAutoScrollRef.current || latestScrollRef.current) return;
+    if (recoverLayoutScroll) resumeFollowingAfterLayoutScroll();
+    if (!shouldFollowOutput()) return;
+    const height = el.scrollHeight;
+    if (height - el.scrollTop - el.clientHeight <= 2) return;
+    el.scrollTop = height;
+    lastScrollTopRef.current = el.scrollTop;
+    prevScrollHeightRef.current = height;
+  });
+  const scheduleContentPin = useStableCallback((recoverLayoutScroll: boolean) => {
+    // A final-output event may follow a normal growth event in the same frame.
+    // Preserve the stronger recovery request when coalescing them.
+    recoverOnContentFrameRef.current ||= recoverLayoutScroll;
+    if (contentGrowthFrameRef.current !== null) return;
+    contentGrowthFrameRef.current = requestAnimationFrame(() => {
+      contentGrowthFrameRef.current = null;
+      const recover = recoverOnContentFrameRef.current;
+      recoverOnContentFrameRef.current = false;
+      pinContentBottom(recover);
+    });
+  });
   const readyExecutionIdsRef = useRef(new Set<string>());
   // The first-byte reveal must not let the viewport jump when older pages are
   // auto-filled behind it. Track the transcripts still filling their initial
@@ -1131,6 +1158,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (isScrollingUp && distanceFromBottom > CONVERSATION_BOTTOM_THRESHOLD) {
       if (viewportChanged) {
         setScrollBottomVisible(isUserScrolledUpRef.current && showLatest);
+        return;
+      }
+      if (!userScrolledAwayRef.current && !historyReadingRef.current && !pointerHeldRef.current) {
+        // Rows above the viewport can clamp scrollTop upwards without any
+        // reader gesture (for example a streaming card reflowing or a card
+        // remounting). Keep following and restore the bottom instead of
+        // leaving the conversation parked on an older card's title.
+        if (!shouldFollowOutput()) setUserScrolledUp(false);
+        pinContentBottom();
+        scheduleContentPin(false);
+        setScrollBottomVisible(false);
         return;
       }
       setUserScrolledUp(true);
@@ -1287,30 +1325,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       setUserScrolledUp(true);
       isScrollingToBottomRef.current = false;
     };
-    const pinContentBottom = (recoverLayoutScroll = false) => {
-      if (suppressAutoScrollRef.current || latestScrollRef.current) return;
-      if (recoverLayoutScroll) resumeFollowingAfterLayoutScroll();
-      if (!shouldFollowOutput()) return;
-      const height = el.scrollHeight;
-      if (height - el.scrollTop - el.clientHeight <= 2) return;
-      el.scrollTop = height;
-      lastScrollTopRef.current = el.scrollTop;
-      prevScrollHeightRef.current = height;
-    };
-    let recoverOnContentFrame = false;
-    const scheduleContentPin = (recoverLayoutScroll: boolean) => {
-      // A final-output event may follow a normal growth event in the same
-      // frame. Preserve the stronger recovery request when coalescing them.
-      recoverOnContentFrame ||= recoverLayoutScroll;
-      if (contentGrowthFrameRef.current === null) {
-        contentGrowthFrameRef.current = requestAnimationFrame(() => {
-          contentGrowthFrameRef.current = null;
-          const recover = recoverOnContentFrame;
-          recoverOnContentFrame = false;
-          pinContentBottom(recover);
-        });
-      }
-    };
     const onContentGrowth = () => {
       pinContentBottom();
       scheduleContentPin(false);
@@ -1371,6 +1385,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     };
     const onPointerDown = (event: PointerEvent) => {
       stopLatestForReader();
+      pointerHeldRef.current = true;
       if (isNestedScrollGesture(event, el) || scrollbarGestureRef.current) return;
       const scrollbarWidth = el.offsetWidth - el.clientWidth;
       const bounds = el.getBoundingClientRect();
@@ -1391,6 +1406,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
     };
     const onPointerUp = (event: PointerEvent) => {
+      pointerHeldRef.current = false;
       const gesture = scrollbarGestureRef.current;
       if (!gesture || gesture.pointerId !== event.pointerId) return;
       scrollbarGestureRef.current = null;
@@ -1432,6 +1448,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
       scrollbarGestureRef.current = null;
+      pointerHeldRef.current = false;
       focusScrollPendingRef.current = false;
       if (focusFrame !== null) cancelAnimationFrame(focusFrame);
       el.removeEventListener("keydown", onKeyDown);
@@ -1442,8 +1459,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         cancelAnimationFrame(contentGrowthFrameRef.current);
         contentGrowthFrameRef.current = null;
       }
+      recoverOnContentFrameRef.current = false;
     };
-  }, [conversationViewKey, resumeFollowingAfterLayoutScroll, stopLatestScroll, setUserScrolledUp, shouldFollowOutput]);
+  }, [conversationViewKey, pinContentBottom, resumeFollowingAfterLayoutScroll, scheduleContentPin, stopLatestScroll, setUserScrolledUp, shouldFollowOutput]);
 
   const handleExpandableContentChange = useCallback((expanded?: boolean, card?: HTMLElement) => {
     // Expanding a card while the reader is already following the newest output

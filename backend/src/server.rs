@@ -1486,6 +1486,27 @@ fn planner_followup_context_required(snapshot: &Snapshot) -> bool {
         })
 }
 
+/// Native sandbox grants are fixed at launch. A steering message may refresh
+/// target names, but must not introduce another physical workspace mid-turn.
+fn planner_workspace_grants(initial: &std::path::Path, targets: &serde_json::Value) -> Vec<String> {
+    let mut grants = vec![initial.to_string_lossy().into_owned()];
+    for target in targets.as_object().into_iter().flat_map(|items| items.values()) {
+        if let Some(path) = target.get("workspace").and_then(serde_json::Value::as_str) {
+            if !grants.iter().any(|grant| crate::path_identity::same_path(std::path::Path::new(grant), std::path::Path::new(path))) {
+                grants.push(path.to_string());
+            }
+        }
+    }
+    grants
+}
+
+fn restrict_planner_workspace_targets(targets: &mut serde_json::Value, grants: &[String]) {
+    if let Some(items) = targets.as_object_mut() {
+        items.retain(|_, target| target.get("workspace").and_then(serde_json::Value::as_str).is_some_and(|path|
+            grants.iter().any(|grant| crate::path_identity::same_path(std::path::Path::new(grant), std::path::Path::new(path)))));
+    }
+}
+
 fn planner_workspace_label(snapshot: &Snapshot, selected_node: Option<&str>) -> String {
     selected_node
         .or_else(|| {
@@ -2000,6 +2021,7 @@ fn plan_goal_internal_with_started(
                 }
             }
             let mut planner_execution_id: Option<String> = None;
+            let mut planner_workspace_selected = false;
             let plan_outcome = (|| -> Result<Snapshot, String> {
                 let route_path = directory.join("route.json");
                 let (route, partition_metrics) = match mode {
@@ -2123,20 +2145,23 @@ fn plan_goal_internal_with_started(
                             let selected = if context_required { runtime.planner_workspace()? } else { None };
                             (selected, context_required)
                         } else { (None, false) };
+                        let mut planner_workspace = selected.as_ref().map(|execution| PathBuf::from(&execution.worktree))
+                            .unwrap_or_else(|| repository.clone());
                         let planner_workspace_targets = if planner_context_required {
                             service
                                 .runtime
                                 .lock()
                                 .map_err(|e| e.to_string())?
-                                .planner_workspace_targets(selected.as_ref().map(|execution| execution.node.as_str()))?
+                                .planner_workspace_targets(selected.as_ref().map(|execution| execution.node.as_str()), &planner_workspace)?
                         } else {
                             serde_json::json!({})
                         };
                         let planner_workspace_targets_file = directory.join("planner-workspaces.json");
                         fs::write(&planner_workspace_targets_file, planner_workspace_targets.to_string())
                             .map_err(|e| e.to_string())?;
-                        let mut planner_workspace = selected.as_ref().map(|execution| PathBuf::from(&execution.worktree))
-                            .unwrap_or_else(|| repository.clone());
+                        let grants = planner_workspace_grants(&planner_workspace, &planner_workspace_targets);
+                        fs::write(directory.join("planner-workspace-grants.json"), serde_json::to_vec(&grants).map_err(|e| e.to_string())?)
+                            .map_err(|e| e.to_string())?;
                         planner_execution_id = selected.as_ref().map(|execution| execution.id.clone());
                         running.worktree = Some(crate::native::host_path(&planner_workspace).to_string_lossy().into_owned());
                         running.workspace_execution_id = selected.as_ref().map(|execution| execution.id.clone());
@@ -2145,6 +2170,7 @@ fn plan_goal_internal_with_started(
                             .map_err(|e| e.to_string())?;
                         service.runtime.lock().map_err(|e| e.to_string())?
                             .emit(EventKind::PlannerWorkspaceSelected { planning: running.clone() })?;
+                        planner_workspace_selected = true;
                         let planner_model_cfg = PiModelConfig::resolve(PiRole::Planner, &config);
                         let planner_config = planner_model_cfg.effective_config(&config);
                         // The live progress fold reports the model that actually
@@ -2600,7 +2626,7 @@ fn plan_goal_internal_with_started(
                         let captured = (|| -> Result<(), String> {
                             let _guard = lock.lock().map_err(|e| e.to_string())?;
                             let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                            if runtime.state.approved && revision_run_id.as_deref() == Some(&runtime.state.run_id) {
+                            if planner_workspace_selected && runtime.state.approved && revision_run_id.as_deref() == Some(&runtime.state.run_id) {
                                 let capture = if let Some(id) = &planner_execution_id {
                                     capture_planner_turn_workspaces(&mut runtime, &planning_id, Some(id))
                                 } else { runtime.capture_planner_source() };
@@ -3376,20 +3402,30 @@ fn control(
         // An empty file makes a switch_workspace call left over from the
         // launch-time tool registration fail once this turn no longer has
         // another workspace worth selecting.
-        let workspace_targets = if is_followup {
-            runtime.planner_workspace_targets(workspace_node)?
+        let current_workspace = runtime.state.planning.as_ref().and_then(|planning| planning.worktree.as_ref())
+            .map(PathBuf::from)
+            .or_else(|| runtime.state.config.as_ref().map(|config| PathBuf::from(&config.repository)))
+            .ok_or("Missing Planner workspace")?;
+        let mut workspace_targets = if is_followup {
+            runtime.planner_workspace_targets(workspace_node, &current_workspace)?
         } else {
             serde_json::json!({})
         };
-        let include_workspace_move = workspace_targets.as_object().is_some_and(|targets| !targets.is_empty());
         let workspace_targets_file = runtime
             .state
             .planning
             .as_ref()
             .map(|planning| runtime.root.join("planning").join(&planning.planning_id).join("planner-workspaces.json"));
         if let Some(file) = &workspace_targets_file {
+            let grants = fs::read(file.with_file_name("planner-workspace-grants.json"))
+                .ok().and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+                .unwrap_or_default();
+            restrict_planner_workspace_targets(&mut workspace_targets, &grants);
             fs::write(file, workspace_targets.to_string()).map_err(|e| e.to_string())?;
+        } else {
+            workspace_targets = serde_json::json!({});
         }
+        let include_workspace_move = workspace_targets.as_object().is_some_and(|targets| !targets.is_empty());
         let message = if is_followup {
             planner_followup_prompt_for_workspace(
                 instruction.trim(),

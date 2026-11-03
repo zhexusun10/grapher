@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-for (const appliedField of ['applied', 'mutationApplied']) test(`separates graph attempts and process outcome (${appliedField})`, () => {
+for (const appliedField of ['applied', 'mutationApplied']) for (const [format, topology] of [
+  ['legacy', { nodes: ['build'], edges: [] }],
+  ['direct dependencies', { directDependencies: { build: [] }, feedbackTo: {} }],
+]) test(`separates graph attempts and process outcome (${appliedField}, ${format})`, () => {
   const dir = mkdtempSync(join(tmpdir(), 'grapher-trajectory-'));
   try {
     const events = [{ type: 'grapher_process_started', timestamp: 1000 }];
@@ -15,7 +18,6 @@ for (const appliedField of ['applied', 'mutationApplied']) test(`separates graph
         result: { content: [{ type: 'text', text: JSON.stringify(mutation) }], ...(diagnosticCodes ? { details: { diagnosticCodes } } : {}) } });
     }
     call('explore', 'bash', 10, 30, {}, true);
-    const topology = { nodes: ['build'], edges: [] };
     const rejected = { [appliedField]: false, topology, diagnostics: [{ code: 'mutation-input' }] };
     call('a', 'node', 20, 25, rejected, true);
     call('b', 'node', 40, 41, rejected, true);

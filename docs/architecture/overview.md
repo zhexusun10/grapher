@@ -51,7 +51,7 @@ Compiler validation requires:
 
 The compiler returns `executionBatches`, `roots`, `terminals` and warnings. Batches describe topology, not scheduler-wide barriers; dispatch readiness belongs to [Runtime](runtime.md#scheduling-and-concurrency).
 
-Planner tool mutations compile atomically: invalid edits leave the saved candidate unchanged. Once a Run has published, delivered nodes cannot be removed. Tools receive the unremovable node names and reject removal with `E210`; the Planner must rework the node or add follow-up work. Execution requires final validation and approval.
+Planner tool mutations compile atomically: invalid edits leave the saved candidate unchanged. Each `node`/`edge` result describes that saved candidate, not a rejected edit: `topology.directDependencies` maps every node to its immediate ordinary predecessors (including empty root lists), and `topology.feedbackTo` maps feedback senders to their conditional targets. If an invalid pre-existing candidate contains edges those maps cannot represent, `unrepresentedEdges` retains them explicitly. This is a model-facing projection only; Graph IR remains unchanged. A root starts from the recorded source, not automatically from the Planner's private workspace; inheritance and snapshot timing belong to [Workspaces and Git](workspace-snapshots-and-feedback.md). Once a Run has published, delivered nodes cannot be removed. Tools receive the unremovable node names and reject removal with `E210`; the Planner must rework the node or add follow-up work. Execution requires final validation and approval.
 
 ## Contract ownership
 

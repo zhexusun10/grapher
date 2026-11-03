@@ -14,7 +14,28 @@ function stripDiagnosticCode(message: string): string {
 }
 
 function topology(graph: Graph) {
-  return { nodes: graph.nodes.map(node => node.name), edges: graph.edges };
+  // Map is safe for arbitrary node names, including __proto__ and constructor.
+  const directDependencies = new Map(graph.nodes.map(node => [node.name, [] as string[]]));
+  const feedbackTo = new Map<string, string>();
+  const unrepresentedEdges: Graph["edges"] = [];
+  for (const edge of graph.edges) {
+    // Valid graphs always have known endpoints and at most one feedback target
+    // per source. Preserve anomalous saved/legacy edges rather than hiding them
+    // if a rejected edit has to report an invalid pre-existing candidate.
+    if (!directDependencies.has(edge.from) || !directDependencies.has(edge.to)
+      || (edge.feedback && feedbackTo.has(edge.from))) {
+      unrepresentedEdges.push(edge);
+    } else if (edge.feedback) {
+      feedbackTo.set(edge.from, edge.to);
+    } else {
+      directDependencies.get(edge.to)!.push(edge.from);
+    }
+  }
+  return {
+    directDependencies: Object.fromEntries(directDependencies),
+    feedbackTo: Object.fromEntries(feedbackTo),
+    ...(unrepresentedEdges.length ? { unrepresentedEdges } : {}),
+  };
 }
 
 function duplicateTargets(field: "nodes" | "edges", targets: string[]): Diagnostic[] {

@@ -886,9 +886,7 @@ fn prepare_repositories(
             .ok_or("Missing nested Git input")?;
         real_child_path(owner, &target, false)?;
         fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-        if !target.join(".git").exists() {
-            install_git_scoped(owner, &target, &record, selected)?;
-        }
+        ensure_project_git(owner, &target, &record, selected)?;
         compose_project_history(&target, &children)?;
         let indices = children
             .iter()
@@ -1351,28 +1349,104 @@ pub(crate) fn validate_bound(path: &Path, source: &Path) -> Result<(), String> {
 fn install_git(path: &Path, record: &Path, view: &View) -> Result<(), String> {
     install_git_scoped(path, path, record, view)
 }
+/// The private copy of the project Git for `path`. Nested repositories and
+/// gitfile/link layouts keep it beside the slot's external state instead of in
+/// the worktree.
+fn private_project_git(owner: &Path, path: &Path, view: &View) -> Result<Option<PathBuf>, String> {
+    if view.git_entries.is_none() {
+        return Ok(None);
+    }
+    let state = crate::workspace_state::process_root(owner)?;
+    Ok(Some(if view.git_file || view.git_link {
+        if owner == path {
+            state.join(".project-git")
+        } else {
+            state.join(format!(
+                ".project-git-{}",
+                git2::Oid::hash_object(
+                    git2::ObjectType::Blob,
+                    name(path.strip_prefix(owner).map_err(|e| e.to_string())?)?.as_bytes()
+                )
+                .map_err(|e| e.to_string())?
+            ))
+        }
+    } else {
+        path.join(".git")
+    }))
+}
+/// True when the slot's native project Git already sits on the recorded code
+/// reference. A slot reused from another execution keeps the previous base in
+/// its native history, while graph `checkout -f` already moved the working
+/// files to this one; preparation is deterministic, so the native repository
+/// must follow the record exactly as a fresh slot would.
+fn project_git_follows_record(path: &Path, record: &Path) -> Result<bool, String> {
+    let git = record.join("git");
+    let dir = git.to_str().ok_or("Invalid recorded project Git path")?;
+    let Ok(recorded) = workspace::project_git(
+        &git,
+        &[
+            "--git-dir",
+            dir,
+            "--work-tree",
+            dir,
+            "rev-parse",
+            "--verify",
+            "HEAD",
+        ],
+    ) else {
+        // An unborn recorded project has no reference to follow.
+        return Ok(true);
+    };
+    let current = workspace::project_git(path, &["rev-parse", "--verify", "HEAD"]).ok();
+    Ok(current == Some(recorded))
+}
+/// Materialize the recorded project Git into a slot that already carries one.
+fn rebind_git_scoped(owner: &Path, path: &Path, record: &Path, view: &View) -> Result<(), String> {
+    let git_dir =
+        private_project_git(owner, path, view)?.ok_or("Missing recorded project Git view")?;
+    let binding = path.join(".git");
+    let existing = fs::symlink_metadata(&binding).map_err(|e| e.to_string())?;
+    if existing.is_dir() && !crate::workspace_symlinks::is_link(&existing) {
+        crate::path_safety::real_child_path(path, &binding, false)?
+            .ok_or("Project Git binding disappeared during preparation")?;
+        fs::remove_dir_all(&binding).map_err(|e| e.to_string())?;
+    } else {
+        fs::remove_file(&binding).map_err(|e| e.to_string())?;
+    }
+    if git_dir != binding {
+        let state = crate::workspace_state::process_root(owner)?;
+        if state.is_dir() {
+            if let Some(external) = crate::path_safety::real_child_path(&state, &git_dir, false)? {
+                fs::remove_dir_all(external).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    install_git_scoped(owner, path, record, view)
+}
+/// Install or, for a reused slot, reinstall the recorded project Git so native
+/// HEAD, index and objects follow the composed project view. Without this the
+/// native history keeps the previous occupant's base, and staging composition
+/// cannot even read the new reference.
+fn ensure_project_git(owner: &Path, path: &Path, record: &Path, view: &View) -> Result<(), String> {
+    if !path.join(".git").exists() {
+        return install_git_scoped(owner, path, record, view);
+    }
+    if view.git_entries.is_none() || project_git_follows_record(path, record)? {
+        return Ok(());
+    }
+    rebind_git_scoped(owner, path, record, view)
+}
 fn install_git_scoped(owner: &Path, path: &Path, record: &Path, view: &View) -> Result<(), String> {
     if path.join(".git").exists() {
         return Err("Refusing to replace an existing project Git view".into());
     }
     if view.git_entries.is_some() {
-        let git_dir = if view.git_file || view.git_link {
-            let state = crate::workspace_state::prepare(owner)?;
-            if owner == path {
-                state.join(".project-git")
-            } else {
-                state.join(format!(
-                    ".project-git-{}",
-                    git2::Oid::hash_object(
-                        git2::ObjectType::Blob,
-                        name(path.strip_prefix(owner).map_err(|e| e.to_string())?)?.as_bytes()
-                    )
-                    .map_err(|e| e.to_string())?
-                ))
-            }
-        } else {
-            path.join(".git")
-        };
+        let git_dir = private_project_git(owner, path, view)?
+            .ok_or("Missing recorded project Git view")?;
+        if git_dir != path.join(".git") {
+            // Gitfile/link layouts keep their metadata beside the slot state.
+            crate::workspace_state::prepare(owner)?;
+        }
         copy_git(&record.join("git"), &git_dir)?;
         if view.git_link {
             // Recreate the source's own .git link kind, bound only to the
@@ -1710,6 +1784,33 @@ fn validate_nested_bindings(owner: &Path, project: &Path) -> Result<(), String> 
     Ok(())
 }
 
+/// True when nothing below `relative` can appear in a project view: only
+/// generated artifacts (agent caches such as `__pycache__` or `.pytest_cache`)
+/// and directories that are themselves unobservable remain. A slot reused from
+/// an earlier execution keeps such ignored leftovers because graph
+/// `checkout -f` only rewrites tracked files, so their enclosing directory is
+/// the one entry the scan records and no composed view can ever carry.
+fn view_unobservable(
+    root: &Path,
+    relative: &Path,
+    tracked: &std::collections::BTreeSet<String>,
+) -> Result<bool, String> {
+    for item in fs::read_dir(root.join(relative)).map_err(|e| e.to_string())? {
+        let item = item.map_err(|e| e.to_string())?;
+        let child = relative.join(item.file_name());
+        if workspace::is_generated_artifact(&child) && !tracked.contains(&name(&child)?) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(root.join(&child)).map_err(|e| e.to_string())?;
+        if !metadata.is_dir() || crate::workspace_symlinks::is_link(&metadata) {
+            return Ok(false);
+        }
+        if !view_unobservable(root, &child, tracked)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 /// Only project blobs and real user Git cross this boundary. The final recursive
 /// comparison is a launch gate, not filtered tool output or an ignore policy.
 pub(crate) fn prepare(
@@ -1751,9 +1852,7 @@ pub(crate) fn prepare(
     }
     if is_bound(path) {
         validate_bound(path, source)?;
-        if view.git_entries.is_some() && !path.join(".git").exists() {
-            install_git(path, &record, &view)?;
-        }
+        ensure_project_git(path, path, &record, &view)?;
     } else {
         install_git(path, &record, &view)?;
         crate::workspace_state::prepare(path)?;
@@ -2122,6 +2221,17 @@ pub(crate) fn prepare(
                 fs::remove_dir(path.join(name)).map_err(|e| {
                     format!("Unrecorded files prevent project directory deletion at {name}: {e}")
                 })?;
+            } else if !expected.keys().any(|key| key.starts_with(&format!("{name}/")))
+                && view_unobservable(path, Path::new(name), &tracked)?
+            {
+                // Nothing this view could ever record is left inside, so the
+                // directory is an ignored leftover of a reused slot rather than
+                // unrecorded project content. Children are handled first (the
+                // scan is iterated in reverse), so a nested leftover that hid
+                // live entries was already refused above.
+                fs::remove_dir_all(path.join(name)).map_err(|e| {
+                    format!("Cannot remove unrecorded project directory at {name}: {e}")
+                })?;
             }
         }
     }
@@ -2142,8 +2252,19 @@ pub(crate) fn prepare(
     restore_entry(path, &root)?;
     let mut verified = BTreeMap::new();
     scan_scoped(path, Path::new(""), &mut verified, false, path, exclusions, &tracked)?;
-    if verified != expected || capture_links(path, &verified)? != topology {
-        return Err("Complete project-view comparison failed; no agent may see the partially prepared workspace".into());
+    if verified != expected {
+        let name = expected.keys().chain(verified.keys())
+            .find(|name| expected.get(*name) != verified.get(*name))
+            .ok_or("Project view comparison could not identify the difference")?;
+        let difference = match (expected.get(name), verified.get(name)) {
+            (None, Some(_)) => "unexpected entry",
+            (Some(_), None) => "missing entry",
+            _ => "entry content, type, or metadata differs",
+        };
+        return Err(format!("Complete project-view comparison failed at {name:?} ({difference}); no agent may see the partially prepared workspace"));
+    }
+    if capture_links(path, &verified)? != topology {
+        return Err("Complete project-view comparison failed (hardlink topology differs); no agent may see the partially prepared workspace".into());
     }
     prepare_repositories(path, path, &record_path(source, base)?, &base_view, &inputs)?;
     mark_ready(path)

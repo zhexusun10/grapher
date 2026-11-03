@@ -28,7 +28,13 @@ Project bytes remain Git blobs. Metadata-only work advances an internal code/vie
 reference as well; it is not silently dropped when the Git tree is unchanged.
 Preparation compares the complete physical result before recording readiness;
 legacy/missing/corrupt evidence and unsupported layouts fail rather than exposing
-an incomplete workspace. The current format records project hardlink topology,
+an incomplete workspace. Preparation is also deterministic for a reused slot:
+entries no view can observe (ignored generated caches such as `__pycache__`, and
+directories left holding nothing else) are removed instead of blocking the
+comparison, while unrecorded project content still fails it. A reused slot's
+native project Git is rebound to the recorded code reference when it still
+describes the previous base, so native HEAD, index and objects follow the
+composed view. The current format records project hardlink topology,
 including external link counts using private control-owned witnesses. Forks do
 not share writable inodes with source or siblings. Native symlinks and Windows
 junctions are reconstructed, not flattened; absolute project-local targets are

@@ -55,8 +55,13 @@ try {
         ? ["applied", "topology", ...(hasWarnings ? ["warnings"] : [])]
         : ["applied", "topology", "diagnostics"]);
       assert.deepEqual(feedback.topology, {
-        nodes: saved.nodes.map((node: { name: string }) => node.name),
-        edges: saved.edges,
+        directDependencies: Object.fromEntries(saved.nodes.map((node: { name: string }) => [
+          node.name,
+          saved.edges.filter((edge: { to: string; feedback: boolean }) => !edge.feedback && edge.to === node.name)
+            .map((edge: { from: string }) => edge.from),
+        ])),
+        feedbackTo: Object.fromEntries(saved.edges.filter((edge: { feedback: boolean }) => edge.feedback)
+          .map((edge: { from: string; to: string }) => [edge.from, edge.to])),
       }, "Every result must describe the saved graph, never a rejected candidate or task text");
       if (hasWarnings) {
         assert.ok(Array.isArray(feedback.warnings));
@@ -167,7 +172,48 @@ try {
     "tolerant-bare", "tolerant-array", "tolerant-object", "tolerant-mixed", "tolerant-string",
   ].map(name => ({ name, delete: true })) })).content[0].text);
   assert.equal(cleanedTolerant.applied, true);
-  assert.deepEqual(cleanedTolerant.topology, { nodes: [], edges: [] });
+  assert.deepEqual(cleanedTolerant.topology, { directDependencies: {}, feedbackTo: {} });
+
+  // Node names are arbitrary strings, not safe object-property identifiers.
+  // Direct dependencies, transitive ancestors and feedback remain distinct.
+  const unusualNames = ["__proto__", "constructor", "toString", "任务•完成"];
+  await call("node", { nodes: unusualNames.map(name => ({ name, task: `Work on ${name}` })) });
+  const unusual = JSON.parse((await call("edge", { edges: [
+    { from: "__proto__", to: "constructor" },
+    { from: "constructor", to: "任务•完成" },
+    { from: "__proto__", to: "toString" },
+    { from: "任务•完成", to: "__proto__", feedback: true },
+  ] })).content[0].text);
+  assert.deepEqual(unusual.topology.directDependencies["__proto__"], []);
+  assert.deepEqual(unusual.topology.directDependencies.constructor, ["__proto__"]);
+  assert.deepEqual(unusual.topology.directDependencies["任务•完成"], ["constructor"],
+    "an ancestor must not be reported as a direct dependency");
+  assert.equal(unusual.topology.feedbackTo["任务•完成"], "__proto__");
+  await call("node", { nodes: unusualNames.map(name => ({ name, delete: true })) });
+
+  // Preserve unexpected pre-existing edges on a rejected edit instead of
+  // presenting an incomplete view of a malformed legacy candidate.
+  const emptyBeforeLegacy = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
+  const invalidLegacy = {
+    originalGoal: "Legacy", nodes: ["a", "b", "c"].map(name => ({ name, task: name })),
+    edges: [
+      { from: "a", to: "b", feedback: false }, { from: "b", to: "c", feedback: false },
+      { from: "c", to: "a", feedback: true }, { from: "c", to: "b", feedback: true },
+      { from: "missing", to: "a", feedback: false },
+    ],
+  };
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(invalidLegacy));
+  const invalidSaved = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
+  const legacy = JSON.parse((await preparedCall("node", { name: "new", task: "new" })).content[0].text);
+  assert.equal(legacy.applied, false);
+  assert.deepEqual(legacy.topology, {
+    directDependencies: { a: [], b: ["a"], c: ["b"] },
+    feedbackTo: { c: "a" },
+    unrepresentedEdges: [invalidLegacy.edges[3], invalidLegacy.edges[4]],
+  });
+  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), invalidSaved);
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, emptyBeforeLegacy);
+
   const nullableNodes = JSON.parse((await call("node", {
     nodes: [{ name: "nullable-build", task: "Build", delete: null }, { name: "nullable-review", task: "Review", delete: null }],
   })).content[0].text);
@@ -183,14 +229,14 @@ try {
   await node({ name: "nullable-build", task: null, delete: true });
   const emptyGraph = JSON.parse((await node({ name: "nullable-review", delete: true })).content[0].text);
   assert.equal(emptyGraph.applied, true, "Mutation checks are not final graph validation");
-  assert.deepEqual(emptyGraph.topology, { nodes: [], edges: [] });
+  assert.deepEqual(emptyGraph.topology, { directDependencies: {}, feedbackTo: {} });
   assert.equal(emptyGraph.warnings, undefined);
   const firstMutation = await node({ name: "build", task: "Build it" });
   assert.deepEqual(Object.keys(firstMutation), ["content"]);
   const firstResult = JSON.parse(firstMutation.content[0].text);
   assert.deepEqual(firstResult, {
     applied: true,
-    topology: { nodes: ["build"], edges: [] },
+    topology: { directDependencies: { build: [] }, feedbackTo: {} },
   });
   await node({ name: "review", task: "Review it" });
   const beforeFeedback = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
@@ -207,8 +253,8 @@ try {
   assert.deepEqual(JSON.parse(dependency.content[0].text), {
     applied: true,
     topology: {
-      nodes: ["build", "review"],
-      edges: [{ from: "build", to: "review", feedback: false }],
+      directDependencies: { build: [], review: ["build"] },
+      feedbackTo: {},
     },
   });
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges[0].feedback, false);
@@ -243,10 +289,10 @@ try {
   const repaired = await edge({ from: "review", to: "build", feedback: true });
   const repairedFeedback = JSON.parse(repaired.content[0].text);
   assert.equal(repairedFeedback.applied, true);
-  assert.deepEqual(repairedFeedback.topology.edges, [
-    { from: "build", to: "review", feedback: false },
-    { from: "review", to: "build", feedback: true },
-  ]);
+  assert.deepEqual(repairedFeedback.topology, {
+    directDependencies: { build: [], review: ["build"] },
+    feedbackTo: { review: "build" },
+  });
   assert.deepEqual(repairedFeedback.warnings, [feedbackWarning("review", "build", ["build", "review"])], "Adding a feedback route replaces the missing-route warning with its conditional invalidation scope");
   assert.equal(await toolResultHook({ toolName: "edge", details: repaired.details, isError: false }), undefined, "Feedback scope warnings do not reject mutations");
   const portableGraph = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
@@ -263,7 +309,7 @@ try {
   assert.equal(readFileSync(join(repository, "changed"), "utf8"), "changed");
   assert.equal(extension.handlers.has("context"), false, "Planner must preserve file contents and tool results");
   const deletedBuild = JSON.parse((await node({ name: "build", delete: true })).content[0].text);
-  assert.deepEqual(deletedBuild.topology, { nodes: ["review"], edges: [] });
+  assert.deepEqual(deletedBuild.topology, { directDependencies: { review: [] }, feedbackTo: {} });
   assert.equal(deletedBuild.warnings.length, 1);
   assert.match(deletedBuild.warnings[0], /review mentions <FEEDBACK>/, "Deleting the feedback target removes the scope warning and exposes the missing-route warning again");
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
@@ -334,14 +380,20 @@ fn main() {
   ];
   const nodeBatch = JSON.parse((await call("node", { nodes: batchNodes })).content[0].text);
   assert.equal(nodeBatch.applied, true);
-  assert.deepEqual(nodeBatch.topology, { nodes: batchNodes.map(node => node.name), edges: [] });
+  assert.deepEqual(nodeBatch.topology, {
+    directDependencies: { contract: [], parser: [], search: [], integration: [], verification: [] },
+    feedbackTo: {},
+  });
   assert.equal(nodeBatch.warnings, undefined);
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
   const batchResult = JSON.parse((await call("edge", { edges: batchEdges })).content[0].text);
   assert.equal(batchResult.applied, true);
   assert.deepEqual(batchResult.topology, {
-    nodes: batchNodes.map(node => node.name),
-    edges: batchEdges.map(edge => ({ ...edge, feedback: false })),
+    directDependencies: {
+      contract: [], parser: ["contract"], search: ["contract"],
+      integration: ["parser", "search"], verification: ["integration"],
+    },
+    feedbackTo: {},
   });
   assert.equal(batchResult.warnings, undefined);
   assert.equal(readFileSync(compilerCalls, "utf8"), "compile\ncompile\n");
@@ -445,14 +497,11 @@ fn main() {
   ] })).content[0].text);
   assert.equal(rewired.applied, true);
   assert.deepEqual(rewired.topology, {
-    nodes: batchNodes.map(node => node.name),
-    edges: [
-      { from: "contract", to: "search", feedback: false },
-      { from: "search", to: "integration", feedback: false },
-      { from: "integration", to: "verification", feedback: false },
-      { from: "parser", to: "contract", feedback: false },
-      { from: "verification", to: "parser", feedback: true },
-    ],
+    directDependencies: {
+      contract: ["parser"], parser: [], search: ["contract"],
+      integration: ["search"], verification: ["integration"],
+    },
+    feedbackTo: { verification: "parser" },
   });
   assert.deepEqual(rewired.warnings, [feedbackWarning("verification", "parser", ["contract", "integration", "parser", "search", "verification"])]);
   // Node deletion removes incident edges; other targets can be replaced atomically.

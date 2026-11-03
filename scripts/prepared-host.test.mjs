@@ -172,10 +172,12 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         assert.doesNotMatch(edgeDescription, /ignored|non-Git|drain|fork/i);
         const rejected = JSON.parse(requests[before + 1].messages.find(message => message.role === 'tool').content);
         assert.equal(rejected.applied, false, 'the bound published-node constraint must reach the Planner compiler');
-        assert.deepEqual(rejected.topology.nodes, ['published']);
+        assert.deepEqual(rejected.topology, { directDependencies: { published: [] }, feedbackTo: {} });
         assert.match(rejected.diagnostics[0], /Cannot remove node 'published'.*already published/);
         const results = requests[before + 2].messages.filter(message => message.role === 'tool');
-        assert.equal(JSON.parse(results[1].content).applied, true, 'a rejected deletion must not prevent further valid edits');
+        const accepted = JSON.parse(results[1].content);
+        assert.equal(accepted.applied, true, 'a rejected deletion must not prevent further valid edits');
+        assert.deepEqual(accepted.topology, { directDependencies: { published: [], A: [] }, feedbackTo: {} });
         assert.deepEqual(JSON.parse(await readFile(graph, 'utf8')).nodes.map(node => node.name), ['published', 'A']);
       } else {
         assert.ok(['read', 'write', 'edit', 'bash'].every(tool => tools.includes(tool)));

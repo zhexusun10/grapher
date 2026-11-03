@@ -55,6 +55,14 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const bodyRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
     const userScrolledUpRef = useRef(false);
+    // Only an explicit upward gesture may stop the card's own following.
+    // Reflow, remount and scrollbar clamping move scrollTop without reader
+    // intent and must not leave the reasoning body parked at its top.
+    const readerUpIntentRef = useRef(false);
+    // A held pointer (selecting reasoning text) owns the inner position.
+    const pointerHeldRef = useRef(false);
+    const isStreamingRef = useRef(isStreaming);
+    const stillTypingRef = useRef(false);
     const lastScrollTopRef = useRef(0);
     const lastTouchYRef = useRef(0);
     const wasStreamingRef = useRef(isStreaming);
@@ -63,6 +71,16 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     // the user hasn't scrolled up. `smoothContent` trails `rawContent` during the
     // post-stream drain too, so keep following until it catches up.
     const stillTyping = isStreaming || smoothContent.length < rawContent.length;
+    isStreamingRef.current = isStreaming;
+    stillTypingRef.current = stillTyping;
+    const pinBodyToBottom = () => {
+      const body = bodyRef.current;
+      if (!body) return;
+      const target = body.scrollHeight - body.clientHeight;
+      if (body.scrollTop >= target - 1) return;
+      body.scrollTop = target;
+      lastScrollTopRef.current = body.scrollTop;
+    };
     useEffect(() => {
       const justFinished = wasStreamingRef.current && !isStreaming;
       wasStreamingRef.current = isStreaming;
@@ -111,12 +129,18 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
 
       if (distFromBottom <= 32) {
         userScrolledUpRef.current = false;
+        readerUpIntentRef.current = false;
         return;
       }
 
-      // Only lock scrolled-up if the user actually scrolled upwards (scrollTop decreased)
-      if (scrollTop < prevScrollTop - 1 && distFromBottom > 32) {
-        userScrolledUpRef.current = true;
+      if (scrollTop < prevScrollTop - 1) {
+        // Only a real gesture holds the reader's position. A clamp caused by a
+        // shrinking layout or a remounted body keeps following the newest line.
+        if (readerUpIntentRef.current || pointerHeldRef.current) {
+          userScrolledUpRef.current = true;
+          return;
+        }
+        if (isStreamingRef.current || stillTypingRef.current) requestAnimationFrame(pinBodyToBottom);
       }
     };
 
@@ -125,6 +149,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     // scroll event itself can arrive after that update, so waiting for
     // handleScroll to notice the direction would lose the race.
     const stopFollowingInsideCard = () => {
+      readerUpIntentRef.current = true;
       userScrolledUpRef.current = true;
     };
 
@@ -159,13 +184,27 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       }
     };
 
+    useEffect(() => {
+      const release = () => { pointerHeldRef.current = false; };
+      window.addEventListener("pointerup", release);
+      window.addEventListener("pointercancel", release);
+      return () => {
+        window.removeEventListener("pointerup", release);
+        window.removeEventListener("pointercancel", release);
+      };
+    }, []);
+
     const handlePointerDown = (event: React.PointerEvent) => {
       const body = bodyRef.current;
       if (!body) return;
+      pointerHeldRef.current = true;
       const scrollbarWidth = body.offsetWidth - body.clientWidth;
-      if (scrollbarWidth > 0 && event.clientX >= body.getBoundingClientRect().right - scrollbarWidth) {
-        stopFollowingInsideCard();
-      }
+      // Overlay scrollbars have no layout width; treat the narrow edge band as
+      // the scrollbar only when the body itself is the target.
+      const onScrollbar = scrollbarWidth > 0
+        ? event.clientX >= body.getBoundingClientRect().right - scrollbarWidth
+        : event.target === body && event.clientX >= body.getBoundingClientRect().right - 14;
+      if (onScrollbar) stopFollowingInsideCard();
     };
 
     const handleCopy = (e: React.MouseEvent) => {
@@ -183,6 +222,7 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       setUserToggled(nextExpanded);
       if (nextExpanded) {
         userScrolledUpRef.current = false;
+        readerUpIntentRef.current = false;
       }
       onExpandedChange?.(nextExpanded, cardRef.current ?? undefined);
     };

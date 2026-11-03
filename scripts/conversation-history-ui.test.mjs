@@ -1724,6 +1724,8 @@ test("actual App preserves scrollback and releases RAM on Node/Conversation navi
     await page.waitForFunction(() => document.querySelector(".chat-messages-stream").style.opacity === "1");
     const scroller = page.locator(".initial-query-scroll");
     await scroller.evaluate(element => {
+      // A reader gesture, not a layout clamp: only gestures stop following.
+      element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
       const transcript = element.querySelector("[data-execution-id]");
       element.scrollTop += transcript.getBoundingClientRect().top - element.getBoundingClientRect().top + 120;
     });

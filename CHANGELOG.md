@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Planner graph tools now return each node's direct dependencies and separate feedback routes, making inherited inputs and independent roots clearer without changing the Graph IR or scheduler.
+
+### Fixed
+
+- Planner follow-ups no longer fail because an unrelated switch target has an incomplete private workspace. Invalid targets are omitted, while an unready selected workspace fails explicitly without falling back to stale files or snapshotting a workspace the Planner never entered. Project-view comparison failures now identify the differing path or hardlink topology.
+
 ## [1.4.1] - 2026-11-03
 
 ### Changed
@@ -21,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Model preflight and session prewarm now match the complete `provider/model` key, so provider IDs containing a slash, such as URL-derived llama.cpp providers, no longer skip the authentication check or reject a valid warmed session.
 - Markdown replies now render inline `$...$` and display `$$...$$` math with KaTeX, including multi-line formulas, while code spans, fenced or indented code, escaped dollars and currency-like prose remain literal.
-- Conversation following now rechecks the bottom as assistant output arrives or finishes, including combined reasoning and answer chunks. If a completed thinking card is still revealing its backlog, its growth no longer pushes the answer being read out of view. Keyboard navigation and scrollbar interactions preserve intentional reading, while stationary scrollbar clicks no longer disable following; scrolling inside a thinking card remains independent.
+- Conversation following now rechecks the bottom as assistant output arrives or finishes, including combined reasoning and answer chunks. Reflow, remounting and scroll clamping no longer disable following in the conversation or inside a thinking card, so reasoning keeps its newest line instead of parking at the card's top or title; the answer being read is no longer pushed out of view when a completed card is still revealing its backlog. Only a real wheel, touch, keyboard, scrollbar or pointer-held gesture takes over, a stationary scrollbar click no longer disables following, and scrolling inside a thinking card remains independent.
 
 ## [1.4.0] - 2026-11-02
 
