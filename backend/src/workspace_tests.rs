@@ -494,7 +494,9 @@ fn deleted_run_refs_and_orphan_heads_are_pruned_with_objects() {
     let kept = workspace::git(&shadow, &["--git-dir", shadow_text, "commit-tree", &tree, "-m", "kept"]).unwrap();
     let orphan = workspace::git(&shadow, &["--git-dir", shadow_text, "commit-tree", &tree, "-m", "orphan"]).unwrap();
     let run_ref = format!("refs/grapher/runs/{run}/nodes/node");
+    let detached_ref = format!("refs/grapher/runs/{run}/planner-detached/{}", uuid::Uuid::new_v4());
     workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &run_ref, &orphan]).unwrap();
+    workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &detached_ref, &orphan]).unwrap();
     workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &format!("refs/grapher/heads/{orphan}"), &orphan]).unwrap();
     workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &format!("refs/grapher/heads/{kept}"), &kept]).unwrap();
     workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", "refs/grapher/published/result", &kept]).unwrap();
@@ -502,6 +504,7 @@ fn deleted_run_refs_and_orphan_heads_are_pruned_with_objects() {
     workspace::prune_shadow_run_refs(&shadow, &run, &std::collections::BTreeSet::new(), true).unwrap();
 
     assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &run_ref]).is_err());
+    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &detached_ref]).is_err());
     assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &format!("refs/grapher/heads/{orphan}")]).is_err());
     assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &format!("refs/grapher/heads/{kept}")]).is_ok());
     assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "cat-file", "-e", &format!("{orphan}^{{commit}}")]).is_err());

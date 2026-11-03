@@ -1184,6 +1184,10 @@ impl Runtime {
         let selected = self.planner_workspace_candidate()?;
         if let Some(execution) = &selected {
             let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+            if !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
+                && self.planner_workspace_owner(execution).is_none_or(|owner| owner.id != execution.id) {
+                return Err(format!("Latest Planner workspace for node '{}' has a different physical owner; retry preparation instead of using stale project state", execution.node));
+            }
             self.validate_planner_workspace(execution, &repository).map_err(|error| format!(
                 "Latest Planner workspace for node '{}' is unavailable: {error}. Retry the node's workspace preparation; refusing to use stale project state", execution.node
             ))?;
@@ -1334,10 +1338,11 @@ impl Runtime {
     }
 
     fn planner_workspace_owner(&self, target: &Execution) -> Option<&Execution> {
-        self.state.executions.iter().rev().find(|execution| {
-            !self.state.superseded_execution_ids.contains(&execution.id)
-                && Self::same_workspace_path(Path::new(&target.worktree), Path::new(&execution.worktree))
-        })
+        // Superseding a node's conversation does not hand its physical slot
+        // back to an older execution. Ownership changes only when a later
+        // execution actually takes that slot, even if it too was superseded.
+        self.state.executions.iter().rev().find(|execution|
+            Self::same_workspace_path(Path::new(&target.worktree), Path::new(&execution.worktree)))
     }
 
     pub(crate) fn planner_workspace_for_node(&self, node: &str) -> Result<Option<PlannerWorkspaceResolution>, String> {
@@ -1448,6 +1453,9 @@ impl Runtime {
             .cloned().ok_or("Planner workspace execution is missing")?;
         let execution = self.planner_workspace_owner(&selected).cloned()
             .ok_or("Planner workspace no longer has a recorded physical owner")?;
+        if execution.id != selected.id {
+            return Err("Planner workspace ownership changed after selection; refusing to capture another execution".into());
+        }
         let path = Path::new(&execution.worktree);
         if self.path_is_running(path) { return Err("Planner workspace still has an active writer".into()); }
         let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
@@ -1458,8 +1466,16 @@ impl Runtime {
             .map_err(|error| format!("Cannot capture an unready Planner workspace: {error}"))?;
         let expected = execution.after.as_deref().unwrap_or(&execution.before);
         workspace::verify_prepared_ancestor(path, expected)?;
-        let head = workspace::snapshot_node_scoped(path, &repository, &execution.node,
-            Some(&self.state.run_id), &self.exclusions()?)?;
+        let detached = self.state.superseded_execution_ids.contains(&execution.id)
+            || !self.state.nodes.contains_key(&execution.node);
+        let exclusions = self.exclusions()?;
+        let head = if detached {
+            workspace::snapshot_detached_planner_scoped(path, &repository, &self.state.run_id,
+                &execution.id, &exclusions)?
+        } else {
+            workspace::snapshot_node_scoped(path, &repository, &execution.node,
+                Some(&self.state.run_id), &exclusions)?
+        };
         let mut result = None;
         let mut environment_changed = false;
         if let (Some(store), Some(previous)) = (self.environments()?, execution.result.as_ref().or(execution.input.as_ref())) {
@@ -1476,10 +1492,14 @@ impl Runtime {
             }
         }
         if head != expected || environment_changed {
-            let invalidated = downstream(&self.state.graph, &execution.node).into_iter()
-                .filter(|name| name != &execution.node && !execution.workspace_lineage.contains(name))
-                .collect();
-            self.emit(EventKind::PlannerWorkspaceSnapshotted { execution_id: execution.id, head, result, invalidated })?;
+            let invalidated = if detached { Vec::new() } else {
+                downstream(&self.state.graph, &execution.node).into_iter()
+                    .filter(|name| name != &execution.node && !execution.workspace_lineage.contains(name))
+                    .collect()
+            };
+            self.emit(EventKind::PlannerWorkspaceSnapshotted {
+                execution_id: execution.id, head, result, invalidated, detached,
+            })?;
         }
         Ok(())
     }

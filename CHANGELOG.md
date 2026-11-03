@@ -9,10 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Planner graph tools now return each node's direct dependencies and separate feedback routes, making inherited inputs and independent roots clearer without changing the Graph IR or scheduler.
+- Planner graph tools now return each node's direct dependencies, separate feedback routes, and the compiler's short list of nodes that inherit nothing, making inherited inputs and unintended extra roots visible without changing the Graph IR or scheduler.
 
 ### Fixed
 
+- Planner follow-ups can safely continue in a prepared workspace after its execution was superseded by a graph revision. Historical Planner writes are retained separately without reassigning the workspace to an older attempt or advancing the new node's result.
 - Planner follow-ups no longer fail because an unrelated switch target has an incomplete private workspace. Invalid targets are omitted, while an unready selected workspace fails explicitly without falling back to stale files or snapshotting a workspace the Planner never entered. Project-view comparison failures now identify the differing path or hardlink topology.
 
 ## [1.4.1] - 2026-11-03

@@ -177,7 +177,10 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         const results = requests[before + 2].messages.filter(message => message.role === 'tool');
         const accepted = JSON.parse(results[1].content);
         assert.equal(accepted.applied, true, 'a rejected deletion must not prevent further valid edits');
-        assert.deepEqual(accepted.topology, { directDependencies: { published: [], A: [] }, feedbackTo: {} });
+        assert.deepEqual(accepted.topology, {
+          roots: ["A", "published"], directDependencies: { published: [], A: [] }, feedbackTo: {},
+        });
+        assert.deepEqual(accepted.topology.roots, ["A", "published"], "both nodes inherit nothing and are listed as roots");
         assert.deepEqual(JSON.parse(await readFile(graph, 'utf8')).nodes.map(node => node.name), ['published', 'A']);
       } else {
         assert.ok(['read', 'write', 'edit', 'bash'].every(tool => tools.includes(tool)));

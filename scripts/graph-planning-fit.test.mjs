@@ -70,6 +70,7 @@ test("actual App: node results render before Planner completion; edges rearrange
   // Pi's end event intentionally has no args. The pairing must survive text updates and polls.
   const endTool = (id, toolName, topology, isError = false, legacy = false) => {
     const projection = legacy ? topology : {
+      roots: topology.nodes.filter(name => !topology.edges.some(edge => !edge.feedback && edge.to === name)),
       directDependencies: Object.fromEntries(topology.nodes.map(name => [name,
         topology.edges.filter(edge => !edge.feedback && edge.to === name).map(edge => edge.from)])),
       feedbackTo: Object.fromEntries(topology.edges.filter(edge => edge.feedback).map(edge => [edge.from, edge.to])),

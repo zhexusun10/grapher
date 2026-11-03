@@ -1507,6 +1507,13 @@ fn restrict_planner_workspace_targets(targets: &mut serde_json::Value, grants: &
     }
 }
 
+fn planner_workspace_notice(snapshot: &Snapshot, execution: Option<&Execution>) -> Option<&'static str> {
+    execution.filter(|execution| snapshot.superseded_execution_ids.contains(&execution.id)
+        || !snapshot.nodes.contains_key(&execution.node)).map(|_| {
+        "This is a retained workspace from a superseded or removed execution, not the pending node's current input. Your writes here are retained separately and are not automatically inherited by current graph nodes."
+    })
+}
+
 fn planner_workspace_label(snapshot: &Snapshot, selected_node: Option<&str>) -> String {
     selected_node
         .or_else(|| {
@@ -1536,8 +1543,10 @@ fn planner_followup_prompt_for_workspace(
     let move_instruction = include_workspace_move.then_some(
         " You can use the switch_workspace tool to move to another node's latest workspace state.",
     ).unwrap_or("");
+    // Keep transport context on the workspace announcement line so user
+    // transcript projection can still identify the following status block.
     let notice = workspace_notice
-        .map(|notice| format!("\n{notice}"))
+        .map(|notice| format!(" {notice}"))
         .unwrap_or_default();
     let note = include_rework_note
         .then_some(format!("\n{PLANNER_REWORK_NOTE}"))
@@ -2205,7 +2214,7 @@ fn plan_goal_internal_with_started(
                                     &runtime.state,
                                     include_rework_note,
                                     include_workspace_move,
-                                    None,
+                                    planner_workspace_notice(&runtime.state, selected.as_ref()),
                                 )
                             } else {
                                 goal.clone()
@@ -3388,13 +3397,13 @@ fn control(
             &runtime.state,
             active_run_id.as_deref(),
         );
-        let workspace_node = runtime
+        let workspace_execution = runtime
             .state
             .planning
             .as_ref()
             .and_then(|planning| planning.workspace_execution_id.as_deref())
-            .and_then(|execution_id| runtime.state.executions.iter().find(|execution| execution.id == execution_id))
-            .map(|execution| execution.node.as_str());
+            .and_then(|execution_id| runtime.state.executions.iter().find(|execution| execution.id == execution_id));
+        let workspace_node = workspace_execution.map(|execution| execution.node.as_str());
         let is_followup = active_run_id.is_some()
             && runtime.state.approved
             && runtime.state.plan_type.as_deref() == Some("graph")
@@ -3433,7 +3442,7 @@ fn control(
                 &runtime.state,
                 include_rework_note,
                 include_workspace_move,
-                None,
+                planner_workspace_notice(&runtime.state, workspace_execution),
             )
         } else {
             instruction.trim().to_string()

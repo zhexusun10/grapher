@@ -54,9 +54,17 @@ let input = ''; for await (const chunk of process.stdin) input += chunk;
     const actionText = fs.readFileSync(action,'utf8');
     if (actionText === 'move-left') {
       // An exact node-name response is a Planner workspace move command.
-    } else {
+    } else if (actionText !== 'delete-right-no-write') {
       fs.writeFileSync('planner.txt', 'Planner writes at the frontier');
       if (actionText === 'fail') throw Error('deliberate Planner failure');
+    }
+    if (actionText.startsWith('delete-right')) {
+      if (!input.includes('retained workspace from a superseded or removed execution'))
+        throw Error('Planner must know this is a historical workspace');
+      const graph = JSON.parse(fs.readFileSync(process.env.GRAPHER_GRAPH_PATH, 'utf8'));
+      graph.nodes = graph.nodes.filter(node => node.name !== 'right');
+      graph.edges = graph.edges.filter(edge => edge.from !== 'right' && edge.to !== 'right');
+      fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
     }
   }
 } else {
@@ -131,7 +139,9 @@ fn planner_external_state_only_write_is_sealed_and_replayed_atomically_with_code
     let event = runtime.state.events.iter().rev().find(|event| matches!(event.kind, EventKind::PlannerWorkspaceSnapshotted { .. })).unwrap();
     let mut legacy = serde_json::to_value(&event.kind).unwrap();
     legacy.as_object_mut().unwrap().remove("result");
-    assert!(serde_json::from_value::<EventKind>(legacy).is_ok(), "legacy events stay readable");
+    legacy.as_object_mut().unwrap().remove("detached");
+    assert!(matches!(serde_json::from_value::<EventKind>(legacy),
+        Ok(EventKind::PlannerWorkspaceSnapshotted { detached: false, .. })), "legacy events stay readable");
     let run = runtime.state.run_id.clone();
     let loaded = runtime.store.load(&run).unwrap();
     assert_eq!(loaded.executions.iter().find(|e| e.id == execution.id).unwrap().result.as_ref(), Some(&result));
@@ -493,6 +503,187 @@ fn planner_refuses_an_unready_latest_slot_without_snapshot_or_stale_fallback() {
     }
     fs::write(marker, saved).unwrap();
     assert_eq!(turn(&service, &config).unwrap().planning.unwrap().workspace_execution_id.as_deref(), Some(latest.id.as_str()));
+}
+
+#[test]
+fn planner_keeps_a_superseded_physical_owner_without_attributing_it_to_an_older_attempt() {
+    for (write, fail) in [(false, false), (true, false), (true, true)] {
+        let (temp, repo, mut service, config) = setup(false);
+        let (selected, prior, run, original_ref) = {
+            let mut runtime = service.runtime.lock().unwrap();
+            let root_job = runtime.jobs().unwrap().remove(0);
+            let root = complete(&mut runtime, root_job);
+            let head = root.after.clone().unwrap();
+            // An older occupant failed before preparation; a later execution
+            // successfully prepared and then retained this same physical slot.
+            let mut prior = root.clone();
+            prior.id = Uuid::new_v4().to_string();
+            prior.node = "right".into();
+            prior.status = "running".into();
+            prior.before = head.clone();
+            prior.after = None;
+            prior.completed_at = None;
+            runtime.emit(EventKind::Started { execution: prior.clone(), message_sequences: None, fresh_restart: false }).unwrap();
+            runtime.emit(EventKind::Failed { node: prior.node.clone(), execution_id: Some(prior.id.clone()),
+                error: "preparation failed".into(), output_bytes: 0, metrics: None }).unwrap();
+            let mut selected = prior.clone();
+            selected.id = Uuid::new_v4().to_string();
+            selected.node = "left".into();
+            selected.status = "running".into();
+            runtime.emit(EventKind::Started { execution: selected.clone(), message_sequences: None, fresh_restart: false }).unwrap();
+            runtime.emit(EventKind::Prepared { execution_id: selected.id.clone(), head: head.clone() }).unwrap();
+            runtime.emit(EventKind::Failed { node: selected.node.clone(), execution_id: Some(selected.id.clone()),
+                error: "paused".into(), output_bytes: 0, metrics: None }).unwrap();
+            let summary = PlanningSummary { planning_id: Uuid::new_v4().to_string(),
+                worktree: Some(selected.worktree.clone()), workspace_execution_id: Some(selected.id.clone()),
+                ..Default::default() };
+            runtime.emit(EventKind::PlannerWorkspaceSelected { planning: summary.clone() }).unwrap();
+            // Rewire the selected node, superseding its attempt without a new
+            // physical owner, as in the reported follow-up failure.
+            let mut graph = runtime.state.graph.clone();
+            graph.nodes.push(Node { name: "pre".into(), task: "pre".into() });
+            graph.edges.retain(|edge| !(edge.from == "root" && edge.to == "left" && !edge.feedback));
+            graph.edges.push(Edge { from: "root".into(), to: "pre".into(), feedback: false });
+            graph.edges.push(Edge { from: "pre".into(), to: "left".into(), feedback: false });
+            runtime.revise_graph(graph, summary).unwrap();
+            assert!(runtime.state.superseded_execution_ids.contains(&selected.id));
+            assert!(!runtime.state.superseded_execution_ids.contains(&prior.id));
+            let run = runtime.state.run_id.clone();
+            let node_ref = format!("refs/grapher/runs/{run}/nodes/left");
+            let original_ref = crate::workspace::repository_git(&repo, &["rev-parse", "--verify", &node_ref]).ok();
+            (selected, prior, run, original_ref)
+        };
+        // Recovery must identify the same physical owner after reopening.
+        drop(service);
+        service = Arc::new(Service {
+            runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
+            driving: AtomicBool::new(true), drive_signal: (Mutex::new(0), Condvar::new()),
+            planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+        });
+        assert_eq!(service.runtime.lock().unwrap().planner_workspace().unwrap().unwrap().id, selected.id);
+        let action = if fail { "fail" } else if write { "delete-right" } else { "delete-right-no-write" };
+        fs::write(temp.path().join("action"), action).unwrap();
+        let outcome = turn(&service, &config);
+        let snapshot = if fail {
+            assert!(outcome.is_err(), "the deliberate Planner error must remain visible");
+            service.runtime.lock().unwrap().state.clone()
+        } else { outcome.unwrap() };
+        assert_eq!(snapshot.graph.nodes.iter().any(|node| node.name == "right"), fail,
+            "a successful deletion commits; a failed turn retains the prior graph");
+        assert!(snapshot.superseded_execution_ids.contains(&selected.id));
+        assert_eq!(snapshot.nodes["left"].status, "waiting");
+        assert_eq!(snapshot.nodes["left"].head, None, "historical writes are not a current node result");
+        assert_eq!(snapshot.executions.iter().find(|e| e.id == prior.id).unwrap().after, None,
+            "the older unprepared occupant must not receive Planner writes");
+        assert!(!repo.join("planner.txt").exists(), "private writes must not reach source");
+        let detached = snapshot.events.iter().filter_map(|event| match &event.kind {
+            EventKind::PlannerWorkspaceSnapshotted { execution_id, head, invalidated, detached: true, .. }
+                if execution_id == &selected.id => Some((head.clone(), invalidated.clone())),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(detached.len(), usize::from(write));
+        if write {
+            assert!(detached[0].1.is_empty());
+            assert_eq!(fs::read_to_string(Path::new(&selected.worktree).join("planner.txt")).unwrap(), "Planner writes at the frontier");
+            assert_eq!(snapshot.executions.iter().find(|e| e.id == selected.id).unwrap().after.as_deref(), Some(detached[0].0.as_str()));
+        }
+        let node_ref = format!("refs/grapher/runs/{run}/nodes/left");
+        assert_eq!(crate::workspace::repository_git(&repo, &["rev-parse", "--verify", &node_ref]).ok(), original_ref,
+            "historical Planner capture must not advance the active node ref");
+        let detached_ref = format!("refs/grapher/runs/{run}/planner-detached/{}", selected.id);
+        let retained = crate::workspace::repository_git(&repo, &["rev-parse", "--verify", &detached_ref]).unwrap();
+        assert_eq!(retained, if write { detached[0].0.clone() } else { selected.before.clone() });
+        drop(service);
+        let recovered = Runtime::open(&temp.path().join("runtime")).unwrap();
+        assert_eq!(recovered.state.nodes["left"].head, None);
+        assert_eq!(recovered.state.graph.nodes.iter().any(|node| node.name == "right"), fail);
+        assert_eq!(recovered.state.events.iter().filter(|event| matches!(&event.kind,
+            EventKind::PlannerWorkspaceSnapshotted { execution_id, detached: true, .. } if execution_id == &selected.id)).count(), usize::from(write));
+    }
+}
+
+#[test]
+fn interrupted_planner_in_superseded_workspace_recovers_detached_once() {
+    check_interrupted_detached_recovery(false);
+    check_interrupted_detached_recovery(true);
+}
+
+fn check_interrupted_detached_recovery(sealed_before_event: bool) {
+    let (temp, repo, service, _config) = setup(false);
+    let mut runtime = service.runtime.lock().unwrap();
+    let root_job = runtime.jobs().unwrap().remove(0);
+    let root = complete(&mut runtime, root_job);
+    let run = runtime.state.run_id.clone();
+    let node_ref = format!("refs/grapher/runs/{run}/nodes/root");
+    let original_ref = crate::workspace::repository_git(&repo, &["rev-parse", "--verify", &node_ref]).unwrap();
+    let mut graph = runtime.state.graph.clone();
+    graph.nodes.iter_mut().find(|node| node.name == "root").unwrap().task = "reworked".into();
+    runtime.revise_graph(graph, PlanningSummary { planning_id: Uuid::new_v4().to_string(),
+        workspace_execution_id: Some(root.id.clone()), worktree: Some(root.worktree.clone()),
+        ..Default::default() }).unwrap();
+    assert!(runtime.state.superseded_execution_ids.contains(&root.id));
+    let planning_id = Uuid::new_v4().to_string();
+    let attempt = temp.path().join("runtime/planning").join(&planning_id);
+    fs::create_dir_all(&attempt).unwrap();
+    let summary = PlanningSummary { planning_id: planning_id.clone(), status: Some("running".into()),
+        worktree: Some(root.worktree.clone()), workspace_execution_id: Some(root.id.clone()),
+        ..Default::default() };
+    write_planning_summary(&attempt, &summary).unwrap();
+    fs::write(attempt.join("request.json"), serde_json::to_vec(&serde_json::json!({
+        "revisionRunId": run, "runId": run,
+    })).unwrap()).unwrap();
+    runtime.emit(EventKind::PlannerWorkspaceSelected { planning: summary }).unwrap();
+    fs::write(Path::new(&root.worktree).join("interrupted-detached.txt"), "retained").unwrap();
+    if sealed_before_event {
+        // Crash after the Git/ref write but before the durable event: replay
+        // must adopt the sealed head once rather than lose or duplicate it.
+        let head = crate::workspace::snapshot_detached_planner_scoped(Path::new(&root.worktree),
+            &repo, &run, &root.id, &runtime.exclusions().unwrap()).unwrap();
+        assert_ne!(Some(head), root.after);
+    }
+    drop(runtime);
+    recover_plannings(&service).unwrap();
+    recover_plannings(&service).unwrap();
+    let runtime = service.runtime.lock().unwrap();
+    let historical = runtime.state.executions.iter().find(|execution| execution.id == root.id).unwrap();
+    assert_ne!(historical.after, root.after);
+    assert_eq!(runtime.state.nodes["root"].head, None, "historical writes are not an active result");
+    assert_eq!(runtime.state.events.iter().filter(|event| matches!(&event.kind,
+        EventKind::PlannerWorkspaceSnapshotted { execution_id, detached: true, .. } if execution_id == &root.id)).count(), 1);
+    assert_eq!(runtime.state.events.iter().filter(|event| matches!(&event.kind,
+        EventKind::PlannerTurnAborted { planning } if planning.planning_id == planning_id)).count(), 1);
+    assert_eq!(crate::workspace::repository_git(&repo, &["rev-parse", "--verify", &node_ref]).unwrap(), original_ref);
+    let detached_ref = format!("refs/grapher/runs/{run}/planner-detached/{}", root.id);
+    assert_eq!(crate::workspace::repository_git(&repo, &["rev-parse", "--verify", &detached_ref]).unwrap(),
+        historical.after.as_ref().unwrap().as_str());
+    assert!(!repo.join("interrupted-detached.txt").exists());
+    let replay = runtime.store.load(&run).unwrap();
+    assert_eq!(replay.nodes["root"].head, None);
+    assert_eq!(replay.executions.iter().find(|execution| execution.id == root.id).unwrap().after, historical.after);
+}
+
+#[test]
+fn planner_refuses_capture_when_a_newer_physical_owner_is_superseded() {
+    let (_temp, _repo, service, _config) = setup(false);
+    let mut runtime = service.runtime.lock().unwrap();
+    let root_job = runtime.jobs().unwrap().remove(0);
+    let root = complete(&mut runtime, root_job);
+    let mut newer = root.clone();
+    newer.id = Uuid::new_v4().to_string();
+    newer.node = "left".into();
+    newer.status = "running".into();
+    newer.after = None;
+    newer.completed_at = None;
+    runtime.emit(EventKind::Started { execution: newer.clone(), message_sequences: None, fresh_restart: false }).unwrap();
+    runtime.emit(EventKind::Failed { node: newer.node.clone(), execution_id: Some(newer.id.clone()),
+        error: "preparation failed".into(), output_bytes: 0, metrics: None }).unwrap();
+    let graph = runtime.state.graph.clone();
+    runtime.emit(EventKind::GraphRevised { graph, planning_id: Uuid::new_v4().to_string(),
+        planning: PlanningSummary::default(), invalidated: vec!["left".into()], source_head: None }).unwrap();
+    assert!(runtime.state.superseded_execution_ids.contains(&newer.id));
+    let error = runtime.capture_planner_workspace(&root.id).unwrap_err();
+    assert!(error.contains("ownership changed"), "{error}");
+    assert!(runtime.planner_workspace_for_node("root").unwrap().is_none());
 }
 
 #[test]

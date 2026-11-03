@@ -236,9 +236,12 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     if (output.diagnostics?.length) return rejected(output.diagnostics);
     if (!output.plan) return rejected([{ code: "compiler-response", message: "Compiler returned no plan." }]);
     writeFileSync(graphPath, JSON.stringify(graph));
+    // `roots` is the compiler's own list, not a second definition, and it stays
+    // first inside the topology it describes. A short list keeps an unintended
+    // extra root visible; scanning a 40-key map for `[]` hides it.
     return result(JSON.stringify({
       applied: true,
-      topology: topology(graph),
+      topology: { roots: output.plan.roots, ...topology(graph) },
       ...(output.plan.warnings?.length ? { warnings: output.plan.warnings.map(stripDiagnosticCode) } : {}),
     }));
   }

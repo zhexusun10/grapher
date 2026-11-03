@@ -106,23 +106,12 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   switchingProjectPath = null,
   loadingRunId = null,
 }) => {
-  const [isCollapsed, setIsCollapsed] = useState(() => {
-    try {
-      return localStorage.getItem("grapher_sidebar_collapsed_v1") === "true";
-    } catch {
-      return false;
-    }
-  });
+  // Every app launch starts expanded; collapsing remains session-local.
+  const [isCollapsed, setIsCollapsed] = useState(false);
   const toggleCollapsed = () => {
-    const next = !isCollapsed;
-    setIsCollapsed(next);
+    setIsCollapsed(!isCollapsed);
     setProjectContextMenu(null);
     setRunContextMenu(null);
-    try {
-      localStorage.setItem("grapher_sidebar_collapsed_v1", String(next));
-    } catch {
-      // Keep the toggle usable when browser storage is unavailable.
-    }
   };
 
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; project: ProjectItem } | null>(null);

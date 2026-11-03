@@ -784,13 +784,18 @@ pub enum EventKind {
     PlannerWorkspaceSelected {
         planning: PlanningSummary,
     },
-    /// Planner writes advance the selected result, never another node's chat.
+    /// Planner writes are captured without transferring another node's chat.
+    /// A detached historical capture never advances the active graph result.
     PlannerWorkspaceSnapshotted {
         execution_id: String,
         head: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<crate::environment::CompositeResult>,
         invalidated: Vec<String>,
+        /// Historical work in a superseded slot is retained without changing
+        /// any active node, dependency or publication state.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        detached: bool,
     },
     /// Planner requested an old node's workspace, but its physical slot is
     /// now owned by a downstream execution. The next Planner prompt explains
@@ -2074,44 +2079,48 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::PlannerReworkNoteInjected => {}
         EventKind::PlannerWorkspaceRedirected { .. } => {}
-        EventKind::PlannerWorkspaceSnapshotted { execution_id, head, result, invalidated } => {
+        EventKind::PlannerWorkspaceSnapshotted { execution_id, head, result, invalidated, detached } => {
             if let Some(execution) = state.executions.iter_mut().find(|e| e.id == *execution_id) {
                 let old_head = execution.after.clone();
                 execution.after = Some(head.clone());
                 if let Some(result) = result { execution.result = Some(result.clone()); }
                 else if let Some(result) = &mut execution.result { result.code_ref = head.clone(); }
-                let mut lineage = execution.workspace_lineage.clone();
-                lineage.push(execution.node.clone());
-                for name in lineage {
-                    if let Some(node) = state.nodes.get_mut(&name) {
-                        if node.status == "completed" && node.head == old_head {
-                            node.head = Some(head.clone());
-                            if let Some(result) = result { node.result = Some(result.clone()); }
-                            else if let Some(result) = &mut node.result { result.code_ref = head.clone(); }
+                if !*detached {
+                    let mut lineage = execution.workspace_lineage.clone();
+                    lineage.push(execution.node.clone());
+                    for name in lineage {
+                        if let Some(node) = state.nodes.get_mut(&name) {
+                            if node.status == "completed" && node.head == old_head {
+                                node.head = Some(head.clone());
+                                if let Some(result) = result { node.result = Some(result.clone()); }
+                                else if let Some(result) = &mut node.result { result.code_ref = head.clone(); }
+                            }
                         }
                     }
                 }
             }
-            for name in invalidated {
-                let never_executed = !state.executions.iter().any(|execution| execution.node == *name);
-                if let Some(node) = state.nodes.get_mut(name) {
-                    let unstarted = node.status == "waiting" || (node.status == "blocked" && never_executed);
-                    node.status = if unstarted { "waiting" } else { "dirty" }.into();
-                    if !unstarted { node.revision += 1; }
-                    node.head = None;
-                    node.result = None;
-                    node.error = None;
-                    node.baseline_head = None;
-                    node.feedback_workspace = None;
-                    node.instruction.clear();
-                    node.instruction_images = None;
-                    node.edit_execution_id = None;
-                    node.human_instruction = false;
-                    node.continuation = false;
-                    node.shared_workspace = false;
+            if !*detached {
+                for name in invalidated {
+                    let never_executed = !state.executions.iter().any(|execution| execution.node == *name);
+                    if let Some(node) = state.nodes.get_mut(name) {
+                        let unstarted = node.status == "waiting" || (node.status == "blocked" && never_executed);
+                        node.status = if unstarted { "waiting" } else { "dirty" }.into();
+                        if !unstarted { node.revision += 1; }
+                        node.head = None;
+                        node.result = None;
+                        node.error = None;
+                        node.baseline_head = None;
+                        node.feedback_workspace = None;
+                        node.instruction.clear();
+                        node.instruction_images = None;
+                        node.edit_execution_id = None;
+                        node.human_instruction = false;
+                        node.continuation = false;
+                        node.shared_workspace = false;
+                    }
                 }
+                state.publication = None;
             }
-            state.publication = None;
         }
         EventKind::PlannerReviewStarted { planning } => {
             state.planning_id = Some(planning.planning_id.clone());

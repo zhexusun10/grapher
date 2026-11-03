@@ -80,6 +80,24 @@ async function copyPrompt(page, runId, label = "Copy prompt") {
   await page.getByRole("button", { name: label, exact: true }).click();
 }
 
+test("the sidebar always opens expanded, even with a stale collapsed preference", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await openApp(async () => false);
+  try {
+    const sidebar = page.locator(".sidebar");
+    assert.equal(await sidebar.evaluate(element => element.classList.contains("is-collapsed")), false);
+    await page.getByRole("button", { name: "Collapse sidebar" }).click();
+    assert.equal(await sidebar.evaluate(element => element.classList.contains("is-collapsed")), true);
+
+    await page.evaluate(() => localStorage.setItem("grapher_sidebar_collapsed_v1", "true"));
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator('.run-item[data-run-id="a"]').waitFor();
+    assert.equal(await sidebar.evaluate(element => element.classList.contains("is-collapsed")), false,
+      "a new launch starts expanded");
+    assert.equal(await page.getByRole("button", { name: "Collapse sidebar" }).isVisible(), true);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("copy menu items remain legible while hovered", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await openApp(async () => false);
   try {

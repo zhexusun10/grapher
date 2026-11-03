@@ -2867,9 +2867,37 @@ pub(crate) fn snapshot_node_scoped(
     run_id: Option<&str>,
     exclusions: &[String],
 ) -> Result<String, String> {
-    if let Some(id) = run_id {
+    let node_id = crate::compiler::node_id(node_name);
+    let target_ref = if let Some(id) = run_id {
         uuid::Uuid::parse_str(id).map_err(|_| "Invalid Run ID for node snapshot")?;
-    }
+        format!("refs/grapher/runs/{id}/nodes/{node_id}")
+    } else {
+        format!("refs/grapher/nodes/{node_id}")
+    };
+    snapshot_slot_to_ref_scoped(path, repository, &target_ref, exclusions)
+}
+
+/// Retain Planner writes from a superseded execution without advancing the
+/// active node's ref. The run-owned ref is removed by ordinary Run cleanup.
+pub(crate) fn snapshot_detached_planner_scoped(
+    path: &Path,
+    repository: &Path,
+    run_id: &str,
+    execution_id: &str,
+    exclusions: &[String],
+) -> Result<String, String> {
+    uuid::Uuid::parse_str(run_id).map_err(|_| "Invalid Run ID for Planner snapshot")?;
+    uuid::Uuid::parse_str(execution_id).map_err(|_| "Invalid execution ID for Planner snapshot")?;
+    let target_ref = format!("refs/grapher/runs/{run_id}/planner-detached/{execution_id}");
+    snapshot_slot_to_ref_scoped(path, repository, &target_ref, exclusions)
+}
+
+fn snapshot_slot_to_ref_scoped(
+    path: &Path,
+    repository: &Path,
+    target_ref: &str,
+    exclusions: &[String],
+) -> Result<String, String> {
     let canonical_repo = repository
         .canonicalize()
         .map_err(|error| error.to_string())?;
@@ -2936,14 +2964,7 @@ pub(crate) fn snapshot_node_scoped(
     )?;
     let head_ref = format!("refs/grapher/heads/{head}");
     let head_refspec = format!("+refs/heads/grapher-node:{head_ref}");
-    // The label stays human-readable; only the ref uses the safe id.
-    let node_id = crate::compiler::node_id(node_name);
-    let node_ref = if let Some(id) = run_id {
-        format!("refs/grapher/runs/{id}/nodes/{node_id}")
-    } else {
-        format!("refs/grapher/nodes/{node_id}")
-    };
-    let node_refspec = format!("+refs/heads/grapher-node:{node_ref}");
+    let node_refspec = format!("+refs/heads/grapher-node:{target_ref}");
     let shadow = if is_standard_git(&canonical_repo) {
         Some(ensure_graph_metadata(&canonical_repo)?)
     } else {
