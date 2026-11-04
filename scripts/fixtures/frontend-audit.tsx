@@ -216,6 +216,32 @@ function LatestScrollFixture() {
   </div> : <p>Conversation closed</p>;
 }
 
+function PlannerRouteFixture() {
+  const noop = () => {};
+  // An auto-routed conversation starts undecided and becomes graph once the
+  // Partitioner answers, which must not read as a conversation switch.
+  const [route, setRoute] = React.useState<"undecided" | "graph">("undecided");
+  audit.setRoute = value => setRoute(value);
+  const [messages] = React.useState([{ id: "msg-goal", role: "user" as const, text: "ROUTE_FLIP_GOAL" }]);
+  const items = React.useMemo(() => Array.from({ length: 60 }, (_, index): TranscriptItem => ({
+    id: `flip-${index}`, type: index % 2 ? "thinking" : "text", role: "assistant",
+    content: `LIVE_FLIP_ROW_${index} ` + "reasoning detail ".repeat(6), status: "running",
+  })), []);
+  const state = { ...emptySnapshot, runId: "planner-route", config, phase: "planning", paused: false, approved: true,
+    planning: { planningId: "route-plan", status: "running", createdAt: 1, repository: "/mock", runId: "planner-route",
+      roles: { planner: { sessionId: "route-session", sessionStart: 1 } } },
+    graph: { originalGoal: "ROUTE_FLIP_GOAL", nodes: [], edges: [] },
+    events: [{ type: "created", sequence: 1, planning_id: "route-plan", timestamp: 1,
+      planning: { planningId: "route-plan", status: "running", createdAt: 1 } }] } as Snapshot;
+  return <div style={{ height: 800, display: "flex" }}>
+    <GraphWorkbench state={state} routeType={route} selected="" setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
+      effectiveMessages={messages} isPlanning plannerStream={{ runId: "planner-route", stage: "planning", items }}
+      onSendMessage={noop} onRequestConfirmation={noop} onControl={noop} onSave={noop} onOpenEditor={noop}
+      onOpenApproval={noop} onOpenFile={noop} repoInfo={null} config={config} active locked={false} pendingRequest={false}
+      publishing={false} publicationFailed={false} nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
+  </div>;
+}
+
 function PlannerReviewFixture() {
   const [phase, setPhase] = useState<"initial" | "review" | "done">("initial");
   audit.startReview = () => setPhase("review");
@@ -391,7 +417,7 @@ const cases: Record<string, React.ComponentType> = {
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
-  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture, plannerReview: PlannerReviewFixture,
+  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
   timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture,
 };

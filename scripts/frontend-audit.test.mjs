@@ -969,6 +969,44 @@ test("a growing reasoning card reserves its scrollbar track instead of rewrappin
   } finally { await context?.close(); await scrollbarBrowser.close(); }
 });
 
+for (const reducedMotion of ["no-preference", "reduce"]) {
+  test(`resolving an auto route keeps a Planner reader where they scrolled to (${reducedMotion})`, { timeout: 30_000 }, async () => {
+    // Auto routing renders the Planner pane while the route is still undecided.
+    // Folding the raw route into the conversation key turned the Partitioner's
+    // answer into a view switch that dropped the reader's position and follow
+    // state, snapping a historical read back to the newest row.
+    const { context, page, errors } = await fixture("plannerRoute", undefined, reducedMotion);
+    try {
+      await page.locator(".conversation-ready").waitFor();
+      await page.waitForTimeout(300);
+      const scroller = page.locator(".initial-query-scroll");
+      const snapshot = () => scroller.evaluate(element => {
+        const bounds = element.getBoundingClientRect();
+        const rows = [...element.querySelectorAll("[data-transcript-id]")];
+        return { top: element.scrollTop, gap: element.scrollHeight - element.scrollTop - element.clientHeight,
+          following: element.dataset.transcriptFollowing ?? null,
+          topRow: rows.find(row => row.getBoundingClientRect().bottom > bounds.top)?.dataset.transcriptId ?? null,
+          opacity: getComputedStyle(element.querySelector(".chat-messages-stream")).opacity };
+      });
+      await scroller.hover();
+      for (let step = 0; step < 4; step++) await page.mouse.wheel(0, -200);
+      await page.waitForTimeout(150);
+      const before = await snapshot();
+      assert.ok(before.gap > 300, `the reader scrolled up into history: ${JSON.stringify(before)}`);
+      assert.equal(before.following, null, "an upward gesture stops following the newest row");
+      await page.evaluate(() => window.audit.setRoute("graph"));
+      await page.waitForTimeout(250);
+      const after = await snapshot();
+      assert.equal(after.following, null, `the resolved route re-enabled following: ${JSON.stringify(after)}`);
+      assert.ok(Math.abs(after.top - before.top) <= 3, `the resolved route moved the reader: ${JSON.stringify({ before, after })}`);
+      assert.ok(after.gap > 300, `the resolved route left the newest row in view: ${JSON.stringify(after)}`);
+      assert.equal(after.topRow, before.topRow, `the resolved route swapped the visible row: ${JSON.stringify({ before, after })}`);
+      assert.equal(after.opacity, "1", "resolving the route must not blank the conversation");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
 test("focusing an older reasoning card keeps keyboard navigation in place during live output", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node");
   try {

@@ -734,7 +734,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // inspected. Keeping `selected` in its key made node selection capture the
   // serial scroll offset and restore it later, leaving the conversation stuck
   // mid-history after switching views or history pages.
-  const conversationViewKey = `${currentRunKey}:${routeType}:${routeType === "graph" ? selected || "planner" : "main"}`;
+  // The pane is also independent of how exactly the route was resolved: an
+  // auto-routed conversation renders the Planner pane for both `undecided` and
+  // the resolved `graph`. Folding the raw route into the key turned that
+  // resolution into a view switch, which discarded the reader's position and
+  // follow state, so a Planner conversation reading its history snapped back to
+  // the newest row as soon as the Partitioner answered.
+  const conversationPaneKey = routeType === "serial" ? "main" : routeType === "graph" && selected ? selected : "planner";
+  const conversationViewKey = `${currentRunKey}:${conversationPaneKey}`;
   const composerDraftKey = JSON.stringify([selected, selectedMerger?.id ?? ""]);
   // Remounting on epoch bumps is the only way to push restored text into the
   // uncontrolled composer without making every keystroke controlled.
