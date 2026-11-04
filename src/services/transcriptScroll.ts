@@ -1,3 +1,5 @@
+import { CONVERSATION_BOTTOM_THRESHOLD } from "./conversationScroll";
+
 export const HISTORY_PREPEND_EVENT = "grapher:history-prepend";
 export const FOLLOW_LATEST_EVENT = "grapher:follow-latest";
 /** A virtualized row-height correction moved the outer viewport; it is not a
@@ -18,6 +20,19 @@ export function markTranscriptPrepend(element: HTMLElement | null): void {
   if (!parent) return;
   parent.dataset.transcriptHistoryReading = "true";
   parent.dispatchEvent(new Event(HISTORY_PREPEND_EVENT));
+}
+
+/** A background fill can start while the view follows the bottom, before the
+ * reader scrolls up. Decide again when its page commits: if the reader has
+ * taken over, lock the prepend so row estimates cannot jump them through the
+ * newly loaded history. A still-pinned view keeps following the bottom. */
+export function markTranscriptPrependIfReading(element: HTMLElement | null): void {
+  const parent = transcriptScrollParent(element);
+  if (!parent || parent.dataset.transcriptScrollMode === "latest" ||
+      parent.dataset.transcriptFollowing === "true" ||
+      parent.dataset.transcriptPreparing === "true") return;
+  if (parent.scrollHeight - parent.scrollTop - parent.clientHeight <= CONVERSATION_BOTTOM_THRESHOLD) return;
+  markTranscriptPrepend(element);
 }
 
 /** True when a wheel, touch or key gesture belongs to a nested scroll area

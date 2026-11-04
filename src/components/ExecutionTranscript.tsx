@@ -8,7 +8,7 @@ import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityP
 import { isRuntimeEventsConnected, RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS, subscribeExecutionOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
 import { cacheTranscriptWindow, executionTranscriptCache, transcriptFromCache } from "../services/transcriptCache";
 import { appendTranscriptPage, prependTranscriptPage, renderTranscriptWindow, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
-import { markTranscriptPrepend } from "../services/transcriptScroll";
+import { markTranscriptPrepend, markTranscriptPrependIfReading } from "../services/transcriptScroll";
 import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES } from "../services/transcriptPaging";
 import { TranscriptHistoryStatus } from "./TranscriptHistoryStatus";
 import { useStableCallback } from "../hooks/useStableCallback";
@@ -86,6 +86,7 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
       const page = await runtimeService.getExecutionOutput(runId, execution.id, 0, signal, false, true, before.start, OLDER_TRANSCRIPT_BYTES, endOffset);
       if (signal.aborted) return;
       if (page.runId !== runId || page.executionId !== execution.id) throw new Error(t("执行记录与请求不匹配"));
+      if (!preserveReading) markTranscriptPrependIfReading(wrapperRef.current);
       // A simultaneous forward response may have extended end; never replace it.
       const next = prependTranscriptPage(windowRef.current!, page);
       publish(next);

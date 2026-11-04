@@ -161,6 +161,153 @@ fn plain_project_stays_without_git_and_keeps_empty_directories() {
     assert_eq!(bytes(&fork.join("result")), b"task result");
 }
 
+#[cfg(unix)]
+#[test]
+fn legacy_foreign_ownership_is_inherited_without_privileged_chown() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let temp = tempfile::tempdir().unwrap();
+    let project_metadata = fs::metadata(temp.path()).unwrap();
+    let source = temp.path().join("plain");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("original"), "unchanged source").unwrap();
+    let base = workspace::materialize_shadow_repo(&source, &[]).unwrap();
+    let upstream = slot(&temp, "upstream");
+    workspace::prepare(&source, &upstream, &base, &[]).unwrap();
+    let upstream_file = upstream.join("output");
+    fs::write(&upstream_file, "task output").unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let xattr = std::ffi::CString::new("com.example.grapher-test").unwrap();
+        let upstream_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+            upstream_file.as_os_str(),
+        ))
+        .unwrap();
+        assert_eq!(
+            unsafe {
+                libc::setxattr(
+                    upstream_path.as_ptr(),
+                    xattr.as_ptr(),
+                    b"preserved".as_ptr().cast(),
+                    b"preserved".len(),
+                    0,
+                    0,
+                )
+            },
+            0
+        );
+    }
+    let upstream_meta = fs::symlink_metadata(&upstream_file).unwrap();
+    let upstream_extra =
+        crate::workspace_metadata::capture(&upstream_file, &upstream_meta).unwrap();
+    let result = workspace::snapshot_node(&upstream, &source, "upstream").unwrap();
+
+    // Reconstruct an older sealed record that contains numeric owner/group IDs.
+    // It remains immutable and must pass its original checksum before the IDs
+    // are normalized in memory.
+    let mut recorded = Vec::new();
+    for head in [&base, &result] {
+        let record = record_path(&source, head).unwrap();
+        let mut legacy = serde_json::to_value(load(&record).unwrap()).unwrap();
+        legacy["root_extra"]["owner"] =
+            serde_json::json!([project_metadata.uid(), project_metadata.gid()]);
+        for (name, entry) in legacy["entries"].as_object_mut().unwrap() {
+            let owner = if name == "output" {
+                (u32::MAX - 1, u32::MAX - 2)
+            } else {
+                (project_metadata.uid(), project_metadata.gid())
+            };
+            entry["extra"]["owner"] = serde_json::json!([owner.0, owner.1]);
+        }
+        save(&record, &serde_json::from_value(legacy).unwrap()).unwrap();
+        let original_view = fs::read(record.join("view.json")).unwrap();
+        let original_checksum = fs::read(record.join("checksum")).unwrap();
+        recorded.push((record, original_view, original_checksum));
+    }
+
+    let identity = node_identity_scoped(&upstream, &source, &[])
+        .unwrap()
+        .unwrap();
+    assert!(record_matches(&source, &result, &identity));
+    let downstream = slot(&temp, "downstream");
+    let inherited = downstream.join("output");
+    workspace::prepare(&source, &downstream, &base, &[result.clone()]).unwrap();
+    let actual = fs::symlink_metadata(&inherited).unwrap();
+    assert_eq!(
+        (actual.uid(), actual.gid()),
+        (project_metadata.uid(), project_metadata.gid())
+    );
+    assert_eq!(actual.mode() & 0o7777, upstream_meta.mode() & 0o7777);
+    assert!(crate::workspace_metadata::capture(&inherited, &actual)
+        .unwrap()
+        .identical(&upstream_extra));
+    assert_ne!(actual.ino(), upstream_meta.ino());
+    assert_eq!(fs::read(&inherited).unwrap(), b"task output");
+    assert_eq!(fs::read(&upstream_file).unwrap(), b"task output");
+    let upstream_after = fs::symlink_metadata(&upstream_file).unwrap();
+    assert_eq!(
+        (upstream_after.uid(), upstream_after.gid()),
+        (upstream_meta.uid(), upstream_meta.gid())
+    );
+    assert!(!source.join("output").exists());
+    assert_eq!(
+        fs::read(source.join("original")).unwrap(),
+        b"unchanged source"
+    );
+    for (record, original_view, original_checksum) in recorded {
+        assert_eq!(fs::read(record.join("view.json")).unwrap(), original_view);
+        assert_eq!(
+            fs::read(record.join("checksum")).unwrap(),
+            original_checksum
+        );
+    }
+    validate_ready(&downstream, &source).unwrap();
+
+    // A previous failed preparation can leave this slot and its Git merge
+    // present without a ready marker. Retry the retained slot as-is.
+    fs::remove_file(ready(&downstream).unwrap()).unwrap();
+    assert!(validate_ready(&downstream, &source).is_err());
+    workspace::prepare(&source, &downstream, &base, std::slice::from_ref(&result)).unwrap();
+    assert_eq!(fs::read(&inherited).unwrap(), b"task output");
+    assert_ne!(
+        fs::symlink_metadata(&inherited).unwrap().ino(),
+        upstream_meta.ino()
+    );
+    validate_ready(&downstream, &source).unwrap();
+
+    // Where another supplementary group is available, verify an actual
+    // ownership-only change rather than relying solely on synthetic evidence.
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    if count > 0 {
+        let mut groups = vec![0 as libc::gid_t; count as usize];
+        let count = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+        assert!(count >= 0);
+        groups.truncate(count as usize);
+        if groups
+            .into_iter()
+            .filter(|gid| *gid != upstream_meta.gid())
+            .any(|gid| std::os::unix::fs::chown(&upstream_file, None, Some(gid)).is_ok())
+        {
+            assert_ne!(
+                fs::symlink_metadata(&upstream_file).unwrap().gid(),
+                upstream_meta.gid()
+            );
+            assert_eq!(
+                workspace::snapshot_node(&upstream, &source, "upstream").unwrap(),
+                result
+            );
+            verify_result(&upstream, &source, &result).unwrap();
+        }
+    }
+
+    // Ignoring host ownership must not hide actual project-permission changes.
+    fs::set_permissions(
+        &upstream_file,
+        fs::Permissions::from_mode((upstream_meta.mode() & 0o7777) ^ 0o100),
+    )
+    .unwrap();
+    assert!(verify_result(&upstream, &source, &result).is_err());
+}
+
 #[test]
 fn automatic_environment_never_owns_same_named_project_files() {
     let temp = tempfile::tempdir().unwrap();
@@ -508,6 +655,62 @@ fn metadata_materialization_requires_full_equality_and_never_hides_a_restore() {
         Some(&Entry::Directory { mode: 0, extra: plain.clone() }),
         &file(0, plain.clone())
     ));
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_unix_ownership_is_normalized_only_after_checksum_validation() {
+    let temp = tempfile::tempdir().unwrap();
+    let extra = serde_json::json!({
+        "attributes": [], "security": [], "protected": false, "flags": 0,
+        "owner": [123456, 654321], "efs": false
+    });
+    let view = serde_json::json!({
+        "schema": 5,
+        "source": "/legacy/source",
+        "root_mode": 0o750,
+        "root_extra": extra,
+        "entries": {"file": {"kind": "file", "mode": 0o640, "blob": "blob", "extra": extra}},
+        "hardlinks": {"aliases": {}, "outside": {}},
+        "repositories": {},
+        "git_entries": null,
+        "git_file": false,
+        "git_file_metadata": null,
+        "git_link": false,
+        "git_link_metadata": null,
+        "git_config": [],
+        "git_files": {},
+        "git_global": []
+    });
+    let raw = serde_json::to_vec(&view).unwrap();
+    fs::write(temp.path().join("view.json"), &raw).unwrap();
+    // Independently calculated Git blob SHA-1 of the sorted legacy JSON with
+    // security fields removed. Do not generate it with the production saver.
+    fs::write(
+        temp.path().join("checksum"),
+        "22c14182eed10e6958d7e3b96819f4b7e7d266ac",
+    )
+    .unwrap();
+    let loaded = load(temp.path()).unwrap();
+    assert_eq!(loaded.root_mode, 0o750);
+    assert!(serde_json::to_value(&loaded.root_extra).unwrap()["owner"].is_null());
+    let Some(Entry::File { mode, extra, .. }) = loaded.entries.get("file") else {
+        panic!("missing legacy file");
+    };
+    assert_eq!(*mode, 0o640);
+    assert!(serde_json::to_value(extra).unwrap()["owner"].is_null());
+    assert_eq!(fs::read(temp.path().join("view.json")).unwrap(), raw);
+
+    let mut damaged: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    damaged["root_extra"]["owner"] = serde_json::json!([1, 2]);
+    fs::write(
+        temp.path().join("view.json"),
+        serde_json::to_vec(&damaged).unwrap(),
+    )
+    .unwrap();
+    assert!(load(temp.path())
+        .unwrap_err()
+        .contains("Damaged project-view evidence"));
 }
 
 #[cfg(target_os = "macos")]

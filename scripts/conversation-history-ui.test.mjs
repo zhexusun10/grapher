@@ -1340,6 +1340,66 @@ for (const scenario of ["final-bytes-after-last-poll", "cached-view-does-not-rew
 }
 
 for (const role of ["node", "planner"]) {
+  test(`${role}: upward gesture during initial history fill preserves the visible row`, { timeout: 30_000 }, async () => {
+    const prefix = Array.from({ length: 50 }, (_, i) => assistant(`PREFIX_FILL_${i}`)).join("");
+    const tail = Array.from({ length: 4 }, (_, i) => assistant(`TAIL_FILL_${i}`)).join("");
+    const data = Buffer.from(prefix + tail), split = Buffer.byteLength(prefix);
+    let releaseOlder;
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      const command = new URL(route.request().url()).pathname.slice(5);
+      if (command !== (role === "node" ? "get_execution_output" : "get_planning_output") ||
+          (role === "planner" && body.planningId !== "planner-latest")) return route.fulfill({ json: { result: {} } });
+      const end = body.before ?? data.length;
+      const start = body.tail ? (body.before === undefined ? split : 0) : body.offset;
+      if (body.before !== undefined) await new Promise(resolve => { releaseOlder = resolve; });
+      try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        planningId: body.planningId, role: "planner", content: data.subarray(start, end).toString(), startOffset: start,
+        nextOffset: end, totalBytes: data.length, complete: end === data.length, status: "running", running: true } } }); } catch {}
+    });
+    try {
+      await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.selectHistory);
+      if (role === "planner") await page.evaluate(() => {
+        window.audit.setPlanningIds(["planner-latest"]);
+        window.audit.selectHistory("planner");
+      });
+      const cache = () => page.evaluate(role => role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning(), role);
+      await page.waitForFunction(role => !!(role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning()), role);
+      for (let i = 0; i < 100 && !releaseOlder; i++) await page.waitForTimeout(10);
+      assert.ok(releaseOlder, "the short tail automatically requests older history");
+      await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) > 0.99);
+      const scroller = page.locator("[data-shared-scroll]");
+      // Scroll away from the bottom while the automatic request is still in
+      // flight. Its page then commits without the caller asking to preserve the
+      // reader, so the commit itself must remember that the gesture took over.
+      await scroller.hover(); await page.mouse.wheel(0, -80);
+      await page.waitForTimeout(100);
+      const anchor = await scroller.evaluate(element => {
+        const top = element.getBoundingClientRect().top;
+        const row = [...element.querySelectorAll("[data-transcript-id]")].find(row => {
+          const rect = row.getBoundingClientRect();
+          return rect.top >= top && rect.bottom <= top + element.clientHeight;
+        });
+        return row ? { id: row.dataset.transcriptId, top: row.getBoundingClientRect().top } : null;
+      });
+      assert.ok(anchor, "the reader has a fully visible retained row");
+      releaseOlder();
+      await page.waitForFunction(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.startOffset === 0, role);
+      await page.waitForTimeout(200);
+      assert.equal((await cache()).startOffset, 0);
+      const nextTop = await page.evaluate(({ id }) => {
+        const row = [...document.querySelectorAll("[data-transcript-id]")].find(candidate => candidate.dataset.transcriptId === id);
+        return row?.getBoundingClientRect().top ?? null;
+      }, anchor);
+      assert.ok(nextTop !== null, "the retained row is still mounted");
+      assert.ok(Math.abs(nextTop - anchor.top) <= 3, `initial fill dragged the reading anchor ${nextTop - anchor.top}px`);
+      assert.deepEqual(errors, []);
+    } finally { releaseOlder?.(); await context.close(); }
+  });
+}
+
+for (const role of ["node", "planner"]) {
   test(`${role}: delayed prepend and simultaneous append preserve the current visible row`, { timeout: 30_000 }, async () => {
     const prefix = Array.from({ length: 80 }, (_, i) => assistant(`OLDER_ANCHOR_${i}`)).join("");
     const tail = Array.from({ length: 60 }, (_, i) => assistant(`VISIBLE_ANCHOR_${i}`)).join("");

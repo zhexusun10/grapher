@@ -10,7 +10,7 @@ import { VirtualizedTranscript } from "./VirtualizedTranscript";
 import { cacheTranscriptWindow, composePlanningOutput, planningTranscriptCache, planningTranscriptKey, transcriptFromCache } from "../services/transcriptCache";
 import { activePlannerOutput } from "../lib/plannerOutput";
 import { appendTranscriptPage, prependTranscriptPage, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
-import { markTranscriptPrepend } from "../services/transcriptScroll";
+import { markTranscriptPrepend, markTranscriptPrependIfReading } from "../services/transcriptScroll";
 import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES } from "../services/transcriptPaging";
 import { TranscriptHistoryStatus } from "./TranscriptHistoryStatus";
 export { planningTranscriptCache } from "../services/transcriptCache";
@@ -95,6 +95,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
       const page = await runtimeService.getPlanningOutput(id, "planner", 0, signal, true, before?.start, OLDER_TRANSCRIPT_BYTES);
       if (signal.aborted) return;
       if (page.planningId !== id || page.role !== "planner") throw new Error(t("执行记录与请求不匹配"));
+      if (!preserveReading) markTranscriptPrependIfReading(sectionRef.current);
       const latest = segments.current.get(id);
       const next = latest ? prependTranscriptPage(latest, page) : windowFromPage(page, !page.running);
       publish(id, next);

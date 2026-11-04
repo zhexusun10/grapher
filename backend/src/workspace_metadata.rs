@@ -19,13 +19,14 @@ pub(crate) struct Extra {
 // `security` is the SDDL/inheritance history of the source path. Windows
 // re-inherits ACLs from the destination parent on restore, so it must not make
 // two project views with the same explicit permissions compare unequal. It is
-// still serialized in the record for restore.
+// still serialized in the record for restore. On Unix, numeric owner/group IDs
+// describe the host copy rather than the private project view.
 impl PartialEq for Extra {
     fn eq(&self, other: &Self) -> bool {
         self.attributes == other.attributes
             && self.protected == other.protected
             && self.flags == other.flags
-            && self.owner == other.owner
+            && (cfg!(unix) || self.owner == other.owner)
             && self.efs == other.efs
     }
 }
@@ -37,23 +38,27 @@ impl Extra {
     /// source-equivalent views compare equal; materialization uses this
     /// stricter form so an entry is left untouched only when even its ACL,
     /// streams, attributes and encryption state already match what `restore`
-    /// would write. Skipping an identical restore is a pure no-op.
+    /// would write. Unix UID/GID are host ownership and do not participate.
+    /// Skipping an identical restore is a pure no-op for project metadata.
     pub(crate) fn identical(&self, other: &Self) -> bool {
         self.attributes == other.attributes
             && self.security == other.security
             && self.protected == other.protected
             && self.flags == other.flags
-            && self.owner == other.owner
+            && (cfg!(unix) || self.owner == other.owner)
             && self.efs == other.efs
     }
 
-    /// Strip host-managed xattrs and flags that do not define project content.
-    /// macOS may assign provenance and revision/storage/security flags after a
-    /// copy, and Linux SELinux labels describe host policy; both sides of a
-    /// comparison ignore them. Legacy records may still contain these values.
+    /// Strip host-managed values that do not define a portable project view.
+    /// Legacy records may still carry Unix ownership, provenance, or flags;
+    /// their checksum is validated before this normalization.
     pub(crate) fn strip_system_managed(&mut self) {
         self.attributes.retain(|(name, _)| !is_system_managed(name));
         self.flags &= !MACOS_HOST_MANAGED_FLAGS;
+        #[cfg(unix)]
+        {
+            self.owner = None;
+        }
     }
 }
 
@@ -267,9 +272,7 @@ mod platform {
         Ok(flags as u32 & !STORAGE)
     }
     pub(super) fn capture(value: &Path) -> Result<Extra, String> {
-        use std::os::unix::fs::MetadataExt;
         let metadata = fs::symlink_metadata(value).map_err(|e| e.to_string())?;
-        let owner = Some((metadata.uid(), metadata.gid()));
         #[cfg(target_os = "linux")]
         let flags = if metadata.is_file() || metadata.is_dir() {
             linux_flags(value, None)?
@@ -313,22 +316,16 @@ mod platform {
         attributes.sort();
         Ok(Extra {
             attributes,
-            owner,
             security,
             flags,
             ..Extra::default()
         })
     }
     pub(super) fn restore(value: &Path, extra: &Extra, mode: Option<u32>) -> Result<(), String> {
+        // Private project entries are created by the runtime's host user.
+        // Legacy UID/GID values are not replayed, including on symlinks; mode,
+        // ACLs, xattrs and flags are still restored and verified below.
         let p = path(value)?;
-        if let Some((uid, gid)) = extra.owner {
-            if unsafe { libc::lchown(p.as_ptr(), uid, gid) } != 0 {
-                return Err(format!(
-                    "Cannot preserve project ownership: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-        }
         for name in xattr_names(value)? {
             if !extra
                 .attributes
@@ -823,6 +820,47 @@ mod platform {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+
+    #[test]
+    fn legacy_unix_ids_do_not_change_private_file_or_link_ownership() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        let alias = temp.path().join("alias");
+        let link = temp.path().join("link");
+        fs::write(&file, b"project bytes").unwrap();
+        fs::hard_link(&file, &alias).unwrap();
+        symlink(&file, &link).unwrap();
+        let before = fs::symlink_metadata(&file).unwrap();
+        let link_before = fs::symlink_metadata(&link).unwrap();
+        let mut extra = capture(&file, &before).unwrap();
+        assert_eq!(extra.owner, None);
+        extra.owner = Some((u32::MAX - 1, u32::MAX - 2));
+        restore_with_mode(&file, &extra, 0o640).unwrap();
+        let after = fs::symlink_metadata(&file).unwrap();
+        assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
+        assert_eq!((after.ino(), after.nlink()), (before.ino(), 2));
+        assert_eq!(fs::metadata(&alias).unwrap().ino(), after.ino());
+        assert_eq!(after.permissions().mode() & 0o7777, 0o640);
+        assert_eq!(fs::read(&file).unwrap(), b"project bytes");
+
+        let mut link_extra = capture(&link, &link_before).unwrap();
+        link_extra.owner = extra.owner;
+        restore(&link, &link_extra).unwrap();
+        let link_after = fs::symlink_metadata(&link).unwrap();
+        assert_eq!(
+            (link_after.uid(), link_after.gid()),
+            (link_before.uid(), link_before.gid())
+        );
+        assert_eq!(fs::read_link(&link).unwrap(), file);
+        extra.strip_system_managed();
+        assert_eq!(extra.owner, None);
     }
 }
 

@@ -8,10 +8,10 @@ Grapher has one project-file version channel: **Git**. The host prepares snapsho
 ## Agent project views
 
 Private native launches require a complete, source-bound project view before any
-agent starts. Project entries/bytes and metadata are preserved recursively,
-including native ignored/untracked files and empty directories. Source-owned
-runtime-like names are not an exclusion policy. Process HOME/cache/environment
-state is external to the project; its contract belongs to
+agent starts. Project entries/bytes and portable metadata are preserved
+recursively, including native ignored/untracked files and empty directories.
+Source-owned runtime-like names are not an exclusion policy. Process
+HOME/cache/environment state is external to the project; its contract belongs to
 [Native environments](native-environments.md).
 
 The agent's project Git is independent of graph Git: it retains the source's
@@ -24,11 +24,21 @@ not filtered listings. Workspace/tool path adaptation still applies.
 
 Immutable `agent-views/<codeRef>/` records under the source shadow store retain
 project Git and supplemental directory/permission/link/ACL/xattr/ADS evidence.
-Project bytes remain Git blobs. Metadata-only work advances an internal code/view
-reference as well; it is not silently dropped when the Git tree is unchanged.
+Project bytes remain Git blobs. Portable metadata-only work advances an internal
+code/view reference as well; it is not silently dropped when the Git tree is
+unchanged.
 Preparation compares the complete physical result before recording readiness;
 legacy/missing/corrupt evidence and unsupported layouts fail rather than exposing
-an incomplete workspace. Preparation is also deterministic for a reused slot:
+an incomplete workspace. Unix UID/GID are host ownership, not portable project
+metadata: private entries keep their actual creation ownership, and legacy view
+records discard UID/GID only after checksum validation. UID/GID-only changes do
+not advance a view reference and are not transferred or published. Permission
+bits, ACLs, xattrs, flags, link topology and bytes remain part of the checked view.
+Consequently a private copy does not promise the source's Unix owner/group or
+identical owner/group-based access decisions, including setuid/setgid behavior
+and setgid-directory inheritance; the source is never chowned. Each node still
+uses its own private project view and sandbox, not access to the whole Run
+parent. Preparation is also deterministic for a reused slot:
 entries no view can observe (ignored generated caches such as `__pycache__`, and
 directories left holding nothing else) are removed instead of blocking the
 comparison, while unrecorded project content still fails it. A reused slot's
