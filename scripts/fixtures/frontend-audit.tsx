@@ -216,6 +216,36 @@ function LatestScrollFixture() {
   </div> : <p>Conversation closed</p>;
 }
 
+function PlannerReviewFixture() {
+  const [phase, setPhase] = useState<"initial" | "review" | "done">("initial");
+  audit.startReview = () => setPhase("review");
+  audit.finishReview = () => setPhase("done");
+  const initial = { planningId: "plan-initial", status: "completed", createdAt: 1, repository: "/mock/review",
+    runId: "review-run", roles: { planner: { sessionId: "review-session", sessionStart: 1, durationSeconds: 1 } } };
+  const review = { planningId: "plan-review", status: phase === "review" ? "running" : "completed", createdAt: 2,
+    repository: "/mock/review", runId: "review-run", roles: { planner: { sessionId: "review-session", sessionStart: 1, durationSeconds: 1 } } };
+  const events = [{ type: "created", planning_id: "plan-initial", planning: initial }];
+  if (phase !== "initial") events.push({ type: "planner_review_started", planning: review });
+  if (phase === "done") events.push({ type: "planner_review_finished", planning: review, approval_required: false });
+  const state = { ...emptySnapshot, runId: "review-run", config: { ...config, repository: "/mock/review" }, planType: "graph",
+    phase: phase === "review" ? "planning" : "completed", approved: true,
+    planningId: phase === "initial" ? "plan-initial" : "plan-review",
+    planning: phase === "initial" ? initial : review,
+    graph: { originalGoal: "Review this run", nodes: [{ name: "worker", task: "Do the work" }], edges: [] },
+    nodes: { worker: { status: "completed", revision: 0, instruction: "", error: null } },
+    events } as Snapshot;
+  const noop = () => {};
+  return <div style={{ height: "calc(100vh - 64px)", display: "flex" }}>
+    <GraphWorkbench state={state} routeType="graph" selected="" setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
+      effectiveMessages={[]} isPlanning={phase === "review"}
+      plannerStream={{ runId: "review-run", stage: phase === "review" ? "planning" : "completed", items: [] }}
+      onSendMessage={noop} onRequestConfirmation={noop}
+      onControl={noop} onSave={noop} onAddManualNode={async () => true} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop}
+      repoInfo={null} config={{ ...config, repository: "/mock/review" }} active={false} locked={false} pendingRequest={false}
+      publishing={false} publicationFailed={false} nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
+  </div>;
+}
+
 function UnrunNodeFixture() {
   const [selected, setSelected] = useState("worker");
   const [started, setStarted] = useState(false);
@@ -361,7 +391,7 @@ const cases: Record<string, React.ComponentType> = {
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
-  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture,
+  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture, plannerReview: PlannerReviewFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
   timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture,
 };

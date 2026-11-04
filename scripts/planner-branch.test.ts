@@ -58,6 +58,23 @@ test('an edit keeps the failed replacement turn it started', () => {
   assert.doesNotMatch(visible, /followup reply/);
 });
 
+test('a live review keeps the earlier Planner conversation before recovery markers settle', () => {
+  const events = [
+    { type: 'created', planning_id: 'initial', planning: { planningId: 'initial', createdAt: 100 } },
+    { type: 'graph_revised', planning_id: 'revision', planning: { planningId: 'revision', createdAt: 200 } },
+    { type: 'planner_review_started', planning: { planningId: 'review', status: 'running', createdAt: 300 } },
+  ];
+  const base = { events, savedPlannerId: 'review', planning: true, live: true, continuation: false,
+    backgroundReview: false, routeType: 'graph' };
+  // The live stream may own the review attempt, but it cannot erase the
+  // committed turns that preceded it.
+  assert.deepEqual(plannerHistoryIds({ ...base, recoveredPlanningId: undefined }), ['initial', 'revision']);
+  assert.deepEqual(plannerHistoryIds({ ...base, recoveredPlanningId: 'review' }), ['initial', 'revision']);
+  // Once the review is durable history rather than a live stream, it joins them.
+  assert.deepEqual(plannerHistoryIds({ ...base, live: false, recoveredPlanningId: 'review' }),
+    ['initial', 'revision', 'review']);
+});
+
 test('aborted revision turns stay in the replayed Planner conversation', () => {
   const events = [
     { type: 'planning_started', planning: { planningId: 'start' } },

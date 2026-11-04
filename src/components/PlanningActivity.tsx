@@ -84,12 +84,16 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     setOutput(composePlanningOutput(planningIds, segments.current));
   }, [runId, key]);
 
-  const loadOlder = useStableCallback(async (preserveReading = true) => {
+  const loadOlder = useStableCallback(async (preserveReading = true, requestedId?: string, quiet = false) => {
     const signal = lifetime.current;
-    const id = olderTarget(planningIds, segments.current);
-    if (!ready || !id || olderBusy.current || !signal || signal.aborted) return;
+    // The generic scrollback target completes the newest revision first. A
+    // reviewed Run also needs its preceding revision mounted even when the
+    // newer review fills the viewport on its own.
+    const id = requestedId && planningIds.includes(requestedId)
+      ? requestedId : olderTarget(planningIds, segments.current);
+    if (!ready || !id || olderBusy.current || !signal || signal.aborted) return false;
     const before = segments.current.get(id);
-    olderBusy.current = true; setLoadingOlder(true); setError("");
+    olderBusy.current = true; setLoadingOlder(true); if (!quiet) setError("");
     if (preserveReading) markTranscriptPrepend(sectionRef.current);
     try {
       const page = await runtimeService.getPlanningOutput(id, "planner", 0, signal, true, before?.start, OLDER_TRANSCRIPT_BYTES);
@@ -99,9 +103,27 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
       const latest = segments.current.get(id);
       const next = latest ? prependTranscriptPage(latest, page) : windowFromPage(page, !page.running);
       publish(id, next);
-    } catch (caught) { if (!signal.aborted) setError(caught instanceof Error ? caught.message : String(caught)); }
+    } catch (caught) { if (!signal.aborted && !quiet) setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { olderBusy.current = false; if (!signal.aborted) setLoadingOlder(false); }
+    return true;
   });
+
+  // Planner turns are separate logs. Without this, opening a reviewed Run
+  // whose latest turn fills two viewports would mount only the review and hide
+  // every earlier Planner turn until the reader happened to scroll above it.
+  // Seed the immediately preceding turn once; its own older bytes still page
+  // on demand, and a concurrent automatic fill is allowed to finish first.
+  const previousPlanningId = planningIds.length > 1 ? planningIds[planningIds.length - 2] : "";
+  const previousAttemptedRef = useRef("");
+  useEffect(() => {
+    if (!ready || !previousPlanningId || loadingOlder || segments.current.has(previousPlanningId) ||
+        previousAttemptedRef.current === previousPlanningId) return;
+    previousAttemptedRef.current = previousPlanningId;
+    void loadOlder(false, previousPlanningId, true).then(started => {
+      // A request already in flight owns the first page. Retry once it lands.
+      if (!started) previousAttemptedRef.current = "";
+    });
+  }, [ready, previousPlanningId, loadingOlder, loadOlder]);
 
   const loadedBytes = [...segments.current.values()].reduce((sum, window) => sum + window.end - window.start, 0);
   const initialReady = useAutoTranscriptHistory(sectionRef, hasOlder, loadingOlder, error, activeOutput,

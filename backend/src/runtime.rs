@@ -1178,21 +1178,24 @@ impl Runtime {
             .transpose()
     }
 
-    /// The latest workspace is mandatory: never silently fall back to an older
-    /// branch or the source when its current owner has not finished preparing.
+    /// The latest usable workspace is the preferred cwd. A latest slot whose
+    /// preparation has not completed (or that fails the readiness/binding gate)
+    /// is retired for this selection instead of failing the turn: the Planner
+    /// still has to answer the user, so it falls back to the source project
+    /// rather than blocking the conversation or silently using an older slot.
     pub(crate) fn planner_workspace(&self) -> Result<Option<Execution>, String> {
-        let selected = self.planner_workspace_candidate()?;
-        if let Some(execution) = &selected {
-            let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
-            if !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
-                && self.planner_workspace_owner(execution).is_none_or(|owner| owner.id != execution.id) {
-                return Err(format!("Latest Planner workspace for node '{}' has a different physical owner; retry preparation instead of using stale project state", execution.node));
-            }
-            self.validate_planner_workspace(execution, &repository).map_err(|error| format!(
-                "Latest Planner workspace for node '{}' is unavailable: {error}. Retry the node's workspace preparation; refusing to use stale project state", execution.node
-            ))?;
+        let Some(execution) = self.planner_workspace_candidate()? else { return Ok(None); };
+        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        if !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
+            && self.planner_workspace_owner(&execution).is_none_or(|owner| owner.id != execution.id) {
+            eprintln!("[Grapher] Retiring the latest Planner workspace for node '{}': its physical owner is a different execution. Planning in the source project instead", execution.node);
+            return Ok(None);
         }
-        Ok(selected)
+        if let Err(error) = self.validate_planner_workspace(&execution, &repository) {
+            eprintln!("[Grapher] Retiring the latest Planner workspace for node '{}': {error}. Planning in the source project instead", execution.node);
+            return Ok(None);
+        }
+        Ok(Some(execution))
     }
 
     fn validate_planner_workspace(&self, execution: &Execution, repository: &Path) -> Result<(), String> {
@@ -1268,7 +1271,14 @@ impl Runtime {
                                 .is_some_and(|(path, source)| path == source)) {
                             return Ok(Some(current.clone()));
                         }
-                        if let Some(actual) = crate::path_safety::real_child_path(&root, path, false)? {
+                        let actual = match crate::path_safety::real_child_path(&root, path, false) {
+                            Ok(actual) => actual,
+                            Err(error) => {
+                                eprintln!("[Grapher] The explicit Planner workspace for node '{}' is unavailable: {error}", current.node);
+                                None
+                            }
+                        };
+                        if let Some(actual) = actual {
                             if workspace::has_private_git(&actual) {
                                 let mut selected = current.clone();
                                 selected.worktree = workspace::normalize_workspace_display_path(&actual);
@@ -1311,19 +1321,32 @@ impl Runtime {
                 continue;
             }
             if !path.is_dir() {
-                // Even an attempt that failed before Prepared is the latest
-                // owner. Silently using an older branch or source would give
-                // Planner a different input without telling it.
-                return Err("Latest Planner workspace is missing; retry preparation instead of using stale source files".into());
+                // An unusable latest slot never becomes an older-slot fallback;
+                // Planner answers from the source project for this selection.
+                eprintln!("[Grapher] Retiring the latest Planner workspace for node '{}': {}", execution.node, path.display());
+                return Ok(None);
             }
             // Only a recorded, real child of this Run may become a Planner cwd.
-            let Some(actual) = crate::path_safety::real_child_path(&root, path, false)? else { continue; };
+            // A slot that fails that gate is retired like an unready one: the
+            // Planner keeps answering from the source project.
+            let actual = match crate::path_safety::real_child_path(&root, path, false) {
+                Ok(Some(actual)) => actual,
+                Ok(None) => {
+                    eprintln!("[Grapher] Retiring the latest Planner workspace for node '{}': {} is outside this Run. Planning in the source project instead", execution.node, path.display());
+                    return Ok(None);
+                }
+                Err(error) => {
+                    eprintln!("[Grapher] Retiring the latest Planner workspace for node '{}': {error}. Planning in the source project instead", execution.node);
+                    return Ok(None);
+                }
+            };
             if self.workspace_reserved(path, None) {
                 reserved = true;
                 continue;
             }
             if !workspace::has_private_git(&actual) {
-                return Err("Latest Planner workspace is not a private Git repository".into());
+                eprintln!("[Grapher] Retiring the latest Planner workspace for node '{}': {} is not a private Git repository. Planning in the source project instead", execution.node, actual.display());
+                return Ok(None);
             }
             let mut selected = execution.clone();
             selected.worktree = workspace::normalize_workspace_display_path(&actual);

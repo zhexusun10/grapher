@@ -250,6 +250,13 @@ for (const role of ["node", "planner"]) {
         runId: body.runId, executionId: body.executionId, content: "", startOffset: 0,
         nextOffset: 0, totalBytes: 0, complete: true, status: "running",
       } } });
+      // This fixture reuses one synthetic tool id across every Planner
+      // revision. The earlier revision is empty so the test still measures the
+      // live tail, rather than rendering two identical mock tool rows.
+      if (role === "planner" && body.planningId === "planner-previous") return route.fulfill({ json: { result: {
+        planningId: body.planningId, role: "planner", content: "", startOffset: 0,
+        nextOffset: 0, totalBytes: 0, complete: true, running: false,
+      } } });
       const end = body.before ?? data.length;
       const start = body.tail ? boundaries[Math.max(0, boundaries.indexOf(end) - 1)] : body.offset;
       if (body.before !== undefined) olderReads++;
@@ -1589,6 +1596,74 @@ for (const role of ["node", "planner"]) {
     } finally { await context.close(); }
   });
 }
+
+test("planner: opening a reviewed run preloads the preceding planning turn", { timeout: 30_000 }, async () => {
+  const earlier = Array.from({ length: 5 }, (_, i) => assistant(`EARLIER_PLAN_${i}`)).join("");
+  const review = Array.from({ length: 100 }, (_, i) => assistant(`LATEST_REVIEW_${i} 中文🚀`)).join("");
+  const earlierBytes = Buffer.from(earlier), reviewBytes = Buffer.from(review);
+  const requests = [];
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    const command = new URL(route.request().url()).pathname.slice(5);
+    if (command !== "get_planning_output") return route.fulfill({ json: { result: {} } });
+    requests.push(body);
+    const latest = body.planningId === "planner-latest";
+    const bytes = latest ? reviewBytes : earlierBytes;
+    const start = body.tail ? 0 : body.offset;
+    const end = Math.min(bytes.length, start + (body.limit ?? 512 * 1024));
+    return route.fulfill({ json: { result: { planningId: body.planningId, role: "planner", content: bytes.subarray(start, end).toString(),
+      startOffset: start, nextOffset: end, totalBytes: bytes.length, complete: end === bytes.length, running: false } } });
+  });
+  try {
+    await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.selectHistory);
+    await page.evaluate(() => { window.audit.setPlanningIds(["planner-previous", "planner-latest"]); window.audit.selectHistory("planner"); });
+    await page.getByText("LATEST_REVIEW_99 中文🚀", { exact: true }).waitFor();
+    // The review itself fills the viewport, so the generic two-viewport fill
+    // cannot discover the preceding revision. It must be seeded explicitly.
+    await page.waitForFunction(() => window.audit.planningCacheKeys().includes("regression:planner-previous"));
+    const scroller = page.locator("[data-shared-scroll]");
+    await scroller.evaluate(element => { element.scrollTop = 0; });
+    await page.waitForTimeout(200);
+    assert.equal(await page.getByText("EARLIER_PLAN_0", { exact: true }).count(), 1,
+      "the preceding planning turn stays available in scrollback");
+    assert.ok(requests.some(body => body.planningId === "planner-previous"),
+      "opening the reviewed conversation seeds the preceding revision");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("planner: starting and finishing a review keeps the earlier planning conversation", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    const command = new URL(route.request().url()).pathname.slice(5);
+    if (command !== "get_planning_output") return route.fulfill({ json: { result: {} } });
+    const content = body.planningId === "plan-initial" ? assistant("INITIAL_PLANNER_HISTORY")
+      : body.planningId === "plan-review" ? assistant("REVIEW_PLANNER_HISTORY") : "";
+    const total = Buffer.byteLength(content);
+    return route.fulfill({ json: { result: { planningId: body.planningId, role: "planner", content,
+      startOffset: 0, nextOffset: total, totalBytes: total, complete: true, running: body.planningId === "plan-review" } } });
+  });
+  try {
+    await page.goto(`${origin}/__history?case=plannerReview`, { waitUntil: "domcontentloaded" });
+    await page.getByText("INITIAL_PLANNER_HISTORY", { exact: true }).waitFor();
+    const scroller = page.locator(".initial-query-scroll");
+    await page.evaluate(() => window.audit.startReview());
+    await page.waitForTimeout(300);
+    await scroller.evaluate(element => { element.scrollTop = 0; });
+    await page.waitForTimeout(200);
+    assert.equal(await page.getByText("INITIAL_PLANNER_HISTORY", { exact: true }).count(), 1,
+      "starting a review must retain the earlier Planner history");
+    await page.evaluate(() => window.audit.finishReview());
+    await page.waitForTimeout(200);
+    await page.getByText("REVIEW_PLANNER_HISTORY", { exact: true }).waitFor();
+    await scroller.evaluate(element => { element.scrollTop = 0; });
+    await page.waitForTimeout(200);
+    assert.equal(await page.getByText("INITIAL_PLANNER_HISTORY", { exact: true }).count(), 1,
+      "finishing a review must retain the earlier Planner history");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 for (const role of ["node", "planner"]) {
   test(`${role}: initial history fills two viewports despite a tall task and graph summary`, { timeout: 30_000 }, async () => {

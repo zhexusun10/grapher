@@ -18,8 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A Node or Planner history page that finishes loading after the reader has already scrolled up now keeps that visible row in place. Background auto-fill started while the conversation was still following the bottom no longer jumps the reader into an earlier part of the loaded history when the older page commits.
+- Opening a reviewed Graph Run now seeds the preceding Planner turn even when the latest review fills the viewport by itself, so the earlier Planner conversation remains in scrollback instead of appearing to vanish. A live review also keeps committed earlier Planner turns while its recovery markers are still settling.
 - Planner follow-ups can safely continue in a prepared workspace after its execution was superseded by a graph revision. Historical Planner writes are retained separately without reassigning the workspace to an older attempt or advancing the new node's result.
-- Planner follow-ups no longer fail because an unrelated switch target has an incomplete private workspace. Invalid targets are omitted, while an unready selected workspace fails explicitly without falling back to stale files or snapshotting a workspace the Planner never entered. Project-view comparison failures now identify the differing path or hardlink topology.
+- Planner follow-ups no longer fail because an unrelated switch target has an incomplete private workspace. Invalid targets are omitted, while a selected workspace that is missing, still preparing or not yet bindable is retired for that turn so the conversation continues in the source project without falling back to stale files or snapshotting a workspace the Planner never entered. Project-view comparison failures now identify the differing path or hardlink topology.
 
 ## [1.4.1] - 2026-11-03
 

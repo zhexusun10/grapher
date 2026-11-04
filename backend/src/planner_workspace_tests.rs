@@ -320,12 +320,14 @@ fn planner_workspace_uses_the_latest_running_frontier_without_waiting() {
     let jobs = runtime.jobs().unwrap();
     assert_eq!(jobs.len(), 2);
     assert!(jobs.iter().all(|job| runtime.state.nodes[&job.execution.node].status == "running"));
-    assert!(runtime.planner_workspace().unwrap_err().contains("preparation"));
+    // A still-preparing latest slot is retired instead of failing the turn:
+    // Planner answers from the source project until preparation is recorded.
+    assert!(runtime.planner_workspace().unwrap().is_none());
     let job = jobs.last().unwrap();
     let head = crate::workspace::prepare(Path::new(&job.config.repository), Path::new(&job.execution.worktree),
         &job.execution.before, &job.parent_heads).unwrap();
     runtime.emit(EventKind::Prepared { execution_id: job.execution.id.clone(), head }).unwrap();
-    let selected = runtime.planner_workspace().unwrap().expect("the latest workspace is mandatory");
+    let selected = runtime.planner_workspace().unwrap().expect("a prepared frontier is selected directly");
     assert!(jobs.iter().any(|job| job.execution.id == selected.id),
         "an active frontier is selected directly instead of falling back to source");
     assert!(runtime.path_is_running(std::path::Path::new(&selected.worktree)));
@@ -367,11 +369,12 @@ fn planner_workspace_writes_survive_success_failure_and_reach_children() {
 }
 
 #[test]
-fn planner_workspace_uses_a_running_writer_and_rejects_a_missing_frontier() {
+fn planner_workspace_uses_a_running_writer_and_retires_an_unusable_latest_slot() {
     let (_temp, _repo, service, _config) = setup(false);
     let mut runtime = service.runtime.lock().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
-    assert!(runtime.planner_workspace().unwrap_err().contains("preparation"));
+    assert!(runtime.planner_workspace().unwrap().is_none(),
+        "an unprepared latest slot is retired instead of failing the turn");
     let head = crate::workspace::prepare(Path::new(&job.config.repository), Path::new(&job.execution.worktree),
         &job.execution.before, &[]).unwrap();
     runtime.emit(EventKind::Prepared { execution_id: job.execution.id.clone(), head }).unwrap();
@@ -381,11 +384,14 @@ fn planner_workspace_uses_a_running_writer_and_rejects_a_missing_frontier() {
     let path = PathBuf::from(&root.worktree);
     let saved = path.with_extension("saved");
     fs::rename(&path, &saved).unwrap();
-    assert!(runtime.planner_workspace().unwrap_err().contains("missing"));
+    assert!(runtime.planner_workspace().unwrap().is_none(),
+        "a vanished latest slot retires to the source project, never an older slot");
     crate::path_safety::directory_link(&saved, &path);
-    assert!(runtime.planner_workspace().is_err());
+    assert!(runtime.planner_workspace().unwrap().is_none(),
+        "a linked latest slot is retired instead of failing the Planner turn");
     crate::path_safety::remove_directory_link(&path);
     fs::rename(saved, path).unwrap();
+    assert_eq!(runtime.planner_workspace().unwrap().unwrap().id, root.id);
 }
 
 #[test]
@@ -468,14 +474,14 @@ fn planner_does_not_offer_an_older_slot_when_the_latest_owner_is_missing() {
         "a previous execution must not masquerade as the node's latest workspace");
     runtime.emit(EventKind::Failed { node: "left".into(), execution_id: Some(id),
         error: "failed before preparation".into(), output_bytes: 0, metrics: None }).unwrap();
-    let error = runtime.planner_workspace().unwrap_err();
-    assert!(error.contains("Latest Planner workspace is missing"), "{error}");
+    assert!(runtime.planner_workspace().unwrap().is_none(),
+        "an unusable latest owner retires to the source project instead of the older slot");
 }
 
 #[test]
-fn planner_refuses_an_unready_latest_slot_without_snapshot_or_stale_fallback() {
-    let (_temp, _repo, service, config) = setup(false);
-    let (latest, selections, captures, sources) = {
+fn planner_retires_an_unready_latest_slot_and_plans_in_the_source_project() {
+    let (_temp, repo, service, config) = setup(false);
+    let (latest, selections, captures) = {
         let mut runtime = service.runtime.lock().unwrap();
         let root = runtime.jobs().unwrap().remove(0);
         complete(&mut runtime, root);
@@ -485,21 +491,30 @@ fn planner_refuses_an_unready_latest_slot_without_snapshot_or_stale_fallback() {
         let latest = complete(&mut runtime, right);
         let count = |predicate: fn(&EventKind) -> bool| runtime.state.events.iter().filter(|event| predicate(&event.kind)).count();
         (latest, count(|kind| matches!(kind, EventKind::PlannerWorkspaceSelected { .. })),
-            count(|kind| matches!(kind, EventKind::PlannerWorkspaceSnapshotted { .. })),
-            count(|kind| matches!(kind, EventKind::SourceSnapshotted { .. })))
+            count(|kind| matches!(kind, EventKind::PlannerWorkspaceSnapshotted { .. })))
     };
     let marker = crate::workspace_state::root(Path::new(&latest.worktree)).unwrap().join("project-ready");
     let saved = fs::read(&marker).unwrap();
     fs::remove_file(&marker).unwrap();
-    let error = turn(&service, &config).unwrap_err().0;
-    assert!(error.contains("Latest Planner workspace") && error.contains("refusing to use stale"), "{error}");
+    let next = turn(&service, &config)
+        .expect("an unready latest workspace must not fail the user's Planner turn");
+    let planning = next.planning.as_ref().unwrap();
+    assert_eq!(planning.workspace_execution_id, None, "the unready slot is retired for this turn");
+    assert_eq!(PathBuf::from(planning.worktree.as_deref().unwrap()).canonicalize().unwrap(),
+        repo.canonicalize().unwrap(), "Planner plans in the source project instead");
     {
         let mut runtime = service.runtime.lock().unwrap();
+        // Retirement is a selection decision, not a capture permission.
         let error = runtime.capture_planner_workspace(&latest.id).unwrap_err();
         assert!(error.contains("unready Planner workspace"), "{error}");
-        assert_eq!(runtime.state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerWorkspaceSelected { .. })).count(), selections);
-        assert_eq!(runtime.state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerWorkspaceSnapshotted { .. })).count(), captures);
-        assert_eq!(runtime.state.events.iter().filter(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. })).count(), sources);
+        assert_eq!(runtime.state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerWorkspaceSelected { .. })).count(),
+            selections + 1, "the source selection is recorded durably");
+        assert_eq!(runtime.state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerWorkspaceSnapshotted { .. })).count(),
+            captures, "the unvisited partial slot is never snapshotted");
+        assert!(next.events.iter().any(|event| matches!(&event.kind,
+            EventKind::GraphRevised { source_head: Some(_), .. })),
+            "the source turn records its own input head instead of a node result");
+        assert!(runtime.planner_workspace().unwrap().is_none());
     }
     fs::write(marker, saved).unwrap();
     assert_eq!(turn(&service, &config).unwrap().planning.unwrap().workspace_execution_id.as_deref(), Some(latest.id.as_str()));
@@ -736,8 +751,8 @@ fn planner_workspace_returns_to_source_after_publication_reclaims_its_previous_c
     assert_eq!(next.run_id, prior.run_id);
     let session = temp.path().join("runtime/planner-sessions").join(next.run_id);
     assert_eq!(fs::read_dir(session).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl")).count(), 1);
-    // A later revision's missing unpublished slot is not permission to fall
-    // back to the older published source merely because published_head exists.
+    // A later revision's missing unpublished slot retires to the source
+    // project; it never falls back to the older published slot.
     let mut runtime = service.runtime.lock().unwrap();
     let mut graph = runtime.state.graph.clone();
     graph.nodes.push(Node { name: "later".into(), task: "later".into() });
@@ -746,7 +761,8 @@ fn planner_workspace_returns_to_source_after_publication_reclaims_its_previous_c
     let job = runtime.jobs().unwrap().remove(0);
     let later = complete(&mut runtime, job);
     fs::remove_dir_all(later.worktree).unwrap();
-    assert!(runtime.planner_workspace().unwrap_err().contains("missing"));
+    assert!(runtime.planner_workspace().unwrap().is_none(),
+        "a vanished latest slot must not resolve to the older published slot");
 }
 
 #[test]

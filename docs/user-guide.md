@@ -49,7 +49,7 @@ After sending, the submitted text clears from the input immediately; a rejected 
 
 Switching conversations does not stop background Runs. Unsent text drafts survive conversation switching only in browser memory; reload clears them, and unsent attachments are not retained. Selecting or removing an attachment does not change project files. Sending stores it under a unique path without replacing an existing same-name file. For a completed node, the file is staged separately and delivered when its follow-up execution is prepared, leaving the completed snapshot unchanged. If the workspace is unavailable or the backend is too old to support safe uploads, the draft and attachment stay in the composer for retry.
 
-Planner follow-ups may work in a current node workspace, even alongside its active writer. They do not present a merged view of every parallel branch. Use **Planning session details** to inspect the actual directory used for each turn.
+Planner follow-ups may work in a current node workspace, even alongside its active writer. They do not present a merged view of every parallel branch. Use **Planning session details** to inspect the actual directory used for each turn. While the newest node workspace has not finished preparing, the turn continues in your source project instead of failing, and that node's partial workspace is never used.
 
 Review nodes can send bounded feedback to their graph-defined target. The target continues its own conversation with explicit instructions and completed file state; agent chat histories are not passed between nodes. An exhausted feedback budget means the requested rework was **not applied**, not that the review passed.
 

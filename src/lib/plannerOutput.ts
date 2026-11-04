@@ -57,8 +57,11 @@ export function plannerHistoryIds(options: {
     recoveredPlanningId, routeType } = options;
   // Recovery discovers the planning ID before the route is known. Mount the
   // durable activity poller now, rather than waiting for the finished graph.
+  // A review turn belongs to an existing Planner conversation even while its
+  // stage/recovery markers are still catching up, so it must keep prior turns.
+  const reviewTurn = events.some(event => event.type === "planner_review_started");
   if ((!recoveredPlanningId && routeType !== "graph") ||
-    (planning && !backgroundReview && !recoveredPlanningId && !continuation)) return [];
+    (planning && !backgroundReview && !recoveredPlanningId && !continuation && !reviewTurn)) return [];
   const completed = plannerTurnIds(events);
   const committed = new Set(completed);
   const ids = savedPlannerId ? [...completed, savedPlannerId] : completed;
