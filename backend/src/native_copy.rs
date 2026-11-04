@@ -51,16 +51,24 @@ pub(crate) fn copy_tree(
         .map_err(|error| error.to_string())?
         .is_dir()
     {
-        return Err(format!("Workspace copy source is not a directory: {}", source.display()));
+        return Err(format!(
+            "Workspace copy source is not a directory: {}",
+            source.display()
+        ));
     }
     if !fs::symlink_metadata(destination)
         .map_err(|error| error.to_string())?
         .is_dir()
     {
-        return Err(format!("Workspace copy destination is not a directory: {}", destination.display()));
+        return Err(format!(
+            "Workspace copy destination is not a directory: {}",
+            destination.display()
+        ));
     }
     let source = source.canonicalize().map_err(|error| error.to_string())?;
-    let destination = destination.canonicalize().map_err(|error| error.to_string())?;
+    let destination = destination
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     if source == destination {
         return Err("Workspace copy source and destination are identical".into());
     }
@@ -89,7 +97,10 @@ fn copy_directory(
         } else if kind.is_dir() {
             match fs::symlink_metadata(&to) {
                 Ok(existing) if existing.file_type().is_symlink() || !existing.is_dir() => {
-                    return Err(format!("Ordinary workspace directory collides with {}", to.display()));
+                    return Err(format!(
+                        "Ordinary workspace directory collides with {}",
+                        to.display()
+                    ));
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -103,7 +114,10 @@ fn copy_directory(
             copy(&from, &to)?;
             fs::set_permissions(&to, metadata.permissions()).map_err(|error| error.to_string())?;
         } else {
-            return Err(format!("Unsupported special workspace file: {}", from.display()));
+            return Err(format!(
+                "Unsupported special workspace file: {}",
+                from.display()
+            ));
         }
     }
     Ok(())
@@ -133,7 +147,10 @@ fn copy_symlink(source: &Path, destination: &Path) -> Result<(), String> {
         let target_path = if target.is_absolute() {
             target.clone()
         } else {
-            source.parent().unwrap_or_else(|| Path::new(".")).join(&target)
+            source
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&target)
         };
         if fs::metadata(&target_path).is_ok_and(|metadata| metadata.is_dir()) {
             std::os::windows::fs::symlink_dir(target, destination)
@@ -305,7 +322,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tree_copy_preserves_permissions_and_links_without_following_them() {
-        use std::os::unix::{fs::PermissionsExt, fs::symlink};
+        use std::os::unix::{fs::symlink, fs::PermissionsExt};
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
         let destination = root.path().join("destination");
@@ -314,15 +331,38 @@ mod tests {
         fs::create_dir(&destination).unwrap();
         fs::create_dir(&outside).unwrap();
         fs::write(source.join("nested/tool"), "tool").unwrap();
-        fs::set_permissions(source.join("nested/tool"), fs::Permissions::from_mode(0o750)).unwrap();
+        fs::set_permissions(
+            source.join("nested/tool"),
+            fs::Permissions::from_mode(0o750),
+        )
+        .unwrap();
         fs::write(outside.join("secret"), "secret").unwrap();
         symlink(&outside, source.join("external")).unwrap();
 
         copy_tree(&source, &destination, |_| false).unwrap();
 
-        assert_eq!(fs::read_to_string(destination.join("nested/tool")).unwrap(), "tool");
-        assert_eq!(fs::symlink_metadata(destination.join("external")).unwrap().file_type().is_symlink(), true);
-        assert_eq!(fs::read_link(destination.join("external")).unwrap(), outside);
-        assert_eq!(fs::metadata(destination.join("nested/tool")).unwrap().permissions().mode() & 0o777, 0o750);
+        assert_eq!(
+            fs::read_to_string(destination.join("nested/tool")).unwrap(),
+            "tool"
+        );
+        assert_eq!(
+            fs::symlink_metadata(destination.join("external"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            true
+        );
+        assert_eq!(
+            fs::read_link(destination.join("external")).unwrap(),
+            outside
+        );
+        assert_eq!(
+            fs::metadata(destination.join("nested/tool"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
     }
 }

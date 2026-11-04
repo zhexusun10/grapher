@@ -75,8 +75,13 @@ pub(crate) fn planning_ids(root: &Path, state: &Snapshot) -> Result<BTreeSet<Str
             }
         }
     }
-    ids.retain(|id| !id.is_empty() && id.len() <= 128
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    ids.retain(|id| {
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    });
     Ok(ids)
 }
 
@@ -142,7 +147,12 @@ pub(crate) fn remove_paths(paths: Vec<PathBuf>) -> Result<(), String> {
         match remove_tree(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("Cannot remove owned directory {}: {error}", path.display())),
+            Err(error) => {
+                return Err(format!(
+                    "Cannot remove owned directory {}: {error}",
+                    path.display()
+                ))
+            }
         }
         // A legacy Planner owner may now be empty. Never recursively remove
         // that parent; another conversation may still have a checkout there.
@@ -188,15 +198,20 @@ pub(crate) fn remove_tree(path: &Path) -> std::io::Result<()> {
             let entry = entry.map_err(|error| cleanup_error("list entry in", path, error))?;
             remove_tree(&entry.path())?;
         }
-        remove_directory(path, &metadata).map_err(|error| cleanup_error("remove directory", path, error))
+        remove_directory(path, &metadata)
+            .map_err(|error| cleanup_error("remove directory", path, error))
     } else {
-        clear_readonly(path, &metadata).map_err(|error| cleanup_error("clear read-only attribute on", path, error))?;
+        clear_readonly(path, &metadata)
+            .map_err(|error| cleanup_error("clear read-only attribute on", path, error))?;
         fs::remove_file(path).map_err(|error| cleanup_error("remove file", path, error))
     }
 }
 
 fn cleanup_error(operation: &str, path: &Path, error: std::io::Error) -> std::io::Error {
-    std::io::Error::new(error.kind(), format!("Cannot {operation} {}: {error}", path.display()))
+    std::io::Error::new(
+        error.kind(),
+        format!("Cannot {operation} {}: {error}", path.display()),
+    )
 }
 
 /// Try plain removal first. Windows can reject a read-only directory with
@@ -204,7 +219,10 @@ fn cleanup_error(operation: &str, path: &Path, error: std::io::Error) -> std::io
 fn remove_directory(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
     match fs::remove_dir(path) {
         #[cfg(windows)]
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && metadata.permissions().readonly() => {
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                && metadata.permissions().readonly() =>
+        {
             use std::os::windows::fs::OpenOptionsExt;
             const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
             const FILE_SHARE_ALL: u32 = 0x7;
@@ -216,10 +234,17 @@ fn remove_directory(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()>
                 .share_mode(FILE_SHARE_ALL)
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                 .open(path)
-                .map_err(|error| cleanup_error("open directory to clear read-only attribute on", path, error))?;
+                .map_err(|error| {
+                    cleanup_error(
+                        "open directory to clear read-only attribute on",
+                        path,
+                        error,
+                    )
+                })?;
             let mut permissions = directory.metadata()?.permissions();
             permissions.set_readonly(false);
-            directory.set_permissions(permissions)
+            directory
+                .set_permissions(permissions)
                 .map_err(|error| cleanup_error("clear read-only attribute on", path, error))?;
             drop(directory);
             fs::remove_dir(path)

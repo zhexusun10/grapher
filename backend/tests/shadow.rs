@@ -24,7 +24,9 @@ fn detect_plain_directory_creates_nothing() {
     assert_eq!(detected.head, "");
     assert!(detected.clean);
     assert!(!project.join(".git").exists());
-    assert!(workspace::shadow_repo_if_exists(&project).unwrap().is_none());
+    assert!(workspace::shadow_repo_if_exists(&project)
+        .unwrap()
+        .is_none());
     assert!(!workspace::shadow_repo_dir(&project).unwrap().exists());
 }
 
@@ -40,7 +42,9 @@ fn first_materialization_is_forced_and_reusable() {
     fs::create_dir(project.join(".cache")).unwrap();
     fs::write(project.join(".cache/package"), "ordinary bytes").unwrap();
 
-    assert!(workspace::shadow_repo_if_exists(&project).unwrap().is_none());
+    assert!(workspace::shadow_repo_if_exists(&project)
+        .unwrap()
+        .is_none());
     let head = workspace::materialize_shadow_repo(&project, &[]).unwrap();
     assert!(!head.is_empty());
     let shadow = workspace::shadow_repo_if_exists(&project).unwrap().unwrap();
@@ -83,13 +87,17 @@ fn first_materialization_is_forced_and_reusable() {
             .replace("\r\n", "\n"),
         "print('modified')\n"
     );
-    assert!(workspace::repository_git(&project, &["status", "--porcelain"])
-        .unwrap()
-        .is_empty());
+    assert!(
+        workspace::repository_git(&project, &["status", "--porcelain"])
+            .unwrap()
+            .is_empty()
+    );
 
     // Publication success reclaims the snapshot completely.
     workspace::remove_shadow_repo(&project).unwrap();
-    assert!(workspace::shadow_repo_if_exists(&project).unwrap().is_none());
+    assert!(workspace::shadow_repo_if_exists(&project)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -119,6 +127,8 @@ fn serial_execution_never_materializes_a_plain_directory() {
     // A serial source-direct execution has no Git snapshot at all.
     let head = workspace::snapshot_execution(&project, &project, "task").unwrap();
     assert_eq!(head, "");
-    assert!(workspace::shadow_repo_if_exists(&project).unwrap().is_none());
+    assert!(workspace::shadow_repo_if_exists(&project)
+        .unwrap()
+        .is_none());
     assert!(!project.join(".git").exists());
 }

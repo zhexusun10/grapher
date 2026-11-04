@@ -99,7 +99,6 @@ pub(crate) struct ResultJob {
     retry: bool,
 }
 
-
 /// Test builds alone support actuator selection.
 #[cfg(feature = "fixture")]
 fn known_engine(engine: &str) -> bool {
@@ -237,7 +236,11 @@ impl Runtime {
         move |run_id| Self::open_run_with_lease(root, lock, run_id)
     }
 
-    fn open_run_with_lease(root: PathBuf, lock: Arc<RuntimeLock>, run_id: &str) -> Result<Self, String> {
+    fn open_run_with_lease(
+        root: PathBuf,
+        lock: Arc<RuntimeLock>,
+        run_id: &str,
+    ) -> Result<Self, String> {
         let store = Store::open(&root.join("events.sqlite"))?;
         #[allow(unused_mut)]
         let mut state = if run_id.is_empty() {
@@ -474,7 +477,10 @@ impl Runtime {
         let persist_changes = matches!(
             &kind,
             EventKind::Finished { .. }
-                | EventKind::Failed { execution_id: Some(_), .. }
+                | EventKind::Failed {
+                    execution_id: Some(_),
+                    ..
+                }
                 | EventKind::MergerFinished { .. }
                 | EventKind::MergerFailed { .. }
                 | EventKind::PublicationCompleted { .. }
@@ -531,7 +537,9 @@ impl Runtime {
             match kind {
                 EventKind::Output { execution_id, .. } => {
                     let before = self.execution_bytes(execution_id);
-                    targets.entry(execution_id.clone()).or_insert((before, false));
+                    targets
+                        .entry(execution_id.clone())
+                        .or_insert((before, false));
                     metrics_before
                         .entry(execution_id.clone())
                         .or_insert_with(|| self.live_metrics(execution_id));
@@ -559,7 +567,10 @@ impl Runtime {
             matches!(
                 kind,
                 EventKind::Finished { .. }
-                    | EventKind::Failed { execution_id: Some(_), .. }
+                    | EventKind::Failed {
+                        execution_id: Some(_),
+                        ..
+                    }
                     | EventKind::MergerFinished { .. }
                     | EventKind::MergerFailed { .. }
                     | EventKind::PublicationCompleted { .. }
@@ -602,8 +613,15 @@ impl Runtime {
             if let Some(mut planning) = self.state.planning.clone() {
                 planning.status = Some("failed".into());
                 planning.error = Some("Backend stopped during post-task Planner review. Saved output is preserved; send a follow-up to continue.".into());
-                let approval_required = self.state.nodes.values().any(|node| node.status != "completed");
-                self.emit(EventKind::PlannerReviewFinished { planning, approval_required })?;
+                let approval_required = self
+                    .state
+                    .nodes
+                    .values()
+                    .any(|node| node.status != "completed");
+                self.emit(EventKind::PlannerReviewFinished {
+                    planning,
+                    approval_required,
+                })?;
             }
         }
         if let Some(execution) = self
@@ -663,8 +681,9 @@ impl Runtime {
         // touching reclaimed Git state.
         if let Some(published_head) = self.state.published_head.clone() {
             if Self::same_published_heads(&self.state.published_heads, &publication.heads) {
-                return self
-                    .emit_outputs(vec![EventKind::PublicationCompleted { head: published_head }]);
+                return self.emit_outputs(vec![EventKind::PublicationCompleted {
+                    head: published_head,
+                }]);
             }
         }
         workspace::validate_binding(Path::new(&publication.repository))?;
@@ -807,7 +826,11 @@ impl Runtime {
             &BTreeSet::from([crate::cleanup::Target::Shadow {
                 root: workspace::data_root(),
                 name,
-                source: Some(repository.canonicalize().unwrap_or_else(|_| repository.to_path_buf())),
+                source: Some(
+                    repository
+                        .canonicalize()
+                        .unwrap_or_else(|_| repository.to_path_buf()),
+                ),
             }]),
         )?;
         if head != self.latest_source_head() {
@@ -823,7 +846,9 @@ impl Runtime {
             .state
             .nodes
             .get(&job.execution.node)
-            .is_some_and(|node| node.edit_execution_id.is_some() || node.feedback_workspace.is_some());
+            .is_some_and(|node| {
+                node.edit_execution_id.is_some() || node.feedback_workspace.is_some()
+            });
         if !pinned {
             job.execution.before = head.to_string();
         }
@@ -924,14 +949,25 @@ impl Runtime {
                 stored = self.store.load(run_id)?;
                 &stored
             };
-            if matches!(target.phase.as_str(), "planning" | "publishing" | "merging" | "launching_result")
-                || target.nodes.values().any(|node| node.status == "running")
-                || target.mergers.iter().any(|merger| merger.status == "running")
-                || target.result_execution.as_ref().is_some_and(|result| result.status == "running")
+            if matches!(
+                target.phase.as_str(),
+                "planning" | "publishing" | "merging" | "launching_result"
+            ) || target.nodes.values().any(|node| node.status == "running")
+                || target
+                    .mergers
+                    .iter()
+                    .any(|merger| merger.status == "running")
+                || target
+                    .result_execution
+                    .as_ref()
+                    .is_some_and(|result| result.status == "running")
             {
                 return Err("Cannot delete a running execution".into());
             }
-            cleanups.push((run_id.clone(), crate::cleanup::manifest(&self.root, &self.store, target, true)?));
+            cleanups.push((
+                run_id.clone(),
+                crate::cleanup::manifest(&self.root, &self.store, target, true)?,
+            ));
         }
         // Validate the whole batch before either SQL deletion or filesystem I/O.
         self.store.delete_runs_with_cleanup(&cleanups)?;
@@ -940,7 +976,9 @@ impl Runtime {
         // without making the browser retain a conversation that no longer exists.
         for run_id in run_ids {
             if let Err(error) = self.retry_cleanup(run_id) {
-                eprintln!("[Grapher] Run {run_id} deleted; filesystem cleanup remains queued: {error}");
+                eprintln!(
+                    "[Grapher] Run {run_id} deleted; filesystem cleanup remains queued: {error}"
+                );
             }
         }
         Ok(())
@@ -948,7 +986,10 @@ impl Runtime {
 
     pub(crate) fn forget_deleted_runs(&mut self, run_ids: &[String]) {
         if run_ids.contains(&self.state.run_id) {
-            self.state = Snapshot { config: self.state.config.clone(), ..Snapshot::default() };
+            self.state = Snapshot {
+                config: self.state.config.clone(),
+                ..Snapshot::default()
+            };
             self.touch();
         }
     }
@@ -1076,17 +1117,30 @@ impl Runtime {
                     || node.legacy_files_version.is_some()
                     || node.legacy_baseline_files_version.is_some()
                     || node.legacy_files_changed
-                    || node.result.as_ref().is_some_and(|result| !result.resource_refs.is_empty())
+                    || node
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| !result.resource_refs.is_empty())
             })
             || self.state.executions.iter().any(|execution| {
-                execution.input.as_ref().is_some_and(|result| !result.resource_refs.is_empty())
-                    || execution.result.as_ref().is_some_and(|result| !result.resource_refs.is_empty())
+                execution
+                    .input
+                    .as_ref()
+                    .is_some_and(|result| !result.resource_refs.is_empty())
+                    || execution
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| !result.resource_refs.is_empty())
             })
-            || self.state.published_result.as_ref().is_some_and(|descriptor| {
-                !descriptor.result.resource_refs.is_empty()
-            })
+            || self
+                .state
+                .published_result
+                .as_ref()
+                .is_some_and(|descriptor| !descriptor.result.resource_refs.is_empty())
             || self.state.events.iter().any(|event| match &event.kind {
-                EventKind::SourceFilesRecorded { .. } | EventKind::WorkspaceFilesChanged { .. } => true,
+                EventKind::SourceFilesRecorded { .. } | EventKind::WorkspaceFilesChanged { .. } => {
+                    true
+                }
                 EventKind::WorkspaceResolved { files_version, .. } => files_version.is_some(),
                 _ => false,
             })
@@ -1116,7 +1170,10 @@ impl Runtime {
                     source_head: Some(head),
                     ..
                 }
-                | EventKind::ManualGraphRevised { source_head: Some(head), .. }
+                | EventKind::ManualGraphRevised {
+                    source_head: Some(head),
+                    ..
+                }
                 | EventKind::SourceSnapshotted { head }
                 | EventKind::PublicationCompleted { head } => Some(head.as_str()),
                 EventKind::Approved { base } => Some(base.as_str()),
@@ -1184,10 +1241,18 @@ impl Runtime {
     /// still has to answer the user, so it falls back to the source project
     /// rather than blocking the conversation or silently using an older slot.
     pub(crate) fn planner_workspace(&self) -> Result<Option<Execution>, String> {
-        let Some(execution) = self.planner_workspace_candidate()? else { return Ok(None); };
-        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        let Some(execution) = self.planner_workspace_candidate()? else {
+            return Ok(None);
+        };
+        let repository = resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
         if !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
-            && self.planner_workspace_owner(&execution).is_none_or(|owner| owner.id != execution.id) {
+            && self
+                .planner_workspace_owner(&execution)
+                .is_none_or(|owner| owner.id != execution.id)
+        {
             eprintln!("[Grapher] Retiring the latest Planner workspace for node '{}': its physical owner is a different execution. Planning in the source project instead", execution.node);
             return Ok(None);
         }
@@ -1198,7 +1263,11 @@ impl Runtime {
         Ok(Some(execution))
     }
 
-    fn validate_planner_workspace(&self, execution: &Execution, repository: &Path) -> Result<(), String> {
+    fn validate_planner_workspace(
+        &self,
+        execution: &Execution,
+        repository: &Path,
+    ) -> Result<(), String> {
         let path = Path::new(&execution.worktree);
         if Self::same_workspace_path(path, repository) {
             return Ok(());
@@ -1215,17 +1284,27 @@ impl Runtime {
     }
 
     fn planner_workspace_candidate(&self) -> Result<Option<Execution>, String> {
-        let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
+        let root = PathBuf::from(workspace::normalize_workspace_display_path(
+            &self.run_workspace_root(),
+        ));
         // Retained published slots can be older than subsequent source edits.
         // Only work recorded since publication can supersede the source cwd.
-        let unpublished: BTreeSet<_> = self.state.events.iter().rev()
+        let unpublished: BTreeSet<_> = self
+            .state
+            .events
+            .iter()
+            .rev()
             .take_while(|event| !matches!(event.kind, EventKind::PublicationCompleted { .. }))
             .filter_map(|event| match &event.kind {
                 EventKind::Started { execution, .. } => Some(execution.id.as_str()),
-                EventKind::Prepared { execution_id, .. } | EventKind::Finished { execution_id, .. }
-                | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. } => Some(execution_id.as_str()),
+                EventKind::Prepared { execution_id, .. }
+                | EventKind::Finished { execution_id, .. }
+                | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. } => {
+                    Some(execution_id.as_str())
+                }
                 _ => None,
-            }).collect();
+            })
+            .collect();
 
         // A Planner may explicitly ask to move to another existing node
         // workspace. Keep that choice for another follow-up when no newer node
@@ -1233,42 +1312,76 @@ impl Runtime {
         // Planner's current cwd is conversation state too: reselecting the
         // globally newest execution on every message would undo the explicit
         // move even when the graph has not changed.
-        if let Some(current_id) = self.state.planning.as_ref().and_then(|planning| planning.workspace_execution_id.as_deref()) {
-            let current_index = self.state.executions.iter().position(|execution| execution.id == current_id);
+        if let Some(current_id) = self
+            .state
+            .planning
+            .as_ref()
+            .and_then(|planning| planning.workspace_execution_id.as_deref())
+        {
+            let current_index = self
+                .state
+                .executions
+                .iter()
+                .position(|execution| execution.id == current_id);
             let selection_sequence = self.state.events.iter().rev().find_map(|event| {
                 matches!(&event.kind, EventKind::PlannerWorkspaceSelected { planning }
                     if planning.workspace_execution_id.as_deref() == Some(current_id))
-                    .then_some(event.sequence)
+                .then_some(event.sequence)
             });
             let newer_workspace = if let Some(sequence) = selection_sequence {
-                self.state.events.iter().filter(|event| event.sequence > sequence).any(|event| {
-                    let execution_id = match &event.kind {
-                        EventKind::Started { execution, .. } => Some(execution.id.as_str()),
-                        EventKind::Prepared { execution_id, .. }
-                        | EventKind::Finished { execution_id, .. }
-                        | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. }
-                        | EventKind::WorkspaceResolved { execution_id, .. } => Some(execution_id.as_str()),
-                        EventKind::Failed { execution_id: Some(execution_id), .. } => Some(execution_id.as_str()),
-                        _ => None,
-                    };
-                    execution_id.is_some_and(|execution_id| execution_id != current_id)
-                })
+                self.state
+                    .events
+                    .iter()
+                    .filter(|event| event.sequence > sequence)
+                    .any(|event| {
+                        let execution_id = match &event.kind {
+                            EventKind::Started { execution, .. } => Some(execution.id.as_str()),
+                            EventKind::Prepared { execution_id, .. }
+                            | EventKind::Finished { execution_id, .. }
+                            | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. }
+                            | EventKind::WorkspaceResolved { execution_id, .. } => {
+                                Some(execution_id.as_str())
+                            }
+                            EventKind::Failed {
+                                execution_id: Some(execution_id),
+                                ..
+                            } => Some(execution_id.as_str()),
+                            _ => None,
+                        };
+                        execution_id.is_some_and(|execution_id| execution_id != current_id)
+                    })
             } else {
-                current_index.is_some_and(|index| self.state.executions.iter().skip(index + 1).any(|execution|
-                    !self.state.superseded_execution_ids.contains(&execution.id)
-                        && self.state.nodes.contains_key(&execution.node)))
+                current_index.is_some_and(|index| {
+                    self.state
+                        .executions
+                        .iter()
+                        .skip(index + 1)
+                        .any(|execution| {
+                            !self.state.superseded_execution_ids.contains(&execution.id)
+                                && self.state.nodes.contains_key(&execution.node)
+                        })
+                })
             };
-            let current_is_new = self.state.published_head.is_none() || unpublished.contains(current_id);
+            let current_is_new =
+                self.state.published_head.is_none() || unpublished.contains(current_id);
             if current_index.is_some() && !newer_workspace && current_is_new {
-                if let Some(current) = self.state.executions.iter().find(|execution| execution.id == current_id) {
+                if let Some(current) = self
+                    .state
+                    .executions
+                    .iter()
+                    .find(|execution| execution.id == current_id)
+                {
                     let path = Path::new(&current.worktree);
                     if self.path_is_running(path) {
                         return Ok(Some(current.clone()));
                     }
                     if path.is_dir() {
-                        if self.state.config.as_ref().is_some_and(|config|
-                            path.canonicalize().ok().zip(Path::new(&config.repository).canonicalize().ok())
-                                .is_some_and(|(path, source)| path == source)) {
+                        if self.state.config.as_ref().is_some_and(|config| {
+                            path.canonicalize()
+                                .ok()
+                                .zip(Path::new(&config.repository).canonicalize().ok())
+                                .is_some_and(|(path, source)| path == source)
+                        }) {
                             return Ok(Some(current.clone()));
                         }
                         let actual = match crate::path_safety::real_child_path(&root, path, false) {
@@ -1281,7 +1394,8 @@ impl Runtime {
                         if let Some(actual) = actual {
                             if workspace::has_private_git(&actual) {
                                 let mut selected = current.clone();
-                                selected.worktree = workspace::normalize_workspace_display_path(&actual);
+                                selected.worktree =
+                                    workspace::normalize_workspace_display_path(&actual);
                                 return Ok(Some(selected));
                             }
                         }
@@ -1295,35 +1409,54 @@ impl Runtime {
         for execution in self.state.executions.iter().rev() {
             if self.state.superseded_execution_ids.contains(&execution.id)
                 || !self.state.nodes.contains_key(&execution.node)
-                || (self.state.published_head.is_some() && !unpublished.contains(execution.id.as_str()))
-                || !seen.insert(execution.worktree.clone()) {
+                || (self.state.published_head.is_some()
+                    && !unpublished.contains(execution.id.as_str()))
+                || !seen.insert(execution.worktree.clone())
+            {
                 continue;
             }
             let path = Path::new(&execution.worktree);
             // Even an active frontier is the latest workspace. Planner starts
             // directly in it; the writer snapshots the shared directory later.
-            if self.path_is_running(path) { return Ok(Some(execution.clone())); }
+            if self.path_is_running(path) {
+                return Ok(Some(execution.clone()));
+            }
             // Published-node follow-ups can use source directly, outside the
             // private Run root. Once their writer drains, Planner uses source too.
-            if self.state.published_head.is_some() && self.state.config.as_ref().is_some_and(|config|
-                path.canonicalize().ok().zip(Path::new(&config.repository).canonicalize().ok())
-                    .is_some_and(|(path, source)| path == source)) {
+            if self.state.published_head.is_some()
+                && self.state.config.as_ref().is_some_and(|config| {
+                    path.canonicalize()
+                        .ok()
+                        .zip(Path::new(&config.repository).canonicalize().ok())
+                        .is_some_and(|(path, source)| path == source)
+                })
+            {
                 return Ok(None);
             }
             // Do not retreat to an ancestor just because its current child is
             // reserved. Another parallel frontier is valid; a stale ancestor isn't.
             let descendants = downstream(&self.state.graph, &execution.node);
-            if descendants.iter().any(|name| name != &execution.node
-                && self.state.nodes.get(name).is_some_and(|node| matches!(node.status.as_str(), "completed" | "failed" | "running"))
-                && self.state.executions.iter().any(|child| child.node == *name
-                    && Path::new(&child.worktree).is_dir()
-                    && !self.state.superseded_execution_ids.contains(&child.id))) {
+            if descendants.iter().any(|name| {
+                name != &execution.node
+                    && self.state.nodes.get(name).is_some_and(|node| {
+                        matches!(node.status.as_str(), "completed" | "failed" | "running")
+                    })
+                    && self.state.executions.iter().any(|child| {
+                        child.node == *name
+                            && Path::new(&child.worktree).is_dir()
+                            && !self.state.superseded_execution_ids.contains(&child.id)
+                    })
+            }) {
                 continue;
             }
             if !path.is_dir() {
                 // An unusable latest slot never becomes an older-slot fallback;
                 // Planner answers from the source project for this selection.
-                eprintln!("[Grapher] Retiring the latest Planner workspace for node '{}': {}", execution.node, path.display());
+                eprintln!(
+                    "[Grapher] Retiring the latest Planner workspace for node '{}': {}",
+                    execution.node,
+                    path.display()
+                );
                 return Ok(None);
             }
             // Only a recorded, real child of this Run may become a Planner cwd.
@@ -1352,7 +1485,12 @@ impl Runtime {
             selected.worktree = workspace::normalize_workspace_display_path(&actual);
             return Ok(Some(selected));
         }
-        if reserved { return Err("Current workspaces are reserved for feedback; continue the repair before planning".into()); }
+        if reserved {
+            return Err(
+                "Current workspaces are reserved for feedback; continue the repair before planning"
+                    .into(),
+            );
+        }
         Ok(None)
     }
 
@@ -1364,44 +1502,75 @@ impl Runtime {
         // Superseding a node's conversation does not hand its physical slot
         // back to an older execution. Ownership changes only when a later
         // execution actually takes that slot, even if it too was superseded.
-        self.state.executions.iter().rev().find(|execution|
-            Self::same_workspace_path(Path::new(&target.worktree), Path::new(&execution.worktree)))
+        self.state.executions.iter().rev().find(|execution| {
+            Self::same_workspace_path(Path::new(&target.worktree), Path::new(&execution.worktree))
+        })
     }
 
-    pub(crate) fn planner_workspace_for_node(&self, node: &str) -> Result<Option<PlannerWorkspaceResolution>, String> {
-        let Some(resolution) = self.planner_workspace_for_node_candidate(node)? else { return Ok(None); };
-        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
-        if self.validate_planner_workspace(&resolution.execution, &repository).is_err() {
+    pub(crate) fn planner_workspace_for_node(
+        &self,
+        node: &str,
+    ) -> Result<Option<PlannerWorkspaceResolution>, String> {
+        let Some(resolution) = self.planner_workspace_for_node_candidate(node)? else {
+            return Ok(None);
+        };
+        let repository = resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
+        if self
+            .validate_planner_workspace(&resolution.execution, &repository)
+            .is_err()
+        {
             return Ok(None);
         }
         Ok(Some(resolution))
     }
 
-    fn planner_workspace_for_node_candidate(&self, node: &str) -> Result<Option<PlannerWorkspaceResolution>, String> {
-        let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
-        let unpublished: BTreeSet<_> = self.state.events.iter().rev()
+    fn planner_workspace_for_node_candidate(
+        &self,
+        node: &str,
+    ) -> Result<Option<PlannerWorkspaceResolution>, String> {
+        let root = PathBuf::from(workspace::normalize_workspace_display_path(
+            &self.run_workspace_root(),
+        ));
+        let unpublished: BTreeSet<_> = self
+            .state
+            .events
+            .iter()
+            .rev()
             .take_while(|event| !matches!(event.kind, EventKind::PublicationCompleted { .. }))
             .filter_map(|event| match &event.kind {
                 EventKind::Started { execution, .. } => Some(execution.id.as_str()),
-                EventKind::Prepared { execution_id, .. } | EventKind::Finished { execution_id, .. }
-                | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. } => Some(execution_id.as_str()),
+                EventKind::Prepared { execution_id, .. }
+                | EventKind::Finished { execution_id, .. }
+                | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. } => {
+                    Some(execution_id.as_str())
+                }
                 _ => None,
-            }).collect();
+            })
+            .collect();
         for requested in self.state.executions.iter().rev() {
             if requested.node != node
                 || self.state.superseded_execution_ids.contains(&requested.id)
-                || (self.state.published_head.is_some() && !unpublished.contains(requested.id.as_str())) {
+                || (self.state.published_head.is_some()
+                    && !unpublished.contains(requested.id.as_str()))
+            {
                 continue;
             }
             let owner = self.planner_workspace_owner(requested).unwrap_or(requested);
             if self.state.superseded_execution_ids.contains(&owner.id)
-                || !Path::new(&owner.worktree).is_dir() {
+                || !Path::new(&owner.worktree).is_dir()
+            {
                 return Ok(None);
             }
             let path = Path::new(&owner.worktree);
-            let is_source = self.state.config.as_ref().is_some_and(|config|
-                path.canonicalize().ok().zip(Path::new(&config.repository).canonicalize().ok())
-                    .is_some_and(|(path, source)| path == source));
+            let is_source = self.state.config.as_ref().is_some_and(|config| {
+                path.canonicalize()
+                    .ok()
+                    .zip(Path::new(&config.repository).canonicalize().ok())
+                    .is_some_and(|(path, source)| path == source)
+            });
             let selected = if is_source {
                 owner.clone()
             } else {
@@ -1423,9 +1592,16 @@ impl Runtime {
         Ok(None)
     }
 
-    pub(crate) fn planner_workspace_targets(&self, current_node: Option<&str>, current_workspace: &Path) -> Result<serde_json::Value, String> {
+    pub(crate) fn planner_workspace_targets(
+        &self,
+        current_node: Option<&str>,
+        current_workspace: &Path,
+    ) -> Result<serde_json::Value, String> {
         let mut targets = serde_json::Map::new();
-        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        let repository = resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
         let mut checked = std::collections::BTreeMap::<String, Result<(), String>>::new();
         for node in &self.state.graph.nodes {
             if current_node == Some(node.name.as_str()) {
@@ -1435,7 +1611,10 @@ impl Runtime {
                 Ok(Some(resolution)) => resolution,
                 Ok(None) => continue,
                 Err(error) => {
-                    eprintln!("[Grapher] Planner workspace for '{}' is unavailable: {error}", node.name);
+                    eprintln!(
+                        "[Grapher] Planner workspace for '{}' is unavailable: {error}",
+                        node.name
+                    );
                     continue;
                 }
             };
@@ -1443,48 +1622,75 @@ impl Runtime {
             // The native launcher grants only slots of the same physical Run.
             // A source-direct execution cannot be a private switch target.
             if Self::same_workspace_path(path, &repository)
-                || !path.parent().zip(current_workspace.parent())
-                    .is_some_and(|(target, current)| Self::same_workspace_path(target, current)) {
+                || !path
+                    .parent()
+                    .zip(current_workspace.parent())
+                    .is_some_and(|(target, current)| Self::same_workspace_path(target, current))
+            {
                 continue;
             }
             let id = resolution.execution.id.clone();
             if !checked.contains_key(&id) {
                 let result = self.validate_planner_workspace(&resolution.execution, &repository);
                 if let Err(error) = &result {
-                    eprintln!("[Grapher] Planner workspace for '{}' is unavailable: {error}", resolution.execution.node);
+                    eprintln!(
+                        "[Grapher] Planner workspace for '{}' is unavailable: {error}",
+                        resolution.execution.node
+                    );
                 }
                 checked.insert(id.clone(), result);
             }
-            if checked[&id].is_err() { continue; }
+            if checked[&id].is_err() {
+                continue;
+            }
             let runtime_environment = if crate::workspace_view::is_bound(path) {
                 Some(crate::native::workspace_environment(path)?)
-            } else { None };
-            targets.insert(node.name.clone(), serde_json::json!({
-                "requestedNode": node.name,
-                "actualNode": resolution.execution.node,
-                "executionId": resolution.execution.id,
-                "workspace": resolution.execution.worktree,
-                "runtimeEnvironment": runtime_environment,
-                "redirected": resolution.redirected_from.is_some(),
-            }));
+            } else {
+                None
+            };
+            targets.insert(
+                node.name.clone(),
+                serde_json::json!({
+                    "requestedNode": node.name,
+                    "actualNode": resolution.execution.node,
+                    "executionId": resolution.execution.id,
+                    "workspace": resolution.execution.worktree,
+                    "runtimeEnvironment": runtime_environment,
+                    "redirected": resolution.redirected_from.is_some(),
+                }),
+            );
         }
         Ok(serde_json::Value::Object(targets))
     }
 
     pub(crate) fn capture_planner_workspace(&mut self, execution_id: &str) -> Result<(), String> {
-        let selected = self.state.executions.iter().find(|e| e.id == execution_id)
-            .cloned().ok_or("Planner workspace execution is missing")?;
-        let execution = self.planner_workspace_owner(&selected).cloned()
+        let selected = self
+            .state
+            .executions
+            .iter()
+            .find(|e| e.id == execution_id)
+            .cloned()
+            .ok_or("Planner workspace execution is missing")?;
+        let execution = self
+            .planner_workspace_owner(&selected)
+            .cloned()
             .ok_or("Planner workspace no longer has a recorded physical owner")?;
         if execution.id != selected.id {
             return Err("Planner workspace ownership changed after selection; refusing to capture another execution".into());
         }
         let path = Path::new(&execution.worktree);
-        if self.path_is_running(path) { return Err("Planner workspace still has an active writer".into()); }
-        let root = PathBuf::from(workspace::normalize_workspace_display_path(&self.run_workspace_root()));
+        if self.path_is_running(path) {
+            return Err("Planner workspace still has an active writer".into());
+        }
+        let root = PathBuf::from(workspace::normalize_workspace_display_path(
+            &self.run_workspace_root(),
+        ));
         crate::path_safety::real_child_path(&root, path, false)?
             .ok_or("Planner workspace is no longer owned by this Run")?;
-        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        let repository = resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
         self.validate_planner_workspace(&execution, &repository)
             .map_err(|error| format!("Cannot capture an unready Planner workspace: {error}"))?;
         let expected = execution.after.as_deref().unwrap_or(&execution.before);
@@ -1493,15 +1699,28 @@ impl Runtime {
             || !self.state.nodes.contains_key(&execution.node);
         let exclusions = self.exclusions()?;
         let head = if detached {
-            workspace::snapshot_detached_planner_scoped(path, &repository, &self.state.run_id,
-                &execution.id, &exclusions)?
+            workspace::snapshot_detached_planner_scoped(
+                path,
+                &repository,
+                &self.state.run_id,
+                &execution.id,
+                &exclusions,
+            )?
         } else {
-            workspace::snapshot_node_scoped(path, &repository, &execution.node,
-                Some(&self.state.run_id), &exclusions)?
+            workspace::snapshot_node_scoped(
+                path,
+                &repository,
+                &execution.node,
+                Some(&self.state.run_id),
+                &exclusions,
+            )?
         };
         let mut result = None;
         let mut environment_changed = false;
-        if let (Some(store), Some(previous)) = (self.environments()?, execution.result.as_ref().or(execution.input.as_ref())) {
+        if let (Some(store), Some(previous)) = (
+            self.environments()?,
+            execution.result.as_ref().or(execution.input.as_ref()),
+        ) {
             if store.load_launch(&previous.launch_ref)?.state_bound() {
                 // Planner is a separate writer, not another attempt/session of
                 // this node. Advance E/L together with code in one replay event.
@@ -1510,18 +1729,28 @@ impl Runtime {
                     ..previous.clone()
                 };
                 let sealed = store.seal(path, &input, &head, vec![])?;
-                environment_changed = sealed.environment_ref != previous.environment_ref || sealed.launch_ref != previous.launch_ref;
+                environment_changed = sealed.environment_ref != previous.environment_ref
+                    || sealed.launch_ref != previous.launch_ref;
                 result = Some(sealed);
             }
         }
         if head != expected || environment_changed {
-            let invalidated = if detached { Vec::new() } else {
-                downstream(&self.state.graph, &execution.node).into_iter()
-                    .filter(|name| name != &execution.node && !execution.workspace_lineage.contains(name))
+            let invalidated = if detached {
+                Vec::new()
+            } else {
+                downstream(&self.state.graph, &execution.node)
+                    .into_iter()
+                    .filter(|name| {
+                        name != &execution.node && !execution.workspace_lineage.contains(name)
+                    })
                     .collect()
             };
             self.emit(EventKind::PlannerWorkspaceSnapshotted {
-                execution_id: execution.id, head, result, invalidated, detached,
+                execution_id: execution.id,
+                head,
+                result,
+                invalidated,
+                detached,
             })?;
         }
         Ok(())
@@ -1674,16 +1903,34 @@ impl Runtime {
         // own phase when it finishes. A concurrent revision could otherwise
         // dispatch a second writer or have its phase overwritten on settlement.
         if self.state.phase == "launching_result"
-            || self.state.result_execution.as_ref().is_some_and(|execution| execution.status == "running")
+            || self
+                .state
+                .result_execution
+                .as_ref()
+                .is_some_and(|execution| execution.status == "running")
         {
             return Err("Wait for the published result to finish before adding a node".into());
         }
-        if matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed" | "followup")
-            || self.state.mergers.iter().any(|merger| merger.status == "running")
-            || self.state.nodes.values().any(|node| node.source_direct_recovery
-                || node.pending_messages.iter().any(|message| message.source_direct))
+        if matches!(
+            self.state.phase.as_str(),
+            "publishing" | "merging" | "publication_failed" | "followup"
+        ) || self
+            .state
+            .mergers
+            .iter()
+            .any(|merger| merger.status == "running")
+            || self.state.nodes.values().any(|node| {
+                node.source_direct_recovery
+                    || node
+                        .pending_messages
+                        .iter()
+                        .any(|message| message.source_direct)
+            })
         {
-            return Err("Wait for publication or the active follow-up to finish before adding a node".into());
+            return Err(
+                "Wait for publication or the active follow-up to finish before adding a node"
+                    .into(),
+            );
         }
         request.node.name = request.node.name.trim().to_string();
         if request.feedback && request.to.as_deref().unwrap_or("").is_empty() {
@@ -1694,19 +1941,33 @@ impl Runtime {
             if !request.feedback {
                 // Inserting into an existing direct dependency replaces that
                 // edge; otherwise it becomes redundant under compiler policy.
-                graph.edges.retain(|edge| edge.feedback || edge.from != *from || edge.to != *to);
+                graph
+                    .edges
+                    .retain(|edge| edge.feedback || edge.from != *from || edge.to != *to);
             }
         }
         if let Some(from) = &request.from {
-            graph.edges.push(Edge { from: from.clone(), to: request.node.name.clone(), feedback: false });
+            graph.edges.push(Edge {
+                from: from.clone(),
+                to: request.node.name.clone(),
+                feedback: false,
+            });
         }
         if let Some(to) = &request.to {
-            graph.edges.push(Edge { from: request.node.name.clone(), to: to.clone(), feedback: request.feedback });
+            graph.edges.push(Edge {
+                from: request.node.name.clone(),
+                to: to.clone(),
+                feedback: request.feedback,
+            });
         }
         graph.nodes.push(request.node);
-        compile(&graph, true).map_err(|errors| errors.into_iter()
-            .map(|error| format!("{}: {}", error.code, error.message))
-            .collect::<Vec<_>>().join("\n"))?;
+        compile(&graph, true).map_err(|errors| {
+            errors
+                .into_iter()
+                .map(|error| format!("{}: {}", error.code, error.message))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })?;
 
         let affected = self.revision_affected(&graph);
         let mut confirmation_scope = affected.clone();
@@ -1718,16 +1979,26 @@ impl Runtime {
             }
         }
         for name in &confirmation_scope {
-            if let Some(node) = self.state.nodes.get(name).filter(|node| node.status == "completed") {
-                if !request.confirmed_completed.iter().any(|confirmed|
-                    confirmed.name == *name && confirmed.revision == node.revision && confirmed.head == node.head)
-                {
+            if let Some(node) = self
+                .state
+                .nodes
+                .get(name)
+                .filter(|node| node.status == "completed")
+            {
+                if !request.confirmed_completed.iter().any(|confirmed| {
+                    confirmed.name == *name
+                        && confirmed.revision == node.revision
+                        && confirmed.head == node.head
+                }) {
                     return Err("Completed results changed or require confirmation; review the graph and confirm again".into());
                 }
             }
         }
-        if self.state.executions.iter().any(|execution|
-            execution.status == "running" && affected.contains(&execution.node))
+        if self
+            .state
+            .executions
+            .iter()
+            .any(|execution| execution.status == "running" && affected.contains(&execution.node))
         {
             return Err("Pause or wait for affected running nodes before adding this node".into());
         }
@@ -1736,24 +2007,38 @@ impl Runtime {
                 return Err("Only an unapproved graph draft can be edited in place".into());
             }
             if self.state.executions.is_empty() {
-                return self.edit_draft_graph(graph, self.state.config.clone().ok_or("Missing config")?);
+                return self
+                    .edit_draft_graph(graph, self.state.config.clone().ok_or("Missing config")?);
             }
             // Post-task review can revoke approval while retaining completed
             // work. DraftEdited would reset every node and discard those heads.
         }
-        let invalidated = affected.into_iter().filter(|name|
-            graph.nodes.iter().any(|node| node.name == *name)).collect();
+        let invalidated = affected
+            .into_iter()
+            .filter(|name| graph.nodes.iter().any(|node| node.name == *name))
+            .collect();
         // As with Planner revisions, include source edits made since approval
         // or publication. A reclaimed plain-directory shadow remains lazy.
-        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
-        let source_head = if !self.state.approved || (!workspace::is_standard_git(&repository)
-            && workspace::shadow_repo_if_exists(&repository)?.is_none())
+        let repository = resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
+        let source_head = if !self.state.approved
+            || (!workspace::is_standard_git(&repository)
+                && workspace::shadow_repo_if_exists(&repository)?.is_none())
         {
             None
         } else {
-            Some(workspace::snapshot_repository_scoped(&repository, &self.exclusions()?)?)
+            Some(workspace::snapshot_repository_scoped(
+                &repository,
+                &self.exclusions()?,
+            )?)
         };
-        self.emit(EventKind::ManualGraphRevised { graph, invalidated, source_head })
+        self.emit(EventKind::ManualGraphRevised {
+            graph,
+            invalidated,
+            source_head,
+        })
     }
 
     /// Nodes whose work or dependencies change, plus consumers of those nodes.
@@ -1820,7 +2105,8 @@ impl Runtime {
         let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
         if self.state.published_head.is_some()
             && previous.nodes.iter().any(|node| {
-                !names.contains(node.name.as_str()) && self.state.nodes[&node.name].status == "completed"
+                !names.contains(node.name.as_str())
+                    && self.state.nodes[&node.name].status == "completed"
             })
         {
             return Err("Cannot remove already published nodes from this run".into());
@@ -1875,7 +2161,10 @@ impl Runtime {
         // results, publication evidence, or already-executed nodes, so it is
         // safe in every phase.
         let settings = RunModelConfig::from_config(config);
-        let previous = self.state.model_config.clone()
+        let previous = self
+            .state
+            .model_config
+            .clone()
             .unwrap_or_else(|| RunModelConfig::from_config(original));
         if settings == previous {
             // A previous save may have happened while a node was still running.
@@ -1892,25 +2181,43 @@ impl Runtime {
             // must never opt a failed Node Agent attempt into Continue.
             Vec::new()
         } else {
-            let started: BTreeSet<_> = self.state.executions.iter()
-                .map(|execution| execution.node.as_str()).collect();
+            let started: BTreeSet<_> = self
+                .state
+                .executions
+                .iter()
+                .map(|execution| execution.node.as_str())
+                .collect();
             // A node's own composition failure is projected as blocked, unlike
             // descendants blocked only by an upstream failure.
-            let preparation_failures: BTreeSet<_> = self.state.nodes.keys()
+            let preparation_failures: BTreeSet<_> = self
+                .state
+                .nodes
+                .keys()
                 .filter(|name| self.state.node_has_own_blocked_failure(name))
-                .cloned().collect();
-            self.state.nodes.iter().filter_map(|(name, node)| {
-                let unstarted = matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")
-                    && !started.contains(name.as_str());
-                let failed = node.status == "failed"
-                    && self.state.executions.iter().rev()
-                        .find(|execution| execution.node == *name
-                            && !self.state.superseded_execution_ids.contains(&execution.id))
-                        .is_some_and(|execution| execution.status == "failed");
-                ((unstarted || failed || preparation_failures.contains(name))
-                    && node.model_config.as_ref().unwrap_or(&previous_node) != &node_settings)
-                    .then(|| name.clone())
-            }).collect()
+                .cloned()
+                .collect();
+            self.state
+                .nodes
+                .iter()
+                .filter_map(|(name, node)| {
+                    let unstarted = matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")
+                        && !started.contains(name.as_str());
+                    let failed = node.status == "failed"
+                        && self
+                            .state
+                            .executions
+                            .iter()
+                            .rev()
+                            .find(|execution| {
+                                execution.node == *name
+                                    && !self.state.superseded_execution_ids.contains(&execution.id)
+                            })
+                            .is_some_and(|execution| execution.status == "failed");
+                    ((unstarted || failed || preparation_failures.contains(name))
+                        && node.model_config.as_ref().unwrap_or(&previous_node) != &node_settings)
+                        .then(|| name.clone())
+                })
+                .collect()
         };
         self.emit(EventKind::ConversationModelsUpdated { settings, nodes })?;
         self.sync_failed_node_models(None)
@@ -1920,35 +2227,67 @@ impl Runtime {
     /// that attempt later fails, but never alter a live or completed writer.
     /// Reconciliation also repairs Runs saved by older backends before retry.
     fn sync_failed_node_models(&mut self, only: Option<&[String]>) -> Result<(), String> {
-        let Some(settings) = self.state.model_config.clone() else { return Ok(()); };
-        let Some(original) = self.state.config.as_ref() else { return Ok(()); };
+        let Some(settings) = self.state.model_config.clone() else {
+            return Ok(());
+        };
+        let Some(original) = self.state.config.as_ref() else {
+            return Ok(());
+        };
         let node_settings = settings.node_agent_settings();
-        if node_settings.model.is_empty() { return Ok(()); }
+        if node_settings.model.is_empty() {
+            return Ok(());
+        }
         let original_node = original.node_agent_settings();
-        let nodes: Vec<_> = self.state.nodes.iter().filter_map(|(name, node)| {
-            if only.is_some_and(|names| !names.contains(name)) { return None; }
-            let failed = node.status == "failed" && self.state.executions.iter().rev()
-                .find(|execution| execution.node == *name
-                    && !self.state.superseded_execution_ids.contains(&execution.id))
-                .is_some_and(|execution| execution.status == "failed");
-            ((failed || self.state.node_has_own_blocked_failure(name))
-                && node.model_config.as_ref().unwrap_or(&original_node) != &node_settings)
-                .then(|| name.clone())
-        }).collect();
-        if nodes.is_empty() { return Ok(()); }
+        let nodes: Vec<_> = self
+            .state
+            .nodes
+            .iter()
+            .filter_map(|(name, node)| {
+                if only.is_some_and(|names| !names.contains(name)) {
+                    return None;
+                }
+                let failed = node.status == "failed"
+                    && self
+                        .state
+                        .executions
+                        .iter()
+                        .rev()
+                        .find(|execution| {
+                            execution.node == *name
+                                && !self.state.superseded_execution_ids.contains(&execution.id)
+                        })
+                        .is_some_and(|execution| execution.status == "failed");
+                ((failed || self.state.node_has_own_blocked_failure(name))
+                    && node.model_config.as_ref().unwrap_or(&original_node) != &node_settings)
+                    .then(|| name.clone())
+            })
+            .collect();
+        if nodes.is_empty() {
+            return Ok(());
+        }
         self.emit(EventKind::ConversationModelsUpdated { settings, nodes })
     }
 
     /// Prove source ownership from the message claim or a prior recovery event,
     /// not merely from a workspace path that happens to alias the source.
     fn execution_was_source_direct(&self, execution: &Execution) -> bool {
-        let Some((index, sequences)) = self.state.events.iter().enumerate().rev().find_map(|(index, event)| {
-            match &event.kind {
-                EventKind::Started { execution: started, message_sequences, .. } if started.id == execution.id =>
-                    Some((index, message_sequences.as_ref())),
-                _ => None,
-            }
-        }) else { return false; };
+        let Some((index, sequences)) =
+            self.state
+                .events
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, event)| match &event.kind {
+                    EventKind::Started {
+                        execution: started,
+                        message_sequences,
+                        ..
+                    } if started.id == execution.id => Some((index, message_sequences.as_ref())),
+                    _ => None,
+                })
+        else {
+            return false;
+        };
         if sequences.is_some_and(|sequences| self.state.events[..index].iter().any(|event| {
             sequences.contains(&event.sequence) && matches!(&event.kind,
                 EventKind::Invalidated { target, source_direct: true, .. } if target == &execution.node)
@@ -1957,11 +2296,22 @@ impl Runtime {
         }
         for event in self.state.events[..index].iter().rev() {
             match &event.kind {
-                EventKind::RecoveryQueued { nodes, source_direct_nodes, .. } if nodes.contains(&execution.node) =>
-                    return source_direct_nodes.contains(&execution.node),
-                EventKind::Started { execution: previous, .. } if previous.node == execution.node => return false,
-                EventKind::Invalidated { target, source_direct, .. }
-                    if sequences.is_none() && target == &execution.node => return *source_direct,
+                EventKind::RecoveryQueued {
+                    nodes,
+                    source_direct_nodes,
+                    ..
+                } if nodes.contains(&execution.node) => {
+                    return source_direct_nodes.contains(&execution.node)
+                }
+                EventKind::Started {
+                    execution: previous,
+                    ..
+                } if previous.node == execution.node => return false,
+                EventKind::Invalidated {
+                    target,
+                    source_direct,
+                    ..
+                } if sequences.is_none() && target == &execution.node => return *source_direct,
                 _ => {}
             }
         }
@@ -1990,15 +2340,38 @@ impl Runtime {
         // Record that ownership so replay does not turn its retry into a Graph
         // workspace or publish the source-direct turn a second time.
         let source_direct_nodes = if !self.is_serial()
-            && self.state.config.as_ref().is_some_and(|config| config.environment.is_none()) {
+            && self
+                .state
+                .config
+                .as_ref()
+                .is_some_and(|config| config.environment.is_none())
+        {
             let repository = resolve_repository(&self.root, self.state.config.as_ref().unwrap())?;
-            roots.iter().filter(|name| self.state.executions.iter().rev().find(|execution| {
-                execution.node == **name && !self.state.superseded_execution_ids.contains(&execution.id)
-            }).is_some_and(|execution| execution.status == "failed"
-                && Self::same_workspace_path(Path::new(&execution.worktree), &repository)
-                && self.execution_was_source_direct(execution)))
-                .cloned().collect()
-        } else { Vec::new() };
+            roots
+                .iter()
+                .filter(|name| {
+                    self.state
+                        .executions
+                        .iter()
+                        .rev()
+                        .find(|execution| {
+                            execution.node == **name
+                                && !self.state.superseded_execution_ids.contains(&execution.id)
+                        })
+                        .is_some_and(|execution| {
+                            execution.status == "failed"
+                                && Self::same_workspace_path(
+                                    Path::new(&execution.worktree),
+                                    &repository,
+                                )
+                                && self.execution_was_source_direct(execution)
+                        })
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let mut recovery = BTreeSet::new();
         for root in roots {
@@ -2025,11 +2398,19 @@ impl Runtime {
 
     /// Record intent before terminating processes, including workers not yet spawned.
     /// Scheduling-only pauses (e.g. Planner revision drain) do not call this.
-    pub fn request_execution_stop(&mut self, node: Option<&str>) -> Result<Vec<(String, String)>, String> {
-        let executions: Vec<_> = self.state.executions.iter()
-            .filter(|execution| execution.status == "running"
-                && node.is_none_or(|node| execution.node == node))
-            .map(|execution| (execution.node.clone(), execution.id.clone())).collect();
+    pub fn request_execution_stop(
+        &mut self,
+        node: Option<&str>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let executions: Vec<_> = self
+            .state
+            .executions
+            .iter()
+            .filter(|execution| {
+                execution.status == "running" && node.is_none_or(|node| execution.node == node)
+            })
+            .map(|execution| (execution.node.clone(), execution.id.clone()))
+            .collect();
         if !executions.is_empty() {
             self.emit(EventKind::ExecutionStopRequested {
                 execution_ids: executions.iter().map(|(_, id)| id.clone()).collect(),
@@ -2043,9 +2424,17 @@ impl Runtime {
         // unrelated failure. Once that work settles, Continue remains
         // available for an explicit retry of the failed nodes.
         let paused_work = !self.state.interrupted_nodes().is_empty()
-            || (self.state.paused && self.state.nodes.values()
-                .any(|node| matches!(node.status.as_str(), "waiting" | "dirty")));
-        let scope = if paused_work { RecoveryScope::InterruptedOnly } else { RecoveryScope::AllFailed };
+            || (self.state.paused
+                && self
+                    .state
+                    .nodes
+                    .values()
+                    .any(|node| matches!(node.status.as_str(), "waiting" | "dirty")));
+        let scope = if paused_work {
+            RecoveryScope::InterruptedOnly
+        } else {
+            RecoveryScope::AllFailed
+        };
         self.set_paused(paused, Some(scope))
     }
 
@@ -2071,8 +2460,10 @@ impl Runtime {
             return Err("Approve the graph first".into());
         }
         if !paused {
-            if self.state.executions.iter().any(|execution| execution.status == "running"
-                && self.state.execution_stop_requests.contains(&execution.id)) {
+            if self.state.executions.iter().any(|execution| {
+                execution.status == "running"
+                    && self.state.execution_stop_requests.contains(&execution.id)
+            }) {
                 return Err("Wait for paused executions to stop before continuing".into());
             }
             resolve_repository(
@@ -2174,12 +2565,26 @@ impl Runtime {
         images: Option<Vec<ImageAttachment>>,
         selected_version: Option<usize>,
     ) -> Result<(), String> {
-        self.edit_node_message_at(node, execution_id, old_text, instruction, images, selected_version, None)
+        self.edit_node_message_at(
+            node,
+            execution_id,
+            old_text,
+            instruction,
+            images,
+            selected_version,
+            None,
+        )
     }
 
     pub fn edit_node_message_at(
-        &mut self, node: &str, execution_id: &str, old_text: &str, instruction: &str,
-        images: Option<Vec<ImageAttachment>>, selected_version: Option<usize>, user_turn_offset: Option<usize>,
+        &mut self,
+        node: &str,
+        execution_id: &str,
+        old_text: &str,
+        instruction: &str,
+        images: Option<Vec<ImageAttachment>>,
+        selected_version: Option<usize>,
+        user_turn_offset: Option<usize>,
     ) -> Result<(), String> {
         if instruction.trim().is_empty() {
             return Err("Enter a replacement message".into());
@@ -2223,21 +2628,52 @@ impl Runtime {
         // Resolve the retained prefix from durable events before reading the log,
         // so an abandoned suffix is never materialized.
         let mut retained_end = None;
-        let anchor_index = self.state.executions.iter().position(|execution| execution.id == anchor.id).expect("validated edit anchor");
+        let anchor_index = self
+            .state
+            .executions
+            .iter()
+            .position(|execution| execution.id == anchor.id)
+            .expect("validated edit anchor");
         if superseded && selected_version.is_none() {
             for event in &self.state.events {
-                if let EventKind::ConversationEdited { target, from_execution_id, from_output_offset, .. } = &event.kind {
-                    if target != node { continue; }
-                    let Some((cut_index, cut)) = self.state.executions.iter().enumerate().find(|(_, execution)| execution.id == *from_execution_id) else { continue; };
-                    if cut.session_id != anchor.session_id { continue; }
-                    if cut_index < anchor_index { retained_end = None; }
-                    if cut.id == anchor.id { retained_end = *from_output_offset; }
+                if let EventKind::ConversationEdited {
+                    target,
+                    from_execution_id,
+                    from_output_offset,
+                    ..
+                } = &event.kind
+                {
+                    if target != node {
+                        continue;
+                    }
+                    let Some((cut_index, cut)) = self
+                        .state
+                        .executions
+                        .iter()
+                        .enumerate()
+                        .find(|(_, execution)| execution.id == *from_execution_id)
+                    else {
+                        continue;
+                    };
+                    if cut.session_id != anchor.session_id {
+                        continue;
+                    }
+                    if cut_index < anchor_index {
+                        retained_end = None;
+                    }
+                    if cut.id == anchor.id {
+                        retained_end = *from_output_offset;
+                    }
                 }
             }
-            let current_session = self.state.executions.iter().rev().find(|execution| execution.node == node &&
-                !self.state.superseded_execution_ids.contains(&execution.id));
-            if current_session.is_some_and(|execution| execution.session_id != anchor.session_id) || retained_end.is_none() ||
-                (current_session.is_none() && self.state.nodes[node].edit_execution_id.is_none()) {
+            let current_session = self.state.executions.iter().rev().find(|execution| {
+                execution.node == node
+                    && !self.state.superseded_execution_ids.contains(&execution.id)
+            });
+            if current_session.is_some_and(|execution| execution.session_id != anchor.session_id)
+                || retained_end.is_none()
+                || (current_session.is_none() && self.state.nodes[node].edit_execution_id.is_none())
+            {
                 return Err("Select a user turn retained in the active conversation".into());
             }
         }
@@ -2246,14 +2682,25 @@ impl Runtime {
         let logged = self.store.log_bytes(&self.state.run_id, &anchor.id)?;
         let output = if logged > 0 {
             let limit = retained_end.map_or(usize::MAX, |end| end.min(logged));
-            self.store.execution_log_page(&self.state.run_id, &anchor.id, 0, limit)?.content
+            self.store
+                .execution_log_page(&self.state.run_id, &anchor.id, 0, limit)?
+                .content
         } else if anchor.output_bytes == 0 || anchor.output_bytes == anchor.output.len() {
             crate::session_branch::truncate_output(&anchor.output, retained_end)
-        } else { String::new() };
+        } else {
+            String::new()
+        };
         let user_turn_offset = if user_turn_offset.is_none() && selected_version.is_none() {
             crate::session_branch::unique_output_user_turn_offset(&output, old_text)
-        } else { user_turn_offset };
-        if superseded && selected_version.is_none() && !user_turn_offset.zip(retained_end).is_some_and(|(offset, end)| offset < end) {
+        } else {
+            user_turn_offset
+        };
+        if superseded
+            && selected_version.is_none()
+            && !user_turn_offset
+                .zip(retained_end)
+                .is_some_and(|(offset, end)| offset < end)
+        {
             return Err("Select a user turn retained in the active conversation".into());
         }
         let start = self
@@ -2285,11 +2732,19 @@ impl Runtime {
             .unwrap_or(self.state.events[start].sequence);
         // Editing a Steer abandons that turn and later turns, not the other
         // user instructions already consumed inside the same execution.
-        let from_event_sequence = self.state.events[start..].iter().find_map(|event| match &event.kind {
-            EventKind::Steered { execution_id: owner, instruction, .. }
-                if owner == execution_id && instruction.trim() == old_text.trim() => Some(event.sequence),
-            _ => None,
-        }).unwrap_or(opening_event_sequence);
+        let from_event_sequence = self.state.events[start..]
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::Steered {
+                    execution_id: owner,
+                    instruction,
+                    ..
+                } if owner == execution_id && instruction.trim() == old_text.trim() => {
+                    Some(event.sequence)
+                }
+                _ => None,
+            })
+            .unwrap_or(opening_event_sequence);
         let first_id = self
             .state
             .executions
@@ -2301,7 +2756,8 @@ impl Runtime {
         let session_dir = self.root.join("sessions").join(&first_id);
         let suffix = format!("_{}.jsonl", anchor.session_id);
         let persisted = fs::read_dir(&session_dir).ok().is_some_and(|entries| {
-            entries.filter_map(Result::ok)
+            entries
+                .filter_map(Result::ok)
                 .any(|entry| entry.file_name().to_string_lossy().ends_with(&suffix))
         });
         // A failed attempt that exited before Pi created its conversation has
@@ -2309,35 +2765,67 @@ impl Runtime {
         // next attempt starts the first turn in the retained session slot. A
         // completed or running conversation still fails closed if its history
         // disappeared, instead of silently losing the abandoned branch.
-        let selector = user_turn_offset.map(|offset| crate::session_branch::output_user_turn(&output, offset, old_text)).transpose()?;
-        let session_writer = self.state.executions.iter().rev().find(|execution| execution.node == node &&
-            execution.session_id == anchor.session_id && !self.state.superseded_execution_ids.contains(&execution.id))
+        let selector = user_turn_offset
+            .map(|offset| crate::session_branch::output_user_turn(&output, offset, old_text))
+            .transpose()?;
+        let session_writer = self
+            .state
+            .executions
+            .iter()
+            .rev()
+            .find(|execution| {
+                execution.node == node
+                    && execution.session_id == anchor.session_id
+                    && !self.state.superseded_execution_ids.contains(&execution.id)
+            })
             .unwrap_or(&anchor);
         let pending = if !persisted && anchor.status == "failed" && selector.is_none() {
             None
         } else {
             Some(crate::session_branch::prepare_node_user_branch(
-                &session_dir, &anchor.session_id, Path::new(&session_writer.worktree), old_text,
-                anchor.started_at, anchor.completed_at.unwrap_or(u64::MAX), selector.as_ref(),
+                &session_dir,
+                &anchor.session_id,
+                Path::new(&session_writer.worktree),
+                old_text,
+                anchor.started_at,
+                anchor.completed_at.unwrap_or(u64::MAX),
+                selector.as_ref(),
             )?)
         };
-        let first_turn = pending.as_ref().map_or(anchor.id == first_id, |branch| branch.first_user_turn);
+        let first_turn = pending
+            .as_ref()
+            .map_or(anchor.id == first_id, |branch| branch.first_user_turn);
         // Distinguish the execution's opening prompt from later Steers. Editing
         // an opening prompt must replace its pre-Started human event too; a
         // recovery attempt must not claim an older execution's opening event.
-        let opening_event = self.state.events.iter().position(|event| event.sequence == opening_event_sequence);
-        let bound_opening = opening_event.is_some_and(|index| index < start &&
-            !self.state.events[index + 1..start].iter().any(|event| matches!(&event.kind,
-                EventKind::Started { execution, .. } if execution.node == node)));
-        let edits_opening = first_turn || (bound_opening && pending.as_ref().is_some_and(|turn| turn.first_in_execution));
-        let from_event_sequence = if edits_opening { opening_event_sequence }
-            else if user_turn_offset.is_some() { self.state.events[start].sequence }
-            else { from_event_sequence };
+        let opening_event = self
+            .state
+            .events
+            .iter()
+            .position(|event| event.sequence == opening_event_sequence);
+        let bound_opening = opening_event.is_some_and(|index| {
+            index < start
+                && !self.state.events[index + 1..start].iter().any(|event| {
+                    matches!(&event.kind,
+                EventKind::Started { execution, .. } if execution.node == node)
+                })
+        });
+        let edits_opening = first_turn
+            || (bound_opening && pending.as_ref().is_some_and(|turn| turn.first_in_execution));
+        let from_event_sequence = if edits_opening {
+            opening_event_sequence
+        } else if user_turn_offset.is_some() {
+            self.state.events[start].sequence
+        } else {
+            from_event_sequence
+        };
         // No mutation or process interruption occurs until the exact user turn
         // has been validated. Stop the sole writer only before committing.
         for (_, stopped_execution) in self.request_execution_stop(Some(node))? {
             crate::process_control::stop_owner(&crate::process_control::execution_owner(
-                &self.state.run_id, node, &stopped_execution,
+                &self.state.run_id,
+                node,
+                &stopped_execution,
             ))?;
         }
         self.sync_failed_node_models(Some(&[node.to_string()]))?;
@@ -2372,11 +2860,26 @@ impl Runtime {
     /// A Merger attachment targets its own repair workspace. A settled
     /// publication Merger has already returned to the user's source directory.
     pub(crate) fn merger_attachment_workspace(&self, node: &str) -> Result<PathBuf, String> {
-        let merger = self.state.mergers.iter().rev().find(|execution| execution.node == node)
+        let merger = self
+            .state
+            .mergers
+            .iter()
+            .rev()
+            .find(|execution| execution.node == node)
             .ok_or("Merger workspace not found in this Run")?;
-        if merger.status != "running" && node == "merger"
-            && self.state.publication.as_ref().is_some_and(|publication| publication.status == "completed") {
-            return self.state.config.as_ref().map(|config| PathBuf::from(&config.repository))
+        if merger.status != "running"
+            && node == "merger"
+            && self
+                .state
+                .publication
+                .as_ref()
+                .is_some_and(|publication| publication.status == "completed")
+        {
+            return self
+                .state
+                .config
+                .as_ref()
+                .map(|config| PathBuf::from(&config.repository))
                 .ok_or_else(|| "Missing Run config".into());
         }
         Ok(PathBuf::from(&merger.worktree))
@@ -2385,12 +2888,18 @@ impl Runtime {
     /// The workspace a Planner attachment would resolve to, if one exists. A
     /// running turn reports its live cwd; otherwise the next turn's selection.
     pub(crate) fn planner_attachment_workspace(&self) -> Result<Option<PathBuf>, String> {
-        if let Some(worktree) = self.state.planning.as_ref()
+        if let Some(worktree) = self
+            .state
+            .planning
+            .as_ref()
             .filter(|planning| planning.status.as_deref() == Some("running"))
-            .and_then(|planning| planning.worktree.as_ref()) {
+            .and_then(|planning| planning.worktree.as_ref())
+        {
             return Ok(Some(PathBuf::from(worktree)));
         }
-        Ok(self.planner_workspace()?.map(|execution| PathBuf::from(execution.worktree)))
+        Ok(self
+            .planner_workspace()?
+            .map(|execution| PathBuf::from(execution.worktree)))
     }
 
     /// A regular node's attachment is written in place only for a source-direct
@@ -2405,14 +2914,27 @@ impl Runtime {
     /// durable `Started` message claims and accepted steers. An initial recovery
     /// that does resend the task contributes that text as well, so a batched
     /// turn never loses one of its claimed attachment references.
-    fn recovery_attachment_instructions(&self, node: &str, session: &str, resent_task: &str) -> String {
-        let executions: BTreeSet<_> = self.state.executions.iter().rev()
-            .filter(|execution| execution.node == node && execution.session_id == session
-                && !self.state.superseded_execution_ids.contains(&execution.id))
+    fn recovery_attachment_instructions(
+        &self,
+        node: &str,
+        session: &str,
+        resent_task: &str,
+    ) -> String {
+        let executions: BTreeSet<_> = self
+            .state
+            .executions
+            .iter()
+            .rev()
+            .filter(|execution| {
+                execution.node == node
+                    && execution.session_id == session
+                    && !self.state.superseded_execution_ids.contains(&execution.id)
+            })
             // Only the unfinished turn and its recovery attempts need inputs;
             // older completed turns must not resurrect deliberately removed files.
             .take_while(|execution| execution.status != "completed")
-            .map(|execution| execution.id.as_str()).collect();
+            .map(|execution| execution.id.as_str())
+            .collect();
         let mut sequences: BTreeSet<i64> = BTreeSet::new();
         let mut parts: Vec<String> = Vec::new();
         if !resent_task.trim().is_empty() {
@@ -2420,17 +2942,28 @@ impl Runtime {
         }
         for event in &self.state.events {
             match &event.kind {
-                EventKind::Started { execution, message_sequences, .. }
-                    if executions.contains(execution.id.as_str()) => {
+                EventKind::Started {
+                    execution,
+                    message_sequences,
+                    ..
+                } if executions.contains(execution.id.as_str()) => {
                     sequences.extend(message_sequences.clone().unwrap_or_default());
                 }
-                EventKind::Steered { execution_id, instruction, .. }
-                    if executions.contains(execution_id.as_str()) => parts.push(instruction.clone()),
+                EventKind::Steered {
+                    execution_id,
+                    instruction,
+                    ..
+                } if executions.contains(execution_id.as_str()) => parts.push(instruction.clone()),
                 _ => {}
             }
         }
         for event in &self.state.events {
-            if let EventKind::Invalidated { target, instruction, .. } = &event.kind {
+            if let EventKind::Invalidated {
+                target,
+                instruction,
+                ..
+            } = &event.kind
+            {
                 if target == node && sequences.contains(&event.sequence) {
                     parts.push(instruction.clone());
                 }
@@ -2444,8 +2977,13 @@ impl Runtime {
     /// environments keep their fixed-layout workspace contract, so they are
     /// excluded from source-direct follow-ups.
     fn source_direct_context(&self, node: &str) -> bool {
-        if self.state.nodes.get(node).and_then(|state| state.pending_messages.first())
-            .is_some_and(|message| message.source_direct) {
+        if self
+            .state
+            .nodes
+            .get(node)
+            .and_then(|state| state.pending_messages.first())
+            .is_some_and(|message| message.source_direct)
+        {
             return true;
         }
         !self.is_serial()
@@ -2604,7 +3142,11 @@ impl Runtime {
             .filter(|edge| {
                 self.state.nodes.get(&edge.from).is_some_and(|node| {
                     matches!(node.status.as_str(), "waiting" | "dirty" | "running")
-                }) || self.state.pending_feedback.iter().any(|pending| pending.from == edge.from)
+                }) || self
+                    .state
+                    .pending_feedback
+                    .iter()
+                    .any(|pending| pending.from == edge.from)
                     || pending_sources.contains(&edge.from.as_str())
             })
             .filter(|edge| self.feedback_scope_has_running(&edge.from))
@@ -2752,16 +3294,21 @@ impl Runtime {
         // A source-direct follow-up runs in the user's directory and must not
         // rebuild/invalidate anything else. `followup` is entered only by a
         // source_direct Invalidated event, so every job scheduled here is one.
-        let source_direct_run = self.state.phase == "followup" || self.state.nodes.values()
-            .any(|node| node.pending_messages.first().is_some_and(|message| message.source_direct));
+        let source_direct_run = self.state.phase == "followup"
+            || self.state.nodes.values().any(|node| {
+                node.pending_messages
+                    .first()
+                    .is_some_and(|message| message.source_direct)
+            });
         let resolved_repository = resolve_repository(&self.root, &config)?;
         let materialize_source = !source_direct_run
             && !self.is_serial()
             && !workspace::is_standard_git(&resolved_repository)
             && self.job_source_is_fresh(&resolved_repository)?;
         for node in ready {
-            let source_direct_run = source_direct_run || (self.state.nodes[&node.name].continuation
-                && self.state.nodes[&node.name].source_direct_recovery);
+            let source_direct_run = source_direct_run
+                || (self.state.nodes[&node.name].continuation
+                    && self.state.nodes[&node.name].source_direct_recovery);
             let id = Uuid::new_v4().to_string();
             // Dependency nodes normally take over their parent's physical workspace.
             let source_head = if self.is_serial() {
@@ -2788,36 +3335,43 @@ impl Runtime {
                     .unwrap_or_else(|| source_head.clone())
             };
             let queued_prompt = self.state.nodes[&node.name].pending_prompt();
-            let message_sequences = self.state.nodes[&node.name].pending_messages.iter()
-                .map(|message| message.sequence).collect::<Vec<_>>();
+            let message_sequences = self.state.nodes[&node.name]
+                .pending_messages
+                .iter()
+                .map(|message| message.sequence)
+                .collect::<Vec<_>>();
             let continuation = self.state.nodes[&node.name].continuation && queued_prompt.is_none();
             // Pi writes the session file when it creates the conversation, before
             // the first turn. A startup failure (process exit, extension load
             // error, interrupted preparation) leaves the execution's session
             // directory empty, so there is no conversation to resume.
             let session_missing = |previous: &Execution| {
-                let origin = self.state.executions.iter()
-                    .find(|execution| execution.node == previous.node
-                        && execution.session_id == previous.session_id)
+                let origin = self
+                    .state
+                    .executions
+                    .iter()
+                    .find(|execution| {
+                        execution.node == previous.node
+                            && execution.session_id == previous.session_id
+                    })
                     .unwrap_or(previous);
                 let suffix = format!("_{}.jsonl", previous.session_id);
                 match fs::read_dir(self.root.join("sessions").join(&origin.id)) {
-                    Ok(mut entries) => !entries.any(|entry| entry.map_or(true, |entry|
-                        entry.file_name().to_string_lossy().ends_with(&suffix))),
+                    Ok(mut entries) => !entries.any(|entry| {
+                        entry.map_or(true, |entry| {
+                            entry.file_name().to_string_lossy().ends_with(&suffix)
+                        })
+                    }),
                     Err(error) => error.kind() == std::io::ErrorKind::NotFound,
                 }
             };
             let resume = if continuation {
-                self.state
-                    .executions
-                    .iter()
-                    .rev()
-                    .find(|execution| {
-                        execution.node == node.name
-                            && execution.status == "failed"
-                            && execution.completed_at.is_some()
-                            && !self.state.superseded_execution_ids.contains(&execution.id)
-                    })
+                self.state.executions.iter().rev().find(|execution| {
+                    execution.node == node.name
+                        && execution.status == "failed"
+                        && execution.completed_at.is_some()
+                        && !self.state.superseded_execution_ids.contains(&execution.id)
+                })
             } else if self.state.nodes[&node.name].human_instruction {
                 let anchor = self.state.nodes[&node.name].edit_execution_id.as_deref();
                 let previous = self
@@ -2831,7 +3385,9 @@ impl Runtime {
                             && anchor.is_none_or(|id| execution.id == id)
                     })
                     .ok_or("No previous node session to continue")?;
-                if session_missing(previous) && self.state.nodes[&node.name].feedback_workspace.is_some() {
+                if session_missing(previous)
+                    && self.state.nodes[&node.name].feedback_workspace.is_some()
+                {
                     let input = self.state.nodes[&node.name]
                         .feedback_workspace
                         .as_ref()
@@ -2855,78 +3411,140 @@ impl Runtime {
             // example while loading an extension) has the same problem: there is
             // no persisted conversation to resume, but the attempt's workspace
             // and session slot must be retained and the task sent again.
-            let stopped_recovery = continuation && resume.is_some_and(|previous| {
-                if !self.state.execution_stop_requests.contains(&previous.id)
-                    || self.state.nodes[&node.name].human_instruction
-                    || self.state.nodes[&node.name].feedback_workspace.as_ref().is_some_and(|input| !input.additional_sources.is_empty())
-                    || self.state.executions.iter().any(|execution| execution.node == node.name
-                        && (execution.pid.is_some() || execution.output_bytes > 0 || execution.status == "completed")) {
-                    return false;
-                }
-                session_missing(previous)
-            });
+            let stopped_recovery = continuation
+                && resume.is_some_and(|previous| {
+                    if !self.state.execution_stop_requests.contains(&previous.id)
+                        || self.state.nodes[&node.name].human_instruction
+                        || self.state.nodes[&node.name]
+                            .feedback_workspace
+                            .as_ref()
+                            .is_some_and(|input| !input.additional_sources.is_empty())
+                        || self.state.executions.iter().any(|execution| {
+                            execution.node == node.name
+                                && (execution.pid.is_some()
+                                    || execution.output_bytes > 0
+                                    || execution.status == "completed")
+                        })
+                    {
+                        return false;
+                    }
+                    session_missing(previous)
+                });
             // A missing file alone does not prove Pi never ran: a session can
             // have been removed after tools executed. Fail closed if any attempt
             // in that session has launch/output evidence or a completed turn.
-            let no_unfinished_activity = |previous: &Execution| self.state.executions.iter().rev()
-                .filter(|execution| execution.node == previous.node && execution.session_id == previous.session_id)
-                .take_while(|execution| execution.status != "completed")
-                .all(|execution| execution.pid.is_none() && execution.output_bytes == 0);
-            let no_session_activity = |previous: &Execution| no_unfinished_activity(previous)
-                && !self.state.executions.iter().any(|execution| {
-                    execution.node == previous.node && execution.session_id == previous.session_id
+            let no_unfinished_activity = |previous: &Execution| {
+                self.state
+                    .executions
+                    .iter()
+                    .rev()
+                    .filter(|execution| {
+                        execution.node == previous.node
+                            && execution.session_id == previous.session_id
+                    })
+                    .take_while(|execution| execution.status != "completed")
+                    .all(|execution| execution.pid.is_none() && execution.output_bytes == 0)
+            };
+            let no_session_activity = |previous: &Execution| {
+                no_unfinished_activity(previous)
+                    && !self.state.executions.iter().any(|execution| {
+                        execution.node == previous.node
+                            && execution.session_id == previous.session_id
+                            && execution.status == "completed"
+                    })
+            };
+            let has_completed_history = |previous: &Execution| {
+                self.state.executions.iter().any(|execution| {
+                    execution.node == previous.node
                         && execution.status == "completed"
-                });
-            let has_completed_history = |previous: &Execution| self.state.executions.iter().any(|execution| {
-                execution.node == previous.node && execution.status == "completed"
-                    && !self.state.superseded_execution_ids.contains(&execution.id)
-            });
+                        && !self.state.superseded_execution_ids.contains(&execution.id)
+                })
+            };
             // A feedback or source-direct follow-up can fail before its fork
             // was created. Resume the original completed node session and send
             // the already-recorded follow-up, rather than losing its history.
-            let fallback_anchor = if continuation && resume.is_some_and(|previous|
-                session_missing(previous) && no_session_activity(previous)) {
+            let fallback_anchor = if continuation
+                && resume.is_some_and(|previous| {
+                    session_missing(previous) && no_session_activity(previous)
+                }) {
                 let node_state = &self.state.nodes[&node.name];
                 let anchor = if let Some(input) = &node_state.feedback_workspace {
-                    self.state.executions.iter().find(|execution| execution.id == input.target_execution_id)
+                    self.state
+                        .executions
+                        .iter()
+                        .find(|execution| execution.id == input.target_execution_id)
                 } else if source_direct_run {
                     self.state.executions.iter().rev().find(|execution| {
-                        execution.node == node.name && execution.status == "completed"
+                        execution.node == node.name
+                            && execution.status == "completed"
                             && !self.state.superseded_execution_ids.contains(&execution.id)
                     })
-                } else { None };
-                anchor.filter(|execution| execution.status == "completed"
-                    && !self.state.superseded_execution_ids.contains(&execution.id)
-                    && !session_missing(execution))
-            } else { None };
+                } else {
+                    None
+                };
+                anchor.filter(|execution| {
+                    execution.status == "completed"
+                        && !self.state.superseded_execution_ids.contains(&execution.id)
+                        && !session_missing(execution)
+                })
+            } else {
+                None
+            };
             // A fork can be written before Pi receives its follow-up. In that
             // case the session exists but the recorded instruction still needs
             // to be sent, rather than invoking an empty continuation turn. Only
             // an attempt that never crossed the durable Prepared boundary is
             // unstarted; an interruption after Prepared must continue without
             // resending the user prompt.
-            let unstarted_followup = continuation && self.state.nodes[&node.name].human_instruction
+            let unstarted_followup = continuation
+                && self.state.nodes[&node.name].human_instruction
                 && !self.state.nodes[&node.name].instruction.is_empty()
-                && resume.is_some_and(|previous| !session_missing(previous)
-                    && self.state.execution_is_preparation_only(previous)
-                    && no_unfinished_activity(previous) && has_completed_history(previous));
+                && resume.is_some_and(|previous| {
+                    !session_missing(previous)
+                        && self.state.execution_is_preparation_only(previous)
+                        && no_unfinished_activity(previous)
+                        && has_completed_history(previous)
+                });
             let failed_before_session = self.state.nodes[&node.name].human_instruction
-                && resume.is_some_and(|previous| previous.status == "failed" && session_missing(previous)
-                    && no_session_activity(previous) && !has_completed_history(previous));
-            let preparation_recovery = self.state.config.as_ref()
-                .and_then(|config| config.environment.as_ref()).is_some()
-                && resume.is_some_and(|previous| self.state.execution_is_preparation_only(previous)
-                    && session_missing(previous) && no_session_activity(previous) && !has_completed_history(previous));
-            let missing_initial_session = continuation && resume.is_some_and(|previous| {
-                let interrupted = self.state.execution_stop_requests.contains(&previous.id)
-                    || self.state.events.iter().any(|event| matches!(&event.kind,
+                && resume.is_some_and(|previous| {
+                    previous.status == "failed"
+                        && session_missing(previous)
+                        && no_session_activity(previous)
+                        && !has_completed_history(previous)
+                });
+            let preparation_recovery = self
+                .state
+                .config
+                .as_ref()
+                .and_then(|config| config.environment.as_ref())
+                .is_some()
+                && resume.is_some_and(|previous| {
+                    self.state.execution_is_preparation_only(previous)
+                        && session_missing(previous)
+                        && no_session_activity(previous)
+                        && !has_completed_history(previous)
+                });
+            let missing_initial_session = continuation
+                && resume.is_some_and(|previous| {
+                    let interrupted = self.state.execution_stop_requests.contains(&previous.id)
+                        || self.state.events.iter().any(|event| {
+                            matches!(&event.kind,
                         EventKind::Failed { execution_id: Some(id), error, .. }
-                            if id == &previous.id && is_interrupted_error(error)));
-                !interrupted && session_missing(previous)
-                    && no_session_activity(previous) && !has_completed_history(previous)
-            });
-            let initial_recovery = stopped_recovery || failed_before_session || preparation_recovery || missing_initial_session;
-            let continuation = continuation && !initial_recovery && fallback_anchor.is_none() && !unstarted_followup;
+                            if id == &previous.id && is_interrupted_error(error))
+                        });
+                    !interrupted
+                        && session_missing(previous)
+                        && no_session_activity(previous)
+                        && !has_completed_history(previous)
+                });
+            let initial_recovery = stopped_recovery
+                || failed_before_session
+                || preparation_recovery
+                || missing_initial_session;
+            let continuation = continuation
+                && !initial_recovery
+                && fallback_anchor.is_none()
+                && !unstarted_followup;
             let preserved_workspace = resume
                 .filter(|previous| {
                     previous.status == "failed"
@@ -2973,8 +3591,12 @@ impl Runtime {
             let mut workspace_lineage = BTreeSet::new();
             let worktree = if let Some(input) = &self.state.nodes[&node.name].feedback_workspace {
                 for source in input.sources() {
-                    if let Some(execution) = self.state.executions.iter()
-                        .find(|execution| execution.id == source.source_execution_id) {
+                    if let Some(execution) = self
+                        .state
+                        .executions
+                        .iter()
+                        .find(|execution| execution.id == source.source_execution_id)
+                    {
                         workspace_lineage.extend(execution.workspace_lineage.iter().cloned());
                     }
                 }
@@ -2984,9 +3606,12 @@ impl Runtime {
                     // Compose into a target-owned slot: sending evidence stays
                     // immutable even if a Merger or repair fails halfway through.
                     // A failed prepared attempt continues in its own partial tree.
-                    let prepared_failure = preserved_workspace.as_ref().filter(|previous|
-                        previous.status == "failed" && Path::new(&previous.worktree).is_dir());
-                    prepared_failure.map(|previous| previous.worktree.clone()).unwrap_or_else(fresh_path)
+                    let prepared_failure = preserved_workspace.as_ref().filter(|previous| {
+                        previous.status == "failed" && Path::new(&previous.worktree).is_dir()
+                    });
+                    prepared_failure
+                        .map(|previous| previous.worktree.clone())
+                        .unwrap_or_else(fresh_path)
                 }
             } else if self.is_serial() || source_direct_run {
                 resolve_repository(&self.root, &config)?
@@ -3040,9 +3665,7 @@ impl Runtime {
                     .collect();
                 let inherited_parent = parent_executions.iter().find(|execution| {
                     let path = Path::new(&execution.worktree);
-                    self.has_single_consumer(&execution.node)
-                        && path.is_dir()
-                        && !busy(path)
+                    self.has_single_consumer(&execution.node) && path.is_dir() && !busy(path)
                 });
                 let available_parent = inherited_parent.or_else(|| {
                     parent_executions.iter().find(|execution| {
@@ -3104,13 +3727,11 @@ impl Runtime {
                             .into_owned(),
                     )
                 } else if let Some(terminal) = shared_terminal.filter(|terminal| {
-                    !busy(Path::new(&terminal.worktree))
-                        && Path::new(&terminal.worktree).is_dir()
+                    !busy(Path::new(&terminal.worktree)) && Path::new(&terminal.worktree).is_dir()
                 }) {
                     Some(terminal.worktree.clone())
                 } else if let Some(previous) = resume.filter(|previous| {
-                    !busy(Path::new(&previous.worktree))
-                        && Path::new(&previous.worktree).is_dir()
+                    !busy(Path::new(&previous.worktree)) && Path::new(&previous.worktree).is_dir()
                 }) {
                     Some(previous.worktree.clone())
                 } else {
@@ -3119,7 +3740,8 @@ impl Runtime {
                         .filter_map(|parent| self.latest_node_execution(parent))
                         .find(|execution| {
                             (!busy(Path::new(&execution.worktree))
-                                || parent_names.len() == 1 && !self.has_single_consumer(&execution.node))
+                                || parent_names.len() == 1
+                                    && !self.has_single_consumer(&execution.node))
                                 && Path::new(&execution.worktree).is_dir()
                         })
                         .map(|execution| execution.worktree.clone())
@@ -3128,24 +3750,29 @@ impl Runtime {
                 None
             };
             workspace_lineage.insert(node.name.clone());
-            if self
-                .state
-                .executions
-                .iter()
-                .any(|execution| execution.status == "running"
-                    && Self::same_workspace_path(Path::new(&execution.worktree), Path::new(&worktree)))
-            {
+            if self.state.executions.iter().any(|execution| {
+                execution.status == "running"
+                    && Self::same_workspace_path(
+                        Path::new(&execution.worktree),
+                        Path::new(&worktree),
+                    )
+            }) {
                 continue;
             }
             let workspace_lineage: Vec<_> = workspace_lineage.into_iter().collect();
             // A prepared failed attempt continues in its retained tree without
             // forking: the Pi session already lives at that cwd.
-            let session_fork = fallback_anchor.or(resume)
-                .filter(|previous| fallback_anchor.is_some() || (!initial_recovery
-                    && (Some(previous.worktree.as_str()) != Some(worktree.as_str())
-                        || feedback_workspace.as_ref().is_some_and(|input| {
-                            input.additional_sources.is_empty() || preserved_workspace.is_none()
-                        }))))
+            let session_fork = fallback_anchor
+                .or(resume)
+                .filter(|previous| {
+                    fallback_anchor.is_some()
+                        || (!initial_recovery
+                            && (Some(previous.worktree.as_str()) != Some(worktree.as_str())
+                                || feedback_workspace.as_ref().is_some_and(|input| {
+                                    input.additional_sources.is_empty()
+                                        || preserved_workspace.is_none()
+                                })))
+                })
                 .map(|previous| {
                     let mut source = previous.clone();
                     source.id = self
@@ -3202,16 +3829,22 @@ impl Runtime {
             // Record the selected Node Agent model before launch so session
             // details can show what this attempt will actually use. Completion
             // replaces this placeholder with parsed live metrics.
-            let node_settings = self.state.nodes[&node.name].model_config.clone().or_else(|| {
-                if execution.attempt == 1 {
-                    self.state.model_config.as_ref().map(RunModelConfig::node_agent_settings)
-                } else {
-                    // An already-started node without an override retains the
-                    // Run's original settings, even if the conversation changed
-                    // models while this attempt was still running.
-                    self.state.config.as_ref().map(Config::node_agent_settings)
-                }
-            });
+            let node_settings = self.state.nodes[&node.name]
+                .model_config
+                .clone()
+                .or_else(|| {
+                    if execution.attempt == 1 {
+                        self.state
+                            .model_config
+                            .as_ref()
+                            .map(RunModelConfig::node_agent_settings)
+                    } else {
+                        // An already-started node without an override retains the
+                        // Run's original settings, even if the conversation changed
+                        // models while this attempt was still running.
+                        self.state.config.as_ref().map(Config::node_agent_settings)
+                    }
+                });
             if let Some(settings) = &node_settings {
                 execution.metrics = Some(ExecutionMetrics {
                     model: Some(settings.model.clone()),
@@ -3224,11 +3857,20 @@ impl Runtime {
             // follow-up edit on a never-started attempt still needs the node
             // task sent first.
             let edited_opening_turn = state.edit_execution_id.as_deref().is_some_and(|anchor_id| {
-                let Some(anchor) = self.state.executions.iter().find(|execution| execution.id == anchor_id) else {
+                let Some(anchor) = self
+                    .state
+                    .executions
+                    .iter()
+                    .find(|execution| execution.id == anchor_id)
+                else {
                     return false;
                 };
-                self.state.executions.iter()
-                    .find(|execution| execution.node == anchor.node && execution.session_id == anchor.session_id)
+                self.state
+                    .executions
+                    .iter()
+                    .find(|execution| {
+                        execution.node == anchor.node && execution.session_id == anchor.session_id
+                    })
                     .is_some_and(|first| first.id == anchor.id)
             });
             let task = if fallback_anchor.is_some() || unstarted_followup {
@@ -3240,8 +3882,13 @@ impl Runtime {
                 // session slot starts with the node task, followed by the
                 // accepted human turn(s).
                 let followup = match &queued_prompt {
-                    Some((prompt, _)) if !state.instruction.is_empty() && !state.pending_messages.iter()
-                        .any(|message| message.instruction == state.instruction) => {
+                    Some((prompt, _))
+                        if !state.instruction.is_empty()
+                            && !state
+                                .pending_messages
+                                .iter()
+                                .any(|message| message.instruction == state.instruction) =>
+                    {
                         format!("{}\n\n{prompt}", state.instruction)
                     }
                     Some((prompt, _)) => prompt.clone(),
@@ -3259,8 +3906,12 @@ impl Runtime {
                     // A Planner revision may have replaced the original task
                     // and session while these accepted turns were waiting.
                     format!("{}\n\n{prompt}", node.task)
-                } else if !state.instruction.is_empty() && !state.pending_messages.iter()
-                    .any(|message| message.instruction == state.instruction) {
+                } else if !state.instruction.is_empty()
+                    && !state
+                        .pending_messages
+                        .iter()
+                        .any(|message| message.instruction == state.instruction)
+                {
                     // Pending feedback/history work is not replaced by the
                     // human-message batch either.
                     format!("{}\n\n{prompt}", state.instruction)
@@ -3282,8 +3933,12 @@ impl Runtime {
             };
             let attachment_instructions = if continuation || initial_recovery {
                 self.recovery_attachment_instructions(&node.name, &execution.session_id, &task)
-            } else { task.clone() };
-            let images = queued_prompt.map(|(_, images)| images).unwrap_or_else(|| state.instruction_images.clone());
+            } else {
+                task.clone()
+            };
+            let images = queued_prompt
+                .map(|(_, images)| images)
+                .unwrap_or_else(|| state.instruction_images.clone());
             let feedback_source = self
                 .state
                 .graph
@@ -3291,22 +3946,47 @@ impl Runtime {
                 .iter()
                 .any(|edge| edge.feedback && edge.from == node.name);
             let history_edit = state.edit_execution_id.is_some();
-            let environment_previous = self.state.executions.iter().rev()
+            let environment_previous = self
+                .state
+                .executions
+                .iter()
+                .rev()
                 .filter(|previous| previous.status == "completed")
-                .find(|previous| previous.result.as_ref()
-                    .is_some_and(|result| result.layout.as_deref().is_some_and(|layout|
-                        Self::same_workspace_path(Path::new(layout), Path::new(&execution.worktree)))))
-                .and_then(|previous| self.state.nodes.get(&previous.node)
-                    .and_then(|node| node.result.as_ref())
-                    .filter(|result| result.layout.as_deref().is_some_and(|layout|
-                        Self::same_workspace_path(Path::new(layout), Path::new(&execution.worktree))))
-                    .or(previous.result.as_ref())).cloned();
+                .find(|previous| {
+                    previous.result.as_ref().is_some_and(|result| {
+                        result.layout.as_deref().is_some_and(|layout| {
+                            Self::same_workspace_path(
+                                Path::new(layout),
+                                Path::new(&execution.worktree),
+                            )
+                        })
+                    })
+                })
+                .and_then(|previous| {
+                    self.state
+                        .nodes
+                        .get(&previous.node)
+                        .and_then(|node| node.result.as_ref())
+                        .filter(|result| {
+                            result.layout.as_deref().is_some_and(|layout| {
+                                Self::same_workspace_path(
+                                    Path::new(layout),
+                                    Path::new(&execution.worktree),
+                                )
+                            })
+                        })
+                        .or(previous.result.as_ref())
+                })
+                .cloned();
             let mut environment_input = None;
             let mut environment_sources = Vec::new();
             let preserve_failed_environment = !history_edit
                 && resume.is_some_and(|previous| {
                     previous.status == "failed"
-                        && Self::same_workspace_path(Path::new(&previous.worktree), Path::new(&execution.worktree))
+                        && Self::same_workspace_path(
+                            Path::new(&previous.worktree),
+                            Path::new(&execution.worktree),
+                        )
                         && Path::new(&execution.worktree).is_dir()
                 });
             if let Some(store) = self.environments()? {
@@ -3361,9 +4041,18 @@ impl Runtime {
                             })
                             .collect::<Result<Vec<_>, String>>()?;
                         environment_sources.extend(inputs.iter().map(|(_, input)| input.clone()));
-                        let baseline = self.state.environment_baseline.as_ref()
+                        let baseline = self
+                            .state
+                            .environment_baseline
+                            .as_ref()
                             .ok_or("Environment baseline is missing")?;
-                        match store.select_for_workspace(&node.name, &inputs, &execution.worktree, baseline, environment_previous.as_ref()) {
+                        match store.select_for_workspace(
+                            &node.name,
+                            &inputs,
+                            &execution.worktree,
+                            baseline,
+                            environment_previous.as_ref(),
+                        ) {
                             Ok(selected) => selected,
                             Err(error) => return Err(error),
                         }
@@ -3385,16 +4074,30 @@ impl Runtime {
                     }
                     let mut selected = selected;
                     store.validate_result_metadata(&selected)?;
-                    if config.environment.as_ref().is_some_and(|policy| policy.best_effort)
-                        && !preserve_failed_environment && !history_edit
-                        && feedback_workspace.as_ref().is_none_or(|input| !input.additional_sources.is_empty())
+                    if config
+                        .environment
+                        .as_ref()
+                        .is_some_and(|policy| policy.best_effort)
+                        && !preserve_failed_environment
+                        && !history_edit
+                        && feedback_workspace
+                            .as_ref()
+                            .is_none_or(|input| !input.additional_sources.is_empty())
                         && store.requires_fixed_layout(&selected.launch_ref)?
-                        && selected.layout.as_ref().is_some_and(|path| *path != execution.worktree)
+                        && selected
+                            .layout
+                            .as_ref()
+                            .is_some_and(|path| *path != execution.worktree)
                     {
                         environment_sources.push(selected.clone());
                         selected = store.select_for_workspace(
-                            &node.name, &[(node.name.clone(), selected)], &execution.worktree,
-                            self.state.environment_baseline.as_ref().ok_or("Environment baseline is missing")?,
+                            &node.name,
+                            &[(node.name.clone(), selected)],
+                            &execution.worktree,
+                            self.state
+                                .environment_baseline
+                                .as_ref()
+                                .ok_or("Environment baseline is missing")?,
                             environment_previous.as_ref(),
                         )?;
                     }
@@ -3422,14 +4125,28 @@ impl Runtime {
                     }
                 }
             }
-            if config.environment.as_ref().is_some_and(|policy| policy.best_effort) {
+            if config
+                .environment
+                .as_ref()
+                .is_some_and(|policy| policy.best_effort)
+            {
                 // An idle slot may retain a custom managed prefix from an older
                 // owner. Keep its exclusion/ownership evidence when resetting it.
-                environment_sources.extend(self.state.nodes.values()
-                    .filter_map(|state| state.result.as_ref())
-                    .filter(|result| result.layout.as_deref().is_some_and(|layout|
-                        Self::same_workspace_path(Path::new(layout), Path::new(&execution.worktree))))
-                    .cloned());
+                environment_sources.extend(
+                    self.state
+                        .nodes
+                        .values()
+                        .filter_map(|state| state.result.as_ref())
+                        .filter(|result| {
+                            result.layout.as_deref().is_some_and(|layout| {
+                                Self::same_workspace_path(
+                                    Path::new(layout),
+                                    Path::new(&execution.worktree),
+                                )
+                            })
+                        })
+                        .cloned(),
+                );
             }
             self.emit(EventKind::Started {
                 execution: execution.clone(),
@@ -3438,19 +4155,31 @@ impl Runtime {
                 // of this node belong to a dead conversation lineage.
                 fresh_restart: session_fork.is_none() && resume_execution_id.is_none(),
             })?;
-            if config.environment.as_ref().is_some_and(|policy| policy.best_effort) {
+            if config
+                .environment
+                .as_ref()
+                .is_some_and(|policy| policy.best_effort)
+            {
                 environment_sources.extend(environment_previous.iter().cloned());
             }
             let mut seen_environments = BTreeSet::new();
-            environment_sources.retain(|source| seen_environments.insert(
-                (source.environment_ref.clone(), source.launch_ref.clone())));
+            environment_sources.retain(|source| {
+                seen_environments
+                    .insert((source.environment_ref.clone(), source.launch_ref.clone()))
+            });
             let previous_environment_launch = if history_edit {
                 self.state
                     .nodes
                     .get(&execution.node)
                     .and_then(|node| node.result.as_ref())
-                    .filter(|result| result.layout.as_deref().is_some_and(|layout|
-                        Self::same_workspace_path(Path::new(layout), Path::new(&execution.worktree))))
+                    .filter(|result| {
+                        result.layout.as_deref().is_some_and(|layout| {
+                            Self::same_workspace_path(
+                                Path::new(layout),
+                                Path::new(&execution.worktree),
+                            )
+                        })
+                    })
                     .map(|result| result.launch_ref.clone())
             } else {
                 None
@@ -3474,7 +4203,10 @@ impl Runtime {
                         && self.state.executions.iter().any(|previous| {
                             previous.node == node.name
                                 && previous.status == "failed"
-                                && Self::same_workspace_path(Path::new(&previous.worktree), Path::new(&input.worktree))
+                                && Self::same_workspace_path(
+                                    Path::new(&previous.worktree),
+                                    Path::new(&input.worktree),
+                                )
                         })
                 }),
                 feedback_workspace,
@@ -3506,7 +4238,11 @@ impl Runtime {
             // the user's directory already holds the result.
             if self.state.phase != "followup"
                 && !self.is_serial()
-                && self.state.nodes.values().all(|node| node.status == "completed")
+                && self
+                    .state
+                    .nodes
+                    .values()
+                    .all(|node| node.status == "completed")
             {
                 let terminal_names: Vec<String> = if let Some(plan) = &self.state.plan {
                     if !plan.terminals.is_empty() {
@@ -3681,10 +4417,9 @@ impl Runtime {
             return None;
         }
         let path = &executions[0].worktree;
-        if executions
-            .iter()
-            .any(|execution| !Self::same_workspace_path(Path::new(&execution.worktree), Path::new(path)))
-        {
+        if executions.iter().any(|execution| {
+            !Self::same_workspace_path(Path::new(&execution.worktree), Path::new(path))
+        }) {
             return None;
         }
         executions
@@ -3706,7 +4441,11 @@ impl Runtime {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let name = entry.file_name();
-                if name == ".files" || name == ".grapher-git" || name == ".grapher-state" || name.to_string_lossy().starts_with("publication-") {
+                if name == ".files"
+                    || name == ".grapher-git"
+                    || name == ".grapher-state"
+                    || name.to_string_lossy().starts_with("publication-")
+                {
                     return None;
                 }
                 entry
@@ -3721,20 +4460,21 @@ impl Runtime {
     }
 
     pub(crate) fn path_is_running(&self, path: &Path) -> bool {
-        self.state
-            .result_execution
-            .as_ref()
-            .is_some_and(|e| e.status == "running" && e.input.layout.as_deref()
-                .is_some_and(|layout| crate::path_identity::same_path(Path::new(layout), path)))
-            || self
-                .state
-                .executions
-                .iter()
-                .chain(&self.state.mergers)
-                .any(|execution| {
-                    execution.status == "running"
-                        && crate::path_identity::same_path(Path::new(&execution.worktree), path)
-                })
+        self.state.result_execution.as_ref().is_some_and(|e| {
+            e.status == "running"
+                && e.input
+                    .layout
+                    .as_deref()
+                    .is_some_and(|layout| crate::path_identity::same_path(Path::new(layout), path))
+        }) || self
+            .state
+            .executions
+            .iter()
+            .chain(&self.state.mergers)
+            .any(|execution| {
+                execution.status == "running"
+                    && crate::path_identity::same_path(Path::new(&execution.worktree), path)
+            })
     }
 
     fn workspace_has_head(&self, path: &Path, head: &str) -> bool {
@@ -3754,9 +4494,12 @@ impl Runtime {
                     && crate::path_identity::same_path(Path::new(&execution.worktree), path)
             })
         }) || self.state.nodes.iter().any(|(name, node)| {
-            Some(name.as_str()) != owner && node.feedback_workspace.as_ref()
-                .is_some_and(|input| input.sources().any(|source|
-                    crate::path_identity::same_path(Path::new(&source.worktree), path)))
+            Some(name.as_str()) != owner
+                && node.feedback_workspace.as_ref().is_some_and(|input| {
+                    input.sources().any(|source| {
+                        crate::path_identity::same_path(Path::new(&source.worktree), path)
+                    })
+                })
         }) {
             return true;
         }
@@ -3769,19 +4512,42 @@ impl Runtime {
         {
             return false;
         }
-        let best_effort = self.state.config.as_ref().and_then(|c| c.environment.as_ref())
+        let best_effort = self
+            .state
+            .config
+            .as_ref()
+            .and_then(|c| c.environment.as_ref())
             .is_some_and(|policy| policy.best_effort);
-        let shared_handoff = owner.is_some_and(|owner| self.state.nodes.get(owner)
-            .is_some_and(|node| node.shared_workspace)
-            && self.terminal_workspace_for(owner).is_some_and(|terminal|
-                crate::path_identity::same_path(Path::new(&terminal.worktree), path)));
-        if best_effort && !shared_handoff && self.state.graph.nodes.iter().any(|node|
-            Some(node.name.as_str()) != owner
-            && self.state.nodes[&node.name].status == "completed"
-            && !self.state.graph.edges.iter().any(|edge| !edge.feedback && edge.from == node.name)
-            && self.state.nodes[&node.name].result.as_ref()
-                .is_some_and(|result| result.layout.as_deref()
-                    .is_some_and(|layout| crate::path_identity::same_path(Path::new(layout), path)))) {
+        let shared_handoff = owner.is_some_and(|owner| {
+            self.state
+                .nodes
+                .get(owner)
+                .is_some_and(|node| node.shared_workspace)
+                && self.terminal_workspace_for(owner).is_some_and(|terminal| {
+                    crate::path_identity::same_path(Path::new(&terminal.worktree), path)
+                })
+        });
+        if best_effort
+            && !shared_handoff
+            && self.state.graph.nodes.iter().any(|node| {
+                Some(node.name.as_str()) != owner
+                    && self.state.nodes[&node.name].status == "completed"
+                    && !self
+                        .state
+                        .graph
+                        .edges
+                        .iter()
+                        .any(|edge| !edge.feedback && edge.from == node.name)
+                    && self.state.nodes[&node.name]
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| {
+                            result.layout.as_deref().is_some_and(|layout| {
+                                crate::path_identity::same_path(Path::new(layout), path)
+                            })
+                        })
+            })
+        {
             return true;
         }
         self.state.executions.iter().any(|e| {
@@ -3860,11 +4626,20 @@ impl Runtime {
         }
         // A completed parent can still be the physical baseline for a new
         // slot when it contains files outside the recorded Git/environment scopes.
-        for execution in self.state.executions.iter().filter(|execution| execution.status == "completed") {
+        for execution in self
+            .state
+            .executions
+            .iter()
+            .filter(|execution| execution.status == "completed")
+        {
             if self.state.graph.edges.iter().any(|edge| {
                 !edge.feedback
                     && edge.from == execution.node
-                    && self.state.nodes.get(&edge.to).is_some_and(|node| node.status != "completed")
+                    && self
+                        .state
+                        .nodes
+                        .get(&edge.to)
+                        .is_some_and(|node| node.status != "completed")
             }) {
                 if let Ok(path) = Path::new(&execution.worktree).canonicalize() {
                     keep.insert(path);
@@ -3881,8 +4656,14 @@ impl Runtime {
                 continue;
             }
             let path = entry.path();
-            if entry.file_name() == ".files" || entry.file_name() == ".grapher-git" || entry.file_name() == ".grapher-state"
-                || entry.file_name().to_string_lossy().starts_with("publication-") {
+            if entry.file_name() == ".files"
+                || entry.file_name() == ".grapher-git"
+                || entry.file_name() == ".grapher-state"
+                || entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("publication-")
+            {
                 continue;
             }
             let Some(path) = crate::path_safety::real_child_path(&canonical_root, &path, false)?
@@ -3905,7 +4686,9 @@ impl Runtime {
         result: Result<(String, String), String>,
     ) -> Result<Option<(String, String)>, String> {
         crate::process_control::clear_owner_stop(&crate::process_control::execution_owner(
-            &self.state.run_id, &execution.node, &execution.id,
+            &self.state.run_id,
+            &execution.node,
+            &execution.id,
         ));
         // A worker may return success concurrently with the user's pause. The
         // persisted request wins; never publish or send feedback from that turn.
@@ -4038,7 +4821,8 @@ impl Runtime {
                                 target.head.clone()
                             },
                             target_revision: target.revision,
-                            target_execution_id: self.reviewed_execution(&execution.id, &edge.to)
+                            target_execution_id: self
+                                .reviewed_execution(&execution.id, &edge.to)
                                 .map(|target| target.id.clone()),
                             accepted: !engine::feedback(&output)?,
                             output_offset,
@@ -4082,7 +4866,8 @@ impl Runtime {
                 // Stop kills Pi's process tree; its nonzero exit code is a
                 // consequence of the user's action, not a model failure.
                 let error = if self.state.stop_requested
-                    && !self.state.execution_stop_requests.contains(&execution.id) {
+                    && !self.state.execution_stop_requests.contains(&execution.id)
+                {
                     "用户已停止本次执行；可以修改消息或重新运行。".to_string()
                 } else {
                     error
@@ -4155,7 +4940,8 @@ impl Runtime {
                     .ok_or("Feedback source has no result")?,
                 target_head: target.head.clone(),
                 target_revision: target.revision,
-                target_execution_id: self.reviewed_execution(&source.id, &edge.to)
+                target_execution_id: self
+                    .reviewed_execution(&source.id, &edge.to)
                     .map(|target| target.id.clone()),
                 accepted,
                 output_offset: 0,
@@ -4175,26 +4961,44 @@ impl Runtime {
     /// Executions are appended in dispatch order. Pin the target that existed
     /// when this sender started, not its movable head after directory handoff.
     fn reviewed_execution(&self, source: &str, target: &str) -> Option<&Execution> {
-        let index = self.state.executions.iter().position(|execution| execution.id == source)?;
-        self.state.executions[..index].iter().rev().find(|execution| {
-            execution.node == target && execution.completed_at.is_some()
-        })
+        let index = self
+            .state
+            .executions
+            .iter()
+            .position(|execution| execution.id == source)?;
+        self.state.executions[..index]
+            .iter()
+            .rev()
+            .find(|execution| execution.node == target && execution.completed_at.is_some())
     }
 
     fn feedback_request_is_current(&self, pending: &PendingFeedback) -> bool {
-        self.state.graph.edges.iter().any(|edge| {
-            edge.feedback && edge.from == pending.from && edge.to == pending.to
-        }) && self.state.nodes.get(&pending.from).is_some_and(|node| {
-            node.status == "completed" && node.head.as_deref() == Some(&pending.source_head)
-        }) && self.state.nodes.get(&pending.to).is_some_and(|node| {
-            node.revision == pending.target_revision && match &pending.target_execution_id {
-                Some(id) => node.status == "completed"
-                    && self.latest_node_execution(&pending.to).is_some_and(|execution| {
-                        execution.id == *id && execution.status == "completed"
-                    }),
-                None => node.head == pending.target_head,
-            }
-        }) && !self.state.superseded_execution_ids.contains(&pending.execution_id)
+        self.state
+            .graph
+            .edges
+            .iter()
+            .any(|edge| edge.feedback && edge.from == pending.from && edge.to == pending.to)
+            && self.state.nodes.get(&pending.from).is_some_and(|node| {
+                node.status == "completed" && node.head.as_deref() == Some(&pending.source_head)
+            })
+            && self.state.nodes.get(&pending.to).is_some_and(|node| {
+                node.revision == pending.target_revision
+                    && match &pending.target_execution_id {
+                        Some(id) => {
+                            node.status == "completed"
+                                && self.latest_node_execution(&pending.to).is_some_and(
+                                    |execution| {
+                                        execution.id == *id && execution.status == "completed"
+                                    },
+                                )
+                        }
+                        None => node.head == pending.target_head,
+                    }
+            })
+            && !self
+                .state
+                .superseded_execution_ids
+                .contains(&pending.execution_id)
     }
 
     fn resolve_feedback(
@@ -4214,15 +5018,24 @@ impl Runtime {
                 disposition: "superseded".into(),
             });
         }
-        let mut batch = self.state.pending_feedback.iter().filter(|candidate| {
-            candidate.execution_id == pending.execution_id
-                || pending.target_execution_id.is_some()
-                    && candidate.to == pending.to
-                    && candidate.target_execution_id == pending.target_execution_id
-                    && candidate.target_revision == pending.target_revision
-                    && self.feedback_request_is_current(candidate)
-        }).cloned().collect::<Vec<_>>();
-        if !batch.iter().any(|candidate| candidate.execution_id == pending.execution_id) {
+        let mut batch = self
+            .state
+            .pending_feedback
+            .iter()
+            .filter(|candidate| {
+                candidate.execution_id == pending.execution_id
+                    || pending.target_execution_id.is_some()
+                        && candidate.to == pending.to
+                        && candidate.target_execution_id == pending.target_execution_id
+                        && candidate.target_revision == pending.target_revision
+                        && self.feedback_request_is_current(candidate)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !batch
+            .iter()
+            .any(|candidate| candidate.execution_id == pending.execution_id)
+        {
             batch.push(pending.clone());
         }
         // A verdict that will apply makes every running execution in its scope
@@ -4266,76 +5079,127 @@ impl Runtime {
         }
         // Only already-dispatched work can hold this barrier; waiting future
         // senders are not batch members and must not deadlock the repair.
-        if batch.iter().any(|candidate| self.feedback_source_busy(&candidate.from)) {
+        if batch
+            .iter()
+            .any(|candidate| self.feedback_source_busy(&candidate.from))
+        {
             return Ok(());
         }
         let mut events = Vec::new();
         let mut instructions = Vec::new();
         let mut sources = Vec::new();
         for member in &batch {
-            let edge = self.state.graph.edges.iter().find(|edge| {
-                edge.feedback && edge.from == member.from && edge.to == member.to
-            }).ok_or("No feedback edge")?;
+            let edge = self
+                .state
+                .graph
+                .edges
+                .iter()
+                .find(|edge| edge.feedback && edge.from == member.from && edge.to == member.to)
+                .ok_or("No feedback edge")?;
             let disposition;
             if !member.accepted && !self.feedback_budget_available(edge) {
                 disposition = "exhausted";
                 events.push(EventKind::FeedbackExhausted {
-                    from: member.from.clone(), to: member.to.clone(),
+                    from: member.from.clone(),
+                    to: member.to.clone(),
                     execution_id: member.execution_id.clone(),
-                    count: self.state.feedback_counts.get(&format!("{}->{}", member.from, member.to))
-                        .copied().unwrap_or(0),
-                    limit: self.state.config.as_ref().ok_or("Missing config")?.max_feedback.min(5),
+                    count: self
+                        .state
+                        .feedback_counts
+                        .get(&format!("{}->{}", member.from, member.to))
+                        .copied()
+                        .unwrap_or(0),
+                    limit: self
+                        .state
+                        .config
+                        .as_ref()
+                        .ok_or("Missing config")?
+                        .max_feedback
+                        .min(5),
                 });
             } else {
-                disposition = if member.accepted { "accepted" } else { "applied" };
+                disposition = if member.accepted {
+                    "accepted"
+                } else {
+                    "applied"
+                };
                 events.push(EventKind::Feedback {
-                    from: member.from.clone(), to: member.to.clone(), accepted: member.accepted,
+                    from: member.from.clone(),
+                    to: member.to.clone(),
+                    accepted: member.accepted,
                 });
                 if !member.accepted {
                     let stored;
                     let text = if member.execution_id == pending.execution_id && output.is_some() {
                         output.unwrap()
                     } else {
-                        stored = self.store.execution_log_page(
-                            &self.state.run_id, &member.execution_id,
-                            member.output_offset, member.output_bytes,
-                        )?.content;
+                        stored = self
+                            .store
+                            .execution_log_page(
+                                &self.state.run_id,
+                                &member.execution_id,
+                                member.output_offset,
+                                member.output_bytes,
+                            )?
+                            .content;
                         if stored.len() != member.output_bytes {
                             return Err("Feedback output range is incomplete".into());
                         }
                         &stored
                     };
                     let body = engine::feedback_body(text)?;
-                    let source = self.state.executions.iter().find(|execution| {
-                        execution.id == member.execution_id
-                    }).ok_or("Missing feedback execution")?;
+                    let source = self
+                        .state
+                        .executions
+                        .iter()
+                        .find(|execution| execution.id == member.execution_id)
+                        .ok_or("Missing feedback execution")?;
                     instructions.push(format!("Feedback:\n{body}"));
                     sources.push(FeedbackSource {
                         source_execution_id: source.id.clone(),
-                        worktree: source.worktree.clone(), head: member.source_head.clone(),
+                        worktree: source.worktree.clone(),
+                        head: member.source_head.clone(),
                     });
                 }
             }
             events.push(EventKind::FeedbackResolved {
-                execution_id: member.execution_id.clone(), disposition: disposition.into(),
+                execution_id: member.execution_id.clone(),
+                disposition: disposition.into(),
             });
         }
         if !sources.is_empty() {
             let source = sources.remove(0);
-            let target = self.state.executions.iter().rev().find(|execution| {
-                execution.node == pending.to && execution.completed_at.is_some()
-                    && pending.target_execution_id.as_ref().is_none_or(|id| execution.id == *id)
-            }).ok_or("Missing feedback target session")?;
+            let target = self
+                .state
+                .executions
+                .iter()
+                .rev()
+                .find(|execution| {
+                    execution.node == pending.to
+                        && execution.completed_at.is_some()
+                        && pending
+                            .target_execution_id
+                            .as_ref()
+                            .is_none_or(|id| execution.id == *id)
+                })
+                .ok_or("Missing feedback target session")?;
             events.push(EventKind::Invalidated {
-                nodes: downstream(&self.state.graph, &pending.to).into_iter().collect(),
-                target: pending.to.clone(), instruction: instructions.join("\n\n"),
-                human: false, images: None,
+                nodes: downstream(&self.state.graph, &pending.to)
+                    .into_iter()
+                    .collect(),
+                target: pending.to.clone(),
+                instruction: instructions.join("\n\n"),
+                human: false,
+                images: None,
                 workspace: Some(FeedbackWorkspace {
                     source_execution_id: source.source_execution_id,
-                    target_execution_id: target.id.clone(), worktree: source.worktree, head: source.head,
+                    target_execution_id: target.id.clone(),
+                    worktree: source.worktree,
+                    head: source.head,
                     additional_sources: sources,
                 }),
-                shared_workspace: false, source_direct: false,
+                shared_workspace: false,
+                source_direct: false,
             });
         }
         // Pin all inputs, consume per-edge budgets, remove all requests and
@@ -4367,25 +5231,47 @@ impl Runtime {
     /// outside the actor, including independent terminal result publication.
     pub(crate) fn publication_environment_input(&self) -> Result<Option<PublicationJob>, String> {
         self.require_current_file_contract()?;
-        let Some(store) = self.environments()? else { return Ok(None); };
+        let Some(store) = self.environments()? else {
+            return Ok(None);
+        };
         let config = self.state.config.as_ref().ok_or("Missing config")?;
-        let independent = config.environment.as_ref().is_some_and(|policy| policy.best_effort);
+        let independent = config
+            .environment
+            .as_ref()
+            .is_some_and(|policy| policy.best_effort);
         let terminals = self.terminal_results()?;
-        let inputs = if independent { terminals }
-            else { vec![("$publication".into(), store.select("$publication", &terminals)?)] };
+        let inputs = if independent {
+            terminals
+        } else {
+            vec![(
+                "$publication".into(),
+                store.select("$publication", &terminals)?,
+            )]
+        };
         for (_, input) in &inputs {
-            if self.state.environment_baseline.as_ref().is_none_or(|base| base.domain != input.domain) {
+            if self
+                .state
+                .environment_baseline
+                .as_ref()
+                .is_none_or(|base| base.domain != input.domain)
+            {
                 return Err("Publication input differs from the frozen native domain".into());
             }
             store.validate_result_metadata(input)?;
-            let path = input.layout.as_deref().ok_or("Published environment has no native layout")?;
+            let path = input
+                .layout
+                .as_deref()
+                .ok_or("Published environment has no native layout")?;
             if self.path_is_running(Path::new(path)) {
                 return Err("Cannot publish a launch descriptor over a live writer".into());
             }
         }
         Ok(Some(PublicationJob {
-            run_id: self.state.run_id.clone(), repository: resolve_repository(&self.root, config)?,
-            store, inputs, independent,
+            run_id: self.state.run_id.clone(),
+            repository: resolve_repository(&self.root, config)?,
+            store,
+            inputs,
+            independent,
         }))
     }
 
@@ -4405,7 +5291,8 @@ impl Runtime {
             return Err("Published result is stale; republish before using it".into());
         }
         let results: Vec<_> = std::iter::once(&descriptor.result)
-            .chain(descriptor.entries.iter().map(|entry| &entry.result)).collect();
+            .chain(descriptor.entries.iter().map(|entry| &entry.result))
+            .collect();
         let store = self.environments()?.ok_or("No managed environment store")?;
         for result in &results {
             if !result.resource_refs.is_empty() {
@@ -4449,7 +5336,9 @@ impl Runtime {
     }
 
     pub(crate) fn start_result_entry(
-        &mut self, args: &[String], entry: Option<&str>,
+        &mut self,
+        args: &[String],
+        entry: Option<&str>,
     ) -> Result<(ResultJob, crate::process_control::ResultControl), String> {
         let retry = self
             .state
@@ -4481,9 +5370,18 @@ impl Runtime {
         {
             return Err("Published result is stale; republish before launching it".into());
         }
-        if retry && self.state.result_execution.as_ref().is_some_and(|execution|
-            execution.input.layout.as_deref() != Some(&descriptor.workspace)) {
-            return Err("Retry must use the failed business entry and its partial workspace".into());
+        if retry
+            && self
+                .state
+                .result_execution
+                .as_ref()
+                .is_some_and(|execution| {
+                    execution.input.layout.as_deref() != Some(&descriptor.workspace)
+                })
+        {
+            return Err(
+                "Retry must use the failed business entry and its partial workspace".into(),
+            );
         }
         let config = self.state.config.clone().ok_or("Missing config")?;
         if !descriptor.result.resource_refs.is_empty() {
@@ -4585,7 +5483,9 @@ impl Runtime {
         &self,
         head: &str,
     ) -> Result<Option<crate::environment::ResultDescriptor>, String> {
-        self.publication_environment_input()?.map(|job| job.descriptor(head)).transpose()
+        self.publication_environment_input()?
+            .map(|job| job.descriptor(head))
+            .transpose()
     }
 }
 
@@ -4599,14 +5499,24 @@ pub(crate) struct PublicationJob {
 
 impl PublicationJob {
     pub(crate) fn validate(&self) -> Result<(), String> {
-        for (_, input) in &self.inputs { self.store.validate_result(input)?; }
+        for (_, input) in &self.inputs {
+            self.store.validate_result(input)?;
+        }
         Ok(())
     }
 
-    pub(crate) fn descriptor(&self, head: &str) -> Result<crate::environment::ResultDescriptor, String> {
+    pub(crate) fn descriptor(
+        &self,
+        head: &str,
+    ) -> Result<crate::environment::ResultDescriptor, String> {
         let mut entries = Vec::new();
         for (name, selected) in &self.inputs {
-            let path = Path::new(selected.layout.as_deref().ok_or("Result has no native layout")?);
+            let path = Path::new(
+                selected
+                    .layout
+                    .as_deref()
+                    .ok_or("Result has no native layout")?,
+            );
             let exclusions = self.store.exclusions(&selected.launch_ref)?;
             let present = path.is_dir();
             if present {
@@ -4615,29 +5525,61 @@ impl PublicationJob {
                 // that head, so verify against it instead of the entry's
                 // original node code.
                 let current = workspace::git(path, &["rev-parse", "HEAD"])?;
-                let expected = if current == selected.code_ref { selected.code_ref.as_str() } else { head };
-                crate::workspace_view::verify_result_scoped(path, &self.repository, expected, &exclusions)?;
-                self.store.verify_view(path, &selected.launch_ref, &selected.environment_ref)?;
+                let expected = if current == selected.code_ref {
+                    selected.code_ref.as_str()
+                } else {
+                    head
+                };
+                crate::workspace_view::verify_result_scoped(
+                    path,
+                    &self.repository,
+                    expected,
+                    &exclusions,
+                )?;
+                self.store
+                    .verify_view(path, &selected.launch_ref, &selected.environment_ref)?;
                 if !workspace::repository_status(path, &exclusions)?.is_empty() {
                     return Err("Published code view changed outside its writer lease".into());
                 }
             }
             let code = workspace::prepare_with_merger_expected_for_run_scoped(
-                &self.repository, path, head, &[], head, Some(&self.run_id), &exclusions,
+                &self.repository,
+                path,
+                head,
+                &[],
+                head,
+                Some(&self.run_id),
+                &exclusions,
                 || Err("Publication descriptor requires a clean composed code result".into()),
             )?;
             if !present {
                 // Reconstruct a missing successful fixed view at its original path.
-                self.store.prepare(path, selected, &Uuid::new_v4().to_string(), &code, vec![], false, true)?;
+                self.store.prepare(
+                    path,
+                    selected,
+                    &Uuid::new_v4().to_string(),
+                    &code,
+                    vec![],
+                    false,
+                    true,
+                )?;
             }
             // Every independent entry delivers the same published project code;
             // only its environment/launch differs. Keep the publication head as
             // the code reference so the entries agree with `published_head`.
-            let result = crate::environment::CompositeResult { code_ref: head.to_string(), resource_refs: vec![], ..selected.clone() };
-            self.store.verify_view(path, &result.launch_ref, &result.environment_ref)?;
-            self.store.validate_launch(path, &self.store.load_launch(&result.launch_ref)?)?;
+            let result = crate::environment::CompositeResult {
+                code_ref: head.to_string(),
+                resource_refs: vec![],
+                ..selected.clone()
+            };
+            self.store
+                .verify_view(path, &result.launch_ref, &result.environment_ref)?;
+            self.store
+                .validate_launch(path, &self.store.load_launch(&result.launch_ref)?)?;
             entries.push(crate::environment::ResultEntry {
-                name: name.clone(), workspace: path.to_string_lossy().into(), result,
+                name: name.clone(),
+                workspace: path.to_string_lossy().into(),
+                result,
             });
         }
         let first = entries.first().ok_or("Missing terminal result")?;
@@ -4651,7 +5593,9 @@ impl PublicationJob {
                 equivalent &= entry.result.launch_ref == first.result.launch_ref;
                 if let Some(binding) = &launch.environment {
                     equivalent &= self.store.files.same_scope_contents(
-                        &first.result.environment_ref, &entry.result.environment_ref, &binding.prefix,
+                        &first.result.environment_ref,
+                        &entry.result.environment_ref,
+                        &binding.prefix,
                     )?;
                 }
             }
@@ -4719,14 +5663,23 @@ pub(crate) fn perform_result(
                     return Err("Failed native result partial view is missing; refusing a silent reset to the published result".into());
                 }
                 if present && !job.retry {
-                    crate::workspace_view::verify_result_scoped(path, &repository, &job.descriptor.result.code_ref, &exclusions)?;
+                    crate::workspace_view::verify_result_scoped(
+                        path,
+                        &repository,
+                        &job.descriptor.result.code_ref,
+                        &exclusions,
+                    )?;
                     if workspace::git(path, &["rev-parse", "HEAD"])?
                         != job.descriptor.result.code_ref
                         || !workspace::repository_status(path, &exclusions)?.is_empty()
                     {
                         return Err("Published code view changed outside its writer lease".into());
                     }
-                    store.verify_view(path, &job.descriptor.result.launch_ref, &job.descriptor.result.environment_ref)?;
+                    store.verify_view(
+                        path,
+                        &job.descriptor.result.launch_ref,
+                        &job.descriptor.result.environment_ref,
+                    )?;
                 }
                 control.check()?;
                 store.record_selected(
@@ -4833,7 +5786,11 @@ pub(crate) fn perform_result(
                     descriptor.schema = job.descriptor.schema;
                     descriptor.default_entry = job.descriptor.default_entry.clone();
                     descriptor.entries = job.descriptor.entries.clone();
-                    for entry in descriptor.entries.iter_mut().filter(|entry| entry.workspace == descriptor.workspace) {
+                    for entry in descriptor
+                        .entries
+                        .iter_mut()
+                        .filter(|entry| entry.workspace == descriptor.workspace)
+                    {
                         entry.result = result.clone();
                     }
                 }
@@ -4885,10 +5842,19 @@ fn perform_with_merger_inner(
     // source-direct semantics merely by resolving to the same physical path.
     let source_tree = path == repository;
     if !source_tree && crate::path_identity::same_path(path, &repository) {
-        return Err("Graph workspace resolves to the source directory; an isolated workspace is required".into());
+        return Err(
+            "Graph workspace resolves to the source directory; an isolated workspace is required"
+                .into(),
+        );
     }
     #[cfg(not(feature = "fixture"))]
-    if !source_tree && job.config.environment.as_ref().is_some_and(|policy| !policy.launch.state_bound()) {
+    if !source_tree
+        && job
+            .config
+            .environment
+            .as_ref()
+            .is_some_and(|policy| !policy.launch.state_bound())
+    {
         return Err("Legacy in-project native state requires explicit migration/reconstruction before another agent launch; the original workspace is retained".into());
     }
     let reused = path.is_dir();
@@ -4896,23 +5862,39 @@ fn perform_with_merger_inner(
     // An interrupted writer's dirty files belong to that execution, not to an
     // expendable workspace slot. Never stash, clean or reset them on recovery.
     let preserved_head = if let Some(previous) = &job.preserved_workspace {
-        if !reused || !crate::path_identity::same_path(
-            Path::new(&previous.worktree),
-            Path::new(&job.execution.worktree),
-        )
+        if !reused
+            || !crate::path_identity::same_path(
+                Path::new(&previous.worktree),
+                Path::new(&job.execution.worktree),
+            )
             || previous.node != job.execution.node
             || previous.session_id != job.execution.session_id
-            || job.history_edit || job.feedback_workspace.as_ref()
+            || job.history_edit
+            || job
+                .feedback_workspace
+                .as_ref()
                 .is_some_and(|input| input.additional_sources.is_empty())
         {
             return Err("Recovery workspace is missing or reassigned; refusing to replace preserved partial work".into());
         }
         workspace::verify_prepared_ancestor(path, &previous.before)?;
-        for input in job.parent_heads.iter().chain(std::iter::once(&job.expected_source_head))
-            .chain(job.feedback_workspace.iter().flat_map(|input| input.additional_sources.iter().map(|source| &source.head))) {
-            if !input.is_empty() && workspace::git(
-                path, &["merge-base", "--is-ancestor", input, &previous.before],
-            ).is_err() {
+        for input in job
+            .parent_heads
+            .iter()
+            .chain(std::iter::once(&job.expected_source_head))
+            .chain(
+                job.feedback_workspace
+                    .iter()
+                    .flat_map(|input| input.additional_sources.iter().map(|source| &source.head)),
+            )
+        {
+            if !input.is_empty()
+                && workspace::git(
+                    path,
+                    &["merge-base", "--is-ancestor", input, &previous.before],
+                )
+                .is_err()
+            {
                 return Err("Recovery inputs changed after preparation; refusing to reset preserved partial work".into());
             }
         }
@@ -4920,16 +5902,27 @@ fn perform_with_merger_inner(
     } else {
         None
     };
-    if reused && preserved_head.is_none() && !job.history_edit && !job.feedback_repair_retry
-        && crate::workspace_view::is_bound(path) {
+    if reused
+        && preserved_head.is_none()
+        && !job.history_edit
+        && !job.feedback_repair_retry
+        && crate::workspace_view::is_bound(path)
+    {
         let current = workspace::git(path, &["rev-parse", "HEAD"])?;
-        let early_exclusions = if let (Some(policy), Some(input)) = (&job.config.environment, &job.environment_input) {
+        let early_exclusions = if let (Some(policy), Some(input)) =
+            (&job.config.environment, &job.environment_input)
+        {
             crate::environment::Environments::new(root, &job.run_id, policy)?
                 .exclusions(&input.launch_ref)?
         } else {
             Vec::new()
         };
-        crate::workspace_view::verify_result_scoped(path, &repository, &current, &early_exclusions)?;
+        crate::workspace_view::verify_result_scoped(
+            path,
+            &repository,
+            &current,
+            &early_exclusions,
+        )?;
     }
     let mut selected_environment = job.environment_input.clone();
     // A failed slot may still carry an environment scope that an older Merger
@@ -4989,9 +5982,16 @@ fn perform_with_merger_inner(
         }
         exclusions.sort();
         exclusions.dedup();
-        if job.config.environment.as_ref().is_some_and(|policy| policy.best_effort)
-            && selected_environment.as_ref().is_some_and(|selected| selected.layout.is_none())
-            && reused && !job.preserve_failed_environment
+        if job
+            .config
+            .environment
+            .as_ref()
+            .is_some_and(|policy| policy.best_effort)
+            && selected_environment
+                .as_ref()
+                .is_some_and(|selected| selected.layout.is_none())
+            && reused
+            && !job.preserve_failed_environment
         {
             if let Some(previous) = &job.environment_previous {
                 store.verify_view(path, &previous.launch_ref, &previous.environment_ref)?;
@@ -4999,11 +5999,16 @@ fn perform_with_merger_inner(
         }
     }
     if let (Some(store), Some(input)) = (&environments, &job.environment_input) {
-        if !job.environment_sources.iter().any(|source|
-            source.environment_ref == input.environment_ref && source.launch_ref == input.launch_ref) {
+        if !job.environment_sources.iter().any(|source| {
+            source.environment_ref == input.environment_ref && source.launch_ref == input.launch_ref
+        }) {
             store.validate_result(input)?;
         }
-        if job.feedback_workspace.as_ref().is_some_and(|input| input.additional_sources.is_empty()) {
+        if job
+            .feedback_workspace
+            .as_ref()
+            .is_some_and(|input| input.additional_sources.is_empty())
+        {
             store.verify_view(path, &input.launch_ref, &input.environment_ref)?;
         }
     }
@@ -5011,10 +6016,19 @@ fn perform_with_merger_inner(
     if let Some(input) = &job.feedback_workspace {
         for source in input.sources() {
             let source_path = Path::new(&source.worktree);
-            let owner = source_path.parent().and_then(Path::file_name).and_then(|name| name.to_str());
-            let bucket = source_path.parent().and_then(Path::parent)
-                .and_then(Path::file_name).and_then(|name| name.to_str());
-            if owner != Some(&job.run_id) || bucket != Some(".grapher-worktrees") || !source_path.is_dir() {
+            let owner = source_path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str());
+            let bucket = source_path
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str());
+            if owner != Some(&job.run_id)
+                || bucket != Some(".grapher-worktrees")
+                || !source_path.is_dir()
+            {
                 return Err("Feedback requires an existing worktree owned by this Run".into());
             }
             let mut source_exclusions = exclusions.clone();
@@ -5025,8 +6039,16 @@ fn perform_with_merger_inner(
             }
             let feedback_head = workspace::git(source_path, &["rev-parse", "HEAD"])?;
             let feedback_status = workspace::repository_status(source_path, &source_exclusions)?;
-            if feedback_head != source.head || !feedback_status.is_empty()
-                || crate::workspace_view::verify_result_scoped(source_path, &repository, &source.head, &source_exclusions).is_err() {
+            if feedback_head != source.head
+                || !feedback_status.is_empty()
+                || crate::workspace_view::verify_result_scoped(
+                    source_path,
+                    &repository,
+                    &source.head,
+                    &source_exclusions,
+                )
+                .is_err()
+            {
                 // A single-source handoff executes the target in the sender's
                 // directory, so a failed attempt of this very node can leave
                 // residue there: its unrecorded after-snapshot commit or
@@ -5041,7 +6063,10 @@ fn perform_with_merger_inner(
                 // execution history, so attribution never depends on whether
                 // the failed attempt's own session happened to be persisted.
                 let own_residue = job.feedback_repair_retry
-                    && crate::path_identity::same_path(Path::new(&source.worktree), Path::new(&job.execution.worktree))
+                    && crate::path_identity::same_path(
+                        Path::new(&source.worktree),
+                        Path::new(&job.execution.worktree),
+                    )
                     && workspace::verify_prepared_ancestor(source_path, &source.head).is_ok();
                 if !own_residue {
                     return Err("Feedback workspace changed after completion".into());
@@ -5096,10 +6121,18 @@ fn perform_with_merger_inner(
         // Unlike stale published parents, a pinned feedback input must never be
         // silently filtered out of composition when its commit is unavailable.
         for source in input.sources() {
-            workspace::repository_git(&repository, &["cat-file", "-e", &format!("{}^{{commit}}", source.head)])
-                .map_err(|error| format!("Feedback input commit is unavailable: {error}"))?;
+            workspace::repository_git(
+                &repository,
+                &["cat-file", "-e", &format!("{}^{{commit}}", source.head)],
+            )
+            .map_err(|error| format!("Feedback input commit is unavailable: {error}"))?;
         }
-        input_heads.extend(input.additional_sources.iter().map(|source| source.head.clone()));
+        input_heads.extend(
+            input
+                .additional_sources
+                .iter()
+                .map(|source| source.head.clone()),
+        );
     }
     if job.history_edit && environments.is_some() {
         input_heads.clear();
@@ -5207,26 +6240,23 @@ fn perform_with_merger_inner(
     if !reused && !crate::workspace_view::is_bound(path) {
         if let Some(source) = &job.copy_from_workspace {
             crate::server::set_prepare_phase(&job.run_id, &job.execution.id, "copy");
-            workspace::copy_ordinary_files(
-                Path::new(source),
-                path,
-                &exclusions,
-                root,
-            )?;
+            workspace::copy_ordinary_files(Path::new(source), path, &exclusions, root)?;
         }
     }
     let environment_input = if let Some(store) = &environments {
-        Some(store.prepare(
-            path,
-            selected_environment
-                .as_ref()
-                .ok_or("Missing managed environment input")?,
-            &job.execution.id,
-            &before,
-            vec![],
-            job.preserve_failed_environment,
-            job.history_edit || !reused,
-        )?)
+        Some(
+            store.prepare(
+                path,
+                selected_environment
+                    .as_ref()
+                    .ok_or("Missing managed environment input")?,
+                &job.execution.id,
+                &before,
+                vec![],
+                job.preserve_failed_environment,
+                job.history_edit || !reused,
+            )?,
+        )
     } else {
         None
     };
@@ -5255,8 +6285,14 @@ fn perform_with_merger_inner(
     // Uploads for a closed node are staged outside its immutable project
     // view. Deliver accepted inputs only after validation/preparation and the
     // durable Prepared boundary, so failed/interrupted delivery is recoverable.
-    crate::attachment_inputs::deliver_prepared(root, &job.run_id, &job.execution.node,
-        &job.attachment_instructions, path, job.preserved_workspace.is_some())?;
+    crate::attachment_inputs::deliver_prepared(
+        root,
+        &job.run_id,
+        &job.execution.node,
+        &job.attachment_instructions,
+        path,
+        job.preserved_workspace.is_some(),
+    )?;
     let mut execution_view = job.execution.clone();
     execution_view.input = environment_input.clone();
     let mut on_output = on_output;
@@ -5326,12 +6362,7 @@ fn perform_with_merger_inner(
             &exclusions,
         )?
     } else {
-        workspace::snapshot_node_for_run(
-            path,
-            &repository,
-            &job.execution.node,
-            Some(&job.run_id),
-        )?
+        workspace::snapshot_node_for_run(path, &repository, &job.execution.node, Some(&job.run_id))?
     };
     if !head.is_empty() && !before.is_empty() {
         crate::file_changes::record_git_commit_changes(
@@ -5346,12 +6377,7 @@ fn perform_with_merger_inner(
     }
     if let (Some(store), Some(input)) = (&environments, &environment_result_input) {
         store.prove_accelerator(&repository, path, input)?;
-        store.seal(
-            path,
-            input,
-            &head,
-            vec![],
-        )?;
+        store.seal(path, input, &head, vec![])?;
     }
     Ok((head, output))
 }

@@ -9,9 +9,15 @@ use std::{
 /// Allow platform aliases in the trusted root (e.g. /var on macOS), but
 /// never let a writable exception traverse symlinks beneath that root.
 fn canonical_exception(root: &Path, path: &Path) -> Result<PathBuf, String> {
-    let relative = path.strip_prefix(root)
-        .map_err(|_| format!("Sandbox exception {} is outside {}", path.display(), root.display()))?;
-    let mut resolved = root.canonicalize()
+    let relative = path.strip_prefix(root).map_err(|_| {
+        format!(
+            "Sandbox exception {} is outside {}",
+            path.display(),
+            root.display()
+        )
+    })?;
+    let mut resolved = root
+        .canonicalize()
         .map_err(|e| format!("Cannot resolve sandbox root {}: {e}", root.display()))?;
     for component in relative.components() {
         let std::path::Component::Normal(name) = component else {
@@ -21,7 +27,10 @@ fn canonical_exception(root: &Path, path: &Path) -> Result<PathBuf, String> {
         let metadata = fs::symlink_metadata(&resolved)
             .map_err(|e| format!("Cannot inspect sandbox path {}: {e}", resolved.display()))?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format!("Sandbox exception must use real directories: {}", resolved.display()));
+            return Err(format!(
+                "Sandbox exception must use real directories: {}",
+                resolved.display()
+            ));
         }
     }
     Ok(resolved)
@@ -64,15 +73,41 @@ pub fn write_execution_profile(
     engine: &Path,
     installation: &Path,
 ) -> Result<PathBuf, String> {
-    write_execution_profile_scoped(path, repository, worktree_root, current, data, session, engine, installation, &[], &[])
+    write_execution_profile_scoped(
+        path,
+        repository,
+        worktree_root,
+        current,
+        data,
+        session,
+        engine,
+        installation,
+        &[],
+        &[],
+    )
 }
 
 pub(crate) fn write_execution_profile_scoped(
-    path: &Path, repository: &Path, worktree_root: &Path, current: &Path,
-    data: &Path, session: &Path, engine: &Path, installation: &Path,
-    workspaces: &[PathBuf], extra_exceptions: &[PathBuf],
+    path: &Path,
+    repository: &Path,
+    worktree_root: &Path,
+    current: &Path,
+    data: &Path,
+    session: &Path,
+    engine: &Path,
+    installation: &Path,
+    workspaces: &[PathBuf],
+    extra_exceptions: &[PathBuf],
 ) -> Result<PathBuf, String> {
-    write_profile(path, repository, worktree_root, current, Some((data, session, engine, installation)), workspaces, extra_exceptions)
+    write_profile(
+        path,
+        repository,
+        worktree_root,
+        current,
+        Some((data, session, engine, installation)),
+        workspaces,
+        extra_exceptions,
+    )
 }
 
 fn write_profile(
@@ -104,14 +139,16 @@ fn write_profile(
         .map(|path| canonical_exception(&worktree_root, path))
         .collect::<Result<Vec<_>, _>>()?;
     let extra = execution
-        .map(|(data, session, engine, installation)| -> Result<_, String> {
-            Ok((
-                data.canonicalize().map_err(|e| e.to_string())?,
-                canonical_exception(data, session)?,
-                engine.canonicalize().map_err(|e| e.to_string())?,
-                installation.canonicalize().map_err(|e| e.to_string())?,
-            ))
-        })
+        .map(
+            |(data, session, engine, installation)| -> Result<_, String> {
+                Ok((
+                    data.canonicalize().map_err(|e| e.to_string())?,
+                    canonical_exception(data, session)?,
+                    engine.canonicalize().map_err(|e| e.to_string())?,
+                    installation.canonicalize().map_err(|e| e.to_string())?,
+                ))
+            },
+        )
         .transpose()?;
     if let Some((data, session, engine, installation)) = &extra {
         if installation == Path::new("/") {
@@ -137,15 +174,26 @@ fn write_profile(
     // Git borrows the same object store through its own alternate.
     let borrowed_objects = (|| -> Option<PathBuf> {
         let expected = crate::workspace::repository_git(
-            &repository, &["rev-parse", "--path-format=absolute", "--git-path", "objects"]
-        ).ok()?;
+            &repository,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "objects",
+            ],
+        )
+        .ok()?;
         let expected = PathBuf::from(expected).canonicalize().ok()?;
-        for alternate in std::iter::once(current.join(".git/objects/info/alternates"))
-            .chain(extra_exceptions.iter().map(|path| path.join("objects/info/alternates")))
-        {
+        for alternate in std::iter::once(current.join(".git/objects/info/alternates")).chain(
+            extra_exceptions
+                .iter()
+                .map(|path| path.join("objects/info/alternates")),
+        ) {
             if let Ok(value) = fs::read_to_string(&alternate) {
                 if let Ok(objects) = PathBuf::from(value.trim()).canonicalize() {
-                    if objects == expected { return Some(objects); }
+                    if objects == expected {
+                        return Some(objects);
+                    }
                 }
             }
         }
@@ -161,7 +209,10 @@ fn write_profile(
         format!("(subpath {})", quote(&repository)?)
     };
     let read_source_rule = if let Some(objects) = &borrowed_objects {
-        format!("(require-all {source_rule} (require-not (subpath {})))", quote(objects)?)
+        format!(
+            "(require-all {source_rule} (require-not (subpath {})))",
+            quote(objects)?
+        )
     } else {
         source_rule.clone()
     };
@@ -169,16 +220,28 @@ fn write_profile(
         if objects.starts_with(&repository) {
             format!("(require-all {read_source_rule} (require-not (literal {})) (require-not (literal {})))",
                 quote(&repository)?, quote(objects.parent().ok_or("Invalid object path")?)?)
-        } else { read_source_rule.clone() }
-    } else { read_source_rule.clone() };
-    let state = crate::workspace_state::process_root(&current).ok().filter(|path| path.is_dir())
-        .map(|path| canonical_exception(&worktree_root, &path)).transpose()?;
+        } else {
+            read_source_rule.clone()
+        }
+    } else {
+        read_source_rule.clone()
+    };
+    let state = crate::workspace_state::process_root(&current)
+        .ok()
+        .filter(|path| path.is_dir())
+        .map(|path| canonical_exception(&worktree_root, &path))
+        .transpose()?;
     let mut exceptions = state.into_iter().collect::<Vec<_>>();
     for workspace in workspaces {
         let target = canonical_exception(&worktree_root, workspace)?;
-        if target.parent() != current.parent() { return Err("Planner sandbox exception leaves the current Run".into()); }
+        if target.parent() != current.parent() {
+            return Err("Planner sandbox exception leaves the current Run".into());
+        }
         crate::workspace_view::validate_ready(&target, &repository)?;
-        exceptions.push(canonical_exception(&worktree_root, &crate::workspace_state::prepare(&target)?)?);
+        exceptions.push(canonical_exception(
+            &worktree_root,
+            &crate::workspace_state::prepare(&target)?,
+        )?);
         exceptions.push(target);
     }
     // The Merger's hidden graph Git lives beside the masked worktrees root and
@@ -188,7 +251,11 @@ fn write_profile(
     }
     exceptions.sort();
     exceptions.dedup();
-    let state_exception = exceptions.iter().map(|path| quote(path).map(|path| format!(" (require-not (subpath {path}))"))).collect::<Result<Vec<_>, _>>()?.concat();
+    let state_exception = exceptions
+        .iter()
+        .map(|path| quote(path).map(|path| format!(" (require-not (subpath {path}))")))
+        .collect::<Result<Vec<_>, _>>()?
+        .concat();
     let mut state_ancestors = String::new();
     for exception in &exceptions {
         let mut parent = exception.parent();
@@ -212,10 +279,16 @@ fn write_profile(
         run = quote(current.parent().ok_or("Invalid execution path")?)?,
     );
     if let Some((data, session, engine, installation)) = &extra {
-        let data_rule = format!("(require-all (subpath {}) (require-not (subpath {})))",
-            quote(data)?, quote(session)?);
+        let data_rule = format!(
+            "(require-all (subpath {}) (require-not (subpath {})))",
+            quote(data)?,
+            quote(session)?
+        );
         if let Some(objects) = borrowed_objects.as_ref().filter(|p| p.starts_with(data)) {
-            let read_rule = format!("(require-all {data_rule} (require-not (subpath {})))", quote(objects)?);
+            let read_rule = format!(
+                "(require-all {data_rule} (require-not (subpath {})))",
+                quote(objects)?
+            );
             let mut ancestors = String::new();
             let mut parent = objects.parent();
             while let Some(dir) = parent.filter(|dir| dir.starts_with(data)) {
@@ -226,7 +299,10 @@ fn write_profile(
         } else {
             text.push_str(&format!("(deny file-read* {data_rule})\n"));
         }
-        text.push_str(&format!("(deny file-write* {data_rule})\n(deny file-write* (subpath {}))\n", quote(engine)?));
+        text.push_str(&format!(
+            "(deny file-write* {data_rule})\n(deny file-write* (subpath {}))\n",
+            quote(engine)?
+        ));
         // The original Grapher installation (source checkout or packaged app)
         // is shared host state. An execution may load from the prepared engine
         // copy but must not modify the installation, exactly as Linux mounts it
@@ -245,23 +321,32 @@ fn write_profile(
     // External shadow repositories keep Git metadata outside source; explicitly deny them.
     let shadow_dir = crate::workspace::shadow_repo_dir(&repository)?;
     if shadow_dir.exists() || shadow_dir.is_symlink() {
-        let canonical_shadow = shadow_dir.canonicalize()
-            .map_err(|e| format!("Cannot resolve shadow repository {}: {e}", shadow_dir.display()))?;
+        let canonical_shadow = shadow_dir.canonicalize().map_err(|e| {
+            format!(
+                "Cannot resolve shadow repository {}: {e}",
+                shadow_dir.display()
+            )
+        })?;
         append_git_dir_rule(&mut text, &canonical_shadow, borrowed_objects.as_deref())?;
     }
     // Source linked worktrees can keep all node snapshots in a shared Git
     // directory outside the source path. Protect that database as well.
     let mut common_dirs = vec![crate::workspace::repository_git(
-        &repository, &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        &repository,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )];
     if crate::workspace::is_standard_git(&repository) {
         // Internal snapshots no longer live in the user's database. A linked
         // source worktree's real external database still needs protection.
-        common_dirs.push(crate::workspace::git(&repository,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+        common_dirs.push(crate::workspace::git(
+            &repository,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ));
     }
     for common in common_dirs.into_iter().flatten() {
-        let common = PathBuf::from(common).canonicalize().map_err(|e| e.to_string())?;
+        let common = PathBuf::from(common)
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
         if !common.starts_with(&repository)
             && !common.starts_with(&current)
             && !extra_resolved.contains(&common)
@@ -278,7 +363,9 @@ fn write_profile(
             &current,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         ) {
-            let common = PathBuf::from(common).canonicalize().map_err(|e| e.to_string())?;
+            let common = PathBuf::from(common)
+                .canonicalize()
+                .map_err(|e| e.to_string())?;
             if !common.starts_with(&current) && !extra_resolved.contains(&common) {
                 text.push_str(&format!(
                     "(deny file-read* file-write* (subpath {}))\n",
@@ -293,10 +380,17 @@ fn write_profile(
     Ok(path.to_path_buf())
 }
 
-fn append_git_dir_rule(text: &mut String, git_dir: &Path, borrowed: Option<&Path>) -> Result<(), String> {
+fn append_git_dir_rule(
+    text: &mut String,
+    git_dir: &Path,
+    borrowed: Option<&Path>,
+) -> Result<(), String> {
     let rule = format!("(subpath {})", quote(git_dir)?);
     if let Some(objects) = borrowed.filter(|objects| objects.starts_with(git_dir)) {
-        text.push_str(&format!("(deny file-read-data (require-all {rule} (require-not (subpath {}))))\n", quote(objects)?));
+        text.push_str(&format!(
+            "(deny file-read-data (require-all {rule} (require-not (subpath {}))))\n",
+            quote(objects)?
+        ));
         text.push_str(&format!("(deny file-read-metadata (require-all {rule} (require-not (subpath {})) (require-not (literal {}))))\n",
             quote(objects)?, quote(git_dir)?));
     } else {
@@ -307,5 +401,6 @@ fn append_git_dir_rule(text: &mut String, git_dir: &Path, borrowed: Option<&Path
 }
 
 pub fn supported() -> bool {
-    cfg!(target_os = "windows") || (cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file())
+    cfg!(target_os = "windows")
+        || (cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file())
 }

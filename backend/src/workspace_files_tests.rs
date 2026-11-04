@@ -20,11 +20,23 @@ fn managed_environment_scopes_remain_versioned_and_independent_of_gitignore() {
     let version = Uuid::new_v4().to_string();
     files.capture(&workspace, &version, "", &[]).unwrap();
     fs::write(workspace.join(".venv/bin/python"), "mutated environment").unwrap();
-    files.materialize(&workspace, &[version.clone()], None, false).unwrap();
+    files
+        .materialize(&workspace, &[version.clone()], None, false)
+        .unwrap();
 
-    assert_eq!(fs::read_to_string(workspace.join(".venv/bin/python")).unwrap(), "initial environment");
-    assert_eq!(fs::read_to_string(workspace.join(".cache")).unwrap(), "ordinary cache");
-    assert!(!workspace::repository_git(&workspace, &["ls-files", "--cached"]).unwrap().contains(".venv"));
+    assert_eq!(
+        fs::read_to_string(workspace.join(".venv/bin/python")).unwrap(),
+        "initial environment"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join(".cache")).unwrap(),
+        "ordinary cache"
+    );
+    assert!(
+        !workspace::repository_git(&workspace, &["ls-files", "--cached"])
+            .unwrap()
+            .contains(".venv")
+    );
 }
 
 #[test]
@@ -39,11 +51,16 @@ fn managed_environment_scope_conflicts_and_missing_versions_fail_closed() {
 
     fs::write(workspace.join(".venv/package"), "changed").unwrap();
     let branch = Uuid::new_v4().to_string();
-    files.capture(&workspace, &branch, "", &[base.clone()]).unwrap();
+    files
+        .capture(&workspace, &branch, "", &[base.clone()])
+        .unwrap();
     assert!(files.exists(&branch));
     fs::remove_file(workspace.join(".venv/package")).unwrap();
     files.materialize(&workspace, &[base], None, false).unwrap();
-    assert_eq!(fs::read_to_string(workspace.join(".venv/package")).unwrap(), "base");
+    assert_eq!(
+        fs::read_to_string(workspace.join(".venv/package")).unwrap(),
+        "base"
+    );
 }
 
 #[test]
@@ -83,12 +100,8 @@ fn nested_cache_paths_are_left_out_of_the_snapshot() {
     crate::path_safety::directory_link(&target, &workspace.join(".venv/cache/broken"));
     fs::remove_dir(&target).unwrap();
     let version_store = temp.path().join("environment-files");
-    let files = Files::environment(
-        &version_store,
-        &[".venv".into()],
-        &[".venv/cache".into()],
-    )
-    .unwrap();
+    let files =
+        Files::environment(&version_store, &[".venv".into()], &[".venv/cache".into()]).unwrap();
 
     let version = Uuid::new_v4().to_string();
     files.capture(&workspace, &version, "", &[]).unwrap();

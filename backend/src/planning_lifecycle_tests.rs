@@ -19,19 +19,48 @@ fn startup_cleanup_recovers_unqueued_completed_workspaces_and_provisional_attemp
     let primary = service(&root);
     let id = {
         let mut runtime = primary.runtime.lock().unwrap();
-        runtime.create(Graph { original_goal: "test".into(), nodes: vec![Node { name: "task".into(), task: "test".into() }], edges: vec![] }, config(&source)).unwrap();
-        runtime.emit(EventKind::PublicationCompleted { head: "test".into() }).unwrap();
+        runtime
+            .create(
+                Graph {
+                    original_goal: "test".into(),
+                    nodes: vec![Node {
+                        name: "task".into(),
+                        task: "test".into(),
+                    }],
+                    edges: vec![],
+                },
+                config(&source),
+            )
+            .unwrap();
+        runtime
+            .emit(EventKind::PublicationCompleted {
+                head: "test".into(),
+            })
+            .unwrap();
         runtime.state.run_id.clone()
     };
-    let workspace = temp.path().join(".grapher-worktrees").join(&id).join("node/dependencies");
+    let workspace = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join(&id)
+        .join("node/dependencies");
     fs::create_dir_all(&workspace).unwrap();
     fs::write(workspace.join("file"), "owned").unwrap();
     let owner = Uuid::new_v4().to_string();
     let planning = Uuid::new_v4().to_string();
     let provisional = root.join("planning").join(&planning);
-    primary.runtime.lock().unwrap().store.remember_cleanup_targets(&owner, &std::collections::BTreeSet::from([
-        crate::cleanup::Target::data("planning", &planning),
-    ])).unwrap();
+    primary
+        .runtime
+        .lock()
+        .unwrap()
+        .store
+        .remember_cleanup_targets(
+            &owner,
+            &std::collections::BTreeSet::from([crate::cleanup::Target::data(
+                "planning", &planning,
+            )]),
+        )
+        .unwrap();
     fs::create_dir_all(&provisional).unwrap();
     fs::write(provisional.join("partial-output"), "incomplete request").unwrap();
     recover_cleanup_tasks(&primary).unwrap();
@@ -48,10 +77,16 @@ fn startup_cleanup_recovers_unqueued_completed_workspaces_and_provisional_attemp
 fn config(repository: &std::path::Path) -> Config {
     serde_json::from_value(serde_json::json!({
         "repository": repository, "model": "mock/model", "maxParallel": 1
-    })).unwrap()
+    }))
+    .unwrap()
 }
 
-fn attempt(root: &std::path::Path, run_id: &str, legacy: bool, revision: bool) -> (PathBuf, PlanningSummary) {
+fn attempt(
+    root: &std::path::Path,
+    run_id: &str,
+    legacy: bool,
+    revision: bool,
+) -> (PathBuf, PlanningSummary) {
     let id = Uuid::new_v4().to_string();
     let directory = root.join("planning").join(&id);
     fs::create_dir_all(&directory).unwrap();
@@ -59,14 +94,25 @@ fn attempt(root: &std::path::Path, run_id: &str, legacy: bool, revision: bool) -
         "goal": "Original goal", "config": config(root), "mode": "graph",
         "revisionRunId": if revision { Some(run_id) } else { None },
     });
-    if !legacy { request["runId"] = serde_json::json!(run_id); }
+    if !legacy {
+        request["runId"] = serde_json::json!(run_id);
+    }
     fs::write(directory.join("request.json"), request.to_string()).unwrap();
-    fs::write(directory.join("planner-workspace"),
-        root.join(".grapher-workspaces").join(run_id).join(&id).to_string_lossy().as_bytes()).unwrap();
+    fs::write(
+        directory.join("planner-workspace"),
+        root.join(".grapher-workspaces")
+            .join(run_id)
+            .join(&id)
+            .to_string_lossy()
+            .as_bytes(),
+    )
+    .unwrap();
     fs::write(directory.join("route.json"), r#"{"planType":"graph"}"#).unwrap();
     let summary = PlanningSummary {
-        planning_id: id, status: Some("running".into()),
-        created_at: Some(1000), repository: Some(root.to_string_lossy().into()),
+        planning_id: id,
+        status: Some("running".into()),
+        created_at: Some(1000),
+        repository: Some(root.to_string_lossy().into()),
         ..Default::default()
     };
     write_planning_summary(&directory, &summary).unwrap();
@@ -88,10 +134,17 @@ fn restart_recovers_durable_and_legacy_planning_with_the_original_run_id() {
         let (_, running) = attempt(temp.path(), &id, legacy, false);
         if !legacy {
             let child = service_for_run(&primary, &id, true).unwrap();
-            child.runtime.lock().unwrap().emit(EventKind::PlanningStarted {
-                goal: "Original goal".into(), config: config(temp.path()),
-                planning: running.clone(), plan_type: Some("graph".into()),
-            }).unwrap();
+            child
+                .runtime
+                .lock()
+                .unwrap()
+                .emit(EventKind::PlanningStarted {
+                    goal: "Original goal".into(),
+                    config: config(temp.path()),
+                    planning: running.clone(),
+                    plan_type: Some("graph".into()),
+                })
+                .unwrap();
             invalidate_service_cache(temp.path(), Some(&id));
         }
         recover_plannings(&primary).unwrap();
@@ -108,10 +161,18 @@ fn restart_recovers_durable_and_legacy_planning_with_the_original_run_id() {
         assert_eq!(summary.roles["planner"].usage.total_tokens, 100);
         assert_eq!(summary.roles["planner"].duration_seconds, 5.0);
         assert!(summary.error.as_ref().unwrap().contains("Backend stopped"));
-        assert_eq!(get_planning(running.planning_id.clone(), &primary).unwrap(), *summary);
-        let json = dispatch(&primary, "get_planning_snapshot", serde_json::json!({
-            "planningId": running.planning_id, "repository": temp.path().to_string_lossy(),
-        })).unwrap();
+        assert_eq!(
+            get_planning(running.planning_id.clone(), &primary).unwrap(),
+            *summary
+        );
+        let json = dispatch(
+            &primary,
+            "get_planning_snapshot",
+            serde_json::json!({
+                "planningId": running.planning_id, "repository": temp.path().to_string_lossy(),
+            }),
+        )
+        .unwrap();
         assert_eq!(json["runId"], id);
         let events = state.events.len();
         recover_plannings(&primary).unwrap();
@@ -130,15 +191,26 @@ fn restart_discards_a_foreground_planner_preview_before_serving_the_committed_gr
     let child = service_for_run(&primary, &id, true).unwrap();
     {
         let mut runtime = child.runtime.lock().unwrap();
-        runtime.emit(EventKind::PlanningStarted {
-            goal: "Original goal".into(), config: config(temp.path()),
-            planning: running.clone(), plan_type: Some("graph".into()),
-        }).unwrap();
-        runtime.emit(EventKind::PlannerPreviewProgress { graph: Graph {
-            original_goal: "Original goal".into(),
-            nodes: vec![Node { name: "draft".into(), task: "draft".into() }],
-            edges: vec![],
-        }}).unwrap();
+        runtime
+            .emit(EventKind::PlanningStarted {
+                goal: "Original goal".into(),
+                config: config(temp.path()),
+                planning: running.clone(),
+                plan_type: Some("graph".into()),
+            })
+            .unwrap();
+        runtime
+            .emit(EventKind::PlannerPreviewProgress {
+                graph: Graph {
+                    original_goal: "Original goal".into(),
+                    nodes: vec![Node {
+                        name: "draft".into(),
+                        task: "draft".into(),
+                    }],
+                    edges: vec![],
+                },
+            })
+            .unwrap();
         let live = snapshot_metadata(&runtime.state).unwrap();
         assert_eq!(live["graph"]["nodes"][0]["name"], "draft");
         assert_eq!(live["phase"], "planning");
@@ -152,7 +224,10 @@ fn restart_discards_a_foreground_planner_preview_before_serving_the_committed_gr
     assert_eq!(state.phase, "planning_failed");
     assert!(state.preview_graph.is_none());
     assert!(state.graph.nodes.is_empty());
-    assert!(snapshot_metadata(&state).unwrap()["graph"]["nodes"].as_array().unwrap().is_empty());
+    assert!(snapshot_metadata(&state).unwrap()["graph"]["nodes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -161,20 +236,43 @@ fn failed_planning_survives_cache_eviction_and_keeps_a_stable_id_on_commit() {
     let primary = service(temp.path());
     let id = Uuid::new_v4().to_string();
     let child = service_for_run(&primary, &id, true).unwrap();
-    let running = PlanningSummary { planning_id: Uuid::new_v4().to_string(), status: Some("running".into()), ..Default::default() };
+    let running = PlanningSummary {
+        planning_id: Uuid::new_v4().to_string(),
+        status: Some("running".into()),
+        ..Default::default()
+    };
     {
         let mut runtime = child.runtime.lock().unwrap();
-        runtime.emit(EventKind::PlanningStarted {
-            goal: "Goal".into(), config: config(temp.path()), planning: running.clone(), plan_type: Some("graph".into()),
-        }).unwrap();
+        runtime
+            .emit(EventKind::PlanningStarted {
+                goal: "Goal".into(),
+                config: config(temp.path()),
+                planning: running.clone(),
+                plan_type: Some("graph".into()),
+            })
+            .unwrap();
         let mut success = running.clone();
         success.status = Some("success".into());
-        runtime.create_with_planning(Graph {
-            original_goal: "Goal".into(),
-            nodes: vec![Node { name: "work".into(), task: "Do work".into() }], edges: vec![],
-        }, config(temp.path()), Some(running.planning_id), Some(success)).unwrap();
+        runtime
+            .create_with_planning(
+                Graph {
+                    original_goal: "Goal".into(),
+                    nodes: vec![Node {
+                        name: "work".into(),
+                        task: "Do work".into(),
+                    }],
+                    edges: vec![],
+                },
+                config(temp.path()),
+                Some(running.planning_id),
+                Some(success),
+            )
+            .unwrap();
         assert_eq!(runtime.state.run_id, id);
-        assert!(matches!(runtime.state.events[0].kind, EventKind::PlanningStarted { .. }));
+        assert!(matches!(
+            runtime.state.events[0].kind,
+            EventKind::PlanningStarted { .. }
+        ));
         assert_eq!(runtime.state.phase, "awaiting_approval");
     }
     invalidate_service_cache(temp.path(), Some(&id));
@@ -190,20 +288,34 @@ fn git_planning_failure_diagnostics_survive_restart() {
     let primary = service(temp.path());
     let id = Uuid::new_v4().to_string();
     let (directory, mut planning) = attempt(temp.path(), &id, false, false);
-    let error = crate::workspace::git(temp.path(), &[
-        "-c", "alias.grapher-fail=!printf 'warning: line endings\\n' >&2; exit 23", "grapher-fail",
-    ]).unwrap_err();
+    let error = crate::workspace::git(
+        temp.path(),
+        &[
+            "-c",
+            "alias.grapher-fail=!printf 'warning: line endings\\n' >&2; exit 23",
+            "grapher-fail",
+        ],
+    )
+    .unwrap_err();
     let child = service_for_run(&primary, &id, true).unwrap();
     {
         let mut runtime = child.runtime.lock().unwrap();
-        runtime.emit(EventKind::PlanningStarted {
-            goal: "Original goal".into(), config: config(temp.path()),
-            planning: planning.clone(), plan_type: Some("graph".into()),
-        }).unwrap();
+        runtime
+            .emit(EventKind::PlanningStarted {
+                goal: "Original goal".into(),
+                config: config(temp.path()),
+                planning: planning.clone(),
+                plan_type: Some("graph".into()),
+            })
+            .unwrap();
         planning.status = Some("failed".into());
         planning.error = Some(error.clone());
         write_planning_summary(&directory, &planning).unwrap();
-        runtime.emit(EventKind::PlanningFailed { planning: planning.clone() }).unwrap();
+        runtime
+            .emit(EventKind::PlanningFailed {
+                planning: planning.clone(),
+            })
+            .unwrap();
     }
     invalidate_service_cache(temp.path(), Some(&id));
     drop(child);
@@ -215,11 +327,24 @@ fn git_planning_failure_diagnostics_survive_restart() {
     assert_eq!(restored.phase, "planning_failed");
     assert!(!restored.approved);
     assert!(restored.executions.is_empty());
-    assert_eq!(restored.planning.as_ref().unwrap().error.as_deref(), Some(error.as_str()));
-    assert_eq!(get_planning(planning.planning_id.clone(), &restarted).unwrap().error, Some(error.clone()));
-    let json = dispatch(&restarted, "get_planning_snapshot", serde_json::json!({
-        "planningId": planning.planning_id, "repository": temp.path().to_string_lossy(),
-    })).unwrap();
+    assert_eq!(
+        restored.planning.as_ref().unwrap().error.as_deref(),
+        Some(error.as_str())
+    );
+    assert_eq!(
+        get_planning(planning.planning_id.clone(), &restarted)
+            .unwrap()
+            .error,
+        Some(error.clone())
+    );
+    let json = dispatch(
+        &restarted,
+        "get_planning_snapshot",
+        serde_json::json!({
+            "planningId": planning.planning_id, "repository": temp.path().to_string_lossy(),
+        }),
+    )
+    .unwrap();
     assert_eq!(json["planning"]["error"], error);
     invalidate_service_cache(temp.path(), None);
 }
@@ -232,12 +357,32 @@ fn committed_graph_wins_over_an_interrupted_summary_write() {
     let (_, mut summary) = attempt(temp.path(), &id, false, false);
     summary.status = Some("success".into());
     let child = service_for_run(&primary, &id, true).unwrap();
-    child.runtime.lock().unwrap().create_with_planning(Graph {
-        original_goal: "Goal".into(),
-        nodes: vec![Node { name: "work".into(), task: "Do work".into() }], edges: vec![],
-    }, config(temp.path()), Some(summary.planning_id.clone()), Some(summary.clone())).unwrap();
+    child
+        .runtime
+        .lock()
+        .unwrap()
+        .create_with_planning(
+            Graph {
+                original_goal: "Goal".into(),
+                nodes: vec![Node {
+                    name: "work".into(),
+                    task: "Do work".into(),
+                }],
+                edges: vec![],
+            },
+            config(temp.path()),
+            Some(summary.planning_id.clone()),
+            Some(summary.clone()),
+        )
+        .unwrap();
     recover_plannings(&primary).unwrap();
-    assert_eq!(get_planning(summary.planning_id, &primary).unwrap().status.as_deref(), Some("success"));
+    assert_eq!(
+        get_planning(summary.planning_id, &primary)
+            .unwrap()
+            .status
+            .as_deref(),
+        Some("success")
+    );
     assert_eq!(snapshot(&child).unwrap().phase, "awaiting_approval");
     invalidate_service_cache(temp.path(), None);
 }
@@ -250,14 +395,29 @@ fn deleted_and_cleared_planning_runs_are_not_reimported() {
         let id = Uuid::new_v4().to_string();
         attempt(temp.path(), &id, true, false);
         recover_plannings(&primary).unwrap();
-        assert!(primary.runtime.lock().unwrap().store.contains_run(&id).unwrap());
+        assert!(primary
+            .runtime
+            .lock()
+            .unwrap()
+            .store
+            .contains_run(&id)
+            .unwrap());
         {
             let runtime = primary.runtime.lock().unwrap();
-            if clear { runtime.store.clear().unwrap(); }
-            else { runtime.store.delete_run(&id).unwrap(); }
+            if clear {
+                runtime.store.clear().unwrap();
+            } else {
+                runtime.store.delete_run(&id).unwrap();
+            }
         }
         recover_plannings(&primary).unwrap();
-        assert!(!primary.runtime.lock().unwrap().store.contains_run(&id).unwrap());
+        assert!(!primary
+            .runtime
+            .lock()
+            .unwrap()
+            .store
+            .contains_run(&id)
+            .unwrap());
         assert!(service_for_run(&primary, &id, false).is_err());
         invalidate_service_cache(temp.path(), None);
     }
@@ -269,27 +429,62 @@ fn interrupted_revision_does_not_replace_a_compiled_graph() {
     let primary = service(temp.path());
     let id = Uuid::new_v4().to_string();
     let child = service_for_run(&primary, &id, true).unwrap();
-    child.runtime.lock().unwrap().create(Graph {
-        original_goal: "Existing graph".into(),
-        nodes: vec![Node { name: "work".into(), task: "Do work".into() }], edges: vec![],
-    }, config(temp.path())).unwrap();
+    child
+        .runtime
+        .lock()
+        .unwrap()
+        .create(
+            Graph {
+                original_goal: "Existing graph".into(),
+                nodes: vec![Node {
+                    name: "work".into(),
+                    task: "Do work".into(),
+                }],
+                edges: vec![],
+            },
+            config(temp.path()),
+        )
+        .unwrap();
     let (directory, running) = attempt(temp.path(), &id, false, true);
     recover_plannings(&primary).unwrap();
     let state = snapshot(&child).unwrap();
     assert_eq!(state.phase, "awaiting_approval");
     assert_eq!(state.graph.original_goal, "Existing graph");
-    assert_eq!(get_planning(running.planning_id.clone(), &primary).unwrap().status.as_deref(), Some("failed"));
+    assert_eq!(
+        get_planning(running.planning_id.clone(), &primary)
+            .unwrap()
+            .status
+            .as_deref(),
+        Some("failed")
+    );
     // The aborted turn stays part of the Run conversation: one history marker,
     // its durable planner.jsonl remains replayable, and recovery is idempotent.
     let recorded_history = history(id.clone(), &primary).unwrap();
-    let aborted = recorded_history.events.iter().filter(|event|
-        matches!(event.kind, EventKind::PlannerTurnAborted { ref planning }
-            if planning.planning_id == running.planning_id)).count();
+    let aborted = recorded_history
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(event.kind, EventKind::PlannerTurnAborted { ref planning }
+            if planning.planning_id == running.planning_id)
+        })
+        .count();
     assert_eq!(aborted, 1);
-    let page = get_planning_output(running.planning_id.clone(), "planner".into(), 0, false, None, None, &primary).unwrap();
+    let page = get_planning_output(
+        running.planning_id.clone(),
+        "planner".into(),
+        0,
+        false,
+        None,
+        None,
+        &primary,
+    )
+    .unwrap();
     assert!(page["totalBytes"].as_u64().unwrap() > 0);
     recover_plannings(&primary).unwrap();
-    assert_eq!(history(id.clone(), &primary).unwrap().events.len(), recorded_history.events.len());
+    assert_eq!(
+        history(id.clone(), &primary).unwrap().events.len(),
+        recorded_history.events.len()
+    );
     drop(directory);
     invalidate_service_cache(temp.path(), None);
 }
@@ -313,19 +508,36 @@ fn run_started_is_published_after_persistence_and_commit_reuses_its_id() {
     cfg.pi_command = "/bin/sh".into();
     cfg.pi_args = vec![script.to_string_lossy().into()];
     let mut published = None;
-    let result = plan_goal_internal_with_started("Goal".into(), cfg, Some("graph"), None, None, &child, false,
+    let result = plan_goal_internal_with_started(
+        "Goal".into(),
+        cfg,
+        Some("graph"),
+        None,
+        None,
+        &child,
+        false,
         |run_id| {
             published = Some(run_id.to_owned());
             let saved = history(run_id.to_owned(), &primary).unwrap();
             assert_eq!(saved.phase, "planning");
             assert_eq!(saved.graph.original_goal, "Goal");
             assert!(saved.config.is_some());
-        }, |_| {}, |_| {}, |_| {}).unwrap();
+        },
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .unwrap();
     assert_eq!(published.as_deref(), Some(id.as_str()));
     assert_eq!(result.run_id, id);
     assert_eq!(result.phase, "awaiting_approval");
     invalidate_service_cache(&root, Some(&id));
-    assert_eq!(snapshot(&service_for_run(&primary, &id, false).unwrap()).unwrap().phase, "awaiting_approval");
+    assert_eq!(
+        snapshot(&service_for_run(&primary, &id, false).unwrap())
+            .unwrap()
+            .phase,
+        "awaiting_approval"
+    );
     invalidate_service_cache(&root, None);
 }
 
@@ -336,13 +548,14 @@ fn restart_preserves_the_review_failure_context_in_the_durable_summary() {
     let id = Uuid::new_v4().to_string();
     let (directory, _) = attempt(temp.path(), &id, false, true);
     let request_path = directory.join("request.json");
-    let mut request: serde_json::Value = serde_json::from_slice(&fs::read(&request_path).unwrap()).unwrap();
+    let mut request: serde_json::Value =
+        serde_json::from_slice(&fs::read(&request_path).unwrap()).unwrap();
     request["backgroundReview"] = serde_json::json!(true);
     fs::write(&request_path, request.to_string()).unwrap();
 
     recover_plannings(&primary).unwrap();
-    let summary: PlanningSummary = serde_json::from_slice(
-        &fs::read(directory.join("summary.json")).unwrap()).unwrap();
+    let summary: PlanningSummary =
+        serde_json::from_slice(&fs::read(directory.join("summary.json")).unwrap()).unwrap();
     assert_eq!(summary.status.as_deref(), Some("failed"));
     let error = summary.error.as_deref().unwrap();
     assert!(error.contains("post-task Planner review"), "{error}");
@@ -351,13 +564,26 @@ fn restart_preserves_the_review_failure_context_in_the_durable_summary() {
 
     // Sidecars written by the older recovery path retain the foreground
     // wording. Loading them repairs the diagnostic without touching the event.
-    let generic = "Backend stopped during planning. Saved output is preserved; start a new planning attempt.";
+    let generic =
+        "Backend stopped during planning. Saved output is preserved; start a new planning attempt.";
     let mut stale = summary;
     stale.error = Some(generic.into());
-    fs::write(directory.join("summary.json"), serde_json::to_vec(&stale).unwrap()).unwrap();
+    fs::write(
+        directory.join("summary.json"),
+        serde_json::to_vec(&stale).unwrap(),
+    )
+    .unwrap();
     recover_plannings(&primary).unwrap();
-    let repaired: PlanningSummary = serde_json::from_slice(
-        &fs::read(directory.join("summary.json")).unwrap()).unwrap();
-    assert!(repaired.error.as_deref().unwrap().contains("send a follow-up to continue"));
-    assert!(!repaired.error.as_deref().unwrap().contains("start a new planning attempt"));
+    let repaired: PlanningSummary =
+        serde_json::from_slice(&fs::read(directory.join("summary.json")).unwrap()).unwrap();
+    assert!(repaired
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("send a follow-up to continue"));
+    assert!(!repaired
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("start a new planning attempt"));
 }

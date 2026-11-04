@@ -49,7 +49,10 @@ fn tracked_scope_admission_uses_the_live_source_index_not_an_older_graph_snapsho
     fs::create_dir(source.join(".env")).unwrap();
     fs::write(source.join(".env/user.txt"), "user-owned tracked data").unwrap();
     workspace::git(&source, &["add", "-f", ".env/user.txt"]).unwrap();
-    assert!(policy().check_tracked(&source).unwrap_err().contains(".env/user.txt"));
+    assert!(policy()
+        .check_tracked(&source)
+        .unwrap_err()
+        .contains(".env/user.txt"));
 }
 
 pub(super) fn policy() -> EnvironmentConfig {
@@ -98,8 +101,14 @@ pub(super) fn policy() -> EnvironmentConfig {
 #[cfg(feature = "fixture")]
 pub(super) fn state_policy() -> EnvironmentConfig {
     let mut config = policy();
-    config.launch.variables.insert("HOME".into(), "{state}/.agent-home".into());
-    config.launch.variables.insert("GTEST_STATE".into(), "{state}".into());
+    config
+        .launch
+        .variables
+        .insert("HOME".into(), "{state}/.agent-home".into());
+    config
+        .launch
+        .variables
+        .insert("GTEST_STATE".into(), "{state}".into());
     config
 }
 
@@ -126,7 +135,11 @@ pub(super) fn graph(names: &[&str], edges: &[(&str, &str, bool)]) -> Graph {
 }
 
 #[cfg(feature = "fixture")]
-pub(super) fn setup(graph: Graph, policy: EnvironmentConfig, body: &str) -> (TempDir, PathBuf, Runtime) {
+pub(super) fn setup(
+    graph: Graph,
+    policy: EnvironmentConfig,
+    body: &str,
+) -> (TempDir, PathBuf, Runtime) {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source 中文 space");
     fs::create_dir(&source).unwrap();
@@ -195,7 +208,9 @@ pub(super) fn run(runtime: &mut Runtime, job: &Job) {
 fn ambient_environment_hints_use_non_authoritative_previous_agent_wording() {
     let mut launch = policy().launch;
     launch.ambient_hints = vec![crate::environment_discovery::AmbientEnvironmentHint {
-        manager: "conda".into(), selector: "name:ml".into(), executable: "conda".into(),
+        manager: "conda".into(),
+        selector: "name:ml".into(),
+        executable: "conda".into(),
     }];
     assert_eq!(
         super::previous_agent_environment_hints(&launch).as_deref(),
@@ -228,7 +243,6 @@ fn history_scope_transition_is_checked_before_touching_code_or_partial_environme
         .validate_history_scopes(&empty, &store.launch(&previous).unwrap())
         .unwrap();
 }
-
 
 #[cfg(feature = "fixture")]
 #[test]
@@ -538,16 +552,23 @@ fs.writeFileSync(process.env.GTEST_STATE+'/.cache/runtime','cache should not for
     let rebuilt = runtime.jobs().unwrap().remove(0);
     assert_eq!(rebuilt.execution.worktree, a.execution.worktree);
     run(&mut runtime, &rebuilt);
-    let rebuilt_policy = runtime.state.config.as_ref().unwrap().environment.clone().unwrap();
+    let rebuilt_policy = runtime
+        .state
+        .config
+        .as_ref()
+        .unwrap()
+        .environment
+        .clone()
+        .unwrap();
     let rebuilt_state = Environments::new(&runtime.root, &runtime.state.run_id, &rebuilt_policy)
         .unwrap()
         .state_root(Path::new(&rebuilt.execution.worktree))
         .unwrap();
-    assert_eq!(fs::read_to_string(rebuilt_state.join(".env/version")).unwrap(), "4");
+    assert_eq!(
+        fs::read_to_string(rebuilt_state.join(".env/version")).unwrap(),
+        "4"
+    );
 }
-
-
-
 
 #[cfg(feature = "fixture")]
 #[test]

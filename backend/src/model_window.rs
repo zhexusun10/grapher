@@ -8,7 +8,10 @@ type FileWindows = BTreeMap<String, usize>;
 /// the latest Pi provider catalog, then installed/user model files; never guess
 /// capacity from a model name. Active sessions report their own window directly.
 pub(crate) fn context_window(model: &str) -> Option<usize> {
-    dynamic_catalog().read().ok().and_then(|windows| windows.get(model).copied())
+    dynamic_catalog()
+        .read()
+        .ok()
+        .and_then(|windows| windows.get(model).copied())
         .or_else(|| catalog().get(model).copied())
 }
 
@@ -21,8 +24,12 @@ fn dynamic_catalog() -> &'static RwLock<BTreeMap<String, usize>> {
 /// Preserve that backend result for old sessions, including network models that
 /// do not occur in the shipped files. This cache never overrides live snapshots.
 pub(crate) fn remember_catalog(value: &serde_json::Value) {
-    let Some(windows) = catalog_models(value) else { return };
-    if let Ok(mut catalog) = dynamic_catalog().write() { *catalog = windows; }
+    let Some(windows) = catalog_models(value) else {
+        return;
+    };
+    if let Ok(mut catalog) = dynamic_catalog().write() {
+        *catalog = windows;
+    }
 }
 
 fn catalog_models(value: &serde_json::Value) -> Option<BTreeMap<String, usize>> {
@@ -30,11 +37,22 @@ fn catalog_models(value: &serde_json::Value) -> Option<BTreeMap<String, usize>> 
     let mut windows = BTreeMap::new();
     for model in models {
         let (Some(provider), Some(id), Some(window)) = (
-            model.get("provider").and_then(|v| v.as_str()).filter(|v| !v.is_empty()),
-            model.get("id").and_then(|v| v.as_str()).filter(|v| !v.is_empty()),
-            model.get("contextWindow").and_then(|v| v.as_u64())
-                .and_then(|v| usize::try_from(v).ok()).filter(|v| *v > 0),
-        ) else { continue };
+            model
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty()),
+            model
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty()),
+            model
+                .get("contextWindow")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| usize::try_from(v).ok())
+                .filter(|v| *v > 0),
+        ) else {
+            continue;
+        };
         windows.insert(format!("{provider}/{id}"), window);
     }
     Some(windows)
@@ -65,7 +83,9 @@ fn agent_model_files() -> Vec<PathBuf> {
     if let Some(directory) = crate::native::environment_path("PI_CODING_AGENT_DIR") {
         return vec![directory.join("models.json")];
     }
-    let Some(home) = crate::native::home_dir() else { return Vec::new() };
+    let Some(home) = crate::native::home_dir() else {
+        return Vec::new();
+    };
     // `.pi` is Pi's upstream location; Grapher's private agent copy is created
     // from it at startup and takes precedence when present.
     vec![
@@ -78,8 +98,12 @@ fn agent_model_files() -> Vec<PathBuf> {
 /// A model id may itself contain a slash (`cline-pass/...`), so the provider key
 /// is the prefix, not the first segment of the id.
 fn load_agent_models(path: &Path) -> BTreeMap<String, usize> {
-    let Ok(bytes) = std::fs::read(path) else { return BTreeMap::new() };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return BTreeMap::new() };
+    let Ok(bytes) = std::fs::read(path) else {
+        return BTreeMap::new();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return BTreeMap::new();
+    };
     let Some(providers) = value.get("providers").and_then(|value| value.as_object()) else {
         return BTreeMap::new();
     };
@@ -123,21 +147,36 @@ fn flatten(files: BTreeMap<String, FileWindows>) -> BTreeMap<String, usize> {
 /// override, so this keeps them separate until the baseline and overlay merge.
 fn load(directory: &Path) -> BTreeMap<String, FileWindows> {
     let mut files = BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(directory) else { return files };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return files;
+    };
     let mut paths: Vec<_> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
         .collect();
     paths.sort();
     for path in paths {
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
-        let Ok(bytes) = std::fs::read(&path) else { continue };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
-        let Some(apis) = value.as_object() else { continue };
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let Some(apis) = value.as_object() else {
+            continue;
+        };
         let mut windows = FileWindows::new();
         for provider_models in apis.values() {
-            let Some(models) = provider_models.as_object() else { continue };
+            let Some(models) = provider_models.as_object() else {
+                continue;
+            };
             for model in models.values() {
                 let (Some(provider), Some(id), Some(window)) = (
                     model.get("provider").and_then(|value| value.as_str()),
@@ -181,10 +220,16 @@ mod tests {
         // Packaged test layouts may not ship the checkout's generated catalog;
         // where it exists, `catalog()` must read the same directory the engine
         // installs beside its entrypoint.
-        if !crate::native::installation_root().join("engine/model-data").is_dir() {
+        if !crate::native::installation_root()
+            .join("engine/model-data")
+            .is_dir()
+        {
             return;
         }
-        assert!(!catalog().is_empty(), "the installed model catalog must resolve models");
+        assert!(
+            !catalog().is_empty(),
+            "the installed model catalog must resolve models"
+        );
     }
 
     #[test]
@@ -240,7 +285,10 @@ mod tests {
         });
         std::fs::write(&path, payload.to_string()).unwrap();
         let windows = load_agent_models(&path);
-        assert_eq!(windows.get("cline/cline-pass/deepseek-v4.1-flash"), Some(&500_000));
+        assert_eq!(
+            windows.get("cline/cline-pass/deepseek-v4.1-flash"),
+            Some(&500_000)
+        );
         assert_eq!(windows.get("custom/explicit"), Some(&128_000));
         assert_eq!(windows.len(), 2);
         assert!(load_agent_models(&temp.path().join("missing.json")).is_empty());

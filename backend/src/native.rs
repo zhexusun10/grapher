@@ -2,21 +2,25 @@
 //! Graph workspaces. macOS/Linux enforce filesystem boundaries; Windows runs
 //! ordinary host processes (no per-agent sandbox). Bash keeps Pi's semantics.
 use crate::engine::PiRole;
+#[cfg(any(not(feature = "fixture"), test))]
+use std::thread;
 use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock},
-};
-#[cfg(any(not(feature = "fixture"), test))]
-use std::{
-    thread,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
 };
 
-static RUNTIME: OnceLock<Mutex<Option<crate::native_runtime_storage::NativeRuntime>>> = OnceLock::new();
+static RUNTIME: OnceLock<Mutex<Option<crate::native_runtime_storage::NativeRuntime>>> =
+    OnceLock::new();
 static RUNTIME_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn begin_shutdown() { RUNTIME_SHUTTING_DOWN.store(true, Ordering::SeqCst); }
+pub(crate) fn begin_shutdown() {
+    RUNTIME_SHUTTING_DOWN.store(true, Ordering::SeqCst);
+}
 
 pub(crate) fn shutdown_runtime() {
     begin_shutdown();
@@ -90,7 +94,9 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
         .get_or_init(|| Mutex::new(None))
         .lock()
         .map_err(|e| e.to_string())?;
-    if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) { return Err("Backend is shutting down".into()); }
+    if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) {
+        return Err("Backend is shutting down".into());
+    }
     if let Some(runtime) = &*cached {
         return Ok(runtime.directory.clone());
     }
@@ -102,11 +108,18 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
     // default too. Unmarked copies still require explicit offline opt-in.
     if std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT").is_none() {
         if let Some(parent) = installation.parent() {
-            match crate::native_runtime_storage::unused_with_cancel(&parent.join(".grapher-workspaces"), false,
-                || RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst)) {
-                Ok(copies) => for copy in copies {
-                    if let Err(error) = crate::native_runtime_storage::remove(&copy) { eprintln!("[Grapher] {error}"); }
-                },
+            match crate::native_runtime_storage::unused_with_cancel(
+                &parent.join(".grapher-workspaces"),
+                false,
+                || RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst),
+            ) {
+                Ok(copies) => {
+                    for copy in copies {
+                        if let Err(error) = crate::native_runtime_storage::remove(&copy) {
+                            eprintln!("[Grapher] {error}");
+                        }
+                    }
+                }
                 Err(error) => eprintln!("[Grapher] Cannot clean legacy native runtimes: {error}"),
             }
         }
@@ -117,12 +130,22 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
         key.trim(),
         || RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst),
         |destination| {
-            let output = run_runtime_preparation(&installation, &runtime_parent, Some(destination), None)?;
-            let returned = PathBuf::from(output.trim()).canonicalize().map_err(|error| error.to_string())?;
-            if returned != destination { return Err("Native runtime preparation returned a different destination".into()); }
+            let output =
+                run_runtime_preparation(&installation, &runtime_parent, Some(destination), None)?;
+            let returned = PathBuf::from(output.trim())
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            if returned != destination {
+                return Err("Native runtime preparation returned a different destination".into());
+            }
             Ok(())
         },
-        |directory| match run_runtime_preparation(&installation, &runtime_parent, None, Some(directory)) {
+        |directory| match run_runtime_preparation(
+            &installation,
+            &runtime_parent,
+            None,
+            Some(directory),
+        ) {
             Ok(actual) => Ok(actual.trim() == key.trim()),
             Err(error) => {
                 eprintln!("[Grapher] Native runtime verification failed: {error}");
@@ -131,31 +154,54 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
         },
     )?;
     let root = runtime.directory.clone();
-    eprintln!("[Grapher] Shared Graph runtime ready: {}", host_path(&root).display());
+    eprintln!(
+        "[Grapher] Shared Graph runtime ready: {}",
+        host_path(&root).display()
+    );
     *cached = Some(runtime);
     Ok(root)
 }
 
-fn run_runtime_preparation(installation: &Path, parent: &Path, destination: Option<&Path>, key_for: Option<&Path>) -> Result<String, String> {
+fn run_runtime_preparation(
+    installation: &Path,
+    parent: &Path,
+    destination: Option<&Path>,
+    key_for: Option<&Path>,
+) -> Result<String, String> {
     let mut command = Command::new("node");
-    command.arg(host_path(&installation.join("scripts/prepare-native-runtime.mjs")))
+    command
+        .arg(host_path(
+            &installation.join("scripts/prepare-native-runtime.mjs"),
+        ))
         .env("GRAPHER_NATIVE_RUNTIME_PARENT", host_path(parent))
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(destination) = destination {
         command.env("GRAPHER_NATIVE_RUNTIME_DIR", host_path(destination));
     } else {
-        command.arg("--cache-key").env_remove("GRAPHER_NATIVE_RUNTIME_DIR");
-        if let Some(directory) = key_for { command.arg(host_path(directory)); }
+        command
+            .arg("--cache-key")
+            .env_remove("GRAPHER_NATIVE_RUNTIME_DIR");
+        if let Some(directory) = key_for {
+            command.arg(host_path(directory));
+        }
     }
     crate::process_control::configure_command(&mut command);
     // Shared preparation is backend-owned, not cancelled with one particular
     // Run. Track its copier/Git descendants so exit cannot leave them writing.
     let output = crate::process_control::with_owner("native-runtime", || {
-        let mut child = command.spawn().map_err(|error| format!("Cannot start native runtime preparation with Node: {error}"))?;
-        let tree = crate::process_control::track(&child).map_err(|error| {
-            let _ = child.kill(); let _ = child.wait(); error
+        let mut child = command.spawn().map_err(|error| {
+            format!("Cannot start native runtime preparation with Node: {error}")
         })?;
-        if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) { tree.terminate(); }
+        let tree = crate::process_control::track(&child).map_err(|error| {
+            let _ = child.kill();
+            let _ = child.wait();
+            error
+        })?;
+        if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) {
+            tree.terminate();
+        }
         child.wait_with_output().map_err(|error| error.to_string())
     })?;
     if !output.status.success() {
@@ -245,9 +291,8 @@ fn normalize_windows_path(path: PathBuf) -> PathBuf {
 /// Normalize a configured environment path from Git Bash/MSYS spelling on
 /// Windows (`/c/Users/...`, `/cygdrive/c/...`) and expand a leading `~`.
 pub(crate) fn environment_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name).map(|value| {
-        normalize_windows_path(expand_home_path(PathBuf::from(value)))
-    })
+    std::env::var_os(name)
+        .map(|value| normalize_windows_path(expand_home_path(PathBuf::from(value))))
 }
 
 /// Windows prefers USERPROFILE; Git Bash commonly exports a POSIX HOME that
@@ -261,7 +306,9 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 }
 
 pub(crate) fn expand_home_path(path: PathBuf) -> PathBuf {
-    let Some(home) = home_dir_for_expansion() else { return path };
+    let Some(home) = home_dir_for_expansion() else {
+        return path;
+    };
     let text = path.to_string_lossy();
     if text == "~" {
         return home;
@@ -320,35 +367,58 @@ pub(crate) fn bind_workspace_state(command: &mut Command, workspace: &Path) -> R
     let home = state.join(".agent-home");
     crate::path_safety::real_child_path(&state, &home, false)?;
     fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    if let Some(directory) = environment_path("GRAPHER_GLOBAL_PI_AGENT_DIR").or_else(|| home_dir().map(|home| home.join(".pi/agent"))) {
+    if let Some(directory) = environment_path("GRAPHER_GLOBAL_PI_AGENT_DIR")
+        .or_else(|| home_dir().map(|home| home.join(".pi/agent")))
+    {
         command.env("GRAPHER_GLOBAL_PI_AGENT_DIR", host_path(&directory));
     }
-    for (key, value) in workspace_environment(workspace)? { command.env(key, value); }
+    for (key, value) in workspace_environment(workspace)? {
+        command.env(key, value);
+    }
     Ok(())
 }
 
-pub(crate) fn workspace_environment(workspace: &Path) -> Result<std::collections::BTreeMap<String, String>, String> {
+pub(crate) fn workspace_environment(
+    workspace: &Path,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
     let state = crate::workspace_state::process_root(workspace)?;
     let home = state.join(".agent-home");
     let mut bindings = std::collections::BTreeMap::new();
     for (key, path) in [
         ("GIT_CONFIG_GLOBAL", state.join(".git-config/global")),
-        ("GIT_CEILING_DIRECTORIES", workspace.parent().ok_or("Missing project parent")?.to_path_buf()),
-        ("HOME", home.clone()), ("USERPROFILE", home.clone()),
-        ("APPDATA", home.join("AppData/Roaming")), ("LOCALAPPDATA", home.join("AppData/Local")),
-        ("XDG_CONFIG_HOME", home.join(".config")), ("XDG_DATA_HOME", home.join(".local/share")),
+        (
+            "GIT_CEILING_DIRECTORIES",
+            workspace
+                .parent()
+                .ok_or("Missing project parent")?
+                .to_path_buf(),
+        ),
+        ("HOME", home.clone()),
+        ("USERPROFILE", home.clone()),
+        ("APPDATA", home.join("AppData/Roaming")),
+        ("LOCALAPPDATA", home.join("AppData/Local")),
+        ("XDG_CONFIG_HOME", home.join(".config")),
+        ("XDG_DATA_HOME", home.join(".local/share")),
         ("XDG_CACHE_HOME", state.join(".runtime-cache/xdg")),
         ("npm_config_cache", state.join(".runtime-cache/npm")),
         ("PIP_CACHE_DIR", state.join(".runtime-cache/pip")),
         ("CONDA_ENVS_PATH", state.join(".environments")),
         ("CONDA_PKGS_DIRS", state.join(".runtime-cache/conda")),
-    ] { bindings.insert(key.to_string(), host_path(&path).to_string_lossy().into_owned()); }
+    ] {
+        bindings.insert(
+            key.to_string(),
+            host_path(&path).to_string_lossy().into_owned(),
+        );
+    }
     Ok(bindings)
 }
 
 pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result<(), String> {
     crate::workspace::validate_binding(repository)?;
-    if let Some(bucket) = cwd.parent().and_then(Path::parent).filter(|root| root.file_name().is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")) {
+    if let Some(bucket) = cwd.parent().and_then(Path::parent).filter(|root| {
+        root.file_name()
+            .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
+    }) {
         crate::path_safety::real_child_path(bucket, cwd, false)?;
     }
     let repository = crate::path_identity::actual_path(repository).map_err(|e| e.to_string())?;
@@ -380,10 +450,7 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
         // A linked/worktree project Git may live under the slot's external
         // process root; validate_ready below still requires that exact binding.
         if cwd.join(".git").exists() {
-            let git = cwd
-                .join(".git")
-                .canonicalize()
-                .map_err(|e| e.to_string())?;
+            let git = cwd.join(".git").canonicalize().map_err(|e| e.to_string())?;
             let state = crate::workspace_state::process_root(&cwd)?;
             if !git.starts_with(&cwd) && !git.starts_with(&state) {
                 return Err("Graph requires a private Git repository".into());
@@ -407,12 +474,24 @@ pub fn validate_workspace(role: PiRole, repository: &Path, cwd: &Path) -> Result
 pub(crate) fn trusted_node() -> Result<PathBuf, String> {
     static NODE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     NODE.get_or_init(|| {
-        let output = Command::new("node").args(["-p", "process.execPath"]).output().map_err(|e| e.to_string())?;
-        if !output.status.success() { return Err("Cannot resolve trusted native Node".into()); }
-        let path = PathBuf::from(String::from_utf8(output.stdout).map_err(|e| e.to_string())?.trim());
-        if !path.is_absolute() || !path.is_file() { return Err("Invalid trusted native Node executable".into()); }
+        let output = Command::new("node")
+            .args(["-p", "process.execPath"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err("Cannot resolve trusted native Node".into());
+        }
+        let path = PathBuf::from(
+            String::from_utf8(output.stdout)
+                .map_err(|e| e.to_string())?
+                .trim(),
+        );
+        if !path.is_absolute() || !path.is_file() {
+            return Err("Invalid trusted native Node executable".into());
+        }
         Ok(host_path(&path.canonicalize().map_err(|e| e.to_string())?))
-    }).clone()
+    })
+    .clone()
 }
 
 /// Resolve the bootstrap Git before applying business PATH. The Grapher-owned
@@ -423,12 +502,15 @@ pub(crate) fn trusted_git() -> Result<PathBuf, String> {
     GIT.get_or_init(|| {
         let name = if cfg!(windows) { "git.exe" } else { "git" };
         let path = std::env::var_os("PATH")
-            .and_then(|value| std::env::split_paths(&value)
-                .map(|directory| directory.join(name))
-                .find(|candidate| candidate.is_file()))
+            .and_then(|value| {
+                std::env::split_paths(&value)
+                    .map(|directory| directory.join(name))
+                    .find(|candidate| candidate.is_file())
+            })
             .ok_or("Native Git is unavailable for pinned baseline verification")?;
         Ok(host_path(&path.canonicalize().map_err(|e| e.to_string())?))
-    }).clone()
+    })
+    .clone()
 }
 
 pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, String> {
@@ -439,7 +521,9 @@ pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, S
         return Err("Private workspaces require execution_command and its platform context".into());
     }
     let mut command = Command::new(trusted_node()?);
-    command.arg(host_path(&installation_root().join("engine/entrypoint.mjs")));
+    command.arg(host_path(
+        &installation_root().join("engine/entrypoint.mjs"),
+    ));
     command.current_dir(host_path(&cwd));
     command.env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
     command.env_remove("GRAPHER_EXECUTION_KIND");
@@ -504,7 +588,11 @@ fn denied_paths_value(
         }
     }
     allowed.extend(merger_git.iter().cloned());
-    let mut read = vec![source.to_path_buf(), worktree_root.to_path_buf(), data.to_path_buf()];
+    let mut read = vec![
+        source.to_path_buf(),
+        worktree_root.to_path_buf(),
+        data.to_path_buf(),
+    ];
     if !crate::path_identity::same_path(repository, source) {
         read.push(repository.to_path_buf());
     }
@@ -536,21 +624,29 @@ pub(crate) fn execution_command_scoped(
     validate_workspace(role, repository, cwd)?;
     let mut allowances = Vec::new();
     for workspace in workspaces {
-        if role != PiRole::Planner { return Err("Only Planner can switch authorized workspaces".into()); }
+        if role != PiRole::Planner {
+            return Err("Only Planner can switch authorized workspaces".into());
+        }
         validate_workspace(role, repository, workspace)?;
         let target = crate::path_identity::actual_path(workspace).map_err(|e| e.to_string())?;
         let current = crate::path_identity::actual_path(cwd).map_err(|e| e.to_string())?;
-        if target.parent() != current.parent() { return Err("Planner workspace belongs to a different physical Run owner".into()); }
+        if target.parent() != current.parent() {
+            return Err("Planner workspace belongs to a different physical Run owner".into());
+        }
         let state = crate::workspace_state::prepare(&target)?;
         let home = state.join(".agent-home");
         crate::path_safety::real_child_path(&state, &home, false)?;
         fs::create_dir_all(home).map_err(|e| e.to_string())?;
-        if target != current && !allowances.contains(&target) { allowances.push(target); }
+        if target != current && !allowances.contains(&target) {
+            allowances.push(target);
+        }
     }
     let bound_source = crate::path_identity::actual_path(repository).map_err(|e| e.to_string())?;
     let bound_data = crate::path_identity::actual_path(data).map_err(|e| e.to_string())?;
     let bound_session = crate::path_identity::actual_path(session).map_err(|e| e.to_string())?;
-    if crate::workspace::scope_contains(&bound_data, &bound_source) || crate::workspace::scope_contains(&bound_session, &bound_source) {
+    if crate::workspace::scope_contains(&bound_data, &bound_source)
+        || crate::workspace::scope_contains(&bound_session, &bound_source)
+    {
         return Err("Agent runtime/session data must be outside the source project; existing data is retained, not migrated".into());
     }
     let source = crate::path_identity::actual_path(repository).map_err(|e| e.to_string())?;
@@ -578,7 +674,9 @@ pub(crate) fn execution_command_scoped(
     // targets it (through GIT_DIR). Expose exactly that repository to the
     // platform sandbox without opening graph history to node/Planner agents.
     let merger_git: Vec<PathBuf> = if role == PiRole::Merger {
-        crate::workspace::private_git_dir(&current).into_iter().collect()
+        crate::workspace::private_git_dir(&current)
+            .into_iter()
+            .collect()
     } else {
         Vec::new()
     };
@@ -772,11 +870,25 @@ mod tests {
     #[test]
     fn source_binding_named_like_a_graph_slot_keeps_its_own_git_directory() {
         let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join(".grapher-worktrees").join(uuid::Uuid::new_v4().to_string()).join("source");
+        let source = temp
+            .path()
+            .join(".grapher-worktrees")
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("source");
         fs::create_dir_all(&source).unwrap();
         crate::workspace::git(&source, &["init", "-q"]).unwrap();
-        execution_command(PiRole::Planner, &source, &source, &temp.path().join("data"), &temp.path().join("session")).unwrap();
-        assert!(source.join(".git").is_dir(), "source metadata must never be hidden as node metadata");
+        execution_command(
+            PiRole::Planner,
+            &source,
+            &source,
+            &temp.path().join("data"),
+            &temp.path().join("session"),
+        )
+        .unwrap();
+        assert!(
+            source.join(".git").is_dir(),
+            "source metadata must never be hidden as node metadata"
+        );
         assert!(crate::workspace::private_git_dir(&source).is_none());
     }
 
@@ -817,7 +929,11 @@ mod tests {
     #[test]
     fn engine_bootstrap_binds_host_git_outside_the_business_path() {
         let git = trusted_git().unwrap();
-        assert!(git.is_file(), "baseline verification requires a real Git: {}", git.display());
+        assert!(
+            git.is_file(),
+            "baseline verification requires a real Git: {}",
+            git.display()
+        );
         let mut command = Command::new("node");
         bind_trusted_git(&mut command).unwrap();
         let value = command
@@ -892,12 +1008,7 @@ mod tests {
         fs::create_dir(&source).unwrap();
         crate::workspace::git(
             &source,
-            &[
-                "init",
-                "-q",
-                "--separate-git-dir",
-                common.to_str().unwrap(),
-            ],
+            &["init", "-q", "--separate-git-dir", common.to_str().unwrap()],
         )
         .unwrap();
         fs::write(source.join("file.txt"), "project\n").unwrap();
@@ -935,7 +1046,8 @@ mod tests {
         crate::workspace::prepare(&source, &private, &input, &[]).unwrap();
         validate_workspace(PiRole::Planner, &source, &private).unwrap();
         assert!(command(PiRole::Planner, &source, &private)
-            .unwrap_err().contains("platform context"));
+            .unwrap_err()
+            .contains("platform context"));
         assert!(validate_workspace(PiRole::Partitioner, &source, &private).is_err());
         #[cfg(unix)]
         {
@@ -954,28 +1066,38 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         assert!(validate_workspace(PiRole::Merger, &source, &source).is_ok());
-        for relative in [".grapher-worktrees/run/node", ".grapher-workspaces/run/preview"] {
+        for relative in [
+            ".grapher-worktrees/run/node",
+            ".grapher-workspaces/run/preview",
+        ] {
             let private = temp.path().join(relative);
             fs::create_dir_all(&private).unwrap();
             assert!(validate_workspace(PiRole::Merger, &source, &private)
-                .unwrap_err().contains("private Git"));
+                .unwrap_err()
+                .contains("private Git"));
             crate::workspace::git(&private, &["init", "-q"]).unwrap();
             assert!(validate_workspace(PiRole::Merger, &source, &private).is_err());
-            let private = private.with_file_name(format!("{}-v2", private.file_name().unwrap().to_string_lossy()));
+            let private = private.with_file_name(format!(
+                "{}-v2",
+                private.file_name().unwrap().to_string_lossy()
+            ));
             let input = crate::workspace::materialize_shadow_repo(&source, &[]).unwrap();
             crate::workspace::prepare(&source, &private, &input, &[]).unwrap();
             validate_workspace(PiRole::Merger, &source, &private).unwrap();
             assert!(validate_workspace(PiRole::Partitioner, &source, &private).is_err());
             assert!(command(PiRole::Merger, &source, &private)
-                .unwrap_err().contains("platform context"));
+                .unwrap_err()
+                .contains("platform context"));
         }
         let overlapping = source.join("nested");
         fs::create_dir(&overlapping).unwrap();
         crate::workspace::git(&overlapping, &["init", "-q"]).unwrap();
         assert!(validate_workspace(PiRole::Merger, &source, &overlapping)
-            .unwrap_err().contains("overlap"));
+            .unwrap_err()
+            .contains("overlap"));
         assert!(validate_workspace(PiRole::Merger, &source, temp.path())
-            .unwrap_err().contains("overlap"));
+            .unwrap_err()
+            .contains("overlap"));
     }
 
     #[test]
@@ -990,25 +1112,61 @@ mod tests {
         fs::create_dir_all(&session).unwrap();
         let graph_path = session.join("graph.json");
         let probe = base.join("planner-probe.ts");
-        fs::write(&probe, r#"import * as fs from 'node:fs';
+        fs::write(
+            &probe,
+            r#"import * as fs from 'node:fs';
 export default function () {
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH!, 'graph');
   fs.writeFileSync('planner-output', 'source content');
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         // Windows canonical paths use the extended prefix; macOS commonly
         // canonicalizes /var to /private/var. Both identities must stay native.
         let canonical_source = source.canonicalize().unwrap();
-        let mut command = execution_command(PiRole::Planner, &canonical_source, &canonical_source, &data, &session).unwrap();
+        let mut command = execution_command(
+            PiRole::Planner,
+            &canonical_source,
+            &canonical_source,
+            &data,
+            &session,
+        )
+        .unwrap();
         assert_eq!(command.get_program(), trusted_node().unwrap().as_os_str());
-        assert_eq!(command.get_current_dir(), Some(host_path(&canonical_source).as_path()));
-        let output = command.args(["--mode", "json", "--print", "--no-session", "--no-skills", "--no-extensions", "--extension"])
-            .arg(&probe).arg("--session-dir").arg(&session)
-            .env("GRAPHER_MODE", "planner").env("GRAPHER_GRAPH_PATH", &graph_path)
-            .stdin(std::process::Stdio::null()).output().unwrap();
-        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert_eq!(
+            command.get_current_dir(),
+            Some(host_path(&canonical_source).as_path())
+        );
+        let output = command
+            .args([
+                "--mode",
+                "json",
+                "--print",
+                "--no-session",
+                "--no-skills",
+                "--no-extensions",
+                "--extension",
+            ])
+            .arg(&probe)
+            .arg("--session-dir")
+            .arg(&session)
+            .env("GRAPHER_MODE", "planner")
+            .env("GRAPHER_GRAPH_PATH", &graph_path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(fs::read_to_string(&graph_path).unwrap(), "graph");
-        assert_eq!(fs::read_to_string(source.join("planner-output")).unwrap(), "source content");
+        assert_eq!(
+            fs::read_to_string(source.join("planner-output")).unwrap(),
+            "source content"
+        );
     }
 
     #[test]
@@ -1021,10 +1179,17 @@ export default function () {
         crate::path_safety::directory_link(&source, &alias);
         for role in [PiRole::Partitioner, PiRole::Planner] {
             for cwd in [&source, &canonical, &alias] {
-                let command = execution_command(role, &source, cwd, temp.path(), temp.path()).unwrap();
+                let command =
+                    execution_command(role, &source, cwd, temp.path(), temp.path()).unwrap();
                 assert_eq!(command.get_program(), trusted_node().unwrap().as_os_str());
-                assert_eq!(command.get_current_dir().unwrap().canonicalize().unwrap(), canonical);
-                assert_eq!(command.get_args().next(), Some(host_path(&installation_root().join("engine/entrypoint.mjs")).as_os_str()));
+                assert_eq!(
+                    command.get_current_dir().unwrap().canonicalize().unwrap(),
+                    canonical
+                );
+                assert_eq!(
+                    command.get_args().next(),
+                    Some(host_path(&installation_root().join("engine/entrypoint.mjs")).as_os_str())
+                );
                 assert!(!temp.path().join(".grapher-workspaces").exists());
                 assert!(!temp.path().join(".grapher-worktrees").exists());
             }
@@ -1036,7 +1201,10 @@ export default function () {
     fn source_launcher_normalizes_windows_drive_and_unc_prefixes_only() {
         for (input, expected) in [
             (r"\\?\C:\源项目 space\src", r"C:\源项目 space\src"),
-            (r"\\?\UNC\server\share\源项目 space", r"\\server\share\源项目 space"),
+            (
+                r"\\?\UNC\server\share\源项目 space",
+                r"\\server\share\源项目 space",
+            ),
             (r"C:\source\file", r"C:\source\file"),
         ] {
             assert_eq!(host_path(Path::new(input)), PathBuf::from(expected));
@@ -1092,23 +1260,50 @@ export default async function () {
             fs::create_dir_all(&session).unwrap();
             let input = crate::workspace::snapshot_repository(&source).unwrap();
             crate::workspace::prepare(&source, &cwd, &input, &[]).unwrap();
-            let mut command = execution_command(PiRole::Planner, &source, &cwd, &data, &session).unwrap();
-            command.args(["--mode", "json", "--print", "--no-session", "--no-extensions", "--no-skills", "--extension"])
-                .arg(&probe).arg("--session-dir").arg(&session)
-                .env("GRAPHER_MODE", "planner").env("GRAPHER_EXECUTION_KIND", "graph")
+            let mut command =
+                execution_command(PiRole::Planner, &source, &cwd, &data, &session).unwrap();
+            command
+                .args([
+                    "--mode",
+                    "json",
+                    "--print",
+                    "--no-session",
+                    "--no-extensions",
+                    "--no-skills",
+                    "--extension",
+                ])
+                .arg(&probe)
+                .arg("--session-dir")
+                .arg(&session)
+                .env("GRAPHER_MODE", "planner")
+                .env("GRAPHER_EXECUTION_KIND", "graph")
                 .env("GRAPHER_PLANNER_WRITE_TOOLS", "true")
-                .env("GRAPHER_TEST_RUNTIME", &engine).env("EXPECTED_CWD", &cwd)
-                .env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_SOURCE_ALIAS", &source)
+                .env("GRAPHER_TEST_RUNTIME", &engine)
+                .env("EXPECTED_CWD", &cwd)
+                .env("GRAPHER_ORIGINAL_ROOT", &source)
+                .env("GRAPHER_SOURCE_ALIAS", &source)
                 .env("PI_CODING_AGENT_DIR", base.join("agent"))
-                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
             crate::process_control::configure_command(&mut command);
             let child = command.spawn().unwrap();
             let _tree = crate::process_control::track(&child).unwrap();
             let output = child.wait_with_output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-            assert_eq!(fs::read_to_string(cwd.join("planner-probe.txt")).unwrap(), "frontier");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                fs::read_to_string(cwd.join("planner-probe.txt")).unwrap(),
+                "frontier"
+            );
             assert!(!source.join("planner-probe.txt").exists());
-            assert_eq!(fs::read_to_string(cwd.join("planner-plan.md")).unwrap(), "planned: second\n");
+            assert_eq!(
+                fs::read_to_string(cwd.join("planner-plan.md")).unwrap(),
+                "planned: second\n"
+            );
             assert!(!source.join("planner-plan.md").exists());
         }
     }
@@ -1121,7 +1316,9 @@ export default async function () {
         let source = base.join("source");
         let data = base.join("data");
         let session = data.join("session");
-        for path in [&source, &session] { fs::create_dir_all(path).unwrap(); }
+        for path in [&source, &session] {
+            fs::create_dir_all(path).unwrap();
+        }
         crate::workspace::git(&source, &["init", "-q"]).unwrap();
         fs::write(source.join("business.txt"), "source").unwrap();
         let input = crate::workspace::snapshot_repository(&source).unwrap();
@@ -1133,33 +1330,89 @@ export default async function () {
             slots.push(path);
         }
         let state = crate::workspace_state::process_root(&slots[1]).unwrap();
-        fs::write(state.join(".git-config/global"), "[user]\n\tname = target-state\n").unwrap();
+        fs::write(
+            state.join(".git-config/global"),
+            "[user]\n\tname = target-state\n",
+        )
+        .unwrap();
         let targets = serde_json::json!({ "target": {
             "requestedNode": "target", "actualNode": "target", "executionId": "target-execution",
             "workspace": slots[1], "runtimeEnvironment": workspace_environment(&slots[1]).unwrap(),
         }});
         let runtime = prepared_runtime().unwrap();
         let probe = base.join("planner-switch.ts");
-        fs::write(&probe, include_str!("../../scripts/planner-switch-launcher-probe.ts")).unwrap();
-        let mut command = execution_command_scoped(PiRole::Planner, &source, &slots[0], &data, &session, &slots[1..2]).unwrap();
-        command.args(["--mode", "json", "--print", "--no-session", "--no-extensions", "--no-skills", "--extension"])
-            .arg(&probe).arg("--session-dir").arg(&session)
-            .env("GRAPHER_MODE", "planner").env("GRAPHER_EXECUTION_KIND", "graph")
-            .env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_SOURCE_ALIAS", &source)
-            .env("GRAPHER_PLANNER_FOLLOWUP", "true").env("GRAPHER_PLANNER_WRITE_TOOLS", "true")
+        fs::write(
+            &probe,
+            include_str!("../../scripts/planner-switch-launcher-probe.ts"),
+        )
+        .unwrap();
+        let mut command = execution_command_scoped(
+            PiRole::Planner,
+            &source,
+            &slots[0],
+            &data,
+            &session,
+            &slots[1..2],
+        )
+        .unwrap();
+        command
+            .args([
+                "--mode",
+                "json",
+                "--print",
+                "--no-session",
+                "--no-extensions",
+                "--no-skills",
+                "--extension",
+            ])
+            .arg(&probe)
+            .arg("--session-dir")
+            .arg(&session)
+            .env("GRAPHER_MODE", "planner")
+            .env("GRAPHER_EXECUTION_KIND", "graph")
+            .env("GRAPHER_ORIGINAL_ROOT", &source)
+            .env("GRAPHER_SOURCE_ALIAS", &source)
+            .env("GRAPHER_PLANNER_FOLLOWUP", "true")
+            .env("GRAPHER_PLANNER_WRITE_TOOLS", "true")
             .env("GRAPHER_PLANNER_WORKSPACES", targets.to_string())
-            .env("GRAPHER_TEST_RUNTIME", runtime).env("GRAPHER_TEST_DENIED", &slots[2]);
+            .env("GRAPHER_TEST_RUNTIME", runtime)
+            .env("GRAPHER_TEST_DENIED", &slots[2]);
         command.env_remove("GRAPHER_PLANNER_WORKSPACES_FILE");
         let output = command.output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         // Pi redirects factory-time stdout to stderr until initialization ends.
-        let log = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(log.contains("planner-switch-ok"), "{log}");
-        assert_eq!(fs::read_to_string(slots[1].join("task.txt")).unwrap(), "selected target");
+        assert_eq!(
+            fs::read_to_string(slots[1].join("task.txt")).unwrap(),
+            "selected target"
+        );
         assert!(!slots[0].join("task.txt").exists());
-        assert_eq!(fs::read_to_string(state.join(".agent-home/planner-written")).unwrap(), "target-owned");
-        assert!(!crate::workspace_state::process_root(&slots[0]).unwrap().join(".agent-home/planner-written").exists());
-        assert!(execution_command_scoped(PiRole::NodeAgent, &source, &slots[0], &data, &session, &slots[1..2]).is_err());
+        assert_eq!(
+            fs::read_to_string(state.join(".agent-home/planner-written")).unwrap(),
+            "target-owned"
+        );
+        assert!(!crate::workspace_state::process_root(&slots[0])
+            .unwrap()
+            .join(".agent-home/planner-written")
+            .exists());
+        assert!(execution_command_scoped(
+            PiRole::NodeAgent,
+            &source,
+            &slots[0],
+            &data,
+            &session,
+            &slots[1..2]
+        )
+        .is_err());
     }
 
     #[test]
@@ -1179,7 +1432,9 @@ export default async function () {
         crate::workspace::git(&source, &["init", "-q"]).unwrap();
         fs::write(source.join("source-marker"), "SOURCE").unwrap();
         let input = crate::workspace::snapshot_repository(&source).unwrap();
-        for path in [&a, &b] { crate::workspace::prepare(&source, path, &input, &[]).unwrap(); }
+        for path in [&a, &b] {
+            crate::workspace::prepare(&source, path, &input, &[]).unwrap();
+        }
         let other_session = data.join("sessions/other/private");
         fs::create_dir_all(other_session.parent().unwrap()).unwrap();
         fs::write(&other_session, "SESSION").unwrap();
@@ -1212,8 +1467,7 @@ export default async function () {
             fs::copy(&material, cwd.join("external-link")).unwrap();
             let session = data.join(format!("sessions/{label}"));
             fs::create_dir_all(&session).unwrap();
-            let mut command =
-                execution_command(role, &source, cwd, &data, &session).unwrap();
+            let mut command = execution_command(role, &source, cwd, &data, &session).unwrap();
             // The production profile already makes the Grapher installation
             // read-only (write-denied) on every platform boundary.
             command
@@ -1229,7 +1483,14 @@ export default async function () {
                 .arg(&probe)
                 .arg("--session-dir")
                 .arg(&session)
-                .env("GRAPHER_MODE", if role == PiRole::Merger { "merger" } else { "node" })
+                .env(
+                    "GRAPHER_MODE",
+                    if role == PiRole::Merger {
+                        "merger"
+                    } else {
+                        "node"
+                    },
+                )
                 .env("GRAPHER_EXECUTION_KIND", "graph")
                 .env("GRAPHER_ORIGINAL_ROOT", &source)
                 .env("GRAPHER_SOURCE_ALIAS", &source)

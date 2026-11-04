@@ -372,9 +372,7 @@ mod platform {
                 {
                     continue;
                 }
-                return Err(format!(
-                    "Cannot preserve project xattr {name}: {error}"
-                ));
+                return Err(format!("Cannot preserve project xattr {name}: {error}"));
             }
         }
         #[cfg(target_os = "macos")]
@@ -549,8 +547,7 @@ mod platform {
                     .iter()
                     .position(|c| *c == 0)
                     .unwrap_or(stream.name.len());
-                let key = String::from_utf16(&stream.name[..length])
-                    .map_err(|e| e.to_string())?;
+                let key = String::from_utf16(&stream.name[..length]).map_err(|e| e.to_string())?;
                 if key != "::$DATA" {
                     if !key.starts_with(':') || !key.ends_with(":$DATA") {
                         return Err(format!(

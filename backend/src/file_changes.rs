@@ -10,7 +10,6 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FileChangeItem {
@@ -140,13 +139,19 @@ struct FileChangesCache {
 
 impl FileChangesCache {
     fn log_token(&self, key: &(String, String)) -> CacheToken {
-        (self.epoch, self.run_epochs.get(&key.0).copied().unwrap_or(0),
-            self.log_state.get(key).map_or(0, |state| state.revision))
+        (
+            self.epoch,
+            self.run_epochs.get(&key.0).copied().unwrap_or(0),
+            self.log_state.get(key).map_or(0, |state| state.revision),
+        )
     }
 
     fn planning_token(&self, key: &(String, String)) -> CacheToken {
-        (self.epoch, self.run_epochs.get(&key.0).copied().unwrap_or(0),
-            self.planning_revisions.get(key).copied().unwrap_or(0))
+        (
+            self.epoch,
+            self.run_epochs.get(&key.0).copied().unwrap_or(0),
+            self.planning_revisions.get(key).copied().unwrap_or(0),
+        )
     }
 
     fn planning_changed(&mut self, key: &(String, String)) {
@@ -245,7 +250,10 @@ fn strip_root_prefix(path: &str, root: &str) -> Option<String> {
 
 /// Normalize a raw path from a tool call or Git output into a clean workspace-relative path.
 pub fn normalize_workspace_path(raw: &str, worktree: &str, repository: &str) -> Option<String> {
-    let mut cleaned = raw.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+    let mut cleaned = raw
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .to_string();
     if cleaned.is_empty() {
         return None;
     }
@@ -289,7 +297,11 @@ pub fn normalize_workspace_path(raw: &str, worktree: &str, repository: &str) -> 
         return None;
     }
     let leaf = cleaned.rsplit('/').next().unwrap_or(&cleaned);
-    if leaf == ".DS_Store" || leaf.starts_with("._") || cleaned == ".git" || cleaned.starts_with(".git/") {
+    if leaf == ".DS_Store"
+        || leaf.starts_with("._")
+        || cleaned == ".git"
+        || cleaned.starts_with(".git/")
+    {
         return None;
     }
     Some(cleaned)
@@ -512,7 +524,11 @@ fn path_change_item(
         additions: 0,
         deletions: 0,
         is_running: false,
-        nodes: if node.is_empty() { vec![] } else { vec![node.into()] },
+        nodes: if node.is_empty() {
+            vec![]
+        } else {
+            vec![node.into()]
+        },
         execution_ids: if execution_id.is_empty() {
             vec![]
         } else {
@@ -575,7 +591,9 @@ fn parse_bash_command_changes(
                         if arg.starts_with('-') {
                             continue;
                         }
-                        if let Some(path) = resolve_bash_path(arg, cwd.as_deref(), worktree, repository) {
+                        if let Some(path) =
+                            resolve_bash_path(arg, cwd.as_deref(), worktree, repository)
+                        {
                             items.push(path_change_item(path, None, "deleted", node, execution_id));
                         }
                     }
@@ -640,7 +658,11 @@ fn build_tool_change_items(
                 additions,
                 deletions: 0,
                 is_running: false,
-                nodes: if node.is_empty() { vec![] } else { vec![node.into()] },
+                nodes: if node.is_empty() {
+                    vec![]
+                } else {
+                    vec![node.into()]
+                },
                 execution_ids: if execution_id.is_empty() {
                     vec![]
                 } else {
@@ -681,7 +703,11 @@ fn build_tool_change_items(
                 additions: total_add,
                 deletions: total_del,
                 is_running: false,
-                nodes: if node.is_empty() { vec![] } else { vec![node.into()] },
+                nodes: if node.is_empty() {
+                    vec![]
+                } else {
+                    vec![node.into()]
+                },
                 execution_ids: if execution_id.is_empty() {
                     vec![]
                 } else {
@@ -780,9 +806,7 @@ fn apply_jsonl(
 ) {
     for raw_line in jsonl.lines() {
         let line = raw_line.trim();
-        if line.is_empty()
-            || (!line.contains("\"tool") && !line.contains("\"grapher_process"))
-        {
+        if line.is_empty() || (!line.contains("\"tool") && !line.contains("\"grapher_process")) {
             continue;
         }
         let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -828,8 +852,11 @@ fn apply_jsonl(
                     let tool_name = tc["name"].as_str().unwrap_or_default();
                     let args = &tc["arguments"];
                     if tool_name == "read" {
-                        if let Some(raw_p) = args["path"].as_str().or_else(|| args["file"].as_str()) {
-                            if let Some(norm) = normalize_workspace_path(raw_p, worktree, repository) {
+                        if let Some(raw_p) = args["path"].as_str().or_else(|| args["file"].as_str())
+                        {
+                            if let Some(norm) =
+                                normalize_workspace_path(raw_p, worktree, repository)
+                            {
                                 if !id.is_empty() {
                                     acc.pending_reads.insert(id, norm);
                                 }
@@ -902,8 +929,12 @@ fn apply_jsonl(
                                 let tool_name = part["name"].as_str().unwrap_or_default();
                                 let args = &part["arguments"];
                                 if tool_name == "read" {
-                                    if let Some(raw_p) = args["path"].as_str().or_else(|| args["file"].as_str()) {
-                                        if let Some(norm) = normalize_workspace_path(raw_p, worktree, repository) {
+                                    if let Some(raw_p) =
+                                        args["path"].as_str().or_else(|| args["file"].as_str())
+                                    {
+                                        if let Some(norm) =
+                                            normalize_workspace_path(raw_p, worktree, repository)
+                                        {
                                             if !id.is_empty() {
                                                 acc.pending_reads.insert(id, norm);
                                             }
@@ -959,7 +990,6 @@ fn apply_jsonl(
             _ => {}
         }
     }
-
 }
 
 fn accumulator_summary(acc: &ChangeAccumulator) -> FileChangeSummary {
@@ -992,7 +1022,15 @@ pub fn parse_jsonl_file_changes(
         process_alive: is_execution_running,
         ..Default::default()
     };
-    apply_jsonl(&mut acc, jsonl, node, execution_id, worktree, repository, is_execution_running);
+    apply_jsonl(
+        &mut acc,
+        jsonl,
+        node,
+        execution_id,
+        worktree,
+        repository,
+        is_execution_running,
+    );
     accumulator_summary(&acc)
 }
 
@@ -1084,7 +1122,11 @@ pub fn compute_git_changes(
                 additions,
                 deletions,
                 is_running: false,
-                nodes: if node.is_empty() { vec![] } else { vec![node.into()] },
+                nodes: if node.is_empty() {
+                    vec![]
+                } else {
+                    vec![node.into()]
+                },
                 execution_ids: if execution_id.is_empty() {
                     vec![]
                 } else {
@@ -1101,8 +1143,8 @@ pub fn compute_git_changes(
     // must stay out. The ignored listing uses the collector's artifact pathspecs so
     // Git skips an inherited node_modules tree instead of materializing it here.
     if after.is_none() {
-        let mut untracked = run_git(&["ls-files", "--others", "--exclude-standard", "-z"])
-            .unwrap_or_default();
+        let mut untracked =
+            run_git(&["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
         let mut ignored_args: Vec<String> = [
             "ls-files",
             "--others",
@@ -1151,7 +1193,11 @@ pub fn compute_git_changes(
                         additions,
                         deletions: 0,
                         is_running: false,
-                        nodes: if node.is_empty() { vec![] } else { vec![node.into()] },
+                        nodes: if node.is_empty() {
+                            vec![]
+                        } else {
+                            vec![node.into()]
+                        },
                         execution_ids: if execution_id.is_empty() {
                             vec![]
                         } else {
@@ -1205,10 +1251,15 @@ pub fn cap_summary_files(mut summary: FileChangeSummary, limit: usize) -> FileCh
         let lead = |item: &FileChangeItem| matches!(item.status.as_str(), "added" | "deleted");
         let changed = |item: &FileChangeItem| item.additions + item.deletions;
         let (first, second) = (&summary.files[*a], &summary.files[*b]);
-        lead(second).cmp(&lead(first)).then_with(|| changed(second).cmp(&changed(first)))
+        lead(second)
+            .cmp(&lead(first))
+            .then_with(|| changed(second).cmp(&changed(first)))
     });
     indices.truncate(limit);
-    let files = indices.iter().map(|index| summary.files[*index].clone()).collect();
+    let files = indices
+        .iter()
+        .map(|index| summary.files[*index].clone())
+        .collect();
     summary.files = files;
     summary
 }
@@ -1241,7 +1292,15 @@ pub fn update_from_log_text(
         process_alive: is_running,
         ..Default::default()
     };
-    apply_jsonl(&mut acc, text, node, execution_id, worktree, repository, is_running);
+    apply_jsonl(
+        &mut acc,
+        text,
+        node,
+        execution_id,
+        worktree,
+        repository,
+        is_running,
+    );
     let summary = accumulator_summary(&acc);
     let key = (run_id.to_string(), execution_id.to_string());
     if !summary.is_empty() {
@@ -1292,13 +1351,26 @@ pub fn update_from_log_chunk(
         return;
     }
     let key = (run_id.to_string(), execution_id.to_string());
-    let Ok(mut guard) = cache().lock() else { return; };
+    let Ok(mut guard) = cache().lock() else {
+        return;
+    };
     guard.log_changed(&key);
-    let acc = guard.live.entry(key.clone()).or_insert_with(|| ChangeAccumulator {
-        process_alive: is_running,
-        ..Default::default()
-    });
-    apply_jsonl(acc, chunk, node, execution_id, worktree, repository, is_running);
+    let acc = guard
+        .live
+        .entry(key.clone())
+        .or_insert_with(|| ChangeAccumulator {
+            process_alive: is_running,
+            ..Default::default()
+        });
+    apply_jsonl(
+        acc,
+        chunk,
+        node,
+        execution_id,
+        worktree,
+        repository,
+        is_running,
+    );
     let summary = accumulator_summary(acc);
     if summary.is_empty() {
         if !is_running {
@@ -1316,7 +1388,9 @@ pub(crate) fn note_read_only_log_append(run: &str, execution: &str, bytes: usize
     // This is only an optimization hint and can run under SQLite's global
     // writer lock. Contention falls back to a later cold read, never blocks a
     // text stream (or an unrelated Run's event commit) behind a cache reader.
-    let Ok(mut guard) = cache().try_lock() else { return; };
+    let Ok(mut guard) = cache().try_lock() else {
+        return;
+    };
     let key = (run.to_string(), execution.to_string());
     if let Some(state) = guard.log_state.get_mut(&key) {
         if state.scanned.is_some_and(|(previous, _)| previous <= bytes) {
@@ -1332,9 +1406,13 @@ pub fn settle(run_id: &str, execution_id: &str) {
         return;
     }
     let key = (run_id.to_string(), execution_id.to_string());
-    let Ok(mut guard) = cache().lock() else { return; };
+    let Ok(mut guard) = cache().lock() else {
+        return;
+    };
     guard.log_changed(&key);
-    let Some(acc) = guard.live.get_mut(&key) else { return; };
+    let Some(acc) = guard.live.get_mut(&key) else {
+        return;
+    };
     acc.settled();
     let summary = accumulator_summary(acc);
     if summary.is_empty() {
@@ -1374,13 +1452,26 @@ pub fn update_planning_from_log_chunk(
         return;
     }
     let key = (run_id.to_string(), planning_id.to_string());
-    let Ok(mut guard) = cache().lock() else { return; };
+    let Ok(mut guard) = cache().lock() else {
+        return;
+    };
     guard.planning_changed(&key);
-    let acc = guard.planning_live.entry(key.clone()).or_insert_with(|| ChangeAccumulator {
-        process_alive: true,
-        ..Default::default()
-    });
-    apply_jsonl(acc, chunk, "planner", planning_id, worktree, repository, true);
+    let acc = guard
+        .planning_live
+        .entry(key.clone())
+        .or_insert_with(|| ChangeAccumulator {
+            process_alive: true,
+            ..Default::default()
+        });
+    apply_jsonl(
+        acc,
+        chunk,
+        "planner",
+        planning_id,
+        worktree,
+        repository,
+        true,
+    );
     let summary = accumulator_summary(acc);
     if summary.is_empty() {
         guard.planning_changes.remove(&key);
@@ -1394,9 +1485,13 @@ pub fn settle_planning(run_id: &str, planning_id: &str) {
         return;
     }
     let key = (run_id.to_string(), planning_id.to_string());
-    let Ok(mut guard) = cache().lock() else { return; };
+    let Ok(mut guard) = cache().lock() else {
+        return;
+    };
     guard.planning_changed(&key);
-    let Some(acc) = guard.planning_live.get_mut(&key) else { return; };
+    let Some(acc) = guard.planning_live.get_mut(&key) else {
+        return;
+    };
     acc.settled();
     let summary = accumulator_summary(acc);
     if summary.is_empty() {
@@ -1419,12 +1514,18 @@ pub fn record_git_commit_changes(
     if run_id.is_empty() || execution_id.is_empty() || before.is_empty() || after.is_empty() {
         return;
     }
-    let target = if worktree.exists() { worktree } else { repository };
+    let target = if worktree.exists() {
+        worktree
+    } else {
+        repository
+    };
     if let Some(summary) = compute_git_changes(target, before, Some(after), node, execution_id) {
         // An empty diff is a successful result too, not a reason to rerun Git
         // on every live poll. Failed reads remain uncached and retryable.
         if let Ok(mut guard) = cache().lock() {
-            guard.git_changes.insert((run_id.to_string(), execution_id.to_string()), summary);
+            guard
+                .git_changes
+                .insert((run_id.to_string(), execution_id.to_string()), summary);
         }
     }
 }
@@ -1435,7 +1536,9 @@ pub fn record_publication_git_changes(run_id: &str, repository: &Path, base: &st
     }
     if let Some(summary) = compute_git_changes(repository, base, Some(head), "", "") {
         if let Ok(mut guard) = cache().lock() {
-            guard.publication_changes.insert(run_id.to_string(), summary);
+            guard
+                .publication_changes
+                .insert(run_id.to_string(), summary);
         }
     }
 }
@@ -1549,9 +1652,9 @@ fn read_persisted(path: &Path) -> PersistedRunChanges {
 
 fn safe_run_id(run_id: &str) -> bool {
     !run_id.is_empty()
-        && run_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+        && run_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
 }
 
 fn persisted_path(root: &Path, run_id: &str) -> Option<PathBuf> {
@@ -1593,17 +1696,26 @@ pub fn persist_run(root: &Path, run_id: &str) -> Result<(), String> {
     let mut persisted = read_persisted(&path);
     persisted.version = PERSISTED_CHANGES_VERSION;
     {
-        let Ok(guard) = cache().lock() else { return Ok(()); };
+        let Ok(guard) = cache().lock() else {
+            return Ok(());
+        };
         let mut per_execution: BTreeMap<String, Vec<FileChangeSummary>> = BTreeMap::new();
-        for ((run, execution_id), summary) in guard.log_changes.iter().chain(guard.git_changes.iter()) {
+        for ((run, execution_id), summary) in
+            guard.log_changes.iter().chain(guard.git_changes.iter())
+        {
             if run == run_id {
-                per_execution.entry(execution_id.clone()).or_default().push(summary.clone());
+                per_execution
+                    .entry(execution_id.clone())
+                    .or_default()
+                    .push(summary.clone());
             }
         }
         persisted = merge_persisted_executions(persisted, per_execution);
         for ((run, planning_id), summary) in &guard.planning_changes {
             if run == run_id {
-                persisted.planning.insert(planning_id.clone(), summary.clone());
+                persisted
+                    .planning
+                    .insert(planning_id.clone(), summary.clone());
             }
         }
         if let Some(publication) = guard.publication_changes.get(run_id) {
@@ -1628,16 +1740,28 @@ pub fn persist_run(root: &Path, run_id: &str) -> Result<(), String> {
 /// Restore a persisted Run before any log replay, so loading a conversation
 /// after a restart does not re-read megabytes of execution logs.
 pub fn hydrate_run(root: &Path, run_id: &str) {
-    let Some(path) = persisted_path(root, run_id) else { return; };
-    if cache().lock().map(|guard| guard.hydrated_runs.contains(run_id)).unwrap_or(false) {
+    let Some(path) = persisted_path(root, run_id) else {
+        return;
+    };
+    if cache()
+        .lock()
+        .map(|guard| guard.hydrated_runs.contains(run_id))
+        .unwrap_or(false)
+    {
         return;
     }
-    let Ok(text) = fs::read_to_string(&path) else { return; };
-    let Ok(saved) = serde_json::from_str::<PersistedRunChanges>(&text) else { return; };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(saved) = serde_json::from_str::<PersistedRunChanges>(&text) else {
+        return;
+    };
     if saved.version != PERSISTED_CHANGES_VERSION {
         return;
     }
-    let Ok(mut guard) = cache().lock() else { return; };
+    let Ok(mut guard) = cache().lock() else {
+        return;
+    };
     let key_run = run_id.to_string();
     for (execution_id, summary) in saved.executions {
         guard
@@ -1666,16 +1790,43 @@ pub fn hydrate_run(root: &Path, run_id: &str) {
 /// The caller holds the selected Run mutex, so these tokens and its Snapshot
 /// share the same live-writer boundary. Never wait for the global display cache
 /// while holding that mutex; a busy reader can simply retry its API request.
-pub(crate) fn capture_warm_fence(state: &Snapshot, scope: Option<&[String]>) -> Result<WarmFence, String> {
-    let guard = cache().try_lock().map_err(|_| "File-change cache is busy; retry the read".to_string())?;
-    let logs = state.executions.iter().chain(&state.mergers)
-        .filter(|exec| !state.superseded_execution_ids.contains(&exec.id)
-            && scope.is_none_or(|ids| ids.contains(&exec.id)))
-        .map(|exec| (exec.id.clone(), guard.log_token(&(state.run_id.clone(), exec.id.clone()))))
+pub(crate) fn capture_warm_fence(
+    state: &Snapshot,
+    scope: Option<&[String]>,
+) -> Result<WarmFence, String> {
+    let guard = cache()
+        .try_lock()
+        .map_err(|_| "File-change cache is busy; retry the read".to_string())?;
+    let logs = state
+        .executions
+        .iter()
+        .chain(&state.mergers)
+        .filter(|exec| {
+            !state.superseded_execution_ids.contains(&exec.id)
+                && scope.is_none_or(|ids| ids.contains(&exec.id))
+        })
+        .map(|exec| {
+            (
+                exec.id.clone(),
+                guard.log_token(&(state.run_id.clone(), exec.id.clone())),
+            )
+        })
         .collect();
-    let planning = state.planning_id.as_ref().filter(|_| scope.is_none())
-        .map(|id| (id.clone(), guard.planning_token(&(state.run_id.clone(), id.clone()))));
-    Ok(WarmFence { run_id: state.run_id.clone(), logs, planning })
+    let planning = state
+        .planning_id
+        .as_ref()
+        .filter(|_| scope.is_none())
+        .map(|id| {
+            (
+                id.clone(),
+                guard.planning_token(&(state.run_id.clone(), id.clone())),
+            )
+        });
+    Ok(WarmFence {
+        run_id: state.run_id.clone(),
+        logs,
+        planning,
+    })
 }
 
 /// Cold reads can run without Runtime's mutex. The snapshot's original fence
@@ -1688,34 +1839,64 @@ fn warm_execution_log(
     read: impl FnOnce(usize) -> Result<String, String>,
 ) {
     let bytes = exec.output_bytes.max(exec.output.len());
-    if bytes == 0 || bytes > 4 * 1024 * 1024 { return; }
+    if bytes == 0 || bytes > 4 * 1024 * 1024 {
+        return;
+    }
     let key = (run.to_string(), exec.id.clone());
     let fingerprint = (bytes, exec.status == "running");
     {
-        let Ok(guard) = cache().lock() else { return; };
+        let Ok(guard) = cache().lock() else {
+            return;
+        };
         if token != guard.log_token(&key)
-            || guard.log_changes.contains_key(&key) || guard.git_changes.contains_key(&key)
-            || guard.log_state.get(&key).is_some_and(|state| state.scanned == Some(fingerprint))
+            || guard.log_changes.contains_key(&key)
+            || guard.git_changes.contains_key(&key)
+            || guard
+                .log_state
+                .get(&key)
+                .is_some_and(|state| state.scanned == Some(fingerprint))
         {
             return;
         }
     }
-    let Ok(text) = read(bytes) else { return; };
+    let Ok(text) = read(bytes) else {
+        return;
+    };
     // Do not cache a partial/truncated read as a complete empty result.
-    if text.len() != bytes { return; }
-    let mut acc = ChangeAccumulator { process_alive: fingerprint.1, ..Default::default() };
-    apply_jsonl(&mut acc, &text, &exec.node, &exec.id, &exec.worktree, repository, fingerprint.1);
+    if text.len() != bytes {
+        return;
+    }
+    let mut acc = ChangeAccumulator {
+        process_alive: fingerprint.1,
+        ..Default::default()
+    };
+    apply_jsonl(
+        &mut acc,
+        &text,
+        &exec.node,
+        &exec.id,
+        &exec.worktree,
+        repository,
+        fingerprint.1,
+    );
     let summary = accumulator_summary(&acc);
-    let Ok(mut guard) = cache().lock() else { return; };
+    let Ok(mut guard) = cache().lock() else {
+        return;
+    };
     if token != guard.log_token(&key)
-        || guard.log_changes.contains_key(&key) || guard.git_changes.contains_key(&key)
+        || guard.log_changes.contains_key(&key)
+        || guard.git_changes.contains_key(&key)
     {
         return;
     }
     guard.log_changed(&key);
     guard.log_state.get_mut(&key).unwrap().scanned = Some(fingerprint);
-    if !summary.is_empty() { guard.log_changes.insert(key.clone(), summary); }
-    if fingerprint.1 { guard.live.insert(key, acc); }
+    if !summary.is_empty() {
+        guard.log_changes.insert(key.clone(), summary);
+    }
+    if fingerprint.1 {
+        guard.live.insert(key, acc);
+    }
 }
 
 /// Warm cache for a Run (called on load/history and by the summary endpoint).
@@ -1726,7 +1907,11 @@ pub fn warm_run_changes(state: &Snapshot, store: &crate::store::Store, root: Opt
 }
 
 pub(crate) fn warm_scoped_changes(
-    state: &Snapshot, store: &crate::store::Store, root: Option<&Path>, scope: Option<&[String]>, fence: &WarmFence,
+    state: &Snapshot,
+    store: &crate::store::Store,
+    root: Option<&Path>,
+    scope: Option<&[String]>,
+    fence: &WarmFence,
 ) {
     if state.run_id.is_empty() || fence.run_id != state.run_id {
         return;
@@ -1745,23 +1930,45 @@ pub(crate) fn warm_scoped_changes(
     // its persisted planner log once (bounded) instead of losing those files.
     if let (None, Some(root), Some(planning_id)) = (scope, root, state.planning_id.as_deref()) {
         let key = (state.run_id.clone(), planning_id.to_string());
-        let token = fence.planning.as_ref().filter(|(id, _)| id == planning_id).map(|(_, token)| *token);
-        let token = token.filter(|token| cache().lock().ok().is_some_and(|guard| {
-            *token == guard.planning_token(&key)
-                && !guard.planning_changes.contains_key(&key) && !guard.planning_live.contains_key(&key)
-        }));
-        let log = root.join("planning").join(planning_id).join("planner.jsonl");
-        if token.is_some() && std::fs::metadata(&log).ok().is_some_and(|meta| meta.len() <= 4 * 1024 * 1024) {
+        let token = fence
+            .planning
+            .as_ref()
+            .filter(|(id, _)| id == planning_id)
+            .map(|(_, token)| *token);
+        let token = token.filter(|token| {
+            cache().lock().ok().is_some_and(|guard| {
+                *token == guard.planning_token(&key)
+                    && !guard.planning_changes.contains_key(&key)
+                    && !guard.planning_live.contains_key(&key)
+            })
+        });
+        let log = root
+            .join("planning")
+            .join(planning_id)
+            .join("planner.jsonl");
+        if token.is_some()
+            && std::fs::metadata(&log)
+                .ok()
+                .is_some_and(|meta| meta.len() <= 4 * 1024 * 1024)
+        {
             if let Ok(text) = std::fs::read_to_string(&log) {
-                let worktree = state.planning.as_ref()
+                let worktree = state
+                    .planning
+                    .as_ref()
                     .and_then(|planning| planning.worktree.as_deref())
                     .unwrap_or(repo_str);
                 let summary = parse_jsonl_file_changes(
-                    &text, "planner", planning_id, worktree, repo_str, false,
+                    &text,
+                    "planner",
+                    planning_id,
+                    worktree,
+                    repo_str,
+                    false,
                 );
                 if let Ok(mut guard) = cache().lock() {
                     if token == Some(guard.planning_token(&key))
-                        && !guard.planning_live.contains_key(&key) && !guard.planning_changes.contains_key(&key)
+                        && !guard.planning_live.contains_key(&key)
+                        && !guard.planning_changes.contains_key(&key)
                     {
                         // Retain empty Planner results as well. This immutable
                         // planning ID's live parser supersedes them on writes.
@@ -1779,18 +1986,20 @@ pub(crate) fn warm_scoped_changes(
             continue;
         }
         let key = (state.run_id.clone(), exec.id.clone());
-        let Some(token) = fence.logs.get(&exec.id).copied() else { continue; };
+        let Some(token) = fence.logs.get(&exec.id).copied() else {
+            continue;
+        };
         warm_execution_log(&state.run_id, exec, repo_str, token, |bytes| {
-            store.execution_log_page(&state.run_id, &exec.id, 0, bytes).map(|page| page.content)
+            store
+                .execution_log_page(&state.run_id, &exec.id, 0, bytes)
+                .map(|page| page.content)
         });
 
         if let Some(after) = &exec.after {
             if !exec.before.is_empty() && !after.is_empty() {
-                let has_git = cache()
-                    .lock()
-                    .ok()
-                    .is_some_and(|g| g.git_changes.contains_key(&key)
-                        || g.hydrated_executions.contains(&key));
+                let has_git = cache().lock().ok().is_some_and(|g| {
+                    g.git_changes.contains_key(&key) || g.hydrated_executions.contains(&key)
+                });
                 if !has_git && !repo_str.is_empty() {
                     record_git_commit_changes(
                         &state.run_id,
@@ -1876,24 +2085,37 @@ mod tests {
         ]
         .join("\n");
 
-        let summary = parse_jsonl_file_changes(&jsonl, "frontend", "exec-1", "/repo", "/repo", false);
+        let summary =
+            parse_jsonl_file_changes(&jsonl, "frontend", "exec-1", "/repo", "/repo", false);
         assert_eq!(summary.total_files, 3);
         assert_eq!(summary.added_count, 1);
         assert_eq!(summary.modified_count, 1);
         assert_eq!(summary.deleted_count, 1);
 
-        let added = summary.files.iter().find(|f| f.path == "new_file.ts").unwrap();
+        let added = summary
+            .files
+            .iter()
+            .find(|f| f.path == "new_file.ts")
+            .unwrap();
         assert_eq!(added.status, "added");
         assert_eq!(added.additions, 2);
 
-        let modified = summary.files.iter().find(|f| f.path == "existing.ts").unwrap();
+        let modified = summary
+            .files
+            .iter()
+            .find(|f| f.path == "existing.ts")
+            .unwrap();
         assert_eq!(modified.status, "modified");
         assert_eq!(modified.additions, 2);
         assert_eq!(modified.deletions, 1);
         assert_eq!(modified.additions, 2);
         assert_eq!(modified.deletions, 1);
 
-        let deleted = summary.files.iter().find(|f| f.path == "old_unused.ts").unwrap();
+        let deleted = summary
+            .files
+            .iter()
+            .find(|f| f.path == "old_unused.ts")
+            .unwrap();
         assert_eq!(deleted.status, "deleted");
     }
 
@@ -1909,7 +2131,8 @@ mod tests {
         ]
         .join("\n");
 
-        let summary = parse_jsonl_file_changes(&jsonl, "foundation", "exec-1", "/repo", "/repo", false);
+        let summary =
+            parse_jsonl_file_changes(&jsonl, "foundation", "exec-1", "/repo", "/repo", false);
         assert!(
             summary.files.is_empty(),
             "rm targets outside the workspace must not be reported: {:?}",
@@ -1929,8 +2152,13 @@ mod tests {
         ]
         .join("\n");
 
-        let summary = parse_jsonl_file_changes(&jsonl, "foundation", "exec-1", "/repo", "/repo", false);
-        let paths: Vec<&str> = summary.files.iter().map(|file| file.path.as_str()).collect();
+        let summary =
+            parse_jsonl_file_changes(&jsonl, "foundation", "exec-1", "/repo", "/repo", false);
+        let paths: Vec<&str> = summary
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
         assert!(paths.contains(&"src/old.ts"), "paths: {paths:?}");
         assert!(paths.contains(&"docs/draft.md"), "paths: {paths:?}");
         assert!(paths.contains(&"keep.ts"), "paths: {paths:?}");
@@ -1953,8 +2181,12 @@ mod tests {
     #[test]
     fn chunked_stream_keeps_pending_calls_and_settles_on_the_next_chunk() {
         let start = r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"edit","args":{"path":"src/a.ts","edits":[{"oldText":"old line","newText":"new line"}]}}"#;
-        let end = r#"{"type":"tool_execution_end","toolCallId":"t1","toolName":"edit","isError":false}"#;
-        let mut acc = ChangeAccumulator { process_alive: true, ..Default::default() };
+        let end =
+            r#"{"type":"tool_execution_end","toolCallId":"t1","toolName":"edit","isError":false}"#;
+        let mut acc = ChangeAccumulator {
+            process_alive: true,
+            ..Default::default()
+        };
         apply_jsonl(&mut acc, start, "worker", "exec-1", "/repo", "/repo", true);
         let live = accumulator_summary(&acc);
         assert!(live.is_running, "a started tool is in flight");
@@ -1973,7 +2205,10 @@ mod tests {
     #[test]
     fn finishing_an_execution_drops_an_unfinished_tool_call() {
         let start = r#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"write","args":{"path":"src/new.ts","content":"export const x = 1;"}}"#;
-        let mut acc = ChangeAccumulator { process_alive: true, ..Default::default() };
+        let mut acc = ChangeAccumulator {
+            process_alive: true,
+            ..Default::default()
+        };
         apply_jsonl(&mut acc, start, "worker", "exec-1", "/repo", "/repo", true);
         assert_eq!(accumulator_summary(&acc).files[0].is_running, true);
         acc.settled();
@@ -1987,14 +2222,16 @@ mod tests {
         invalidate_run("planning-run");
         reset_planning("planning-run", "planning-1");
         let start = r##"{"type":"tool_execution_start","toolCallId":"p1","toolName":"write","args":{"path":"docs/plan.md","content":"# Plan"}}"##;
-        let end = r#"{"type":"tool_execution_end","toolCallId":"p1","toolName":"write","isError":false}"#;
+        let end =
+            r#"{"type":"tool_execution_end","toolCallId":"p1","toolName":"write","isError":false}"#;
         update_planning_from_log_chunk("planning-run", "planning-1", "/repo", "/repo", start);
         update_planning_from_log_chunk("planning-run", "planning-1", "/repo", "/repo", end);
         settle_planning("planning-run", "planning-1");
         let mut state = Snapshot::default();
         state.run_id = "planning-run".into();
         state.planning_id = Some("planning-1".into());
-        let summary = get_cached_run_changes(&state).expect("planner writes are part of the run summary");
+        let summary =
+            get_cached_run_changes(&state).expect("planner writes are part of the run summary");
         assert_eq!(summary.files[0].path, "docs/plan.md");
         assert_eq!(summary.files[0].nodes, vec!["planner".to_string()]);
         invalidate_run("planning-run");
@@ -2016,17 +2253,36 @@ mod tests {
 
         let path = root.join("file-changes").join(run).join("changes.json");
         assert!(path.is_file(), "counts are persisted next to runtime data");
-        assert!(std::fs::metadata(&path).unwrap().len() < 4096, "summary stays tiny");
+        assert!(
+            std::fs::metadata(&path).unwrap().len() < 4096,
+            "summary stays tiny"
+        );
 
         invalidate_run(run);
         hydrate_run(root, run);
-        let state = Snapshot { run_id: run.into(), ..Default::default() };
+        let state = Snapshot {
+            run_id: run.into(),
+            ..Default::default()
+        };
         let execution = Execution {
-            id: "exec".into(), node: "worker".into(), revision: 0, attempt: 1,
-            session_id: "session".into(), worktree: "/repo".into(), before: String::new(),
-            workspace_lineage: vec![], after: None, input: None, result: None,
-            status: "completed".into(), output: String::new(), output_bytes: 0, pid: None,
-            started_at: 1, completed_at: Some(2), metrics: None,
+            id: "exec".into(),
+            node: "worker".into(),
+            revision: 0,
+            attempt: 1,
+            session_id: "session".into(),
+            worktree: "/repo".into(),
+            before: String::new(),
+            workspace_lineage: vec![],
+            after: None,
+            input: None,
+            result: None,
+            status: "completed".into(),
+            output: String::new(),
+            output_bytes: 0,
+            pid: None,
+            started_at: 1,
+            completed_at: Some(2),
+            metrics: None,
         };
         let summary = get_cached_execution_changes(&state.run_id, &execution)
             .expect("hydrated summary is available without reading logs");
@@ -2060,11 +2316,24 @@ mod tests {
         invalidate_run(run);
         hydrate_run(root, run);
         let execution = Execution {
-            id: "exec".into(), node: "foundation".into(), revision: 0, attempt: 1,
-            session_id: "session".into(), worktree: "/repo".into(), before: String::new(),
-            workspace_lineage: vec![], after: None, input: None, result: None,
-            status: "completed".into(), output: String::new(), output_bytes: 0, pid: None,
-            started_at: 1, completed_at: Some(2), metrics: None,
+            id: "exec".into(),
+            node: "foundation".into(),
+            revision: 0,
+            attempt: 1,
+            session_id: "session".into(),
+            worktree: "/repo".into(),
+            before: String::new(),
+            workspace_lineage: vec![],
+            after: None,
+            input: None,
+            result: None,
+            status: "completed".into(),
+            output: String::new(),
+            output_bytes: 0,
+            pid: None,
+            started_at: 1,
+            completed_at: Some(2),
+            metrics: None,
         };
         assert!(
             get_cached_execution_changes(run, &execution).is_none(),
@@ -2092,8 +2361,13 @@ mod tests {
                 None,
             )
         };
-        let mut persisted = PersistedRunChanges { version: PERSISTED_CHANGES_VERSION, ..Default::default() };
-        persisted.executions.insert("exec-old".into(), summary("src/old.ts"));
+        let mut persisted = PersistedRunChanges {
+            version: PERSISTED_CHANGES_VERSION,
+            ..Default::default()
+        };
+        persisted
+            .executions
+            .insert("exec-old".into(), summary("src/old.ts"));
 
         // The current session only derived a different execution. The earlier
         // terminal summary must survive the overlay.
@@ -2127,7 +2401,8 @@ mod tests {
         fs::write(repo.join("added.txt"), "new1\nnew2\n").unwrap();
 
         // Working tree changes (before commit)
-        let live_summary = compute_git_changes(&repo, &before, None, "worker", "exec-live").unwrap();
+        let live_summary =
+            compute_git_changes(&repo, &before, None, "worker", "exec-live").unwrap();
         assert_eq!(live_summary.total_files, 3);
         assert_eq!(live_summary.added_count, 1);
         assert_eq!(live_summary.modified_count, 1);
@@ -2144,7 +2419,6 @@ mod tests {
         assert_eq!(committed_summary.added_count, 1);
         assert_eq!(committed_summary.modified_count, 1);
         assert_eq!(committed_summary.deleted_count, 1);
-
     }
 
     #[test]
@@ -2174,7 +2448,11 @@ mod tests {
 
         let live = compute_git_changes(&repo, &before, None, "worker", "exec-live").unwrap();
         let paths: Vec<&str> = live.files.iter().map(|file| file.path.as_str()).collect();
-        assert_eq!(paths, vec!["dist/bundle.js", "src.ts"], "authored files stay: {paths:?}");
+        assert_eq!(
+            paths,
+            vec!["dist/bundle.js", "src.ts"],
+            "authored files stay: {paths:?}"
+        );
         assert_eq!(live.added_count, 2);
     }
 }

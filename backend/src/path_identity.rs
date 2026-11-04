@@ -40,13 +40,7 @@ fn actual_existing(path: &Path) -> Option<PathBuf> {
     use std::os::unix::io::AsRawFd;
     if let Ok(file) = fs::File::open(path) {
         let mut buffer = vec![0u8; libc::PATH_MAX as usize + 1];
-        let result = unsafe {
-            libc::fcntl(
-                file.as_raw_fd(),
-                libc::F_GETPATH,
-                buffer.as_mut_ptr(),
-            )
-        };
+        let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
         if result == 0 {
             if let Some(end) = buffer.iter().position(|byte| *byte == 0) {
                 return Some(PathBuf::from(std::ffi::OsString::from_vec(
@@ -106,9 +100,7 @@ pub(crate) fn path_key(path: &Path) -> String {
             .or_else(|| text.strip_prefix(r"\\?\").map(str::to_owned))
             .unwrap_or(text);
         let text = text.replace('/', "\\");
-        return text
-            .trim_end_matches('\\')
-            .to_ascii_lowercase();
+        return text.trim_end_matches('\\').to_ascii_lowercase();
     }
     #[cfg(not(windows))]
     {
@@ -136,21 +128,27 @@ fn macos_case_insensitive(path: &Path) -> bool {
     } else {
         return false;
     };
-    let Ok(original) = fs::metadata(probe) else { return false };
+    let Ok(original) = fs::metadata(probe) else {
+        return false;
+    };
     let text = probe.to_string_lossy();
-    let swapped: String = text.chars().map(|character| {
-        if character.is_ascii_lowercase() {
-            character.to_ascii_uppercase()
-        } else if character.is_ascii_uppercase() {
-            character.to_ascii_lowercase()
-        } else {
-            character
-        }
-    }).collect();
+    let swapped: String = text
+        .chars()
+        .map(|character| {
+            if character.is_ascii_lowercase() {
+                character.to_ascii_uppercase()
+            } else if character.is_ascii_uppercase() {
+                character.to_ascii_lowercase()
+            } else {
+                character
+            }
+        })
+        .collect();
     if swapped == text {
         return false;
     }
-    fs::metadata(swapped).is_ok_and(|other| original.dev() == other.dev() && original.ino() == other.ino())
+    fs::metadata(swapped)
+        .is_ok_and(|other| original.dev() == other.dev() && original.ino() == other.ino())
 }
 
 /// Cheap comparison key for relative workspace paths. Avoids filesystem
@@ -159,7 +157,10 @@ pub(crate) fn lexical_key(path: &Path) -> String {
     let text = path.to_string_lossy().into_owned();
     #[cfg(windows)]
     {
-        return text.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+        return text
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase();
     }
     #[cfg(not(windows))]
     {
@@ -199,9 +200,8 @@ pub(crate) fn windows_api_path(path: &Path) -> Result<Vec<u16>, String> {
         os::windows::ffi::OsStrExt,
         path::{Component, Prefix},
     };
-    let absolute = std::path::absolute(path).map_err(|e| {
-        format!("Cannot prepare native Windows path {}: {e}", path.display())
-    })?;
+    let absolute = std::path::absolute(path)
+        .map_err(|e| format!("Cannot prepare native Windows path {}: {e}", path.display()))?;
     let (prefix, skip) = match absolute.components().next() {
         Some(Component::Prefix(prefix)) => match prefix.kind() {
             Prefix::Disk(_) => (r"\\?\", 0),
@@ -243,10 +243,18 @@ mod tests {
 
     #[test]
     fn runtime_metadata_names_are_portable() {
-        for name in [".git", ".grapher", ".grapher-worktrees", ".grapher-workspaces", ".grapher-path-audit"] {
+        for name in [
+            ".git",
+            ".grapher",
+            ".grapher-worktrees",
+            ".grapher-workspaces",
+            ".grapher-path-audit",
+        ] {
             assert!(is_runtime_metadata_name(OsStr::new(name)));
             #[cfg(any(windows, target_os = "macos"))]
-            assert!(is_runtime_metadata_name(&OsStr::new(&name.to_ascii_uppercase())));
+            assert!(is_runtime_metadata_name(&OsStr::new(
+                &name.to_ascii_uppercase()
+            )));
         }
         assert!(!is_runtime_metadata_name(OsStr::new("src")));
     }

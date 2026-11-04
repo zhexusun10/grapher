@@ -20,7 +20,9 @@ unsafe impl GlobalAlloc for Counting {
         }
         System.alloc(layout)
     }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) { System.dealloc(ptr, layout) }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout)
+    }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if TRACK.load(Ordering::Relaxed) {
             TOTAL.fetch_add(new_size, Ordering::Relaxed);
@@ -37,7 +39,8 @@ fn legacy(db: &Connection, kind: EventKind) {
     db.execute(
         "INSERT INTO events(run_id,timestamp,payload) VALUES('run',1000,?1)",
         params![serde_json::to_string(&kind).unwrap()],
-    ).unwrap();
+    )
+    .unwrap();
 }
 
 #[test]
@@ -50,32 +53,75 @@ fn load_of_a_large_legacy_run_never_parses_transcript_text() {
         db.execute_batch("CREATE TABLE events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, timestamp INTEGER NOT NULL, payload TEXT NOT NULL);").unwrap();
         let config: Config = serde_json::from_value(serde_json::json!({
             "repository": "/repo", "model": "test", "maxParallel": 1
-        })).unwrap();
-        legacy(&db, EventKind::Created {
-            graph: Graph {
-                nodes: ["one", "two"].iter().map(|name| Node { name: (*name).into(), task: "test".into() }).collect(),
-                ..Default::default()
+        }))
+        .unwrap();
+        legacy(
+            &db,
+            EventKind::Created {
+                graph: Graph {
+                    nodes: ["one", "two"]
+                        .iter()
+                        .map(|name| Node {
+                            name: (*name).into(),
+                            task: "test".into(),
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+                config,
+                planning_id: None,
+                planning: None,
             },
-            config, planning_id: None, planning: None,
-        });
+        );
         let filler = "x".repeat(8 * 1024 * 1024);
         for id in ["one", "two"] {
             let execution = Execution {
-                id: id.into(), node: id.into(), revision: 1, attempt: 1,
-                session_id: id.into(), worktree: String::new(), before: String::new(),
+                id: id.into(),
+                node: id.into(),
+                revision: 1,
+                attempt: 1,
+                session_id: id.into(),
+                worktree: String::new(),
+                before: String::new(),
                 workspace_lineage: vec![],
-                after: None, status: "running".into(), output: String::new(), output_bytes: 0, pid: None,
-                input: None, result: None,
-                started_at: 1, completed_at: None, metrics: None,
+                after: None,
+                status: "running".into(),
+                output: String::new(),
+                output_bytes: 0,
+                pid: None,
+                input: None,
+                result: None,
+                started_at: 1,
+                completed_at: None,
+                metrics: None,
             };
-            legacy(&db, EventKind::Started { execution, message_sequences: None, fresh_restart: false });
+            legacy(
+                &db,
+                EventKind::Started {
+                    execution,
+                    message_sequences: None,
+                    fresh_restart: false,
+                },
+            );
             for _ in 0..3 {
-                legacy(&db, EventKind::Output { execution_id: id.into(), text: filler.clone() });
+                legacy(
+                    &db,
+                    EventKind::Output {
+                        execution_id: id.into(),
+                        text: filler.clone(),
+                    },
+                );
             }
-            legacy(&db, EventKind::Finished {
-                execution_id: id.into(), head: "h".into(),
-                output: format!("{filler}{filler}{filler}END-{id}"), output_bytes: 0, metrics: None,
-            });
+            legacy(
+                &db,
+                EventKind::Finished {
+                    execution_id: id.into(),
+                    head: "h".into(),
+                    output: format!("{filler}{filler}{filler}END-{id}"),
+                    output_bytes: 0,
+                    metrics: None,
+                },
+            );
         }
     }
     let store = Store::open(&path).unwrap();
@@ -92,8 +138,14 @@ fn load_of_a_large_legacy_run_never_parses_transcript_text() {
     let max = MAX.load(Ordering::SeqCst);
     eprintln!("legacy load: {elapsed:?}, allocated {total} bytes, largest block {max} bytes");
     assert_eq!(state.events.len(), 5, "only business events replay");
-    assert!(state.executions.iter().all(|execution| execution.output.is_empty()));
+    assert!(state
+        .executions
+        .iter()
+        .all(|execution| execution.output.is_empty()));
     assert_eq!(state.executions.len(), 2);
-    assert!(max < 1024 * 1024, "a transcript-sized allocation was observed: {max}");
+    assert!(
+        max < 1024 * 1024,
+        "a transcript-sized allocation was observed: {max}"
+    );
     assert!(total < 4 * 1024 * 1024, "replay allocated {total} bytes");
 }

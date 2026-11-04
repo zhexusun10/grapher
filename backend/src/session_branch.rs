@@ -1,7 +1,12 @@
 //! Branch a settled Pi JSONL session before a previous user turn. Keep the
 //! abandoned branch in the same file, as Pi's /tree does; never truncate it.
-use std::{collections::{HashMap, HashSet}, fs::{self, OpenOptions}, io::Write, path::{Path, PathBuf}};
 use serde_json::{json, Value};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
 pub struct PreparedBranch {
@@ -12,32 +17,51 @@ pub struct PreparedBranch {
 
 impl PreparedBranch {
     pub fn rollback(self) -> Result<(), String> {
-        OpenOptions::new().write(true).open(&self.path)
+        OpenOptions::new()
+            .write(true)
+            .open(&self.path)
             .and_then(|file| file.set_len(self.old_len))
             .map_err(|error| format!("Cannot restore Pi session after failed edit: {error}"))
     }
 }
 
-fn session_file(source_dir: &Path, source_id: &str)
-    -> Result<(PathBuf, std::io::BufReader<fs::File>, Value), String>
-{
+fn session_file(
+    source_dir: &Path,
+    source_id: &str,
+) -> Result<(PathBuf, std::io::BufReader<fs::File>, Value), String> {
     use std::io::{BufRead, BufReader, Read, Seek};
     Uuid::parse_str(source_id).map_err(|_| "Invalid source session ID")?;
     let suffix = format!("_{source_id}.jsonl");
-    let files: Vec<_> = fs::read_dir(source_dir).map_err(|error| format!("Cannot open node session: {error}"))?
-        .filter_map(Result::ok).filter(|entry| entry.file_name().to_string_lossy().ends_with(&suffix) && entry.path().is_file()).collect();
-    if files.len() != 1 { return Err("Persisted node conversation is missing or ambiguous".into()); }
+    let files: Vec<_> = fs::read_dir(source_dir)
+        .map_err(|error| format!("Cannot open node session: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_name().to_string_lossy().ends_with(&suffix) && entry.path().is_file()
+        })
+        .collect();
+    if files.len() != 1 {
+        return Err("Persisted node conversation is missing or ambiguous".into());
+    }
     let source = files[0].path();
     let mut file = fs::File::open(&source).map_err(|error| error.to_string())?;
-    if file.metadata().map_err(|error| error.to_string())?.len() == 0 { return Err("Empty node session".into()); }
-    file.seek(std::io::SeekFrom::End(-1)).map_err(|error| error.to_string())?;
+    if file.metadata().map_err(|error| error.to_string())?.len() == 0 {
+        return Err("Empty node session".into());
+    }
+    file.seek(std::io::SeekFrom::End(-1))
+        .map_err(|error| error.to_string())?;
     let mut last = [0];
-    file.read_exact(&mut last).map_err(|error| error.to_string())?;
-    if last != [b'\n'] { return Err("Node session has an incomplete last entry".into()); }
-    file.seek(std::io::SeekFrom::Start(0)).map_err(|error| error.to_string())?;
+    file.read_exact(&mut last)
+        .map_err(|error| error.to_string())?;
+    if last != [b'\n'] {
+        return Err("Node session has an incomplete last entry".into());
+    }
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|error| error.to_string())?;
     let mut reader = BufReader::new(file);
     let mut first = String::new();
-    reader.read_line(&mut first).map_err(|error| error.to_string())?;
+    reader
+        .read_line(&mut first)
+        .map_err(|error| error.to_string())?;
     let header: Value = serde_json::from_str(&first).map_err(|error| error.to_string())?;
     if header["type"] != "session" || header["id"] != source_id {
         return Err("Node session history belongs to another identity".into());
@@ -45,15 +69,18 @@ fn session_file(source_dir: &Path, source_id: &str)
     Ok((source, reader, header))
 }
 
-fn open_session(source_dir: &Path, source_id: &str, source_cwd: &Path)
-    -> Result<(PathBuf, std::io::BufReader<fs::File>, Value), String>
-{
+fn open_session(
+    source_dir: &Path,
+    source_id: &str,
+    source_cwd: &Path,
+) -> Result<(PathBuf, std::io::BufReader<fs::File>, Value), String> {
     let (source, reader, header) = session_file(source_dir, source_id)?;
-    let expected = crate::path_identity::actual_path(source_cwd)
-        .unwrap_or_else(|_| source_cwd.to_path_buf());
-    let matches_cwd = header.get("cwd").and_then(Value::as_str).is_some_and(|cwd| {
-        crate::path_identity::same_path(Path::new(cwd), &expected)
-    });
+    let expected =
+        crate::path_identity::actual_path(source_cwd).unwrap_or_else(|_| source_cwd.to_path_buf());
+    let matches_cwd = header
+        .get("cwd")
+        .and_then(Value::as_str)
+        .is_some_and(|cwd| crate::path_identity::same_path(Path::new(cwd), &expected));
     if !matches_cwd {
         return Err("Node session history belongs to another workspace or identity".into());
     }
@@ -141,21 +168,16 @@ pub(crate) fn rebind_session_cwd_by_header(
         if path.extension().is_none_or(|ext| ext != "jsonl") {
             continue;
         }
-        let mut input = BufReader::new(
-            fs::File::open(&path).map_err(|error| error.to_string())?,
-        );
+        let mut input = BufReader::new(fs::File::open(&path).map_err(|error| error.to_string())?);
         let mut line = String::new();
         input
             .read_line(&mut line)
             .map_err(|error| error.to_string())?;
-        let header: Value =
-            serde_json::from_str(&line).map_err(|error| error.to_string())?;
+        let header: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
         if header.get("id").and_then(Value::as_str) != Some(id) {
             continue;
         }
-        if header.get("cwd").and_then(Value::as_str)
-            == Some(actual.to_string_lossy().as_ref())
-        {
+        if header.get("cwd").and_then(Value::as_str) == Some(actual.to_string_lossy().as_ref()) {
             return Ok(());
         }
         return rewrite_session_header(&path, input, header, &actual);
@@ -167,21 +189,33 @@ pub(crate) fn rebind_session_cwd_by_header(
 /// history or loading its transcript into memory. Pi discovers this new binding
 /// by its new session ID and cwd; parentSession keeps the lineage inspectable.
 pub fn fork_session(
-    source_dir: &Path, source_id: &str, source_cwd: &Path,
-    target_dir: &Path, target_id: &str, target_cwd: &Path,
+    source_dir: &Path,
+    source_id: &str,
+    source_cwd: &Path,
+    target_dir: &Path,
+    target_id: &str,
+    target_cwd: &Path,
 ) -> Result<(), String> {
     Uuid::parse_str(target_id).map_err(|_| "Invalid target session ID")?;
-    if target_id == source_id { return Err("A forked node session needs a new identity".into()); }
+    if target_id == source_id {
+        return Err("A forked node session needs a new identity".into());
+    }
     let (source, mut reader, mut header) = open_session(source_dir, source_id, source_cwd)?;
     header["id"] = json!(target_id);
     header["cwd"] = json!(session_cwd(target_cwd)?);
     header["parentSession"] = json!(crate::native::host_path(&source));
     fs::create_dir_all(target_dir).map_err(|error| error.to_string())?;
     let target = target_dir.join(format!("grapher_{target_id}.jsonl"));
-    if target.exists() { return Err("Cannot overwrite an existing forked node session".into()); }
+    if target.exists() {
+        return Err("Cannot overwrite an existing forked node session".into());
+    }
     let temporary = target_dir.join(format!("fork-{}.pending", Uuid::new_v4()));
     let result = (|| {
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|error| error.to_string())?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
         writeln!(file, "{header}").map_err(|error| error.to_string())?;
         std::io::copy(&mut reader, &mut file).map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())?;
@@ -198,23 +232,60 @@ fn user_text(value: &Value) -> Option<String> {
         return None;
     }
     let content = message.get("content")?;
-    if let Some(text) = content.as_str() { return Some(text.to_owned()); }
-    content.as_array().map(|parts| parts.iter().filter_map(|part| {
-        (part.get("type")?.as_str()? == "text").then(|| part.get("text")?.as_str()).flatten()
-    }).collect::<Vec<_>>().join(""))
+    if let Some(text) = content.as_str() {
+        return Some(text.to_owned());
+    }
+    content.as_array().map(|parts| {
+        parts
+            .iter()
+            .filter_map(|part| {
+                (part.get("type")?.as_str()? == "text")
+                    .then(|| part.get("text")?.as_str())
+                    .flatten()
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    })
 }
 
 pub fn branch_before_user(
-    session_dir: &Path, session_id: &str, cwd: &Path,
-    old_text: &str, started_at: u64, completed_at: u64,
+    session_dir: &Path,
+    session_id: &str,
+    cwd: &Path,
+    old_text: &str,
+    started_at: u64,
+    completed_at: u64,
 ) -> Result<PreparedBranch, String> {
-    prepare_user_branch(session_dir, session_id, cwd, old_text, started_at, completed_at, false, None)?.commit()
+    prepare_user_branch(
+        session_dir,
+        session_id,
+        cwd,
+        old_text,
+        started_at,
+        completed_at,
+        false,
+        None,
+    )?
+    .commit()
 }
 
 pub fn branch_before_planner_user(
-    session_dir: &Path, session_id: &str, cwd: &Path, old_text: &str,
+    session_dir: &Path,
+    session_id: &str,
+    cwd: &Path,
+    old_text: &str,
 ) -> Result<PreparedBranch, String> {
-    prepare_user_branch(session_dir, session_id, cwd, old_text, 0, u64::MAX, true, None)?.commit()
+    prepare_user_branch(
+        session_dir,
+        session_id,
+        cwd,
+        old_text,
+        0,
+        u64::MAX,
+        true,
+        None,
+    )?
+    .commit()
 }
 
 /// The absolute execution-log cursor identifies a row even when its text is
@@ -227,7 +298,12 @@ pub struct OutputUserTurn {
 }
 
 fn output_user_turns(output: &str, old_text: &str) -> Vec<(usize, Option<u64>, Option<String>)> {
-    let normalized = |text: &str| text.strip_suffix(crate::engine::FEEDBACK_INSTRUCTIONS).unwrap_or(text).trim().to_string();
+    let normalized = |text: &str| {
+        text.strip_suffix(crate::engine::FEEDBACK_INSTRUCTIONS)
+            .unwrap_or(text)
+            .trim()
+            .to_string()
+    };
     let expected = normalized(old_text);
     let mut cursor = 0;
     let mut turns = Vec::new();
@@ -235,17 +311,36 @@ fn output_user_turns(output: &str, old_text: &str) -> Vec<(usize, Option<u64>, O
     for line in output.split_inclusive('\n') {
         let at = cursor;
         cursor += line.len();
-        let Ok(event) = serde_json::from_str::<Value>(line) else { continue; };
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         let kind = event["type"].as_str().unwrap_or_default();
-        if !matches!(kind, "message_start" | "message_end" | "message") || event["message"]["role"] != "user" { continue; }
-        if kind == "message_end" && pending_start { pending_start = false; continue; }
+        if !matches!(kind, "message_start" | "message_end" | "message")
+            || event["message"]["role"] != "user"
+        {
+            continue;
+        }
+        if kind == "message_end" && pending_start {
+            pending_start = false;
+            continue;
+        }
         pending_start = kind == "message_start";
         let mut wrapped = event.clone();
         wrapped["type"] = json!("message");
         let text = user_text(&wrapped).unwrap_or_default();
-        if normalized(&text) != expected { continue; }
-        let id = if kind == "message" { event["id"].as_str() } else { event["message"]["id"].as_str() };
-        turns.push((at, event["message"]["timestamp"].as_u64(), id.map(str::to_owned)));
+        if normalized(&text) != expected {
+            continue;
+        }
+        let id = if kind == "message" {
+            event["id"].as_str()
+        } else {
+            event["message"]["id"].as_str()
+        };
+        turns.push((
+            at,
+            event["message"]["timestamp"].as_u64(),
+            id.map(str::to_owned),
+        ));
     }
     turns
 }
@@ -261,19 +356,32 @@ pub fn truncate_output(output: &str, end: Option<usize>) -> String {
     match end {
         Some(end) if end < output.len() => {
             let mut boundary = end;
-            while boundary > 0 && !output.is_char_boundary(boundary) { boundary -= 1; }
+            while boundary > 0 && !output.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
             output[..boundary].to_string()
         }
         _ => output.to_string(),
     }
 }
 
-pub fn output_user_turn(output: &str, offset: usize, old_text: &str) -> Result<OutputUserTurn, String> {
+pub fn output_user_turn(
+    output: &str,
+    offset: usize,
+    old_text: &str,
+) -> Result<OutputUserTurn, String> {
     let turns = output_user_turns(output, old_text);
     let total_occurrences = turns.len();
-    turns.into_iter().enumerate()
+    turns
+        .into_iter()
+        .enumerate()
         .find(|(_, (at, _, _))| *at == offset)
-        .map(|(occurrence, (_, timestamp, entry_id))| OutputUserTurn { occurrence, total_occurrences, timestamp, entry_id })
+        .map(|(occurrence, (_, timestamp, entry_id))| OutputUserTurn {
+            occurrence,
+            total_occurrences,
+            timestamp,
+            entry_id,
+        })
         .ok_or_else(|| "The selected output row is not that user turn".into())
 }
 
@@ -289,48 +397,91 @@ pub struct UserBranch {
 }
 
 pub fn prepare_node_user_branch(
-    session_dir: &Path, session_id: &str, cwd: &Path, old_text: &str,
-    started_at: u64, completed_at: u64, selector: Option<&OutputUserTurn>,
+    session_dir: &Path,
+    session_id: &str,
+    cwd: &Path,
+    old_text: &str,
+    started_at: u64,
+    completed_at: u64,
+    selector: Option<&OutputUserTurn>,
 ) -> Result<UserBranch, String> {
-    prepare_user_branch(session_dir, session_id, cwd, old_text, started_at, completed_at, false, selector)
+    prepare_user_branch(
+        session_dir,
+        session_id,
+        cwd,
+        old_text,
+        started_at,
+        completed_at,
+        false,
+        selector,
+    )
 }
 
 fn prepare_user_branch(
-    session_dir: &Path, session_id: &str, cwd: &Path,
-    old_text: &str, started_at: u64, completed_at: u64, planner: bool, selector: Option<&OutputUserTurn>,
+    session_dir: &Path,
+    session_id: &str,
+    cwd: &Path,
+    old_text: &str,
+    started_at: u64,
+    completed_at: u64,
+    planner: bool,
+    selector: Option<&OutputUserTurn>,
 ) -> Result<UserBranch, String> {
     Uuid::parse_str(session_id).map_err(|_| "Invalid Pi session identity")?;
     let suffix = format!("_{session_id}.jsonl");
-    let files: Vec<_> = fs::read_dir(session_dir).map_err(|error| error.to_string())?
+    let files: Vec<_> = fs::read_dir(session_dir)
+        .map_err(|error| error.to_string())?
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().ends_with(&suffix) && entry.path().is_file())
+        .filter(|entry| {
+            entry.file_name().to_string_lossy().ends_with(&suffix) && entry.path().is_file()
+        })
         .collect();
-    if files.len() != 1 { return Err("Expected exactly one persisted Pi session for this execution".into()); }
+    if files.len() != 1 {
+        return Err("Expected exactly one persisted Pi session for this execution".into());
+    }
     let path = files[0].path();
     let contents = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    if !contents.ends_with('\n') { return Err("Pi session has an incomplete last entry".into()); }
-    let values: Vec<Value> = contents.lines().map(|line| serde_json::from_str(line)
-        .map_err(|_| "Invalid Pi session entry".to_string())).collect::<Result<_, _>>()?;
+    if !contents.ends_with('\n') {
+        return Err("Pi session has an incomplete last entry".into());
+    }
+    let values: Vec<Value> = contents
+        .lines()
+        .map(|line| serde_json::from_str(line).map_err(|_| "Invalid Pi session entry".to_string()))
+        .collect::<Result<_, _>>()?;
     let header = values.first().ok_or("Empty Pi session")?;
     let actual_cwd = header.get("cwd").and_then(Value::as_str).map(Path::new);
-    let cwd_matches = actual_cwd.is_some_and(|actual| {
-        crate::path_identity::same_path(actual, cwd)
-    });
+    let cwd_matches = actual_cwd.is_some_and(|actual| crate::path_identity::same_path(actual, cwd));
     if header.get("type").and_then(Value::as_str) != Some("session")
         || header.get("id").and_then(Value::as_str) != Some(session_id)
         || !cwd_matches
-    { return Err("Pi session belongs to another workspace or execution".into()); }
-    let entries: HashMap<&str, &Value> = values.iter().skip(1).map(|entry| {
-        entry.get("id").and_then(Value::as_str).map(|id| (id, entry))
-            .ok_or("Pi session entry has no identity".to_string())
-    }).collect::<Result<_, _>>()?;
-    let leaf = values.last().and_then(|entry| entry.get("id")).and_then(Value::as_str)
+    {
+        return Err("Pi session belongs to another workspace or execution".into());
+    }
+    let entries: HashMap<&str, &Value> = values
+        .iter()
+        .skip(1)
+        .map(|entry| {
+            entry
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| (id, entry))
+                .ok_or("Pi session entry has no identity".to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    let leaf = values
+        .last()
+        .and_then(|entry| entry.get("id"))
+        .and_then(Value::as_str)
         .ok_or("Pi session has no conversation")?;
     let mut active_ids = HashSet::new();
     let mut cursor = Some(leaf);
     while let Some(id) = cursor {
-        if !active_ids.insert(id) { return Err("Pi session contains a cycle".into()); }
-        let entry = entries.get(id).ok_or("Pi session contains a missing parent")?;
+        if !active_ids.insert(id) {
+            return Err("Pi session contains a cycle".into());
+        }
+        let entry = entries
+            .get(id)
+            .ok_or("Pi session contains a missing parent")?;
         cursor = entry.get("parentId").and_then(Value::as_str);
     }
 
@@ -339,42 +490,91 @@ fn prepare_user_branch(
     let mut matches = Vec::new();
     for entry in values.iter().skip(1) {
         let content = user_text(entry);
-        let matches_text = content.as_deref().is_some_and(|text| text == old_text ||
-            (!planner && text.strip_suffix(crate::engine::FEEDBACK_INSTRUCTIONS) == Some(old_text)) ||
-            (planner && text.ends_with(&format!("\n{old_text}")) &&
-                (text.starts_with("Current graph node status:\n") || text.starts_with("User query:\n") || text.starts_with("You are now at "))));
-        if !matches_text { continue; }
-        let time = entry.get("message").and_then(|message| message.get("timestamp"))
-            .and_then(Value::as_u64).unwrap_or(0);
-        if time < started_at || time > completed_at { continue; }
-        let id = entry.get("id").and_then(Value::as_str).ok_or("Pi session entry has no identity")?;
-        let parent = entry.get("parentId").and_then(Value::as_str).map(str::to_owned);
+        let matches_text = content.as_deref().is_some_and(|text| {
+            text == old_text
+                || (!planner
+                    && text.strip_suffix(crate::engine::FEEDBACK_INSTRUCTIONS) == Some(old_text))
+                || (planner
+                    && text.ends_with(&format!("\n{old_text}"))
+                    && (text.starts_with("Current graph node status:\n")
+                        || text.starts_with("User query:\n")
+                        || text.starts_with("You are now at ")))
+        });
+        if !matches_text {
+            continue;
+        }
+        let time = entry
+            .get("message")
+            .and_then(|message| message.get("timestamp"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if time < started_at || time > completed_at {
+            continue;
+        }
+        let id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("Pi session entry has no identity")?;
+        let parent = entry
+            .get("parentId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         matches.push((id, parent, active_ids.contains(id)));
     }
     let candidate = if let Some(selector) = selector {
         let active: Vec<_> = matches.iter().filter(|(_, _, active)| *active).collect();
-        let by_id = selector.entry_id.as_deref().and_then(|id| active.iter().copied().find(|candidate| candidate.0 == id));
-        let by_time: Vec<_> = active.iter().copied().filter(|candidate| selector.timestamp.is_some_and(|time|
-            entries.get(candidate.0).is_some_and(|entry| entry["message"]["timestamp"].as_u64() == Some(time)))).collect();
-        let candidate = if let Some(candidate) = by_id { candidate }
-            else if by_time.len() == 1 { by_time[0] }
-            else if active.len() == selector.total_occurrences { *active.get(selector.occurrence)
-                .ok_or("The selected user turn is no longer in the active Pi branch")? }
-            else { return Err("Cannot unambiguously align this output row with the active Pi user turns".into()); };
-        let entry = entries.get(candidate.0).ok_or("Missing selected Pi entry")?;
-        if selector.timestamp.is_some_and(|time| entry["message"]["timestamp"].as_u64() != Some(time)) {
+        let by_id = selector
+            .entry_id
+            .as_deref()
+            .and_then(|id| active.iter().copied().find(|candidate| candidate.0 == id));
+        let by_time: Vec<_> = active
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                selector.timestamp.is_some_and(|time| {
+                    entries
+                        .get(candidate.0)
+                        .is_some_and(|entry| entry["message"]["timestamp"].as_u64() == Some(time))
+                })
+            })
+            .collect();
+        let candidate = if let Some(candidate) = by_id {
+            candidate
+        } else if by_time.len() == 1 {
+            by_time[0]
+        } else if active.len() == selector.total_occurrences {
+            *active
+                .get(selector.occurrence)
+                .ok_or("The selected user turn is no longer in the active Pi branch")?
+        } else {
+            return Err(
+                "Cannot unambiguously align this output row with the active Pi user turns".into(),
+            );
+        };
+        let entry = entries
+            .get(candidate.0)
+            .ok_or("Missing selected Pi entry")?;
+        if selector
+            .timestamp
+            .is_some_and(|time| entry["message"]["timestamp"].as_u64() != Some(time))
+        {
             return Err("The output row does not match the persisted Pi user turn".into());
         }
         candidate
-    } else { match matches.as_slice() {
-        [] => return Err("Cannot locate that user turn in the Pi conversation tree".into()),
-        [single] => single,
-        many => {
-            let active: Vec<_> = many.iter().filter(|(_, _, active)| *active).collect();
-            if active.len() == 1 { active[0] }
-            else { return Err("Multiple identical user turns match this Pi conversation".into()); }
+    } else {
+        match matches.as_slice() {
+            [] => return Err("Cannot locate that user turn in the Pi conversation tree".into()),
+            [single] => single,
+            many => {
+                let active: Vec<_> = many.iter().filter(|(_, _, active)| *active).collect();
+                if active.len() == 1 {
+                    active[0]
+                } else {
+                    return Err("Multiple identical user turns match this Pi conversation".into());
+                }
+            }
         }
-    }};
+    };
     let parent = candidate.1.clone();
     // One execution can contain the opening prompt and many consumed steers.
     // Only a turn with no user ancestor may replace the node's original task.
@@ -382,37 +582,79 @@ fn prepare_user_branch(
     let mut cursor = parent.as_deref();
     let mut ancestors = HashSet::new();
     while let Some(id) = cursor {
-        if !ancestors.insert(id) { return Err("Pi session contains a cycle".into()); }
-        let entry = entries.get(id).ok_or("Pi session contains a missing parent")?;
-        if user_text(entry).is_some() { first_user_turn = false; break; }
+        if !ancestors.insert(id) {
+            return Err("Pi session contains a cycle".into());
+        }
+        let entry = entries
+            .get(id)
+            .ok_or("Pi session contains a missing parent")?;
+        if user_text(entry).is_some() {
+            first_user_turn = false;
+            break;
+        }
         cursor = entry.get("parentId").and_then(Value::as_str);
     }
-    let first_in_execution = values.iter().skip(1).find(|entry| {
-        let time = entry["message"]["timestamp"].as_u64().unwrap_or(0);
-        user_text(entry).is_some() && entry["id"].as_str().is_some_and(|id| active_ids.contains(id)) &&
-            time >= started_at && time <= completed_at
-    }).is_some_and(|entry| entry["id"].as_str() == Some(candidate.0));
-    Ok(UserBranch { path, selected_id: candidate.0.into(), parent, first_user_turn, first_in_execution, require_active: selector.is_some() })
+    let first_in_execution = values
+        .iter()
+        .skip(1)
+        .find(|entry| {
+            let time = entry["message"]["timestamp"].as_u64().unwrap_or(0);
+            user_text(entry).is_some()
+                && entry["id"]
+                    .as_str()
+                    .is_some_and(|id| active_ids.contains(id))
+                && time >= started_at
+                && time <= completed_at
+        })
+        .is_some_and(|entry| entry["id"].as_str() == Some(candidate.0));
+    Ok(UserBranch {
+        path,
+        selected_id: candidate.0.into(),
+        parent,
+        first_user_turn,
+        first_in_execution,
+        require_active: selector.is_some(),
+    })
 }
 
 impl UserBranch {
     pub fn commit(self) -> Result<PreparedBranch, String> {
         let contents = fs::read_to_string(&self.path).map_err(|error| error.to_string())?;
-        if !contents.ends_with('\n') { return Err("Pi session has an incomplete last entry".into()); }
-        let values: Vec<Value> = contents.lines().map(|line| serde_json::from_str(line)
-            .map_err(|_| "Invalid Pi session entry".to_string())).collect::<Result<_, _>>()?;
-        let leaf = values.last().and_then(|entry| entry["id"].as_str()).ok_or("Missing Pi leaf")?;
+        if !contents.ends_with('\n') {
+            return Err("Pi session has an incomplete last entry".into());
+        }
+        let values: Vec<Value> = contents
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).map_err(|_| "Invalid Pi session entry".to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        let leaf = values
+            .last()
+            .and_then(|entry| entry["id"].as_str())
+            .ok_or("Missing Pi leaf")?;
         if self.require_active {
-            let entries: HashMap<_, _> = values.iter().skip(1).filter_map(|entry| entry["id"].as_str().map(|id| (id, entry))).collect();
+            let entries: HashMap<_, _> = values
+                .iter()
+                .skip(1)
+                .filter_map(|entry| entry["id"].as_str().map(|id| (id, entry)))
+                .collect();
             let mut cursor = Some(leaf);
             let mut seen = HashSet::new();
             let mut found = false;
             while let Some(id) = cursor {
-                if !seen.insert(id) { return Err("Pi session contains a cycle".into()); }
-                if id == self.selected_id { found = true; break; }
+                if !seen.insert(id) {
+                    return Err("Pi session contains a cycle".into());
+                }
+                if id == self.selected_id {
+                    found = true;
+                    break;
+                }
                 cursor = entries.get(id).ok_or("Missing Pi parent")?["parentId"].as_str();
             }
-            if !found { return Err("The selected user turn is no longer active".into()); }
+            if !found {
+                return Err("The selected user turn is no longer active".into());
+            }
         }
         let marker = json!({
             "type": "custom", "id": Uuid::new_v4().to_string(), "parentId": self.parent,
@@ -420,11 +662,24 @@ impl UserBranch {
             "customType": "grapher-edit", "data": {"fromId": leaf},
         });
         let old_len = contents.len() as u64;
-        let mut file = OpenOptions::new().append(true).open(&self.path).map_err(|error| error.to_string())?;
-        let branch = PreparedBranch { path: self.path, old_len, first_user_turn: self.first_user_turn };
-        if let Err(error) = file.write_all(format!("{marker}\n").as_bytes()).and_then(|()| file.sync_data()) {
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .map_err(|error| error.to_string())?;
+        let branch = PreparedBranch {
+            path: self.path,
+            old_len,
+            first_user_turn: self.first_user_turn,
+        };
+        if let Err(error) = file
+            .write_all(format!("{marker}\n").as_bytes())
+            .and_then(|()| file.sync_data())
+        {
             drop(file);
-            return Err(match branch.rollback() { Ok(()) => error.to_string(), Err(rollback) => format!("{error}; {rollback}") });
+            return Err(match branch.rollback() {
+                Ok(()) => error.to_string(),
+                Err(rollback) => format!("{error}; {rollback}"),
+            });
         }
         Ok(branch)
     }
@@ -441,7 +696,11 @@ mod tests {
         assert_eq!(truncate_output(text, Some(text.len())), text);
         assert_eq!(truncate_output(text, Some(1)), "a");
         assert_eq!(truncate_output(text, Some(4)), "a中");
-        assert_eq!(truncate_output(text, Some(2)), "a", "a cursor inside a scalar floors to the previous boundary");
+        assert_eq!(
+            truncate_output(text, Some(2)),
+            "a",
+            "a cursor inside a scalar floors to the previous boundary"
+        );
     }
 
     #[test]
@@ -457,14 +716,27 @@ mod tests {
             ].iter().map(|entry| format!("{entry}\n")).collect::<String>();
             fs::write(&file, &history).unwrap();
             let mut row = json!({"type":"message_start","message":{"role":"user","content":"again","timestamp":10}});
-            if identified { row["message"]["id"] = json!("steer"); }
+            if identified {
+                row["message"]["id"] = json!("steer");
+            }
             let selector = output_user_turn(&format!("{row}\n"), 0, "again").unwrap();
-            let pending = prepare_node_user_branch(temp.path(), &id, temp.path(), "again", 0, 20, Some(&selector));
+            let pending = prepare_node_user_branch(
+                temp.path(),
+                &id,
+                temp.path(),
+                "again",
+                0,
+                20,
+                Some(&selector),
+            );
             if identified {
                 let pending = pending.unwrap();
                 assert!(!pending.first_user_turn);
                 pending.commit().unwrap();
-                let marker: Value = serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
+                let marker: Value = serde_json::from_str(
+                    fs::read_to_string(&file).unwrap().lines().last().unwrap(),
+                )
+                .unwrap();
                 assert_eq!(marker["parentId"], "opening");
             } else {
                 assert!(pending.is_err(), "a missing opening row must not shift an ambiguous occurrence onto the wrong turn");
@@ -483,11 +755,18 @@ mod tests {
         let id = Uuid::new_v4().to_string();
         let path = sessions.join(format!("test_{id}.jsonl"));
         let lower = workspace.to_string_lossy().to_lowercase();
-        fs::write(&path, format!("{}\n", json!({"type":"session","id":id,"cwd":lower}))).unwrap();
+        fs::write(
+            &path,
+            format!("{}\n", json!({"type":"session","id":id,"cwd":lower})),
+        )
+        .unwrap();
         rebind_session_cwd(&sessions, &id, &workspace).unwrap();
         let first = fs::read_to_string(&path).unwrap();
         let header: Value = serde_json::from_str(first.lines().next().unwrap()).unwrap();
-        assert_eq!(Path::new(header["cwd"].as_str().unwrap()), crate::path_identity::actual_path(&workspace).unwrap());
+        assert_eq!(
+            Path::new(header["cwd"].as_str().unwrap()),
+            crate::path_identity::actual_path(&workspace).unwrap()
+        );
         validate_session(&sessions, &id, &workspace).unwrap();
     }
 
@@ -498,11 +777,16 @@ mod tests {
         let new = temp.path().join("review");
         let source = temp.path().join("source-session");
         let target = temp.path().join("target-session");
-        for path in [&old, &new, &source] { fs::create_dir(path).unwrap(); }
+        for path in [&old, &new, &source] {
+            fs::create_dir(path).unwrap();
+        }
         let id = Uuid::new_v4().to_string();
         let next = Uuid::new_v4().to_string();
         let body = "{\"type\":\"message\",\"id\":\"turn\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"OWNER HISTORY\"}}\n";
-        let bytes = format!("{}\n{body}", json!({"type":"session", "version":3, "id":id, "cwd":old}));
+        let bytes = format!(
+            "{}\n{body}",
+            json!({"type":"session", "version":3, "id":id, "cwd":old})
+        );
         let path = source.join(format!("test_{id}.jsonl"));
         fs::write(&path, &bytes).unwrap();
         fork_session(&source, &id, &old, &target, &next, &new).unwrap();
@@ -516,14 +800,24 @@ mod tests {
         #[cfg(windows)]
         let expected_cwd = crate::native::host_path(&new);
         #[cfg(not(windows))]
-        let expected_cwd = crate::native::host_path(
-            &crate::path_identity::actual_path(&new).unwrap()
-        );
+        let expected_cwd =
+            crate::native::host_path(&crate::path_identity::actual_path(&new).unwrap());
         assert_eq!(header["cwd"], json!(expected_cwd));
-        assert_eq!(header["parentSession"], json!(crate::native::host_path(&path)));
+        assert_eq!(
+            header["parentSession"],
+            json!(crate::native::host_path(&path))
+        );
         assert_eq!(preserved, body);
         assert_eq!(fs::read_to_string(path).unwrap(), bytes);
-        assert!(fork_session(&source, &id, &new, &target, &Uuid::new_v4().to_string(), &old).is_err());
+        assert!(fork_session(
+            &source,
+            &id,
+            &new,
+            &target,
+            &Uuid::new_v4().to_string(),
+            &old
+        )
+        .is_err());
     }
 
     #[test]
@@ -537,7 +831,9 @@ mod tests {
                 "message":{"role":"user", "content":format!("Review code{}", crate::engine::FEEDBACK_INSTRUCTIONS), "timestamp":1}}),
         ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
         let branch = branch_before_user(dir.path(), &id, dir.path(), "Review code", 0, 2).unwrap();
-        let marker: Value = serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap()).unwrap();
+        let marker: Value =
+            serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap())
+                .unwrap();
         assert_eq!(marker["parentId"], Value::Null);
         branch.rollback().unwrap();
     }
@@ -555,7 +851,9 @@ mod tests {
                 "message":{"role":"user", "content":"Current graph node status:\n- task: completed\n\nlater", "timestamp":2}}),
         ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
         let branch = branch_before_planner_user(dir.path(), &id, dir.path(), "later").unwrap();
-        let value: Value = serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap()).unwrap();
+        let value: Value =
+            serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap())
+                .unwrap();
         assert_eq!(value["parentId"], "root");
         branch.rollback().unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 3);
@@ -574,9 +872,18 @@ mod tests {
             json!({"type":"custom","id":"branch","parentId":"root","customType":"grapher-edit"}),
             json!({"type":"message","id":"new-target","parentId":"branch","message":{"role":"user","content":"replacement","timestamp":300}}),
         ];
-        fs::write(&path, entries.iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+        fs::write(
+            &path,
+            entries
+                .iter()
+                .map(|entry| format!("{entry}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
         let branch = branch_before_user(dir.path(), &id, dir.path(), "edit me", 90, 150).unwrap();
-        let marker: Value = serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap()).unwrap();
+        let marker: Value =
+            serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap())
+                .unwrap();
         assert_eq!(marker["parentId"], "root");
         branch.rollback().unwrap();
     }
@@ -594,7 +901,14 @@ mod tests {
             json!({"type":"message","id":"d","parentId":"c","message":{"role":"assistant","content":[]}}),
             json!({"type":"message","id":"e","parentId":"d","message":{"role":"user","content":"later","timestamp":300}}),
         ];
-        fs::write(&path, entries.iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+        fs::write(
+            &path,
+            entries
+                .iter()
+                .map(|entry| format!("{entry}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
         assert!(branch_before_user(dir.path(), &id, dir.path(), "edit me", 300, 400).is_err());
         let branch = branch_before_user(dir.path(), &id, dir.path(), "edit me", 180, 240).unwrap();
         let data = fs::read_to_string(&path).unwrap();
@@ -602,6 +916,9 @@ mod tests {
         assert_eq!(marker["parentId"], "b");
         assert!(data.contains("\"id\":\"e\""));
         branch.rollback().unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), entries.len());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap().lines().count(),
+            entries.len()
+        );
     }
 }

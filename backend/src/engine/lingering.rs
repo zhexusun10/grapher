@@ -17,10 +17,7 @@
 //! while it is still running.
 
 use super::prewarm::Worker;
-use std::{
-    path::PathBuf,
-    sync::Mutex,
-};
+use std::{path::PathBuf, sync::Mutex};
 
 /// Stable identity of a Serial Pi conversation. Execution ids change across
 /// attempts (invalidate/retry), so they must never key a parked shell.
@@ -57,7 +54,9 @@ impl<W: Worker> Lingering<W> {
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Entry<W>>> {
         // A panic while retiring a worker must not make the pool permanently
         // unusable: parked shells would leak until backend shutdown.
-        self.entries.lock().unwrap_or_else(|error| error.into_inner())
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     /// Park a settled shell, replacing any existing entry for the same session.
@@ -68,7 +67,11 @@ impl<W: Worker> Lingering<W> {
             if let Some(index) = entries.iter().position(|entry| entry.key == key) {
                 retired.push(entries.remove(index).worker);
             }
-            entries.push(Entry { key, run_id, worker });
+            entries.push(Entry {
+                key,
+                run_id,
+                worker,
+            });
         }
         for worker in retired {
             worker.retire();
@@ -116,7 +119,10 @@ impl<W: Worker> Lingering<W> {
     pub(crate) fn shutdown(&self) {
         let drained = {
             let mut entries = self.lock();
-            entries.drain(..).map(|entry| entry.worker).collect::<Vec<_>>()
+            entries
+                .drain(..)
+                .map(|entry| entry.worker)
+                .collect::<Vec<_>>()
         };
         for worker in drained {
             worker.retire();

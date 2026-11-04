@@ -20,43 +20,63 @@ impl ToolOutputProjection {
                 // Usage is authoritative on message_end, not on every token.
                 // The UI uses complete tool args from toolcall_end/start, not
                 // the partial JSON fragments emitted while generating them.
-                if let Some(object) = event.as_object_mut() { object.remove("usage"); }
+                if let Some(object) = event.as_object_mut() {
+                    object.remove("usage");
+                }
                 let update = &mut event["assistantMessageEvent"];
                 match update["type"].as_str() {
                     Some("toolcall_delta") => return false,
                     Some("text_delta" | "thinking_delta") => {
                         // Some Pi transports also repeat cumulative snapshots;
                         // these consumers only need the lossless delta itself.
-                        if let Some(object) = update.as_object_mut() { object.remove("partial"); }
-                        if let Some(object) = event.as_object_mut() { object.remove("message"); }
+                        if let Some(object) = update.as_object_mut() {
+                            object.remove("partial");
+                        }
+                        if let Some(object) = event.as_object_mut() {
+                            object.remove("message");
+                        }
                     }
                     _ => {}
                 }
             }
             "tool_execution_start" => {
-                if let Some(id) = event["toolCallId"].as_str() { self.progress_seen.remove(id); }
+                if let Some(id) = event["toolCallId"].as_str() {
+                    self.progress_seen.remove(id);
+                }
             }
             "tool_execution_update" => {
                 if let Some(id) = event["toolCallId"].as_str() {
-                    if !self.progress_seen.insert(id.to_owned()) { return false; }
+                    if !self.progress_seen.insert(id.to_owned()) {
+                        return false;
+                    }
                 }
                 // Keep one identity/args record for a tail that starts mid-tool,
                 // but never persist repeated, cumulative partial-result bodies.
-                if let Some(object) = event.as_object_mut() { object.remove("partialResult"); }
+                if let Some(object) = event.as_object_mut() {
+                    object.remove("partialResult");
+                }
             }
             "tool_execution_end" => {
-                if let Some(id) = event["toolCallId"].as_str() { self.progress_seen.remove(id); }
-                if let Some(result) = event.get_mut("result") { limit_result(result); }
+                if let Some(id) = event["toolCallId"].as_str() {
+                    self.progress_seen.remove(id);
+                }
+                if let Some(result) = event.get_mut("result") {
+                    limit_result(result);
+                }
             }
             _ => {}
         }
         // Pi repeats tool results in message and aggregate lifecycle records.
         // Limit every copy, not just tool_execution_end, while retaining errors,
         // assistant replies, exit status and timing for runtime consumers.
-        if let Some(message) = event.get_mut("message") { limit_message(message); }
+        if let Some(message) = event.get_mut("message") {
+            limit_message(message);
+        }
         for key in ["messages", "toolResults"] {
             if let Some(messages) = event.get_mut(key).and_then(Value::as_array_mut) {
-                for message in messages { limit_message(message); }
+                for message in messages {
+                    limit_message(message);
+                }
             }
         }
         // `write`/`edit` arguments carry whole file bodies; the browser only
@@ -67,15 +87,25 @@ impl ToolOutputProjection {
 }
 
 fn limit_message(message: &mut Value) {
-    if message["role"] == "toolResult" { limit_result(message); }
+    if message["role"] == "toolResult" {
+        limit_result(message);
+    }
 }
 
 fn limit_result(result: &mut Value) {
-    let Some(content) = result.get_mut("content") else { return; };
-    if !limit_content(content) { return; }
-    let Some(object) = result.as_object_mut() else { return; };
+    let Some(content) = result.get_mut("content") else {
+        return;
+    };
+    if !limit_content(content) {
+        return;
+    }
+    let Some(object) = result.as_object_mut() else {
+        return;
+    };
     let details = object.entry("details").or_insert_with(|| json!({}));
-    if !details.is_object() { *details = json!({}); }
+    if !details.is_object() {
+        *details = json!({});
+    }
     // This is a display-log projection, not the tool's own truncation signal.
     details["displayTruncated"] = true.into();
 }
@@ -91,11 +121,17 @@ fn limit_arguments(value: &mut Value) {
                     truncated |= limit_strings(arguments);
                 }
             }
-            if truncated { object.insert("argsTruncated".into(), true.into()); }
-            for child in object.values_mut() { limit_arguments(child); }
+            if truncated {
+                object.insert("argsTruncated".into(), true.into());
+            }
+            for child in object.values_mut() {
+                limit_arguments(child);
+            }
         }
         Value::Array(items) => {
-            for item in items { limit_arguments(item); }
+            for item in items {
+                limit_arguments(item);
+            }
         }
         _ => {}
     }
@@ -104,21 +140,29 @@ fn limit_arguments(value: &mut Value) {
 fn limit_strings(value: &mut Value) -> bool {
     match value {
         Value::String(text) => {
-            if text.len() <= PREVIEW_BYTES { return false; }
+            if text.len() <= PREVIEW_BYTES {
+                return false;
+            }
             let mut end = PREVIEW_BYTES - ELLIPSIS.len();
-            while !text.is_char_boundary(end) { end -= 1; }
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
             text.truncate(end);
             text.push_str(ELLIPSIS);
             true
         }
         Value::Array(items) => {
             let mut changed = false;
-            for item in items { changed |= limit_strings(item); }
+            for item in items {
+                changed |= limit_strings(item);
+            }
             changed
         }
         Value::Object(map) => {
             let mut changed = false;
-            for item in map.values_mut() { changed |= limit_strings(item); }
+            for item in map.values_mut() {
+                changed |= limit_strings(item);
+            }
             changed
         }
         _ => false,
@@ -128,26 +172,44 @@ fn limit_strings(value: &mut Value) -> bool {
 fn limit_content(content: &mut Value) -> bool {
     let texts: Vec<&str> = match content {
         Value::String(text) => vec![text.as_str()],
-        Value::Array(parts) => parts.iter().filter(|part| part["type"] == "text")
-            .map(|part| part["text"].as_str().unwrap_or_default()).collect(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter(|part| part["type"] == "text")
+            .map(|part| part["text"].as_str().unwrap_or_default())
+            .collect(),
         _ => return false,
     };
-    let total = texts.iter().fold(0usize, |sum, text| sum.saturating_add(text.len()))
+    let total = texts
+        .iter()
+        .fold(0usize, |sum, text| sum.saturating_add(text.len()))
         .saturating_add(texts.len().saturating_sub(1));
-    if total <= PREVIEW_BYTES { return false; }
+    if total <= PREVIEW_BYTES {
+        return false;
+    }
     let mut preview = String::with_capacity(PREVIEW_BYTES);
     let head_limit = PREVIEW_BYTES - ELLIPSIS.len();
     for (index, text) in texts.iter().enumerate() {
-        if preview.len() == head_limit { break; }
-        if index > 0 { preview.push('\n'); }
+        if preview.len() == head_limit {
+            break;
+        }
+        if index > 0 {
+            preview.push('\n');
+        }
         let mut end = text.len().min(head_limit - preview.len());
-        while !text.is_char_boundary(end) { end -= 1; }
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
         preview.push_str(&text[..end]);
-        if end < text.len() { break; }
+        if end < text.len() {
+            break;
+        }
     }
     preview.push_str(ELLIPSIS);
-    *content = if content.is_string() { preview.into() }
-        else { json!([{ "type": "text", "text": preview }]) };
+    *content = if content.is_string() {
+        preview.into()
+    } else {
+        json!([{ "type": "text", "text": preview }])
+    };
     true
 }
 
@@ -202,7 +264,13 @@ mod tests {
         assert_eq!(event["result"]["details"]["other"], "retained");
         assert_eq!(event["durationMs"], 1234);
         assert_eq!(event["isError"], true);
-        assert!(original["result"]["content"][0]["text"].as_str().unwrap().len() > PREVIEW_BYTES);
+        assert!(
+            original["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .len()
+                > PREVIEW_BYTES
+        );
     }
 
     #[test]
@@ -267,7 +335,11 @@ mod tests {
         let assistant = json!({ "role": "assistant", "content": [{ "type": "text", "text": "a".repeat(PREVIEW_BYTES + 1) }] });
         let mut event = json!({ "type": "agent_end", "message": tool.clone(), "toolResults": [tool.clone()], "messages": [tool, assistant.clone()] });
         assert!(ToolOutputProjection::default().project(&mut event));
-        for message in [&event["message"], &event["toolResults"][0], &event["messages"][0]] {
+        for message in [
+            &event["message"],
+            &event["toolResults"][0],
+            &event["messages"][0],
+        ] {
             let text = message["content"].as_str().unwrap();
             assert_eq!(text.len(), PREVIEW_BYTES);
             assert!(text.ends_with("\n..."));
@@ -279,15 +351,29 @@ mod tests {
 
     #[test]
     fn tool_output_projection_preserves_small_and_exact_limit_results() {
-        for content in [json!("x".repeat(PREVIEW_BYTES)), json!([{ "type": "text", "text": "small" }]),
-            json!([{ "type": "text", "text": "x".repeat(PREVIEW_BYTES / 2) }, { "type": "text", "text": "y".repeat(PREVIEW_BYTES / 2) }])] {
-            let mut event = json!({ "type": "tool_execution_end", "result": { "content": content } });
+        for content in [
+            json!("x".repeat(PREVIEW_BYTES)),
+            json!([{ "type": "text", "text": "small" }]),
+            json!([{ "type": "text", "text": "x".repeat(PREVIEW_BYTES / 2) }, { "type": "text", "text": "y".repeat(PREVIEW_BYTES / 2) }]),
+        ] {
+            let mut event =
+                json!({ "type": "tool_execution_end", "result": { "content": content } });
             let original = event.clone();
             assert!(ToolOutputProjection::default().project(&mut event));
-            if original["result"]["content"].is_array() && original["result"]["content"].as_array().unwrap().len() == 2 {
-                assert!(event["result"]["content"][0]["text"].as_str().unwrap().len() <= PREVIEW_BYTES);
+            if original["result"]["content"].is_array()
+                && original["result"]["content"].as_array().unwrap().len() == 2
+            {
+                assert!(
+                    event["result"]["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .len()
+                        <= PREVIEW_BYTES
+                );
                 assert_eq!(event["result"]["details"]["displayTruncated"], true);
-            } else { assert_eq!(event, original); }
+            } else {
+                assert_eq!(event, original);
+            }
         }
     }
 }

@@ -8,11 +8,11 @@ use std::{
 };
 
 mod cleanup;
-mod logs;
 mod conversations;
-pub use conversations::{conversation_summaries, ConversationCatalog, ConversationSummary};
+mod logs;
 #[cfg(test)]
 pub(crate) use conversations::forget_catalog;
+pub use conversations::{conversation_summaries, ConversationCatalog, ConversationSummary};
 pub use logs::{LogPage, MigrationReport};
 const CHECKPOINT_INTERVAL: usize = 128;
 
@@ -254,9 +254,12 @@ impl Store {
     /// Independent read-only connection for cold log projection. No schema
     /// setup, write transaction, or Runtime mutex is needed for these reads.
     pub(crate) fn open_reader(path: &Path) -> Result<Self, String> {
-        let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(10))
             .map_err(|error| error.to_string())?;
-        connection.busy_timeout(std::time::Duration::from_secs(10)).map_err(|error| error.to_string())?;
         Ok(Self {
             connection,
             appended_since_checkpoint: Cell::new(0),
@@ -322,7 +325,10 @@ impl Store {
         }
         match &kind {
             EventKind::Finished { execution_id, .. }
-            | EventKind::Failed { execution_id: Some(execution_id), .. }
+            | EventKind::Failed {
+                execution_id: Some(execution_id),
+                ..
+            }
             | EventKind::MergerFinished { execution_id, .. }
             | EventKind::MergerFailed { execution_id, .. } => {
                 crate::file_changes::settle(&state.run_id, execution_id);
@@ -644,7 +650,8 @@ impl Store {
                 // Older checkpoints predate the durable node-message queue.
                 // Replay their business events to reconstruct pending turns;
                 // no user database migration or log rewrite is needed.
-                serde_json::from_str::<serde_json::Value>(&payload).ok()
+                serde_json::from_str::<serde_json::Value>(&payload)
+                    .ok()
                     .filter(|value| value["nodeMessageQueueVersion"] == 1)
                     .and_then(|value| serde_json::from_value::<Snapshot>(value).ok())
                     .filter(|state| {
@@ -753,7 +760,11 @@ impl Store {
         &self,
         cleanups: &[(String, crate::cleanup::Manifest)],
     ) -> Result<(), String> {
-        self.delete_runs(cleanups.iter().map(|(id, manifest)| (id.as_str(), Some(manifest))))
+        self.delete_runs(
+            cleanups
+                .iter()
+                .map(|(id, manifest)| (id.as_str(), Some(manifest))),
+        )
     }
 
     fn delete_runs<'a>(
@@ -761,17 +772,26 @@ impl Store {
         runs: impl IntoIterator<Item = (&'a str, Option<&'a crate::cleanup::Manifest>)>,
     ) -> Result<(), String> {
         let _write_guard = store_write_guard()?;
-        let tx = self.connection.unchecked_transaction().map_err(|e| e.to_string())?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
         for (run_id, cleanup) in runs {
             // Ownership and tombstones commit with ALL event/log deletions.
             // A crash or locked file after commit cannot orphan cleanup.
             if let Some(cleanup) = cleanup {
                 self.insert_cleanup(&tx, run_id, cleanup)?;
             }
-            tx.execute("INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)", [run_id])
-                .map_err(|e| e.to_string())?;
-            tx.execute("UPDATE workspace_selection SET run_id=NULL WHERE run_id=?1", [run_id])
-                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT OR IGNORE INTO deleted_runs(run_id) VALUES(?1)",
+                [run_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE workspace_selection SET run_id=NULL WHERE run_id=?1",
+                [run_id],
+            )
+            .map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM checkpoints WHERE run_id=?1", [run_id])
                 .map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM events WHERE run_id=?1", [run_id])

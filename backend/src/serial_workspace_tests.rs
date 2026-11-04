@@ -30,7 +30,8 @@ fn serial_run(kind: SourceKind) -> (TempDir, PathBuf, Runtime) {
     fs::write(source.join("ignored/input.bin"), "user data").unwrap();
     let config = serde_json::from_value(serde_json::json!({
         "repository": source, "model": "test/model", "maxParallel": 1, "maxFeedback": 0,
-    })).unwrap();
+    }))
+    .unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime.create(single(), config).unwrap();
     runtime.set_route("serial").unwrap();
@@ -64,21 +65,32 @@ if (existsSync('deleted.txt')) unlinkSync('deleted.txt');
 if ({fail}) process.exit(23);
 console.log(JSON.stringify({{type:'message_end',message:{{role:'assistant',content:[{{type:'text',text:'Completed'}}]}}}}));
 "#)).unwrap();
-    job.config.pi_command = crate::native::trusted_node().unwrap().to_string_lossy().into();
+    job.config.pi_command = crate::native::trusted_node()
+        .unwrap()
+        .to_string_lossy()
+        .into();
     job.config.pi_args = vec![script.to_string_lossy().into()];
 }
 
 fn assert_source_only(runtime: &Runtime, source: &Path, git: &Option<GitState>) {
-    assert_eq!(&git_state(source), git, "Serial must preserve HEAD, refs and the index");
+    assert_eq!(
+        &git_state(source),
+        git,
+        "Serial must preserve HEAD, refs and the index"
+    );
     assert!(!workspace::shadow_repo_dir(source).unwrap().exists());
     assert!(!runtime.run_workspace_root().exists());
     assert_eq!(runtime.state.base, "");
     assert!(runtime.state.publication.is_none());
-    assert!(runtime.state.events.iter().all(|event| !matches!(event.kind,
+    assert!(runtime.state.events.iter().all(|event| !matches!(
+        event.kind,
         EventKind::SourceSnapshotted { .. } | EventKind::PublicationStarted { .. }
     )));
     for execution in &runtime.state.executions {
-        assert!(crate::path_identity::same_path(Path::new(&execution.worktree), source));
+        assert!(crate::path_identity::same_path(
+            Path::new(&execution.worktree),
+            source
+        ));
         assert!(execution.before.is_empty());
         assert!(execution.after.as_ref().is_none_or(String::is_empty));
     }
@@ -89,10 +101,19 @@ fn run_agent(runtime: &mut Runtime, temp: &TempDir, fail: bool) -> Job {
     assert!(!job.materialize_source);
     assert!(job.expected_source_head.is_empty());
     agent(&mut job, temp, fail);
-    let result = perform(&job, &runtime.root.clone(), &[], |_| {}, |head| {
-        assert!(head.is_empty());
-        runtime.emit(EventKind::Prepared { execution_id: job.execution.id.clone(), head })
-    });
+    let result = perform(
+        &job,
+        &runtime.root.clone(),
+        &[],
+        |_| {},
+        |head| {
+            assert!(head.is_empty());
+            runtime.emit(EventKind::Prepared {
+                execution_id: job.execution.id.clone(),
+                head,
+            })
+        },
+    );
     assert_eq!(result.is_err(), fail, "{result:?}");
     if let Ok((head, _)) = &result {
         assert!(head.is_empty());
@@ -120,9 +141,18 @@ fn serial_execution_and_followup_never_snapshot_or_commit_the_source() {
         assert!(runtime.jobs().unwrap().is_empty());
         assert_eq!(runtime.state.phase, "completed");
         assert_source_only(&runtime, &source, &git);
-        assert_eq!(fs::read_to_string(source.join("tracked.txt")).unwrap(), "agent edit");
-        assert_eq!(fs::read_to_string(source.join("result.txt")).unwrap(), "source result");
-        assert_eq!(fs::read_to_string(source.join("ignored/output.bin")).unwrap(), "agent data");
+        assert_eq!(
+            fs::read_to_string(source.join("tracked.txt")).unwrap(),
+            "agent edit"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("result.txt")).unwrap(),
+            "source result"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("ignored/output.bin")).unwrap(),
+            "agent data"
+        );
         assert!(!source.join("deleted.txt").exists());
     }
 }
@@ -136,7 +166,9 @@ fn serial_does_not_update_or_reclaim_an_existing_graph_shadow_snapshot() {
     runtime.approve().unwrap();
     // Old Serial histories may already contain Git heads. New executions must
     // not propagate or resolve them, even when the snapshot is still present.
-    runtime.emit(EventKind::SourceSnapshotted { head: head.clone() }).unwrap();
+    runtime
+        .emit(EventKind::SourceSnapshotted { head: head.clone() })
+        .unwrap();
     let job = run_agent(&mut runtime, &temp, false);
     assert!(job.execution.before.is_empty());
     runtime.capture_planner_source().unwrap();
@@ -145,7 +177,10 @@ fn serial_does_not_update_or_reclaim_an_existing_graph_shadow_snapshot() {
     assert!(!runtime.shadow_reclaimable(&source).unwrap());
     runtime.reclaim_shadow(&source).unwrap();
     assert!(shadow.is_dir());
-    assert_eq!(workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(), head);
+    assert_eq!(
+        workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+        head
+    );
     assert_eq!(fs::read(shadow.join("index")).unwrap(), index);
     assert!(!source.join(".git").exists());
     assert!(runtime.state.publication.is_none());
@@ -162,15 +197,22 @@ fn serial_runs_do_not_keep_published_graph_snapshots_alive() {
         workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
         fs::write(path.join("result.txt"), "published").unwrap();
         let head = workspace::snapshot_node(path, &source, "task").unwrap();
-        graph.finish(&job.execution, Ok((head, "completed".into()))).unwrap();
+        graph
+            .finish(&job.execution, Ok((head, "completed".into())))
+            .unwrap();
         assert!(graph.jobs().unwrap().is_empty());
         let publication = graph.state.publication.clone().unwrap();
         let head = crate::graph_merge::merge_graph(&source, &publication.heads, || {
             Err("unexpected conflict".into())
-        }).unwrap();
-        graph.emit(EventKind::PublicationCompleted { head }).unwrap();
+        })
+        .unwrap();
+        graph
+            .emit(EventKind::PublicationCompleted { head })
+            .unwrap();
         let mut serial = graph.open_run("").unwrap();
-        serial.create(single(), graph.state.config.clone().unwrap()).unwrap();
+        serial
+            .create(single(), graph.state.config.clone().unwrap())
+            .unwrap();
         serial.set_route("serial").unwrap();
         if phase != "draft" {
             serial.approve().unwrap();
@@ -178,7 +220,9 @@ fn serial_runs_do_not_keep_published_graph_snapshots_alive() {
             match phase {
                 "paused" => serial.pause(true).unwrap(),
                 "failed" => {
-                    serial.finish(&job.execution, Err("provider failed".into())).unwrap();
+                    serial
+                        .finish(&job.execution, Err("provider failed".into()))
+                        .unwrap();
                 }
                 "interrupted" => {
                     let id = serial.state.run_id.clone();
@@ -188,13 +232,24 @@ fn serial_runs_do_not_keep_published_graph_snapshots_alive() {
                 _ => {}
             }
         }
-        assert!(!graph.store.shadow_repo_needed_by_other_run(&graph.state.run_id, &source).unwrap(),
-            "{phase} Serial must not pin a Graph snapshot");
-        assert!(!graph.store.shadow_repo_in_use(&workspace::shadow_repo_dir(&source).unwrap()).unwrap());
+        assert!(
+            !graph
+                .store
+                .shadow_repo_needed_by_other_run(&graph.state.run_id, &source)
+                .unwrap(),
+            "{phase} Serial must not pin a Graph snapshot"
+        );
+        assert!(!graph
+            .store
+            .shadow_repo_in_use(&workspace::shadow_repo_dir(&source).unwrap())
+            .unwrap());
         assert!(graph.shadow_reclaimable(&source).unwrap());
         graph.reclaim_shadow(&source).unwrap();
         assert!(!workspace::shadow_repo_dir(&source).unwrap().exists());
-        assert_eq!(fs::read_to_string(source.join("result.txt")).unwrap(), "published");
+        assert_eq!(
+            fs::read_to_string(source.join("result.txt")).unwrap(),
+            "published"
+        );
         // Starting the draft Serial after Graph cleanup still needs no snapshot.
         if phase == "draft" {
             fs::create_dir(source.join("ignored")).unwrap();
@@ -221,13 +276,25 @@ fn graph_source_alias_is_not_treated_as_a_serial_execution() {
         agent(&mut job, &temp, false);
         let git = git_state(&source);
         let mut prepared = false;
-        let result = perform(&job, &runtime.root, &[], |_| {}, |_| {
-            prepared = true;
-            Ok(())
-        });
-        assert!(result.is_err(), "Graph must reject a source alias, not run directly: {result:?}");
+        let result = perform(
+            &job,
+            &runtime.root,
+            &[],
+            |_| {},
+            |_| {
+                prepared = true;
+                Ok(())
+            },
+        );
+        assert!(
+            result.is_err(),
+            "Graph must reject a source alias, not run directly: {result:?}"
+        );
         assert!(!prepared, "reject before launching the agent");
-        assert_eq!(fs::read_to_string(source.join("tracked.txt")).unwrap(), "original");
+        assert_eq!(
+            fs::read_to_string(source.join("tracked.txt")).unwrap(),
+            "original"
+        );
         assert!(!source.join("result.txt").exists());
         assert_eq!(git_state(&source), git);
     }
@@ -243,15 +310,25 @@ fn serial_legacy_commit_heads_do_not_block_followup_after_restart() {
         // Retain old append-only evidence, but never resolve these historical
         // heads when executing a new Serial turn (the objects may be gone).
         let old_head = "0123456789012345678901234567890123456789".to_string();
-        runtime.emit(EventKind::Prepared {
-            execution_id: legacy.execution.id.clone(), head: old_head.clone(),
-        }).unwrap();
-        runtime.finish(&legacy.execution, Ok((old_head.clone(), "legacy result".into()))).unwrap();
+        runtime
+            .emit(EventKind::Prepared {
+                execution_id: legacy.execution.id.clone(),
+                head: old_head.clone(),
+            })
+            .unwrap();
+        runtime
+            .finish(
+                &legacy.execution,
+                Ok((old_head.clone(), "legacy result".into())),
+            )
+            .unwrap();
         assert!(runtime.jobs().unwrap().is_empty());
         let root = runtime.root.clone();
         drop(runtime);
         let mut runtime = Runtime::open(&root).unwrap();
-        runtime.intervene("task", "continue without historical Git objects").unwrap();
+        runtime
+            .intervene("task", "continue without historical Git objects")
+            .unwrap();
         let followup = run_agent(&mut runtime, &temp, false);
         assert_eq!(followup.execution.session_id, legacy.execution.session_id);
         assert!(followup.execution.before.is_empty());
@@ -259,7 +336,10 @@ fn serial_legacy_commit_heads_do_not_block_followup_after_restart() {
         assert_eq!(runtime.state.phase, "completed");
         let saved = runtime.store.load(&runtime.state.run_id).unwrap();
         assert_eq!(saved.executions[0].before, old_head);
-        assert_eq!(saved.executions[0].after.as_deref(), Some(old_head.as_str()));
+        assert_eq!(
+            saved.executions[0].after.as_deref(),
+            Some(old_head.as_str())
+        );
         assert_eq!(saved.executions[1].after.as_deref(), Some(""));
         assert_eq!(git_state(&source), git);
         assert!(!workspace::shadow_repo_dir(&source).unwrap().exists());
@@ -279,7 +359,9 @@ fn serial_failed_execution_retries_after_restart_without_git_snapshots() {
         let root = runtime.root.clone();
         drop(runtime);
         let mut runtime = Runtime::open(&root).unwrap();
-        runtime.intervene("task", "retry without changing Git").unwrap();
+        runtime
+            .intervene("task", "retry without changing Git")
+            .unwrap();
         runtime.pause(false).unwrap();
         let retry = run_agent(&mut runtime, &temp, false);
         assert_eq!(retry.execution.session_id, failed.execution.session_id);
@@ -296,9 +378,12 @@ fn serial_interrupted_execution_resumes_in_the_source_without_git_snapshots() {
         let git = git_state(&source);
         runtime.approve().unwrap();
         let interrupted = runtime.jobs().unwrap().remove(0);
-        runtime.emit(EventKind::Prepared {
-            execution_id: interrupted.execution.id.clone(), head: String::new(),
-        }).unwrap();
+        runtime
+            .emit(EventKind::Prepared {
+                execution_id: interrupted.execution.id.clone(),
+                head: String::new(),
+            })
+            .unwrap();
         fs::write(source.join("partial.txt"), "unfinished work").unwrap();
         let root = runtime.root.clone();
         drop(runtime);
@@ -310,6 +395,9 @@ fn serial_interrupted_execution_resumes_in_the_source_without_git_snapshots() {
         assert!(runtime.jobs().unwrap().is_empty());
         assert_eq!(runtime.state.phase, "completed");
         assert_source_only(&runtime, &source, &git);
-        assert_eq!(fs::read_to_string(source.join("partial.txt")).unwrap(), "unfinished work");
+        assert_eq!(
+            fs::read_to_string(source.join("partial.txt")).unwrap(),
+            "unfinished work"
+        );
     }
 }

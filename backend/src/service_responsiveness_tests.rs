@@ -64,14 +64,38 @@ fn sidebar_metadata_bootstrap_uses_summaries_without_repository_discovery() {
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": temp.path().join("not-a-git-checkout"), "model": "mock/model", "maxParallel": 1
     })).unwrap();
-    fs::write(temp.path().join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
-    let mut state = Snapshot { run_id: "sidebar-card".into(), ..Default::default() };
-    primary.runtime.lock().unwrap().store.append(&mut state, EventKind::Created {
-        graph: Graph { original_goal: "Sidebar title".into(), ..Default::default() },
-        config: config.clone(), planning_id: None, planning: None,
-    }).unwrap();
+    fs::write(
+        temp.path().join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    let mut state = Snapshot {
+        run_id: "sidebar-card".into(),
+        ..Default::default()
+    };
+    primary
+        .runtime
+        .lock()
+        .unwrap()
+        .store
+        .append(
+            &mut state,
+            EventKind::Created {
+                graph: Graph {
+                    original_goal: "Sidebar title".into(),
+                    ..Default::default()
+                },
+                config: config.clone(),
+                planning_id: None,
+                planning: None,
+            },
+        )
+        .unwrap();
     let boot = bootstrap(&primary, true).unwrap();
-    assert!(boot.repository_info.is_none(), "metadata bootstrap must not inspect the working tree");
+    assert!(
+        boot.repository_info.is_none(),
+        "metadata bootstrap must not inspect the working tree"
+    );
     assert_eq!(boot.config.repository, config.repository);
     let conversations = boot.conversations.unwrap();
     assert_eq!(conversations.len(), 1);
@@ -89,17 +113,27 @@ fn sidebar_failure_cannot_fail_bootstrap_or_an_already_committed_settings_save()
     let primary = primary(temp.path());
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": temp.path(), "model": "mock/model", "maxParallel": 1
-    })).unwrap();
+    }))
+    .unwrap();
     // A fault only in the disposable catalog's read path. The live runtime and
     // settings file remain usable; never run this against a workspace database.
-    rusqlite::Connection::open(temp.path().join("events.sqlite")).unwrap()
-        .execute_batch("DROP TABLE deleted_runs").unwrap();
+    rusqlite::Connection::open(temp.path().join("events.sqlite"))
+        .unwrap()
+        .execute_batch("DROP TABLE deleted_runs")
+        .unwrap();
     let boot = bootstrap(&primary, true).unwrap();
-    assert!(boot.conversations.is_none(), "failure must not become an authoritative empty list");
+    assert!(
+        boot.conversations.is_none(),
+        "failure must not become an authoritative empty list"
+    );
     let saved = save_config(config.clone(), &primary).unwrap();
-    assert!(saved.conversations.is_none(), "settings saves do not build the catalog");
+    assert!(
+        saved.conversations.is_none(),
+        "settings saves do not build the catalog"
+    );
     assert_eq!(saved.config.model, "mock/model");
-    let disk: Config = serde_json::from_slice(&fs::read(temp.path().join("config.json")).unwrap()).unwrap();
+    let disk: Config =
+        serde_json::from_slice(&fs::read(temp.path().join("config.json")).unwrap()).unwrap();
     assert_eq!(disk.model, config.model);
     crate::store::forget_catalog(&temp.path().join("events.sqlite"));
 }
@@ -138,17 +172,35 @@ fn a_briefly_busy_unrelated_run_does_not_fail_an_existing_lookup() {
         "repository": temp.path(), "model": "mock/model", "maxParallel": 1
     }))
     .unwrap();
-    let mut stored = Snapshot { run_id: "existing".into(), ..Default::default() };
-    primary.runtime.lock().unwrap().store.append(&mut stored, EventKind::Created {
-        graph: Graph::default(), config, planning_id: None, planning: None,
-    }).unwrap();
+    let mut stored = Snapshot {
+        run_id: "existing".into(),
+        ..Default::default()
+    };
+    primary
+        .runtime
+        .lock()
+        .unwrap()
+        .store
+        .append(
+            &mut stored,
+            EventKind::Created {
+                graph: Graph::default(),
+                config,
+                planning_id: None,
+                planning: None,
+            },
+        )
+        .unwrap();
     let busy = service_for_run(&primary, "busy", true).unwrap();
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     // This hold is a stand-in for a brief reader, not a schedule guarantee:
     // the lookup budget absorbs the jitter of waking this thread on a loaded
     // host, so the hold must stay an order of magnitude below it.
     let hold = Duration::from_millis(20);
-    assert!(hold * 8 < SERVICE_LOOKUP_GRACE, "the lookup grace must absorb jitter");
+    assert!(
+        hold * 8 < SERVICE_LOOKUP_GRACE,
+        "the lookup grace must absorb jitter"
+    );
     let holder = thread::spawn(move || {
         let guard = busy.runtime.lock().unwrap();
         locked_tx.send(()).unwrap();
@@ -158,7 +210,10 @@ fn a_briefly_busy_unrelated_run_does_not_fail_an_existing_lookup() {
     locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     let lookup = service_for_run(&primary, "existing", false);
     holder.join().unwrap();
-    assert!(lookup.is_ok(), "a short unrelated lock must not poison the lookup");
+    assert!(
+        lookup.is_ok(),
+        "a short unrelated lock must not poison the lookup"
+    );
     invalidate_service_cache(temp.path(), None);
 }
 
@@ -273,14 +328,19 @@ fn sse_event_stream_coalesces_outputs_and_suppresses_mid_stream_snapshot_storms(
         let mut pending = String::new();
         let mut own = String::new();
         while !own.contains(expected) {
-            assert!(std::time::Instant::now() < deadline, "Missing {expected}: {own}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Missing {expected}: {own}"
+            );
             let mut bytes = vec![0; 64 * 1024];
             let count = std::io::Read::read(stream, &mut bytes).unwrap();
             assert!(count > 0);
             pending.push_str(&String::from_utf8_lossy(&bytes[..count]));
             while let Some(end) = pending.find("\n\n") {
                 let frame: String = pending.drain(..end + 2).collect();
-                if frame.contains("\"runId\":\"sse-run\"") { own.push_str(&frame); }
+                if frame.contains("\"runId\":\"sse-run\"") {
+                    own.push_str(&frame);
+                }
             }
         }
         own
@@ -401,7 +461,10 @@ fn a_usage_bearing_output_chunk_refreshes_snapshot_watchers() {
         let mut pending = String::new();
         let mut own = String::new();
         while !own.contains(expected) {
-            assert!(std::time::Instant::now() < deadline, "Missing {expected}: {own}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Missing {expected}: {own}"
+            );
             let mut bytes = vec![0; 64 * 1024];
             let count = std::io::Read::read(stream, &mut bytes).unwrap();
             assert!(count > 0);

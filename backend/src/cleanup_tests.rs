@@ -43,7 +43,8 @@ fn execution(runtime: &Runtime, id: &str) -> Execution {
         before: "base".into(),
         workspace_lineage: vec![],
         after: None,
-        input: None, result: None,
+        input: None,
+        result: None,
         status: "running".into(),
         output: String::new(),
         output_bytes: 0,
@@ -58,7 +59,9 @@ fn failed_execution(runtime: &mut Runtime, id: &str) {
     runtime
         .emit(EventKind::Started {
             execution: execution(runtime, id),
-            message_sequences: None, fresh_restart: false })
+            message_sequences: None,
+            fresh_restart: false,
+        })
         .unwrap();
     runtime
         .emit(EventKind::Failed {
@@ -146,25 +149,50 @@ fn completed_git_graphs_keep_shared_private_history_until_the_last_conversation_
     let config = runtime.state.config.clone().unwrap();
     let mut ids = Vec::new();
     for _ in 0..2 {
-        if !ids.is_empty() { runtime.create(graph(), config.clone()).unwrap(); }
+        if !ids.is_empty() {
+            runtime.create(graph(), config.clone()).unwrap();
+        }
         runtime.set_route("graph").unwrap();
         runtime.approve().unwrap();
-        runtime.emit(EventKind::PublicationStarted {
-            repository: source.to_string_lossy().into(), heads: vec![runtime.state.base.clone()],
-        }).unwrap();
-        runtime.emit(EventKind::PublicationCompleted { head: source_head.clone() }).unwrap();
+        runtime
+            .emit(EventKind::PublicationStarted {
+                repository: source.to_string_lossy().into(),
+                heads: vec![runtime.state.base.clone()],
+            })
+            .unwrap();
+        runtime
+            .emit(EventKind::PublicationCompleted {
+                head: source_head.clone(),
+            })
+            .unwrap();
         ids.push(runtime.state.run_id.clone());
     }
     let shadow = crate::workspace::shadow_repo_dir(&source).unwrap();
-    let target = Target::Shadow { root: crate::workspace::data_root(), name: shadow.file_name().unwrap().to_string_lossy().into(), source: None };
-    assert!(runtime.store.shadow_repo_in_use(&shadow).unwrap(), "offline GC must retain completed Git Graph history");
-    assert!(runtime.store.cleanup_target_is_shared(&ids[1], &target).unwrap());
+    let target = Target::Shadow {
+        root: crate::workspace::data_root(),
+        name: shadow.file_name().unwrap().to_string_lossy().into(),
+        source: None,
+    };
+    assert!(
+        runtime.store.shadow_repo_in_use(&shadow).unwrap(),
+        "offline GC must retain completed Git Graph history"
+    );
+    assert!(runtime
+        .store
+        .cleanup_target_is_shared(&ids[1], &target)
+        .unwrap());
     let moved = source.with_extension("moved");
     fs::rename(&source, &moved).unwrap();
-    assert!(runtime.store.shadow_repo_in_use(&shadow).unwrap(), "recorded ownership must survive a missing source binding");
+    assert!(
+        runtime.store.shadow_repo_in_use(&shadow).unwrap(),
+        "recorded ownership must survive a missing source binding"
+    );
     fs::rename(moved, &source).unwrap();
     runtime.delete_run(&ids[0]).unwrap();
-    assert!(shadow.is_dir(), "deleting one completed conversation must not delete another's source history");
+    assert!(
+        shadow.is_dir(),
+        "deleting one completed conversation must not delete another's source history"
+    );
     runtime.delete_run(&ids[1]).unwrap();
     assert!(!shadow.exists());
     assert!(source.join("user.txt").exists());
@@ -207,11 +235,19 @@ fn plain_folder_shadow_snapshot_is_reclaimed_when_the_project_has_no_other_run()
     // A failed plain-folder Run keeps its lazily materialized snapshot, so a
     // deleted failed Run must not leak it into the data directory.
     let shadow = crate::workspace::shadow_repo_dir(&source).unwrap();
-    assert!(!crate::workspace::materialize_shadow_repo(&source, &[]).unwrap().is_empty());
+    assert!(!crate::workspace::materialize_shadow_repo(&source, &[])
+        .unwrap()
+        .is_empty());
     assert!(shadow.join("objects").is_dir());
     runtime.delete_run(&id).unwrap();
-    assert!(!shadow.exists(), "a deleted failed Run must reclaim its shadow snapshot");
-    assert_eq!(fs::read_to_string(source.join("user.txt")).unwrap(), "keep user files");
+    assert!(
+        !shadow.exists(),
+        "a deleted failed Run must reclaim its shadow snapshot"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("user.txt")).unwrap(),
+        "keep user files"
+    );
     assert!(runtime.store.pending_cleanups().unwrap().is_empty());
 }
 
@@ -231,14 +267,25 @@ fn shared_plain_folder_shadow_snapshot_survives_until_the_last_run_is_deleted() 
     let node = Uuid::new_v4().to_string();
     failed_execution(&mut runtime, &node);
     let shadow = crate::workspace::shadow_repo_dir(&source).unwrap();
-    assert!(!crate::workspace::materialize_shadow_repo(&source, &[]).unwrap().is_empty());
+    assert!(!crate::workspace::materialize_shadow_repo(&source, &[])
+        .unwrap()
+        .is_empty());
     runtime.create(graph(), config).unwrap();
     let second = runtime.state.run_id.clone();
     runtime.delete_run(&first).unwrap();
-    assert!(shadow.exists(), "another Conversation still shares this snapshot");
+    assert!(
+        shadow.exists(),
+        "another Conversation still shares this snapshot"
+    );
     runtime.delete_run(&second).unwrap();
-    assert!(!shadow.exists(), "the last Conversation reclaims the shared snapshot");
-    assert_eq!(fs::read_to_string(source.join("user.txt")).unwrap(), "keep user files");
+    assert!(
+        !shadow.exists(),
+        "the last Conversation reclaims the shared snapshot"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("user.txt")).unwrap(),
+        "keep user files"
+    );
     assert!(runtime.store.pending_cleanups().unwrap().is_empty());
 }
 
@@ -258,7 +305,9 @@ fn deleting_a_run_releases_a_snapshot_only_completed_runs_still_record() {
     let node = Uuid::new_v4().to_string();
     failed_execution(&mut runtime, &node);
     let shadow = crate::workspace::shadow_repo_dir(&source).unwrap();
-    assert!(!crate::workspace::materialize_shadow_repo(&source, &[]).unwrap().is_empty());
+    assert!(!crate::workspace::materialize_shadow_repo(&source, &[])
+        .unwrap()
+        .is_empty());
     runtime.create(graph(), config).unwrap();
     let doomed = runtime.state.run_id.clone();
     // A completed Conversation handed its result to the source, so it no longer
@@ -275,8 +324,14 @@ fn deleting_a_run_releases_a_snapshot_only_completed_runs_still_record() {
         )
         .unwrap();
     runtime.delete_run(&doomed).unwrap();
-    assert!(!shadow.exists(), "completed Runs must not pin a released snapshot");
-    assert_eq!(fs::read_to_string(source.join("user.txt")).unwrap(), "keep user files");
+    assert!(
+        !shadow.exists(),
+        "completed Runs must not pin a released snapshot"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("user.txt")).unwrap(),
+        "keep user files"
+    );
     assert!(runtime.store.pending_cleanups().unwrap().is_empty());
 }
 
@@ -623,11 +678,20 @@ fn workspace_batch_deletion_is_atomic_and_cascades_database_and_owned_files() {
     let mut ids = Vec::new();
     let mut directories = Vec::new();
     for index in 0..2 {
-        if index > 0 { runtime.create(graph(), runtime.state.config.clone().unwrap()).unwrap(); }
+        if index > 0 {
+            runtime
+                .create(graph(), runtime.state.config.clone().unwrap())
+                .unwrap();
+        }
         let id = runtime.state.run_id.clone();
         let node = Uuid::new_v4().to_string();
         failed_execution(&mut runtime, &node);
-        runtime.emit(EventKind::Output { execution_id: node.clone(), text: "retained history\n".into() }).unwrap();
+        runtime
+            .emit(EventKind::Output {
+                execution_id: node.clone(),
+                text: "retained history\n".into(),
+            })
+            .unwrap();
         let session = runtime.root.join("sessions").join(node);
         let workspace = temp.path().join(".grapher-worktrees").join(&id);
         directory(&session);
@@ -637,7 +701,10 @@ fn workspace_batch_deletion_is_atomic_and_cascades_database_and_owned_files() {
     }
     let db = rusqlite::Connection::open(runtime.root.join("events.sqlite")).unwrap();
     db.execute_batch(&format!("CREATE TRIGGER deny_second BEFORE DELETE ON events WHEN OLD.run_id='{}' BEGIN SELECT RAISE(ABORT,'batch failure'); END;", ids[1])).unwrap();
-    assert!(runtime.delete_runs(&ids).unwrap_err().contains("batch failure"));
+    assert!(runtime
+        .delete_runs(&ids)
+        .unwrap_err()
+        .contains("batch failure"));
     for id in &ids {
         assert!(runtime.store.contains_run(id).unwrap());
         assert!(!runtime.store.run_was_deleted(id).unwrap());
@@ -648,25 +715,49 @@ fn workspace_batch_deletion_is_atomic_and_cascades_database_and_owned_files() {
     db.execute_batch("DROP TRIGGER deny_second").unwrap();
     runtime.delete_runs(&ids).unwrap();
     for id in &ids {
-        for table in ["events", "checkpoints", "execution_logs", "run_owned_directories", "cleanup_tasks", "workspace_cleanup_done"] {
-            let rows: i64 = db.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE run_id=?1"), [id], |r| r.get(0)).unwrap();
+        for table in [
+            "events",
+            "checkpoints",
+            "execution_logs",
+            "run_owned_directories",
+            "cleanup_tasks",
+            "workspace_cleanup_done",
+        ] {
+            let rows: i64 = db
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE run_id=?1"),
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(rows, 0, "{table} retained a deleted conversation");
         }
-        assert!(runtime.store.run_was_deleted(id).unwrap(), "stale-writer tombstones must survive");
+        assert!(
+            runtime.store.run_was_deleted(id).unwrap(),
+            "stale-writer tombstones must survive"
+        );
     }
     assert!(runtime.state.run_id.is_empty());
     assert!(directories.iter().all(|path| !path.exists()));
-    assert_eq!(fs::read_to_string(source.join("user.txt")).unwrap(), "keep user files");
+    assert_eq!(
+        fs::read_to_string(source.join("user.txt")).unwrap(),
+        "keep user files"
+    );
 }
 
 #[test]
 fn workspace_batch_rejects_active_conversations_before_deleting_any_history() {
     let (_temp, _source, mut runtime) = setup();
     let first = runtime.state.run_id.clone();
-    runtime.create(graph(), runtime.state.config.clone().unwrap()).unwrap();
+    runtime
+        .create(graph(), runtime.state.config.clone().unwrap())
+        .unwrap();
     let second = runtime.state.run_id.clone();
     runtime.state.phase = "launching_result".into();
-    assert!(runtime.delete_runs(&[first.clone(), second.clone()]).unwrap_err().contains("running"));
+    assert!(runtime
+        .delete_runs(&[first.clone(), second.clone()])
+        .unwrap_err()
+        .contains("running"));
     assert!(runtime.store.contains_run(&first).unwrap());
     assert!(runtime.store.contains_run(&second).unwrap());
     assert!(runtime.store.pending_cleanups().unwrap().is_empty());
@@ -762,17 +853,27 @@ fn cleanup_reports_locked_child_and_retries_after_restart() {
     let root = runtime.root.clone();
     let workspace = temp.path().join(".grapher-worktrees").join(&id);
     directory(&workspace);
-    let file = workspace.join("nested/dependencies/file").canonicalize().unwrap();
+    let file = workspace
+        .join("nested/dependencies/file")
+        .canonicalize()
+        .unwrap();
     let directory = file.parent().unwrap();
     let mut permissions = fs::metadata(directory).unwrap().permissions();
     permissions.set_readonly(true);
     fs::set_permissions(directory, permissions).unwrap();
-    let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&file).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&file)
+        .unwrap();
 
     runtime.delete_run(&id).unwrap();
     let task = runtime.store.cleanup_task(&id).unwrap().unwrap();
     let error = task.last_error.unwrap();
-    assert!(error.contains(&file.to_string_lossy().to_string()), "{error}");
+    assert!(
+        error.contains(&file.to_string_lossy().to_string()),
+        "{error}"
+    );
     assert!(error.contains("Cannot "), "{error}");
     drop(runtime);
 

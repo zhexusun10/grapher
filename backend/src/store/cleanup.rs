@@ -333,9 +333,15 @@ impl Store {
                 }) { return Ok(true); }
                 continue;
             }
-            let undelivered_result = state.published_head.is_none() && state.nodes.values().any(|node|
-                node.status == "completed" && node.head.as_deref().is_some_and(|head| !head.is_empty()));
-            if state.phase != "completed" || crate::workspace::is_standard_git(source) || undelivered_result {
+            let undelivered_result = state.published_head.is_none()
+                && state.nodes.values().any(|node| {
+                    node.status == "completed"
+                        && node.head.as_deref().is_some_and(|head| !head.is_empty())
+                });
+            if state.phase != "completed"
+                || crate::workspace::is_standard_git(source)
+                || undelivered_result
+            {
                 return Ok(true);
             }
         }

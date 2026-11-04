@@ -5,33 +5,70 @@ use tempfile::TempDir;
 fn created(repository: &str, direct: Option<&str>, nested: Option<&str>) -> EventKind {
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": repository, "model": "test", "maxParallel": 1
-    })).unwrap();
-    let planning = nested.map(|id| serde_json::from_value(serde_json::json!({
-        "planningId": id, "roles": {}, "totalPlanningDuration": 0, "modelDuration": 0
-    })).unwrap());
+    }))
+    .unwrap();
+    let planning = nested.map(|id| {
+        serde_json::from_value(serde_json::json!({
+            "planningId": id, "roles": {}, "totalPlanningDuration": 0, "modelDuration": 0
+        }))
+        .unwrap()
+    });
     EventKind::Created {
-        graph: Graph { nodes: ["completed", "failed", "live"].iter().map(|name| Node { name: (*name).into(), task: "test".into() }).collect(), ..Default::default() },
-        config, planning_id: direct.map(str::to_string), planning,
+        graph: Graph {
+            nodes: ["completed", "failed", "live"]
+                .iter()
+                .map(|name| Node {
+                    name: (*name).into(),
+                    task: "test".into(),
+                })
+                .collect(),
+            ..Default::default()
+        },
+        config,
+        planning_id: direct.map(str::to_string),
+        planning,
     }
 }
 
 fn execution(id: &str) -> Execution {
     Execution {
-        id: id.into(), node: id.into(), revision: 1, attempt: 1,
-        session_id: id.into(), worktree: String::new(), before: String::new(),
+        id: id.into(),
+        node: id.into(),
+        revision: 1,
+        attempt: 1,
+        session_id: id.into(),
+        worktree: String::new(),
+        before: String::new(),
         workspace_lineage: vec![],
-        after: None, status: "running".into(), output: String::new(), output_bytes: 0, pid: None,
-        input: None, result: None,
-        started_at: 1, completed_at: None, metrics: None,
+        after: None,
+        status: "running".into(),
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        input: None,
+        result: None,
+        started_at: 1,
+        completed_at: None,
+        metrics: None,
     }
 }
 
 // Seed through raw SQL: Store's new writer must never create legacy rows.
 fn legacy(db: &Connection, run: &str, kind: EventKind, indexed: bool) {
     let value = serde_json::to_value(kind).unwrap();
-    let id = value["execution_id"].as_str().or(value["execution"]["id"].as_str());
-    db.execute("INSERT INTO events(run_id,timestamp,payload,kind,execution_id) VALUES(?1,1000,?2,?3,?4)",
-        params![run, value.to_string(), indexed.then(|| value["type"].as_str()).flatten(), if indexed { id } else { None }]).unwrap();
+    let id = value["execution_id"]
+        .as_str()
+        .or(value["execution"]["id"].as_str());
+    db.execute(
+        "INSERT INTO events(run_id,timestamp,payload,kind,execution_id) VALUES(?1,1000,?2,?3,?4)",
+        params![
+            run,
+            value.to_string(),
+            indexed.then(|| value["type"].as_str()).flatten(),
+            if indexed { id } else { None }
+        ],
+    )
+    .unwrap();
 }
 
 fn seed_legacy(path: &std::path::Path, indexed: bool) -> String {
@@ -40,19 +77,67 @@ fn seed_legacy(path: &std::path::Path, indexed: bool) -> String {
     let text = format!("{}\n── Final response ──\n完成🚀\n", "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":7,\"output\":3,\"totalTokens\":10}}}\n".repeat(500));
     for kind in [
         created("repo", Some("id"), None),
-        EventKind::Started { execution: execution("completed"), message_sequences: None, fresh_restart: false },
-        EventKind::Output { execution_id: "completed".into(), text: "redundant".into() },
-        EventKind::Finished { execution_id: "completed".into(), head: "h".into(), output: text.clone(), output_bytes: 0, metrics: None },
-        EventKind::Started { execution: execution("failed"), message_sequences: None, fresh_restart: false },
-        EventKind::Output { execution_id: "failed".into(), text: "失败前\n".into() },
-        EventKind::Output { execution_id: "failed".into(), text: "🚀🎉\u{1b}[31m错误\u{1b}[0m".into() },
-        EventKind::Failed { node: "failed".into(), execution_id: Some("failed".into()), error: "failed".into(), output_bytes: 0, metrics: None },
-        EventKind::Started { execution: execution("live"), message_sequences: None, fresh_restart: false },
-        EventKind::Output { execution_id: "live".into(), text: "interrupted\n".into() },
-        EventKind::MergerStarted { execution: execution("merge") },
-        EventKind::Output { execution_id: "merge".into(), text: "conflict\n".into() },
-        EventKind::MergerFailed { execution_id: "merge".into(), error: "unresolved".into(), output_bytes: 0, metrics: None },
-    ] { legacy(&db, "run", kind, indexed); }
+        EventKind::Started {
+            execution: execution("completed"),
+            message_sequences: None,
+            fresh_restart: false,
+        },
+        EventKind::Output {
+            execution_id: "completed".into(),
+            text: "redundant".into(),
+        },
+        EventKind::Finished {
+            execution_id: "completed".into(),
+            head: "h".into(),
+            output: text.clone(),
+            output_bytes: 0,
+            metrics: None,
+        },
+        EventKind::Started {
+            execution: execution("failed"),
+            message_sequences: None,
+            fresh_restart: false,
+        },
+        EventKind::Output {
+            execution_id: "failed".into(),
+            text: "失败前\n".into(),
+        },
+        EventKind::Output {
+            execution_id: "failed".into(),
+            text: "🚀🎉\u{1b}[31m错误\u{1b}[0m".into(),
+        },
+        EventKind::Failed {
+            node: "failed".into(),
+            execution_id: Some("failed".into()),
+            error: "failed".into(),
+            output_bytes: 0,
+            metrics: None,
+        },
+        EventKind::Started {
+            execution: execution("live"),
+            message_sequences: None,
+            fresh_restart: false,
+        },
+        EventKind::Output {
+            execution_id: "live".into(),
+            text: "interrupted\n".into(),
+        },
+        EventKind::MergerStarted {
+            execution: execution("merge"),
+        },
+        EventKind::Output {
+            execution_id: "merge".into(),
+            text: "conflict\n".into(),
+        },
+        EventKind::MergerFailed {
+            execution_id: "merge".into(),
+            error: "unresolved".into(),
+            output_bytes: 0,
+            metrics: None,
+        },
+    ] {
+        legacy(&db, "run", kind, indexed);
+    }
     text
 }
 
@@ -64,18 +149,43 @@ fn migrates_planning_ids_and_uses_exact_index() {
         let db = Connection::open(&path).unwrap();
         db.execute_batch("CREATE TABLE events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, timestamp INTEGER NOT NULL, payload TEXT NOT NULL);").unwrap();
         for (run, id, nested) in [("one", "a%_", false), ("two", "aXy", true)] {
-            let kind = created(run, if nested { None } else { Some(id) }, if nested { Some(id) } else { None });
-            db.execute("INSERT INTO events(run_id,timestamp,payload) VALUES (?1,1,?2)", params![run, serde_json::to_string(&kind).unwrap()]).unwrap();
+            let kind = created(
+                run,
+                if nested { None } else { Some(id) },
+                if nested { Some(id) } else { None },
+            );
+            db.execute(
+                "INSERT INTO events(run_id,timestamp,payload) VALUES (?1,1,?2)",
+                params![run, serde_json::to_string(&kind).unwrap()],
+            )
+            .unwrap();
         }
     }
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.find_repository_by_planning_id("a%_"), Some("one".into()));
-    assert_eq!(store.find_repository_by_planning_id("aXy"), Some("two".into()));
+    assert_eq!(
+        store.find_repository_by_planning_id("a%_"),
+        Some("one".into())
+    );
+    assert_eq!(
+        store.find_repository_by_planning_id("aXy"),
+        Some("two".into())
+    );
     assert_eq!(store.find_repository_by_planning_id("a"), None);
-    let mut state = Snapshot { run_id: "three".into(), ..Default::default() };
-    store.append(&mut state, created("both", Some("direct"), Some("nested"))).unwrap();
-    assert_eq!(store.find_repository_by_planning_id("direct"), Some("both".into()));
-    assert_eq!(store.find_repository_by_planning_id("nested"), Some("both".into()));
+    let mut state = Snapshot {
+        run_id: "three".into(),
+        ..Default::default()
+    };
+    store
+        .append(&mut state, created("both", Some("direct"), Some("nested")))
+        .unwrap();
+    assert_eq!(
+        store.find_repository_by_planning_id("direct"),
+        Some("both".into())
+    );
+    assert_eq!(
+        store.find_repository_by_planning_id("nested"),
+        Some("both".into())
+    );
 }
 
 #[test]
@@ -101,15 +211,50 @@ fn migration_preserves_finished_failed_interrupted_and_merger_logs_and_is_idempo
         assert_eq!(page.total_bytes, expected.len());
     }
     let loaded = store.load("run").unwrap();
-    assert!(loaded.executions.iter().chain(&loaded.mergers).all(|e| e.output.is_empty() && e.output_bytes > 0));
-    assert_eq!(loaded.executions[0].metrics.as_ref().unwrap().usage.total_tokens, 5000);
+    assert!(loaded
+        .executions
+        .iter()
+        .chain(&loaded.mergers)
+        .all(|e| e.output.is_empty() && e.output_bytes > 0));
+    assert_eq!(
+        loaded.executions[0]
+            .metrics
+            .as_ref()
+            .unwrap()
+            .usage
+            .total_tokens,
+        5000
+    );
     let db = Connection::open(&path).unwrap();
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM events WHERE kind='output'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    assert_eq!(db.query_row("SELECT length(json_extract(payload,'$.output')) FROM events WHERE kind='finished'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM events WHERE kind='output'", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT length(json_extract(payload,'$.output')) FROM events WHERE kind='finished'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
     store.vacuum().unwrap();
-    assert_eq!(db.query_row("PRAGMA auto_vacuum", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(
+        db.query_row("PRAGMA auto_vacuum", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
     let again = store.migrate_legacy_logs().unwrap();
-    assert_eq!(again.updated_rows + again.backfilled_rows + again.deleted_chunks + again.migrated_executions, 0);
+    assert_eq!(
+        again.updated_rows
+            + again.backfilled_rows
+            + again.deleted_chunks
+            + again.migrated_executions,
+        0
+    );
 }
 
 #[test]
@@ -123,21 +268,36 @@ fn jit_is_concurrent_idempotent_and_never_mutates_events() {
         let loaded = Store::open(&path).unwrap().load("run").unwrap();
         assert!(loaded.executions.iter().all(|e| e.output.is_empty()));
         let responses = std::thread::scope(|scope| {
-            let readers: Vec<_> = (0..2).map(|_| {
-                let path = &path;
-                scope.spawn(move || {
-                    let store = Store::open(path).unwrap();
-                    store.ensure_legacy_logs("run", "completed").unwrap();
-                    store.ensure_legacy_logs("run", "merge").unwrap();
-                    store.execution_log_page("run", "completed", 0, usize::MAX).unwrap().content
+            let readers: Vec<_> = (0..2)
+                .map(|_| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        let store = Store::open(path).unwrap();
+                        store.ensure_legacy_logs("run", "completed").unwrap();
+                        store.ensure_legacy_logs("run", "merge").unwrap();
+                        store
+                            .execution_log_page("run", "completed", 0, usize::MAX)
+                            .unwrap()
+                            .content
+                    })
                 })
-            }).collect();
-            readers.into_iter().map(|reader| reader.join().unwrap()).collect::<Vec<_>>()
+                .collect();
+            readers
+                .into_iter()
+                .map(|reader| reader.join().unwrap())
+                .collect::<Vec<_>>()
         });
         assert_eq!(responses, vec![full.clone(), full]);
         let after: String = db.query_row("SELECT json_group_array(json_object('sequence',sequence,'payload',payload,'kind',kind,'execution_id',execution_id)) FROM events", [], |r| r.get(0)).unwrap();
         assert_eq!(before, after);
-        assert_eq!(Store::open(&path).unwrap().execution_log_page("run", "merge", 0, usize::MAX).unwrap().content, "conflict\n\nMerger failed: unresolved\n");
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .execution_log_page("run", "merge", 0, usize::MAX)
+                .unwrap()
+                .content,
+            "conflict\n\nMerger failed: unresolved\n"
+        );
     }
 }
 
@@ -146,55 +306,116 @@ fn utf8_paging_and_interleaved_cursors_survive_reopen_and_cascade_deletion() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.db");
     let mut store = Store::open(&path).unwrap();
-    let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
-    store.append(&mut state, created("repo", None, None)).unwrap();
-    for id in ["completed", "live"] { store.append(&mut state, EventKind::Started { execution: execution(id), message_sequences: None, fresh_restart: false }).unwrap(); }
+    let mut state = Snapshot {
+        run_id: "run".into(),
+        ..Default::default()
+    };
+    store
+        .append(&mut state, created("repo", None, None))
+        .unwrap();
+    for id in ["completed", "live"] {
+        store
+            .append(
+                &mut state,
+                EventKind::Started {
+                    execution: execution(id),
+                    message_sequences: None,
+                    fresh_restart: false,
+                },
+            )
+            .unwrap();
+    }
     let chunk = format!("{}🚀🎉中文\u{1b}[31m\n", "a".repeat(32 * 1024 - 1));
     let mut expected = String::new();
     for _ in 0..3 {
-        store.append_batch(&mut state, vec![
-            EventKind::Output { execution_id: "completed".into(), text: chunk.clone() },
-            EventKind::Output { execution_id: "live".into(), text: "其他日志\n".into() },
-        ]).unwrap();
+        store
+            .append_batch(
+                &mut state,
+                vec![
+                    EventKind::Output {
+                        execution_id: "completed".into(),
+                        text: chunk.clone(),
+                    },
+                    EventKind::Output {
+                        execution_id: "live".into(),
+                        text: "其他日志\n".into(),
+                    },
+                ],
+            )
+            .unwrap();
         expected.push_str(&chunk);
         store = Store::open(&path).unwrap(); // No cached offset: recover from DB.
     }
     assert_eq!(store.log_bytes("run", "completed").unwrap(), expected.len());
     assert_eq!(state.executions[0].output, expected);
-    assert!(state.events.iter().all(|e| !matches!(e.kind, EventKind::Output { .. })));
+    assert!(state
+        .events
+        .iter()
+        .all(|e| !matches!(e.kind, EventKind::Output { .. })));
     let mut restored = String::new();
     let mut offset = 0;
     loop {
-        let page = store.execution_log_page("run", "completed", offset, 32 * 1024).unwrap();
+        let page = store
+            .execution_log_page("run", "completed", offset, 32 * 1024)
+            .unwrap();
         assert!(page.content.len() <= 32 * 1024);
         restored.push_str(&page.content);
         offset = page.next_offset;
-        if page.complete { break; }
+        if page.complete {
+            break;
+        }
     }
     assert_eq!(restored.as_bytes(), expected.as_bytes());
-    let tail = store.execution_log_tail_page("run", "completed", expected.len(), 32 * 1024).unwrap();
+    let tail = store
+        .execution_log_tail_page("run", "completed", expected.len(), 32 * 1024)
+        .unwrap();
     assert!(expected.ends_with(&tail.content));
     let mut older = String::new();
     let mut before = tail.start_offset;
     while before > 0 {
-        let page = store.execution_log_tail_page("run", "completed", before, 32 * 1024).unwrap();
+        let page = store
+            .execution_log_tail_page("run", "completed", before, 32 * 1024)
+            .unwrap();
         older.insert_str(0, &page.content);
         before = page.start_offset;
     }
-    assert_eq!(format!("{older}{}", tail.content).as_bytes(), expected.as_bytes());
-    assert!(store.execution_log_page("run", "completed", 32 * 1024, 1024).is_err());
-    assert!(store.execution_log_page("wrong-run", "completed", 1, 1024).is_err());
+    assert_eq!(
+        format!("{older}{}", tail.content).as_bytes(),
+        expected.as_bytes()
+    );
+    assert!(store
+        .execution_log_page("run", "completed", 32 * 1024, 1024)
+        .is_err());
+    assert!(store
+        .execution_log_page("wrong-run", "completed", 1, 1024)
+        .is_err());
     let db = Connection::open(&path).unwrap();
     let mut previous = 0;
     let mut stmt = db.prepare("SELECT offset,bytes,text FROM execution_logs WHERE execution_id='completed' ORDER BY offset").unwrap();
-    for row in stmt.query_map([], |r| Ok((r.get::<_, usize>(0)?, r.get::<_, usize>(1)?, r.get::<_, String>(2)?))).unwrap() {
+    for row in stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, usize>(0)?,
+                r.get::<_, usize>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+    {
         let (offset, bytes, text) = row.unwrap();
-        assert_eq!(offset, previous); assert_eq!(bytes, text.len()); assert!(bytes <= 32 * 1024);
+        assert_eq!(offset, previous);
+        assert_eq!(bytes, text.len());
+        assert!(bytes <= 32 * 1024);
         previous += bytes;
     }
     drop(stmt);
     store.delete_run("run").unwrap();
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM execution_logs", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM execution_logs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     assert!(store.load("run").is_err());
     store.clear().unwrap();
 }
@@ -203,21 +424,50 @@ fn utf8_paging_and_interleaved_cursors_survive_reopen_and_cascade_deletion() {
 fn tail_pages_never_discard_a_tool_result_larger_than_the_page() {
     let temp = TempDir::new().unwrap();
     let store = Store::open(&temp.path().join("events.db")).unwrap();
-    let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
-    store.append(&mut state, created("repo", None, None)).unwrap();
-    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None, fresh_restart: false }).unwrap();
-    let text = format!("{}\n", serde_json::json!({ "type": "tool_execution_end", "toolCallId": "tool",
-        "toolName": "read", "result": { "content": [{ "type": "text", "text": "中文🚀".repeat(100_000) }] } }));
-    store.append(&mut state, EventKind::Output { execution_id: "completed".into(), text: text.clone() }).unwrap();
+    let mut state = Snapshot {
+        run_id: "run".into(),
+        ..Default::default()
+    };
+    store
+        .append(&mut state, created("repo", None, None))
+        .unwrap();
+    store
+        .append(
+            &mut state,
+            EventKind::Started {
+                execution: execution("completed"),
+                message_sequences: None,
+                fresh_restart: false,
+            },
+        )
+        .unwrap();
+    let text = format!(
+        "{}\n",
+        serde_json::json!({ "type": "tool_execution_end", "toolCallId": "tool",
+        "toolName": "read", "result": { "content": [{ "type": "text", "text": "中文🚀".repeat(100_000) }] } })
+    );
+    store
+        .append(
+            &mut state,
+            EventKind::Output {
+                execution_id: "completed".into(),
+                text: text.clone(),
+            },
+        )
+        .unwrap();
     let mut before = text.len();
     let mut restored = String::new();
     loop {
-        let page = store.execution_log_tail_page("run", "completed", before, 32 * 1024).unwrap();
+        let page = store
+            .execution_log_tail_page("run", "completed", before, 32 * 1024)
+            .unwrap();
         assert!(page.start_offset < before);
         assert_eq!(page.next_offset, before);
         assert_eq!(page.content, text[page.start_offset..before]);
         restored.insert_str(0, &page.content);
-        if page.start_offset == 0 { break; }
+        if page.start_offset == 0 {
+            break;
+        }
         before = page.start_offset;
     }
     assert_eq!(restored, text);
@@ -230,21 +480,58 @@ fn committed_finished_has_no_text_and_carries_metrics_and_pid() {
     runtime.state.run_id = "run".into();
     runtime.emit(created("repo", None, None)).unwrap();
     let exec = execution("completed");
-    runtime.emit(EventKind::Started { execution: exec.clone(), message_sequences: None, fresh_restart: false }).unwrap();
+    runtime
+        .emit(EventKind::Started {
+            execution: exec.clone(),
+            message_sequences: None,
+            fresh_restart: false,
+        })
+        .unwrap();
     let first = "{\"type\":\"grapher_process_started\",\"pid\":123}";
-    runtime.emit_outputs(vec![EventKind::Output { execution_id: "completed".into(), text: first.into() }]).unwrap();
+    runtime
+        .emit_outputs(vec![EventKind::Output {
+            execution_id: "completed".into(),
+            text: first.into(),
+        }])
+        .unwrap();
     runtime.emit_outputs(vec![EventKind::Output { execution_id: "completed".into(), text: "\n{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"totalTokens\":42}}}\n".into() }]).unwrap();
     assert_eq!(runtime.state.executions[0].pid, Some(123));
-    runtime.finish(&exec, Ok(("head".into(), "完成🚀".into()))).unwrap();
-    let page = runtime.store.execution_log_page("run", "completed", 0, usize::MAX).unwrap();
+    runtime
+        .finish(&exec, Ok(("head".into(), "完成🚀".into())))
+        .unwrap();
+    let page = runtime
+        .store
+        .execution_log_page("run", "completed", 0, usize::MAX)
+        .unwrap();
     assert!(page.content.ends_with("\n── Final response ──\n完成🚀\n"));
     let loaded = runtime.store.load("run").unwrap();
     assert_eq!(loaded.executions[0].output_bytes, page.total_bytes);
-    assert_eq!(loaded.executions[0].metrics.as_ref().unwrap().usage.total_tokens, 42);
+    assert_eq!(
+        loaded.executions[0]
+            .metrics
+            .as_ref()
+            .unwrap()
+            .usage
+            .total_tokens,
+        42
+    );
     assert!(loaded.executions[0].output.is_empty());
     let db = Connection::open(temp.path().join("events.sqlite")).unwrap();
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM events WHERE kind='output'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    assert!(db.query_row("SELECT length(payload) FROM events WHERE kind='finished'", [], |r| r.get::<_, usize>(0)).unwrap() < 1024);
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM events WHERE kind='output'", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(
+        db.query_row(
+            "SELECT length(payload) FROM events WHERE kind='finished'",
+            [],
+            |r| r.get::<_, usize>(0)
+        )
+        .unwrap()
+            < 1024
+    );
 }
 
 #[test]
@@ -253,16 +540,61 @@ fn runtime_merger_failure_and_failed_bytes_survive_reload() {
     let mut runtime = grapher::runtime::Runtime::open(temp.path()).unwrap();
     runtime.state.run_id = "run".into();
     runtime.emit(created("repo", None, None)).unwrap();
-    runtime.emit(EventKind::Started { execution: execution("failed"), message_sequences: None, fresh_restart: false }).unwrap();
-    runtime.emit(EventKind::Output { execution_id: "failed".into(), text: "失败日志🎉".into() }).unwrap();
-    runtime.emit(EventKind::Failed { node: "failed".into(), execution_id: Some("failed".into()), error: "oops".into(), output_bytes: 0, metrics: None }).unwrap();
-    runtime.emit(EventKind::MergerStarted { execution: execution("merge") }).unwrap();
-    runtime.emit(EventKind::Output { execution_id: "merge".into(), text: "merge\n".into() }).unwrap();
-    runtime.emit(EventKind::MergerFailed { execution_id: "merge".into(), error: "conflict".into(), output_bytes: 0, metrics: None }).unwrap();
+    runtime
+        .emit(EventKind::Started {
+            execution: execution("failed"),
+            message_sequences: None,
+            fresh_restart: false,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Output {
+            execution_id: "failed".into(),
+            text: "失败日志🎉".into(),
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Failed {
+            node: "failed".into(),
+            execution_id: Some("failed".into()),
+            error: "oops".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::MergerStarted {
+            execution: execution("merge"),
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Output {
+            execution_id: "merge".into(),
+            text: "merge\n".into(),
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::MergerFailed {
+            execution_id: "merge".into(),
+            error: "conflict".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     let loaded = runtime.store.load("run").unwrap();
     assert_eq!(loaded.executions[0].output_bytes, "失败日志🎉".len());
-    assert_eq!(loaded.mergers[0].output_bytes, "merge\n\nMerger failed: conflict\n".len());
-    assert_eq!(runtime.store.execution_log_page("run", "merge", 0, usize::MAX).unwrap().content, "merge\n\nMerger failed: conflict\n");
+    assert_eq!(
+        loaded.mergers[0].output_bytes,
+        "merge\n\nMerger failed: conflict\n".len()
+    );
+    assert_eq!(
+        runtime
+            .store
+            .execution_log_page("run", "merge", 0, usize::MAX)
+            .unwrap()
+            .content,
+        "merge\n\nMerger failed: conflict\n"
+    );
 }
 
 #[test]
@@ -273,8 +605,19 @@ fn interrupted_runtime_preserves_committed_logs_bytes_and_metrics() {
         let mut runtime = grapher::runtime::Runtime::open(temp.path()).unwrap();
         runtime.state.run_id = "run".into();
         runtime.emit(created("repo", None, None)).unwrap();
-        runtime.emit(EventKind::Started { execution: execution("failed"), message_sequences: None, fresh_restart: false }).unwrap();
-        runtime.emit(EventKind::Output { execution_id: "failed".into(), text: text.into() }).unwrap();
+        runtime
+            .emit(EventKind::Started {
+                execution: execution("failed"),
+                message_sequences: None,
+                fresh_restart: false,
+            })
+            .unwrap();
+        runtime
+            .emit(EventKind::Output {
+                execution_id: "failed".into(),
+                text: text.into(),
+            })
+            .unwrap();
         // No terminal event: equivalent durable state to an interrupted process.
     }
     let runtime = grapher::runtime::Runtime::open(temp.path()).unwrap();
@@ -283,9 +626,19 @@ fn interrupted_runtime_preserves_committed_logs_bytes_and_metrics() {
     assert!(exec.output.is_empty());
     assert_eq!(exec.output_bytes, text.len());
     assert_eq!(exec.metrics.as_ref().unwrap().usage.total_tokens, 42);
-    assert_eq!(runtime.store.execution_log_page("run", "failed", 0, usize::MAX).unwrap().content, text);
+    assert_eq!(
+        runtime
+            .store
+            .execution_log_page("run", "failed", 0, usize::MAX)
+            .unwrap()
+            .content,
+        text
+    );
     runtime.store.migrate_legacy_logs().unwrap();
-    assert_eq!(runtime.store.load("run").unwrap().executions[0].output_bytes, text.len());
+    assert_eq!(
+        runtime.store.load("run").unwrap().executions[0].output_bytes,
+        text.len()
+    );
 }
 
 #[test]
@@ -293,24 +646,75 @@ fn failed_log_commit_never_advances_projection_or_offset_cursor() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.db");
     let mut store = Store::open(&path).unwrap();
-    let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
-    store.append(&mut state, created("repo", None, None)).unwrap();
-    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None, fresh_restart: false }).unwrap();
-    store.append(&mut state, EventKind::Output { execution_id: "completed".into(), text: "before\n".into() }).unwrap();
+    let mut state = Snapshot {
+        run_id: "run".into(),
+        ..Default::default()
+    };
+    store
+        .append(&mut state, created("repo", None, None))
+        .unwrap();
+    store
+        .append(
+            &mut state,
+            EventKind::Started {
+                execution: execution("completed"),
+                message_sequences: None,
+                fresh_restart: false,
+            },
+        )
+        .unwrap();
+    store
+        .append(
+            &mut state,
+            EventKind::Output {
+                execution_id: "completed".into(),
+                text: "before\n".into(),
+            },
+        )
+        .unwrap();
     let db = Connection::open(&path).unwrap();
     db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON execution_logs WHEN NEW.text='reject' BEGIN SELECT RAISE(ABORT,'injected failure'); END;
         CREATE TRIGGER fail_log_update BEFORE UPDATE ON execution_logs WHEN NEW.text LIKE '%reject%' BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
-    assert!(store.append_batch(&mut state, vec![
-        EventKind::Output { execution_id: "completed".into(), text: "reject".into() },
-        EventKind::Output { execution_id: "other".into(), text: "also rollback".into() },
-    ]).is_err());
+    assert!(store
+        .append_batch(
+            &mut state,
+            vec![
+                EventKind::Output {
+                    execution_id: "completed".into(),
+                    text: "reject".into()
+                },
+                EventKind::Output {
+                    execution_id: "other".into(),
+                    text: "also rollback".into()
+                },
+            ]
+        )
+        .is_err());
     assert_eq!(state.executions[0].output, "before\n");
     assert_eq!(store.log_bytes("run", "completed").unwrap(), 7);
     assert_eq!(store.log_bytes("run", "other").unwrap(), 0);
-    db.execute_batch("DROP TRIGGER fail_log; DROP TRIGGER fail_log_update;").unwrap();
-    store.append(&mut state, EventKind::Output { execution_id: "completed".into(), text: "after🚀\n".into() }).unwrap();
-    assert_eq!(store.execution_log_page("run", "completed", 0, usize::MAX).unwrap().content, "before\nafter🚀\n");
-    assert_eq!(store.log_bytes("run", "completed").unwrap(), state.executions[0].output.len());
+    db.execute_batch("DROP TRIGGER fail_log; DROP TRIGGER fail_log_update;")
+        .unwrap();
+    store
+        .append(
+            &mut state,
+            EventKind::Output {
+                execution_id: "completed".into(),
+                text: "after🚀\n".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .execution_log_page("run", "completed", 0, usize::MAX)
+            .unwrap()
+            .content,
+        "before\nafter🚀\n"
+    );
+    assert_eq!(
+        store.log_bytes("run", "completed").unwrap(),
+        state.executions[0].output.len()
+    );
 }
 
 #[test]
@@ -318,29 +722,76 @@ fn small_output_batches_fill_bounded_chunks_across_reopens_without_changing_byte
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.db");
     let mut store = Store::open(&path).unwrap();
-    let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
-    store.append(&mut state, created("repo", None, None)).unwrap();
+    let mut state = Snapshot {
+        run_id: "run".into(),
+        ..Default::default()
+    };
+    store
+        .append(&mut state, created("repo", None, None))
+        .unwrap();
     for id in ["completed", "live"] {
-        store.append(&mut state, EventKind::Started { execution: execution(id), message_sequences: None, fresh_restart: false }).unwrap();
+        store
+            .append(
+                &mut state,
+                EventKind::Started {
+                    execution: execution(id),
+                    message_sequences: None,
+                    fresh_restart: false,
+                },
+            )
+            .unwrap();
     }
     let mut expected = String::new();
     let mut saved_cursor = 0;
     for i in 0..512 {
         let text = format!("{i}:中文🚀\n").repeat(12);
-        store.append_batch(&mut state, vec![
-            EventKind::Output { execution_id: "completed".into(), text: text.clone() },
-            EventKind::Output { execution_id: "live".into(), text: "other\n".into() },
-        ]).unwrap();
+        store
+            .append_batch(
+                &mut state,
+                vec![
+                    EventKind::Output {
+                        execution_id: "completed".into(),
+                        text: text.clone(),
+                    },
+                    EventKind::Output {
+                        execution_id: "live".into(),
+                        text: "other\n".into(),
+                    },
+                ],
+            )
+            .unwrap();
         expected.push_str(&text);
-        if i == 0 { saved_cursor = expected.len(); }
-        if i % 64 == 0 { store = Store::open(&path).unwrap(); }
+        if i == 0 {
+            saved_cursor = expected.len();
+        }
+        if i % 64 == 0 {
+            store = Store::open(&path).unwrap();
+        }
     }
     let db = Connection::open(&path).unwrap();
-    let rows: usize = db.query_row("SELECT COUNT(*) FROM execution_logs WHERE execution_id='completed'", [], |r| r.get(0)).unwrap();
-    assert!(rows <= expected.len() / (32 * 1024 - 3) + 1, "small writes left {rows} permanent rows");
+    let rows: usize = db
+        .query_row(
+            "SELECT COUNT(*) FROM execution_logs WHERE execution_id='completed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        rows <= expected.len() / (32 * 1024 - 3) + 1,
+        "small writes left {rows} permanent rows"
+    );
     let mut previous = 0;
     let mut statement = db.prepare("SELECT offset,bytes,text FROM execution_logs WHERE execution_id='completed' ORDER BY offset").unwrap();
-    for row in statement.query_map([], |r| Ok((r.get::<_, usize>(0)?, r.get::<_, usize>(1)?, r.get::<_, String>(2)?))).unwrap() {
+    for row in statement
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, usize>(0)?,
+                r.get::<_, usize>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+    {
         let (offset, bytes, text) = row.unwrap();
         assert_eq!(offset, previous);
         assert_eq!(bytes, text.len());
@@ -348,10 +799,30 @@ fn small_output_batches_fill_bounded_chunks_across_reopens_without_changing_byte
         previous += bytes;
     }
     assert_eq!(previous, expected.len());
-    assert_eq!(store.execution_log_page("run", "completed", 0, usize::MAX).unwrap().content, expected);
-    assert_eq!(store.execution_log_page("run", "completed", saved_cursor, usize::MAX).unwrap().content, expected[saved_cursor..]);
-    assert_eq!(store.execution_log_page("run", "live", 0, usize::MAX).unwrap().content, "other\n".repeat(512));
-    let tail = store.execution_log_tail_page("run", "completed", saved_cursor, 32 * 1024).unwrap();
+    assert_eq!(
+        store
+            .execution_log_page("run", "completed", 0, usize::MAX)
+            .unwrap()
+            .content,
+        expected
+    );
+    assert_eq!(
+        store
+            .execution_log_page("run", "completed", saved_cursor, usize::MAX)
+            .unwrap()
+            .content,
+        expected[saved_cursor..]
+    );
+    assert_eq!(
+        store
+            .execution_log_page("run", "live", 0, usize::MAX)
+            .unwrap()
+            .content,
+        "other\n".repeat(512)
+    );
+    let tail = store
+        .execution_log_tail_page("run", "completed", saved_cursor, 32 * 1024)
+        .unwrap();
     assert_eq!(tail.content, expected[..saved_cursor]);
 }
 
@@ -360,38 +831,107 @@ fn delete_run_releases_incremental_pages_and_cascades_logs() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.db");
     let mut store = Store::open(&path).unwrap();
-    let mut state = Snapshot { run_id: "run".into(), ..Default::default() };
-    store.append(&mut state, created("repo", None, None)).unwrap();
-    store.append(&mut state, EventKind::Started { execution: execution("completed"), message_sequences: None, fresh_restart: false }).unwrap();
+    let mut state = Snapshot {
+        run_id: "run".into(),
+        ..Default::default()
+    };
+    store
+        .append(&mut state, created("repo", None, None))
+        .unwrap();
+    store
+        .append(
+            &mut state,
+            EventKind::Started {
+                execution: execution("completed"),
+                message_sequences: None,
+                fresh_restart: false,
+            },
+        )
+        .unwrap();
     for batch in 0..8 {
-        store.append_batch(&mut state, (0..32).map(|i| EventKind::Output {
-            execution_id: "completed".into(), text: format!("{batch}-{i}-{}", "y".repeat(64 * 1024)),
-        }).collect()).unwrap();
+        store
+            .append_batch(
+                &mut state,
+                (0..32)
+                    .map(|i| EventKind::Output {
+                        execution_id: "completed".into(),
+                        text: format!("{batch}-{i}-{}", "y".repeat(64 * 1024)),
+                    })
+                    .collect(),
+            )
+            .unwrap();
     }
     let db = Connection::open(&path).unwrap();
-    assert_eq!(db.query_row("PRAGMA auto_vacuum", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA auto_vacuum", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
     let before_pages: i64 = db.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap();
-    let before_free: i64 = db.query_row("PRAGMA freelist_count", [], |r| r.get(0)).unwrap();
+    let before_free: i64 = db
+        .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+        .unwrap();
     let before_size = std::fs::metadata(&path).unwrap().len();
-    let log_rows: i64 = db.query_row("SELECT COUNT(*) FROM execution_logs WHERE run_id='run'", [], |r| r.get(0)).unwrap();
+    let log_rows: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM execution_logs WHERE run_id='run'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert!(log_rows > 0);
     store.delete_run("run").unwrap();
-    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
     let after_pages: i64 = db.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap();
-    let after_free: i64 = db.query_row("PRAGMA freelist_count", [], |r| r.get(0)).unwrap();
+    let after_free: i64 = db
+        .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+        .unwrap();
     let after_size = std::fs::metadata(&path).unwrap().len();
     eprintln!("pages {before_pages} -> {after_pages}, free {before_free} -> {after_free}, file {before_size} -> {after_size}");
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM execution_logs", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM events WHERE run_id='run'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM checkpoints WHERE run_id='run'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM execution_logs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM events WHERE run_id='run'", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM checkpoints WHERE run_id='run'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
     // Fully step the PRAGMA, not just its first yielded page. Reclaim all
     // freed pages or exhaust the bounded 4096-page per-delete budget.
-    assert!(after_pages < before_pages, "incremental_vacuum did not release pages: {before_pages} -> {after_pages}");
-    assert!(after_free == 0 || before_pages - after_pages >= 4096,
-        "vacuum stopped before its page budget: reclaimed {}, remaining {after_free}", before_pages - after_pages);
-    assert!(after_size < before_size, "file did not shrink: {before_size} -> {after_size}");
-    assert!(after_free >= 0 && after_free < after_pages, "freelist must not cover the live database");
+    assert!(
+        after_pages < before_pages,
+        "incremental_vacuum did not release pages: {before_pages} -> {after_pages}"
+    );
+    assert!(
+        after_free == 0 || before_pages - after_pages >= 4096,
+        "vacuum stopped before its page budget: reclaimed {}, remaining {after_free}",
+        before_pages - after_pages
+    );
+    assert!(
+        after_size < before_size,
+        "file did not shrink: {before_size} -> {after_size}"
+    );
+    assert!(
+        after_free >= 0 && after_free < after_pages,
+        "freelist must not cover the live database"
+    );
 }
 
 #[test]
@@ -400,23 +940,44 @@ fn metadata_load_performance_budgets() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.db");
     let store = Store::open(&path).unwrap();
-    let mut state = Snapshot { run_id: "history".into(), ..Default::default() };
-    store.append(&mut state, created("repo", None, None)).unwrap();
+    let mut state = Snapshot {
+        run_id: "history".into(),
+        ..Default::default()
+    };
+    store
+        .append(&mut state, created("repo", None, None))
+        .unwrap();
     let db = Connection::open(&path).unwrap();
-    db.execute_batch("WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<889999)
-        INSERT INTO execution_logs SELECT 'history','huge', x*128,128,printf('%0128d',x) FROM n;").unwrap();
+    db.execute_batch(
+        "WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<889999)
+        INSERT INTO execution_logs SELECT 'history','huge', x*128,128,printf('%0128d',x) FROM n;",
+    )
+    .unwrap();
     let start = std::time::Instant::now();
     let loaded = store.load("history").unwrap();
     let history_elapsed = start.elapsed();
     eprintln!("890,000 log blocks (~109 MiB), metadata load: {history_elapsed:?}");
-    assert!(history_elapsed.as_millis() < 50, "history load: {history_elapsed:?}");
+    assert!(
+        history_elapsed.as_millis() < 50,
+        "history load: {history_elapsed:?}"
+    );
     assert_eq!(loaded.events.len(), 1);
-    state.run_id = "business".into(); state.events.clear();
-    store.append(&mut state, created("repo", None, None)).unwrap();
-    for _ in 0..10_000 { store.append(&mut state, EventKind::Paused { paused: true }).unwrap(); }
+    state.run_id = "business".into();
+    state.events.clear();
+    store
+        .append(&mut state, created("repo", None, None))
+        .unwrap();
+    for _ in 0..10_000 {
+        store
+            .append(&mut state, EventKind::Paused { paused: true })
+            .unwrap();
+    }
     let start = std::time::Instant::now();
     assert_eq!(store.load("business").unwrap().events.len(), 10_001);
     let business_elapsed = start.elapsed();
     eprintln!("10,001 business events + checkpoint, metadata load: {business_elapsed:?}");
-    assert!(business_elapsed.as_millis() < 100, "business load: {business_elapsed:?}");
+    assert!(
+        business_elapsed.as_millis() < 100,
+        "business load: {business_elapsed:?}"
+    );
 }

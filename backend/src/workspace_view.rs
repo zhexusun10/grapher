@@ -79,11 +79,11 @@ impl View {
     /// remains loadable while comparisons use the stable project identity.
     fn strip_system_managed(&mut self) {
         self.root_extra.strip_system_managed();
-        for entry in self
-            .entries
-            .values_mut()
-            .chain(self.git_entries.iter_mut().flat_map(|entries| entries.values_mut()))
-        {
+        for entry in self.entries.values_mut().chain(
+            self.git_entries
+                .iter_mut()
+                .flat_map(|entries| entries.values_mut()),
+        ) {
             strip_entry_system_managed(entry);
         }
         for extra in [&mut self.git_file_metadata, &mut self.git_link_metadata]
@@ -361,7 +361,15 @@ fn inspect_scoped(source: &Path, owner: &Path, exclusions: &[String]) -> Result<
     }
     let mut entries = BTreeMap::new();
     let tracked = workspace::project_tracked_paths(&source);
-    scan_scoped(&source, Path::new(""), &mut entries, false, owner, exclusions, &tracked)?;
+    scan_scoped(
+        &source,
+        Path::new(""),
+        &mut entries,
+        false,
+        owner,
+        exclusions,
+        &tracked,
+    )?;
     let mut repositories = BTreeMap::new();
     for (relative, entry) in &entries {
         if !matches!(entry, Entry::Directory { .. })
@@ -1062,8 +1070,10 @@ pub(crate) fn stage_project(path: &Path, metadata: &Path) -> Result<(), String> 
                 "-z",
             ],
         )?;
-        let tracked: std::collections::BTreeSet<&str> =
-            tracked.split('\0').filter(|name| !name.is_empty()).collect();
+        let tracked: std::collections::BTreeSet<&str> = tracked
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .collect();
         entries.retain(|name, _| {
             !workspace::is_host_metadata(name) || tracked.contains(name.as_str())
         });
@@ -1104,27 +1114,28 @@ pub(crate) fn stage_project(path: &Path, metadata: &Path) -> Result<(), String> 
                         );
                     }
                 } else {
-                    let stored =
-                        if fs::metadata(&file).map_err(|e| e.to_string())?.len() <= 8 * 1024 * 1024 {
-                            repository
-                                .blob(&fs::read(&file).map_err(|e| e.to_string())?)
-                                .map_err(|e| e.to_string())?
-                        } else {
-                            let file = crate::native::host_path(&file);
-                            let oid = workspace::git(
-                                path,
-                                &[
-                                    "--git-dir",
-                                    metadata.to_str().ok_or("Invalid graph metadata path")?,
-                                    "hash-object",
-                                    "-w",
-                                    "--no-filters",
-                                    "--",
-                                    file.to_str().ok_or("Invalid file path")?,
-                                ],
-                            )?;
-                            git2::Oid::from_str(&oid).map_err(|e| e.to_string())?
-                        };
+                    let stored = if fs::metadata(&file).map_err(|e| e.to_string())?.len()
+                        <= 8 * 1024 * 1024
+                    {
+                        repository
+                            .blob(&fs::read(&file).map_err(|e| e.to_string())?)
+                            .map_err(|e| e.to_string())?
+                    } else {
+                        let file = crate::native::host_path(&file);
+                        let oid = workspace::git(
+                            path,
+                            &[
+                                "--git-dir",
+                                metadata.to_str().ok_or("Invalid graph metadata path")?,
+                                "hash-object",
+                                "-w",
+                                "--no-filters",
+                                "--",
+                                file.to_str().ok_or("Invalid file path")?,
+                            ],
+                        )?;
+                        git2::Oid::from_str(&oid).map_err(|e| e.to_string())?
+                    };
                     if stored != oid {
                         return Err(
                             "Project changed while binding its byte snapshot; retry preparation"
@@ -1255,8 +1266,8 @@ pub(crate) fn source_identity(source: &Path) -> Result<String, String> {
     source_identity_scoped(source, &[])
 }
 fn source_identity_scoped(source: &Path, exclusions: &[String]) -> Result<String, String> {
-    let bytes =
-        serde_json::to_vec(&inspect_scoped(source, source, exclusions)?).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(&inspect_scoped(source, source, exclusions)?)
+        .map_err(|e| e.to_string())?;
     Ok(git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
         .map_err(|e| e.to_string())?
         .to_string())
@@ -1441,8 +1452,8 @@ fn install_git_scoped(owner: &Path, path: &Path, record: &Path, view: &View) -> 
         return Err("Refusing to replace an existing project Git view".into());
     }
     if view.git_entries.is_some() {
-        let git_dir = private_project_git(owner, path, view)?
-            .ok_or("Missing recorded project Git view")?;
+        let git_dir =
+            private_project_git(owner, path, view)?.ok_or("Missing recorded project Git view")?;
         if git_dir != path.join(".git") {
             // Gitfile/link layouts keep their metadata beside the slot state.
             crate::workspace_state::prepare(owner)?;
@@ -1655,17 +1666,24 @@ fn metadata_materialized(current: Option<&Entry>, expected: &Entry) -> bool {
     };
     match (current, expected) {
         (
-            Entry::File { mode: a, extra: ae, .. },
-            Entry::File { mode: b, extra: be, .. },
+            Entry::File {
+                mode: a, extra: ae, ..
+            },
+            Entry::File {
+                mode: b, extra: be, ..
+            },
         )
-        | (
-            Entry::Directory { mode: a, extra: ae },
-            Entry::Directory { mode: b, extra: be },
-        ) => a == b && ae.identical(be),
+        | (Entry::Directory { mode: a, extra: ae }, Entry::Directory { mode: b, extra: be }) => {
+            a == b && ae.identical(be)
+        }
         (Entry::Link { extra: ae, .. }, Entry::Link { extra: be, .. }) => ae.identical(be),
         (
-            Entry::Special { mode: a, extra: ae, .. },
-            Entry::Special { mode: b, extra: be, .. },
+            Entry::Special {
+                mode: a, extra: ae, ..
+            },
+            Entry::Special {
+                mode: b, extra: be, ..
+            },
         ) => a == b && ae.identical(be),
         _ => false,
     }
@@ -1693,9 +1711,8 @@ fn mark_ready(path: &Path) -> Result<(), String> {
 }
 pub(crate) fn validate_ready(path: &Path, source: &Path) -> Result<(), String> {
     validate_bound(path, source)?;
-    crate::workspace::private_git_dir(path).ok_or(
-        "Private project view is missing its graph Git metadata; retry preparation",
-    )?;
+    crate::workspace::private_git_dir(path)
+        .ok_or("Private project view is missing its graph Git metadata; retry preparation")?;
     let file = ready(path)?;
     let root = crate::workspace_state::root(path)?;
     crate::path_safety::real_child_path(&root, &file, true)?
@@ -1878,7 +1895,15 @@ pub(crate) fn prepare(
     let conflict = workspace::git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok();
     let tracked = workspace::project_tracked_paths(path);
     let mut actual = BTreeMap::new();
-    scan_scoped(path, Path::new(""), &mut actual, false, path, exclusions, &tracked)?;
+    scan_scoped(
+        path,
+        Path::new(""),
+        &mut actual,
+        false,
+        path,
+        exclusions,
+        &tracked,
+    )?;
     let mut expected = BTreeMap::new();
     // Entries this pass writes, links or recreates get fresh OS metadata that
     // the scan above could not observe (for example writing clears a read-only
@@ -1914,7 +1939,8 @@ pub(crate) fn prepare(
             }
             let target = path.join(name);
             if fields[0] == "120000" {
-                let data = workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?;
+                let data =
+                    workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?;
                 let target_name = String::from_utf8(data).map_err(|_| "Non-UTF-8 project link")?;
                 let baseline = base_view
                     .entries
@@ -1956,7 +1982,8 @@ pub(crate) fn prepare(
                 let blob = if fields[2].len() == 40 {
                     fields[2].to_string()
                 } else {
-                    let data = workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?;
+                    let data =
+                        workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?;
                     let hash = git2::Oid::hash_object(git2::ObjectType::Blob, &data)
                         .map_err(|e| e.to_string())?
                         .to_string();
@@ -1967,7 +1994,12 @@ pub(crate) fn prepare(
                 {
                     let data = match cached {
                         Some(data) => data,
-                        None => workspace::git_bytes(path, &["cat-file", "blob", fields[2]], None, None)?,
+                        None => workspace::git_bytes(
+                            path,
+                            &["cat-file", "blob", fields[2]],
+                            None,
+                            None,
+                        )?,
                     };
                     if let Some(existing) = actual.get(name) {
                         if !matches!(existing, Entry::File { .. }) {
@@ -2221,7 +2253,9 @@ pub(crate) fn prepare(
                 fs::remove_dir(path.join(name)).map_err(|e| {
                     format!("Unrecorded files prevent project directory deletion at {name}: {e}")
                 })?;
-            } else if !expected.keys().any(|key| key.starts_with(&format!("{name}/")))
+            } else if !expected
+                .keys()
+                .any(|key| key.starts_with(&format!("{name}/")))
                 && view_unobservable(path, Path::new(name), &tracked)?
             {
                 // Nothing this view could ever record is left inside, so the
@@ -2251,9 +2285,19 @@ pub(crate) fn prepare(
         .ok_or("Missing project root metadata")?;
     restore_entry(path, &root)?;
     let mut verified = BTreeMap::new();
-    scan_scoped(path, Path::new(""), &mut verified, false, path, exclusions, &tracked)?;
+    scan_scoped(
+        path,
+        Path::new(""),
+        &mut verified,
+        false,
+        path,
+        exclusions,
+        &tracked,
+    )?;
     if verified != expected {
-        let name = expected.keys().chain(verified.keys())
+        let name = expected
+            .keys()
+            .chain(verified.keys())
             .find(|name| expected.get(*name) != verified.get(*name))
             .ok_or("Project view comparison could not identify the difference")?;
         let difference = match (expected.get(name), verified.get(name)) {
@@ -2401,12 +2445,15 @@ fn nested_repository_views(project: &Path) -> Result<BTreeMap<String, View>, Str
     Ok(views)
 }
 
-fn node_view(path: &Path, source: &Path, exclusions: &[String]) -> Result<Option<(View, Option<PathBuf>)>, String> {
+fn node_view(
+    path: &Path,
+    source: &Path,
+    exclusions: &[String],
+) -> Result<Option<(View, Option<PathBuf>)>, String> {
     if is_bound(path) {
         validate_bound(path, source)?;
         if path.join(".git").exists()
-            && !workspace::git(path, &["diff", "--name-only", "--diff-filter=U"])?
-                .is_empty()
+            && !workspace::git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty()
         {
             return Err("Unresolved project Git conflicts remain".into());
         }
@@ -2427,7 +2474,15 @@ fn node_view(path: &Path, source: &Path, exclusions: &[String]) -> Result<Option
     let mut view = load(&record)?;
     view.entries.clear();
     let tracked = workspace::project_tracked_paths(path);
-    scan_scoped(path, Path::new(""), &mut view.entries, false, path, exclusions, &tracked)?;
+    scan_scoped(
+        path,
+        Path::new(""),
+        &mut view.entries,
+        false,
+        path,
+        exclusions,
+        &tracked,
+    )?;
     view.hardlinks = capture_links(path, &view.entries)?;
     // Do not reuse nested repository evidence recorded from another state:
     // a host-only/fixture checkout can still advance its nested worktrees.
@@ -2530,7 +2585,8 @@ pub(crate) fn verify_result_scoped(
         // stale or reclaimed head must not block a rebaseline.
         return Ok(());
     }
-    let (current, _) = node_view(path, source, exclusions)?.ok_or("Missing current project view")?;
+    let (current, _) =
+        node_view(path, source, exclusions)?.ok_or("Missing current project view")?;
     let recorded = load(&record_path(source, head)?)?;
     let tracked = workspace::project_tracked_paths(path);
     if without_generated(&current, &tracked) != without_generated(&recorded, &tracked) {

@@ -8,11 +8,20 @@ const CHUNK_BYTES: usize = 32 * 1024;
 
 fn floor_boundary(text: &str, mut offset: usize) -> usize {
     offset = offset.min(text.len());
-    while !text.is_char_boundary(offset) { offset -= 1; }
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
     offset
 }
 
-fn insert_chunks(db: &Connection, run: &str, id: &str, start: usize, text: &str, idempotent: bool) -> Result<(), String> {
+fn insert_chunks(
+    db: &Connection,
+    run: &str,
+    id: &str,
+    start: usize,
+    text: &str,
+    idempotent: bool,
+) -> Result<(), String> {
     let sql = if idempotent {
         "INSERT OR IGNORE INTO execution_logs(run_id,execution_id,offset,bytes,text) VALUES(?1,?2,?3,?4,?5)"
     } else {
@@ -22,7 +31,15 @@ fn insert_chunks(db: &Connection, run: &str, id: &str, start: usize, text: &str,
     let mut pos = 0;
     while pos < text.len() {
         let end = floor_boundary(text, pos.saturating_add(CHUNK_BYTES));
-        insert.execute(params![run, id, (start + pos) as i64, (end - pos) as i64, &text[pos..end]]).map_err(|e| e.to_string())?;
+        insert
+            .execute(params![
+                run,
+                id,
+                (start + pos) as i64,
+                (end - pos) as i64,
+                &text[pos..end]
+            ])
+            .map_err(|e| e.to_string())?;
         pos = end;
     }
     Ok(())
@@ -31,8 +48,16 @@ fn insert_chunks(db: &Connection, run: &str, id: &str, start: usize, text: &str,
 /// Fill the last partial block across writer batches too. Flushing live output
 /// must not turn every small stdout packet into a permanent row and index entry.
 /// Only the suffix grows; all previously committed UTF-8 byte offsets stay valid.
-fn append_chunks(db: &Connection, run: &str, id: &str, mut start: usize, mut text: &str) -> Result<(), String> {
-    if text.is_empty() { return Ok(()); }
+fn append_chunks(
+    db: &Connection,
+    run: &str,
+    id: &str,
+    mut start: usize,
+    mut text: &str,
+) -> Result<(), String> {
+    if text.is_empty() {
+        return Ok(());
+    }
     let last = db.query_row(
         "SELECT offset,bytes FROM execution_logs WHERE execution_id=?1 AND run_id=?2 ORDER BY offset DESC LIMIT 1",
         params![id, run], |row| Ok((row.get::<_, usize>(0)?, row.get::<_, usize>(1)?)),
@@ -78,39 +103,71 @@ impl Store {
     }
 
     pub(super) fn replace_logs(&self, run: &str, id: &str, text: &str) -> Result<(), String> {
-        let tx = self.connection.unchecked_transaction().map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM execution_logs WHERE execution_id=?1 AND run_id=?2", params![id, run]).map_err(|e| e.to_string())?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM execution_logs WHERE execution_id=?1 AND run_id=?2",
+            params![id, run],
+        )
+        .map_err(|e| e.to_string())?;
         insert_chunks(&tx, run, id, 0, text, false)?;
         tx.commit().map_err(|e| e.to_string())?;
-        self.execution_offsets.borrow_mut().insert(id.to_owned(), text.len());
+        self.execution_offsets
+            .borrow_mut()
+            .insert(id.to_owned(), text.len());
         Ok(())
     }
 
-    pub(super) fn append_logs(&self, state: &mut Snapshot, kinds: Vec<EventKind>) -> Result<(), String> {
+    pub(super) fn append_logs(
+        &self,
+        state: &mut Snapshot,
+        kinds: Vec<EventKind>,
+    ) -> Result<(), String> {
         let _write_guard = store_write_guard()?;
-        if kinds.is_empty() { return Ok(()); }
+        if kinds.is_empty() {
+            return Ok(());
+        }
         self.ensure_not_deleted(&state.run_id)?;
         let count = kinds.len();
         // Coalesce tiny stdout packets within the bounded writer batch; one
         // character per event must not become one database row per character.
         let mut texts: HashMap<String, String> = HashMap::new();
         for kind in kinds {
-            let EventKind::Output { execution_id, text } = kind else { return Err("Expected output batch".into()); };
+            let EventKind::Output { execution_id, text } = kind else {
+                return Err("Expected output batch".into());
+            };
             texts.entry(execution_id).or_default().push_str(&text);
         }
-        let tx = self.connection.unchecked_transaction().map_err(|e| e.to_string())?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())?;
         let mut offsets = HashMap::new();
         for (execution_id, text) in &texts {
             let cached = self.execution_offsets.borrow().get(execution_id).copied();
-            let offset = match cached { Some(offset) => offset, None => self.log_bytes(&state.run_id, execution_id)? };
+            let offset = match cached {
+                Some(offset) => offset,
+                None => self.log_bytes(&state.run_id, execution_id)?,
+            };
             append_chunks(&tx, &state.run_id, execution_id, offset, text)?;
             offsets.insert(execution_id.clone(), offset + text.len());
         }
         tx.commit().map_err(|e| e.to_string())?;
         // Neither cursors nor the live projection advance before COMMIT.
-        let repo = state.config.as_ref().map(|c| c.repository.clone()).unwrap_or_default();
+        let repo = state
+            .config
+            .as_ref()
+            .map(|c| c.repository.clone())
+            .unwrap_or_default();
         for (execution_id, text) in texts {
-            if let Some(execution) = state.executions.iter_mut().chain(state.mergers.iter_mut()).find(|e| e.id == execution_id) {
+            if let Some(execution) = state
+                .executions
+                .iter_mut()
+                .chain(state.mergers.iter_mut())
+                .find(|e| e.id == execution_id)
+            {
                 append_live_output(execution, &text);
                 execution.output_bytes = offsets[&execution_id];
                 // Incremental parse of just this flush; a long transcript is
@@ -127,7 +184,10 @@ impl Store {
                     );
                 } else {
                     crate::file_changes::note_read_only_log_append(
-                        &state.run_id, &execution.id, execution.output_bytes, execution.status == "running",
+                        &state.run_id,
+                        &execution.id,
+                        execution.output_bytes,
+                        execution.status == "running",
                     );
                 }
             }
@@ -140,12 +200,30 @@ impl Store {
         Ok(())
     }
 
-    pub fn forget_log_cursor(&self, id: &str) { self.execution_offsets.borrow_mut().remove(id); }
+    pub fn forget_log_cursor(&self, id: &str) {
+        self.execution_offsets.borrow_mut().remove(id);
+    }
 
-    pub fn execution_log_page(&self, run: &str, id: &str, offset: usize, limit: usize) -> Result<LogPage, String> {
+    pub fn execution_log_page(
+        &self,
+        run: &str,
+        id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<LogPage, String> {
         let total = self.log_bytes(run, id)?;
-        if offset > total { return Err("Invalid output offset".into()); }
-        if offset == total { return Ok(LogPage { content: String::new(), start_offset: offset, next_offset: offset, total_bytes: total, complete: true }); }
+        if offset > total {
+            return Err("Invalid output offset".into());
+        }
+        if offset == total {
+            return Ok(LogPage {
+                content: String::new(),
+                start_offset: offset,
+                next_offset: offset,
+                total_bytes: total,
+                complete: true,
+            });
+        }
         let start: i64 = self.connection.query_row(
             "SELECT offset FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset<=?3 ORDER BY offset DESC LIMIT 1",
             params![id, run, offset as i64], |r| r.get(0),
@@ -154,34 +232,62 @@ impl Store {
         let mut stmt = self.connection.prepare(
             "SELECT offset,bytes,text FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset>=?3 AND offset<?4 ORDER BY offset",
         ).map_err(|e| e.to_string())?;
-        let mut rows = stmt.query(params![id, run, start, end as i64]).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(params![id, run, start, end as i64])
+            .map_err(|e| e.to_string())?;
         let mut content = String::new();
         let mut next = offset;
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let block_start = row.get::<_, i64>(0).map_err(|e| e.to_string())? as usize;
             let bytes = row.get::<_, i64>(1).map_err(|e| e.to_string())? as usize;
             let text: String = row.get(2).map_err(|e| e.to_string())?;
-            if text.len() != bytes || block_start > next { return Err("Corrupt execution log".into()); }
+            if text.len() != bytes || block_start > next {
+                return Err("Corrupt execution log".into());
+            }
             let from = next.saturating_sub(block_start);
-            if from > text.len() || !text.is_char_boundary(from) { return Err("Invalid output offset".into()); }
+            if from > text.len() || !text.is_char_boundary(from) {
+                return Err("Invalid output offset".into());
+            }
             let to = floor_boundary(&text, end.saturating_sub(block_start));
-            if to < from { return Err("Invalid output offset".into()); }
+            if to < from {
+                return Err("Invalid output offset".into());
+            }
             content.push_str(&text[from..to]);
             next = block_start + to;
-            if to < bytes { break; }
+            if to < bytes {
+                break;
+            }
         }
-        Ok(LogPage { content, start_offset: offset, next_offset: next, total_bytes: total, complete: next == total })
+        Ok(LogPage {
+            content,
+            start_offset: offset,
+            next_offset: next,
+            total_bytes: total,
+            complete: next == total,
+        })
     }
 
     /// Read a bounded tail of a log. The returned start offset is aligned to a
     /// stored chunk boundary (and includes one preceding chunk when possible),
     /// so callers can prepend older pages without losing a line split at the
     /// edge of the window.
-    pub fn execution_log_tail_page(&self, run: &str, id: &str, before: usize, limit: usize) -> Result<LogPage, String> {
+    pub fn execution_log_tail_page(
+        &self,
+        run: &str,
+        id: &str,
+        before: usize,
+        limit: usize,
+    ) -> Result<LogPage, String> {
         let total = self.log_bytes(run, id)?;
         let end = before.min(total);
         if end == 0 {
-            return Ok(LogPage { content: String::new(), start_offset: 0, next_offset: 0, total_bytes: total, complete: total == 0 });
+            return Ok(LogPage {
+                content: String::new(),
+                start_offset: 0,
+                next_offset: 0,
+                total_bytes: total,
+                complete: total == 0,
+            });
         }
         let candidate = end.saturating_sub(limit);
         let chunk_start: usize = self.connection.query_row(
@@ -195,31 +301,51 @@ impl Store {
         let mut stmt = self.connection.prepare(
             "SELECT offset,bytes,text FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset>=?3 AND offset<?4 ORDER BY offset",
         ).map_err(|e| e.to_string())?;
-        let mut rows = stmt.query(params![id, run, start as i64, end as i64]).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(params![id, run, start as i64, end as i64])
+            .map_err(|e| e.to_string())?;
         let mut content = String::new();
         let mut next = start;
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let block_start = row.get::<_, i64>(0).map_err(|e| e.to_string())? as usize;
             let bytes = row.get::<_, i64>(1).map_err(|e| e.to_string())? as usize;
             let text: String = row.get(2).map_err(|e| e.to_string())?;
-            if text.len() != bytes || block_start > next { return Err("Corrupt execution log".into()); }
+            if text.len() != bytes || block_start > next {
+                return Err("Corrupt execution log".into());
+            }
             let from = next.saturating_sub(block_start);
-            if from > text.len() || !text.is_char_boundary(from) { return Err("Invalid output offset".into()); }
+            if from > text.len() || !text.is_char_boundary(from) {
+                return Err("Invalid output offset".into());
+            }
             let to = floor_boundary(&text, end.saturating_sub(block_start));
-            if to < from { return Err("Invalid output offset".into()); }
+            if to < from {
+                return Err("Invalid output offset".into());
+            }
             content.push_str(&text[from..to]);
             next = block_start + to;
-            if to < bytes { break; }
+            if to < bytes {
+                break;
+            }
         }
         // Keep the complete byte range, including a possible leading JSONL
         // fragment. Dropping through its newline can drop an entire tool result
         // and can return a non-progressing empty page for a long record.
-        Ok(LogPage { content, start_offset: start, next_offset: next, total_bytes: total, complete: next == total })
+        Ok(LogPage {
+            content,
+            start_offset: start,
+            next_offset: next,
+            total_bytes: total,
+            complete: next == total,
+        })
     }
 
     // Only this compatibility path materializes legacy log text. Normal load
     // reads metadata alone. Indexed and pre-index databases are both supported.
-    fn legacy_transcript(&self, run: &str, id: &str) -> Result<(String, Vec<(i64, u64, EventKind)>), String> {
+    fn legacy_transcript(
+        &self,
+        run: &str,
+        id: &str,
+    ) -> Result<(String, Vec<(i64, u64, EventKind)>), String> {
         let mut stmt = self.connection.prepare(
             "SELECT sequence,timestamp,payload FROM events
              WHERE run_id=?1 AND (
@@ -236,7 +362,15 @@ impl Store {
              )
              ORDER BY sequence",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(params![run, id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, u64>(1)?, r.get::<_, String>(2)?))).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![run, id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, u64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
         let mut text = String::new();
         let mut terminal = Vec::new();
         let mut authoritative = false;
@@ -245,16 +379,23 @@ impl Store {
             let kind: EventKind = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
             match &kind {
                 EventKind::Started { execution, .. } | EventKind::MergerStarted { execution } => {
-                    if !authoritative { text = execution.output.clone(); }
+                    if !authoritative {
+                        text = execution.output.clone();
+                    }
                 }
                 EventKind::Output { text: chunk, .. } if !authoritative => text.push_str(chunk),
                 EventKind::Finished { output, .. } if !output.is_empty() => {
-                    text = output.clone(); authoritative = true;
+                    text = output.clone();
+                    authoritative = true;
                 }
-                EventKind::MergerFailed { error, .. } if !authoritative => text.push_str(&format!("\nMerger failed: {error}\n")),
+                EventKind::MergerFailed { error, .. } if !authoritative => {
+                    text.push_str(&format!("\nMerger failed: {error}\n"))
+                }
                 _ => {}
             }
-            if !matches!(kind, EventKind::Output { .. }) { terminal.push((sequence, timestamp, kind)); }
+            if !matches!(kind, EventKind::Output { .. }) {
+                terminal.push((sequence, timestamp, kind));
+            }
         }
         Ok((text, terminal))
     }
@@ -263,9 +404,13 @@ impl Store {
     /// cross-Service readers and checks for an already committed migration.
     pub fn ensure_legacy_logs(&self, run: &str, id: &str) -> Result<usize, String> {
         let _write_guard = store_write_guard()?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+        let tx =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
         let existing = self.log_bytes(run, id)?;
-        if existing > 0 { return Ok(existing); }
+        if existing > 0 {
+            return Ok(existing);
+        }
         let (text, _) = self.legacy_transcript(run, id)?;
         insert_chunks(&tx, run, id, 0, &text, true)?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -276,7 +421,10 @@ impl Store {
     /// commits independently; a restart can safely resume after any commit.
     pub fn migrate_legacy_logs(&self) -> Result<MigrationReport, String> {
         let _write_guard = store_write_guard()?;
-        let mut report = MigrationReport { backfilled_rows: self.backfill_event_index()?, ..Default::default() };
+        let mut report = MigrationReport {
+            backfilled_rows: self.backfill_event_index()?,
+            ..Default::default()
+        };
         let ids = {
             let mut stmt = self.connection.prepare(
                 "SELECT DISTINCT run_id,execution_id FROM events WHERE execution_id IS NOT NULL AND
@@ -284,46 +432,102 @@ impl Store {
                     OR (kind IN ('started','merger_started') AND COALESCE(json_extract(payload,'$.execution.output'),'')!='')
                     OR (kind='merger_failed' AND NOT EXISTS(SELECT 1 FROM execution_logs l WHERE l.execution_id=events.execution_id)))",
             ).map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(|e| e.to_string())?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
         };
         for (run, id) in ids {
-            let tx = rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.connection,
+                TransactionBehavior::Immediate,
+            )
+            .map_err(|e| e.to_string())?;
             let (text, events) = self.legacy_transcript(&run, &id)?;
             insert_chunks(&tx, &run, &id, 0, &text, true)?;
             // Never clean the source unless the committed/JIT chunks match it.
             let saved = self.execution_log_page(&run, &id, 0, usize::MAX)?;
-            if saved.content != text { return Err(format!("Legacy log mismatch for {id}; source events preserved")); }
-            let started = events.iter().find_map(|(_, _, kind)| match kind {
-                EventKind::Started { execution, .. } | EventKind::MergerStarted { execution } => Some(execution.started_at),
-                _ => None,
-            }).unwrap_or(0);
+            if saved.content != text {
+                return Err(format!(
+                    "Legacy log mismatch for {id}; source events preserved"
+                ));
+            }
+            let started = events
+                .iter()
+                .find_map(|(_, _, kind)| match kind {
+                    EventKind::Started { execution, .. }
+                    | EventKind::MergerStarted { execution } => Some(execution.started_at),
+                    _ => None,
+                })
+                .unwrap_or(0);
             for (sequence, timestamp, mut kind) in events {
                 let rewrite = match &mut kind {
-                    EventKind::Finished { output, output_bytes, metrics, .. } => {
+                    EventKind::Finished {
+                        output,
+                        output_bytes,
+                        metrics,
+                        ..
+                    } => {
                         *output_bytes = text.len();
-                        *metrics = metrics.take().or_else(|| Some(parse_execution_metrics(&text, started, timestamp)));
-                        output.clear(); true
+                        *metrics = metrics
+                            .take()
+                            .or_else(|| Some(parse_execution_metrics(&text, started, timestamp)));
+                        output.clear();
+                        true
                     }
-                    EventKind::Failed { output_bytes, metrics, .. }
-                    | EventKind::MergerFinished { output_bytes, metrics, .. }
-                    | EventKind::MergerFailed { output_bytes, metrics, .. } => {
+                    EventKind::Failed {
+                        output_bytes,
+                        metrics,
+                        ..
+                    }
+                    | EventKind::MergerFinished {
+                        output_bytes,
+                        metrics,
+                        ..
+                    }
+                    | EventKind::MergerFailed {
+                        output_bytes,
+                        metrics,
+                        ..
+                    } => {
                         *output_bytes = text.len();
-                        *metrics = metrics.take().or_else(|| Some(parse_execution_metrics(&text, started, timestamp))); true
+                        *metrics = metrics
+                            .take()
+                            .or_else(|| Some(parse_execution_metrics(&text, started, timestamp)));
+                        true
                     }
-                    EventKind::Started { execution, .. } | EventKind::MergerStarted { execution } if !execution.output.is_empty() => {
-                        execution.output.clear(); true
+                    EventKind::Started { execution, .. }
+                    | EventKind::MergerStarted { execution }
+                        if !execution.output.is_empty() =>
+                    {
+                        execution.output.clear();
+                        true
                     }
                     _ => false,
                 };
                 if rewrite {
-                    report.updated_rows += tx.execute("UPDATE events SET payload=?1 WHERE sequence=?2", params![serde_json::to_string(&kind).map_err(|e| e.to_string())?, sequence]).map_err(|e| e.to_string())?;
+                    report.updated_rows += tx
+                        .execute(
+                            "UPDATE events SET payload=?1 WHERE sequence=?2",
+                            params![
+                                serde_json::to_string(&kind).map_err(|e| e.to_string())?,
+                                sequence
+                            ],
+                        )
+                        .map_err(|e| e.to_string())?;
                 }
             }
-            report.deleted_chunks += tx.execute("DELETE FROM events WHERE execution_id=?1 AND run_id=?2 AND kind='output'", params![id, run]).map_err(|e| e.to_string())?;
+            report.deleted_chunks += tx
+                .execute(
+                    "DELETE FROM events WHERE execution_id=?1 AND run_id=?2 AND kind='output'",
+                    params![id, run],
+                )
+                .map_err(|e| e.to_string())?;
             // Old checkpoints can carry stale metrics/byte counts. Replay the
             // small business log once instead of rewriting huge old projections.
-            tx.execute("DELETE FROM checkpoints WHERE run_id=?1", [&run]).map_err(|e| e.to_string())?;
+            tx.execute("DELETE FROM checkpoints WHERE run_id=?1", [&run])
+                .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
             self.forget_log_cursor(&id);
             report.migrated_executions += 1;

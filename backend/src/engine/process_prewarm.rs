@@ -198,7 +198,8 @@ mod tests {
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             environment: None,
             role_models: Default::default(),
         };

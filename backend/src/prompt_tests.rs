@@ -6,7 +6,8 @@ fn busy_background_poll_is_retryable_instead_of_a_client_error() {
         "snapshot_if_changed",
         r#"{"version":"run:7","runId":"run"}"#,
         SERVICE_LOOKUP_BUSY,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(result["version"], "run:7");
     assert_eq!(result["busy"], true);
     assert!(result["snapshot"].is_null());
@@ -37,31 +38,56 @@ fn snapshot_poll_reports_transient_activity_without_waiting_for_the_run_mutex() 
     let request_id = run_id.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let thread = std::thread::spawn(move || {
-        let result = dispatch(&worker, "snapshot_if_changed", serde_json::json!({
-            "runId": request_id, "version": "unchanged"
-        }));
+        let result = dispatch(
+            &worker,
+            "snapshot_if_changed",
+            serde_json::json!({
+                "runId": request_id, "version": "unchanged"
+            }),
+        );
         let _ = tx.send(result);
     });
     let result = rx.recv_timeout(std::time::Duration::from_secs(2));
     drop(locked);
     thread.join().unwrap();
-    let value = result.expect("snapshot poll waited for the Run mutex").unwrap();
+    let value = result
+        .expect("snapshot poll waited for the Run mutex")
+        .unwrap();
     assert_eq!(value["version"], "unchanged");
     assert!(value["snapshot"].is_null());
-    assert_eq!(value["busy"], true, "a busy Run mutex must ask the client to retry soon");
-    assert_eq!(value["activity"], serde_json::json!([
-        { "kind": "source_capture", "nodes": [] },
-        { "kind": "workspace_prepare", "nodes": ["left", "right"] }
-    ]));
+    assert_eq!(
+        value["busy"], true,
+        "a busy Run mutex must ask the client to retry soon"
+    );
+    assert_eq!(
+        value["activity"],
+        serde_json::json!([
+            { "kind": "source_capture", "nodes": [] },
+            { "kind": "workspace_prepare", "nodes": ["left", "right"] }
+        ])
+    );
     drop((capture, left, right, duplicate));
-    let value = dispatch(&service, "snapshot_if_changed", serde_json::json!({ "runId": run_id })).unwrap();
+    let value = dispatch(
+        &service,
+        "snapshot_if_changed",
+        serde_json::json!({ "runId": run_id }),
+    )
+    .unwrap();
     assert_eq!(value["activity"], serde_json::json!([]));
     assert_eq!(service.runtime.lock().unwrap().state.events.len(), events);
-    let cached = dispatch(&service, "snapshot_if_changed", serde_json::json!({
-        "runId": run_id, "version": value["version"]
-    })).unwrap();
+    let cached = dispatch(
+        &service,
+        "snapshot_if_changed",
+        serde_json::json!({
+            "runId": run_id, "version": value["version"]
+        }),
+    )
+    .unwrap();
     assert!(cached["snapshot"].is_null());
-    assert!(cached["busy"].is_null(), "an unchanged poll is not a busy response");
+    assert!(
+        cached["busy"].is_null(),
+        "an unchanged poll is not a busy response"
+    );
     assert_eq!(cached["activity"], serde_json::json!([]));
 }
 
@@ -112,19 +138,34 @@ fn intervention_unpause_control_does_not_retry_unknown_failure() {
     fs::create_dir_all(&source).unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime.state.run_id = Uuid::new_v4().to_string();
-    runtime.emit(EventKind::Created {
-        graph: Graph { original_goal: "test".into(), nodes: vec![Node {
-            name: "task".into(), task: "test".into(),
-        }], edges: vec![] },
-        config: serde_json::from_value(serde_json::json!({
-            "repository": source, "model": "test", "maxParallel": 1,
-        })).unwrap(),
-        planning_id: None, planning: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "test".into(),
+                nodes: vec![Node {
+                    name: "task".into(),
+                    task: "test".into(),
+                }],
+                edges: vec![],
+            },
+            config: serde_json::from_value(serde_json::json!({
+                "repository": source, "model": "test", "maxParallel": 1,
+            }))
+            .unwrap(),
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
     runtime.set_route("serial").unwrap();
-    runtime.emit(EventKind::Approved { base: String::new() }).unwrap();
+    runtime
+        .emit(EventKind::Approved {
+            base: String::new(),
+        })
+        .unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&failed.execution, Err("unrecognized failure".into())).unwrap();
+    runtime
+        .finish(&failed.execution, Err("unrecognized failure".into()))
+        .unwrap();
     runtime.pause(true).unwrap();
     let run_id = runtime.state.run_id.clone();
     let service = Arc::new(Service {
@@ -135,12 +176,29 @@ fn intervention_unpause_control_does_not_retry_unknown_failure() {
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
-    let snapshot = control("resume_after_intervention".into(), None, None,
-        Some(run_id.clone()), None, None, &service).unwrap();
+    let snapshot = control(
+        "resume_after_intervention".into(),
+        None,
+        None,
+        Some(run_id.clone()),
+        None,
+        None,
+        &service,
+    )
+    .unwrap();
     assert!(!snapshot.paused);
     assert_eq!(snapshot.nodes["task"].status, "failed");
     assert!(snapshot.can_resume());
-    let snapshot = control("resume".into(), None, None, Some(run_id), None, None, &service).unwrap();
+    let snapshot = control(
+        "resume".into(),
+        None,
+        None,
+        Some(run_id),
+        None,
+        None,
+        &service,
+    )
+    .unwrap();
     assert_eq!(snapshot.nodes["task"].status, "waiting");
     assert!(snapshot.nodes["task"].continuation);
     assert_eq!(snapshot.executions[0].status, "failed");
@@ -151,16 +209,29 @@ fn completed_node_message_control_does_not_wait_for_planner_or_start_driver() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     runtime.state.run_id = Uuid::new_v4().to_string();
-    runtime.emit(EventKind::Created {
-        graph: Graph { original_goal: "test".into(), nodes: vec![Node {
-            name: "task".into(), task: "test".into(),
-        }], edges: vec![] },
-        config: serde_json::from_value(serde_json::json!({
-            "repository": temp.path(), "model": "test", "maxParallel": 1,
-        })).unwrap(),
-        planning_id: None, planning: None,
-    }).unwrap();
-    runtime.emit(EventKind::Approved { base: String::new() }).unwrap();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "test".into(),
+                nodes: vec![Node {
+                    name: "task".into(),
+                    task: "test".into(),
+                }],
+                edges: vec![],
+            },
+            config: serde_json::from_value(serde_json::json!({
+                "repository": temp.path(), "model": "test", "maxParallel": 1,
+            }))
+            .unwrap(),
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Approved {
+            base: String::new(),
+        })
+        .unwrap();
     runtime.state.nodes.get_mut("task").unwrap().status = "completed".into();
     let run_id = runtime.state.run_id.clone();
     let service = Arc::new(Service {
@@ -170,13 +241,32 @@ fn completed_node_message_control_does_not_wait_for_planner_or_start_driver() {
         planning: AtomicBool::new(true),
         extension: temp.path().join("unused.ts"),
     });
-    let snap = control("message_node".into(), Some("task".into()), Some("hi".into()),
-        Some(run_id.clone()), None, None, &service).unwrap();
+    let snap = control(
+        "message_node".into(),
+        Some("task".into()),
+        Some("hi".into()),
+        Some(run_id.clone()),
+        None,
+        None,
+        &service,
+    )
+    .unwrap();
     assert_eq!(snap.nodes["task"].status, "completed");
     assert!(snap.executions.is_empty());
-    assert!(matches!(snap.events.last().unwrap().kind, EventKind::NodeMessaged { .. }));
-    assert!(control("message_node".into(), Some("task".into()), Some("wrong run".into()),
-        Some("old-run".into()), None, None, &service).is_err());
+    assert!(matches!(
+        snap.events.last().unwrap().kind,
+        EventKind::NodeMessaged { .. }
+    ));
+    assert!(control(
+        "message_node".into(),
+        Some("task".into()),
+        Some("wrong run".into()),
+        Some("old-run".into()),
+        None,
+        None,
+        &service
+    )
+    .is_err());
     assert!(!service.driving.load(Ordering::SeqCst));
 }
 
@@ -220,9 +310,12 @@ fn publication_merger_continuation_control_validates_phase_and_workspace() {
         before: String::new(),
         workspace_lineage: vec![],
         after: None,
-        input: None, result: None,
+        input: None,
+        result: None,
         status: status.into(),
-        output: String::new(), output_bytes: 0, pid: None,
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
         started_at: now(),
         completed_at: None,
         metrics: None,
@@ -233,7 +326,10 @@ fn publication_merger_continuation_control_validates_phase_and_workspace() {
             execution: merger.clone(),
         })
         .unwrap();
-    assert_eq!(runtime.state.phase, "running", "a standalone merger must not own publication phase");
+    assert_eq!(
+        runtime.state.phase, "running",
+        "a standalone merger must not own publication phase"
+    );
     runtime
         .emit(EventKind::MergerFinished {
             execution_id: merger.id.clone(),
@@ -324,7 +420,11 @@ fn publication_merger_continuation_control_validates_phase_and_workspace() {
         .runtime
         .lock()
         .unwrap()
-        .emit(EventKind::Started { execution: busy, message_sequences: None, fresh_restart: false })
+        .emit(EventKind::Started {
+            execution: busy,
+            message_sequences: None,
+            fresh_restart: false,
+        })
         .unwrap();
     assert!(attempt("merger", &merger.id).is_err());
 }
@@ -336,53 +436,110 @@ fn topology_pause_and_node_stop_recover_unlaunched_workers_without_a_phantom_ses
         let temp = tempfile::tempdir().unwrap();
         let repository = crate::fixture::repository(temp.path()).unwrap();
         let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-        runtime.create(Graph {
-            original_goal: "pause".into(),
-            nodes: ["left", "right"].into_iter().map(|name| Node {
-                name: name.into(), task: name.into(),
-            }).collect(), edges: vec![],
-        }, serde_json::from_value(serde_json::json!({
-            "repository": repository, "model": "mock/model", "maxParallel": 2,
-        })).unwrap()).unwrap();
+        runtime
+            .create(
+                Graph {
+                    original_goal: "pause".into(),
+                    nodes: ["left", "right"]
+                        .into_iter()
+                        .map(|name| Node {
+                            name: name.into(),
+                            task: name.into(),
+                        })
+                        .collect(),
+                    edges: vec![],
+                },
+                serde_json::from_value(serde_json::json!({
+                    "repository": repository, "model": "mock/model", "maxParallel": 2,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         runtime.approve().unwrap();
         let jobs = runtime.jobs().unwrap();
         let run_id = runtime.state.run_id.clone();
         let service = Arc::new(Service {
-            runtime: Mutex::new(runtime), driving: AtomicBool::new(true),
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(true),
             drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-            planning: AtomicBool::new(true), extension: temp.path().join("unused.ts"),
+            planning: AtomicBool::new(true),
+            extension: temp.path().join("unused.ts"),
         });
-        let paused = control(if global { "pause" } else { "stop" }.into(),
-            if global { None } else { Some("left".into()) }, None,
-            Some(run_id.clone()), None, None, &service).unwrap();
+        let paused = control(
+            if global { "pause" } else { "stop" }.into(),
+            if global { None } else { Some("left".into()) },
+            None,
+            Some(run_id.clone()),
+            None,
+            None,
+            &service,
+        )
+        .unwrap();
         assert_eq!(paused.paused, global);
-        assert!(!paused.stop_requested, "node/topology pause must not cancel the Planner");
+        assert!(
+            !paused.stop_requested,
+            "node/topology pause must not cancel the Planner"
+        );
         assert!(service.planning.load(Ordering::SeqCst));
-        assert_eq!(paused.execution_stop_requests.len(), if global { 2 } else { 1 });
-        assert!(control("resume".into(), None, None, Some(run_id.clone()), None, None, &service).is_err());
+        assert_eq!(
+            paused.execution_stop_requests.len(),
+            if global { 2 } else { 1 }
+        );
+        assert!(control(
+            "resume".into(),
+            None,
+            None,
+            Some(run_id.clone()),
+            None,
+            None,
+            &service
+        )
+        .is_err());
         {
             let mut runtime = service.runtime.lock().unwrap();
             for job in &jobs {
                 if global || job.execution.node == "left" {
-                    runtime.finish(&job.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+                    runtime
+                        .finish(&job.execution, Err("Pi exited with exit code: 1".into()))
+                        .unwrap();
                 } else {
                     let head = runtime.state.base.clone();
-                    runtime.finish(&job.execution, Ok((head, "completed".into()))).unwrap();
+                    runtime
+                        .finish(&job.execution, Ok((head, "completed".into())))
+                        .unwrap();
                 }
             }
             let view = snapshot_metadata(&runtime.state).unwrap();
             assert_eq!(view["nodes"]["left"]["status"], "paused");
-            assert_eq!(view["nodes"]["right"]["status"], if global { "paused" } else { "completed" });
+            assert_eq!(
+                view["nodes"]["right"]["status"],
+                if global { "paused" } else { "completed" }
+            );
         }
-        let resumed = control("resume".into(), None, None, Some(run_id), None, None, &service).unwrap();
+        let resumed = control(
+            "resume".into(),
+            None,
+            None,
+            Some(run_id),
+            None,
+            None,
+            &service,
+        )
+        .unwrap();
         assert!(!resumed.paused);
         assert_eq!(resumed.nodes["left"].status, "waiting");
         let mut runtime = service.runtime.lock().unwrap();
         let retry = runtime.jobs().unwrap();
         assert_eq!(retry.len(), if global { 2 } else { 1 });
         for job in retry {
-            let prior = jobs.iter().find(|prior| prior.execution.node == job.execution.node).unwrap();
-            assert!(!job.continuation, "these workers were paused before Pi launched");
+            let prior = jobs
+                .iter()
+                .find(|prior| prior.execution.node == job.execution.node)
+                .unwrap();
+            assert!(
+                !job.continuation,
+                "these workers were paused before Pi launched"
+            );
             assert!(job.initial_recovery);
             assert_eq!(job.task, job.execution.node);
             assert_eq!(job.execution.session_id, prior.execution.session_id);
@@ -398,30 +555,60 @@ fn planner_conversation_stop_does_not_pause_running_nodes_and_restart_offers_con
     let repository = crate::fixture::repository(temp.path()).unwrap();
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
-    runtime.create(Graph {
-        original_goal: "keep nodes running".into(),
-        nodes: ["left", "right"].into_iter().map(|name| Node {
-            name: name.into(), task: name.into(),
-        }).collect(),
-        edges: vec![],
-    }, serde_json::from_value(serde_json::json!({
-        "repository": repository, "model": "mock/model", "engine": "fixture",
-        "maxParallel": 2, "maxFeedback": 0,
-    })).unwrap()).unwrap();
+    runtime
+        .create(
+            Graph {
+                original_goal: "keep nodes running".into(),
+                nodes: ["left", "right"]
+                    .into_iter()
+                    .map(|name| Node {
+                        name: name.into(),
+                        task: name.into(),
+                    })
+                    .collect(),
+                edges: vec![],
+            },
+            serde_json::from_value(serde_json::json!({
+                "repository": repository, "model": "mock/model", "engine": "fixture",
+                "maxParallel": 2, "maxFeedback": 0,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     runtime.approve().unwrap();
     assert_eq!(runtime.jobs().unwrap().len(), 2);
     let run_id = runtime.state.run_id.clone();
     let service = Arc::new(Service {
-        runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
         drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-        planning: AtomicBool::new(true), extension: temp.path().join("unused.ts"),
+        planning: AtomicBool::new(true),
+        extension: temp.path().join("unused.ts"),
     });
-    let stopped = control("stop_planner".into(), None, None, Some(run_id.clone()), None, None, &service).unwrap();
-    assert!(!stopped.paused, "stopping the Planner conversation must not pause the Run");
+    let stopped = control(
+        "stop_planner".into(),
+        None,
+        None,
+        Some(run_id.clone()),
+        None,
+        None,
+        &service,
+    )
+    .unwrap();
+    assert!(
+        !stopped.paused,
+        "stopping the Planner conversation must not pause the Run"
+    );
     assert!(!stopped.stop_requested, "it is not a run-wide stop");
-    assert!(stopped.execution_stop_requests.is_empty(), "node agents keep running");
+    assert!(
+        stopped.execution_stop_requests.is_empty(),
+        "node agents keep running"
+    );
     assert!(stopped.nodes.values().all(|node| node.status == "running"));
-    assert!(service.planning.load(Ordering::SeqCst), "the owning Planner turn observes cancellation and clears its own flag");
+    assert!(
+        service.planning.load(Ordering::SeqCst),
+        "the owning Planner turn observes cancellation and clears its own flag"
+    );
     crate::process_control::clear_owner_stop(&crate::process_control::planning_owner(&run_id));
     drop(service);
 
@@ -431,9 +618,20 @@ fn planner_conversation_stop_does_not_pause_running_nodes_and_restart_offers_con
     let reopened = Runtime::open(&root).unwrap();
     assert_eq!(reopened.state.run_id, run_id);
     assert!(reopened.state.paused);
-    assert!(reopened.state.can_resume(), "restart keeps Continue available");
-    assert!(reopened.state.nodes.values().all(|node| node.status == "failed"));
-    CANCELLED_PLANNING.get_or_init(Default::default).lock().unwrap().remove(&run_id);
+    assert!(
+        reopened.state.can_resume(),
+        "restart keeps Continue available"
+    );
+    assert!(reopened
+        .state
+        .nodes
+        .values()
+        .all(|node| node.status == "failed"));
+    CANCELLED_PLANNING
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(&run_id);
 }
 
 #[cfg(feature = "fixture")]
@@ -444,27 +642,48 @@ fn failed_node_instruction_control_starts_a_new_running_execution() {
         let root = temp.path().join("runtime");
         let repository = crate::fixture::repository(temp.path()).unwrap();
         let mut runtime = Runtime::open(&root).unwrap();
-        runtime.create(Graph {
-            original_goal: "test".into(), nodes: vec![Node {
-                name: "task".into(), task: "test".into(),
-            }], edges: vec![],
-        }, serde_json::from_value(serde_json::json!({
-            "repository": repository, "model": "mock/model", "engine": "fixture",
-            "maxParallel": 1, "maxFeedback": 0,
-        })).unwrap()).unwrap();
+        runtime
+            .create(
+                Graph {
+                    original_goal: "test".into(),
+                    nodes: vec![Node {
+                        name: "task".into(),
+                        task: "test".into(),
+                    }],
+                    edges: vec![],
+                },
+                serde_json::from_value(serde_json::json!({
+                    "repository": repository, "model": "mock/model", "engine": "fixture",
+                    "maxParallel": 1, "maxFeedback": 0,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         runtime.set_route(route).unwrap();
         runtime.approve().unwrap();
         let failed = runtime.jobs().unwrap().remove(0);
-        runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
+        runtime
+            .finish(&failed.execution, Err("Provider failed".into()))
+            .unwrap();
         runtime.jobs().unwrap();
         let run_id = runtime.state.run_id.clone();
         let service = Arc::new(Service {
-            runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(false),
             drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-            planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
         });
-        let snapshot = control("intervene".into(), Some("task".into()), Some("try again".into()),
-            Some(run_id), None, None, &service).unwrap();
+        let snapshot = control(
+            "intervene".into(),
+            Some("task".into()),
+            Some("try again".into()),
+            Some(run_id),
+            None,
+            None,
+            &service,
+        )
+        .unwrap();
         assert_eq!(snapshot.phase, "running");
         assert_eq!(snapshot.nodes["task"].error, None);
         // A fixture retry still pays full worktree/publication overhead, which
@@ -486,7 +705,10 @@ fn failed_node_instruction_control_starts_a_new_running_execution() {
             thread::sleep(std::time::Duration::from_millis(10));
         }
         while service.driving.load(Ordering::SeqCst) {
-            assert!(std::time::Instant::now() < deadline, "retry driver did not settle");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "retry driver did not settle"
+            );
             thread::sleep(std::time::Duration::from_millis(20));
         }
         let runtime = service.runtime.lock().unwrap();
@@ -514,19 +736,32 @@ fn edit_planner_api_branches_the_same_run_and_keeps_the_previous_turn() {
     fs::create_dir_all(&session).unwrap();
     let private = temp.path().join("private-planner-workspace");
     fs::create_dir_all(&private).unwrap();
-    fs::write(root.join("planning").join(&id).join("planner-workspace"), private.to_string_lossy().as_bytes()).unwrap();
+    fs::write(
+        root.join("planning").join(&id).join("planner-workspace"),
+        private.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
     let path = session.join(format!("session_{id}.jsonl"));
-    fs::write(&path, [
-        serde_json::json!({"type":"session", "id":id, "cwd":private}),
-        serde_json::json!({"type":"message", "id":"first", "parentId":null,
+    fs::write(
+        &path,
+        [
+            serde_json::json!({"type":"session", "id":id, "cwd":private}),
+            serde_json::json!({"type":"message", "id":"first", "parentId":null,
           "message":{"role":"user", "content":"User query:\n\noriginal", "timestamp":1}}),
-        serde_json::json!({"type":"message", "id":"answer", "parentId":"first",
+            serde_json::json!({"type":"message", "id":"answer", "parentId":"first",
           "message":{"role":"assistant", "content":[]}}),
-    ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+        ]
+        .iter()
+        .map(|entry| format!("{entry}\n"))
+        .collect::<String>(),
+    )
+    .unwrap();
     let service = Arc::new(Service {
-        runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
         drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
     });
     let result = dispatch(&service, "edit_planner", serde_json::json!({
         "runId":run_id, "oldText":"original", "instruction":"replacement", "compact":true, "detail":"metadata",
@@ -535,13 +770,19 @@ fn edit_planner_api_branches_the_same_run_and_keeps_the_previous_turn() {
     assert_eq!(result["graph"]["originalGoal"], "replacement");
     assert!(fs::read_to_string(&path).unwrap().contains("grapher-edit"));
     assert!(fs::read_to_string(&path).unwrap().contains("User query:"));
-    assert_eq!(result["events"].as_array().unwrap().last().unwrap()["type"], "planner_conversation_edited");
+    assert_eq!(
+        result["events"].as_array().unwrap().last().unwrap()["type"],
+        "planner_conversation_edited"
+    );
     drop(service);
     let restored = Runtime::open(&root).unwrap();
     assert_eq!(restored.state.run_id, run_id);
     assert_eq!(restored.state.graph.original_goal, "replacement");
-    assert!(restored.state.events.iter().any(|event|
-        matches!(event.kind, EventKind::PlannerConversationEdited { .. })));
+    assert!(restored
+        .state
+        .events
+        .iter()
+        .any(|event| matches!(event.kind, EventKind::PlannerConversationEdited { .. })));
 }
 
 #[cfg(feature = "fixture")]
@@ -553,53 +794,82 @@ fn edit_planner_api_branches_a_first_turn_that_never_committed_a_graph() {
     let id = Uuid::new_v4().to_string();
     let run_id = Uuid::new_v4().to_string();
     let mut runtime = Runtime::open(&root).unwrap();
-    runtime.state = Snapshot { run_id: run_id.clone(), ..Default::default() };
+    runtime.state = Snapshot {
+        run_id: run_id.clone(),
+        ..Default::default()
+    };
     let config = serde_json::from_value(serde_json::json!({
         "repository": repository, "model": "mock/model", "engine": "fixture", "maxParallel": 1, "maxFeedback": 0,
     })).unwrap();
-    runtime.emit(EventKind::PlanningStarted {
-        goal: "original".into(),
-        config,
-        planning: PlanningSummary {
-            planning_id: id.clone(), status: Some("running".into()),
-            plan_type: Some("graph".into()), goal: Some("original".into()),
-            run_id: Some(run_id.clone()), ..Default::default()
-        },
-        plan_type: Some("graph".into()),
-    }).unwrap();
+    runtime
+        .emit(EventKind::PlanningStarted {
+            goal: "original".into(),
+            config,
+            planning: PlanningSummary {
+                planning_id: id.clone(),
+                status: Some("running".into()),
+                plan_type: Some("graph".into()),
+                goal: Some("original".into()),
+                run_id: Some(run_id.clone()),
+                ..Default::default()
+            },
+            plan_type: Some("graph".into()),
+        })
+        .unwrap();
     let attempt = root.join("planning").join(&id);
     let session = attempt.join("planner-session");
     fs::create_dir_all(&session).unwrap();
     let private = temp.path().join("private-planner-workspace");
     fs::create_dir_all(&private).unwrap();
-    fs::write(attempt.join("planner-workspace"), private.to_string_lossy().as_bytes()).unwrap();
+    fs::write(
+        attempt.join("planner-workspace"),
+        private.to_string_lossy().as_bytes(),
+    )
+    .unwrap();
     let path = session.join(format!("session_{id}.jsonl"));
-    fs::write(&path, [
-        serde_json::json!({"type":"session", "id":id, "cwd":private}),
-        serde_json::json!({"type":"message", "id":"first", "parentId":null,
+    fs::write(
+        &path,
+        [
+            serde_json::json!({"type":"session", "id":id, "cwd":private}),
+            serde_json::json!({"type":"message", "id":"first", "parentId":null,
           "message":{"role":"user", "content":"original", "timestamp":1}}),
-        serde_json::json!({"type":"message", "id":"answer", "parentId":"first",
+            serde_json::json!({"type":"message", "id":"answer", "parentId":"first",
           "message":{"role":"assistant", "content":[]}}),
-    ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
-    runtime.emit(EventKind::PlanningFailed {
-        planning: PlanningSummary {
-            planning_id: id.clone(), status: Some("failed".into()),
-            error: Some("Planning was stopped for this Run".into()),
-            plan_type: Some("graph".into()), goal: Some("original".into()),
-            run_id: Some(run_id.clone()), ..Default::default()
-        },
-    }).unwrap();
+        ]
+        .iter()
+        .map(|entry| format!("{entry}\n"))
+        .collect::<String>(),
+    )
+    .unwrap();
+    runtime
+        .emit(EventKind::PlanningFailed {
+            planning: PlanningSummary {
+                planning_id: id.clone(),
+                status: Some("failed".into()),
+                error: Some("Planning was stopped for this Run".into()),
+                plan_type: Some("graph".into()),
+                goal: Some("original".into()),
+                run_id: Some(run_id.clone()),
+                ..Default::default()
+            },
+        })
+        .unwrap();
     let service = Arc::new(Service {
-        runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
         drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
     });
     let result = dispatch(&service, "edit_planner", serde_json::json!({
         "runId":run_id, "oldText":"original", "instruction":"replacement", "compact":true, "detail":"metadata",
     })).unwrap();
     assert_eq!(result["graph"]["originalGoal"], "replacement");
     assert!(fs::read_to_string(&path).unwrap().contains("grapher-edit"));
-    assert_eq!(result["events"].as_array().unwrap().last().unwrap()["type"], "planner_conversation_edited");
+    assert_eq!(
+        result["events"].as_array().unwrap().last().unwrap()["type"],
+        "planner_conversation_edited"
+    );
 }
 
 #[cfg(feature = "fixture")]
@@ -609,19 +879,35 @@ fn edit_node_api_branches_the_pi_session_before_driving_a_new_turn() {
     let root = temp.path().join("runtime");
     let repository = crate::fixture::repository(temp.path()).unwrap();
     let mut runtime = Runtime::open(&root).unwrap();
-    runtime.create(Graph {
-        original_goal: "original".into(),
-        nodes: vec![Node { name: "task".into(), task: "original".into() }], edges: vec![],
-    }, serde_json::from_value(serde_json::json!({
-        "repository": repository, "model": "mock/model", "engine": "fixture",
-        "maxParallel": 1, "maxFeedback": 0,
-    })).unwrap()).unwrap();
+    runtime
+        .create(
+            Graph {
+                original_goal: "original".into(),
+                nodes: vec![Node {
+                    name: "task".into(),
+                    task: "original".into(),
+                }],
+                edges: vec![],
+            },
+            serde_json::from_value(serde_json::json!({
+                "repository": repository, "model": "mock/model", "engine": "fixture",
+                "maxParallel": 1, "maxFeedback": 0,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     runtime.set_route("serial").unwrap();
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: job.execution.id.clone(), head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: job.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     runtime.jobs().unwrap();
     let run_id = runtime.state.run_id.clone();
     let dir = root.join("sessions").join(&job.execution.id);
@@ -633,20 +919,30 @@ fn edit_node_api_branches_the_pi_session_before_driving_a_new_turn() {
             "message":{"role":"user", "content":"original", "timestamp":job.execution.started_at}}),
     ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
     let service = Arc::new(Service {
-        runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
         drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
     });
-    let reply = dispatch(&service, "edit_node", serde_json::json!({
-        "node":"task", "executionId":job.execution.id, "oldText":"original",
-        "instruction":"replacement", "runId":run_id, "compact":true, "detail":"metadata",
-    })).unwrap();
+    let reply = dispatch(
+        &service,
+        "edit_node",
+        serde_json::json!({
+            "node":"task", "executionId":job.execution.id, "oldText":"original",
+            "instruction":"replacement", "runId":run_id, "compact":true, "detail":"metadata",
+        }),
+    )
+    .unwrap();
     assert_eq!(reply["graph"]["originalGoal"], "replacement");
     assert_eq!(reply["supersededExecutionIds"].as_array().unwrap().len(), 1);
     assert!(fs::read_to_string(&path).unwrap().contains("grapher-edit"));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while service.driving.load(Ordering::SeqCst) {
-        assert!(std::time::Instant::now() < deadline, "edit driver did not settle");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "edit driver did not settle"
+        );
         thread::sleep(std::time::Duration::from_millis(20));
     }
 }
@@ -728,9 +1024,12 @@ fn buffered_output_flushes_before_finish_and_replays() {
         before: "".into(),
         workspace_lineage: vec![],
         after: None,
-        input: None, result: None,
+        input: None,
+        result: None,
         status: "running".into(),
-        output: String::new(), output_bytes: 0, pid: None,
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
         started_at: now(),
         completed_at: None,
         metrics: None,
@@ -757,7 +1056,9 @@ fn buffered_output_flushes_before_finish_and_replays() {
         runtime
             .emit(EventKind::Started {
                 execution: execution.clone(),
-                message_sequences: None, fresh_restart: false })
+                message_sequences: None,
+                fresh_restart: false,
+            })
             .unwrap();
     }
     let (tx, rx) = std::sync::mpsc::sync_channel(256);
@@ -822,7 +1123,10 @@ fn buffered_output_flushes_before_finish_and_replays() {
         replay.executions[0].output,
         runtime.state.executions[0].output
     );
-    let page = runtime.store.execution_log_page(&runtime.state.run_id, &id, 0, usize::MAX).unwrap();
+    let page = runtime
+        .store
+        .execution_log_page(&runtime.state.run_id, &id, 0, usize::MAX)
+        .unwrap();
     assert!(replay.executions[0].output.is_empty());
     assert!(page.content.contains(&"x".repeat(800)));
     assert!(page.content.contains("Final response"));
@@ -847,7 +1151,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
     let config = Config {
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -962,7 +1267,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     )
     .unwrap();
     let config = Config {
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -985,17 +1291,17 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let settle = |service: &Arc<Service>| {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
         loop {
-            let phase = service
-                .runtime
-                .lock()
-                .unwrap()
-                .state
-                .phase
-                .clone();
-            if matches!(phase.as_str(), "completed" | "needs_attention" | "publication_failed") {
+            let phase = service.runtime.lock().unwrap().state.phase.clone();
+            if matches!(
+                phase.as_str(),
+                "completed" | "needs_attention" | "publication_failed"
+            ) {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "Run did not settle: {phase}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Run did not settle: {phase}"
+            );
             thread::sleep(std::time::Duration::from_millis(20));
         }
         while service.driving.load(Ordering::SeqCst) {
@@ -1089,9 +1395,18 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
             .count(),
         1
     );
-    assert_eq!(crate::workspace::git(&repo, &["rev-list", "--count", "HEAD"]).unwrap(), "1");
-    assert!(crate::workspace::git(&repo, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
-    assert!(!crate::workspace::git(&repo, &["status", "--porcelain"]).unwrap().is_empty());
+    assert_eq!(
+        crate::workspace::git(&repo, &["rev-list", "--count", "HEAD"]).unwrap(),
+        "1"
+    );
+    assert!(
+        crate::workspace::git(&repo, &["diff", "--cached", "--name-only"])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!crate::workspace::git(&repo, &["status", "--porcelain"])
+        .unwrap()
+        .is_empty());
     let trace = fs::read_to_string(temp.path().join("session-trace.txt")).unwrap();
     let lines: Vec<_> = trace.lines().collect();
     assert_eq!(lines.len(), 2, "{trace}");
@@ -1221,7 +1536,8 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
                 max_feedback: 1,
                 auto_approve: false,
                 role_models: Default::default(),
-                post_task_review: false, planner_write_tools: true,
+                post_task_review: false,
+                planner_write_tools: true,
             },
         )
         .unwrap();
@@ -1235,9 +1551,12 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
     fs::create_dir_all(&expected).unwrap();
     fs::write(
         expected.join("turns.jsonl"),
-        format!("{}\n", serde_json::json!({
-            "type": "session", "id": runtime.state.run_id, "cwd": repo,
-        })),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session", "id": runtime.state.run_id, "cwd": repo,
+            })
+        ),
     )
     .unwrap();
     assert_eq!(
@@ -1259,11 +1578,26 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
     snapshot.graph = Graph {
         original_goal: "test goal".into(),
         nodes: vec![
-            Node { name: "completed_task".into(), task: "finished task".into() },
-            Node { name: "paused_task".into(), task: "manually stopped task".into() },
-            Node { name: "app_interrupted_task".into(), task: "interrupted task".into() },
-            Node { name: "failed_task".into(), task: "broken task".into() },
-            Node { name: "waiting_task".into(), task: "pending task".into() },
+            Node {
+                name: "completed_task".into(),
+                task: "finished task".into(),
+            },
+            Node {
+                name: "paused_task".into(),
+                task: "manually stopped task".into(),
+            },
+            Node {
+                name: "app_interrupted_task".into(),
+                task: "interrupted task".into(),
+            },
+            Node {
+                name: "failed_task".into(),
+                task: "broken task".into(),
+            },
+            Node {
+                name: "waiting_task".into(),
+                task: "pending task".into(),
+            },
         ],
         edges: vec![],
     };
@@ -1277,18 +1611,24 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
 
     let mut interrupted_node = NodeState::default();
     interrupted_node.status = "failed".into();
-    interrupted_node.error = Some("Application stopped during this execution. Inspect and rerun.".into());
+    interrupted_node.error =
+        Some("Application stopped during this execution. Inspect and rerun.".into());
 
     let mut failed_node = NodeState::default();
     failed_node.status = "failed".into();
-    failed_node.error = Some("TypeError: unsupported operand type(s)\nadditional traceback details".into());
+    failed_node.error =
+        Some("TypeError: unsupported operand type(s)\nadditional traceback details".into());
 
     let mut waiting_node = NodeState::default();
     waiting_node.status = "waiting".into();
 
-    snapshot.nodes.insert("completed_task".into(), completed_node);
+    snapshot
+        .nodes
+        .insert("completed_task".into(), completed_node);
     snapshot.nodes.insert("paused_task".into(), paused_node);
-    snapshot.nodes.insert("app_interrupted_task".into(), interrupted_node);
+    snapshot
+        .nodes
+        .insert("app_interrupted_task".into(), interrupted_node);
     snapshot.nodes.insert("failed_task".into(), failed_node);
     snapshot.nodes.insert("waiting_task".into(), waiting_node);
 
@@ -1319,15 +1659,19 @@ fn planner_node_status_distinguishes_user_paused_and_failed_nodes() {
     assert!(status_text.contains("- completed_task: completed\n"));
     assert!(status_text.contains("- paused_task: paused (manually paused by user)\n"));
     assert!(status_text.contains("- app_interrupted_task: paused (manually paused by user)\n"));
-    assert!(status_text.contains("- failed_task: failed (error: TypeError: unsupported operand type(s))\n"));
+    assert!(status_text
+        .contains("- failed_task: failed (error: TypeError: unsupported operand type(s))\n"));
     assert!(status_text.contains("- waiting_task: waiting\n"));
 
     // Verify planner_followup_prompt carries the distinguished status
     let followup = planner_followup_prompt("Please replan", Some("test-run"), &snapshot);
-    assert!(followup.starts_with("You are now at source's workspace.\nCurrent graph node status:\n"));
+    assert!(
+        followup.starts_with("You are now at source's workspace.\nCurrent graph node status:\n")
+    );
     assert!(followup.contains("- completed_task: completed\n"));
     assert!(followup.contains("- paused_task: paused (manually paused by user)\n"));
-    assert!(followup.contains("- failed_task: failed (error: TypeError: unsupported operand type(s))\n"));
+    assert!(followup
+        .contains("- failed_task: failed (error: TypeError: unsupported operand type(s))\n"));
     assert!(followup.ends_with("\nPlease replan"));
 }
 
@@ -1341,8 +1685,14 @@ fn planner_followup_context_is_omitted_when_there_is_no_active_work() {
     snapshot.graph = Graph {
         original_goal: "test goal".into(),
         nodes: vec![
-            Node { name: "first".into(), task: "first".into() },
-            Node { name: "second".into(), task: "second".into() },
+            Node {
+                name: "first".into(),
+                task: "first".into(),
+            },
+            Node {
+                name: "second".into(),
+                task: "second".into(),
+            },
         ],
         edges: vec![],
     };
@@ -1368,28 +1718,14 @@ fn planner_followup_context_is_omitted_when_there_is_no_active_work() {
     snapshot.phase = "awaiting_approval".into();
     snapshot.nodes.get_mut("second").unwrap().status = "waiting".into();
     assert_eq!(
-        planner_followup_prompt_for_workspace(
-            "Draft feedback",
-            None,
-            &snapshot,
-            true,
-            true,
-            None,
-        ),
+        planner_followup_prompt_for_workspace("Draft feedback", None, &snapshot, true, true, None,),
         "Draft feedback"
     );
 
     // Legacy snapshots may still carry approval while showing a draft phase.
     snapshot.approved = true;
     assert_eq!(
-        planner_followup_prompt_for_workspace(
-            "Still a draft",
-            None,
-            &snapshot,
-            false,
-            false,
-            None,
-        ),
+        planner_followup_prompt_for_workspace("Still a draft", None, &snapshot, false, false, None,),
         "Still a draft"
     );
 
@@ -1414,14 +1750,23 @@ fn planner_node_status_uses_completed_after_loading_a_legacy_snapshot() {
     snapshot.run_id = "legacy-planner-status".into();
     snapshot.approved = true;
     snapshot.plan_type = Some("graph".into());
-    snapshot.graph.nodes.push(Node { name: "task".into(), task: "Retain the result".into() });
-    snapshot.graph.nodes.push(Node { name: "pending".into(), task: "Keep working".into() });
+    snapshot.graph.nodes.push(Node {
+        name: "task".into(),
+        task: "Retain the result".into(),
+    });
+    snapshot.graph.nodes.push(Node {
+        name: "pending".into(),
+        task: "Keep working".into(),
+    });
     snapshot.nodes.insert("task".into(), NodeState::default());
-    snapshot.nodes.insert("pending".into(), NodeState::default());
+    snapshot
+        .nodes
+        .insert("pending".into(), NodeState::default());
     let mut saved = serde_json::to_value(snapshot).unwrap();
     saved["nodes"]["task"]["status"] = "done".into();
     let restored: Snapshot = serde_json::from_value(saved).unwrap();
-    let followup = planner_followup_prompt("Please replan", Some("legacy-planner-status"), &restored);
+    let followup =
+        planner_followup_prompt("Please replan", Some("legacy-planner-status"), &restored);
     assert!(followup.contains("- task: completed\n"));
     assert!(!followup.contains("- task: done\n"));
     assert!(followup.contains("- pending: waiting\n"));
@@ -1435,9 +1780,10 @@ fn user_stopped_node_is_recognized_as_interrupted_and_recoverable() {
     snapshot.phase = "running".into();
     snapshot.graph = Graph {
         original_goal: "test goal".into(),
-        nodes: vec![
-            Node { name: "stopped_worker".into(), task: "do work".into() },
-        ],
+        nodes: vec![Node {
+            name: "stopped_worker".into(),
+            task: "do work".into(),
+        }],
         edges: vec![],
     };
 
@@ -1467,7 +1813,10 @@ fn user_stopped_node_is_recognized_as_interrupted_and_recoverable() {
         metrics: None,
     });
 
-    assert_eq!(snapshot.interrupted_nodes(), vec!["stopped_worker".to_string()]);
+    assert_eq!(
+        snapshot.interrupted_nodes(),
+        vec!["stopped_worker".to_string()]
+    );
     assert!(snapshot.can_resume_interrupted());
     assert!(snapshot.is_node_user_paused("stopped_worker"));
     assert!(!snapshot.is_node_failed("stopped_worker"));
@@ -1503,7 +1852,8 @@ fn legacy_planner_session_keeps_its_original_pi_identity() {
                 max_feedback: 1,
                 auto_approve: false,
                 role_models: Default::default(),
-                post_task_review: false, planner_write_tools: true,
+                post_task_review: false,
+                planner_write_tools: true,
             },
             Some(planning_id.clone()),
             None,
@@ -1518,9 +1868,12 @@ fn legacy_planner_session_keeps_its_original_pi_identity() {
     fs::create_dir_all(&session).unwrap();
     fs::write(
         session.join("legacy.jsonl"),
-        format!("{}\n", serde_json::json!({
-            "type": "session", "id": legacy, "cwd": repo,
-        })),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session", "id": legacy, "cwd": repo,
+            })
+        ),
     )
     .unwrap();
     let attempt = root.join("planning").join(Uuid::new_v4().to_string());
@@ -1563,7 +1916,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 "#).unwrap();
     let root = temp.path().join("runtime");
     let config = Config {
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -1671,7 +2025,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_feedback: 1,
         auto_approve: false,
         role_models: Default::default(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime
@@ -1703,10 +2058,19 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let running = runtime.jobs().unwrap().remove(0).execution;
     // An active writer already has a prepared directory; Planner must be able
     // to launch there without draining it.
-    crate::workspace::prepare(&repo, std::path::Path::new(&running.worktree), &running.before, &[]).unwrap();
-    runtime.emit(EventKind::Prepared {
-        execution_id: running.id.clone(), head: running.before.clone(),
-    }).unwrap();
+    crate::workspace::prepare(
+        &repo,
+        std::path::Path::new(&running.worktree),
+        &running.before,
+        &[],
+    )
+    .unwrap();
+    runtime
+        .emit(EventKind::Prepared {
+            execution_id: running.id.clone(),
+            head: running.before.clone(),
+        })
+        .unwrap();
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),
@@ -1732,11 +2096,25 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     // The running frontier is the latest workspace: Planner starts directly
     // in it without waiting, and the writer remains active.
     assert_eq!(snapshot.nodes["keep"].status, "running");
-    assert_eq!(snapshot.executions.iter().find(|exec| exec.id == running.id).unwrap().status, "running");
+    assert_eq!(
+        snapshot
+            .executions
+            .iter()
+            .find(|exec| exec.id == running.id)
+            .unwrap()
+            .status,
+        "running"
+    );
     assert_eq!(snapshot.nodes["pending"].status, "waiting");
     let planning = snapshot.planning.as_ref().unwrap();
-    assert_eq!(planning.workspace_execution_id.as_deref(), Some(running.id.as_str()));
-    assert_eq!(planning.worktree.as_deref(), Some(running.worktree.as_str()));
+    assert_eq!(
+        planning.workspace_execution_id.as_deref(),
+        Some(running.id.as_str())
+    );
+    assert_eq!(
+        planning.worktree.as_deref(),
+        Some(running.worktree.as_str())
+    );
     assert_eq!(
         snapshot
             .graph
@@ -1771,7 +2149,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_feedback: 1,
         auto_approve: false,
         role_models: Default::default(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime
@@ -1796,11 +2175,19 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let jobs = runtime.jobs().unwrap();
     // Pretend the driver owns already-started jobs in prepared directories.
     for job in &jobs {
-        crate::workspace::prepare(&repo, std::path::Path::new(&job.execution.worktree),
-            &job.execution.before, &[]).unwrap();
-        runtime.emit(EventKind::Prepared {
-            execution_id: job.execution.id.clone(), head: job.execution.before.clone(),
-        }).unwrap();
+        crate::workspace::prepare(
+            &repo,
+            std::path::Path::new(&job.execution.worktree),
+            &job.execution.before,
+            &[],
+        )
+        .unwrap();
+        runtime
+            .emit(EventKind::Prepared {
+                execution_id: job.execution.id.clone(),
+                head: job.execution.before.clone(),
+            })
+            .unwrap();
     }
     // The latest running writer is used directly; Planner does not drain it.
     let service = Arc::new(Service {
@@ -1827,10 +2214,20 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     assert_eq!(snapshot.nodes["other"].status, "running");
     assert_eq!(snapshot.nodes["added"].status, "waiting");
     let planning = snapshot.planning.as_ref().unwrap();
-    let selected = planning.workspace_execution_id.as_deref().expect("a running workspace is selected");
-    let selected_execution = snapshot.executions.iter().find(|execution| execution.id == selected).unwrap();
+    let selected = planning
+        .workspace_execution_id
+        .as_deref()
+        .expect("a running workspace is selected");
+    let selected_execution = snapshot
+        .executions
+        .iter()
+        .find(|execution| execution.id == selected)
+        .unwrap();
     assert_eq!(selected_execution.status, "running");
-    assert_eq!(planning.worktree.as_deref(), Some(selected_execution.worktree.as_str()));
+    assert_eq!(
+        planning.worktree.as_deref(),
+        Some(selected_execution.worktree.as_str())
+    );
 }
 
 #[cfg(feature = "fixture")]
@@ -1844,7 +2241,8 @@ printf '%s' '{"originalGoal":"test","nodes":[{"name":"work","task":"work"}],"edg
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
 "#).unwrap();
     let config = Config {
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -1922,7 +2320,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
     let config = Config {
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -2028,7 +2427,8 @@ fn manual_graph_edits_after_reject_create_approvable_graph_drafts() {
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
         pi_args: vec![],
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         model: "mock/model".into(),
         thinking_level: "medium".into(),
         max_parallel: 2,
@@ -2133,18 +2533,38 @@ esac
     let root = temp.path().join("runtime");
     let service = Arc::new(Service {
         runtime: Mutex::new(Runtime::open(&root).unwrap()),
-        driving: AtomicBool::new(false), drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
     });
     let config = Config {
         environment: None,
-        repository: repo.to_string_lossy().into(), engine: "pi".into(),
-        pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-        model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
-        max_parallel: 1, max_feedback: 0, auto_approve: false, post_task_review: false, planner_write_tools: true,
+        repository: repo.to_string_lossy().into(),
+        engine: "pi".into(),
+        pi_command: "/bin/sh".into(),
+        pi_args: vec![script.to_string_lossy().into()],
+        model: "mock/model".into(),
+        role_models: Default::default(),
+        thinking_level: "off".into(),
+        max_parallel: 1,
+        max_feedback: 0,
+        auto_approve: false,
+        post_task_review: false,
+        planner_write_tools: true,
     };
-    let snapshot = plan_goal_internal("test".into(), config, None, None, None, &service,
-        |_| {}, |_| {}, |_| {}).unwrap();
+    let snapshot = plan_goal_internal(
+        "test".into(),
+        config,
+        None,
+        None,
+        None,
+        &service,
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .unwrap();
     assert_eq!(snapshot.phase, "awaiting_approval");
     assert!(snapshot.executions.is_empty());
     let canonical = repo.canonicalize().unwrap();
@@ -2152,11 +2572,18 @@ esac
         let cwd = fs::read_to_string(repo.join(format!("{role}-cwd.txt"))).unwrap();
         assert_eq!(PathBuf::from(cwd).canonicalize().unwrap(), canonical);
     }
-    let attempt = root.join("planning").join(snapshot.planning_id.as_ref().unwrap());
+    let attempt = root
+        .join("planning")
+        .join(snapshot.planning_id.as_ref().unwrap());
     assert!(attempt.join("partition-session").is_dir());
     assert!(attempt.join("planner-session").is_dir());
     assert!(attempt.join("graph.json").is_file());
-    assert_eq!(PathBuf::from(fs::read_to_string(attempt.join("planner-workspace")).unwrap()).canonicalize().unwrap(), canonical);
+    assert_eq!(
+        PathBuf::from(fs::read_to_string(attempt.join("planner-workspace")).unwrap())
+            .canonicalize()
+            .unwrap(),
+        canonical
+    );
     for parent in [temp.path(), repo.parent().unwrap()] {
         assert!(!parent.join(".grapher-workspaces").exists());
         assert!(!parent.join(".grapher-worktrees").exists());
@@ -2192,7 +2619,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         max_feedback: 1,
         auto_approve: false,
         role_models: Default::default(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
     };
     let snapshot = plan_goal_internal(
         "Build two modules".into(),
@@ -2239,7 +2667,8 @@ fn partitioner_failure_persists_history_without_compiling_or_approving_a_run() {
             thinking_level: "medium".into(),
             max_parallel: 4,
             max_feedback: 3,
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             auto_approve: false,
             role_models: Default::default(),
         },
@@ -2327,7 +2756,8 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
         pi_args: vec![script.to_string_lossy().into()],
         model: "mock/model".into(),
         thinking_level: "medium".into(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         max_parallel: 1,
         max_feedback: 0,
         auto_approve: false,
@@ -2403,18 +2833,41 @@ fn legacy_planner_identity_survives_its_already_cleaned_private_checkout() {
     fs::create_dir(&repository).unwrap();
     fs::create_dir(&session).unwrap();
     let id = Uuid::new_v4().to_string();
-    let private = temp.path().join(".grapher-workspaces").join(Uuid::new_v4().to_string()).join(&id);
+    let private = temp
+        .path()
+        .join(".grapher-workspaces")
+        .join(Uuid::new_v4().to_string())
+        .join(&id);
     let history = "{\"type\":\"message\",\"opaque\":\"preserve exactly\"}\n";
-    fs::write(session.join("conversation.jsonl"), format!("{}\n{history}", serde_json::json!({"type":"session","id":id,"cwd":private}))).unwrap();
-    assert_eq!(stored_planner_session_id(&session, &repository, &private, &id).unwrap(), Some(id.clone()));
-    let foreign = temp.path().join(".grapher-workspaces").join(Uuid::new_v4().to_string()).join(&id);
+    fs::write(
+        session.join("conversation.jsonl"),
+        format!(
+            "{}\n{history}",
+            serde_json::json!({"type":"session","id":id,"cwd":private})
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_planner_session_id(&session, &repository, &private, &id).unwrap(),
+        Some(id.clone())
+    );
+    let foreign = temp
+        .path()
+        .join(".grapher-workspaces")
+        .join(Uuid::new_v4().to_string())
+        .join(&id);
     assert!(stored_planner_session_id(&session, &repository, &foreign, &id).is_err());
     rebind_planner_session(&session, &id, &repository).unwrap();
     let text = fs::read_to_string(session.join("conversation.jsonl")).unwrap();
     assert!(text.ends_with(history));
     let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
     assert_eq!(header["id"], id);
-    assert_eq!(PathBuf::from(header["cwd"].as_str().unwrap()).canonicalize().unwrap(), repository.canonicalize().unwrap());
+    assert_eq!(
+        PathBuf::from(header["cwd"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        repository.canonicalize().unwrap()
+    );
 }
 
 #[test]
@@ -2423,25 +2876,52 @@ fn legacy_planner_session_rebinds_only_its_cwd_and_preserves_history() {
     let repository = temp.path().join("source");
     let private = temp.path().join("private");
     let session = temp.path().join("session");
-    for path in [&repository, &private, &session] { fs::create_dir(path).unwrap(); }
+    for path in [&repository, &private, &session] {
+        fs::create_dir(path).unwrap();
+    }
     let id = Uuid::new_v4().to_string();
     let file = session.join(format!("session_{id}.jsonl"));
     let history = "{\"type\":\"message\",\"id\":\"old\",\"message\":{\"role\":\"user\",\"content\":\"历史 中文🚀\"}}\n";
-    fs::write(&file, format!("{}\n{history}", serde_json::json!({ "type": "session", "id": id, "cwd": private }))).unwrap();
-    assert_eq!(stored_planner_session_id(&session, &repository, &private, &id).unwrap(), Some(id.clone()));
+    fs::write(
+        &file,
+        format!(
+            "{}\n{history}",
+            serde_json::json!({ "type": "session", "id": id, "cwd": private })
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_planner_session_id(&session, &repository, &private, &id).unwrap(),
+        Some(id.clone())
+    );
     rebind_planner_session(&session, &id, &repository).unwrap();
     let content = fs::read_to_string(&file).unwrap();
     let (header, tail) = content.split_once('\n').unwrap();
     let header: serde_json::Value = serde_json::from_str(header).unwrap();
     assert_eq!(header["id"], id);
-    assert_eq!(PathBuf::from(header["cwd"].as_str().unwrap()).canonicalize().unwrap(), repository.canonicalize().unwrap());
+    assert_eq!(
+        PathBuf::from(header["cwd"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        repository.canonicalize().unwrap()
+    );
     assert_eq!(tail, history);
     fs::remove_dir(&private).unwrap();
-    assert_eq!(stored_planner_session_id(&session, &repository, &private, &id).unwrap(), Some(id.clone()),
-        "migrated history remains usable after private workspace cleanup");
-    assert_eq!(stored_planner_session_id(&session, &repository, &repository, &id).unwrap(), Some(id.clone()));
+    assert_eq!(
+        stored_planner_session_id(&session, &repository, &private, &id).unwrap(),
+        Some(id.clone()),
+        "migrated history remains usable after private workspace cleanup"
+    );
+    assert_eq!(
+        stored_planner_session_id(&session, &repository, &repository, &id).unwrap(),
+        Some(id.clone())
+    );
     rebind_planner_session(&session, &id, &repository).unwrap();
-    assert_eq!(fs::read_to_string(&file).unwrap(), content, "rebinding is idempotent");
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        content,
+        "rebinding is idempotent"
+    );
 }
 
 #[cfg(feature = "fixture")]
@@ -2461,13 +2941,27 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
         fs::write(&script, "cat >/dev/null\nprintf 'failed revision source' > tracked.txt\nprintf 'new file' > new.txt\nexit 1\n").unwrap();
         let config = Config {
             environment: None,
-            repository: repository.to_string_lossy().into(), engine: "pi".into(),
-            pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-            model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
-            max_parallel: 1, max_feedback: 0, auto_approve: false, post_task_review: false, planner_write_tools: true,
+            repository: repository.to_string_lossy().into(),
+            engine: "pi".into(),
+            pi_command: "/bin/sh".into(),
+            pi_args: vec![script.to_string_lossy().into()],
+            model: "mock/model".into(),
+            role_models: Default::default(),
+            thinking_level: "off".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+            post_task_review: false,
+            planner_write_tools: true,
         };
-        let graph = Graph { original_goal: "original graph".into(),
-            nodes: vec![Node { name: "worker".into(), task: "original task".into() }], edges: vec![] };
+        let graph = Graph {
+            original_goal: "original graph".into(),
+            nodes: vec![Node {
+                name: "worker".into(),
+                task: "original task".into(),
+            }],
+            edges: vec![],
+        };
         let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
         runtime.create(graph.clone(), config.clone()).unwrap();
         runtime.set_route("graph").unwrap();
@@ -2475,11 +2969,25 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
         runtime.pause(true).unwrap(); // Keep the driver out of this snapshot assertion.
         let run_id = runtime.state.run_id.clone();
         let approval = runtime.state.base.clone();
-        let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
-            drive_signal: (Mutex::new(0), std::sync::Condvar::new()), planning: AtomicBool::new(false),
-            extension: temp.path().join("unused.ts") });
-        assert!(plan_goal_internal("revision".into(), config, Some("graph"), None, Some(run_id.clone()),
-            &service, |_| {}, |_| {}, |_| {}).is_err());
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(false),
+            drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("unused.ts"),
+        });
+        assert!(plan_goal_internal(
+            "revision".into(),
+            config,
+            Some("graph"),
+            None,
+            Some(run_id.clone()),
+            &service,
+            |_| {},
+            |_| {},
+            |_| {}
+        )
+        .is_err());
         let mut runtime = service.runtime.lock().unwrap();
         assert_eq!(runtime.state.graph, graph);
         assert_eq!(runtime.state.base, approval);
@@ -2500,11 +3008,27 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
         }
         assert_ne!(job.execution.before, approval);
         let node = std::path::Path::new(&job.execution.worktree);
-        crate::workspace::prepare_with_merger_expected_for_run(&repository, node, &job.execution.before, &[],
-            &job.expected_source_head, Some(&run_id), || Err("unexpected conflict".into())).unwrap();
-        assert_eq!(fs::read_to_string(node.join("tracked.txt")).unwrap(), "failed revision source");
-        assert_eq!(fs::read_to_string(node.join("new.txt")).unwrap(), "new file");
-        if !standard_git { fs::remove_dir_all(crate::workspace::shadow_repo_dir(&repository).unwrap()).unwrap(); }
+        crate::workspace::prepare_with_merger_expected_for_run(
+            &repository,
+            node,
+            &job.execution.before,
+            &[],
+            &job.expected_source_head,
+            Some(&run_id),
+            || Err("unexpected conflict".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(node.join("tracked.txt")).unwrap(),
+            "failed revision source"
+        );
+        assert_eq!(
+            fs::read_to_string(node.join("new.txt")).unwrap(),
+            "new file"
+        );
+        if !standard_git {
+            fs::remove_dir_all(crate::workspace::shadow_repo_dir(&repository).unwrap()).unwrap();
+        }
     }
 }
 
@@ -2539,21 +3063,41 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display(), if fail { "exit 1" } else { ":" })).unwrap();
             let config = Config {
-                post_task_review: false, planner_write_tools: true,
+                post_task_review: false,
+                planner_write_tools: true,
                 environment: None,
-                repository: repository.to_string_lossy().into(), engine: "pi".into(),
-                pi_command: "/bin/sh".into(), pi_args: vec![script.to_string_lossy().into()],
-                model: "mock/model".into(), role_models: Default::default(), thinking_level: "off".into(),
-                max_parallel: 1, max_feedback: 0, auto_approve: false,
+                repository: repository.to_string_lossy().into(),
+                engine: "pi".into(),
+                pi_command: "/bin/sh".into(),
+                pi_args: vec![script.to_string_lossy().into()],
+                model: "mock/model".into(),
+                role_models: Default::default(),
+                thinking_level: "off".into(),
+                max_parallel: 1,
+                max_feedback: 0,
+                auto_approve: false,
             };
             let service = Arc::new(Service {
                 runtime: Mutex::new(Runtime::open(&temp.path().join("runtime")).unwrap()),
-                driving: AtomicBool::new(false), drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-                planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+                driving: AtomicBool::new(false),
+                drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+                planning: AtomicBool::new(false),
+                extension: temp.path().join("unused.ts"),
             });
             let worker_service = service.clone();
-            let worker = thread::spawn(move || plan_goal_internal("test".into(), config, Some("graph"), None, None,
-                &worker_service, |_| {}, |_| {}, |_| {}));
+            let worker = thread::spawn(move || {
+                plan_goal_internal(
+                    "test".into(),
+                    config,
+                    Some("graph"),
+                    None,
+                    None,
+                    &worker_service,
+                    |_| {},
+                    |_| {},
+                    |_| {},
+                )
+            });
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
             while !started.exists() && std::time::Instant::now() < deadline {
                 thread::sleep(std::time::Duration::from_millis(20));
@@ -2564,7 +3108,10 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             fs::write(&release, "go").unwrap();
             let result = worker.join().unwrap();
             assert_eq!(contents.unwrap(), "planner edit");
-            assert_eq!(fs::read_to_string(repository.join("nested/new.txt")).unwrap(), "planner new file");
+            assert_eq!(
+                fs::read_to_string(repository.join("nested/new.txt")).unwrap(),
+                "planner new file"
+            );
             assert!(!repository.join("deleted.txt").exists());
             assert!(!temp.path().join(".grapher-workspaces").exists());
             if fail {
@@ -2581,11 +3128,18 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             }
             let node = std::path::Path::new(&job.execution.worktree);
             crate::workspace::prepare(&repository, node, &job.execution.before, &[]).unwrap();
-            assert_eq!(fs::read_to_string(node.join("tracked.txt")).unwrap(), "planner edit");
-            assert_eq!(fs::read_to_string(node.join("nested/new.txt")).unwrap(), "planner new file");
+            assert_eq!(
+                fs::read_to_string(node.join("tracked.txt")).unwrap(),
+                "planner edit"
+            );
+            assert_eq!(
+                fs::read_to_string(node.join("nested/new.txt")).unwrap(),
+                "planner new file"
+            );
             assert!(!node.join("deleted.txt").exists());
             if !standard_git {
-                fs::remove_dir_all(crate::workspace::shadow_repo_dir(&repository).unwrap()).unwrap();
+                fs::remove_dir_all(crate::workspace::shadow_repo_dir(&repository).unwrap())
+                    .unwrap();
             }
         }
     }
@@ -2619,7 +3173,8 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display(), label, label)).unwrap();
         let config = Config {
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             environment: None,
             repository: repository.to_string_lossy().into(),
             engine: "pi".into(),
@@ -2694,7 +3249,8 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display())).unwrap();
         let config = Config {
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             environment: None,
             repository: repository.to_string_lossy().into(),
             engine: "pi".into(),
@@ -2784,7 +3340,8 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                         edges: vec![],
                     },
                     Config {
-                        post_task_review: false, planner_write_tools: true,
+                        post_task_review: false,
+                        planner_write_tools: true,
                         environment: None,
                         repository: repository.to_string_lossy().into(),
                         engine: "pi".into(),
@@ -3005,7 +3562,8 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 thinking_level: "medium".into(),
                 max_parallel: 4,
                 max_feedback: 2,
-                post_task_review: false, planner_write_tools: true,
+                post_task_review: false,
+                planner_write_tools: true,
                 auto_approve: false,
                 role_models: Default::default(),
             },
@@ -3031,13 +3589,28 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     // The driver is waiting on the slow worker. A new API event must still
     // dispatch the follow-up without waiting for that worker to finish.
     if observed.nodes["after_fast"].status == "completed" {
-        control("intervene".into(), Some("z_fast".into()), Some("again".into()), None, None, None, &service).unwrap();
+        control(
+            "intervene".into(),
+            Some("z_fast".into()),
+            Some("again".into()),
+            None,
+            None,
+            None,
+            &service,
+        )
+        .unwrap();
     }
     let rerun_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let rerun_observed = loop {
         let state = service.runtime.lock().unwrap().state.clone();
-        if state.executions.iter().filter(|e| e.node == "z_fast" && e.status == "completed").count() == 2
-            || std::time::Instant::now() > rerun_deadline {
+        if state
+            .executions
+            .iter()
+            .filter(|e| e.node == "z_fast" && e.status == "completed")
+            .count()
+            == 2
+            || std::time::Instant::now() > rerun_deadline
+        {
             break state;
         }
         thread::sleep(std::time::Duration::from_millis(20));
@@ -3047,7 +3620,14 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     while service.driving.load(Ordering::SeqCst) {
         thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert_eq!(rerun_observed.executions.iter().filter(|e| e.node == "z_fast" && e.status == "completed").count(), 2);
+    assert_eq!(
+        rerun_observed
+            .executions
+            .iter()
+            .filter(|e| e.node == "z_fast" && e.status == "completed")
+            .count(),
+        2
+    );
     assert_eq!(rerun_observed.nodes["a_slow"].status, "running");
     assert_eq!(observed.nodes["z_fast"].status, "completed");
     assert_eq!(observed.nodes["a_slow"].status, "running");
@@ -3091,9 +3671,12 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
         before: String::new(),
         workspace_lineage: vec![],
         after: None,
-        input: None, result: None,
+        input: None,
+        result: None,
         status: "running".into(),
-        output: String::new(), output_bytes: 0, pid: None,
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
         started_at: now(),
         completed_at: None,
         metrics: None,
@@ -3109,14 +3692,21 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
         let mut runtime = service.runtime.lock().unwrap();
         runtime.state.run_id = "large-run".into();
         runtime.state.executions.push(execution);
-        runtime.emit_outputs(vec![EventKind::Output { execution_id: "large".into(), text: text.clone() }]).unwrap();
+        runtime
+            .emit_outputs(vec![EventKind::Output {
+                execution_id: "large".into(),
+                text: text.clone(),
+            }])
+            .unwrap();
         runtime.state.events.push(Event {
             sequence: 1,
             timestamp: now(),
             kind: EventKind::Finished {
                 execution_id: "large".into(),
                 head: "head".into(),
-                output: text.clone(), output_bytes: 0, metrics: None,
+                output: text.clone(),
+                output_bytes: 0,
+                metrics: None,
             },
         });
     }
@@ -3179,13 +3769,15 @@ fn metadata_and_output_pages_preserve_unicode_without_copying_logs_into_polls() 
     let running_page = get_execution_output(
         &serde_json::json!({"runId":"large-run", "executionId":"large", "full":true}),
         &service,
-    ).unwrap();
+    )
+    .unwrap();
     assert!(running_page["content"].as_str().unwrap().len() <= 256 * 1024);
     service.runtime.lock().unwrap().state.executions[0].status = "completed".into();
     let full = get_execution_output(
         &serde_json::json!({"runId":"large-run", "executionId":"large", "full":true}),
         &service,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(full["content"], text);
     assert_eq!(full["complete"], true);
     assert!(get_execution_output(
@@ -3211,8 +3803,18 @@ fn activity_is_reported_without_blocking_on_a_busy_run_lock() {
         extension: temp.path().join("unused.ts"),
     });
     let run = "activity-run";
-    set_activity(run, "prepare-foundation", "workspace_prepare", "foundation_contract");
-    set_activity(run, "prepare-signals", "workspace_prepare", "temporal_signal_design");
+    set_activity(
+        run,
+        "prepare-foundation",
+        "workspace_prepare",
+        "foundation_contract",
+    );
+    set_activity(
+        run,
+        "prepare-signals",
+        "workspace_prepare",
+        "temporal_signal_design",
+    );
     set_activity(run, "approve", "source_capture", "");
     {
         // A long filesystem pass holds the Run mutex while the browser polls.
@@ -3265,7 +3867,11 @@ fn prepare_activity_reports_a_phase_only_when_all_nodes_agree() {
     set_prepare_phase(run, "a", "compose");
     set_prepare_phase(run, "b", "conflict");
     let mixed = run_activity(run);
-    assert_eq!(mixed.len(), 1, "only the two real preparations are reported");
+    assert_eq!(
+        mixed.len(),
+        1,
+        "only the two real preparations are reported"
+    );
     assert_eq!(mixed[0].kind, "workspace_prepare");
     assert_eq!(mixed[0].nodes, vec!["a".to_string(), "b".to_string()]);
     assert!(
@@ -3288,7 +3894,10 @@ fn prepare_activity_reports_a_phase_only_when_all_nodes_agree() {
         .into_iter()
         .find(|entry| entry.kind == "source_capture")
         .unwrap();
-    assert!(serde_json::to_value(&capture).unwrap().get("phase").is_none());
+    assert!(serde_json::to_value(&capture)
+        .unwrap()
+        .get("phase")
+        .is_none());
 
     clear_activity(run, "prepare-a");
     clear_activity(run, "prepare-b");
@@ -3324,8 +3933,16 @@ fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
             if ready(&state) {
                 return state;
             }
-            let nodes: Vec<_> = state.nodes.iter().map(|(name, node)| (name, &node.status)).collect();
-            let executions: Vec<_> = state.executions.iter().map(|e| (&e.node, e.attempt, &e.status)).collect();
+            let nodes: Vec<_> = state
+                .nodes
+                .iter()
+                .map(|(name, node)| (name, &node.status))
+                .collect();
+            let executions: Vec<_> = state
+                .executions
+                .iter()
+                .map(|e| (&e.node, e.attempt, &e.status))
+                .collect();
             assert!(
                 std::time::Instant::now() < deadline,
                 "Timed out waiting for {label}: phase={}, driving={}, nodes={nodes:?}, executions={executions:?}, feedback={:?}",
@@ -3348,16 +3965,27 @@ fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
             }
             if thread::panicking() {
                 let _ = control(
-                    "stop".into(), None, None, Some(self.run_id.clone()), None, None, &self.service,
+                    "stop".into(),
+                    None,
+                    None,
+                    Some(self.run_id.clone()),
+                    None,
+                    None,
+                    &self.service,
                 );
             }
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            while self.service.driving.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            while self.service.driving.load(Ordering::SeqCst)
+                && std::time::Instant::now() < deadline
+            {
                 thread::sleep(std::time::Duration::from_millis(20));
             }
             if self.service.driving.load(Ordering::SeqCst) {
                 crate::engine::terminate_run(&self.run_id);
-                eprintln!("Feedback test cleanup: driver for {} did not settle", self.run_id);
+                eprintln!(
+                    "Feedback test cleanup: driver for {} did not settle",
+                    self.run_id
+                );
             }
         }
     }
@@ -3412,7 +4040,8 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 max_parallel: 4,
                 max_feedback: 1,
                 auto_approve: false,
-                post_task_review: false, planner_write_tools: true,
+                post_task_review: false,
+                planner_write_tools: true,
             },
         )
         .unwrap();
@@ -3434,7 +4063,10 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         &service,
         "completed review with both workers started",
         |state| {
-            state.executions.iter().any(|e| e.node == "review" && e.status == "completed")
+            state
+                .executions
+                .iter()
+                .any(|e| e.node == "review" && e.status == "completed")
                 && slow_started.is_file()
                 && related_started.is_file()
         },
@@ -3447,15 +4079,34 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     let observed = wait_for_state(
         &service,
         "verdict applied after the in-scope worker was stopped",
-        |state| state.feedback_counts.get("review->owner").copied().unwrap_or(0) >= 1,
+        |state| {
+            state
+                .feedback_counts
+                .get("review->owner")
+                .copied()
+                .unwrap_or(0)
+                >= 1
+        },
     );
-    assert!(!release_related.is_file(), "the stopped worker must not need its gate released");
-    assert!(!release.is_file(), "feedback must not require releasing the unrelated sibling");
+    assert!(
+        !release_related.is_file(),
+        "the stopped worker must not need its gate released"
+    );
+    assert!(
+        !release.is_file(),
+        "feedback must not require releasing the unrelated sibling"
+    );
     assert_eq!(observed.nodes["slow"].status, "running");
     assert_eq!(observed.feedback_counts.get("review->owner"), Some(&1));
-    let stopped_related = observed.executions.iter().find(|e| e.node == "related")
+    let stopped_related = observed
+        .executions
+        .iter()
+        .find(|e| e.node == "related")
         .expect("the affected worker was stopped before the verdict applied");
-    assert_eq!(stopped_related.status, "failed", "the in-scope worker is stopped, not drained");
+    assert_eq!(
+        stopped_related.status, "failed",
+        "the in-scope worker is stopped, not drained"
+    );
     assert!(
         !observed.executions.iter().any(|e| e.node == "consumer"),
         "feedback must not expose stale consumers"
@@ -3466,7 +4117,12 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         &service,
         "related re-dispatched after the repair",
         |state| {
-            state.executions.iter().filter(|e| e.node == "related").count() >= 2
+            state
+                .executions
+                .iter()
+                .filter(|e| e.node == "related")
+                .count()
+                >= 2
                 && state.nodes["related"].status == "running"
         },
     );
@@ -3496,26 +4152,58 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             .count(),
         2
     );
-    let relateds: Vec<_> = runtime.state.executions.iter().filter(|execution| execution.node == "related").collect();
-    assert_eq!(relateds.len(), 2, "the stopped worker is recomputed once after the repair");
-    assert_eq!(relateds[0].status, "failed", "the first attempt was stopped by the verdict");
+    let relateds: Vec<_> = runtime
+        .state
+        .executions
+        .iter()
+        .filter(|execution| execution.node == "related")
+        .collect();
+    assert_eq!(
+        relateds.len(),
+        2,
+        "the stopped worker is recomputed once after the repair"
+    );
+    assert_eq!(
+        relateds[0].status, "failed",
+        "the first attempt was stopped by the verdict"
+    );
     assert_eq!(relateds[1].status, "completed");
     assert_eq!(runtime.state.nodes["related"].status, "completed");
-    let consumers: Vec<_> = runtime.state.executions.iter().filter(|execution| execution.node == "consumer").collect();
-    assert_eq!(consumers.len(), 1, "the consumer runs once after feedback is skipped, not on the stale verdict");
+    let consumers: Vec<_> = runtime
+        .state
+        .executions
+        .iter()
+        .filter(|execution| execution.node == "consumer")
+        .collect();
+    assert_eq!(
+        consumers.len(),
+        1,
+        "the consumer runs once after feedback is skipped, not on the stale verdict"
+    );
     assert_eq!(consumers[0].status, "completed");
     assert_eq!(runtime.state.nodes["review"].status, "completed");
     assert_eq!(runtime.state.feedback_counts.get("review->owner"), Some(&1));
     let skipped = runtime.state.events.iter().find(|event| matches!(&event.kind,
         EventKind::FeedbackExhausted { from, to, count: 1, limit: 1, .. } if from == "review" && to == "owner"
     )).expect("exhaustion must be recorded, not accepted or failed");
-    let consumer_started = runtime.state.events.iter().find(|event| matches!(&event.kind,
-        EventKind::Started { execution, .. } if execution.node == "consumer"
-    )).unwrap();
+    let consumer_started = runtime
+        .state
+        .events
+        .iter()
+        .find(|event| {
+            matches!(&event.kind,
+                EventKind::Started { execution, .. } if execution.node == "consumer"
+            )
+        })
+        .unwrap();
     assert!(skipped.sequence < consumer_started.sequence);
     assert_eq!(runtime.state.phase, "completed");
     let input = fs::read_to_string(repository.join("consumer-input.txt")).unwrap();
-    assert_eq!(input.trim_end(), "Work", "the consumer receives only its own task, not upstream feedback or budget warnings");
+    assert_eq!(
+        input.trim_end(),
+        "Work",
+        "the consumer receives only its own task, not upstream feedback or budget warnings"
+    );
 }
 
 #[test]
@@ -3548,7 +4236,11 @@ fn live_planner_metrics_fold_matches_the_whole_log_parse() {
 
 #[test]
 fn planner_turn_progress_publishes_live_session_metrics() {
-    let mut state = Snapshot { run_id: "run".into(), phase: "running".into(), ..Default::default() };
+    let mut state = Snapshot {
+        run_id: "run".into(),
+        phase: "running".into(),
+        ..Default::default()
+    };
     let planning = PlanningSummary {
         planning_id: "plan-1".into(),
         status: Some("running".into()),
@@ -3558,7 +4250,10 @@ fn planner_turn_progress_publishes_live_session_metrics() {
                 model: "m".into(),
                 session_id: Some("sess-1".into()),
                 usage: TokenUsage {
-                    input: 100, output: 10, cache_write: 50, consumed_tokens: 160,
+                    input: 100,
+                    output: 10,
+                    cache_write: 50,
+                    consumed_tokens: 160,
                     ..Default::default()
                 },
                 context_tokens: 500,
@@ -3570,14 +4265,25 @@ fn planner_turn_progress_publishes_live_session_metrics() {
         .collect(),
         ..Default::default()
     };
-    apply(&mut state, &Event {
-        sequence: 1,
-        timestamp: 0,
-        kind: EventKind::PlannerTurnProgress { planning },
-    });
+    apply(
+        &mut state,
+        &Event {
+            sequence: 1,
+            timestamp: 0,
+            kind: EventKind::PlannerTurnProgress { planning },
+        },
+    );
 
-    assert_eq!(state.planning.as_ref().unwrap().roles["planner"].usage.consumed_tokens, 160);
-    let run = state.run_metrics.as_ref().expect("progress must refresh Run metrics");
+    assert_eq!(
+        state.planning.as_ref().unwrap().roles["planner"]
+            .usage
+            .consumed_tokens,
+        160
+    );
+    let run = state
+        .run_metrics
+        .as_ref()
+        .expect("progress must refresh Run metrics");
     assert_eq!(run.session_usage["sess-1"].consumed_tokens, 160);
     assert_eq!(run.session_context["sess-1"].tokens, 500);
     // A progress record is history, not a settled turn: the phase is untouched.
@@ -3622,7 +4328,8 @@ fn planning_metrics_parsing_and_persistence() {
         #[cfg(feature = "fixture")]
         pi_args: Vec::new(),
         model: "test-model".into(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         thinking_level: "medium".into(),
         max_parallel: 4,
         max_feedback: 1,
@@ -3676,7 +4383,10 @@ fn execution_metrics_record_the_model_that_answered_without_a_model_change_event
 {"type":"grapher_process_exited","elapsedMs":1250,"success":true,"timestamp":1726300001250}
 "#;
     let metrics = crate::model::parse_execution_metrics(output, 1726300000000, 1726300001250);
-    assert_eq!(metrics.model.as_deref(), Some("antigravity/gemini-3.8-flash"));
+    assert_eq!(
+        metrics.model.as_deref(),
+        Some("antigravity/gemini-3.8-flash")
+    );
     assert_eq!(metrics.thinking_level.as_deref(), Some("high"));
     assert_eq!(metrics.assistant_messages, 1);
 }
@@ -3709,19 +4419,25 @@ fn completion_keeps_the_prelaunch_model_when_the_transcript_recorded_none() {
             ..Default::default()
         }),
     });
-    apply(&mut state, &Event {
-        sequence: 1,
-        timestamp: 1726300002000,
-        kind: EventKind::Finished {
-            execution_id: "exec-model".into(),
-            head: "head".into(),
-            output: String::new(),
-            output_bytes: 0,
-            metrics: Some(ExecutionMetrics::default()),
+    apply(
+        &mut state,
+        &Event {
+            sequence: 1,
+            timestamp: 1726300002000,
+            kind: EventKind::Finished {
+                execution_id: "exec-model".into(),
+                head: "head".into(),
+                output: String::new(),
+                output_bytes: 0,
+                metrics: Some(ExecutionMetrics::default()),
+            },
         },
-    });
+    );
     let metrics = state.executions[0].metrics.as_ref().unwrap();
-    assert_eq!(metrics.model.as_deref(), Some("antigravity/gemini-3.8-flash"));
+    assert_eq!(
+        metrics.model.as_deref(),
+        Some("antigravity/gemini-3.8-flash")
+    );
     assert_eq!(metrics.thinking_level.as_deref(), Some("high"));
 }
 
@@ -3784,7 +4500,8 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
     };
     runtime
         .create(
@@ -3810,19 +4527,30 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         before: "base-head".into(),
         workspace_lineage: vec![],
         after: None,
-        input: None, result: None,
+        input: None,
+        result: None,
         status: "running".into(),
-        output: String::new(), output_bytes: 0, pid: None,
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
         started_at: 1726300000000,
         completed_at: None,
         metrics: None,
     };
-    runtime.emit(EventKind::Started { execution, message_sequences: None, fresh_restart: false }).unwrap();
+    runtime
+        .emit(EventKind::Started {
+            execution,
+            message_sequences: None,
+            fresh_restart: false,
+        })
+        .unwrap();
     runtime
         .emit(EventKind::Finished {
             execution_id: "exec-1".into(),
             head: "finished-head".into(),
-            output: sample_output.into(), output_bytes: 0, metrics: None,
+            output: sample_output.into(),
+            output_bytes: 0,
+            metrics: None,
         })
         .unwrap();
 
@@ -3866,7 +4594,8 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
     let mut runtime = Runtime::open(temp.path()).unwrap();
     let config = Config {
         environment: None,
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         repository: "/workspace/repo-a".into(),
         #[cfg(feature = "fixture")]
         engine: "fixture".into(),
@@ -4005,7 +4734,8 @@ fn completed_graph_is_published_by_driver() {
         repository: String::new(),
         engine: "fixture".into(),
         pi_command: String::new(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         pi_args: Vec::new(),
         model: String::new(),
         thinking_level: "medium".into(),
@@ -4041,7 +4771,10 @@ fn completed_graph_is_published_by_driver() {
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused-extension.ts"),
     });
-    let fixture = DrivenFixture { service, temp: Some(temp) };
+    let fixture = DrivenFixture {
+        service,
+        temp: Some(temp),
+    };
     let service = &fixture.service;
     drive(service.clone());
     let started = std::time::Instant::now();
@@ -4072,7 +4805,10 @@ fn completed_graph_is_published_by_driver() {
                     state.publication, state.events.last(),
                 );
                 assert!(
-                    !state.executions.iter().any(|execution| execution.status == "failed")
+                    !state
+                        .executions
+                        .iter()
+                        .any(|execution| execution.status == "failed")
                         && state.phase != "publication_failed",
                     "Driver failed before successful publication: {observed}"
                 );
@@ -4085,41 +4821,62 @@ fn completed_graph_is_published_by_driver() {
         }
         let now = std::time::Instant::now();
         assert!(
-            now < stage_deadline && now.duration_since(started) < std::time::Duration::from_secs(90),
+            now < stage_deadline
+                && now.duration_since(started) < std::time::Duration::from_secs(90),
             "Driver stalled in {} after {:.2}s; runtime_busy={}; last observed: {observed}",
             ["node execution", "publication", "driver cleanup"][stage],
-            now.duration_since(started).as_secs_f64(), service.runtime.try_lock().is_err(),
+            now.duration_since(started).as_secs_f64(),
+            service.runtime.try_lock().is_err(),
         );
         thread::sleep(std::time::Duration::from_millis(20));
     }
     let runtime = service.runtime.lock().unwrap();
     assert_eq!(runtime.state.phase, "completed", "{observed}");
     let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
-    assert_eq!(replayed.phase, "completed", "publication must survive event replay");
+    assert_eq!(
+        replayed.phase, "completed",
+        "publication must survive event replay"
+    );
     assert!(
-        replayed.events.iter().any(|event| matches!(event.kind, EventKind::PublicationCompleted { .. })),
+        replayed
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::PublicationCompleted { .. })),
         "completed phase requires durable publication evidence"
     );
     let source = root.join("fixture-repository");
     assert!(source.join("first.md").exists());
     assert!(source.join("last.md").exists());
-    assert_eq!(crate::workspace::git(&source, &["rev-list", "--count", "HEAD"]).unwrap(), "1");
-    assert!(crate::workspace::git(&source, &["diff", "--cached", "--name-only"]).unwrap().is_empty());
-    assert!(crate::workspace::git(&source, &["status", "--porcelain"]).unwrap().contains("first.md"));
+    assert_eq!(
+        crate::workspace::git(&source, &["rev-list", "--count", "HEAD"]).unwrap(),
+        "1"
+    );
+    assert!(
+        crate::workspace::git(&source, &["diff", "--cached", "--name-only"])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(crate::workspace::git(&source, &["status", "--porcelain"])
+        .unwrap()
+        .contains("first.md"));
     drop(runtime);
     // The fixture streams output chunks, then Finished seals the transcript;
     // the redundant chunks must not accumulate in the event store.
     let db = rusqlite::Connection::open(root.join("events.sqlite")).unwrap();
     let chunks: i64 = db
-        .query_row("SELECT COUNT(*) FROM events WHERE kind='output'", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind='output'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(chunks, 0);
     let transcripts: i64 = db
-        .query_row("SELECT COUNT(*) FROM events WHERE kind='finished'", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind='finished'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert!(transcripts >= 2);
 }
@@ -4269,8 +5026,14 @@ fn workspace_attachment_dispatch_preserves_originals() {
     .unwrap();
     assert_eq!(write_res["name"], "hello.txt");
     let uploaded = write_res["path"].as_str().unwrap();
-    assert_eq!(fs::read_to_string(repo.join(uploaded)).unwrap(), "hello world");
-    assert_eq!(fs::read_to_string(repo.join("hello.txt")).unwrap(), "original unsaved work");
+    assert_eq!(
+        fs::read_to_string(repo.join(uploaded)).unwrap(),
+        "hello world"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("hello.txt")).unwrap(),
+        "original unsaved work"
+    );
 
     // A cross-platform basename is isolated below a new attachment ID.
     let traversal_res = dispatch(
@@ -4288,9 +5051,14 @@ fn workspace_attachment_dispatch_preserves_originals() {
     assert!(!temp.path().join("evil.py").exists());
 
     // Deletion accepts only the returned path, not arbitrary project files.
-    assert!(dispatch(&service, "delete_workspace_attachment", serde_json::json!({
-        "repository": repo, "filename": "hello.txt",
-    })).is_err());
+    assert!(dispatch(
+        &service,
+        "delete_workspace_attachment",
+        serde_json::json!({
+            "repository": repo, "filename": "hello.txt",
+        })
+    )
+    .is_err());
     let del_res = dispatch(
         &service,
         "delete_workspace_attachment",
@@ -4302,7 +5070,10 @@ fn workspace_attachment_dispatch_preserves_originals() {
     .unwrap();
     assert_eq!(del_res["success"], true);
     assert!(!repo.join(uploaded).exists());
-    assert_eq!(fs::read_to_string(repo.join("hello.txt")).unwrap(), "original unsaved work");
+    assert_eq!(
+        fs::read_to_string(repo.join("hello.txt")).unwrap(),
+        "original unsaved work"
+    );
 
     // A private node workspace is never edited at upload time: the file is
     // staged for that Run/node scope and delivered when an agent owns it.
@@ -4312,12 +5083,19 @@ fn workspace_attachment_dispatch_preserves_originals() {
     {
         let mut runtime = service.runtime.lock().unwrap();
         runtime.state.run_id = run_id.clone();
-        runtime.state.config = Some(serde_json::from_value(serde_json::json!({
-            "repository": repo, "model": "test/model", "maxParallel": 1,
-        })).unwrap());
-        runtime.state.nodes.insert("node-a".into(), NodeState {
-            status: "running".into(), ..Default::default()
-        });
+        runtime.state.config = Some(
+            serde_json::from_value(serde_json::json!({
+                "repository": repo, "model": "test/model", "maxParallel": 1,
+            }))
+            .unwrap(),
+        );
+        runtime.state.nodes.insert(
+            "node-a".into(),
+            NodeState {
+                status: "running".into(),
+                ..Default::default()
+            },
+        );
         runtime.state.executions.push(Execution {
             id: "exec-1".to_string(),
             node: "node-a".to_string(),
@@ -4366,7 +5144,10 @@ fn workspace_attachment_dispatch_preserves_originals() {
         &node_worktree,
     )
     .unwrap();
-    assert_eq!(fs::read_to_string(node_worktree.join(node_path)).unwrap(), "1,2,3");
+    assert_eq!(
+        fs::read_to_string(node_worktree.join(node_path)).unwrap(),
+        "1,2,3"
+    );
 
     // 5. 定向删除测试
     let node_del_res = dispatch(
@@ -4389,7 +5170,8 @@ fn planning_preflight_checks_model_format() {
     let mut config = Config {
         environment: None,
         repository: "/tmp/fake".into(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         model: "".into(),
         thinking_level: "medium".into(),
         max_parallel: 4,
@@ -4424,7 +5206,8 @@ fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
     let config = Config {
         environment: None,
         repository: "/tmp/fake".into(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         model: "example/test".into(),
         thinking_level: "medium".into(),
         max_parallel: 2,
@@ -4471,8 +5254,12 @@ fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
         }))
     };
     let error = validate_role_model_preflight(
-        PiRole::NodeAgent, &slash_model, &slash_catalog, &unauthenticated_slash,
-    ).unwrap_err();
+        PiRole::NodeAgent,
+        &slash_model,
+        &slash_catalog,
+        &unauthenticated_slash,
+    )
+    .unwrap_err();
     assert!(error.contains("not authenticated"));
     assert!(error.contains(slash_provider));
 
@@ -4500,27 +5287,44 @@ fn saving_node_model_settings_targets_failed_and_unstarted_nodes_only_in_the_req
     });
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": repository, "model": "old/model", "thinkingLevel": "off", "maxParallel": 2
-    })).unwrap();
+    }))
+    .unwrap();
     let make_failed = || {
         let id = Uuid::new_v4().to_string();
         let service = service_for_run(&primary, &id, true).unwrap();
         {
             let mut runtime = service.runtime.lock().unwrap();
-            runtime.emit(EventKind::Created {
-                graph: Graph {
-                    nodes: vec![
-                        Node { name: "task".into(), task: "test".into() },
-                        Node { name: "pending".into(), task: "wait for task".into() },
-                    ],
-                    edges: vec![Edge { from: "task".into(), to: "pending".into(), feedback: false }],
-                    ..Graph::default()
-                },
-                config: config.clone(), planning_id: None, planning: None,
-            }).unwrap();
+            runtime
+                .emit(EventKind::Created {
+                    graph: Graph {
+                        nodes: vec![
+                            Node {
+                                name: "task".into(),
+                                task: "test".into(),
+                            },
+                            Node {
+                                name: "pending".into(),
+                                task: "wait for task".into(),
+                            },
+                        ],
+                        edges: vec![Edge {
+                            from: "task".into(),
+                            to: "pending".into(),
+                            feedback: false,
+                        }],
+                        ..Graph::default()
+                    },
+                    config: config.clone(),
+                    planning_id: None,
+                    planning: None,
+                })
+                .unwrap();
             runtime.set_route("graph").unwrap();
             runtime.approve().unwrap();
             let job = runtime.jobs().unwrap().remove(0);
-            runtime.finish(&job.execution, Err("Provider quota exhausted".into())).unwrap();
+            runtime
+                .finish(&job.execution, Err("Provider quota exhausted".into()))
+                .unwrap();
             runtime.jobs().unwrap();
         }
         (id, service)
@@ -4532,7 +5336,8 @@ fn saving_node_model_settings_targets_failed_and_unstarted_nodes_only_in_the_req
     let mut updated = config.clone();
     updated.role_models = serde_json::from_value(serde_json::json!({
         "nodeAgent": { "model": "new/coder", "thinkingLevel": "high" }
-    })).unwrap();
+    }))
+    .unwrap();
     let body = serde_json::json!({"runId": second_id, "config": updated, "detail": "metadata"});
     let selected = api_service(&primary, "save_config", &body).unwrap();
     assert!(Arc::ptr_eq(&selected, &second));
@@ -4540,30 +5345,62 @@ fn saving_node_model_settings_targets_failed_and_unstarted_nodes_only_in_the_req
     assert_eq!(result["snapshot"]["runId"], second_id);
     assert_eq!(result["snapshot"]["canResume"], true);
     assert_eq!(result["snapshot"]["nodes"]["task"]["status"], "failed");
-    assert_eq!(result["snapshot"]["nodes"]["task"]["modelConfig"]["model"], "new/coder");
+    assert_eq!(
+        result["snapshot"]["nodes"]["task"]["modelConfig"]["model"],
+        "new/coder"
+    );
     assert_eq!(result["snapshot"]["nodes"]["task"]["modelRetry"], true);
     assert_eq!(result["snapshot"]["nodes"]["pending"]["status"], "blocked");
-    assert_eq!(result["snapshot"]["nodes"]["pending"]["modelConfig"]["model"], "new/coder");
+    assert_eq!(
+        result["snapshot"]["nodes"]["pending"]["modelConfig"]["model"],
+        "new/coder"
+    );
     assert_eq!(result["snapshot"]["nodes"]["pending"]["modelRetry"], false);
-    assert_eq!(result["snapshot"]["executions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        result["snapshot"]["executions"].as_array().unwrap().len(),
+        1
+    );
     assert_eq!(result["snapshot"]["config"]["model"], "old/model");
-    assert_eq!(result["snapshot"]["modelConfig"]["roleModels"]["nodeAgent"]["model"], "new/coder");
-    assert!(!second.driving.load(Ordering::SeqCst), "saving is not Continue");
-    assert_eq!(serde_json::to_value(&first.runtime.lock().unwrap().state).unwrap(), first_before);
-    assert_eq!(primary.runtime.lock().unwrap().snapshot_version(), primary_before);
-    let reloaded = dispatch(&selected, "history", serde_json::json!({
-        "runId": second_id, "detail": "metadata"
-    })).unwrap();
-    assert_eq!(reloaded["modelConfig"]["roleModels"]["nodeAgent"]["model"], "new/coder",
-        "a reloaded conversation must project the saved model selection");
+    assert_eq!(
+        result["snapshot"]["modelConfig"]["roleModels"]["nodeAgent"]["model"],
+        "new/coder"
+    );
+    assert!(
+        !second.driving.load(Ordering::SeqCst),
+        "saving is not Continue"
+    );
+    assert_eq!(
+        serde_json::to_value(&first.runtime.lock().unwrap().state).unwrap(),
+        first_before
+    );
+    assert_eq!(
+        primary.runtime.lock().unwrap().snapshot_version(),
+        primary_before
+    );
+    let reloaded = dispatch(
+        &selected,
+        "history",
+        serde_json::json!({
+            "runId": second_id, "detail": "metadata"
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        reloaded["modelConfig"]["roleModels"]["nodeAgent"]["model"], "new/coder",
+        "a reloaded conversation must project the saved model selection"
+    );
     let root = second.runtime.lock().unwrap().root.clone();
     let saved = fs::read(root.join("config.json")).unwrap();
     let saved_defaults: Config = serde_json::from_slice(&saved).unwrap();
-    assert_eq!(saved_defaults.model, "old/model",
-        "a conversation save must not replace the global model defaults");
+    assert_eq!(
+        saved_defaults.model, "old/model",
+        "a conversation save must not replace the global model defaults"
+    );
     let mut mismatched = body;
     mismatched["config"]["repository"] = serde_json::json!(temp.path().join("other"));
-    assert!(dispatch(&selected, "save_config", mismatched).unwrap_err().contains("repository"));
+    assert!(dispatch(&selected, "save_config", mismatched)
+        .unwrap_err()
+        .contains("repository"));
     assert_eq!(fs::read(root.join("config.json")).unwrap(), saved);
 }
 
@@ -4602,7 +5439,8 @@ fn save_config_updates_bootstrap_and_persists() {
         max_parallel: 2,
         max_feedback: 3,
         auto_approve: true,
-        post_task_review: false, planner_write_tools: false,
+        post_task_review: false,
+        planner_write_tools: false,
         #[cfg(feature = "fixture")]
         engine: "pi".into(),
         #[cfg(feature = "fixture")]
@@ -4672,7 +5510,10 @@ fn save_config_updates_bootstrap_and_persists() {
     assert_eq!(saved_disk.model, "openai/gpt-4o");
     assert_eq!(saved_disk.thinking_level, "high");
     assert!(saved_disk.auto_approve);
-    assert!(!saved_disk.planner_write_tools, "Planner tool settings must persist");
+    assert!(
+        !saved_disk.planner_write_tools,
+        "Planner tool settings must persist"
+    );
 
     // 4. Verify new bootstrap reloads the persisted config
     let reloaded = bootstrap(&service, false).unwrap();
@@ -4687,7 +5528,9 @@ fn save_config_updates_bootstrap_and_persists() {
 }
 
 /// A compiled Graph Run waiting for approval, plus its binding and config.
-fn pending_graph_run(auto_approve: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>, Config, String) {
+fn pending_graph_run(
+    auto_approve: bool,
+) -> (tempfile::TempDir, PathBuf, Arc<Service>, Config, String) {
     let temp = tempfile::TempDir::new().unwrap();
     let repository = temp.path().join("repo");
     fs::create_dir_all(&repository).unwrap();
@@ -4701,18 +5544,24 @@ fn pending_graph_run(auto_approve: bool) -> (tempfile::TempDir, PathBuf, Arc<Ser
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": repository, "model": "test/model", "thinkingLevel": "medium",
         "maxParallel": 1, "autoApprove": auto_approve
-    })).unwrap();
+    }))
+    .unwrap();
     let run_id = {
         let mut runtime = service.runtime.lock().unwrap();
-        runtime.emit(EventKind::Created {
-            graph: Graph {
-                nodes: vec![Node { name: "work".into(), task: "work".into() }],
-                ..Graph::default()
-            },
-            config: config.clone(),
-            planning_id: None,
-            planning: None,
-        }).unwrap();
+        runtime
+            .emit(EventKind::Created {
+                graph: Graph {
+                    nodes: vec![Node {
+                        name: "work".into(),
+                        task: "work".into(),
+                    }],
+                    ..Graph::default()
+                },
+                config: config.clone(),
+                planning_id: None,
+                planning: None,
+            })
+            .unwrap();
         runtime.set_route("graph").unwrap();
         assert_eq!(runtime.state.phase, "awaiting_approval");
         assert!(!runtime.state.approved);
@@ -4730,7 +5579,10 @@ fn save_config_enabling_auto_approve_approves_pending_graph() {
     enabled.auto_approve = true;
     let updated = save_config_projection(enabled, Some(run_id), &service, false).unwrap();
     service.driving.store(false, Ordering::SeqCst);
-    assert_eq!(updated.snapshot["approved"], true, "enabling Auto Approve approves the waiting Graph");
+    assert_eq!(
+        updated.snapshot["approved"], true,
+        "enabling Auto Approve approves the waiting Graph"
+    );
     assert_eq!(updated.snapshot["phase"], "running");
     assert!(updated.config.auto_approve);
 }
@@ -4757,7 +5609,10 @@ fn save_config_keeps_the_setting_when_auto_approve_cannot_start_the_run() {
     let mut enabled = config;
     enabled.auto_approve = true;
     let updated = save_config_projection(enabled, Some(run_id), &service, false).unwrap();
-    assert!(updated.config.auto_approve, "the setting is persisted even when approval fails");
+    assert!(
+        updated.config.auto_approve,
+        "the setting is persisted even when approval fails"
+    );
     assert_eq!(updated.snapshot["approved"], false);
     assert_eq!(updated.snapshot["phase"], "awaiting_approval");
 }
@@ -4784,7 +5639,8 @@ fn save_config_while_planning_does_not_require_a_committed_binding() {
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": repository, "model": "test/model", "thinkingLevel": "medium",
         "maxParallel": 1, "autoApprove": true
-    })).unwrap();
+    }))
+    .unwrap();
     let updated = save_config_projection(config, Some(run_id), &service, false).unwrap();
     assert!(updated.config.auto_approve);
     assert_eq!(updated.snapshot["phase"], "planning");
@@ -4816,15 +5672,30 @@ fn independent_role_settings_persist_and_invalid_levels_do_not_replace_saved_con
     let from_disk: Config = serde_json::from_slice(&saved).unwrap();
     assert_eq!(from_disk.role_models, config.role_models);
     let mut invalid = config.clone();
-    invalid.role_models.get_mut("planner").unwrap().thinking_level = Some("invalid".into());
-    assert!(save_config(invalid, &service).err().unwrap().contains("planner thinking level"));
+    invalid
+        .role_models
+        .get_mut("planner")
+        .unwrap()
+        .thinking_level = Some("invalid".into());
+    assert!(save_config(invalid, &service)
+        .err()
+        .unwrap()
+        .contains("planner thinking level"));
     assert_eq!(fs::read(temp.path().join("config.json")).unwrap(), saved);
 
     let mut runtime = service.runtime.lock().unwrap();
-    runtime.create(Graph {
-        nodes: vec![Node { name: "task".into(), task: "test".into() }],
-        ..Graph::default()
-    }, config.clone()).unwrap();
+    runtime
+        .create(
+            Graph {
+                nodes: vec![Node {
+                    name: "task".into(),
+                    task: "test".into(),
+                }],
+                ..Graph::default()
+            },
+            config.clone(),
+        )
+        .unwrap();
     let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
     assert_eq!(replayed.config.unwrap().role_models, config.role_models);
 }
@@ -4834,7 +5705,8 @@ fn explicit_node_model_is_checked_even_in_serial_preflight() {
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": "/tmp/fake", "model": "example/default", "maxParallel": 1,
         "roleModels": {"nodeAgent": {"model": "missing-provider", "thinkingLevel": "off"}}
-    })).unwrap();
+    }))
+    .unwrap();
     let error = validate_planning_models_preflight(&config, Some("serial"), || None).unwrap_err();
     assert!(error.contains("NodeAgent"));
     assert!(error.contains("provider prefix"));
@@ -4893,14 +5765,28 @@ printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"
         planning: AtomicBool::new(false),
         extension: temp.path().join("unused.ts"),
     });
-    let snapshot = plan_goal_internal("test".into(), config, None, None, None, &service, |_| {}, |_| {}, |_| {}).unwrap();
+    let snapshot = plan_goal_internal(
+        "test".into(),
+        config,
+        None,
+        None,
+        None,
+        &service,
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .unwrap();
     assert_eq!(snapshot.plan_type.as_deref(), Some("graph"));
     assert_eq!(snapshot.phase, "awaiting_approval");
     service.runtime.lock().unwrap().approve().unwrap();
     drive(service.clone());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while service.driving.load(Ordering::SeqCst) {
-        assert!(std::time::Instant::now() < deadline, "Driver did not settle");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Driver did not settle"
+        );
         thread::sleep(std::time::Duration::from_millis(20));
     }
     let runtime = service.runtime.lock().unwrap();
@@ -4945,8 +5831,12 @@ fn snapshot_poll_reports_source_materialize_activity() {
         serde_json::json!([{ "kind": "source_materialize", "nodes": ["task"] }])
     );
     drop(activity);
-    let value = dispatch(&service, "snapshot_if_changed", serde_json::json!({ "runId": run_id }))
-        .unwrap();
+    let value = dispatch(
+        &service,
+        "snapshot_if_changed",
+        serde_json::json!({ "runId": run_id }),
+    )
+    .unwrap();
     assert_eq!(value["activity"], serde_json::json!([]));
 }
 
@@ -5077,33 +5967,58 @@ fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
     assert!(get_merger_prompt(
         &serde_json::json!({"runId": run_id, "executionId": merger_id}),
         &service,
-    ).is_err());
+    )
+    .is_err());
 
     // 2. Register merger in state
-    service.runtime.lock().unwrap().state.mergers.push(Execution {
-        id: merger_id.into(),
-        node: "merge:feat_qa".into(),
-        revision: 1, attempt: 1,
-        session_id: merger_id.into(),
-        worktree: temp.path().to_string_lossy().into(),
-        before: "head".into(),
-        workspace_lineage: vec![],
-        after: None, input: None, result: None,
-        status: "running".into(),
-        output: String::new(), output_bytes: 0, pid: None,
-        started_at: now(), completed_at: None, metrics: None,
-    });
-    service.runtime.lock().unwrap().state.graph.nodes.push(Node {
-        name: "feat_qa".into(),
-        task: "Feature QA verification task".into(),
-    });
+    service
+        .runtime
+        .lock()
+        .unwrap()
+        .state
+        .mergers
+        .push(Execution {
+            id: merger_id.into(),
+            node: "merge:feat_qa".into(),
+            revision: 1,
+            attempt: 1,
+            session_id: merger_id.into(),
+            worktree: temp.path().to_string_lossy().into(),
+            before: "head".into(),
+            workspace_lineage: vec![],
+            after: None,
+            input: None,
+            result: None,
+            status: "running".into(),
+            output: String::new(),
+            output_bytes: 0,
+            pid: None,
+            started_at: now(),
+            completed_at: None,
+            metrics: None,
+        });
+    service
+        .runtime
+        .lock()
+        .unwrap()
+        .state
+        .graph
+        .nodes
+        .push(Node {
+            name: "feat_qa".into(),
+            task: "Feature QA verification task".into(),
+        });
 
     // Fallback computes from graph task
     let fallback = get_merger_prompt(
         &serde_json::json!({"runId": run_id, "executionId": merger_id}),
         &service,
-    ).unwrap();
-    assert!(fallback["prompt"].as_str().unwrap().contains("Feature QA verification task"));
+    )
+    .unwrap();
+    assert!(fallback["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("Feature QA verification task"));
 
     // 3. When system-prompt.md is written to disk, it reads the disk file directly
     let session_dir = temp.path().join("mergers").join(merger_id);
@@ -5114,7 +6029,7 @@ fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
     let disk_res = get_merger_prompt(
         &serde_json::json!({"runId": run_id, "executionId": merger_id}),
         &service,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(disk_res["prompt"], disk_prompt);
 }
-

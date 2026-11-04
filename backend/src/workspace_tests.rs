@@ -12,7 +12,10 @@ fn host_git_disables_automatic_maintenance() {
     workspace::git(repository, &["init", "-q"]).unwrap();
     // A node result is complete before its ref import; an opportunistic repack
     // must never keep the execution in Running after Pi has settled.
-    assert_eq!(workspace::git(repository, &["config", "--get", "gc.auto"]).unwrap(), "0");
+    assert_eq!(
+        workspace::git(repository, &["config", "--get", "gc.auto"]).unwrap(),
+        "0"
+    );
     assert_eq!(
         workspace::git(repository, &["config", "--get", "maintenance.auto"]).unwrap(),
         "false"
@@ -30,8 +33,10 @@ fn snapshot_commits_use_neutral_subject() {
         workspace::repository_git(repository, &["log", "-1", "--format=%s", &head]).unwrap(),
         "snapshot"
     );
-    assert!(workspace::git(repository, &["log", "-1", "--format=%s"]).is_err(),
-        "source snapshot must not create a user commit");
+    assert!(
+        workspace::git(repository, &["log", "-1", "--format=%s"]).is_err(),
+        "source snapshot must not create a user commit"
+    );
 }
 
 #[test]
@@ -47,9 +52,12 @@ fn git_line_ending_warnings_do_not_fail_snapshots() {
     // Confirm this repository really produces a successful add with warnings.
     let mut command = std::process::Command::new("git");
     crate::native::clear_git_environment(&mut command);
-    let output = command.args(["add", "--", "input.txt"])
+    let output = command
+        .args(["add", "--", "input.txt"])
         .env("LC_ALL", "C")
-        .current_dir(repository).output().unwrap();
+        .current_dir(repository)
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("LF will be replaced by CRLF"), "{stderr}");
@@ -57,7 +65,10 @@ fn git_line_ending_warnings_do_not_fail_snapshots() {
     fs::write(repository.join("input.txt"), "updated\nsecond\n").unwrap();
     let head = workspace::snapshot_repository(repository).unwrap();
     assert!(!head.is_empty());
-    assert_eq!(workspace::repository_git(repository, &["show", &format!("{head}:input.txt")]).unwrap(), "updated\nsecond");
+    assert_eq!(
+        workspace::repository_git(repository, &["show", &format!("{head}:input.txt")]).unwrap(),
+        "updated\nsecond"
+    );
     assert_eq!(workspace::snapshot_repository(repository).unwrap(), head);
     assert!(workspace::git(repository, &["rev-parse", "--verify", "HEAD"]).is_err());
 }
@@ -68,12 +79,32 @@ fn raw_workspace_capture_preserves_bytes_without_running_line_ending_filters() {
     workspace::git(temp.path(), &["init", "-q"]).unwrap();
     workspace::git(temp.path(), &["config", "core.autocrlf", "true"]).unwrap();
     workspace::git(temp.path(), &["config", "core.safecrlf", "true"]).unwrap();
-    fs::write(temp.path().join(".gitattributes"), "*.txt text\n.gitattributes -text\n").unwrap();
+    fs::write(
+        temp.path().join(".gitattributes"),
+        "*.txt text\n.gitattributes -text\n",
+    )
+    .unwrap();
     fs::write(temp.path().join("input.txt"), "first\nsecond\n").unwrap();
     let head = workspace::snapshot_repository(temp.path()).unwrap();
-    let blob = workspace::repository_git(temp.path(), &["rev-parse", &format!("{head}:input.txt")]).unwrap();
+    let blob = workspace::repository_git(temp.path(), &["rev-parse", &format!("{head}:input.txt")])
+        .unwrap();
     let metadata = workspace::shadow_repo_dir(temp.path()).unwrap();
-    assert_eq!(workspace::git_bytes(temp.path(), &["--git-dir", metadata.to_str().unwrap(), "cat-file", "blob", &blob], None, None).unwrap(), b"first\nsecond\n");
+    assert_eq!(
+        workspace::git_bytes(
+            temp.path(),
+            &[
+                "--git-dir",
+                metadata.to_str().unwrap(),
+                "cat-file",
+                "blob",
+                &blob
+            ],
+            None,
+            None
+        )
+        .unwrap(),
+        b"first\nsecond\n"
+    );
     assert!(workspace::project_git(temp.path(), &["rev-parse", "--verify", "HEAD"]).is_err());
 }
 
@@ -85,22 +116,39 @@ fn git_failure_keeps_exit_status_command_directory_and_both_streams() {
         "alias.grapher-fail=!printf 'failure detail on stdout\\n'; printf 'warning: line endings\\n' >&2; exit 23",
         "grapher-fail",
     ]).unwrap_err();
-    assert!(error.contains("exit code: 23") || error.contains("exit status: 23"), "{error}");
+    assert!(
+        error.contains("exit code: 23") || error.contains("exit status: 23"),
+        "{error}"
+    );
     assert!(error.contains("grapher-fail"), "{error}");
-    assert!(error.contains(&temp.path().display().to_string()), "{error}");
+    assert!(
+        error.contains(&temp.path().display().to_string()),
+        "{error}"
+    );
     assert!(error.contains("stderr:\nwarning: line endings"), "{error}");
-    assert!(error.contains("stdout:\nfailure detail on stdout"), "{error}");
+    assert!(
+        error.contains("stdout:\nfailure detail on stdout"),
+        "{error}"
+    );
 }
 
 #[test]
 fn git_failure_without_output_still_explains_which_command_failed() {
     let temp = tempfile::tempdir().unwrap();
-    let error = workspace::git(temp.path(), &[
-        "-c", "alias.grapher-fail=!exit 19", "grapher-fail",
-    ]).unwrap_err();
-    assert!(error.contains("exit code: 19") || error.contains("exit status: 19"), "{error}");
+    let error = workspace::git(
+        temp.path(),
+        &["-c", "alias.grapher-fail=!exit 19", "grapher-fail"],
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("exit code: 19") || error.contains("exit status: 19"),
+        "{error}"
+    );
     assert!(error.contains("grapher-fail"), "{error}");
-    assert!(error.contains(&temp.path().display().to_string()), "{error}");
+    assert!(
+        error.contains(&temp.path().display().to_string()),
+        "{error}"
+    );
 }
 
 #[cfg(windows)]
@@ -112,10 +160,14 @@ fn git_crash_with_only_warnings_keeps_windows_exception_status() {
         stdout: Vec::new(),
         stderr: b"warning: LF will be replaced by CRLF\n".to_vec(),
     };
-    let error = workspace::git_command_failure(Path::new("C:/project"), &["add", "-f", "-A"], &output);
+    let error =
+        workspace::git_command_failure(Path::new("C:/project"), &["add", "-f", "-A"], &output);
     assert!(error.contains("0xC0000005"), "{error}");
     assert!(error.contains("add"), "{error}");
-    assert!(error.contains("warning: LF will be replaced by CRLF"), "{error}");
+    assert!(
+        error.contains("warning: LF will be replaced by CRLF"),
+        "{error}"
+    );
 }
 
 #[cfg(windows)]
@@ -127,7 +179,11 @@ fn git_control_c_exit_is_reported_as_console_interruption() {
         stdout: Vec::new(),
         stderr: Vec::new(),
     };
-    let error = workspace::git_command_failure(Path::new("C:/project"), &["commit", "-m", "snapshot"], &output);
+    let error = workspace::git_command_failure(
+        Path::new("C:/project"),
+        &["commit", "-m", "snapshot"],
+        &output,
+    );
     assert!(error.contains("0xC000013A"), "{error}");
     assert!(error.contains("console control event"), "{error}");
     assert!(error.contains("Ctrl+C/Ctrl+Break"), "{error}");
@@ -142,7 +198,8 @@ fn git_killed_with_only_warnings_keeps_signal_status() {
         stdout: Vec::new(),
         stderr: b"warning: line endings\n".to_vec(),
     };
-    let error = workspace::git_command_failure(Path::new("/project"), &["add", "-f", "-A"], &output);
+    let error =
+        workspace::git_command_failure(Path::new("/project"), &["add", "-f", "-A"], &output);
     assert!(error.contains(&output.status.to_string()), "{error}");
     assert!(error.contains("warning: line endings"), "{error}");
 }
@@ -185,11 +242,23 @@ fn ordinary_copy_ignores_gitignore_and_keeps_tracked_files_from_the_git_commit()
     prepared_copy(&source, &a, &head, &[], &temp.path().join("runtime"));
     prepared_copy(&source, &b, &head, &[], &temp.path().join("runtime"));
 
-    assert_eq!(fs::read_to_string(a.join(".cache/input")).unwrap(), "ordinary bytes");
-    assert_eq!(fs::read_to_string(a.join("tracked.txt")).unwrap(), "from Git history");
+    assert_eq!(
+        fs::read_to_string(a.join(".cache/input")).unwrap(),
+        "ordinary bytes"
+    );
+    assert_eq!(
+        fs::read_to_string(a.join("tracked.txt")).unwrap(),
+        "from Git history"
+    );
     fs::write(a.join(".cache/input"), "changed in A").unwrap();
-    assert_eq!(fs::read_to_string(b.join(".cache/input")).unwrap(), "ordinary bytes");
-    assert_eq!(fs::read_to_string(source.join(".cache/input")).unwrap(), "ordinary bytes");
+    assert_eq!(
+        fs::read_to_string(b.join(".cache/input")).unwrap(),
+        "ordinary bytes"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join(".cache/input")).unwrap(),
+        "ordinary bytes"
+    );
     assert!(a.join(".git").is_dir());
 }
 
@@ -220,7 +289,7 @@ fn ordinary_copy_excludes_runtime_data_environment_scopes_and_grapher_internals(
 #[cfg(unix)]
 #[test]
 fn ordinary_copy_preserves_symbolic_links_and_permissions_without_following_targets() {
-    use std::os::unix::{fs::PermissionsExt, fs::symlink};
+    use std::os::unix::{fs::symlink, fs::PermissionsExt};
     let temp = tempfile::tempdir().unwrap();
     let (source, head) = source(&temp);
     let outside = temp.path().join("outside");
@@ -228,15 +297,35 @@ fn ordinary_copy_preserves_symbolic_links_and_permissions_without_following_targ
     fs::write(outside.join("secret"), "external").unwrap();
     fs::create_dir(source.join(".cache")).unwrap();
     fs::write(source.join(".cache/tool"), "tool").unwrap();
-    fs::set_permissions(source.join(".cache/tool"), fs::Permissions::from_mode(0o750)).unwrap();
+    fs::set_permissions(
+        source.join(".cache/tool"),
+        fs::Permissions::from_mode(0o750),
+    )
+    .unwrap();
     symlink(&outside, source.join(".cache/external")).unwrap();
     let destination = temp.path().join("target");
-    prepared_copy(&source, &destination, &head, &[], &temp.path().join("runtime"));
+    prepared_copy(
+        &source,
+        &destination,
+        &head,
+        &[],
+        &temp.path().join("runtime"),
+    );
 
     let link = destination.join(".cache/external");
-    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert_eq!(fs::read_link(link).unwrap(), outside);
-    assert_eq!(fs::metadata(destination.join(".cache/tool")).unwrap().permissions().mode() & 0o777, 0o750);
+    assert_eq!(
+        fs::metadata(destination.join(".cache/tool"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o750
+    );
 }
 
 #[cfg(unix)]
@@ -250,13 +339,9 @@ fn ordinary_copy_rejects_unsupported_special_files_explicitly() {
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
     let destination = temp.path().join("target");
     workspace::prepare(&source, &destination, &head, &[]).unwrap();
-    let error = workspace::copy_ordinary_files(
-        &source,
-        &destination,
-        &[],
-        &temp.path().join("runtime"),
-    )
-    .unwrap_err();
+    let error =
+        workspace::copy_ordinary_files(&source, &destination, &[], &temp.path().join("runtime"))
+            .unwrap_err();
     assert!(error.contains("Unsupported special workspace file"));
 }
 
@@ -269,7 +354,11 @@ fn host_metadata_is_excluded_from_forced_snapshots_unless_already_tracked() {
     fs::write(repository.join(".gitignore"), ".DS_Store\n._*\n").unwrap();
     fs::write(repository.join("keep.txt"), "keep").unwrap();
     fs::write(repository.join(".DS_Store"), "tracked metadata").unwrap();
-    workspace::git(&repository, &["add", "-f", ".gitignore", "keep.txt", ".DS_Store"]).unwrap();
+    workspace::git(
+        &repository,
+        &["add", "-f", ".gitignore", "keep.txt", ".DS_Store"],
+    )
+    .unwrap();
     workspace::git(&repository, &["commit", "-qm", "base"]).unwrap();
 
     fs::create_dir(repository.join("nested")).unwrap();
@@ -278,21 +367,38 @@ fn host_metadata_is_excluded_from_forced_snapshots_unless_already_tracked() {
     fs::write(repository.join(".DS_Store"), "tracked metadata updated").unwrap();
     fs::write(repository.join("keep.txt"), "keep updated").unwrap();
     let head = workspace::snapshot_repository(&repository).unwrap();
-    let tree = workspace::repository_git(&repository, &["ls-tree", "-r", "--name-only", &head]).unwrap();
+    let tree =
+        workspace::repository_git(&repository, &["ls-tree", "-r", "--name-only", &head]).unwrap();
     let names: Vec<&str> = tree.lines().collect();
 
     if cfg!(target_os = "macos") {
-        assert!(names.contains(&".DS_Store"), "explicitly tracked metadata remains: {names:?}");
+        assert!(
+            names.contains(&".DS_Store"),
+            "explicitly tracked metadata remains: {names:?}"
+        );
         assert_eq!(
-            workspace::repository_git(&repository, &["show", &format!("{head}:.DS_Store")]).unwrap(),
+            workspace::repository_git(&repository, &["show", &format!("{head}:.DS_Store")])
+                .unwrap(),
             "tracked metadata updated"
         );
-        assert!(!names.contains(&"nested/.DS_Store"), "Finder metadata entered the snapshot: {names:?}");
-        assert!(!names.contains(&"._xattr"), "AppleDouble metadata entered the snapshot: {names:?}");
+        assert!(
+            !names.contains(&"nested/.DS_Store"),
+            "Finder metadata entered the snapshot: {names:?}"
+        );
+        assert!(
+            !names.contains(&"._xattr"),
+            "AppleDouble metadata entered the snapshot: {names:?}"
+        );
     } else {
         // Keep the Windows/Linux collection contract unchanged.
-        assert!(names.contains(&"nested/.DS_Store"), "non-macOS metadata collection changed: {names:?}");
-        assert!(names.contains(&"._xattr"), "non-macOS metadata collection changed: {names:?}");
+        assert!(
+            names.contains(&"nested/.DS_Store"),
+            "non-macOS metadata collection changed: {names:?}"
+        );
+        assert!(
+            names.contains(&"._xattr"),
+            "non-macOS metadata collection changed: {names:?}"
+        );
     }
 
     // Untracked Finder metadata created after a snapshot must not keep the
@@ -300,20 +406,36 @@ fn host_metadata_is_excluded_from_forced_snapshots_unless_already_tracked() {
     fs::write(repository.join("._late"), "late apple double").unwrap();
     fs::write(repository.join("._space file"), "quoted apple double").unwrap();
     assert_eq!(
-        workspace::repository_status(&repository, &[]).unwrap().is_empty(),
+        workspace::repository_status(&repository, &[])
+            .unwrap()
+            .is_empty(),
         cfg!(target_os = "macos")
     );
     assert_eq!(
-        workspace::repository_status(&repository, &["managed".into()]).unwrap().is_empty(),
+        workspace::repository_status(&repository, &["managed".into()])
+            .unwrap()
+            .is_empty(),
         cfg!(target_os = "macos")
     );
     fs::write(repository.join(".DS_Store"), "pending tracked edit").unwrap();
-    assert!(!workspace::repository_status(&repository, &[]).unwrap().is_empty());
-    assert!(!workspace::repository_status(&repository, &["managed".into()]).unwrap().is_empty());
+    assert!(!workspace::repository_status(&repository, &[])
+        .unwrap()
+        .is_empty());
+    assert!(
+        !workspace::repository_status(&repository, &["managed".into()])
+            .unwrap()
+            .is_empty()
+    );
     fs::write(repository.join(".DS_Store"), "tracked metadata updated").unwrap();
 
     let destination = temp.path().join("target");
-    prepared_copy(&repository, &destination, &head, &[], &temp.path().join("runtime"));
+    prepared_copy(
+        &repository,
+        &destination,
+        &head,
+        &[],
+        &temp.path().join("runtime"),
+    );
     assert_eq!(
         fs::read_to_string(destination.join(".DS_Store")).unwrap(),
         "tracked metadata updated"
@@ -343,7 +465,9 @@ fn host_metadata_does_not_dirty_a_shadow_snapshot() {
     workspace::materialize_shadow_repo(&project, &[]).unwrap();
     fs::write(project.join("._late"), "metadata").unwrap();
     assert_eq!(
-        workspace::repository_status(&project, &[]).unwrap().is_empty(),
+        workspace::repository_status(&project, &[])
+            .unwrap()
+            .is_empty(),
         cfg!(target_os = "macos")
     );
 }
@@ -362,8 +486,14 @@ fn macos_filtered_status_preserves_tracked_and_rename_entries() {
     workspace::repository_status(&repository, &["managed".into()]).unwrap();
     fs::write(repository.join("._late"), "metadata").unwrap();
     let status = workspace::repository_status(&repository, &["managed".into()]).unwrap();
-    assert!(status.contains("R  b.txt -> a.txt"), "rename status lost: {status}");
-    assert!(!status.contains("._late"), "host metadata leaked into status: {status}");
+    assert!(
+        status.contains("R  b.txt -> a.txt"),
+        "rename status lost: {status}"
+    );
+    assert!(
+        !status.contains("._late"),
+        "host metadata leaked into status: {status}"
+    );
 }
 
 #[test]
@@ -376,8 +506,12 @@ fn git_snapshots_collect_gitignored_project_files_without_a_large_file_gate() {
     fs::write(repository.join("tracked.txt"), "tracked").unwrap();
     workspace::snapshot_repository(&repository).unwrap();
 
-    fs::create_dir_all(repository.join("packages")) .unwrap();
-    fs::write(repository.join("packages/data.bin"), vec![7; 2 * 1024 * 1024]).unwrap();
+    fs::create_dir_all(repository.join("packages")).unwrap();
+    fs::write(
+        repository.join("packages/data.bin"),
+        vec![7; 2 * 1024 * 1024],
+    )
+    .unwrap();
     workspace::snapshot_repository(&repository).unwrap();
 
     let tracked = workspace::repository_git(&repository, &["ls-files"]).unwrap();
@@ -395,7 +529,8 @@ fn unborn_source_snapshot_is_internal_and_keeps_user_head_unborn() {
     assert!(!head.is_empty());
     assert!(workspace::git(&repository, &["rev-parse", "--verify", "HEAD"]).is_err());
     assert_eq!(
-        workspace::repository_git(&repository, &["rev-parse", &format!("{head}^{{tree}}")]).unwrap(),
+        workspace::repository_git(&repository, &["rev-parse", &format!("{head}^{{tree}}")])
+            .unwrap(),
         workspace::repository_git(&repository, &["rev-parse", "HEAD^{tree}"]).unwrap()
     );
     assert_eq!(
@@ -461,7 +596,11 @@ fn recreated_slot_ignores_metadata_from_a_deleted_workspace() {
     workspace::git(&source, &["add", "-A"]).unwrap();
     workspace::git(&source, &["commit", "-q", "-m", "base"]).unwrap();
     let base = workspace::git(&source, &["rev-parse", "HEAD"]).unwrap();
-    let slot = temp.path().join(".grapher-worktrees").join("run").join("slot");
+    let slot = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join("run")
+        .join("slot");
     workspace::prepare(&source, &slot, &base, &[]).unwrap();
     workspace::hide_private_git(&slot).unwrap();
     assert!(workspace::private_git_dir(&slot).is_some());
@@ -479,36 +618,165 @@ fn deleted_run_refs_and_orphan_heads_are_pruned_with_objects() {
     workspace::git(&shadow, &["init", "--bare", "-q"]).unwrap();
     let shadow_text = shadow.to_str().unwrap();
     let run = uuid::Uuid::new_v4().to_string();
-    let blob = String::from_utf8(workspace::git_bytes(
+    let blob = String::from_utf8(
+        workspace::git_bytes(
+            &shadow,
+            &["--git-dir", shadow_text, "hash-object", "-w", "--stdin"],
+            None,
+            Some(b"content\n"),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let tree = String::from_utf8(
+        workspace::git_bytes(
+            &shadow,
+            &["--git-dir", shadow_text, "mktree"],
+            None,
+            Some(format!("100644 blob {blob}\tfile\n").as_bytes()),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let kept = workspace::git(
         &shadow,
-        &["--git-dir", shadow_text, "hash-object", "-w", "--stdin"],
-        None,
-        Some(b"content\n"),
-    ).unwrap()).unwrap().trim().to_string();
-    let tree = String::from_utf8(workspace::git_bytes(
+        &["--git-dir", shadow_text, "commit-tree", &tree, "-m", "kept"],
+    )
+    .unwrap();
+    let orphan = workspace::git(
         &shadow,
-        &["--git-dir", shadow_text, "mktree"],
-        None,
-        Some(format!("100644 blob {blob}\tfile\n").as_bytes()),
-    ).unwrap()).unwrap().trim().to_string();
-    let kept = workspace::git(&shadow, &["--git-dir", shadow_text, "commit-tree", &tree, "-m", "kept"]).unwrap();
-    let orphan = workspace::git(&shadow, &["--git-dir", shadow_text, "commit-tree", &tree, "-m", "orphan"]).unwrap();
+        &[
+            "--git-dir",
+            shadow_text,
+            "commit-tree",
+            &tree,
+            "-m",
+            "orphan",
+        ],
+    )
+    .unwrap();
     let run_ref = format!("refs/grapher/runs/{run}/nodes/node");
-    let detached_ref = format!("refs/grapher/runs/{run}/planner-detached/{}", uuid::Uuid::new_v4());
-    workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &run_ref, &orphan]).unwrap();
-    workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &detached_ref, &orphan]).unwrap();
-    workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &format!("refs/grapher/heads/{orphan}"), &orphan]).unwrap();
-    workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", &format!("refs/grapher/heads/{kept}"), &kept]).unwrap();
-    workspace::git(&shadow, &["--git-dir", shadow_text, "update-ref", "refs/grapher/published/result", &kept]).unwrap();
+    let detached_ref = format!(
+        "refs/grapher/runs/{run}/planner-detached/{}",
+        uuid::Uuid::new_v4()
+    );
+    workspace::git(
+        &shadow,
+        &["--git-dir", shadow_text, "update-ref", &run_ref, &orphan],
+    )
+    .unwrap();
+    workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "update-ref",
+            &detached_ref,
+            &orphan,
+        ],
+    )
+    .unwrap();
+    workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "update-ref",
+            &format!("refs/grapher/heads/{orphan}"),
+            &orphan,
+        ],
+    )
+    .unwrap();
+    workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "update-ref",
+            &format!("refs/grapher/heads/{kept}"),
+            &kept,
+        ],
+    )
+    .unwrap();
+    workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "update-ref",
+            "refs/grapher/published/result",
+            &kept,
+        ],
+    )
+    .unwrap();
 
-    workspace::prune_shadow_run_refs(&shadow, &run, &std::collections::BTreeSet::new(), true).unwrap();
+    workspace::prune_shadow_run_refs(&shadow, &run, &std::collections::BTreeSet::new(), true)
+        .unwrap();
 
-    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &run_ref]).is_err());
-    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &detached_ref]).is_err());
-    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &format!("refs/grapher/heads/{orphan}")]).is_err());
-    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "rev-parse", "--verify", &format!("refs/grapher/heads/{kept}")]).is_ok());
-    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "cat-file", "-e", &format!("{orphan}^{{commit}}")]).is_err());
-    assert!(workspace::git(&shadow, &["--git-dir", shadow_text, "cat-file", "-e", &format!("{kept}^{{commit}}")]).is_ok());
+    assert!(workspace::git(
+        &shadow,
+        &["--git-dir", shadow_text, "rev-parse", "--verify", &run_ref]
+    )
+    .is_err());
+    assert!(workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "rev-parse",
+            "--verify",
+            &detached_ref
+        ]
+    )
+    .is_err());
+    assert!(workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "rev-parse",
+            "--verify",
+            &format!("refs/grapher/heads/{orphan}")
+        ]
+    )
+    .is_err());
+    assert!(workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "rev-parse",
+            "--verify",
+            &format!("refs/grapher/heads/{kept}")
+        ]
+    )
+    .is_ok());
+    assert!(workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "cat-file",
+            "-e",
+            &format!("{orphan}^{{commit}}")
+        ]
+    )
+    .is_err());
+    assert!(workspace::git(
+        &shadow,
+        &[
+            "--git-dir",
+            shadow_text,
+            "cat-file",
+            "-e",
+            &format!("{kept}^{{commit}}")
+        ]
+    )
+    .is_ok());
 }
 
 #[test]

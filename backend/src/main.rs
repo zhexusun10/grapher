@@ -2,9 +2,13 @@ use std::io::{self, Read};
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--grapher-env-tool") {
-        let status = match grapher::environment_discovery::tool(std::env::args().skip(2).collect()) {
+        let status = match grapher::environment_discovery::tool(std::env::args().skip(2).collect())
+        {
             Ok(status) => status,
-            Err(error) => { eprintln!("Native environment observation refused: {error}"); 1 }
+            Err(error) => {
+                eprintln!("Native environment observation refused: {error}");
+                1
+            }
         };
         std::process::exit(status);
     }
@@ -30,7 +34,12 @@ fn main() {
             // nodes whose results this run already published cannot be removed.
             let unremovable: Vec<String> = value["unremovableNodes"]
                 .as_array()
-                .map(|names| names.iter().filter_map(|name| name.as_str().map(String::from)).collect())
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(|name| name.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             Ok(
                 match grapher::compiler::compile(
@@ -38,7 +47,8 @@ fn main() {
                     value["finalCheck"].as_bool().unwrap_or(true),
                 ) {
                     Ok(plan) => {
-                        let diagnostics = grapher::compiler::unremovable_node_diagnostics(&graph, &unremovable);
+                        let diagnostics =
+                            grapher::compiler::unremovable_node_diagnostics(&graph, &unremovable);
                         if diagnostics.is_empty() {
                             serde_json::json!({ "plan": plan, "diagnostics": [] })
                         } else {
@@ -53,13 +63,18 @@ fn main() {
         return;
     }
     if std::env::args().nth(1).as_deref() == Some("--cleanup-workspaces") {
-        if let Err(error) = grapher::maintenance::cleanup_workspaces(std::env::args().skip(2).collect()) {
+        if let Err(error) =
+            grapher::maintenance::cleanup_workspaces(std::env::args().skip(2).collect())
+        {
             eprintln!("{error}");
             std::process::exit(1);
         }
         return;
     }
-    if matches!(std::env::args().nth(1).as_deref(), Some("--compact" | "--migrate")) {
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--compact" | "--migrate")
+    ) {
         if let Err(error) = grapher::server::compact_output_chunks() {
             eprintln!("{error}");
             std::process::exit(1);

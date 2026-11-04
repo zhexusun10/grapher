@@ -11,9 +11,13 @@ fn replacement(config: &Config) -> Config {
     let mut config = config.clone();
     config.model = "legacy/unused".into();
     config.thinking_level = "off".into();
-    config.role_models.insert("nodeAgent".into(), crate::model::RoleModelConfig {
-        model: "replacement/coder".into(), thinking_level: Some("high".into()),
-    });
+    config.role_models.insert(
+        "nodeAgent".into(),
+        crate::model::RoleModelConfig {
+            model: "replacement/coder".into(),
+            thinking_level: Some("high".into()),
+        },
+    );
     config
 }
 
@@ -27,40 +31,78 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
             let failed = runtime.jobs().unwrap().remove(0);
             record_session(&runtime, &failed.execution);
             if route == "graph" {
-                workspace::prepare(&source, Path::new(&failed.execution.worktree),
-                    &failed.execution.before, &[]).unwrap();
-                runtime.emit(EventKind::Prepared {
-                    execution_id: failed.execution.id.clone(), head: failed.execution.before.clone(),
-                }).unwrap();
+                workspace::prepare(
+                    &source,
+                    Path::new(&failed.execution.worktree),
+                    &failed.execution.before,
+                    &[],
+                )
+                .unwrap();
+                runtime
+                    .emit(EventKind::Prepared {
+                        execution_id: failed.execution.id.clone(),
+                        head: failed.execution.before.clone(),
+                    })
+                    .unwrap();
             }
             let partial = Path::new(&failed.execution.worktree).join("partial.txt");
             fs::write(&partial, "keep unfinished work").unwrap();
-            runtime.finish(&failed.execution, Err("Provider quota exhausted".into())).unwrap();
+            runtime
+                .finish(&failed.execution, Err("Provider quota exhausted".into()))
+                .unwrap();
             runtime.jobs().unwrap();
-            assert!(runtime.state.can_resume(), "retry is available even before changing settings");
-            if paused { runtime.pause(true).unwrap(); }
+            assert!(
+                runtime.state.can_resume(),
+                "retry is available even before changing settings"
+            );
+            if paused {
+                runtime.pause(true).unwrap();
+            }
             let original = serde_json::to_value(&runtime.state.config).unwrap();
             let config = replacement(runtime.state.config.as_ref().unwrap());
             let error = runtime.state.nodes["task"].error.clone();
             runtime.update_node_models(&config).unwrap();
             assert_eq!(runtime.state.nodes["task"].status, "failed");
             assert_eq!(runtime.state.nodes["task"].error, error);
-            assert_eq!(runtime.state.executions.len(), 1, "saving never dispatches a retry");
+            assert_eq!(
+                runtime.state.executions.len(),
+                1,
+                "saving never dispatches a retry"
+            );
             assert!(runtime.state.can_resume());
-            assert_eq!(crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"], true);
-            assert_eq!(serde_json::to_value(&runtime.state.config).unwrap(), original);
+            assert_eq!(
+                crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"],
+                true
+            );
+            assert_eq!(
+                serde_json::to_value(&runtime.state.config).unwrap(),
+                original
+            );
             let version = runtime.snapshot_version();
             runtime.update_node_models(&config).unwrap();
-            assert_eq!(runtime.snapshot_version(), version, "identical saves are idempotent");
+            assert_eq!(
+                runtime.snapshot_version(),
+                version,
+                "identical saves are idempotent"
+            );
 
             let root = runtime.root.clone();
             drop(runtime);
             let mut runtime = Runtime::open(&root).unwrap();
-            assert!(runtime.state.can_resume(), "the override survives a backend restart");
-            assert_eq!(runtime.state.nodes["task"].model_config, Some(config.node_agent_settings()));
+            assert!(
+                runtime.state.can_resume(),
+                "the override survives a backend restart"
+            );
+            assert_eq!(
+                runtime.state.nodes["task"].model_config,
+                Some(config.node_agent_settings())
+            );
             runtime.pause(false).unwrap();
             let next = runtime.jobs().unwrap().remove(0);
-            assert_eq!(next.config.node_agent_settings(), config.node_agent_settings());
+            assert_eq!(
+                next.config.node_agent_settings(),
+                config.node_agent_settings()
+            );
             assert!(next.continuation);
             assert!(next.task.is_empty(), "do not add a synthetic user message");
             assert_eq!(next.execution.session_id, failed.execution.session_id);
@@ -68,7 +110,9 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
             assert_eq!(next.resume_execution_id, Some(failed.execution.id.clone()));
             assert_ne!(next.execution.id, failed.execution.id);
             assert_eq!(next.execution.attempt, 2);
-            if route == "graph" { assert!(next.preserved_workspace.is_some()); }
+            if route == "graph" {
+                assert!(next.preserved_workspace.is_some());
+            }
             assert_eq!(fs::read_to_string(partial).unwrap(), "keep unfinished work");
             assert_eq!(runtime.state.executions[0].status, "failed");
             assert!(!runtime.state.can_resume());
@@ -87,30 +131,57 @@ fn model_saved_during_execution_is_applied_after_failure_or_pause() {
                 let job = runtime.jobs().unwrap().remove(0);
                 record_session(&runtime, &job.execution);
                 if route == "graph" {
-                    workspace::prepare(&source, Path::new(&job.execution.worktree),
-                        &job.execution.before, &[]).unwrap();
-                    runtime.emit(EventKind::Prepared {
-                        execution_id: job.execution.id.clone(), head: job.execution.before.clone(),
-                    }).unwrap();
+                    workspace::prepare(
+                        &source,
+                        Path::new(&job.execution.worktree),
+                        &job.execution.before,
+                        &[],
+                    )
+                    .unwrap();
+                    runtime
+                        .emit(EventKind::Prepared {
+                            execution_id: job.execution.id.clone(),
+                            head: job.execution.before.clone(),
+                        })
+                        .unwrap();
                 }
                 let settings = replacement(runtime.state.config.as_ref().unwrap());
                 let original = job.config.node_agent_settings();
                 runtime.update_node_models(&settings).unwrap();
-                assert!(runtime.state.nodes["task"].model_config.is_none(), "a live writer is not retargeted");
+                assert!(
+                    runtime.state.nodes["task"].model_config.is_none(),
+                    "a live writer is not retargeted"
+                );
                 assert_eq!(job.config.node_agent_settings(), original);
-                if stopped { runtime.request_execution_stop(Some("task")).unwrap(); }
-                runtime.finish(&job.execution, Err("Provider failed".into())).unwrap();
+                if stopped {
+                    runtime.request_execution_stop(Some("task")).unwrap();
+                }
+                runtime
+                    .finish(&job.execution, Err("Provider failed".into()))
+                    .unwrap();
                 assert_eq!(runtime.state.nodes["task"].status, "failed");
-                assert_eq!(runtime.state.nodes["task"].model_config, Some(settings.node_agent_settings()));
+                assert_eq!(
+                    runtime.state.nodes["task"].model_config,
+                    Some(settings.node_agent_settings())
+                );
                 assert_eq!(runtime.state.nodes["task"].model_retry, Some(true));
                 let root = runtime.root.clone();
                 drop(runtime);
                 let mut runtime = Runtime::open(&root).unwrap();
-                assert_eq!(runtime.state.nodes["task"].model_config, Some(settings.node_agent_settings()));
-                if followup { runtime.intervene("task", "continue").unwrap(); }
+                assert_eq!(
+                    runtime.state.nodes["task"].model_config,
+                    Some(settings.node_agent_settings())
+                );
+                if followup {
+                    runtime.intervene("task", "continue").unwrap();
+                }
                 runtime.pause(false).unwrap();
                 let next = runtime.jobs().unwrap().remove(0);
-                assert_eq!(next.config.node_agent_settings(), settings.node_agent_settings(), "{route}, stopped={stopped}, followup={followup}");
+                assert_eq!(
+                    next.config.node_agent_settings(),
+                    settings.node_agent_settings(),
+                    "{route}, stopped={stopped}, followup={followup}"
+                );
                 assert_eq!(next.execution.session_id, job.execution.session_id);
                 assert_eq!(next.execution.worktree, job.execution.worktree);
                 assert_eq!(runtime.state.executions[0].status, "failed");
@@ -126,14 +197,25 @@ fn model_saved_during_a_composition_failure_is_applied_after_the_block() {
     let job = runtime.jobs().unwrap().remove(0);
     let settings = replacement(runtime.state.config.as_ref().unwrap());
     runtime.update_node_models(&settings).unwrap();
-    runtime.finish(&job.execution, Err("Workspace composition failed: unavailable".into())).unwrap();
+    runtime
+        .finish(
+            &job.execution,
+            Err("Workspace composition failed: unavailable".into()),
+        )
+        .unwrap();
     assert_eq!(runtime.state.nodes["task"].status, "blocked");
-    assert_eq!(runtime.state.nodes["task"].model_config, Some(settings.node_agent_settings()));
+    assert_eq!(
+        runtime.state.nodes["task"].model_config,
+        Some(settings.node_agent_settings())
+    );
     assert_eq!(runtime.state.nodes["task"].model_retry, Some(true));
     assert!(runtime.state.can_resume());
     runtime.pause(false).unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
-    assert_eq!(retry.config.node_agent_settings(), settings.node_agent_settings());
+    assert_eq!(
+        retry.config.node_agent_settings(),
+        settings.node_agent_settings()
+    );
 }
 
 #[test]
@@ -143,10 +225,18 @@ fn model_saved_during_a_successful_attempt_does_not_retarget_that_node() {
     let job = runtime.jobs().unwrap().remove(0);
     let settings = replacement(runtime.state.config.as_ref().unwrap());
     runtime.update_node_models(&settings).unwrap();
-    runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    runtime
+        .finish(
+            &job.execution,
+            Ok((runtime.state.base.clone(), "done".into())),
+        )
+        .unwrap();
     assert_eq!(runtime.state.nodes["task"].status, "completed");
     assert!(runtime.state.nodes["task"].model_config.is_none());
-    assert_ne!(job.config.node_agent_settings(), settings.node_agent_settings());
+    assert_ne!(
+        job.config.node_agent_settings(),
+        settings.node_agent_settings()
+    );
 }
 
 #[test]
@@ -160,8 +250,15 @@ fn legacy_failed_attempts_reconcile_a_model_saved_while_running() {
         let settings = replacement(runtime.state.config.as_ref().unwrap());
         runtime.update_node_models(&settings).unwrap();
         // An old backend recorded the failure without reconciling this node.
-        runtime.emit(EventKind::Failed { node: "task".into(), execution_id: Some(job.execution.id.clone()),
-            error: "Provider failed".into(), output_bytes: 0, metrics: None }).unwrap();
+        runtime
+            .emit(EventKind::Failed {
+                node: "task".into(),
+                execution_id: Some(job.execution.id.clone()),
+                error: "Provider failed".into(),
+                output_bytes: 0,
+                metrics: None,
+            })
+            .unwrap();
         assert!(runtime.state.nodes["task"].model_config.is_none());
         let root = runtime.root.clone();
         drop(runtime);
@@ -175,13 +272,21 @@ fn legacy_failed_attempts_reconcile_a_model_saved_while_running() {
                 runtime.update_node_models(&settings).unwrap();
                 let version = runtime.snapshot_version();
                 runtime.update_node_models(&settings).unwrap();
-                assert_eq!(runtime.snapshot_version(), version, "reconciliation is idempotent");
+                assert_eq!(
+                    runtime.snapshot_version(),
+                    version,
+                    "reconciliation is idempotent"
+                );
                 runtime.pause(false).unwrap();
             }
             _ => runtime.pause(false).unwrap(),
         }
         let next = runtime.jobs().unwrap().remove(0);
-        assert_eq!(next.config.node_agent_settings(), settings.node_agent_settings(), "{recovery}");
+        assert_eq!(
+            next.config.node_agent_settings(),
+            settings.node_agent_settings(),
+            "{recovery}"
+        );
         assert_eq!(next.execution.session_id, job.execution.session_id);
     }
 }
@@ -193,13 +298,18 @@ fn serial_followup_after_a_failure_uses_the_updated_model() {
     runtime.approve().unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
     record_session(&runtime, &failed.execution);
-    runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
+    runtime
+        .finish(&failed.execution, Err("Provider failed".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     let settings = replacement(runtime.state.config.as_ref().unwrap());
     runtime.update_node_models(&settings).unwrap();
     runtime.intervene("task", "continue the task").unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
-    assert_eq!(retry.config.node_agent_settings(), settings.node_agent_settings());
+    assert_eq!(
+        retry.config.node_agent_settings(),
+        settings.node_agent_settings()
+    );
     assert_eq!(retry.task, "continue the task");
     assert_eq!(retry.execution.session_id, failed.execution.session_id);
     assert_eq!(retry.execution.worktree, failed.execution.worktree);
@@ -210,15 +320,29 @@ fn serial_followup_after_a_failure_uses_the_updated_model() {
 #[test]
 fn blocked_composition_failure_uses_the_new_model_after_restart() {
     let graph = Graph {
-        nodes: ["first", "after"].into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() }).collect(),
-        edges: vec![Edge { from: "first".into(), to: "after".into(), feedback: false }],
+        nodes: ["first", "after"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "first".into(),
+            to: "after".into(),
+            feedback: false,
+        }],
         ..Graph::default()
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&failed.execution, Err("Workspace composition failed: unavailable".into())).unwrap();
+    runtime
+        .finish(
+            &failed.execution,
+            Err("Workspace composition failed: unavailable".into()),
+        )
+        .unwrap();
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.nodes["first"].status, "blocked");
     assert_eq!(runtime.state.nodes["after"].status, "blocked");
@@ -228,49 +352,90 @@ fn blocked_composition_failure_uses_the_new_model_after_restart() {
     let settings = replacement(runtime.state.config.as_ref().unwrap());
     runtime.update_node_models(&settings).unwrap();
     crate::model::apply(&mut replayed, runtime.state.events.last().unwrap());
-    assert_eq!(replayed.nodes["first"].model_config, Some(settings.node_agent_settings()));
+    assert_eq!(
+        replayed.nodes["first"].model_config,
+        Some(settings.node_agent_settings())
+    );
     assert_eq!(replayed.nodes["first"].model_retry, Some(true));
-    assert_eq!(runtime.state.nodes["first"].model_config, Some(settings.node_agent_settings()));
+    assert_eq!(
+        runtime.state.nodes["first"].model_config,
+        Some(settings.node_agent_settings())
+    );
     assert_eq!(runtime.state.nodes["first"].model_retry, Some(true));
     assert_eq!(runtime.state.nodes["first"].error, error);
     assert_eq!(runtime.state.nodes["after"].model_retry, Some(false));
-    assert_eq!(runtime.state.executions.len(), 1, "saving never dispatches a retry");
+    assert_eq!(
+        runtime.state.executions.len(),
+        1,
+        "saving never dispatches a retry"
+    );
     let version = runtime.snapshot_version();
     runtime.update_node_models(&settings).unwrap();
-    assert_eq!(runtime.snapshot_version(), version, "repeated saves are idempotent");
+    assert_eq!(
+        runtime.snapshot_version(),
+        version,
+        "repeated saves are idempotent"
+    );
     let root = runtime.root.clone();
     drop(runtime);
     let mut runtime = Runtime::open(&root).unwrap();
     assert!(runtime.state.can_resume());
-    assert_eq!(runtime.state.nodes["first"].model_config, Some(settings.node_agent_settings()));
+    assert_eq!(
+        runtime.state.nodes["first"].model_config,
+        Some(settings.node_agent_settings())
+    );
     assert_eq!(runtime.state.nodes["first"].model_retry, Some(true));
     runtime.pause(false).unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
     assert_eq!(retry.execution.node, "first");
-    assert_eq!(retry.config.node_agent_settings(), settings.node_agent_settings());
+    assert_eq!(
+        retry.config.node_agent_settings(),
+        settings.node_agent_settings()
+    );
     assert_eq!(retry.execution.session_id, failed.execution.session_id);
 }
 
 #[test]
 fn an_upstream_block_does_not_retarget_an_old_failed_descendant() {
     let graph = Graph {
-        nodes: ["first", "after"].into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() }).collect(),
-        edges: vec![Edge { from: "first".into(), to: "after".into(), feedback: false }],
+        nodes: ["first", "after"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "first".into(),
+            to: "after".into(),
+            feedback: false,
+        }],
         ..Graph::default()
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&first.execution, Ok((runtime.state.base.clone(), "done".into()))).unwrap();
+    runtime
+        .finish(
+            &first.execution,
+            Ok((runtime.state.base.clone(), "done".into())),
+        )
+        .unwrap();
     let after = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&after.execution, Err("old failure".into())).unwrap();
+    runtime
+        .finish(&after.execution, Err("old failure".into()))
+        .unwrap();
     runtime.intervene("first", "recompute").unwrap();
     let again = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&again.execution, Err("new upstream failure".into())).unwrap();
-    runtime.emit(EventKind::Blocked {
-        node: "after".into(), error: "Required upstream branch failed or is blocked".into(),
-    }).unwrap();
+    runtime
+        .finish(&again.execution, Err("new upstream failure".into()))
+        .unwrap();
+    runtime
+        .emit(EventKind::Blocked {
+            node: "after".into(),
+            error: "Required upstream branch failed or is blocked".into(),
+        })
+        .unwrap();
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.nodes["after"].status, "blocked");
     // An old preparation-only descendant failure must not be retargeted when
@@ -283,12 +448,18 @@ fn an_upstream_block_does_not_retarget_an_old_failed_descendant() {
     let mut settings = replacement(runtime.state.config.as_ref().unwrap());
     settings.environment = None; // Settings saves do not submit Runtime-owned admission policy.
     runtime.update_node_models(&settings).unwrap();
-    assert_eq!(runtime.state.nodes["first"].model_config, Some(settings.node_agent_settings()));
+    assert_eq!(
+        runtime.state.nodes["first"].model_config,
+        Some(settings.node_agent_settings())
+    );
     assert!(runtime.state.nodes["after"].model_config.is_none());
     let root = runtime.root.clone();
     drop(runtime);
     let runtime = Runtime::open(&root).unwrap();
-    assert!(runtime.state.nodes["after"].model_config.is_none(), "replay preserves the descendant's settings");
+    assert!(
+        runtime.state.nodes["after"].model_config.is_none(),
+        "replay preserves the descendant's settings"
+    );
 }
 
 #[test]
@@ -338,7 +509,10 @@ fn preparation_only_failure_is_resumable_without_a_conversation_turn() {
     let mut settings = replacement(runtime.state.config.as_ref().unwrap());
     settings.environment = None;
     runtime.update_node_models(&settings).unwrap();
-    assert_eq!(runtime.state.nodes["task"].model_config, Some(settings.node_agent_settings()));
+    assert_eq!(
+        runtime.state.nodes["task"].model_config,
+        Some(settings.node_agent_settings())
+    );
     assert_eq!(runtime.state.nodes["task"].model_retry, Some(true));
 
     runtime.pause(false).unwrap();
@@ -352,31 +526,60 @@ fn newly_added_nodes_use_this_conversations_saved_settings() {
     let latest = replacement(runtime.state.config.as_ref().unwrap());
     runtime.update_node_models(&latest).unwrap();
     let mut graph = runtime.state.graph.clone();
-    graph.nodes.push(Node { name: "added".into(), task: "added".into() });
-    runtime.revise_graph(graph, PlanningSummary {
-        planning_id: Uuid::new_v4().to_string(),
-        status: Some("success".into()),
-        ..Default::default()
-    }).unwrap();
+    graph.nodes.push(Node {
+        name: "added".into(),
+        task: "added".into(),
+    });
+    runtime
+        .revise_graph(
+            graph,
+            PlanningSummary {
+                planning_id: Uuid::new_v4().to_string(),
+                status: Some("success".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     let jobs = runtime.jobs().unwrap();
     for name in ["task", "added"] {
         let job = jobs.iter().find(|job| job.execution.node == name).unwrap();
-        assert_eq!(job.config.node_agent_settings(), latest.node_agent_settings(),
-            "a node added after the conversation changed models must use that selection");
-        assert_eq!(job.execution.metrics.as_ref().and_then(|metrics| metrics.model.as_deref()),
+        assert_eq!(
+            job.config.node_agent_settings(),
+            latest.node_agent_settings(),
+            "a node added after the conversation changed models must use that selection"
+        );
+        assert_eq!(
+            job.execution
+                .metrics
+                .as_ref()
+                .and_then(|metrics| metrics.model.as_deref()),
             Some(latest.node_agent_settings().model.as_str()),
-            "session details must see the selected model before launch");
+            "session details must see the selected model before launch"
+        );
     }
 }
 
 #[test]
 fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_completed_nodes() {
     let graph = Graph {
-        nodes: ["failed", "completed", "running", "after", "pending"].into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() }).collect(),
+        nodes: ["failed", "completed", "running", "after", "pending"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
         edges: vec![
-            Edge { from: "failed".into(), to: "after".into(), feedback: false },
-            Edge { from: "running".into(), to: "pending".into(), feedback: false },
+            Edge {
+                from: "failed".into(),
+                to: "after".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "running".into(),
+                to: "pending".into(),
+                feedback: false,
+            },
         ],
         ..Graph::default()
     };
@@ -386,11 +589,27 @@ fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_complet
     runtime.edit_draft_graph(graph, config.clone()).unwrap();
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
-    let failed = jobs.iter().find(|job| job.execution.node == "failed").unwrap();
-    let completed = jobs.iter().find(|job| job.execution.node == "completed").unwrap();
-    let running = jobs.iter().find(|job| job.execution.node == "running").unwrap();
-    runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
-    runtime.finish(&completed.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
+    let failed = jobs
+        .iter()
+        .find(|job| job.execution.node == "failed")
+        .unwrap();
+    let completed = jobs
+        .iter()
+        .find(|job| job.execution.node == "completed")
+        .unwrap();
+    let running = jobs
+        .iter()
+        .find(|job| job.execution.node == "running")
+        .unwrap();
+    runtime
+        .finish(&failed.execution, Err("Provider failed".into()))
+        .unwrap();
+    runtime
+        .finish(
+            &completed.execution,
+            Ok((runtime.state.base.clone(), "completed".into())),
+        )
+        .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.nodes["after"].status, "blocked");
     assert_eq!(runtime.state.nodes["pending"].status, "waiting");
@@ -408,26 +627,53 @@ fn node_model_change_updates_waiting_and_blocked_nodes_but_not_active_or_complet
         let mut expected = before["nodes"][name].clone();
         expected["modelConfig"] = serde_json::to_value(settings.node_agent_settings()).unwrap();
         expected["modelRetry"] = serde_json::json!(false);
-        assert_eq!(after["nodes"][name], expected, "only settings change for {name}");
+        assert_eq!(
+            after["nodes"][name], expected,
+            "only settings change for {name}"
+        );
     }
     assert_eq!(after["config"], before["config"]);
     assert_eq!(after["executions"], before["executions"]);
     assert_eq!(after["phase"], before["phase"]);
-    assert_eq!(running.config.node_agent_settings(), config.node_agent_settings());
-    assert!(!runtime.state.can_resume(), "an active writer still disables the recovery hint");
+    assert_eq!(
+        running.config.node_agent_settings(),
+        config.node_agent_settings()
+    );
+    assert!(
+        !runtime.state.can_resume(),
+        "an active writer still disables the recovery hint"
+    );
 
-    runtime.finish(&running.execution, Err("Unrelated provider failure".into())).unwrap();
+    runtime
+        .finish(&running.execution, Err("Unrelated provider failure".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.nodes["after"].status, "blocked");
     assert_eq!(runtime.state.nodes["pending"].status, "blocked");
     runtime.pause(false).unwrap();
     let retry = runtime.jobs().unwrap();
-    assert_eq!(retry.len(), 2, "explicit Continue retries both failed roots");
-    let retried_failed = retry.iter().find(|job| job.execution.node == "failed").unwrap();
-    let retried_running = retry.iter().find(|job| job.execution.node == "running").unwrap();
-    assert_eq!(retried_failed.config.node_agent_settings(), settings.node_agent_settings());
-    assert_eq!(retried_running.config.node_agent_settings(), settings.node_agent_settings(),
-        "a model saved during the attempt applies after it fails");
+    assert_eq!(
+        retry.len(),
+        2,
+        "explicit Continue retries both failed roots"
+    );
+    let retried_failed = retry
+        .iter()
+        .find(|job| job.execution.node == "failed")
+        .unwrap();
+    let retried_running = retry
+        .iter()
+        .find(|job| job.execution.node == "running")
+        .unwrap();
+    assert_eq!(
+        retried_failed.config.node_agent_settings(),
+        settings.node_agent_settings()
+    );
+    assert_eq!(
+        retried_running.config.node_agent_settings(),
+        settings.node_agent_settings(),
+        "a model saved during the attempt applies after it fails"
+    );
     assert_eq!(runtime.state.nodes["after"].status, "waiting");
     assert_eq!(runtime.state.nodes["pending"].status, "waiting");
     assert_eq!(runtime.state.nodes["completed"].status, "completed");
@@ -447,31 +693,60 @@ fn unstarted_node_models_follow_settings_in_drafts_and_before_dispatch() {
             let before = serde_json::to_value(&runtime.state).unwrap();
             let mut config = replacement(&original);
             runtime.update_node_models(&config).unwrap();
-            assert_eq!(runtime.state.nodes["task"].model_config, Some(config.node_agent_settings()));
+            assert_eq!(
+                runtime.state.nodes["task"].model_config,
+                Some(config.node_agent_settings())
+            );
             assert_eq!(runtime.state.nodes["task"].status, "waiting");
             assert_eq!(runtime.state.nodes["task"].model_retry, Some(false));
             assert_eq!(runtime.state.phase, before["phase"].as_str().unwrap());
             assert_eq!(runtime.state.approved, approved);
-            assert!(runtime.state.executions.is_empty(), "saving never dispatches work");
-            assert!(!runtime.state.can_resume(), "unstarted overrides are not failure recovery");
+            assert!(
+                runtime.state.executions.is_empty(),
+                "saving never dispatches work"
+            );
+            assert!(
+                !runtime.state.can_resume(),
+                "unstarted overrides are not failure recovery"
+            );
             let version = runtime.snapshot_version();
             runtime.update_node_models(&config).unwrap();
             assert_eq!(runtime.snapshot_version(), version);
 
             // Reverting to the Run's original selection must replace the override too.
             runtime.update_node_models(&original).unwrap();
-            assert_eq!(runtime.state.nodes["task"].model_config, Some(original.node_agent_settings()));
-            config.role_models.get_mut("nodeAgent").unwrap().thinking_level = Some("low".into());
+            assert_eq!(
+                runtime.state.nodes["task"].model_config,
+                Some(original.node_agent_settings())
+            );
+            config
+                .role_models
+                .get_mut("nodeAgent")
+                .unwrap()
+                .thinking_level = Some("low".into());
             runtime.update_node_models(&config).unwrap();
-            assert_eq!(serde_json::to_value(&runtime.state.config).unwrap(), before["config"]);
+            assert_eq!(
+                serde_json::to_value(&runtime.state.config).unwrap(),
+                before["config"]
+            );
 
             let root = runtime.root.clone();
             drop(runtime);
             let mut runtime = Runtime::open(&root).unwrap();
-            assert_eq!(runtime.state.nodes["task"].model_config, Some(config.node_agent_settings()));
-            if approved { runtime.pause(false).unwrap(); } else { runtime.approve().unwrap(); }
+            assert_eq!(
+                runtime.state.nodes["task"].model_config,
+                Some(config.node_agent_settings())
+            );
+            if approved {
+                runtime.pause(false).unwrap();
+            } else {
+                runtime.approve().unwrap();
+            }
             let job = runtime.jobs().unwrap().remove(0);
-            assert_eq!(job.config.node_agent_settings(), config.node_agent_settings());
+            assert_eq!(
+                job.config.node_agent_settings(),
+                config.node_agent_settings()
+            );
             assert!(!job.continuation);
             assert_eq!(job.execution.attempt, 1);
         }
@@ -485,17 +760,30 @@ fn prestart_model_settings_are_retained_when_a_later_failure_is_retried() {
     runtime.update_node_models(&config).unwrap();
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&job.execution, Err("Provider quota exhausted".into())).unwrap();
+    runtime
+        .finish(&job.execution, Err("Provider quota exhausted".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     assert!(runtime.state.can_resume());
     let root = runtime.root.clone();
     drop(runtime);
     let mut runtime = Runtime::open(&root).unwrap();
-    assert!(runtime.state.can_resume(), "failure recovery survives restart");
+    assert!(
+        runtime.state.can_resume(),
+        "failure recovery survives restart"
+    );
     assert_eq!(runtime.state.nodes["task"].model_retry, Some(false));
     runtime.update_node_models(&config).unwrap();
-    assert_eq!(runtime.state.nodes["task"].model_retry, Some(false), "an unchanged save does not rewrite the override");
-    config.role_models.get_mut("nodeAgent").unwrap().thinking_level = Some("low".into());
+    assert_eq!(
+        runtime.state.nodes["task"].model_retry,
+        Some(false),
+        "an unchanged save does not rewrite the override"
+    );
+    config
+        .role_models
+        .get_mut("nodeAgent")
+        .unwrap()
+        .thinking_level = Some("low".into());
     runtime.update_node_models(&config).unwrap();
     assert_eq!(runtime.state.nodes["task"].model_retry, Some(true));
     assert!(runtime.state.can_resume());
@@ -507,15 +795,36 @@ fn previously_started_waiting_blocked_and_dirty_nodes_keep_their_models() {
         let (_temp, _source, mut runtime) = setup(true, single());
         runtime.approve().unwrap();
         let job = runtime.jobs().unwrap().remove(0);
-        runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
+        runtime
+            .finish(
+                &job.execution,
+                Ok((runtime.state.base.clone(), "completed".into())),
+            )
+            .unwrap();
         // These states can also represent rescheduled work, not just a first attempt.
         runtime.state.nodes.get_mut("task").unwrap().status = status.into();
-        runtime.state.superseded_execution_ids.push(job.execution.id.clone());
-        runtime.update_node_models(&replacement(runtime.state.config.as_ref().unwrap())).unwrap();
-        assert!(runtime.state.nodes["task"].model_config.is_none(),
-            "an already-started node keeps its own model");
-        assert_eq!(runtime.state.model_config.as_ref().unwrap().node_agent_settings().model,
-            "replacement/coder", "the conversation still records the selection for future nodes");
+        runtime
+            .state
+            .superseded_execution_ids
+            .push(job.execution.id.clone());
+        runtime
+            .update_node_models(&replacement(runtime.state.config.as_ref().unwrap()))
+            .unwrap();
+        assert!(
+            runtime.state.nodes["task"].model_config.is_none(),
+            "an already-started node keeps its own model"
+        );
+        assert_eq!(
+            runtime
+                .state
+                .model_config
+                .as_ref()
+                .unwrap()
+                .node_agent_settings()
+                .model,
+            "replacement/coder",
+            "the conversation still records the selection for future nodes"
+        );
     }
 }
 
@@ -524,12 +833,17 @@ fn legacy_failed_node_model_events_and_snapshots_keep_continue_recovery() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&job.execution, Err("Provider failed".into())).unwrap();
+    runtime
+        .finish(&job.execution, Err("Provider failed".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     let settings = replacement(runtime.state.config.as_ref().unwrap()).node_agent_settings();
-    runtime.emit(EventKind::FailedNodeModelsUpdated {
-        nodes: vec!["task".into()], settings: settings.clone(),
-    }).unwrap();
+    runtime
+        .emit(EventKind::FailedNodeModelsUpdated {
+            nodes: vec!["task".into()],
+            settings: settings.clone(),
+        })
+        .unwrap();
     assert!(runtime.state.can_resume());
     let root = runtime.root.clone();
     drop(runtime);
@@ -537,9 +851,15 @@ fn legacy_failed_node_model_events_and_snapshots_keep_continue_recovery() {
     assert_eq!(runtime.state.nodes["task"].model_config, Some(settings));
     assert!(runtime.state.can_resume());
     let mut legacy = serde_json::to_value(&runtime.state).unwrap();
-    legacy["nodes"]["task"].as_object_mut().unwrap().remove("modelRetry");
+    legacy["nodes"]["task"]
+        .as_object_mut()
+        .unwrap()
+        .remove("modelRetry");
     let legacy: Snapshot = serde_json::from_value(legacy).unwrap();
-    assert!(legacy.can_resume(), "old checkpoints without a retry flag remain recoverable");
+    assert!(
+        legacy.can_resume(),
+        "old checkpoints without a retry flag remain recoverable"
+    );
 }
 
 #[test]
@@ -547,28 +867,50 @@ fn unrelated_settings_do_not_retarget_failed_node_retries() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
+    runtime
+        .finish(&failed.execution, Err("Provider failed".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     let version = runtime.snapshot_version();
     let mut config = runtime.state.config.clone().unwrap();
-    config.role_models.insert("planner".into(), crate::model::RoleModelConfig {
-        model: "replacement/planner".into(), thinking_level: Some("max".into()),
-    });
+    config.role_models.insert(
+        "planner".into(),
+        crate::model::RoleModelConfig {
+            model: "replacement/planner".into(),
+            thinking_level: Some("max".into()),
+        },
+    );
     config.auto_approve = true;
     runtime.update_node_models(&config).unwrap();
-    assert_ne!(runtime.snapshot_version(), version, "the conversation records its planner settings");
-    assert!(runtime.state.can_resume(), "failure recovery is independent of the planner setting");
-    assert!(runtime.state.nodes["task"].model_config.is_none(), "a planner-only change does not retarget the node");
+    assert_ne!(
+        runtime.snapshot_version(),
+        version,
+        "the conversation records its planner settings"
+    );
+    assert!(
+        runtime.state.can_resume(),
+        "failure recovery is independent of the planner setting"
+    );
+    assert!(
+        runtime.state.nodes["task"].model_config.is_none(),
+        "a planner-only change does not retarget the node"
+    );
     assert_eq!(runtime.state.nodes["task"].status, "failed");
 
     // Legacy defaults and thinking-only changes are also effective node settings.
     config.thinking_level = "high".into();
     runtime.update_node_models(&config).unwrap();
     assert!(runtime.state.can_resume());
-    assert_eq!(runtime.state.nodes["task"].model_config, Some(config.node_agent_settings()));
+    assert_eq!(
+        runtime.state.nodes["task"].model_config,
+        Some(config.node_agent_settings())
+    );
     runtime.pause(false).unwrap();
     let retried = runtime.jobs().unwrap().remove(0);
-    assert_eq!(retried.config.node_agent_settings(), config.node_agent_settings());
+    assert_eq!(
+        retried.config.node_agent_settings(),
+        config.node_agent_settings()
+    );
 }
 
 #[test]
@@ -585,15 +927,26 @@ fn conversation_settings_do_not_leak_into_another_run_or_global_defaults() {
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
     let mut graph = runtime.state.graph.clone();
-    graph.nodes.push(Node { name: "added".into(), task: "added".into() });
-    runtime.revise_graph(graph, PlanningSummary {
-        planning_id: Uuid::new_v4().to_string(),
-        status: Some("success".into()),
-        ..Default::default()
-    }).unwrap();
+    graph.nodes.push(Node {
+        name: "added".into(),
+        task: "added".into(),
+    });
+    runtime
+        .revise_graph(
+            graph,
+            PlanningSummary {
+                planning_id: Uuid::new_v4().to_string(),
+                status: Some("success".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     for job in runtime.jobs().unwrap() {
-        assert_eq!(job.config.node_agent_settings(), original.node_agent_settings(),
-            "another conversation keeps its creation settings");
+        assert_eq!(
+            job.config.node_agent_settings(),
+            original.node_agent_settings(),
+            "another conversation keeps its creation settings"
+        );
     }
 
     // A global defaults save must not rewrite A either.
@@ -601,7 +954,15 @@ fn conversation_settings_do_not_leak_into_another_run_or_global_defaults() {
     global.model = "global/default".into();
     runtime.save_default_config(&global).unwrap();
     let saved_a = runtime.store.load(&run_a).unwrap();
-    assert_eq!(saved_a.model_config.as_ref().unwrap().node_agent_settings().model, "conversation/a");
+    assert_eq!(
+        saved_a
+            .model_config
+            .as_ref()
+            .unwrap()
+            .node_agent_settings()
+            .model,
+        "conversation/a"
+    );
     assert_eq!(saved_a.config.as_ref().unwrap().model, original.model);
 }
 
@@ -610,52 +971,100 @@ fn a_finished_conversation_records_models_for_future_followups() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
+    runtime
+        .finish(
+            &job.execution,
+            Ok((runtime.state.base.clone(), "completed".into())),
+        )
+        .unwrap();
     runtime.jobs().unwrap();
-    runtime.emit(EventKind::PublicationCompleted { head: runtime.state.base.clone() }).unwrap();
-    assert_eq!(runtime.state.phase, "completed", "test setup reaches the settled phase");
+    runtime
+        .emit(EventKind::PublicationCompleted {
+            head: runtime.state.base.clone(),
+        })
+        .unwrap();
+    assert_eq!(
+        runtime.state.phase, "completed",
+        "test setup reaches the settled phase"
+    );
     let node_before = serde_json::to_value(&runtime.state.nodes["task"]).unwrap();
     let config = replacement(runtime.state.config.as_ref().unwrap());
     runtime.update_node_models(&config).unwrap();
-    assert_eq!(serde_json::to_value(&runtime.state.nodes["task"]).unwrap(), node_before,
-        "an executed node keeps its recorded model");
-    assert_eq!(runtime.state.model_config.as_ref().unwrap().node_agent_settings(),
-        config.node_agent_settings(), "the conversation selects the model for future turns");
+    assert_eq!(
+        serde_json::to_value(&runtime.state.nodes["task"]).unwrap(),
+        node_before,
+        "an executed node keeps its recorded model"
+    );
+    assert_eq!(
+        runtime
+            .state
+            .model_config
+            .as_ref()
+            .unwrap()
+            .node_agent_settings(),
+        config.node_agent_settings(),
+        "the conversation selects the model for future turns"
+    );
     let root = runtime.root.clone();
     drop(runtime);
     let restored = Runtime::open(&root).unwrap();
-    assert_eq!(restored.state.model_config.as_ref().unwrap().node_agent_settings(),
-        config.node_agent_settings(), "the settled conversation keeps the selection after restart");
+    assert_eq!(
+        restored
+            .state
+            .model_config
+            .as_ref()
+            .unwrap()
+            .node_agent_settings(),
+        config.node_agent_settings(),
+        "the settled conversation keeps the selection after restart"
+    );
     let metadata = crate::snapshot_view::snapshot_metadata(&restored.state).unwrap();
-    assert_eq!(metadata["modelConfig"]["roleModels"]["nodeAgent"]["model"], "replacement/coder",
-        "the Settings projection receives the restored conversation selection");
+    assert_eq!(
+        metadata["modelConfig"]["roleModels"]["nodeAgent"]["model"], "replacement/coder",
+        "the Settings projection receives the restored conversation selection"
+    );
 }
 
 #[test]
 fn legacy_checkpoints_hydrate_the_conversation_selection_from_node_overrides() {
     let (_temp, _source, mut runtime) = setup(true, single());
     let config = replacement(runtime.state.config.as_ref().unwrap());
-    runtime.emit(EventKind::NodeModelsUpdated {
-        nodes: vec!["task".into()],
-        settings: config.node_agent_settings(),
-    }).unwrap();
+    runtime
+        .emit(EventKind::NodeModelsUpdated {
+            nodes: vec!["task".into()],
+            settings: config.node_agent_settings(),
+        })
+        .unwrap();
     // Simulate a checkpoint written before Run-level model selections existed.
     runtime.state.model_config = None;
     runtime.state.hydrate_legacy_model_config();
     let settings = runtime.state.model_config.as_ref().unwrap();
     assert_eq!(settings.node_agent_settings(), config.node_agent_settings());
-    assert_eq!(settings.model, runtime.state.config.as_ref().unwrap().model,
-        "legacy hydration keeps the Run's original non-node roles");
+    assert_eq!(
+        settings.model,
+        runtime.state.config.as_ref().unwrap().model,
+        "legacy hydration keeps the Run's original non-node roles"
+    );
 }
 #[test]
 fn credential_failure_is_continued_without_a_synthetic_message() {
     let graph = Graph {
         original_goal: "reauth recovery".into(),
         nodes: vec![
-            Node { name: "first".into(), task: "first".into() },
-            Node { name: "after".into(), task: "after".into() },
+            Node {
+                name: "first".into(),
+                task: "first".into(),
+            },
+            Node {
+                name: "after".into(),
+                task: "after".into(),
+            },
         ],
-        edges: vec![Edge { from: "first".into(), to: "after".into(), feedback: false }],
+        edges: vec![Edge {
+            from: "first".into(),
+            to: "after".into(),
+            feedback: false,
+        }],
     };
     let (_temp, source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
@@ -689,7 +1098,10 @@ fn credential_failure_is_continued_without_a_synthetic_message() {
         !runtime.state.can_resume_interrupted(),
         "a credential failure is a real failure, not an interrupted turn"
     );
-    assert!(runtime.state.can_resume(), "re-authenticating makes Continue the recovery path");
+    assert!(
+        runtime.state.can_resume(),
+        "re-authenticating makes Continue the recovery path"
+    );
     assert_eq!(
         crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"],
         true,
@@ -710,15 +1122,30 @@ fn credential_failure_is_continued_without_a_synthetic_message() {
     assert_eq!(resumed.len(), 1);
     assert_eq!(resumed[0].execution.node, "first");
     assert!(resumed[0].continuation);
-    assert!(resumed[0].task.is_empty(), "do not add a synthetic user message");
+    assert!(
+        resumed[0].task.is_empty(),
+        "do not add a synthetic user message"
+    );
     assert_eq!(resumed[0].execution.session_id, failed.execution.session_id);
     assert_eq!(resumed[0].execution.worktree, failed.execution.worktree);
-    assert_eq!(resumed[0].resume_execution_id.as_deref(), Some(failed.execution.id.as_str()));
+    assert_eq!(
+        resumed[0].resume_execution_id.as_deref(),
+        Some(failed.execution.id.as_str())
+    );
     assert_ne!(resumed[0].execution.id, failed.execution.id);
-    assert!(resumed[0].preserved_workspace.is_some(), "Continue keeps the partial work");
+    assert!(
+        resumed[0].preserved_workspace.is_some(),
+        "Continue keeps the partial work"
+    );
     assert_eq!(fs::read_to_string(partial).unwrap(), "keep unfinished work");
-    assert_eq!(runtime.state.executions[0].status, "failed", "failure evidence stays recorded");
-    assert!(!runtime.state.can_resume(), "a queued recovery is no longer offered twice");
+    assert_eq!(
+        runtime.state.executions[0].status, "failed",
+        "failure evidence stays recorded"
+    );
+    assert!(
+        !runtime.state.can_resume(),
+        "a queued recovery is no longer offered twice"
+    );
 }
 
 #[test]
@@ -755,14 +1182,19 @@ fn provider_transport_failure_enables_continue_without_a_synthetic_message() {
     // Pi already exhausted its automatic transport retries; the session and
     // workspace are intact, so Continue must be the manual retry path.
     record_session(&runtime, &failed.execution);
-    runtime.finish(&failed.execution, Err("Connection error.".into())).unwrap();
+    runtime
+        .finish(&failed.execution, Err("Connection error.".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.phase, "needs_attention");
     assert!(
         !runtime.state.can_resume_interrupted(),
         "a transport failure is not a user pause"
     );
-    assert!(runtime.state.can_resume(), "Continue offers the unfinished turn");
+    assert!(
+        runtime.state.can_resume(),
+        "Continue offers the unfinished turn"
+    );
     assert_eq!(
         crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"],
         true,
@@ -774,14 +1206,20 @@ fn provider_transport_failure_enables_continue_without_a_synthetic_message() {
     let resumed = runtime.jobs().unwrap();
     assert_eq!(resumed.len(), 1);
     assert!(resumed[0].continuation);
-    assert!(resumed[0].task.is_empty(), "do not add a synthetic user message");
+    assert!(
+        resumed[0].task.is_empty(),
+        "do not add a synthetic user message"
+    );
     assert_eq!(resumed[0].execution.session_id, failed.execution.session_id);
     assert_eq!(resumed[0].execution.worktree, failed.execution.worktree);
     assert_eq!(
         resumed[0].resume_execution_id.as_deref(),
         Some(failed.execution.id.as_str())
     );
-    assert!(!runtime.state.can_resume(), "a queued recovery is no longer offered twice");
+    assert!(
+        !runtime.state.can_resume(),
+        "a queued recovery is no longer offered twice"
+    );
 }
 
 #[test]

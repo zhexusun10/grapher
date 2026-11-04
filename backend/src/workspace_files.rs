@@ -268,11 +268,20 @@ impl Files {
 
     /// Compare a business prefix independently of writer HOME/other scopes.
     /// This is a metadata optimization only; native use still validates bytes.
-    pub(crate) fn same_scope_contents(&self, left: &str, right: &str, scope: &str) -> Result<bool, String> {
+    pub(crate) fn same_scope_contents(
+        &self,
+        left: &str,
+        right: &str,
+        scope: &str,
+    ) -> Result<bool, String> {
         relative(scope)?;
         let entries = |version: &str| -> Result<Entries, String> {
-            Ok(self.load(version)?.entries.into_iter().filter(|(name, _)|
-                workspace::scope_contains(Path::new(name), Path::new(scope))).collect())
+            Ok(self
+                .load(version)?
+                .entries
+                .into_iter()
+                .filter(|(name, _)| workspace::scope_contains(Path::new(name), Path::new(scope)))
+                .collect())
         };
         Ok(entries(left)? == entries(right)?)
     }
@@ -570,7 +579,9 @@ impl Files {
             }
         }
         if bases.len() > 1 {
-            return Err("Managed environment scope composition blocked: ambiguous merge base".into());
+            return Err(
+                "Managed environment scope composition blocked: ambiguous merge base".into(),
+            );
         }
         let base = bases
             .iter()
@@ -675,7 +686,9 @@ impl Files {
         }
         let tracked = if self.project_index {
             workspace::working_tree_git(workspace, &["ls-files", "-z", "--cached"])?
-        } else { String::new() };
+        } else {
+            String::new()
+        };
         let tracked: BTreeSet<_> = tracked
             .split('\0')
             .filter(|name| !name.is_empty())
@@ -688,7 +701,9 @@ impl Files {
                         continue;
                     }
                 }
-                return Err(format!("Managed environment scope conflicts with tracked path {name}"));
+                return Err(format!(
+                    "Managed environment scope conflicts with tracked path {name}"
+                ));
             }
         }
         if reuse {

@@ -30,30 +30,68 @@ fn offline_cleanup_reclaims_completed_workspaces_but_keeps_the_conversation_and_
     let data = temp.path().join("data");
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
-    let config = serde_json::from_value(serde_json::json!({"repository":source,"model":"test","maxParallel":1})).unwrap();
+    let config = serde_json::from_value(
+        serde_json::json!({"repository":source,"model":"test","maxParallel":1}),
+    )
+    .unwrap();
     let mut runtime = Runtime::open_lazy(&data).unwrap();
-    runtime.create(Graph { original_goal: "test".into(), nodes: vec![Node { name: "task".into(), task: "test".into() }], edges: vec![] }, config).unwrap();
-    runtime.emit(EventKind::PublicationCompleted { head: "test".into() }).unwrap();
+    runtime
+        .create(
+            Graph {
+                original_goal: "test".into(),
+                nodes: vec![Node {
+                    name: "task".into(),
+                    task: "test".into(),
+                }],
+                edges: vec![],
+            },
+            config,
+        )
+        .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted {
+            head: "test".into(),
+        })
+        .unwrap();
     let id = runtime.state.run_id.clone();
-    let worktree = temp.path().join(".grapher-worktrees").join(&id).join("node/dependencies");
+    let worktree = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join(&id)
+        .join("node/dependencies");
     fs::create_dir_all(&worktree).unwrap();
     let history = data.join("sessions").join(Uuid::new_v4().to_string());
     fs::create_dir_all(&history).unwrap();
     fs::write(history.join("session.jsonl"), "history").unwrap();
     drop(runtime);
     let preview = cleanup(&data, temp.path(), &[]);
-    assert!(preview.status.success(), "{}", String::from_utf8_lossy(&preview.stderr));
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
     assert!(worktree.is_dir());
     let apply = cleanup(&data, temp.path(), &["--apply"]);
-    assert!(apply.status.success(), "{}", String::from_utf8_lossy(&apply.stderr));
+    assert!(
+        apply.status.success(),
+        "{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
     assert!(!worktree.exists());
     assert!(history.join("session.jsonl").is_file());
-    assert!(Runtime::open_lazy(&data).unwrap().store.contains_run(&id).unwrap());
+    assert!(Runtime::open_lazy(&data)
+        .unwrap()
+        .store
+        .contains_run(&id)
+        .unwrap());
 }
 
 #[test]
 fn explicit_parent_recovers_missing_legacy_binding_and_finishes_the_durable_queue() {
-    use grapher::{cleanup::{Manifest, Target}, model::{EventKind, Snapshot}};
+    use grapher::{
+        cleanup::{Manifest, Target},
+        model::{EventKind, Snapshot},
+    };
     use std::collections::BTreeSet;
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().join("data");
@@ -61,23 +99,60 @@ fn explicit_parent_recovers_missing_legacy_binding_and_finishes_the_durable_queu
     let runtime = Runtime::open_lazy(&data).unwrap();
     let id = Uuid::new_v4().to_string();
     let session_id = Uuid::new_v4().to_string();
-    let mut legacy = Snapshot { run_id: id.clone(), ..Default::default() };
-    runtime.store.append(&mut legacy, EventKind::Created { graph: Graph::default(), config: serde_json::from_value(serde_json::json!({"repository":source,"model":"test","maxParallel":1})).unwrap(), planning_id: None, planning: None }).unwrap();
-    let worktree = temp.path().join(".grapher-worktrees").join(&id).join("node/dependencies");
+    let mut legacy = Snapshot {
+        run_id: id.clone(),
+        ..Default::default()
+    };
+    runtime
+        .store
+        .append(
+            &mut legacy,
+            EventKind::Created {
+                graph: Graph::default(),
+                config: serde_json::from_value(
+                    serde_json::json!({"repository":source,"model":"test","maxParallel":1}),
+                )
+                .unwrap(),
+                planning_id: None,
+                planning: None,
+            },
+        )
+        .unwrap();
+    let worktree = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join(&id)
+        .join("node/dependencies");
     fs::create_dir_all(&worktree).unwrap();
     let session = data.join("sessions").join(&session_id);
     fs::create_dir_all(&session).unwrap();
     fs::write(session.join("session.jsonl"), "history").unwrap();
-    runtime.store.delete_run_with_cleanup(&id, Some(&Manifest {
-        targets: BTreeSet::from([Target::data("sessions", &session_id)]),
-        unresolved_repository: Some(source.to_string_lossy().into_owned()), ..Default::default()
-    })).unwrap();
+    runtime
+        .store
+        .delete_run_with_cleanup(
+            &id,
+            Some(&Manifest {
+                targets: BTreeSet::from([Target::data("sessions", &session_id)]),
+                unresolved_repository: Some(source.to_string_lossy().into_owned()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
     drop(runtime);
     let apply = cleanup(&data, temp.path(), &["--apply"]);
-    assert!(apply.status.success(), "{}", String::from_utf8_lossy(&apply.stderr));
+    assert!(
+        apply.status.success(),
+        "{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
     assert!(!worktree.exists());
     assert!(!session.exists());
-    assert!(Runtime::open_lazy(&data).unwrap().store.pending_cleanups().unwrap().is_empty());
+    assert!(Runtime::open_lazy(&data)
+        .unwrap()
+        .store
+        .pending_cleanups()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

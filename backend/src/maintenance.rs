@@ -189,14 +189,16 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
     if !explicit_parent {
         fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
     }
-    let parent = parent.canonicalize()
+    let parent = parent
+        .canonicalize()
         .map_err(|error| format!("Cannot resolve workspace parent: {error}"))?;
     let plan = workspace_plan(&root, &store, &parent)?;
-    let engine_parent = if explicit_parent && std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT").is_none() {
-        parent.join(".grapher-workspaces") // Explicit legacy/project-parent inspection.
-    } else {
-        crate::workspace::native_runtime_parent()
-    };
+    let engine_parent =
+        if explicit_parent && std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT").is_none() {
+            parent.join(".grapher-workspaces") // Explicit legacy/project-parent inspection.
+        } else {
+            crate::workspace::native_runtime_parent()
+        };
     let sources = store.cleanup_sources()?;
     let engines: Vec<_> = crate::native_runtime_storage::unused(&engine_parent, legacy)?
         .into_iter()
@@ -258,7 +260,8 @@ pub fn cleanup_workspaces(args: Vec<String>) -> Result<(), String> {
         plan.paths.len(), engines.len(), plan.retained);
     println!(
         "[cleanup] {} shadow repositories; retained {} referenced by incomplete Runs.",
-        plan.shadow_paths.len(), plan.shadow_retained
+        plan.shadow_paths.len(),
+        plan.shadow_retained
     );
     println!(
         "[cleanup] {} cleanup tasks (deleted conversations and completed-run workspaces).",
@@ -423,7 +426,9 @@ mod tests {
         let referenced = crate::workspace::shadow_repo_dir(&source).unwrap();
         assert!(store.shadow_repo_in_use(&referenced).unwrap());
         // A leftover directory with no owning Run is reclaimable.
-        let orphan = root.join("shadow_repos").join("orphan_0000000000000000.git");
+        let orphan = root
+            .join("shadow_repos")
+            .join("orphan_0000000000000000.git");
         fs::create_dir_all(&orphan).unwrap();
         assert!(!store.shadow_repo_in_use(&orphan).unwrap());
         let plan = workspace_plan(&root, &store, temp.path()).unwrap();

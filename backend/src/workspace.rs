@@ -502,7 +502,9 @@ pub(crate) fn private_git_dir(path: &Path) -> Option<PathBuf> {
     }
     let run = path.parent()?;
     let name = path.file_name()?.to_str()?;
-    let metadata = run.join(".grapher-git").join(graph_metadata_name(name).ok()?);
+    let metadata = run
+        .join(".grapher-git")
+        .join(graph_metadata_name(name).ok()?);
     fs::symlink_metadata(&metadata)
         .ok()
         .filter(|m| m.is_dir() && !m.file_type().is_symlink())?;
@@ -579,11 +581,12 @@ fn allocate_private_git(path: &Path) -> Result<(), String> {
         );
     }
     let run = path.parent().ok_or("Missing slot owner")?;
-    let target = run
-        .join(".grapher-git")
-        .join(graph_metadata_name(
-            path.file_name().ok_or("Missing slot")?.to_str().ok_or("Non-UTF-8 slot")?,
-        )?);
+    let target = run.join(".grapher-git").join(graph_metadata_name(
+        path.file_name()
+            .ok_or("Missing slot")?
+            .to_str()
+            .ok_or("Non-UTF-8 slot")?,
+    )?);
     crate::path_safety::real_child_path(run, &target, false)?;
     if target.join("HEAD").exists() && !target.join("workspace-layout-v4").is_file() {
         return Err(
@@ -670,7 +673,11 @@ pub(crate) fn reclaim_orphan_git_metadata(run_root: &Path) -> Result<(), String>
     let mut live = std::collections::BTreeSet::new();
     for entry in fs::read_dir(run_root).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
-        if entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+        if entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
             if let Some(name) = entry.file_name().to_str() {
                 if let Ok(metadata) = graph_metadata_name(name) {
                     live.insert(metadata);
@@ -687,11 +694,7 @@ pub(crate) fn reclaim_orphan_git_metadata(run_root: &Path) -> Result<(), String>
             remaining = true;
             continue;
         };
-        if slot.is_empty()
-            || slot.contains('/')
-            || slot.contains('\\')
-            || live.contains(&name)
-        {
+        if slot.is_empty() || slot.contains('/') || slot.contains('\\') || live.contains(&name) {
             remaining = true;
             continue;
         }
@@ -2520,7 +2523,14 @@ pub(crate) fn prepare_with_merger_expected_for_run(
     resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
     prepare_with_merger_expected_for_run_scoped(
-        repository, path, base, parents, expected_source_head, run_id, &[], resolve,
+        repository,
+        path,
+        base,
+        parents,
+        expected_source_head,
+        run_id,
+        &[],
+        resolve,
     )
 }
 
@@ -2915,7 +2925,8 @@ fn snapshot_slot_to_ref_scoped(
     if !git(&canonical_path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
         return Err("Unresolved merge conflicts remain".into());
     }
-    let view_identity = crate::workspace_view::node_identity_scoped(&canonical_path, &canonical_repo, exclusions)?;
+    let view_identity =
+        crate::workspace_view::node_identity_scoped(&canonical_path, &canonical_repo, exclusions)?;
     if view_identity.is_some() {
         crate::workspace_view::reject_undeliverable_special_changes(
             &canonical_path,
@@ -2939,8 +2950,7 @@ fn snapshot_slot_to_ref_scoped(
     // snapshot commit. This keeps `runtime.resolved` importing the user's
     // commit as the node result. Only a head whose recorded view disagrees
     // needs a new binding commit.
-    let rebind_view = changed_view
-        && crate::workspace_view::has_record(&canonical_repo, &current);
+    let rebind_view = changed_view && crate::workspace_view::has_record(&canonical_repo, &current);
     if rebind_view || !git(&canonical_path, &["diff", "--cached", "--name-only"])?.is_empty() {
         let message = view_identity
             .as_ref()
@@ -3005,7 +3015,12 @@ fn snapshot_slot_to_ref_scoped(
         args.push(&node_refspec);
         match git(&canonical_repo, &args) {
             Ok(_) => {
-                crate::workspace_view::capture_node_scoped(&canonical_path, &canonical_repo, &head, exclusions)?;
+                crate::workspace_view::capture_node_scoped(
+                    &canonical_path,
+                    &canonical_repo,
+                    &head,
+                    exclusions,
+                )?;
                 return Ok(head);
             }
             Err(error) if attempt == 3 => return Err(error),
@@ -3120,7 +3135,8 @@ pub(crate) fn collection_excluded(
     {
         return true;
     }
-    is_generated_artifact(relative) && !tracked.contains(&relative.to_string_lossy().replace('\\', "/"))
+    is_generated_artifact(relative)
+        && !tracked.contains(&relative.to_string_lossy().replace('\\', "/"))
 }
 
 /// Git pathspecs that exclude generated artifacts from a forced `git add` or
@@ -3247,7 +3263,12 @@ fn restore_tracked_generated(
         .collect();
     let run = |args: Vec<String>| -> Result<(), String> {
         let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-        if local { git(path, &args) } else { repository_git(path, &args) }.map(|_| ())
+        if local {
+            git(path, &args)
+        } else {
+            repository_git(path, &args)
+        }
+        .map(|_| ())
     };
     if !present.is_empty() {
         let mut args = vec!["add".to_string(), "-f".to_string(), "--".to_string()];
@@ -3325,7 +3346,13 @@ fn filtered_status_for(raw: String, root: &Path, exclusions: &[String], macos: b
                 continue;
             }
             if code == "!!"
-                && status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions, &tracked)
+                && status_path_excluded(
+                    path,
+                    root.as_deref(),
+                    data.as_deref(),
+                    exclusions,
+                    &tracked,
+                )
             {
                 continue;
             }
@@ -3351,7 +3378,13 @@ fn ignored_host_metadata(raw: &str, root: &Path, exclusions: &[String]) -> Strin
         .filter(|path| {
             !path.is_empty()
                 && is_host_metadata_name(path)
-                && !status_path_excluded(path, root.as_deref(), data.as_deref(), exclusions, &tracked)
+                && !status_path_excluded(
+                    path,
+                    root.as_deref(),
+                    data.as_deref(),
+                    exclusions,
+                    &tracked,
+                )
         })
         .map(|path| format!("!! {path}"))
         .collect::<Vec<_>>()

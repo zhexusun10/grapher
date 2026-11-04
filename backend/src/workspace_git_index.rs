@@ -74,7 +74,10 @@ fn index(root: &Path) -> Result<Index, String> {
                     "3" => 1,
                     _ => 0,
                 };
-                if unmerged.get(name).is_none_or(|(current, _)| rank > *current) {
+                if unmerged
+                    .get(name)
+                    .is_none_or(|(current, _)| rank > *current)
+                {
                     unmerged.insert(name.into(), (rank, item));
                 }
             }

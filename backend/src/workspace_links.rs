@@ -19,7 +19,8 @@ impl Topology {
     /// Drop aliases/outside records whose path fails `keep`. Used when a
     /// comparison ignores generated artifacts a recorded view may still carry.
     pub(crate) fn retain(&mut self, keep: impl Fn(&str) -> bool) {
-        self.aliases.retain(|name, target| keep(name) && keep(target));
+        self.aliases
+            .retain(|name, target| keep(name) && keep(target));
         self.outside.retain(|name, _| keep(name));
     }
 }

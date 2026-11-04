@@ -638,21 +638,37 @@ fn metadata_materialization_requires_full_equality_and_never_hides_a_restore() {
         "flags": 0, "owner": null, "efs": false
     }))
     .unwrap();
-    let file = |mode: u32, extra: Extra| Entry::File { mode, blob: String::new(), extra };
+    let file = |mode: u32, extra: Extra| Entry::File {
+        mode,
+        blob: String::new(),
+        extra,
+    };
 
     // Identical kind, mode and full metadata (including the ACL) is the only
     // case that may skip a restore.
-    assert!(metadata_materialized(Some(&file(0, plain.clone())), &file(0, plain.clone())));
+    assert!(metadata_materialized(
+        Some(&file(0, plain.clone())),
+        &file(0, plain.clone())
+    ));
     // A mode change (for example a read-only bit cleared before a rewrite) is
     // not already materialized.
-    assert!(!metadata_materialized(Some(&file(1, plain.clone())), &file(0, plain.clone())));
+    assert!(!metadata_materialized(
+        Some(&file(1, plain.clone())),
+        &file(0, plain.clone())
+    ));
     // A security-descriptor difference must still restore even though the
     // view-identity comparison ignores `security`.
-    assert!(!metadata_materialized(Some(&file(0, secured.clone())), &file(0, plain.clone())));
+    assert!(!metadata_materialized(
+        Some(&file(0, secured.clone())),
+        &file(0, plain.clone())
+    ));
     // A missing or differently-typed on-disk entry never counts as materialized.
     assert!(!metadata_materialized(None, &file(0, plain.clone())));
     assert!(!metadata_materialized(
-        Some(&Entry::Directory { mode: 0, extra: plain.clone() }),
+        Some(&Entry::Directory {
+            mode: 0,
+            extra: plain.clone()
+        }),
         &file(0, plain.clone())
     ));
 }
@@ -717,11 +733,12 @@ fn legacy_unix_ownership_is_normalized_only_after_checksum_validation() {
 #[test]
 fn legacy_provenance_metadata_is_ignored_after_load() {
     let temp = tempfile::tempdir().unwrap();
-    let legacy_extra: crate::workspace_metadata::Extra = serde_json::from_value(serde_json::json!({
-        "attributes": [["com.apple.provenance", [1, 2, 3]]],
-        "security": [], "protected": false, "flags": 64, "owner": null, "efs": false
-    }))
-    .unwrap();
+    let legacy_extra: crate::workspace_metadata::Extra =
+        serde_json::from_value(serde_json::json!({
+            "attributes": [["com.apple.provenance", [1, 2, 3]]],
+            "security": [], "protected": false, "flags": 64, "owner": null, "efs": false
+        }))
+        .unwrap();
     let view = View {
         schema: 5,
         source: "/legacy/source".into(),
@@ -808,10 +825,22 @@ fn generated_artifacts_are_not_collected_unless_tracked() {
     workspace::git(&source, &["commit", "-qm", "commit bytecode"]).unwrap();
 
     let assert_collected = |target: &Path| {
-        assert!(!target.join("node_modules").exists(), "node_modules must not be collected");
-        assert!(!target.join(".next").exists(), ".next must not be collected");
-        assert!(!target.join("src/__pycache__").exists(), "__pycache__ must not be collected");
-        assert!(!target.join("tsconfig.tsbuildinfo").exists(), "tsbuildinfo must not be collected");
+        assert!(
+            !target.join("node_modules").exists(),
+            "node_modules must not be collected"
+        );
+        assert!(
+            !target.join(".next").exists(),
+            ".next must not be collected"
+        );
+        assert!(
+            !target.join("src/__pycache__").exists(),
+            "__pycache__ must not be collected"
+        );
+        assert!(
+            !target.join("tsconfig.tsbuildinfo").exists(),
+            "tsbuildinfo must not be collected"
+        );
         // An ambiguous authored directory and a committed generated file stay.
         assert_eq!(bytes(&target.join("dist/authored.txt")), b"authored\n");
         assert_eq!(bytes(&target.join("committed.pyc")), b"tracked bytecode\n");
@@ -845,7 +874,11 @@ fn reused_slot_prunes_ignored_leftover_directories() {
     // `checkout -f` rewrites tracked files only, so just the enclosing
     // directory survives and the scan records it.
     fs::create_dir_all(target.join("src/pkg/__pycache__")).unwrap();
-    fs::write(target.join("src/pkg/__pycache__/mod.cpython-312.pyc"), "cache\n").unwrap();
+    fs::write(
+        target.join("src/pkg/__pycache__/mod.cpython-312.pyc"),
+        "cache\n",
+    )
+    .unwrap();
 
     fs::remove_dir_all(source.join("src/pkg")).unwrap();
     let second = workspace::materialize_shadow_repo(&source, &[]).unwrap();
@@ -872,8 +905,14 @@ fn reused_slot_keeps_unrecorded_project_content() {
     fs::write(target.join("src/pkg/__pycache__/mod.pyc"), "cache\n").unwrap();
     fs::write(target.join("notes.md"), "authored\n").unwrap();
     let error = workspace::prepare(&source, &target, &base, &[]).unwrap_err();
-    assert!(error.contains("notes.md") && error.contains("unexpected entry"), "{error}");
-    assert_eq!(bytes(&target.join("src/pkg/__pycache__/mod.pyc")), b"cache\n");
+    assert!(
+        error.contains("notes.md") && error.contains("unexpected entry"),
+        "{error}"
+    );
+    assert_eq!(
+        bytes(&target.join("src/pkg/__pycache__/mod.pyc")),
+        b"cache\n"
+    );
     assert_eq!(bytes(&target.join("notes.md")), b"authored\n");
 }
 
@@ -935,7 +974,8 @@ fn windows_long_path_fan_in_prepares_after_conflict_and_retry() {
     let target = slot(&temp, "long-path-join");
     let error = workspace::prepare_with_merger(&source, &target, &base, &parents, || {
         Err("injected interrupted conflict repair".into())
-    }).unwrap_err();
+    })
+    .unwrap_err();
     assert!(error.contains("injected interrupted conflict repair"));
     assert!(target.join(&relative).is_file());
 
@@ -948,7 +988,8 @@ fn windows_long_path_fan_in_prepares_after_conflict_and_retry() {
         workspace::git(&canonical, &["add", "-f", "--", &name])?;
         workspace::git(&canonical, &["commit", "--no-edit"])?;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(repairs, 1);
     assert_eq!(bytes(&target.join(&relative)), b"resolved\n");
     validate_ready(&target, &source).unwrap();
@@ -1594,7 +1635,11 @@ fn reused_slot_rebinds_project_git_to_the_new_base() {
     );
 
     fs::create_dir_all(target.join("src/pkg/__pycache__")).unwrap();
-    fs::write(target.join("src/pkg/__pycache__/mod.cpython-312.pyc"), "cache\n").unwrap();
+    fs::write(
+        target.join("src/pkg/__pycache__/mod.cpython-312.pyc"),
+        "cache\n",
+    )
+    .unwrap();
     workspace::git(&source, &["rm", "-q", "-r", "src/pkg"]).unwrap();
     workspace::git(&source, &["commit", "-qm", "drop pkg"]).unwrap();
     let second = workspace::snapshot_repository(&source).unwrap();

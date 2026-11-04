@@ -24,7 +24,10 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
         pi_args: vec![script_path.to_string_lossy().into()],
         model: String::new(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false, post_task_review: false, planner_write_tools: true,
+        max_feedback: 3,
+        auto_approve: false,
+        post_task_review: false,
+        planner_write_tools: true,
         thinking_level: "medium".into(),
         role_models: Default::default(),
     };
@@ -203,10 +206,20 @@ fn parse_route_decision_safe_fallback_on_ambiguity_or_gibberish() {
 
 #[test]
 fn parse_route_decision_does_not_recognize_graph_or_partial_keywords() {
-    for text in ["graph", "grap", "seral", "paragraph", "parallelism", "nonparallel"] {
+    for text in [
+        "graph",
+        "grap",
+        "seral",
+        "paragraph",
+        "parallelism",
+        "nonparallel",
+    ] {
         assert_eq!(parse_route_decision(text).plan_type, "serial", "{text}");
     }
-    assert_eq!(parse_route_decision("graph execution: parallel").plan_type, "graph");
+    assert_eq!(
+        parse_route_decision("graph execution: parallel").plan_type,
+        "graph"
+    );
 }
 
 #[test]
@@ -242,8 +255,14 @@ exit 1
 "#,
     );
     let err = result.unwrap_err();
-    assert!(err.contains("Insufficient Balance"), "Expected Insufficient Balance, got: {err}");
-    assert!(!err.starts_with("Pi exited with"), "Should not be overshadowed by exit code: {err}");
+    assert!(
+        err.contains("Insufficient Balance"),
+        "Expected Insufficient Balance, got: {err}"
+    );
+    assert!(
+        !err.starts_with("Pi exited with"),
+        "Should not be overshadowed by exit code: {err}"
+    );
 }
 
 #[test]
@@ -292,12 +311,19 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_args: vec![script_path.to_string_lossy().into()],
         model: String::new(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false,
+        max_feedback: 3,
+        auto_approve: false,
         thinking_level: "medium".into(),
         role_models: Default::default(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
     };
-    for role in [PiRole::Merger, PiRole::NodeAgent, PiRole::Planner, PiRole::Partitioner] {
+    for role in [
+        PiRole::Merger,
+        PiRole::NodeAgent,
+        PiRole::Planner,
+        PiRole::Partitioner,
+    ] {
         let mut output = String::new();
         let result = run_pi(
             PiRequest {
@@ -317,7 +343,10 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             |text| output.push_str(&text),
         );
         assert_eq!(result.unwrap(), "OK");
-        assert_eq!(output.contains("--append-system-prompt"), role == PiRole::Merger);
+        assert_eq!(
+            output.contains("--append-system-prompt"),
+            role == PiRole::Merger
+        );
         assert_eq!(output.contains("--system-prompt"), role != PiRole::Merger);
         assert!(output.contains("SYSTEM_PROMPT_CONTENT: Custom system prompt content for test"));
     }
@@ -340,9 +369,11 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_command: "/bin/sh".into(),
         pi_args: vec![script_path.to_string_lossy().into()],
         model: "test-model".into(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false,
+        max_feedback: 3,
+        auto_approve: false,
         thinking_level: "medium".into(),
         role_models: Default::default(),
     };
@@ -549,9 +580,11 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_command: "/bin/sh".into(),
         pi_args: vec![script.to_string_lossy().into()],
         model: "test-model".into(),
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false,
+        max_feedback: 3,
+        auto_approve: false,
         thinking_level: "medium".into(),
         role_models: Default::default(),
     };
@@ -626,7 +659,10 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         model: "test-model".into(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false, post_task_review: false, planner_write_tools: true,
+        max_feedback: 3,
+        auto_approve: false,
+        post_task_review: false,
+        planner_write_tools: true,
         role_models: Default::default(),
     };
     let mut output = String::new();
@@ -693,7 +729,10 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         role_models: Default::default(),
         thinking_level: "medium".into(),
         max_parallel: 2,
-        max_feedback: 3, auto_approve: false, post_task_review: false, planner_write_tools: true,
+        max_feedback: 3,
+        auto_approve: false,
+        post_task_review: false,
+        planner_write_tools: true,
     };
 
     // Verify PiModelConfig::resolve for NodeAgent ignores PI_MODEL and uses base_config.model

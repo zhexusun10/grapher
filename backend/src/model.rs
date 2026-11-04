@@ -116,7 +116,8 @@ impl TokenUsage {
         if self.total_tokens > 0 {
             self.total_tokens
         } else {
-            self.input.saturating_add(self.output)
+            self.input
+                .saturating_add(self.output)
                 .saturating_add(self.cache_read)
                 .saturating_add(self.cache_write)
         }
@@ -467,10 +468,15 @@ fn record_session_context(
         return;
     }
     let entry = contexts.entry(session_id.to_string()).or_default();
-    entry.peak = entry.peak.max(peak).max(tokens).max(snapshot.map_or(0, |context| context.peak));
+    entry.peak = entry
+        .peak
+        .max(peak)
+        .max(tokens)
+        .max(snapshot.map_or(0, |context| context.peak));
     if (snapshot.is_some() || tokens > 0) && stamp >= stamps.get(session_id).copied().unwrap_or(0) {
         entry.tokens = snapshot.map_or(tokens, |context| context.tokens);
-        entry.window = snapshot.and_then(|context| context.window)
+        entry.window = snapshot
+            .and_then(|context| context.window)
             .or_else(|| model.and_then(crate::model_window::context_window));
         stamps.insert(session_id.to_string(), stamp);
     }
@@ -487,8 +493,12 @@ pub(crate) fn record_context_usage(
     if value.get("type").and_then(|v| v.as_str()) != Some("grapher_context_usage") {
         return false;
     }
-    let count = |key: &str| value.get(key).and_then(|v| v.as_u64())
-        .and_then(|v| usize::try_from(v).ok());
+    let count = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .and_then(|v| usize::try_from(v).ok())
+    };
     *tokens = count("tokens").unwrap_or(0);
     *peak = (*peak).max(*tokens);
     *snapshot = Some(SessionContext {
@@ -501,10 +511,14 @@ pub(crate) fn record_context_usage(
 
 /// A capacity observed for one model must not be reused after a model change.
 pub(crate) fn record_context_model(
-    model: &mut Option<String>, snapshot: &mut Option<SessionContext>, next: String,
+    model: &mut Option<String>,
+    snapshot: &mut Option<SessionContext>,
+    next: String,
 ) {
     if model.as_ref().is_some_and(|previous| previous != &next) {
-        if let Some(context) = snapshot { context.window = None; }
+        if let Some(context) = snapshot {
+            context.window = None;
+        }
     }
     *model = Some(next);
 }
@@ -520,12 +534,18 @@ pub(crate) fn record_assistant_context(
 ) {
     let stop = message.get("stopReason").and_then(|v| v.as_str());
     if matches!(stop, Some("error" | "aborted"))
-        || (stop.is_none() && usage.output > 0 && usage.input == 0
-            && usage.cache_read == 0 && usage.cache_write == 0) {
+        || (stop.is_none()
+            && usage.output > 0
+            && usage.input == 0
+            && usage.cache_read == 0
+            && usage.cache_write == 0)
+    {
         return;
     }
     let count = usage.context_tokens();
-    if count == 0 { return; }
+    if count == 0 {
+        return;
+    }
     *tokens = count;
     *peak = (*peak).max(count);
     if let Some(context) = snapshot {
@@ -597,7 +617,8 @@ impl FeedbackWorkspace {
             source_execution_id: self.source_execution_id.clone(),
             worktree: self.worktree.clone(),
             head: self.head.clone(),
-        }).chain(self.additional_sources.iter().cloned())
+        })
+        .chain(self.additional_sources.iter().cloned())
     }
 }
 
@@ -737,14 +758,21 @@ impl NodeState {
     /// Batch only undispatched turns, preserving message boundaries and the
     /// correspondence between each turn and its ordered image attachments.
     pub fn pending_prompt(&self) -> Option<(String, Option<Vec<ImageAttachment>>)> {
-        if self.pending_messages.is_empty() { return None; }
+        if self.pending_messages.is_empty() {
+            return None;
+        }
         let mut images = Vec::new();
         let mut parts = Vec::new();
         for (index, message) in self.pending_messages.iter().enumerate() {
             let first_image = images.len() + 1;
             images.extend(message.images.clone().unwrap_or_default());
             let label = if images.len() >= first_image {
-                format!("[User message {}; attached images {}-{}]", index + 1, first_image, images.len())
+                format!(
+                    "[User message {}; attached images {}-{}]",
+                    index + 1,
+                    first_image,
+                    images.len()
+                )
             } else {
                 format!("[User message {}]", index + 1)
             };
@@ -1307,10 +1335,14 @@ pub fn parse_execution_metrics(
                                 .and_then(|v| v.as_str())
                                 .filter(|model_id| !model_id.is_empty())
                             {
-                                let next = msg.get("provider")
+                                let next = msg
+                                    .get("provider")
                                     .and_then(|v| v.as_str())
                                     .filter(|provider| !provider.is_empty())
-                                    .map_or_else(|| model_id.to_string(), |provider| format!("{provider}/{model_id}"));
+                                    .map_or_else(
+                                        || model_id.to_string(),
+                                        |provider| format!("{provider}/{model_id}"),
+                                    );
                                 record_context_model(&mut model, &mut context_usage, next);
                             }
                             if let Some(level) = msg
@@ -1324,8 +1356,13 @@ pub fn parse_execution_metrics(
                                 assistant_messages += 1;
                                 if let Some(u) = msg.get("usage") {
                                     let message = TokenUsage::from_message_usage(u);
-                                    record_assistant_context(msg, &message, &mut context_tokens,
-                                        &mut context_peak, &mut context_usage);
+                                    record_assistant_context(
+                                        msg,
+                                        &message,
+                                        &mut context_tokens,
+                                        &mut context_peak,
+                                        &mut context_usage,
+                                    );
                                     usage.accumulate(&message);
                                 }
                             }
@@ -1333,14 +1370,24 @@ pub fn parse_execution_metrics(
                     }
                 }
                 "grapher_context_usage" => {
-                    record_context_usage(&value, &mut context_tokens, &mut context_peak, &mut context_usage);
+                    record_context_usage(
+                        &value,
+                        &mut context_tokens,
+                        &mut context_peak,
+                        &mut context_usage,
+                    );
                 }
                 "model_change" => {
                     let model_id = value.get("modelId").and_then(|v| v.as_str());
                     if let Some(model_id) = model_id {
-                        let next = value.get("provider").and_then(|v| v.as_str())
+                        let next = value
+                            .get("provider")
+                            .and_then(|v| v.as_str())
                             .filter(|provider| !provider.is_empty())
-                            .map_or_else(|| model_id.to_string(), |provider| format!("{provider}/{model_id}"));
+                            .map_or_else(
+                                || model_id.to_string(),
+                                |provider| format!("{provider}/{model_id}"),
+                            );
                         record_context_model(&mut model, &mut context_usage, next);
                     }
                 }
@@ -1398,7 +1445,9 @@ pub fn parse_context_from_tail(output: &str) -> Option<SessionContext> {
             continue;
         }
         // A tail fragment may begin mid-record; unparsable lines are skipped.
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else { continue };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
         let mut tokens = 0;
         let mut peak = 0;
         let mut snapshot = None;
@@ -1408,15 +1457,28 @@ pub fn parse_context_from_tail(output: &str) -> Option<SessionContext> {
         if value.get("type").and_then(|value| value.as_str()) != Some("message_end") {
             continue;
         }
-        let Some(msg) = value.get("message") else { continue };
+        let Some(msg) = value.get("message") else {
+            continue;
+        };
         if msg.get("role").and_then(|value| value.as_str()) != Some("assistant") {
             continue;
         }
-        let Some(usage) = msg.get("usage") else { continue };
-        record_assistant_context(msg, &TokenUsage::from_message_usage(usage),
-            &mut tokens, &mut peak, &mut snapshot);
+        let Some(usage) = msg.get("usage") else {
+            continue;
+        };
+        record_assistant_context(
+            msg,
+            &TokenUsage::from_message_usage(usage),
+            &mut tokens,
+            &mut peak,
+            &mut snapshot,
+        );
         if tokens > 0 {
-            return Some(SessionContext { tokens, peak, window: None });
+            return Some(SessionContext {
+                tokens,
+                peak,
+                window: None,
+            });
         }
     }
     None
@@ -1493,8 +1555,12 @@ impl Snapshot {
         if self.model_config.is_some() {
             return;
         }
-        let Some(config) = self.config.as_ref() else { return; };
-        let Some(settings) = self.nodes.values()
+        let Some(config) = self.config.as_ref() else {
+            return;
+        };
+        let Some(settings) = self
+            .nodes
+            .values()
             .find_map(|node| node.model_config.clone())
         else {
             return;
@@ -1555,16 +1621,23 @@ impl Snapshot {
     /// Explicit Continue can retry a failed attempt even when its error is not
     /// recognized. Never treat a superseded or non-terminal attempt as a root.
     pub fn failed_retry_nodes(&self) -> Vec<String> {
-        self.nodes.iter().filter_map(|(name, node)| {
-            if node.status != "failed" {
-                return None;
-            }
-            self.executions.iter().rev()
-                .find(|execution| execution.node == *name
-                    && !self.superseded_execution_ids.contains(&execution.id))
-                .filter(|execution| execution.status == "failed")
-                .map(|_| name.clone())
-        }).collect()
+        self.nodes
+            .iter()
+            .filter_map(|(name, node)| {
+                if node.status != "failed" {
+                    return None;
+                }
+                self.executions
+                    .iter()
+                    .rev()
+                    .find(|execution| {
+                        execution.node == *name
+                            && !self.superseded_execution_ids.contains(&execution.id)
+                    })
+                    .filter(|execution| execution.status == "failed")
+                    .map(|_| name.clone())
+            })
+            .collect()
     }
 
     /// A failed attempt that never reached `Prepared` and produced no output:
@@ -1596,21 +1669,37 @@ impl Snapshot {
         if session_start {
             return true;
         }
-        !self.events.iter().any(|event| matches!(
-            &event.kind,
-            EventKind::Prepared { execution_id, .. } if execution_id == &execution.id
-        ))
+        !self.events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                EventKind::Prepared { execution_id, .. } if execution_id == &execution.id
+            )
+        })
     }
 
     /// A blocked node belongs to its own failed attempt only when the
     /// attempt-scoped Failed/Blocked pair still explains the current block.
     /// Managed preparation failures can use different failure/block messages.
     pub fn node_has_own_blocked_failure(&self, name: &str) -> bool {
-        let Some(node) = self.nodes.get(name).filter(|node| node.status == "blocked") else { return false; };
-        let Some(latest) = self.executions.iter().rev().find(|execution| {
-            execution.node == name && !self.superseded_execution_ids.contains(&execution.id)
-        }).filter(|execution| execution.status == "failed") else { return false; };
-        let managed_preparation = self.config.as_ref().and_then(|config| config.environment.as_ref()).is_some()
+        let Some(node) = self.nodes.get(name).filter(|node| node.status == "blocked") else {
+            return false;
+        };
+        let Some(latest) = self
+            .executions
+            .iter()
+            .rev()
+            .find(|execution| {
+                execution.node == name && !self.superseded_execution_ids.contains(&execution.id)
+            })
+            .filter(|execution| execution.status == "failed")
+        else {
+            return false;
+        };
+        let managed_preparation = self
+            .config
+            .as_ref()
+            .and_then(|config| config.environment.as_ref())
+            .is_some()
             && self.execution_is_preparation_only(latest);
         self.events.windows(2).any(|pair| matches!(
             (&pair[0].kind, &pair[1].kind),
@@ -1626,7 +1715,11 @@ impl Snapshot {
     /// a managed environment. Distinguish it from a descendant blocked by an
     /// upstream failure using the adjacent, attempt-scoped Failed/Blocked pair.
     pub fn preparation_failed_nodes(&self) -> Vec<String> {
-        let managed = self.config.as_ref().and_then(|config| config.environment.as_ref()).is_some();
+        let managed = self
+            .config
+            .as_ref()
+            .and_then(|config| config.environment.as_ref())
+            .is_some();
         self.nodes
             .iter()
             .filter_map(|(name, node)| {
@@ -1658,7 +1751,10 @@ impl Snapshot {
         matches!(
             self.phase.as_str(),
             "running" | "followup" | "publishing" | "merging" | "publication_failed"
-        ) || self.executions.iter().any(|execution| execution.status == "running")
+        ) || self
+            .executions
+            .iter()
+            .any(|execution| execution.status == "running")
             || self.mergers.iter().any(|merger| merger.status == "running")
             || self
                 .nodes
@@ -1705,8 +1801,7 @@ impl Snapshot {
         let mut session_context: BTreeMap<String, SessionContext> = BTreeMap::new();
         let mut context_stamps: BTreeMap<String, u64> = BTreeMap::new();
 
-        let mut planning_turns: Vec<&PlanningSummary> =
-            self.planning_turns.values().collect();
+        let mut planning_turns: Vec<&PlanningSummary> = self.planning_turns.values().collect();
         if let Some(planning) = &self.planning {
             // Fall back to the displayed summary for snapshots that predate the
             // per-turn map. Once the map is populated it is authoritative.
@@ -1935,7 +2030,9 @@ fn line_advances_live_metrics(line: &str) -> bool {
     let trimmed = line.trim();
     !trimmed.is_empty()
         && !trimmed.starts_with("[stderr]")
-        && LIVE_METRIC_MARKERS.iter().any(|marker| trimmed.contains(marker))
+        && LIVE_METRIC_MARKERS
+            .iter()
+            .any(|marker| trimmed.contains(marker))
 }
 
 /// Fold one streamed chunk into the running attempt's metrics.
@@ -1946,7 +2043,9 @@ fn line_advances_live_metrics(line: &str) -> bool {
 /// authoritative. Engine output is line-delimited, so a partial record simply
 /// fails to parse and is ignored.
 fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
-    let metrics = execution.metrics.get_or_insert_with(ExecutionMetrics::default);
+    let metrics = execution
+        .metrics
+        .get_or_insert_with(ExecutionMetrics::default);
     for line in text.lines() {
         if !line_advances_live_metrics(line) {
             continue;
@@ -1955,7 +2054,11 @@ fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
-        match value.get("type").and_then(|kind| kind.as_str()).unwrap_or_default() {
+        match value
+            .get("type")
+            .and_then(|kind| kind.as_str())
+            .unwrap_or_default()
+        {
             "message_start" | "message_end" => {
                 let Some(message) = value.get("message") else {
                     continue;
@@ -1968,10 +2071,14 @@ fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
                     .and_then(|model| model.as_str())
                     .filter(|model| !model.is_empty())
                 {
-                    let next = message.get("provider")
+                    let next = message
+                        .get("provider")
                         .and_then(|provider| provider.as_str())
                         .filter(|provider| !provider.is_empty())
-                        .map_or_else(|| model.to_string(), |provider| format!("{provider}/{model}"));
+                        .map_or_else(
+                            || model.to_string(),
+                            |provider| format!("{provider}/{model}"),
+                        );
                     record_context_model(&mut metrics.model, &mut metrics.context_usage, next);
                 }
                 if let Some(level) = message
@@ -1987,14 +2094,23 @@ fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
                 metrics.assistant_messages += 1;
                 if let Some(usage) = message.get("usage") {
                     let turn = TokenUsage::from_message_usage(usage);
-                    record_assistant_context(message, &turn, &mut metrics.context_tokens,
-                        &mut metrics.context_peak, &mut metrics.context_usage);
+                    record_assistant_context(
+                        message,
+                        &turn,
+                        &mut metrics.context_tokens,
+                        &mut metrics.context_peak,
+                        &mut metrics.context_usage,
+                    );
                     metrics.usage.accumulate(&turn);
                 }
             }
             "grapher_context_usage" => {
-                record_context_usage(&value, &mut metrics.context_tokens,
-                    &mut metrics.context_peak, &mut metrics.context_usage);
+                record_context_usage(
+                    &value,
+                    &mut metrics.context_tokens,
+                    &mut metrics.context_peak,
+                    &mut metrics.context_usage,
+                );
             }
             "model_change" => {
                 if let Some(model) = value
@@ -2002,10 +2118,14 @@ fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
                     .and_then(|model| model.as_str())
                     .filter(|model| !model.is_empty())
                 {
-                    let next = value.get("provider")
+                    let next = value
+                        .get("provider")
                         .and_then(|provider| provider.as_str())
                         .filter(|provider| !provider.is_empty())
-                        .map_or_else(|| model.to_string(), |provider| format!("{provider}/{model}"));
+                        .map_or_else(
+                            || model.to_string(),
+                            |provider| format!("{provider}/{model}"),
+                        );
                     record_context_model(&mut metrics.model, &mut metrics.context_usage, next);
                 }
             }
@@ -2020,7 +2140,10 @@ fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
             }
             "tool_execution_start" => metrics.tools += 1,
             "tool_execution_end" => {
-                if value.get("isError").and_then(|flag| flag.as_bool()).unwrap_or(false)
+                if value
+                    .get("isError")
+                    .and_then(|flag| flag.as_bool())
+                    .unwrap_or(false)
                     || value
                         .get("result")
                         .and_then(|result| result.get("isError"))
@@ -2079,12 +2202,21 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::PlannerReworkNoteInjected => {}
         EventKind::PlannerWorkspaceRedirected { .. } => {}
-        EventKind::PlannerWorkspaceSnapshotted { execution_id, head, result, invalidated, detached } => {
+        EventKind::PlannerWorkspaceSnapshotted {
+            execution_id,
+            head,
+            result,
+            invalidated,
+            detached,
+        } => {
             if let Some(execution) = state.executions.iter_mut().find(|e| e.id == *execution_id) {
                 let old_head = execution.after.clone();
                 execution.after = Some(head.clone());
-                if let Some(result) = result { execution.result = Some(result.clone()); }
-                else if let Some(result) = &mut execution.result { result.code_ref = head.clone(); }
+                if let Some(result) = result {
+                    execution.result = Some(result.clone());
+                } else if let Some(result) = &mut execution.result {
+                    result.code_ref = head.clone();
+                }
                 if !*detached {
                     let mut lineage = execution.workspace_lineage.clone();
                     lineage.push(execution.node.clone());
@@ -2092,8 +2224,11 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         if let Some(node) = state.nodes.get_mut(&name) {
                             if node.status == "completed" && node.head == old_head {
                                 node.head = Some(head.clone());
-                                if let Some(result) = result { node.result = Some(result.clone()); }
-                                else if let Some(result) = &mut node.result { result.code_ref = head.clone(); }
+                                if let Some(result) = result {
+                                    node.result = Some(result.clone());
+                                } else if let Some(result) = &mut node.result {
+                                    result.code_ref = head.clone();
+                                }
                             }
                         }
                     }
@@ -2101,11 +2236,17 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
             if !*detached {
                 for name in invalidated {
-                    let never_executed = !state.executions.iter().any(|execution| execution.node == *name);
+                    let never_executed = !state
+                        .executions
+                        .iter()
+                        .any(|execution| execution.node == *name);
                     if let Some(node) = state.nodes.get_mut(name) {
-                        let unstarted = node.status == "waiting" || (node.status == "blocked" && never_executed);
+                        let unstarted = node.status == "waiting"
+                            || (node.status == "blocked" && never_executed);
                         node.status = if unstarted { "waiting" } else { "dirty" }.into();
-                        if !unstarted { node.revision += 1; }
+                        if !unstarted {
+                            node.revision += 1;
+                        }
                         node.head = None;
                         node.result = None;
                         node.error = None;
@@ -2137,7 +2278,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::PlannerPreviewProgress { graph } => {
             state.preview_graph = Some(graph.clone());
         }
-        EventKind::PlannerReviewFinished { planning, approval_required } => {
+        EventKind::PlannerReviewFinished {
+            planning,
+            approval_required,
+        } => {
             state.planning = Some(planning.clone());
             state.review_graph = None;
             if *approval_required {
@@ -2194,9 +2338,18 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.base = base.clone();
             state.phase = "running".into();
         }
-        EventKind::GraphRevised { graph, invalidated, .. }
-        | EventKind::ManualGraphRevised { graph, invalidated, .. } => {
-            if let EventKind::GraphRevised { planning_id, planning, .. } = &event.kind {
+        EventKind::GraphRevised {
+            graph, invalidated, ..
+        }
+        | EventKind::ManualGraphRevised {
+            graph, invalidated, ..
+        } => {
+            if let EventKind::GraphRevised {
+                planning_id,
+                planning,
+                ..
+            } = &event.kind
+            {
                 state.stop_requested = false;
                 state.planning_id = Some(planning_id.clone());
                 state.planning = Some(planning.clone());
@@ -2295,9 +2448,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = if *paused { "paused" } else { "running" }.into();
         }
         EventKind::FailedNodeModelsUpdated { nodes, settings } => {
-            let mut models = state.model_config.clone()
-                .unwrap_or_else(|| state.config.as_ref().map(RunModelConfig::from_config).unwrap_or_default());
-            models.role_models.insert("nodeAgent".into(), settings.clone());
+            let mut models = state.model_config.clone().unwrap_or_else(|| {
+                state
+                    .config
+                    .as_ref()
+                    .map(RunModelConfig::from_config)
+                    .unwrap_or_default()
+            });
+            models
+                .role_models
+                .insert("nodeAgent".into(), settings.clone());
             state.model_config = Some(models);
             for name in nodes {
                 if let Some(node) = state.nodes.get_mut(name) {
@@ -2309,16 +2469,27 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
         }
         EventKind::NodeModelsUpdated { nodes, settings } => {
-            let mut models = state.model_config.clone()
-                .unwrap_or_else(|| state.config.as_ref().map(RunModelConfig::from_config).unwrap_or_default());
-            models.role_models.insert("nodeAgent".into(), settings.clone());
+            let mut models = state.model_config.clone().unwrap_or_else(|| {
+                state
+                    .config
+                    .as_ref()
+                    .map(RunModelConfig::from_config)
+                    .unwrap_or_default()
+            });
+            models
+                .role_models
+                .insert("nodeAgent".into(), settings.clone());
             state.model_config = Some(models);
             for name in nodes {
-                let never_executed = !state.executions.iter()
+                let never_executed = !state
+                    .executions
+                    .iter()
                     .any(|execution| execution.node == *name);
                 if let Some(node) = state.nodes.get_mut(name) {
                     if node.status == "failed"
-                        || (never_executed && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")) {
+                        || (never_executed
+                            && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty"))
+                    {
                         node.model_config = Some(settings.clone());
                         node.model_retry = Some(node.status == "failed");
                     }
@@ -2329,21 +2500,32 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.model_config = Some(settings.clone());
             let node_settings = settings.node_agent_settings();
             for name in nodes {
-                let never_executed = !state.executions.iter()
+                let never_executed = !state
+                    .executions
+                    .iter()
                     .any(|execution| execution.node == *name);
                 if let Some(node) = state.nodes.get_mut(name) {
                     // The event's explicit node list is selected by Runtime:
                     // an already-executed blocked node here is its own failed
                     // preparation, not a dependency blocked by another node.
-                    let retry = node.status == "failed" || (node.status == "blocked" && !never_executed);
-                    if retry || (never_executed && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")) {
+                    let retry =
+                        node.status == "failed" || (node.status == "blocked" && !never_executed);
+                    if retry
+                        || (never_executed
+                            && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty"))
+                    {
                         node.model_config = Some(node_settings.clone());
                         node.model_retry = Some(retry);
                     }
                 }
             }
         }
-        EventKind::RecoveryQueued { nodes, continuation_nodes, resume_failed, source_direct_nodes } => {
+        EventKind::RecoveryQueued {
+            nodes,
+            continuation_nodes,
+            resume_failed,
+            source_direct_nodes,
+        } => {
             for name in nodes {
                 let Some(node) = state.nodes.get_mut(name) else {
                     continue;
@@ -2351,19 +2533,26 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if !matches!(node.status.as_str(), "failed" | "blocked") {
                     continue;
                 }
-                let continuation = node.pending_messages.is_empty() && continuation_nodes.contains(name)
-                    && (*resume_failed || node.model_config.is_some()
+                let continuation = node.pending_messages.is_empty()
+                    && continuation_nodes.contains(name)
+                    && (*resume_failed
+                        || node.model_config.is_some()
                         || node.error.as_deref().is_some_and(|error| {
-                            is_interrupted_error(error) || is_credential_error(error)
+                            is_interrupted_error(error)
+                                || is_credential_error(error)
                                 || is_transport_error(error)
                         }));
                 // A failed multi-source repair has a queued user continuation
                 // that duplicates the node instruction. Claim it so the retry
                 // keeps the feedback batch input and cannot re-batch the text.
-                if node.pending_messages.len() == 1 && node.human_instruction
+                if node.pending_messages.len() == 1
+                    && node.human_instruction
                     && node.pending_messages[0].instruction == node.instruction
-                    && node.feedback_workspace.as_ref()
-                        .is_some_and(|input| !input.additional_sources.is_empty()) {
+                    && node
+                        .feedback_workspace
+                        .as_ref()
+                        .is_some_and(|input| !input.additional_sources.is_empty())
+                {
                     node.pending_messages.clear();
                     node.continuation = true;
                 }
@@ -2373,7 +2562,12 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                             && execution.status == "completed"
                             && !state.superseded_execution_ids.contains(&execution.id)
                     });
-                node.status = if has_previous_result { "dirty" } else { "waiting" }.into();
+                node.status = if has_previous_result {
+                    "dirty"
+                } else {
+                    "waiting"
+                }
+                .into();
                 node.error = None;
                 node.baseline_head = None;
                 node.continuation = continuation;
@@ -2384,15 +2578,28 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = "rejected".into();
             state.approved = false;
         }
-        EventKind::Started { execution, message_sequences, fresh_restart } => {
+        EventKind::Started {
+            execution,
+            message_sequences,
+            fresh_restart,
+        } => {
             let node = state.nodes.get_mut(&execution.node).unwrap();
             let source_direct = (node.continuation && node.source_direct_recovery)
-                || node.pending_messages.iter().any(|message| message.source_direct
-                    && message_sequences.as_ref().is_none_or(|sequences| sequences.contains(&message.sequence)));
-            node.pending_messages.retain(|message| message_sequences.as_ref()
-                .is_some_and(|sequences| !sequences.contains(&message.sequence)));
+                || node.pending_messages.iter().any(|message| {
+                    message.source_direct
+                        && message_sequences
+                            .as_ref()
+                            .is_none_or(|sequences| sequences.contains(&message.sequence))
+                });
+            node.pending_messages.retain(|message| {
+                message_sequences
+                    .as_ref()
+                    .is_some_and(|sequences| !sequences.contains(&message.sequence))
+            });
             node.source_direct_recovery = false;
-            if source_direct { state.phase = "followup".into(); }
+            if source_direct {
+                state.phase = "followup".into();
+            }
             // Live work owns the displayed topology; provisional draft edits
             // must never pass for a running graph.
             state.preview_graph = None;
@@ -2404,10 +2611,14 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 // A from-zero execution starts a new Pi session in this
                 // workspace: the node's prior attempts belong to a dead
                 // conversation lineage and no longer render as live history.
-                let superseded: Vec<String> = state.executions.iter()
-                    .filter(|prior| prior.node == execution.node
-                        && prior.id != execution.id
-                        && !state.superseded_execution_ids.contains(&prior.id))
+                let superseded: Vec<String> = state
+                    .executions
+                    .iter()
+                    .filter(|prior| {
+                        prior.node == execution.node
+                            && prior.id != execution.id
+                            && !state.superseded_execution_ids.contains(&prior.id)
+                    })
                     .map(|prior| prior.id.clone())
                     .collect();
                 state.superseded_execution_ids.extend(superseded);
@@ -2603,7 +2814,11 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         .clone()
                         .or_else(|| {
                             (!output.is_empty()).then(|| {
-                                parse_execution_metrics(output, execution.started_at, event.timestamp)
+                                parse_execution_metrics(
+                                    output,
+                                    execution.started_at,
+                                    event.timestamp,
+                                )
                             })
                         })
                         .or_else(|| recorded.clone());
@@ -2687,7 +2902,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         node.instruction = message.instruction.clone();
                         node.instruction_images = message.images.clone();
                         node.shared_workspace = message.shared_workspace;
-                        if message.source_direct { state.phase = "followup".into(); }
+                        if message.source_direct {
+                            state.phase = "followup".into();
+                        }
                     }
                 }
             }
@@ -2806,14 +3023,21 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             if *human && !instruction.is_empty() {
                 let node = state.nodes.get_mut(target).unwrap();
                 node.pending_messages.push(PendingNodeMessage {
-                    sequence: event.sequence, instruction: instruction.clone(), images: images.clone(),
-                    source_direct: *source_direct, shared_workspace: *shared_workspace,
+                    sequence: event.sequence,
+                    instruction: instruction.clone(),
+                    images: images.clone(),
+                    source_direct: *source_direct,
+                    shared_workspace: *shared_workspace,
                 });
                 // A new turn cannot overwrite a queued turn or reconfigure a
                 // live writer. The scheduler claims the immutable FIFO batch.
-                if node.status == "running" || (node.pending_messages.len() > 1
-                    && matches!(node.status.as_str(), "dirty" | "waiting" | "blocked")) {
-                    if node.status != "running" { node.revision += 1; }
+                if node.status == "running"
+                    || (node.pending_messages.len() > 1
+                        && matches!(node.status.as_str(), "dirty" | "waiting" | "blocked"))
+                {
+                    if node.status != "running" {
+                        node.revision += 1;
+                    }
                     state.events.push(event.clone());
                     state.run_metrics = Some(state.compute_run_metrics());
                     return;
@@ -3056,10 +3280,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             output_bytes,
             metrics,
         } => {
-            let repaired_node = state.mergers.iter()
+            let repaired_node = state
+                .mergers
+                .iter()
                 .find(|execution| execution.id == *execution_id && execution.status == "running")
-                .and_then(|execution| execution.node.strip_prefix("merge:")
-                    .map(|name| (name.to_string(), execution.revision)));
+                .and_then(|execution| {
+                    execution
+                        .node
+                        .strip_prefix("merge:")
+                        .map(|name| (name.to_string(), execution.revision))
+                });
             if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
                 execution.status = "completed".into();
                 execution.after = Some(head.clone());
@@ -3105,7 +3335,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             // duplicate completions cannot revive a newer node generation.
             if let Some((name, revision)) = repaired_node {
                 if let Some(node) = state.nodes.get_mut(&name) {
-                    if node.revision == revision && matches!(node.status.as_str(), "failed" | "blocked") {
+                    if node.revision == revision
+                        && matches!(node.status.as_str(), "failed" | "blocked")
+                    {
                         node.status = "dirty".into();
                         node.error = None;
                         node.revision += 1;
@@ -3122,40 +3354,43 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             output_bytes,
             metrics,
         } => {
-            let target_node_name = if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
-                execution.status = "failed".into();
-                // Runtime persists the annotation before this terminal event.
-                // Replay restores byte counts from the log table, not text.
-                let _ = error;
-                execution.completed_at = Some(event.timestamp);
-                execution.output_bytes = (*output_bytes)
-                    .max(execution.output_bytes)
-                    .max(execution.output.len());
-                let recorded = execution.metrics.take();
-                execution.metrics = metrics
-                    .clone()
-                    .or_else(|| {
-                        (!execution.output.is_empty()).then(|| {
-                            parse_execution_metrics(
-                                &execution.output,
-                                execution.started_at,
-                                event.timestamp,
-                            )
+            let target_node_name =
+                if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
+                    execution.status = "failed".into();
+                    // Runtime persists the annotation before this terminal event.
+                    // Replay restores byte counts from the log table, not text.
+                    let _ = error;
+                    execution.completed_at = Some(event.timestamp);
+                    execution.output_bytes = (*output_bytes)
+                        .max(execution.output_bytes)
+                        .max(execution.output.len());
+                    let recorded = execution.metrics.take();
+                    execution.metrics = metrics
+                        .clone()
+                        .or_else(|| {
+                            (!execution.output.is_empty()).then(|| {
+                                parse_execution_metrics(
+                                    &execution.output,
+                                    execution.started_at,
+                                    event.timestamp,
+                                )
+                            })
                         })
-                    })
-                    .or_else(|| recorded.clone());
-                if let Some(current) = execution.metrics.as_mut() {
-                    merge_recorded_model(current, recorded.as_ref());
-                }
-                execution.output = String::new();
-                execution.node.strip_prefix("merge:").map(|s| s.to_string())
-            } else {
-                None
-            };
+                        .or_else(|| recorded.clone());
+                    if let Some(current) = execution.metrics.as_mut() {
+                        merge_recorded_model(current, recorded.as_ref());
+                    }
+                    execution.output = String::new();
+                    execution.node.strip_prefix("merge:").map(|s| s.to_string())
+                } else {
+                    None
+                };
             if let Some(target_name) = target_node_name {
                 if let Some(node) = state.nodes.get_mut(&target_name) {
                     node.status = "blocked".into();
-                    node.error = Some(format!("Workspace composition blocked: Merger failed: {error}"));
+                    node.error = Some(format!(
+                        "Workspace composition blocked: Merger failed: {error}"
+                    ));
                 }
             }
         }
@@ -3256,7 +3491,10 @@ mod metrics_tests {
         assert_eq!(metrics.context_peak, 2_005);
 
         // Session details read these buckets while the terminal event is absent.
-        let run = state.run_metrics.as_ref().expect("live metrics must refresh Run totals");
+        let run = state
+            .run_metrics
+            .as_ref()
+            .expect("live metrics must refresh Run totals");
         assert_eq!(run.session_usage["session-a"].input, 110);
         assert_eq!(run.session_usage["session-a"].consumed_tokens, 175);
         assert_eq!(run.session_context["session-a"].tokens, 2_005);
@@ -3275,7 +3513,14 @@ mod metrics_tests {
             "\n{\"type\":\"grapher_process_exited\",\"elapsedMs\":10}",
             "\n[stderr] prefer the last real prompt\n",
         );
-        assert_eq!(parse_context_from_tail(tail), Some(SessionContext { tokens: 2_010, peak: 2_010, window: None }));
+        assert_eq!(
+            parse_context_from_tail(tail),
+            Some(SessionContext {
+                tokens: 2_010,
+                peak: 2_010,
+                window: None
+            })
+        );
         assert_eq!(parse_context_from_tail(""), None);
         assert_eq!(parse_context_from_tail("not json\n{}"), None);
     }
@@ -3284,12 +3529,14 @@ mod metrics_tests {
     fn legacy_configs_disable_planner_file_tools_by_default() {
         let legacy: Config = serde_json::from_value(serde_json::json!({
             "repository": "repo", "model": "provider/model", "maxParallel": 1
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!legacy.planner_write_tools);
         let enabled: Config = serde_json::from_value(serde_json::json!({
             "repository": "repo", "model": "provider/model", "maxParallel": 1,
             "plannerWriteTools": true
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(enabled.planner_write_tools);
     }
 
@@ -3515,7 +3762,12 @@ mod metrics_tests {
         }
 
         let metrics = state.compute_run_metrics();
-        assert_eq!(metrics.session_usage.len(), 3, "{:?}", metrics.session_usage);
+        assert_eq!(
+            metrics.session_usage.len(),
+            3,
+            "{:?}",
+            metrics.session_usage
+        );
 
         let resumed = &metrics.session_usage["session-a"];
         assert_eq!(resumed.input, 300);
@@ -3546,7 +3798,12 @@ mod metrics_tests {
 
         // Context is a per-turn snapshot: the resumed session reports its last
         // turn, not the sum of every prompt it re-read.
-        assert_eq!(metrics.session_context.len(), 3, "{:?}", metrics.session_context);
+        assert_eq!(
+            metrics.session_context.len(),
+            3,
+            "{:?}",
+            metrics.session_context
+        );
         assert_eq!(metrics.session_context["session-a"].tokens, 2_500);
         assert_eq!(metrics.session_context["session-a"].peak, 2_500);
         assert_eq!(metrics.session_context["session-b"].tokens, 700);
@@ -3618,11 +3875,15 @@ mod metrics_tests {
         state.backfill_consumed_tokens();
 
         assert_eq!(
-            state.planning.as_ref().unwrap().roles["planner"].usage.consumed_tokens,
+            state.planning.as_ref().unwrap().roles["planner"]
+                .usage
+                .consumed_tokens,
             160
         );
         assert_eq!(
-            state.planning_turns["legacy"].roles["planner"].usage.consumed_tokens,
+            state.planning_turns["legacy"].roles["planner"]
+                .usage
+                .consumed_tokens,
             160
         );
     }

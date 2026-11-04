@@ -29,8 +29,12 @@ fn alternate_dependency_path(graph: &Graph, from: &str, to: &str) -> Option<Vec<
     let mut queue = VecDeque::from([from.to_string()]);
     let mut previous = BTreeMap::<String, Option<String>>::from([(from.to_string(), None)]);
     while let Some(name) = queue.pop_front() {
-        let neighbors: BTreeSet<_> = graph.edges.iter()
-            .filter(|edge| !edge.feedback && edge.from == name && !(edge.from == from && edge.to == to))
+        let neighbors: BTreeSet<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                !edge.feedback && edge.from == name && !(edge.from == from && edge.to == to)
+            })
             .map(|edge| edge.to.clone())
             .collect();
         for next in neighbors {
@@ -93,21 +97,21 @@ pub fn node_id(name: &str) -> String {
 }
 
 fn is_windows_reserved_name(name: &str) -> bool {
-    let device = name
-        .split('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    matches!(device.as_str(), "con" | "prn" | "aux" | "nul" | "conin$" | "conout$")
-        || ((device.starts_with("com") || device.starts_with("lpt"))
-            && device.chars().count() == 4
-            && device.ends_with(['1', '2', '3', '4', '5', '6', '7', '8', '9']))
+    let device = name.split('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(
+        device.as_str(),
+        "con" | "prn" | "aux" | "nul" | "conin$" | "conout$"
+    ) || ((device.starts_with("com") || device.starts_with("lpt"))
+        && device.chars().count() == 4
+        && device.ends_with(['1', '2', '3', '4', '5', '6', '7', '8', '9']))
 }
 
 fn is_legacy_node_id(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
-        && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
         && !is_windows_reserved_name(name)
 }
 
@@ -140,7 +144,11 @@ pub fn compile_legacy(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diag
     compile_with_policy(graph, final_check, false)
 }
 
-fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool) -> Result<Plan, Vec<Diagnostic>> {
+fn compile_with_policy(
+    graph: &Graph,
+    final_check: bool,
+    reject_redundant: bool,
+) -> Result<Plan, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut add = |code: &str, message: String| {
         errors.push(Diagnostic {
@@ -159,7 +167,9 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
         }
         if !names.insert(node.name.clone()) {
             add("E202", format!("Duplicate node: {}", node.name));
-        } else if let Some(previous) = folded_names.insert(node.name.to_lowercase(), node.name.clone()) {
+        } else if let Some(previous) =
+            folded_names.insert(node.name.to_lowercase(), node.name.clone())
+        {
             add("E202", format!(
                 "Node names '{previous}' and '{}' differ only by case and would collide on case-insensitive filesystems",
                 node.name
@@ -250,10 +260,12 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
         for name in &ready {
             visited.insert(name.clone());
             for edge in dependencies.iter().filter(|edge| edge.from == *name) {
-                let degree = degrees.get_mut(&edge.to).ok_or_else(|| vec![Diagnostic {
-                    code: "E204".into(),
-                    message: format!("Unknown endpoint: {}", edge.to),
-                }])?;
+                let degree = degrees.get_mut(&edge.to).ok_or_else(|| {
+                    vec![Diagnostic {
+                        code: "E204".into(),
+                        message: format!("Unknown endpoint: {}", edge.to),
+                    }]
+                })?;
                 *degree -= 1;
                 if *degree == 0 {
                     next.insert(edge.to.clone());
@@ -308,7 +320,10 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
     // Compare literal task text, not inferred intent or overlapping file paths.
     let mut task_nodes: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for node in &graph.nodes {
-        task_nodes.entry(node.task.as_str()).or_default().insert(node.name.as_str());
+        task_nodes
+            .entry(node.task.as_str())
+            .or_default()
+            .insert(node.name.as_str());
     }
     for nodes in task_nodes.values().filter(|nodes| nodes.len() > 1) {
         warnings.push(format!(
@@ -345,7 +360,6 @@ fn compile_with_policy(graph: &Graph, final_check: bool, reject_redundant: bool)
     })
 }
 
-
 #[cfg(test)]
 mod node_id_tests {
     use super::*;
@@ -355,7 +369,12 @@ mod node_id_tests {
         for name in ["CON", "con", "NUL", "COM1", "lpt9"] {
             let id = node_id(name);
             assert_ne!(id, name);
-            assert!(id.starts_with("con") || id.starts_with("nul") || id.starts_with("com") || id.starts_with("lpt"));
+            assert!(
+                id.starts_with("con")
+                    || id.starts_with("nul")
+                    || id.starts_with("com")
+                    || id.starts_with("lpt")
+            );
         }
         assert_eq!(node_id("worker"), "worker");
     }
@@ -365,13 +384,20 @@ mod node_id_tests {
         let graph = Graph {
             original_goal: String::new(),
             nodes: vec![
-                crate::model::Node { name: "Worker".into(), task: "one".into() },
-                crate::model::Node { name: "worker".into(), task: "two".into() },
+                crate::model::Node {
+                    name: "Worker".into(),
+                    task: "one".into(),
+                },
+                crate::model::Node {
+                    name: "worker".into(),
+                    task: "two".into(),
+                },
             ],
             edges: vec![],
         };
         let errors = compile(&graph, true).unwrap_err();
-        assert!(errors.iter().any(|error| error.code == "E202"
-            && error.message.contains("differ only by case")));
+        assert!(errors
+            .iter()
+            .any(|error| error.code == "E202" && error.message.contains("differ only by case")));
     }
 }

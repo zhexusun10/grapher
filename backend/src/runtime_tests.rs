@@ -54,7 +54,10 @@ fn setup(git: bool, graph: Graph) -> (TempDir, PathBuf, Runtime) {
             planning: None,
         })
         .unwrap();
-    runtime.store.select_run(Some(&runtime.state.run_id)).unwrap();
+    runtime
+        .store
+        .select_run(Some(&runtime.state.run_id))
+        .unwrap();
     runtime.set_route("graph").unwrap();
     (temp, source, runtime)
 }
@@ -91,7 +94,13 @@ fn legacy_created_runs_keep_their_unmanaged_contract_on_replay_and_approval() {
     assert!(replayed.state.environment_policy.is_none());
     replayed.approve().unwrap();
     assert!(replayed.state.environment_policy.is_none());
-    assert!(replayed.state.config.as_ref().unwrap().environment.is_none());
+    assert!(replayed
+        .state
+        .config
+        .as_ref()
+        .unwrap()
+        .environment
+        .is_none());
     assert!(replayed.state.environment_baseline.is_none());
     assert!(replayed
         .store
@@ -153,14 +162,23 @@ fn cached_graph_workspaces_keep_durable_cleanup_when_the_source_moves() {
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     let checkout = PathBuf::from(&job.execution.worktree);
-    assert!(checkout.starts_with(crate::native::host_path(&workspace::workspaces_parent(&runtime.root)).join(".grapher-worktrees").join(&runtime.state.run_id)));
-    assert!(!temp.path().join(".grapher-worktrees").exists(), "new workspaces are not project-adjacent");
+    assert!(checkout.starts_with(
+        crate::native::host_path(&workspace::workspaces_parent(&runtime.root))
+            .join(".grapher-worktrees")
+            .join(&runtime.state.run_id)
+    ));
+    assert!(
+        !temp.path().join(".grapher-worktrees").exists(),
+        "new workspaces are not project-adjacent"
+    );
     workspace::prepare(&source, &checkout, &job.execution.before, &[]).unwrap();
     assert!(runtime.store.owned_cleanup_targets(&runtime.state.run_id).unwrap().iter().any(|target| {
         matches!(target, crate::cleanup::Target::Workspace { parent, bucket, .. }
             if parent == &runtime.root.join("workspaces").canonicalize().unwrap() && bucket == ".grapher-worktrees")
     }));
-    runtime.finish(&job.execution, Err("stopped".into())).unwrap();
+    runtime
+        .finish(&job.execution, Err("stopped".into()))
+        .unwrap();
     fs::rename(&source, temp.path().join("moved-source")).unwrap();
     runtime.cleanup_worktrees().unwrap();
     assert!(!checkout.exists());
@@ -176,15 +194,27 @@ fn cleanup_refuses_linked_workspace_roots_without_deleting_external_data() {
         fs::create_dir_all(&retained).unwrap();
         fs::write(retained.join("marker"), "external data").unwrap();
         crate::path_safety::directory_link(&outside, &temp.path().join(name));
-        let own_node = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
+        let own_node = temp
+            .path()
+            .join(".grapher-worktrees")
+            .join(&runtime.state.run_id);
         if name == ".grapher-workspaces" {
             fs::create_dir_all(&own_node).unwrap();
             fs::write(own_node.join("marker"), "keep on rejected cleanup").unwrap();
         }
-        assert!(runtime.cleanup_worktrees().unwrap_err().contains("Refusing"));
-        assert_eq!(fs::read_to_string(retained.join("marker")).unwrap(), "external data");
+        assert!(runtime
+            .cleanup_worktrees()
+            .unwrap_err()
+            .contains("Refusing"));
+        assert_eq!(
+            fs::read_to_string(retained.join("marker")).unwrap(),
+            "external data"
+        );
         if name == ".grapher-workspaces" {
-            assert_eq!(fs::read_to_string(own_node.join("marker")).unwrap(), "keep on rejected cleanup");
+            assert_eq!(
+                fs::read_to_string(own_node.join("marker")).unwrap(),
+                "keep on rejected cleanup"
+            );
         }
     }
 }
@@ -197,23 +227,40 @@ fn cleanup_uses_physical_source_parent_and_preserves_alias_parent_workspaces() {
     let alias = alias_parent.join("source-alias");
     crate::path_safety::directory_link(&source, &alias);
     runtime.state.config.as_mut().unwrap().repository = alias.to_string_lossy().into();
-    let actual = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
-    let decoy = alias_parent.join(".grapher-worktrees").join(&runtime.state.run_id);
-    let other = temp.path().join(".grapher-worktrees").join(Uuid::new_v4().to_string());
+    let actual = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join(&runtime.state.run_id);
+    let decoy = alias_parent
+        .join(".grapher-worktrees")
+        .join(&runtime.state.run_id);
+    let other = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join(Uuid::new_v4().to_string());
     for path in [&actual, &decoy, &other] {
         fs::create_dir_all(path).unwrap();
         fs::write(path.join("marker"), "retained").unwrap();
     }
     runtime.cleanup_worktrees().unwrap();
     assert!(!actual.exists());
-    assert_eq!(fs::read_to_string(decoy.join("marker")).unwrap(), "retained");
-    assert_eq!(fs::read_to_string(other.join("marker")).unwrap(), "retained");
+    assert_eq!(
+        fs::read_to_string(decoy.join("marker")).unwrap(),
+        "retained"
+    );
+    assert_eq!(
+        fs::read_to_string(other.join("marker")).unwrap(),
+        "retained"
+    );
 }
 
 #[test]
 fn cleanup_unlinks_nested_directory_links_without_following_their_targets() {
     let (temp, _source, runtime) = setup(true, single());
-    let owned = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
+    let owned = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join(&runtime.state.run_id);
     let outside = temp.path().join("external");
     fs::create_dir_all(&owned).unwrap();
     fs::create_dir(&outside).unwrap();
@@ -221,19 +268,28 @@ fn cleanup_unlinks_nested_directory_links_without_following_their_targets() {
     crate::path_safety::directory_link(&outside, &owned.join("nested-link"));
     runtime.cleanup_worktrees().unwrap();
     assert!(!owned.exists());
-    assert_eq!(fs::read_to_string(outside.join("marker")).unwrap(), "external data");
+    assert_eq!(
+        fs::read_to_string(outside.join("marker")).unwrap(),
+        "external data"
+    );
 }
 
 #[test]
 fn missing_source_binding_still_cleans_previously_recorded_workspace_ownership() {
     let (temp, source, mut runtime) = setup(true, single());
-    let retained = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
+    let retained = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join(&runtime.state.run_id);
     fs::create_dir_all(&retained).unwrap();
     fs::write(retained.join("marker"), "retained").unwrap();
     fs::rename(&source, temp.path().join("moved-source")).unwrap();
     runtime.reset_workspace().unwrap();
     assert!(!retained.exists());
-    assert_eq!(fs::read_to_string(temp.path().join("moved-source/tracked.txt")).unwrap(), "original");
+    assert_eq!(
+        fs::read_to_string(temp.path().join("moved-source/tracked.txt")).unwrap(),
+        "original"
+    );
 }
 
 #[test]
@@ -247,7 +303,11 @@ fn deleting_a_historical_run_recursively_cleans_its_nodes_without_changing_selec
         let current = runtime.state.run_id.clone();
         for name in [".grapher-worktrees", ".grapher-workspaces"] {
             for id in [&historical, &current] {
-                let path = temp.path().join(name).join(id).join("node/retry/dependencies");
+                let path = temp
+                    .path()
+                    .join(name)
+                    .join(id)
+                    .join("node/retry/dependencies");
                 fs::create_dir_all(&path).unwrap();
                 fs::write(path.join("large-file"), "owned node data").unwrap();
             }
@@ -255,10 +315,18 @@ fn deleting_a_historical_run_recursively_cleans_its_nodes_without_changing_selec
         runtime.delete_run(&historical).unwrap();
         for name in [".grapher-worktrees", ".grapher-workspaces"] {
             assert!(!temp.path().join(name).join(&historical).exists());
-            assert!(temp.path().join(name).join(&current).join("node/retry/dependencies/large-file").is_file());
+            assert!(temp
+                .path()
+                .join(name)
+                .join(&current)
+                .join("node/retry/dependencies/large-file")
+                .is_file());
         }
         assert_eq!(runtime.state.run_id, current);
-        assert_eq!(runtime.store.selected_run().unwrap().as_deref(), Some(current.as_str()));
+        assert_eq!(
+            runtime.store.selected_run().unwrap().as_deref(),
+            Some(current.as_str())
+        );
         assert!(!runtime.store.contains_run(&historical).unwrap());
         assert!(source.join("tracked.txt").is_file());
     }
@@ -271,34 +339,86 @@ fn deleting_a_run_cleans_earlier_planner_copies_and_uncommitted_revision_attempt
     let latest = Uuid::new_v4().to_string();
     let failed_revision = Uuid::new_v4().to_string();
     let owner = Uuid::new_v4().to_string();
-    runtime.create_with_planning(single(), runtime.state.config.clone().unwrap(),
-        Some(first.clone()), None).unwrap();
+    runtime
+        .create_with_planning(
+            single(),
+            runtime.state.config.clone().unwrap(),
+            Some(first.clone()),
+            None,
+        )
+        .unwrap();
     let run_id = runtime.state.run_id.clone();
-    let legacy = temp.path().join(".grapher-workspaces").join(&owner).join(&first);
-    let failed = temp.path().join(".grapher-workspaces").join(&owner).join(&failed_revision);
-    let sibling = temp.path().join(".grapher-workspaces").join(&owner).join(Uuid::new_v4().to_string());
+    let legacy = temp
+        .path()
+        .join(".grapher-workspaces")
+        .join(&owner)
+        .join(&first);
+    let failed = temp
+        .path()
+        .join(".grapher-workspaces")
+        .join(&owner)
+        .join(&failed_revision);
+    let sibling = temp
+        .path()
+        .join(".grapher-workspaces")
+        .join(&owner)
+        .join(Uuid::new_v4().to_string());
     for path in [&legacy, &failed, &sibling] {
         fs::create_dir_all(path.join("node/dependencies")).unwrap();
         fs::write(path.join("node/dependencies/marker"), "owned").unwrap();
     }
-    for (id, workspace) in [(&first, &legacy), (&latest, &source), (&failed_revision, &failed)] {
+    for (id, workspace) in [
+        (&first, &legacy),
+        (&latest, &source),
+        (&failed_revision, &failed),
+    ] {
         let attempt = runtime.root.join("planning").join(id);
         fs::create_dir_all(&attempt).unwrap();
-        fs::write(attempt.join("planner-workspace"), workspace.to_string_lossy().as_bytes()).unwrap();
+        fs::write(
+            attempt.join("planner-workspace"),
+            workspace.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
     }
-    fs::write(runtime.root.join("planning").join(&failed_revision).join("request.json"),
-        serde_json::json!({"revisionRunId": run_id}).to_string()).unwrap();
-    runtime.emit(EventKind::GraphRevised {
-        graph: single(), planning_id: latest.clone(), planning: PlanningSummary {
-            planning_id: latest.clone(), ..Default::default()
-        }, invalidated: Vec::new(), source_head: None,
-    }).unwrap();
+    fs::write(
+        runtime
+            .root
+            .join("planning")
+            .join(&failed_revision)
+            .join("request.json"),
+        serde_json::json!({"revisionRunId": run_id}).to_string(),
+    )
+    .unwrap();
+    runtime
+        .emit(EventKind::GraphRevised {
+            graph: single(),
+            planning_id: latest.clone(),
+            planning: PlanningSummary {
+                planning_id: latest.clone(),
+                ..Default::default()
+            },
+            invalidated: Vec::new(),
+            source_head: None,
+        })
+        .unwrap();
     assert_eq!(runtime.state.planning_id.as_deref(), Some(latest.as_str()));
     runtime.delete_run(&run_id).unwrap();
-    assert!(!legacy.exists(), "Created's earlier planning marker must not be forgotten");
-    assert!(!failed.exists(), "failed revision requests also own their private copies");
-    assert!(sibling.join("node/dependencies/marker").is_file(), "do not remove another owner's siblings");
-    assert!(source.join("tracked.txt").is_file(), "modern source cwd is not a deletion target");
+    assert!(
+        !legacy.exists(),
+        "Created's earlier planning marker must not be forgotten"
+    );
+    assert!(
+        !failed.exists(),
+        "failed revision requests also own their private copies"
+    );
+    assert!(
+        sibling.join("node/dependencies/marker").is_file(),
+        "do not remove another owner's siblings"
+    );
+    assert!(
+        source.join("tracked.txt").is_file(),
+        "modern source cwd is not a deletion target"
+    );
 }
 
 #[test]
@@ -306,14 +426,23 @@ fn serial_cleanup_removes_owned_private_leftovers_but_never_the_source_cwd() {
     let (temp, source, mut runtime) = setup(true, single());
     runtime.set_route("serial").unwrap();
     for name in [".grapher-worktrees", ".grapher-workspaces"] {
-        fs::create_dir_all(temp.path().join(name).join(&runtime.state.run_id).join("old-node/dependencies")).unwrap();
+        fs::create_dir_all(
+            temp.path()
+                .join(name)
+                .join(&runtime.state.run_id)
+                .join("old-node/dependencies"),
+        )
+        .unwrap();
     }
     let id = runtime.state.run_id.clone();
     runtime.delete_run(&id).unwrap();
     for name in [".grapher-worktrees", ".grapher-workspaces"] {
         assert!(!temp.path().join(name).join(&id).exists());
     }
-    assert_eq!(fs::read_to_string(source.join("tracked.txt")).unwrap(), "original");
+    assert_eq!(
+        fs::read_to_string(source.join("tracked.txt")).unwrap(),
+        "original"
+    );
 }
 
 #[test]
@@ -321,7 +450,9 @@ fn clearing_history_cleans_every_saved_run_and_preserves_unknown_directories() {
     let (temp, source, mut runtime) = setup(true, single());
     let mut ids = vec![runtime.state.run_id.clone()];
     for _ in 0..2 {
-        runtime.create(single(), runtime.state.config.clone().unwrap()).unwrap();
+        runtime
+            .create(single(), runtime.state.config.clone().unwrap())
+            .unwrap();
         ids.push(runtime.state.run_id.clone());
     }
     let unknown = Uuid::new_v4().to_string();
@@ -334,8 +465,15 @@ fn clearing_history_cleans_every_saved_run_and_preserves_unknown_directories() {
     }
     runtime.clear_history().unwrap();
     for name in [".grapher-worktrees", ".grapher-workspaces"] {
-        for id in &ids { assert!(!temp.path().join(name).join(id).exists()); }
-        assert!(temp.path().join(name).join(&unknown).join("nested/node/marker").is_file());
+        for id in &ids {
+            assert!(!temp.path().join(name).join(id).exists());
+        }
+        assert!(temp
+            .path()
+            .join(name)
+            .join(&unknown)
+            .join("nested/node/marker")
+            .is_file());
     }
     assert!(runtime.store.runs().unwrap().is_empty());
     assert!(source.join("tracked.txt").is_file());
@@ -345,7 +483,9 @@ fn clearing_history_cleans_every_saved_run_and_preserves_unknown_directories() {
 fn failed_historical_cleanup_keeps_database_ownership_for_retry() {
     let (temp, _source, mut runtime) = setup(true, single());
     let old_id = runtime.state.run_id.clone();
-    runtime.create(single(), runtime.state.config.clone().unwrap()).unwrap();
+    runtime
+        .create(single(), runtime.state.config.clone().unwrap())
+        .unwrap();
     let retained = temp.path().join(".grapher-worktrees").join(&old_id);
     fs::create_dir_all(&retained).unwrap();
     let outside = temp.path().join("outside");
@@ -353,7 +493,10 @@ fn failed_historical_cleanup_keeps_database_ownership_for_retry() {
     crate::path_safety::directory_link(&outside, &temp.path().join(".grapher-workspaces"));
     assert!(runtime.delete_run(&old_id).is_err());
     assert!(runtime.store.contains_run(&old_id).unwrap());
-    assert!(retained.is_dir(), "validate all targets before deleting the first one");
+    assert!(
+        retained.is_dir(),
+        "validate all targets before deleting the first one"
+    );
     assert!(outside.join(&old_id).is_dir());
 }
 
@@ -397,7 +540,9 @@ fn node_workers_respect_per_run_limit_and_keep_scheduling_as_slots_open() {
             .emit(EventKind::Finished {
                 execution_id: first.execution.id,
                 head: runtime.state.base.clone(),
-                output: "completed".into(), output_bytes: 0, metrics: None,
+                output: "completed".into(),
+                output_bytes: 0,
+                metrics: None,
             })
             .unwrap();
         assert_eq!(
@@ -414,7 +559,10 @@ fn feedback_scope_does_not_block_a_shared_ancestors_other_branch() {
         original_goal: "feedback and independent work".into(),
         nodes: ["root", "owner", "review", "related", "fast", "after_fast"]
             .into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() })
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
             .collect(),
         edges: [
             ("root", "owner", false),
@@ -426,36 +574,71 @@ fn feedback_scope_does_not_block_a_shared_ancestors_other_branch() {
         ]
         .into_iter()
         .map(|(from, to, feedback)| Edge {
-            from: from.into(), to: to.into(), feedback,
-        }).collect(),
+            from: from.into(),
+            to: to.into(),
+            feedback,
+        })
+        .collect(),
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let root = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: root.execution.id, head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: root.execution.id,
+            head: runtime.state.base.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     let first = runtime.jobs().unwrap();
     assert_eq!(first.len(), 2);
     assert!(runtime.feedback_source_busy("review"));
-    let fast = first.iter().find(|job| job.execution.node == "fast").unwrap();
-    runtime.emit(EventKind::Finished {
-        execution_id: fast.execution.id.clone(), head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
-    assert_eq!(runtime.jobs().unwrap().iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["after_fast"]);
+    let fast = first
+        .iter()
+        .find(|job| job.execution.node == "fast")
+        .unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: fast.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    assert_eq!(
+        runtime
+            .jobs()
+            .unwrap()
+            .iter()
+            .map(|job| job.execution.node.as_str())
+            .collect::<Vec<_>>(),
+        vec!["after_fast"]
+    );
     assert_eq!(runtime.state.nodes["owner"].status, "running");
     assert_eq!(runtime.state.nodes["related"].status, "waiting");
 }
-
 
 #[test]
 fn pending_feedback_blocks_review_consumers_but_not_independent_work() {
     let graph = Graph {
         original_goal: "pending review".into(),
-        nodes: ["owner", "related", "review", "consumer", "other", "after_other"]
-            .into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() })
-            .collect(),
+        nodes: [
+            "owner",
+            "related",
+            "review",
+            "consumer",
+            "other",
+            "after_other",
+        ]
+        .into_iter()
+        .map(|name| Node {
+            name: name.into(),
+            task: name.into(),
+        })
+        .collect(),
         edges: [
             ("owner", "related", false),
             ("owner", "review", false),
@@ -465,7 +648,9 @@ fn pending_feedback_blocks_review_consumers_but_not_independent_work() {
         ]
         .into_iter()
         .map(|(from, to, feedback)| Edge {
-            from: from.into(), to: to.into(), feedback,
+            from: from.into(),
+            to: to.into(),
+            feedback,
         })
         .collect(),
     };
@@ -475,22 +660,56 @@ fn pending_feedback_blocks_review_consumers_but_not_independent_work() {
     runtime.edit_draft_graph(graph, config).unwrap();
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap();
-    let owner = first.iter().find(|job| job.execution.node == "owner").unwrap();
-    runtime.emit(EventKind::Finished {
-        execution_id: owner.execution.id.clone(), head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    let owner = first
+        .iter()
+        .find(|job| job.execution.node == "owner")
+        .unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: owner.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     let next = runtime.jobs().unwrap();
-    let review = next.iter().find(|job| job.execution.node == "review").unwrap();
-    runtime.emit(EventKind::Finished {
-        execution_id: review.execution.id.clone(), head: runtime.state.base.clone(), output: "<FEEDBACK>".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    let review = next
+        .iter()
+        .find(|job| job.execution.node == "review")
+        .unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: review.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "<FEEDBACK>".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     assert!(runtime.feedback_source_busy("review"));
-    let other = first.iter().find(|job| job.execution.node == "other").unwrap();
-    runtime.emit(EventKind::Finished {
-        execution_id: other.execution.id.clone(), head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
-    let jobs = runtime.jobs_with_pending_feedback(true, &["review"]).unwrap();
-    assert_eq!(jobs.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["after_other"]);
+    let other = first
+        .iter()
+        .find(|job| job.execution.node == "other")
+        .unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: other.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    let jobs = runtime
+        .jobs_with_pending_feedback(true, &["review"])
+        .unwrap();
+    assert_eq!(
+        jobs.iter()
+            .map(|job| job.execution.node.as_str())
+            .collect::<Vec<_>>(),
+        vec!["after_other"]
+    );
     assert_eq!(runtime.state.nodes["consumer"].status, "waiting");
     assert_eq!(runtime.state.phase, "running");
 }
@@ -503,7 +722,10 @@ fn resolved_feedback_allows_ready_descendants_while_sibling_runs() {
         original_goal: "accepted reviews do not serialize downstream work".into(),
         nodes: ["04", "06", "08", "09", "10", "13", "11", "14", "15", "16"]
             .into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() })
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
             .collect(),
         edges: [
             ("04", "06", false),
@@ -522,7 +744,11 @@ fn resolved_feedback_allows_ready_descendants_while_sibling_runs() {
             ("15", "16", false),
         ]
         .into_iter()
-        .map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback })
+        .map(|(from, to, feedback)| Edge {
+            from: from.into(),
+            to: to.into(),
+            feedback,
+        })
         .collect(),
     };
     let (_temp, _source, mut runtime) = setup(true, graph.clone());
@@ -535,11 +761,25 @@ fn resolved_feedback_allows_ready_descendants_while_sibling_runs() {
         let jobs = runtime.jobs().unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].execution.node, name);
-        let output = if jobs[0].feedback_source { "<ACCEPT>" } else { "completed" };
-        runtime.finish(&jobs[0].execution, Ok((runtime.state.base.clone(), output.into()))).unwrap();
+        let output = if jobs[0].feedback_source {
+            "<ACCEPT>"
+        } else {
+            "completed"
+        };
+        runtime
+            .finish(
+                &jobs[0].execution,
+                Ok((runtime.state.base.clone(), output.into())),
+            )
+            .unwrap();
     }
     let jobs = runtime.jobs().unwrap();
-    assert_eq!(jobs.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["10", "13"]);
+    assert_eq!(
+        jobs.iter()
+            .map(|job| job.execution.node.as_str())
+            .collect::<Vec<_>>(),
+        vec!["10", "13"]
+    );
     assert!(runtime.state.pending_feedback.is_empty());
     for from in ["06", "09"] {
         assert!(runtime.state.events.iter().any(|event| matches!(
@@ -547,14 +787,28 @@ fn resolved_feedback_allows_ready_descendants_while_sibling_runs() {
         )));
     }
     let evaluation = jobs.iter().find(|job| job.execution.node == "10").unwrap();
-    runtime.finish(&evaluation.execution, Ok((runtime.state.base.clone(), "evaluated".into()))).unwrap();
+    runtime
+        .finish(
+            &evaluation.execution,
+            Ok((runtime.state.base.clone(), "evaluated".into())),
+        )
+        .unwrap();
     // Replay the durable projection, without restarting/recovering live workers.
     runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
     assert_eq!(runtime.state.nodes["13"].status, "running");
     assert!(runtime.state.pending_feedback.is_empty());
-    assert!(runtime.state.feedback_counts.is_empty(), "acceptance does not exhaust the feedback budget");
+    assert!(
+        runtime.state.feedback_counts.is_empty(),
+        "acceptance does not exhaust the feedback budget"
+    );
     let consumers = runtime.jobs().unwrap();
-    assert_eq!(consumers.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["11", "14", "15"]);
+    assert_eq!(
+        consumers
+            .iter()
+            .map(|job| job.execution.node.as_str())
+            .collect::<Vec<_>>(),
+        vec!["11", "14", "15"]
+    );
     assert_eq!(runtime.state.nodes["13"].status, "running");
     assert_eq!(runtime.state.nodes["16"].status, "waiting");
     assert!(runtime.jobs().unwrap().is_empty());
@@ -565,10 +819,22 @@ fn queued_feedback_keeps_scope_blocked_until_related_workers_drain() {
     for verdict in ["<ACCEPT>", "<FEEDBACK>"] {
         let graph = Graph {
             original_goal: "queued verdict retains its drain barrier".into(),
-            nodes: ["owner", "review", "slow", "fast", "after_fast", "consumer", "other", "after_other"]
-                .into_iter()
-                .map(|name| Node { name: name.into(), task: name.into() })
-                .collect(),
+            nodes: [
+                "owner",
+                "review",
+                "slow",
+                "fast",
+                "after_fast",
+                "consumer",
+                "other",
+                "after_other",
+            ]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
             edges: [
                 ("owner", "review", false),
                 ("owner", "slow", false),
@@ -579,7 +845,11 @@ fn queued_feedback_keeps_scope_blocked_until_related_workers_drain() {
                 ("other", "after_other", false),
             ]
             .into_iter()
-            .map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback })
+            .map(|(from, to, feedback)| Edge {
+                from: from.into(),
+                to: to.into(),
+                feedback,
+            })
             .collect(),
         };
         let (_temp, _source, mut runtime) = setup(true, graph.clone());
@@ -588,25 +858,72 @@ fn queued_feedback_keeps_scope_blocked_until_related_workers_drain() {
         runtime.edit_draft_graph(graph, config).unwrap();
         runtime.approve().unwrap();
         let roots = runtime.jobs().unwrap();
-        let owner = roots.iter().find(|job| job.execution.node == "owner").unwrap();
-        runtime.finish(&owner.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
+        let owner = roots
+            .iter()
+            .find(|job| job.execution.node == "owner")
+            .unwrap();
+        runtime
+            .finish(
+                &owner.execution,
+                Ok((runtime.state.base.clone(), "completed".into())),
+            )
+            .unwrap();
         let jobs = runtime.jobs().unwrap();
-        assert_eq!(jobs.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["review", "slow", "fast"]);
-        let fast = jobs.iter().find(|job| job.execution.node == "fast").unwrap();
-        runtime.finish(&fast.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
-        let review = jobs.iter().find(|job| job.execution.node == "review").unwrap();
-        runtime.finish(&review.execution, Ok((runtime.state.base.clone(), verdict.into()))).unwrap();
-        let other = roots.iter().find(|job| job.execution.node == "other").unwrap();
-        runtime.finish(&other.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
+        assert_eq!(
+            jobs.iter()
+                .map(|job| job.execution.node.as_str())
+                .collect::<Vec<_>>(),
+            vec!["review", "slow", "fast"]
+        );
+        let fast = jobs
+            .iter()
+            .find(|job| job.execution.node == "fast")
+            .unwrap();
+        runtime
+            .finish(
+                &fast.execution,
+                Ok((runtime.state.base.clone(), "completed".into())),
+            )
+            .unwrap();
+        let review = jobs
+            .iter()
+            .find(|job| job.execution.node == "review")
+            .unwrap();
+        runtime
+            .finish(
+                &review.execution,
+                Ok((runtime.state.base.clone(), verdict.into())),
+            )
+            .unwrap();
+        let other = roots
+            .iter()
+            .find(|job| job.execution.node == "other")
+            .unwrap();
+        runtime
+            .finish(
+                &other.execution,
+                Ok((runtime.state.base.clone(), "completed".into())),
+            )
+            .unwrap();
         runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
         assert_eq!(runtime.state.nodes["review"].status, "completed");
         assert_eq!(runtime.state.nodes["slow"].status, "running");
         assert_eq!(runtime.state.pending_feedback.len(), 1);
         let independent = runtime.jobs().unwrap();
-        assert_eq!(independent.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["after_other"]);
+        assert_eq!(
+            independent
+                .iter()
+                .map(|job| job.execution.node.as_str())
+                .collect::<Vec<_>>(),
+            vec!["after_other"]
+        );
         assert_eq!(runtime.state.nodes["after_fast"].status, "waiting");
         assert_eq!(runtime.state.nodes["consumer"].status, "waiting");
-        assert_eq!(runtime.state.pending_feedback.len(), 1, "{verdict} must still wait for the related worker");
+        assert_eq!(
+            runtime.state.pending_feedback.len(),
+            1,
+            "{verdict} must still wait for the related worker"
+        );
     }
 }
 
@@ -616,7 +933,10 @@ fn resolved_feedback_barrier_reactivates_when_review_is_rerun() {
         original_goal: "a new review can invalidate its target again".into(),
         nodes: ["owner", "review", "related", "after_related"]
             .into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() })
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
             .collect(),
         edges: [
             ("owner", "review", false),
@@ -625,24 +945,52 @@ fn resolved_feedback_barrier_reactivates_when_review_is_rerun() {
             ("review", "owner", true),
         ]
         .into_iter()
-        .map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback })
+        .map(|(from, to, feedback)| Edge {
+            from: from.into(),
+            to: to.into(),
+            feedback,
+        })
         .collect(),
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let owner = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&owner.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
+    runtime
+        .finish(
+            &owner.execution,
+            Ok((runtime.state.base.clone(), "completed".into())),
+        )
+        .unwrap();
     for job in runtime.jobs().unwrap() {
-        let output = if job.feedback_source { "<ACCEPT>" } else { "completed" };
-        runtime.finish(&job.execution, Ok((runtime.state.base.clone(), output.into()))).unwrap();
+        let output = if job.feedback_source {
+            "<ACCEPT>"
+        } else {
+            "completed"
+        };
+        runtime
+            .finish(
+                &job.execution,
+                Ok((runtime.state.base.clone(), output.into())),
+            )
+            .unwrap();
     }
     let related = runtime.jobs().unwrap().remove(0);
     assert_eq!(related.execution.node, "after_related");
     assert!(runtime.state.pending_feedback.is_empty());
-    runtime.intervene("review", "review the owner again").unwrap();
+    runtime
+        .intervene("review", "review the owner again")
+        .unwrap();
     assert_eq!(runtime.state.nodes["review"].status, "dirty");
-    assert!(runtime.jobs().unwrap().is_empty(), "a new verdict must wait for the affected worker");
-    runtime.finish(&related.execution, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
+    assert!(
+        runtime.jobs().unwrap().is_empty(),
+        "a new verdict must wait for the affected worker"
+    );
+    runtime
+        .finish(
+            &related.execution,
+            Ok((runtime.state.base.clone(), "completed".into())),
+        )
+        .unwrap();
     let review = runtime.jobs().unwrap().remove(0);
     assert_eq!(review.execution.node, "review");
     assert!(review.feedback_source);
@@ -661,10 +1009,19 @@ fn named_parents_resolve_against_their_own_run_refs() {
     }
     let target = temp.path().join("named-parent");
     workspace::prepare_with_merger_expected_for_run(
-        &source, &target, &runtime.state.base, &["task".into()], &runtime.state.base,
-        Some(&runtime.state.run_id), || Err("unexpected conflict".into()),
-    ).unwrap();
-    assert_eq!(fs::read_to_string(target.join("tracked.txt")).unwrap(), "first");
+        &source,
+        &target,
+        &runtime.state.base,
+        &["task".into()],
+        &runtime.state.base,
+        Some(&runtime.state.run_id),
+        || Err("unexpected conflict".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(target.join("tracked.txt")).unwrap(),
+        "first"
+    );
 }
 
 #[test]
@@ -680,14 +1037,35 @@ fn parallel_snapshots_of_one_host_repository_do_not_race_ref_locks() {
         paths.push(path);
     }
     std::thread::scope(|scope| {
-        let workers: Vec<_> = paths.iter().enumerate().map(|(i, path)| {
-            let source = &source;
-            let run_id = &run_id;
-            scope.spawn(move || workspace::snapshot_node_for_run(path, source, &format!("worker{i}"), Some(run_id)))
-        }).collect();
+        let workers: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                let source = &source;
+                let run_id = &run_id;
+                scope.spawn(move || {
+                    workspace::snapshot_node_for_run(
+                        path,
+                        source,
+                        &format!("worker{i}"),
+                        Some(run_id),
+                    )
+                })
+            })
+            .collect();
         for (i, worker) in workers.into_iter().enumerate() {
             let head = worker.join().unwrap().unwrap();
-            assert_eq!(workspace::repository_git(&source, &["rev-parse", &format!("refs/grapher/runs/{run_id}/nodes/worker{i}")]).unwrap(), head);
+            assert_eq!(
+                workspace::repository_git(
+                    &source,
+                    &[
+                        "rev-parse",
+                        &format!("refs/grapher/runs/{run_id}/nodes/worker{i}")
+                    ]
+                )
+                .unwrap(),
+                head
+            );
         }
     });
 }
@@ -696,38 +1074,65 @@ fn parallel_snapshots_of_one_host_repository_do_not_race_ref_locks() {
 fn messaging_completed_node_preserves_its_result_and_running_downstream() {
     let graph = Graph {
         original_goal: "message".into(),
-        nodes: ["parent", "child"].into_iter().map(|name| Node {
-            name: name.into(), task: name.into(),
-        }).collect(),
+        nodes: ["parent", "child"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
         edges: vec![Edge {
-            from: "parent".into(), to: "child".into(), feedback: false,
+            from: "parent".into(),
+            to: "child".into(),
+            feedback: false,
         }],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let parent = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: parent.execution.id, head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: parent.execution.id,
+            head: runtime.state.base.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     let child = runtime.jobs().unwrap().remove(0);
     let before = runtime.state.nodes.clone();
     let executions = runtime.state.executions.len();
     let images = Some(vec![ImageAttachment {
-        r#type: "image".into(), mime_type: "image/png".into(), data: "abc".into(), name: None,
+        r#type: "image".into(),
+        mime_type: "image/png".into(),
+        data: "abc".into(),
+        name: None,
     }]);
-    runtime.message_completed_node("parent", "  new instruction  ", images.clone()).unwrap();
-    assert_eq!(serde_json::to_value(&runtime.state.nodes).unwrap(), serde_json::to_value(before).unwrap());
+    runtime
+        .message_completed_node("parent", "  new instruction  ", images.clone())
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&runtime.state.nodes).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
     assert_eq!(runtime.state.executions.len(), executions);
     assert_eq!(runtime.state.nodes["child"].status, "running");
     assert!(runtime.jobs().unwrap().is_empty());
     let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
-    assert!(matches!(replayed.events.last().unwrap().kind, EventKind::NodeMessaged {
+    assert!(
+        matches!(replayed.events.last().unwrap().kind, EventKind::NodeMessaged {
         ref node, ref instruction, images: ref saved,
     } if node == "parent" && instruction == "new instruction" &&
-        serde_json::to_value(saved).unwrap() == serde_json::to_value(&images).unwrap()));
+        serde_json::to_value(saved).unwrap() == serde_json::to_value(&images).unwrap())
+    );
     assert!(runtime.message_completed_node("child", "no", None).is_err());
-    assert!(runtime.message_completed_node("parent", "   ", None).is_err());
-    assert_eq!(runtime.state.executions.last().unwrap().id, child.execution.id);
+    assert!(runtime
+        .message_completed_node("parent", "   ", None)
+        .is_err());
+    assert_eq!(
+        runtime.state.executions.last().unwrap().id,
+        child.execution.id
+    );
 }
 
 #[test]
@@ -735,12 +1140,20 @@ fn message_after_run_completed_keeps_it_completed() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: job.execution.id, head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: job.execution.id,
+            head: runtime.state.base.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     runtime.emit(EventKind::Settled).unwrap();
     let head = runtime.state.nodes["task"].head.clone();
-    runtime.message_completed_node("task", "hello", None).unwrap();
+    runtime
+        .message_completed_node("task", "hello", None)
+        .unwrap();
     assert_eq!(runtime.state.phase, "completed");
     assert_eq!(runtime.state.nodes["task"].head, head);
     assert_eq!(runtime.state.nodes["task"].status, "completed");
@@ -758,17 +1171,27 @@ fn intervention_continues_the_previous_result_in_place() {
     let path = Path::new(&first.execution.worktree);
     workspace::prepare(&source, path, &first.execution.before, &[]).unwrap();
     fs::write(path.join("tracked.txt"), "first result").unwrap();
-    let head = workspace::snapshot_node_for_run(path, &source, "task", Some(&runtime.state.run_id)).unwrap();
-    runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id, head: head.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    let head = workspace::snapshot_node_for_run(path, &source, "task", Some(&runtime.state.run_id))
+        .unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: first.execution.id,
+            head: head.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     runtime.intervene("task", "continue").unwrap();
     assert_eq!(runtime.state.nodes["task"].head, Some(head.clone()));
     let followup = runtime.jobs().unwrap().remove(0);
     assert_eq!(followup.execution.before, head);
     assert_eq!(followup.execution.worktree, path.to_string_lossy());
     assert_eq!(followup.execution.session_id, session_id);
-    assert_eq!(followup.resume_execution_id.as_deref(), Some(first_execution_id.as_str()));
+    assert_eq!(
+        followup.resume_execution_id.as_deref(),
+        Some(first_execution_id.as_str())
+    );
 }
 
 #[test]
@@ -777,22 +1200,39 @@ fn serial_followup_resumes_completed_pi_session_with_images_after_settlement() {
     runtime.set_route("serial").unwrap();
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: first.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     runtime.jobs().unwrap(); // settle the run
     assert_eq!(runtime.state.phase, "completed");
 
     let images = vec![ImageAttachment {
-        r#type: "image".into(), mime_type: "image/png".into(), data: "aGVsbG8=".into(), name: None,
+        r#type: "image".into(),
+        mime_type: "image/png".into(),
+        data: "aGVsbG8=".into(),
+        name: None,
     }];
-    runtime.intervene_with_images("task", "next turn", Some(images.clone())).unwrap();
+    runtime
+        .intervene_with_images("task", "next turn", Some(images.clone()))
+        .unwrap();
     assert_eq!(runtime.state.phase, "running");
     let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
-    assert_eq!(serde_json::to_value(&replayed.nodes["task"].instruction_images).unwrap(), serde_json::to_value(&images).unwrap());
+    assert_eq!(
+        serde_json::to_value(&replayed.nodes["task"].instruction_images).unwrap(),
+        serde_json::to_value(&images).unwrap()
+    );
     let next = runtime.jobs().unwrap().remove(0);
     assert_eq!(next.task, "next turn");
-    assert_eq!(serde_json::to_value(&next.images).unwrap(), serde_json::to_value(&images).unwrap());
+    assert_eq!(
+        serde_json::to_value(&next.images).unwrap(),
+        serde_json::to_value(&images).unwrap()
+    );
     assert_eq!(next.resume_execution_id, Some(first.execution.id));
     assert_eq!(next.execution.session_id, first.execution.session_id);
     assert_eq!(next.execution.worktree, first.execution.worktree);
@@ -806,7 +1246,9 @@ fn messaging_a_failed_node_resumes_its_session_without_a_successful_result() {
             runtime.set_route(route).unwrap();
             runtime.approve().unwrap();
             let failed = runtime.jobs().unwrap().remove(0);
-            runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
+            runtime
+                .finish(&failed.execution, Err("Provider failed".into()))
+                .unwrap();
             runtime.jobs().unwrap();
             // A provider failure happens after Pi created the conversation, so
             // the follow-up resumes that persisted session.
@@ -827,10 +1269,14 @@ fn messaging_a_failed_node_resumes_its_session_without_a_successful_result() {
             assert_eq!(runtime.state.events.len(), event_count);
 
             let images = Some(vec![ImageAttachment {
-                r#type: "image".into(), mime_type: "image/png".into(),
-                data: "aGVsbG8=".into(), name: None,
+                r#type: "image".into(),
+                mime_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+                name: None,
             }]);
-            runtime.intervene_with_images("task", "  retry with this image  ", images.clone()).unwrap();
+            runtime
+                .intervene_with_images("task", "  retry with this image  ", images.clone())
+                .unwrap();
             assert_eq!(runtime.state.nodes["task"].status, "dirty");
             assert_eq!(runtime.state.nodes["task"].error, None);
             assert_eq!(runtime.state.nodes["task"].revision, 2);
@@ -847,16 +1293,27 @@ fn messaging_a_failed_node_resumes_its_session_without_a_successful_result() {
             assert_eq!(runtime.state.phase, "running");
             assert_eq!(runtime.state.nodes["task"].status, "running");
             assert_eq!(next.task, "retry with this image");
-            assert_eq!(serde_json::to_value(&next.images).unwrap(), serde_json::to_value(&images).unwrap());
+            assert_eq!(
+                serde_json::to_value(&next.images).unwrap(),
+                serde_json::to_value(&images).unwrap()
+            );
             assert_ne!(next.execution.id, failed.execution.id);
             assert_eq!(next.execution.attempt, 2);
-            assert!(!next.initial_recovery, "a persisted conversation is resumed instead of restarted");
+            assert!(
+                !next.initial_recovery,
+                "a persisted conversation is resumed instead of restarted"
+            );
             assert_eq!(next.execution.session_id, failed.execution.session_id);
             assert_eq!(next.execution.worktree, failed.execution.worktree);
             assert_eq!(next.resume_execution_id, Some(failed.execution.id.clone()));
             assert_eq!(runtime.state.executions[0].status, "failed");
             assert!(runtime.state.executions[0].after.is_none());
-            runtime.finish(&next.execution, Ok((runtime.state.base.clone(), "recovered".into()))).unwrap();
+            runtime
+                .finish(
+                    &next.execution,
+                    Ok((runtime.state.base.clone(), "recovered".into())),
+                )
+                .unwrap();
             assert_eq!(runtime.state.nodes["task"].status, "completed");
         }
     }
@@ -869,18 +1326,26 @@ fn failed_start_followup_restarts_the_task_in_the_retained_session_slot() {
     // The first attempt exited while loading extensions, before Pi created any
     // conversation file in the execution's session directory.
     let failed = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&failed.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime
+        .finish(&failed.execution, Err("Pi exited with exit code: 1".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.phase, "needs_attention");
 
     runtime.intervene("task", "continue your work").unwrap();
     let next = runtime.jobs().unwrap().remove(0);
-    assert!(next.initial_recovery, "a missing conversation restarts the first turn in the retained slot");
+    assert!(
+        next.initial_recovery,
+        "a missing conversation restarts the first turn in the retained slot"
+    );
     assert!(!next.continuation);
     assert_eq!(next.resume_execution_id, Some(failed.execution.id.clone()));
     assert_eq!(next.execution.session_id, failed.execution.session_id);
     assert_eq!(next.execution.worktree, failed.execution.worktree);
-    assert_eq!(next.task, "self-contained task\ncontinue your work", "the fresh session still receives the node task");
+    assert_eq!(
+        next.task, "self-contained task\ncontinue your work",
+        "the fresh session still receives the node task"
+    );
 }
 
 #[test]
@@ -888,17 +1353,30 @@ fn editing_a_failed_start_opening_turn_replaces_the_task_without_branching() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&failed.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime
+        .finish(&failed.execution, Err("Pi exited with exit code: 1".into()))
+        .unwrap();
     runtime.jobs().unwrap();
 
     // There is no JSONL to branch, but the opening turn can still be replaced.
-    runtime.edit_node_message("task", &failed.execution.id, "self-contained task", "edited task", None).unwrap();
+    runtime
+        .edit_node_message(
+            "task",
+            &failed.execution.id,
+            "self-contained task",
+            "edited task",
+            None,
+        )
+        .unwrap();
     assert_eq!(runtime.state.graph.nodes[0].task, "edited task");
     let next = runtime.jobs().unwrap().remove(0);
     assert!(next.initial_recovery);
     assert_eq!(next.resume_execution_id, Some(failed.execution.id.clone()));
     assert_eq!(next.execution.session_id, failed.execution.session_id);
-    assert_eq!(next.task, "edited task", "the replacement opening turn is not duplicated");
+    assert_eq!(
+        next.task, "edited task",
+        "the replacement opening turn is not duplicated"
+    );
 }
 
 #[test]
@@ -906,14 +1384,26 @@ fn editing_a_failed_start_followup_keeps_the_node_task() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&first.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime
+        .finish(&first.execution, Err("Pi exited with exit code: 1".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     runtime.intervene("task", "continue your work").unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&retry.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime
+        .finish(&retry.execution, Err("Pi exited with exit code: 1".into()))
+        .unwrap();
     runtime.jobs().unwrap();
 
-    runtime.edit_node_message("task", &retry.execution.id, "continue your work", "keep going", None).unwrap();
+    runtime
+        .edit_node_message(
+            "task",
+            &retry.execution.id,
+            "continue your work",
+            "keep going",
+            None,
+        )
+        .unwrap();
     let next = runtime.jobs().unwrap().remove(0);
     assert!(next.initial_recovery);
     assert_eq!(next.resume_execution_id, Some(first.execution.id.clone()));
@@ -927,10 +1417,14 @@ fn messaging_a_failed_followup_keeps_the_original_session_and_last_result() {
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
     let head = runtime.state.base.clone();
-    runtime.finish(&first.execution, Ok((head.clone(), "completed".into()))).unwrap();
+    runtime
+        .finish(&first.execution, Ok((head.clone(), "completed".into())))
+        .unwrap();
     runtime.intervene("task", "second turn").unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&failed.execution, Err("Provider failed".into())).unwrap();
+    runtime
+        .finish(&failed.execution, Err("Provider failed".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     runtime.intervene("task", "try again").unwrap();
     let next = runtime.jobs().unwrap().remove(0);
@@ -949,19 +1443,37 @@ fn editing_an_earlier_serial_turn_branches_pi_and_supersedes_later_executions() 
     runtime.set_route("serial").unwrap();
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: first.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "first".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     runtime.intervene("task", "second").unwrap();
     let second = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: second.execution.id.clone(), head: runtime.state.base.clone(), output: "second".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: second.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "second".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     runtime.intervene("task", "third").unwrap();
     let third = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: third.execution.id.clone(), head: runtime.state.base.clone(), output: "third".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: third.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "third".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     let session_dir = runtime.root.join("sessions").join(&first.execution.id);
     fs::create_dir_all(&session_dir).unwrap();
     let file = session_dir.join(format!("test_{}.jsonl", first.execution.session_id));
@@ -974,22 +1486,46 @@ fn editing_an_earlier_serial_turn_branches_pi_and_supersedes_later_executions() 
         serde_json::json!({"type":"message", "id":"answer2", "parentId":"two", "message":{"role":"assistant", "content":[]}}),
         serde_json::json!({"type":"message", "id":"three", "parentId":"answer2", "message":{"role":"user", "content":"third", "timestamp":third.execution.started_at}}),
     ];
-    fs::write(&file, entries.iter().map(|e| format!("{e}\n")).collect::<String>()).unwrap();
+    fs::write(
+        &file,
+        entries.iter().map(|e| format!("{e}\n")).collect::<String>(),
+    )
+    .unwrap();
     let before = fs::read(&file).unwrap();
-    assert!(runtime.edit_node_message("task", &second.execution.id, "wrong", "edited", None).is_err());
+    assert!(runtime
+        .edit_node_message("task", &second.execution.id, "wrong", "edited", None)
+        .is_err());
     assert_eq!(fs::read(&file).unwrap(), before);
-    runtime.edit_node_message("task", &second.execution.id, "second", "edited second", None).unwrap();
+    runtime
+        .edit_node_message(
+            "task",
+            &second.execution.id,
+            "second",
+            "edited second",
+            None,
+        )
+        .unwrap();
     let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
     assert_eq!(replayed.superseded_execution_ids.len(), 2);
-    assert_eq!(replayed.nodes["task"].edit_execution_id.as_deref(), Some(second.execution.id.as_str()));
-    let marker: serde_json::Value = serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
+    assert_eq!(
+        replayed.nodes["task"].edit_execution_id.as_deref(),
+        Some(second.execution.id.as_str())
+    );
+    let marker: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
     assert_eq!(marker["parentId"], "answer1");
     let edited = runtime.jobs().unwrap().remove(0);
     assert_eq!(edited.task, "edited second");
     assert_eq!(edited.execution.session_id, first.execution.session_id);
-    assert_eq!(edited.resume_execution_id.as_deref(), Some(first.execution.id.as_str()));
+    assert_eq!(
+        edited.resume_execution_id.as_deref(),
+        Some(first.execution.id.as_str())
+    );
     assert_eq!(edited.execution.before, second.execution.before);
-    assert!(!runtime.state.superseded_execution_ids.contains(&edited.execution.id));
+    assert!(!runtime
+        .state
+        .superseded_execution_ids
+        .contains(&edited.execution.id));
 }
 
 #[test]
@@ -1011,64 +1547,198 @@ fn editing_a_repeated_steer_uses_its_log_cursor_and_can_reedit_the_retained_pref
             serde_json::json!({"type":"message", "id":"reply-one", "parentId":"steer-one", "message":{"role":"assistant", "content":[]}}),
             serde_json::json!({"type":"message", "id":"steer-two", "parentId":"reply-one", "message":{"role":"user", "content":"继续 中文🚀", "timestamp":time}}),
         ];
-        let history = entries.iter().map(|entry| format!("{entry}\n")).collect::<String>();
+        let history = entries
+            .iter()
+            .map(|entry| format!("{entry}\n"))
+            .collect::<String>();
         fs::write(&file, &history).unwrap();
-        let line = |kind: &str, role: &str, text: &str| format!("{}\n", serde_json::json!({"type":kind,
-            "message":{"role":role,"content":[{"type":"text","text":text}],"timestamp":time}}));
-        let mut output = line("message_end", "user", &first.task) + &line("message_end", "assistant", "original response");
+        let line = |kind: &str, role: &str, text: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type":kind,
+            "message":{"role":role,"content":[{"type":"text","text":text}],"timestamp":time}})
+            )
+        };
+        let mut output = line("message_end", "user", &first.task)
+            + &line("message_end", "assistant", "original response");
         let earlier = output.len();
-        output += &(line("message_start", "user", "继续 中文🚀") + &line("message_end", "user", "继续 中文🚀"));
+        output += &(line("message_start", "user", "继续 中文🚀")
+            + &line("message_end", "user", "继续 中文🚀"));
         output += &line("message_end", "assistant", "keep this reply");
         let later = output.len();
-        output += &(line("message_start", "user", "继续 中文🚀") + &line("message_end", "user", "继续 中文🚀"));
-        runtime.emit(EventKind::Output { execution_id: first.execution.id.clone(), text: output }).unwrap();
+        output += &(line("message_start", "user", "继续 中文🚀")
+            + &line("message_end", "user", "继续 中文🚀"));
+        runtime
+            .emit(EventKind::Output {
+                execution_id: first.execution.id.clone(),
+                text: output,
+            })
+            .unwrap();
         for _ in 0..2 {
-            runtime.emit(EventKind::Steered { execution_id: first.execution.id.clone(), node: "task".into(),
-                instruction: "继续 中文🚀".into(), images: None }).unwrap();
+            runtime
+                .emit(EventKind::Steered {
+                    execution_id: first.execution.id.clone(),
+                    node: "task".into(),
+                    instruction: "继续 中文🚀".into(),
+                    images: None,
+                })
+                .unwrap();
         }
-        assert!(runtime.edit_node_message("task", &first.execution.id, "继续 中文🚀", "wrong", None).is_err());
-        assert!(runtime.edit_node_message_at("task", &first.execution.id, "继续 中文🚀", "wrong", None, None, Some(later + 1)).is_err());
-        assert!(runtime.state.execution_stop_requests.is_empty(), "invalid or ambiguous edits must not stop the writer");
+        assert!(runtime
+            .edit_node_message("task", &first.execution.id, "继续 中文🚀", "wrong", None)
+            .is_err());
+        assert!(runtime
+            .edit_node_message_at(
+                "task",
+                &first.execution.id,
+                "继续 中文🚀",
+                "wrong",
+                None,
+                None,
+                Some(later + 1)
+            )
+            .is_err());
+        assert!(
+            runtime.state.execution_stop_requests.is_empty(),
+            "invalid or ambiguous edits must not stop the writer"
+        );
         assert_eq!(fs::read_to_string(&file).unwrap(), history);
-        runtime.edit_node_message_at("task", &first.execution.id, "继续 中文🚀", "edited later", None, None, Some(later)).unwrap();
-        let marker: serde_json::Value = serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
-        assert_eq!(marker["parentId"], "reply-one", "the second identical message was selected");
-        runtime.emit(EventKind::Failed { node: "task".into(), execution_id: Some(first.execution.id.clone()),
-            error: "stopped".into(), output_bytes: 0, metrics: None }).unwrap();
+        runtime
+            .edit_node_message_at(
+                "task",
+                &first.execution.id,
+                "继续 中文🚀",
+                "edited later",
+                None,
+                None,
+                Some(later),
+            )
+            .unwrap();
+        let marker: serde_json::Value =
+            serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert_eq!(
+            marker["parentId"], "reply-one",
+            "the second identical message was selected"
+        );
+        runtime
+            .emit(EventKind::Failed {
+                node: "task".into(),
+                execution_id: Some(first.execution.id.clone()),
+                error: "stopped".into(),
+                output_bytes: 0,
+                metrics: None,
+            })
+            .unwrap();
         let next = runtime.jobs().unwrap().remove(0);
         // Pi appends the replacement onto the newly selected branch.
         use std::io::Write;
         let replacement = serde_json::json!({"type":"message", "id":"replacement", "parentId":marker["id"],
             "message":{"role":"user","content":"edited later","timestamp":next.execution.started_at}});
-        writeln!(fs::OpenOptions::new().append(true).open(&file).unwrap(), "{replacement}").unwrap();
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&file).unwrap(),
+            "{replacement}"
+        )
+        .unwrap();
         runtime.emit(EventKind::Output { execution_id: next.execution.id.clone(), text: format!("{}\n", serde_json::json!({
             "type":"message_end", "message":{"role":"user","content":"edited later","timestamp":next.execution.started_at}
         })) }).unwrap();
         let checkpoint = runtime.store.load(&runtime.state.run_id).unwrap();
-        assert!(matches!(&checkpoint.events.iter().rev().find(|event| matches!(event.kind, EventKind::ConversationEdited { .. })).unwrap().kind,
-            EventKind::ConversationEdited { from_output_offset: Some(end), .. } if *end == later));
+        assert!(
+            matches!(&checkpoint.events.iter().rev().find(|event| matches!(event.kind, EventKind::ConversationEdited { .. })).unwrap().kind,
+            EventKind::ConversationEdited { from_output_offset: Some(end), .. } if *end == later)
+        );
         runtime.state = checkpoint;
         let before_invalid = fs::read_to_string(&file).unwrap();
-        assert!(runtime.edit_node_message_at("task", &first.execution.id, "继续 中文🚀", "abandoned", None, None, Some(later)).is_err());
-        assert!(!runtime.state.execution_stop_requests.contains(&next.execution.id));
+        assert!(runtime
+            .edit_node_message_at(
+                "task",
+                &first.execution.id,
+                "继续 中文🚀",
+                "abandoned",
+                None,
+                None,
+                Some(later)
+            )
+            .is_err());
+        assert!(!runtime
+            .state
+            .execution_stop_requests
+            .contains(&next.execution.id));
         assert_eq!(fs::read_to_string(&file).unwrap(), before_invalid);
-        let opening_sequence = runtime.state.events.iter().rev().find(|event| matches!(event.kind, EventKind::ConversationEdited { .. })).unwrap().sequence;
-        runtime.edit_node_message("task", &next.execution.id, "edited later", "edited replacement opening", None).unwrap();
-        assert!(matches!(&runtime.state.events.last().unwrap().kind, EventKind::ConversationEdited {
+        let opening_sequence = runtime
+            .state
+            .events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::ConversationEdited { .. }))
+            .unwrap()
+            .sequence;
+        runtime
+            .edit_node_message(
+                "task",
+                &next.execution.id,
+                "edited later",
+                "edited replacement opening",
+                None,
+            )
+            .unwrap();
+        assert!(
+            matches!(&runtime.state.events.last().unwrap().kind, EventKind::ConversationEdited {
             from_event_sequence, from_output_offset: Some(0), ..
-        } if *from_event_sequence == opening_sequence), "editing the replacement prompt must replace, not append to, its human event");
-        runtime.edit_node_message_at("task", &first.execution.id, "继续 中文🚀", "edited earlier", None, None, Some(earlier)).unwrap();
-        let marker: serde_json::Value = serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
-        assert_eq!(marker["parentId"], "answer", "the retained earlier message remains editable");
+        } if *from_event_sequence == opening_sequence),
+            "editing the replacement prompt must replace, not append to, its human event"
+        );
+        runtime
+            .edit_node_message_at(
+                "task",
+                &first.execution.id,
+                "继续 中文🚀",
+                "edited earlier",
+                None,
+                None,
+                Some(earlier),
+            )
+            .unwrap();
+        let marker: serde_json::Value =
+            serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert_eq!(
+            marker["parentId"], "answer",
+            "the retained earlier message remains editable"
+        );
         assert_eq!(runtime.state.graph.nodes[0].task, "self-contained task");
-        assert!(matches!(&runtime.store.load(&runtime.state.run_id).unwrap().events.last().unwrap().kind,
-            EventKind::ConversationEdited { from_output_offset: Some(end), first_turn: false, .. } if *end == earlier));
+        assert!(
+            matches!(&runtime.store.load(&runtime.state.run_id).unwrap().events.last().unwrap().kind,
+            EventKind::ConversationEdited { from_output_offset: Some(end), first_turn: false, .. } if *end == earlier)
+        );
         // The surrounding task bubble has no log cursor; a uniquely retained
         // opening turn must still be editable after editing a Steer.
-        runtime.edit_node_message("task", &first.execution.id, "self-contained task", "edited opening", None).unwrap();
+        runtime
+            .edit_node_message(
+                "task",
+                &first.execution.id,
+                "self-contained task",
+                "edited opening",
+                None,
+            )
+            .unwrap();
         assert_eq!(runtime.state.graph.nodes[0].task, "edited opening");
-        assert!(matches!(&runtime.store.load(&runtime.state.run_id).unwrap().events.last().unwrap().kind,
-            EventKind::ConversationEdited { from_output_offset: Some(0), first_turn: true, .. }));
+        assert!(matches!(
+            &runtime
+                .store
+                .load(&runtime.state.run_id)
+                .unwrap()
+                .events
+                .last()
+                .unwrap()
+                .kind,
+            EventKind::ConversationEdited {
+                from_output_offset: Some(0),
+                first_turn: true,
+                ..
+            }
+        ));
     }
 }
 
@@ -1090,25 +1760,64 @@ fn a_text_only_edit_scans_only_the_retained_prefix() {
         serde_json::json!({"type":"message", "id":"reply-one", "parentId":"steer-one", "message":{"role":"assistant", "content":[]}}),
         serde_json::json!({"type":"message", "id":"steer-two", "parentId":"reply-one", "message":{"role":"user", "content":"again", "timestamp":time}}),
     ];
-    fs::write(&file, entries.iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
-    let line = |kind: &str, role: &str, text: &str| format!("{}\n", serde_json::json!({"type":kind,
-        "message":{"role":role,"content":[{"type":"text","text":text}],"timestamp":time}}));
-    let mut output = line("message_end", "user", &first.task) + &line("message_end", "assistant", "answer");
+    fs::write(
+        &file,
+        entries
+            .iter()
+            .map(|entry| format!("{entry}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let line = |kind: &str, role: &str, text: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type":kind,
+        "message":{"role":role,"content":[{"type":"text","text":text}],"timestamp":time}})
+        )
+    };
+    let mut output =
+        line("message_end", "user", &first.task) + &line("message_end", "assistant", "answer");
     let earlier = output.len();
     output += &line("message_end", "user", "again");
     let later = output.len();
     output += &line("message_end", "user", "again");
-    runtime.emit(EventKind::Output { execution_id: first.execution.id.clone(), text: output }).unwrap();
+    runtime
+        .emit(EventKind::Output {
+            execution_id: first.execution.id.clone(),
+            text: output,
+        })
+        .unwrap();
     // The first edit keeps only the prefix before the second identical turn.
-    runtime.edit_node_message_at("task", &first.execution.id, "again", "edited later", None, None, Some(later)).unwrap();
-    runtime.emit(EventKind::Failed { node: "task".into(), execution_id: Some(first.execution.id.clone()),
-        error: "stopped".into(), output_bytes: 0, metrics: None }).unwrap();
+    runtime
+        .edit_node_message_at(
+            "task",
+            &first.execution.id,
+            "again",
+            "edited later",
+            None,
+            None,
+            Some(later),
+        )
+        .unwrap();
+    runtime
+        .emit(EventKind::Failed {
+            node: "task".into(),
+            execution_id: Some(first.execution.id.clone()),
+            error: "stopped".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
     // A text-only edit must see the first turn once (the second is abandoned and
     // must not be read), resolving instead of reporting an ambiguous match.
-    runtime.edit_node_message("task", &first.execution.id, "again", "edited earlier", None).unwrap();
-    assert!(matches!(&runtime.store.load(&runtime.state.run_id).unwrap().events.last().unwrap().kind,
-        EventKind::ConversationEdited { from_output_offset: Some(end), .. } if *end == earlier));
+    runtime
+        .edit_node_message("task", &first.execution.id, "again", "edited earlier", None)
+        .unwrap();
+    assert!(
+        matches!(&runtime.store.load(&runtime.state.run_id).unwrap().events.last().unwrap().kind,
+        EventKind::ConversationEdited { from_output_offset: Some(end), .. } if *end == earlier)
+    );
 }
 
 #[test]
@@ -1120,10 +1829,14 @@ fn editing_a_consumed_steer_keeps_the_opening_task_and_branches_at_the_steer() {
             runtime.approve().unwrap();
             let first = runtime.jobs().unwrap().remove(0);
             for instruction in ["earlier steer", "steer this work"] {
-                runtime.emit(EventKind::Steered {
-                    execution_id: first.execution.id.clone(), node: "task".into(),
-                    instruction: instruction.into(), images: None,
-                }).unwrap();
+                runtime
+                    .emit(EventKind::Steered {
+                        execution_id: first.execution.id.clone(),
+                        node: "task".into(),
+                        instruction: instruction.into(),
+                        images: None,
+                    })
+                    .unwrap();
             }
             let steer_sequence = runtime.state.events.last().unwrap().sequence;
             let session_dir = runtime.root.join("sessions").join(&first.execution.id);
@@ -1136,32 +1849,63 @@ fn editing_a_consumed_steer_keeps_the_opening_task_and_branches_at_the_steer() {
                 serde_json::json!({"type":"message", "id":"earlier-steer", "parentId":"answer", "message":{"role":"user", "content":"earlier steer", "timestamp":first.execution.started_at}}),
                 serde_json::json!({"type":"message", "id":"steer", "parentId":"earlier-steer", "message":{"role":"user", "content":"steer this work", "timestamp":first.execution.started_at}}),
             ];
-            let history = entries.iter().map(|entry| format!("{entry}\n")).collect::<String>();
+            let history = entries
+                .iter()
+                .map(|entry| format!("{entry}\n"))
+                .collect::<String>();
             fs::write(&file, &history).unwrap();
             if !running {
-                runtime.emit(EventKind::Finished {
-                    execution_id: first.execution.id.clone(), head: runtime.state.base.clone(),
-                    output: "done".into(), output_bytes: 0, metrics: None,
-                }).unwrap();
+                runtime
+                    .emit(EventKind::Finished {
+                        execution_id: first.execution.id.clone(),
+                        head: runtime.state.base.clone(),
+                        output: "done".into(),
+                        output_bytes: 0,
+                        metrics: None,
+                    })
+                    .unwrap();
             }
             let original_goal = runtime.state.graph.original_goal.clone();
             let original_task = runtime.state.graph.nodes[0].task.clone();
-            runtime.edit_node_message("task", &first.execution.id, "steer this work", "edited steer", None).unwrap();
+            runtime
+                .edit_node_message(
+                    "task",
+                    &first.execution.id,
+                    "steer this work",
+                    "edited steer",
+                    None,
+                )
+                .unwrap();
             let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
-            assert_eq!(replayed.graph.original_goal, original_goal, "{route}, running={running}");
+            assert_eq!(
+                replayed.graph.original_goal, original_goal,
+                "{route}, running={running}"
+            );
             assert_eq!(replayed.graph.nodes[0].task, original_task);
             assert!(matches!(&replayed.events.last().unwrap().kind,
                 EventKind::ConversationEdited { first_turn: false, from_event_sequence, .. } if *from_event_sequence == steer_sequence));
             let branched = fs::read_to_string(&file).unwrap();
-            assert!(branched.starts_with(&history), "the abandoned branch is retained");
-            let marker: serde_json::Value = serde_json::from_str(branched.lines().last().unwrap()).unwrap();
+            assert!(
+                branched.starts_with(&history),
+                "the abandoned branch is retained"
+            );
+            let marker: serde_json::Value =
+                serde_json::from_str(branched.lines().last().unwrap()).unwrap();
             assert_eq!(marker["parentId"], "earlier-steer");
             if running {
-                assert!(runtime.state.execution_stop_requests.contains(&first.execution.id));
-                runtime.emit(EventKind::Failed {
-                    node: "task".into(), execution_id: Some(first.execution.id.clone()),
-                    error: "stopped for edit".into(), output_bytes: 0, metrics: None,
-                }).unwrap();
+                assert!(runtime
+                    .state
+                    .execution_stop_requests
+                    .contains(&first.execution.id));
+                runtime
+                    .emit(EventKind::Failed {
+                        node: "task".into(),
+                        execution_id: Some(first.execution.id.clone()),
+                        error: "stopped for edit".into(),
+                        output_bytes: 0,
+                        metrics: None,
+                    })
+                    .unwrap();
                 assert_eq!(runtime.state.nodes["task"].status, "dirty");
             }
             // Reload the authoritative state before dispatching the replacement.
@@ -1169,7 +1913,10 @@ fn editing_a_consumed_steer_keeps_the_opening_task_and_branches_at_the_steer() {
             let edited = runtime.jobs().unwrap().remove(0);
             assert_eq!(edited.task, "edited steer");
             assert_eq!(edited.execution.session_id, first.execution.session_id);
-            assert!(runtime.state.superseded_execution_ids.contains(&first.execution.id));
+            assert!(runtime
+                .state
+                .superseded_execution_ids
+                .contains(&first.execution.id));
         }
     }
 }
@@ -1191,10 +1938,22 @@ fn editing_a_node_turn_retires_the_runs_parked_serial_shell() {
     ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
     crate::engine::park_test_shell(&runtime.state.run_id, &first.execution.session_id);
     assert_eq!(crate::engine::parked_shell_count(), 1);
-    runtime.edit_node_message("task", &first.execution.id, &first.task, "edited opening", None).unwrap();
+    runtime
+        .edit_node_message(
+            "task",
+            &first.execution.id,
+            &first.task,
+            "edited opening",
+            None,
+        )
+        .unwrap();
     // A parked shell holds the pre-edit conversation in memory, so the next turn
     // must cold-launch and re-read the branched Pi session file.
-    assert_eq!(crate::engine::parked_shell_count(), 0, "a history edit must retire the parked shell");
+    assert_eq!(
+        crate::engine::parked_shell_count(),
+        0,
+        "a history edit must retire the parked shell"
+    );
 }
 
 #[test]
@@ -1203,9 +1962,15 @@ fn editing_a_running_node_stops_its_execution_and_branches_from_the_start() {
     runtime.set_route("serial").unwrap();
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: first.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "first".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     runtime.intervene("task", "second").unwrap();
     let second = runtime.jobs().unwrap().remove(0);
     // The follow-up execution is still running when the opening prompt is edited.
@@ -1219,26 +1984,57 @@ fn editing_a_running_node_stops_its_execution_and_branches_from_the_start() {
         serde_json::json!({"type":"message", "id":"answer1", "parentId":"one", "message":{"role":"assistant", "content":[]}}),
         serde_json::json!({"type":"message", "id":"two", "parentId":"answer1", "message":{"role":"user", "content":"second", "timestamp":second.execution.started_at}}),
     ];
-    fs::write(&file, entries.iter().map(|e| format!("{e}\n")).collect::<String>()).unwrap();
-    runtime.edit_node_message("task", &first.execution.id, "self-contained task", "new goal", None).unwrap();
+    fs::write(
+        &file,
+        entries.iter().map(|e| format!("{e}\n")).collect::<String>(),
+    )
+    .unwrap();
+    runtime
+        .edit_node_message(
+            "task",
+            &first.execution.id,
+            "self-contained task",
+            "new goal",
+            None,
+        )
+        .unwrap();
     // The live execution is stopped (recorded request) and superseded, and the
     // node waits to rerun from the branched opening turn.
-    assert!(runtime.state.execution_stop_requests.contains(&second.execution.id));
-    assert!(runtime.state.superseded_execution_ids.contains(&second.execution.id));
+    assert!(runtime
+        .state
+        .execution_stop_requests
+        .contains(&second.execution.id));
+    assert!(runtime
+        .state
+        .superseded_execution_ids
+        .contains(&second.execution.id));
     assert_eq!(runtime.state.nodes["task"].status, "dirty");
     assert_eq!(runtime.state.graph.nodes[0].task, "new goal");
-    let marker: serde_json::Value = serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
+    let marker: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&file).unwrap().lines().last().unwrap()).unwrap();
     assert_eq!(marker["parentId"], "root");
     // The stopped writer's observed failure must not flip the node back to failed.
-    runtime.emit(EventKind::Failed {
-        node: "task".into(), execution_id: Some(second.execution.id.clone()), error: "killed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Failed {
+            node: "task".into(),
+            execution_id: Some(second.execution.id.clone()),
+            error: "killed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     assert_eq!(runtime.state.nodes["task"].status, "dirty");
     let edited = runtime.jobs().unwrap().remove(0);
     assert_eq!(edited.task, "new goal");
     assert_eq!(edited.execution.session_id, first.execution.session_id);
-    assert_eq!(edited.resume_execution_id.as_deref(), Some(first.execution.id.as_str()));
-    assert!(!runtime.state.superseded_execution_ids.contains(&edited.execution.id));
+    assert_eq!(
+        edited.resume_execution_id.as_deref(),
+        Some(first.execution.id.as_str())
+    );
+    assert!(!runtime
+        .state
+        .superseded_execution_ids
+        .contains(&edited.execution.id));
 }
 
 #[test]
@@ -1246,30 +2042,70 @@ fn interrupted_nodes_and_blocked_descendants_resume_from_the_topology_control() 
     let graph = Graph {
         original_goal: "interrupted graph".into(),
         nodes: vec![
-            Node { name: "first".into(), task: "first".into() },
-            Node { name: "second".into(), task: "second".into() },
-            Node { name: "after".into(), task: "after".into() },
+            Node {
+                name: "first".into(),
+                task: "first".into(),
+            },
+            Node {
+                name: "second".into(),
+                task: "second".into(),
+            },
+            Node {
+                name: "after".into(),
+                task: "after".into(),
+            },
         ],
         edges: vec![
-            Edge { from: "first".into(), to: "after".into(), feedback: false },
-            Edge { from: "second".into(), to: "after".into(), feedback: false },
+            Edge {
+                from: "first".into(),
+                to: "after".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "second".into(),
+                to: "after".into(),
+                feedback: false,
+            },
         ],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
     assert_eq!(jobs.len(), 2);
-    let interrupted = jobs.iter().find(|job| job.execution.node == "first").unwrap().execution.clone();
-    let completed = jobs.iter().find(|job| job.execution.node == "second").unwrap().execution.clone();
+    let interrupted = jobs
+        .iter()
+        .find(|job| job.execution.node == "first")
+        .unwrap()
+        .execution
+        .clone();
+    let completed = jobs
+        .iter()
+        .find(|job| job.execution.node == "second")
+        .unwrap()
+        .execution
+        .clone();
 
-    runtime.finish(&interrupted, Err("Pi exited with exit code: 0xc000013a".into())).unwrap();
-    runtime.finish(&completed, Ok((runtime.state.base.clone(), "completed".into()))).unwrap();
+    runtime
+        .finish(
+            &interrupted,
+            Err("Pi exited with exit code: 0xc000013a".into()),
+        )
+        .unwrap();
+    runtime
+        .finish(
+            &completed,
+            Ok((runtime.state.base.clone(), "completed".into())),
+        )
+        .unwrap();
     runtime.jobs().unwrap(); // The failed root blocks its dependent and settles the Run.
     assert_eq!(runtime.state.phase, "needs_attention");
     assert_eq!(runtime.state.nodes["first"].status, "failed");
     assert_eq!(runtime.state.nodes["after"].status, "blocked");
     assert!(runtime.state.can_resume_interrupted());
-    assert_eq!(crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"], true);
+    assert_eq!(
+        crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["canResume"],
+        true
+    );
 
     runtime.pause(true).unwrap();
     runtime.pause(false).unwrap();
@@ -1286,7 +2122,10 @@ fn interrupted_nodes_and_blocked_descendants_resume_from_the_topology_control() 
     assert_eq!(resumed[0].execution.node, "first");
     assert!(resumed[0].continuation);
     assert!(resumed[0].task.is_empty());
-    assert_eq!(resumed[0].resume_execution_id.as_deref(), Some(interrupted.id.as_str()));
+    assert_eq!(
+        resumed[0].resume_execution_id.as_deref(),
+        Some(interrupted.id.as_str())
+    );
     assert_eq!(resumed[0].execution.session_id, interrupted.session_id);
     assert_ne!(resumed[0].execution.id, interrupted.id);
 }
@@ -1295,21 +2134,47 @@ fn interrupted_nodes_and_blocked_descendants_resume_from_the_topology_control() 
 fn starting_an_upstream_node_returns_its_blocked_descendants_to_waiting() {
     let graph = Graph {
         original_goal: "recover blocked descendants".into(),
-        nodes: ["first", "after", "last", "second", "other"].into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() })
+        nodes: ["first", "after", "last", "second", "other"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
             .collect(),
         edges: vec![
-            Edge { from: "first".into(), to: "after".into(), feedback: false },
-            Edge { from: "after".into(), to: "last".into(), feedback: false },
-            Edge { from: "second".into(), to: "other".into(), feedback: false },
+            Edge {
+                from: "first".into(),
+                to: "after".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "after".into(),
+                to: "last".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "second".into(),
+                to: "other".into(),
+                feedback: false,
+            },
         ],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
     assert_eq!(jobs.len(), 2);
-    let first = jobs.iter().find(|job| job.execution.node == "first").unwrap().execution.clone();
-    let second = jobs.iter().find(|job| job.execution.node == "second").unwrap().execution.clone();
+    let first = jobs
+        .iter()
+        .find(|job| job.execution.node == "first")
+        .unwrap()
+        .execution
+        .clone();
+    let second = jobs
+        .iter()
+        .find(|job| job.execution.node == "second")
+        .unwrap()
+        .execution
+        .clone();
     runtime.finish(&first, Err("boom".into())).unwrap();
     runtime.finish(&second, Err("boom".into())).unwrap();
     runtime.jobs().unwrap(); // Both failed roots block their branches.
@@ -1335,26 +2200,50 @@ fn starting_an_upstream_node_returns_its_blocked_descendants_to_waiting() {
 fn manual_node_pause_is_replayable_and_does_not_disguise_an_unrelated_failure() {
     let graph = Graph {
         original_goal: "pause one branch".into(),
-        nodes: ["left", "right"].into_iter().map(|name| Node {
-            name: name.into(), task: name.into(),
-        }).collect(),
+        nodes: ["left", "right"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
         edges: vec![],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
-    let left = &jobs.iter().find(|job| job.execution.node == "left").unwrap().execution;
-    let right = &jobs.iter().find(|job| job.execution.node == "right").unwrap().execution;
-    runtime.emit_outputs(vec![EventKind::Output {
-        execution_id: left.id.clone(),
-        text: "{\"type\":\"grapher_process_started\",\"pid\":1234}\n".into(),
-    }]).unwrap();
+    let left = &jobs
+        .iter()
+        .find(|job| job.execution.node == "left")
+        .unwrap()
+        .execution;
+    let right = &jobs
+        .iter()
+        .find(|job| job.execution.node == "right")
+        .unwrap()
+        .execution;
+    runtime
+        .emit_outputs(vec![EventKind::Output {
+            execution_id: left.id.clone(),
+            text: "{\"type\":\"grapher_process_started\",\"pid\":1234}\n".into(),
+        }])
+        .unwrap();
     let stopped = runtime.request_execution_stop(Some("left")).unwrap();
     assert_eq!(stopped.len(), 1);
-    assert!(!runtime.state.paused, "node stop must not pause unrelated branches");
-    assert!(runtime.pause(false).is_err(), "do not resume before the writer drains");
-    runtime.finish(left, Err("Pi exited with exit code: 1".into())).unwrap();
-    runtime.finish(right, Err("Pi exited with exit code: 1".into())).unwrap();
+    assert!(
+        !runtime.state.paused,
+        "node stop must not pause unrelated branches"
+    );
+    assert!(
+        runtime.pause(false).is_err(),
+        "do not resume before the writer drains"
+    );
+    runtime
+        .finish(left, Err("Pi exited with exit code: 1".into()))
+        .unwrap();
+    runtime
+        .finish(right, Err("Pi exited with exit code: 1".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     assert!(runtime.state.can_resume());
     let replay = runtime.store.load(&runtime.state.run_id).unwrap();
@@ -1364,33 +2253,58 @@ fn manual_node_pause_is_replayable_and_does_not_disguise_an_unrelated_failure() 
         assert_eq!(view["nodes"]["right"]["status"], "failed");
         assert_eq!(view["executions"][0]["status"], "paused");
         assert_eq!(view["executions"][1]["status"], "failed");
-        assert!(!view["nodes"]["left"]["error"].as_str().unwrap().contains("exit code"));
+        assert!(!view["nodes"]["left"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("exit code"));
         assert_eq!(view["canResume"], true);
     }
-    let checkpoint: Snapshot = serde_json::from_value(
-        crate::snapshot_view::checkpoint_projection(&runtime.state),
-    ).unwrap();
+    let checkpoint: Snapshot =
+        serde_json::from_value(crate::snapshot_view::checkpoint_projection(&runtime.state))
+            .unwrap();
     assert_eq!(checkpoint.execution_stop_requests, vec![left.id.clone()]);
-    assert_eq!(crate::snapshot_view::snapshot_metadata(&checkpoint).unwrap()["executions"][0]["status"], "paused");
+    assert_eq!(
+        crate::snapshot_view::snapshot_metadata(&checkpoint).unwrap()["executions"][0]["status"],
+        "paused"
+    );
     // Give both attempts their persisted conversations before continuing them.
     for execution in [left, right] {
         let directory = runtime.root.join("sessions").join(&execution.id);
         fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join(format!("test_{}.jsonl", execution.session_id)), "{}\n").unwrap();
+        fs::write(
+            directory.join(format!("test_{}.jsonl", execution.session_id)),
+            "{}\n",
+        )
+        .unwrap();
     }
     runtime.pause(false).unwrap();
     let resumed = runtime.jobs().unwrap();
-    assert_eq!(resumed.len(), 1, "Continue first resumes only interrupted work");
+    assert_eq!(
+        resumed.len(),
+        1,
+        "Continue first resumes only interrupted work"
+    );
     let continued_left = &resumed[0];
     assert_eq!(continued_left.execution.node, "left");
     assert!(continued_left.continuation);
     assert_eq!(continued_left.execution.session_id, left.session_id);
     assert_eq!(continued_left.execution.worktree, left.worktree);
-    assert_eq!(continued_left.resume_execution_id.as_deref(), Some(left.id.as_str()));
+    assert_eq!(
+        continued_left.resume_execution_id.as_deref(),
+        Some(left.id.as_str())
+    );
     assert_eq!(runtime.state.nodes["right"].status, "failed");
-    runtime.finish(&continued_left.execution, Ok((runtime.state.base.clone(), "resumed".into()))).unwrap();
+    runtime
+        .finish(
+            &continued_left.execution,
+            Ok((runtime.state.base.clone(), "resumed".into())),
+        )
+        .unwrap();
     runtime.jobs().unwrap();
-    assert!(runtime.state.can_resume(), "the unrelated failure still offers Continue");
+    assert!(
+        runtime.state.can_resume(),
+        "the unrelated failure still offers Continue"
+    );
     runtime.pause(false).unwrap();
     let retry = runtime.jobs().unwrap();
     assert_eq!(retry.len(), 1);
@@ -1416,15 +2330,27 @@ fn running_output_exposes_live_session_metrics_before_completion() {
         },
     ]).unwrap();
 
-    let execution = runtime.state.executions.iter().find(|item| item.id == execution_id).unwrap();
+    let execution = runtime
+        .state
+        .executions
+        .iter()
+        .find(|item| item.id == execution_id)
+        .unwrap();
     assert_eq!(execution.status, "running");
-    let metrics = execution.metrics.as_ref().expect("live metrics appear before Finished");
+    let metrics = execution
+        .metrics
+        .as_ref()
+        .expect("live metrics appear before Finished");
     assert_eq!(metrics.model.as_deref(), Some("p/m"));
     assert_eq!(metrics.usage.input, 100);
     assert_eq!(metrics.usage.consumed_tokens, 110);
     assert_eq!(metrics.context_tokens, 1_010);
 
-    let run = runtime.state.run_metrics.as_ref().expect("Run totals refresh with live output");
+    let run = runtime
+        .state
+        .run_metrics
+        .as_ref()
+        .expect("Run totals refresh with live output");
     assert_eq!(run.session_usage[&session_id].input, 100);
     assert_eq!(run.session_usage[&session_id].consumed_tokens, 110);
     assert_eq!(run.session_context[&session_id].tokens, 1_010);
@@ -1437,12 +2363,20 @@ fn explicit_pause_wins_a_completion_race_without_publishing_a_result() {
     let job = runtime.jobs().unwrap().remove(0);
     runtime.pause(true).unwrap();
     runtime.request_execution_stop(None).unwrap();
-    runtime.finish(&job.execution, Ok((runtime.state.base.clone(), "racing success".into()))).unwrap();
+    runtime
+        .finish(
+            &job.execution,
+            Ok((runtime.state.base.clone(), "racing success".into())),
+        )
+        .unwrap();
     assert_eq!(runtime.state.phase, "paused");
     assert!(runtime.state.nodes["task"].head.is_none());
     assert!(runtime.state.executions[0].after.is_none());
     assert!(runtime.state.publication.is_none());
-    assert_eq!(crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["nodes"]["task"]["status"], "paused");
+    assert_eq!(
+        crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["nodes"]["task"]["status"],
+        "paused"
+    );
     runtime.pause(false).unwrap();
     assert_eq!(runtime.jobs().unwrap().len(), 1);
 }
@@ -1453,15 +2387,26 @@ fn scheduling_only_pause_does_not_reclassify_provider_failure() {
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     runtime.pause(true).unwrap(); // Planner's temporary drain is not a user stop.
-    runtime.finish(&job.execution, Err("Pi exited with exit code: 1".into())).unwrap();
+    runtime
+        .finish(&job.execution, Err("Pi exited with exit code: 1".into()))
+        .unwrap();
     let view = crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap();
     assert_eq!(view["nodes"]["task"]["status"], "failed");
     assert_eq!(view["executions"][0]["status"], "failed");
-    assert!(runtime.state.can_resume(), "a failed attempt can still be explicitly retried");
+    assert!(
+        runtime.state.can_resume(),
+        "a failed attempt can still be explicitly retried"
+    );
     runtime.resume_scheduling().unwrap();
-    assert_eq!(runtime.state.nodes["task"].status, "failed", "internal unpause does not retry it");
+    assert_eq!(
+        runtime.state.nodes["task"].status, "failed",
+        "internal unpause does not retry it"
+    );
     assert!(runtime.jobs().unwrap().is_empty());
-    assert_eq!(runtime.store.load(&runtime.state.run_id).unwrap().nodes["task"].status, "failed");
+    assert_eq!(
+        runtime.store.load(&runtime.state.run_id).unwrap().nodes["task"].status,
+        "failed"
+    );
 }
 
 #[test]
@@ -1472,8 +2417,14 @@ fn only_an_explicit_stop_hides_pis_forced_exit_code() {
     let job = runtime.jobs().unwrap().remove(0);
     runtime.pause(true).unwrap();
     runtime.emit(EventKind::StopRequested).unwrap();
-    runtime.finish(&job.execution, Err("Pi exited with exit code: 1: ".into())).unwrap();
-    assert!(!runtime.state.nodes["task"].error.as_deref().unwrap().contains("exit code"));
+    runtime
+        .finish(&job.execution, Err("Pi exited with exit code: 1: ".into()))
+        .unwrap();
+    assert!(!runtime.state.nodes["task"]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("exit code"));
     runtime.pause(false).unwrap();
     assert!(!runtime.state.stop_requested);
 }
@@ -1484,9 +2435,15 @@ fn editing_serial_initial_turn_updates_goal_without_replacing_the_run() {
     runtime.set_route("serial").unwrap();
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: first.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     let session_dir = runtime.root.join("sessions").join(&first.execution.id);
     fs::create_dir_all(&session_dir).unwrap();
     let file = session_dir.join(format!("test_{}.jsonl", first.execution.session_id));
@@ -1496,7 +2453,15 @@ fn editing_serial_initial_turn_updates_goal_without_replacing_the_run() {
         serde_json::json!({"type":"message", "id":"first", "parentId":"root", "message":{"role":"user", "content":"self-contained task", "timestamp":first.execution.started_at}}),
     ].iter().map(|e| format!("{e}\n")).collect::<String>()).unwrap();
     let run_id = runtime.state.run_id.clone();
-    runtime.edit_node_message("task", &first.execution.id, "self-contained task", "new goal", None).unwrap();
+    runtime
+        .edit_node_message(
+            "task",
+            &first.execution.id,
+            "self-contained task",
+            "new goal",
+            None,
+        )
+        .unwrap();
     assert_eq!(runtime.state.run_id, run_id);
     assert_eq!(runtime.state.graph.original_goal, "new goal");
     assert_eq!(runtime.state.graph.nodes[0].task, "new goal");
@@ -1509,29 +2474,61 @@ fn editing_serial_initial_turn_updates_goal_without_replacing_the_run() {
 fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
     let graph = Graph {
         original_goal: "graph".into(),
-        nodes: ["parent", "child"].into_iter().map(|name| Node {
-            name: name.into(), task: name.into(),
-        }).collect(),
-        edges: vec![Edge { from: "parent".into(), to: "child".into(), feedback: false }],
+        nodes: ["parent", "child"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "parent".into(),
+            to: "child".into(),
+            feedback: false,
+        }],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap().remove(0);
     // This reducer-focused test synthesizes Finished, so record the filesystem
     // checkpoint that a real perform would create before opening the session.
-    workspace::prepare(&_source, Path::new(&first.execution.worktree), &first.execution.before, &[]).unwrap();
-    runtime.emit(EventKind::Finished {
-        execution_id: first.execution.id.clone(), head: runtime.state.base.clone(), output: "first".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    workspace::prepare(
+        &_source,
+        Path::new(&first.execution.worktree),
+        &first.execution.before,
+        &[],
+    )
+    .unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: first.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "first".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     let child = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: child.execution.id.clone(), head: runtime.state.base.clone(), output: "child".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: child.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "child".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     runtime.intervene("parent", "later").unwrap();
     let later = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: later.execution.id.clone(), head: runtime.state.base.clone(), output: "later".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: later.execution.id.clone(),
+            head: runtime.state.base.clone(),
+            output: "later".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     // The follow-up returned the same result, so the descendant stays valid.
     assert_eq!(runtime.state.nodes["child"].status, "completed");
     let session_dir = runtime.root.join("sessions").join(&first.execution.id);
@@ -1544,23 +2541,52 @@ fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
         serde_json::json!({"type":"message", "id":"answer", "parentId":"start", "message":{"role":"assistant", "content":[]}}),
         serde_json::json!({"type":"message", "id":"next", "parentId":"answer", "message":{"role":"user", "content":"later", "timestamp":later.execution.started_at}}),
     ].iter().map(|e| format!("{e}\n")).collect::<String>()).unwrap();
-    runtime.edit_node_message("parent", &first.execution.id, "parent", "edited parent", None).unwrap();
+    runtime
+        .edit_node_message(
+            "parent",
+            &first.execution.id,
+            "parent",
+            "edited parent",
+            None,
+        )
+        .unwrap();
     assert_eq!(runtime.state.graph.nodes[0].task, "edited parent");
-    assert_eq!(runtime.state.nodes["parent"].head.as_deref(), Some(first.execution.before.as_str()));
+    assert_eq!(
+        runtime.state.nodes["parent"].head.as_deref(),
+        Some(first.execution.before.as_str())
+    );
     // The edited run has not finished, so the descendant is still valid.
     assert_eq!(runtime.state.nodes["child"].status, "completed");
-    assert!(runtime.state.superseded_execution_ids.contains(&first.execution.id));
-    assert!(!runtime.state.superseded_execution_ids.contains(&child.execution.id));
-    assert!(runtime.state.superseded_execution_ids.contains(&later.execution.id));
+    assert!(runtime
+        .state
+        .superseded_execution_ids
+        .contains(&first.execution.id));
+    assert!(!runtime
+        .state
+        .superseded_execution_ids
+        .contains(&child.execution.id));
+    assert!(runtime
+        .state
+        .superseded_execution_ids
+        .contains(&later.execution.id));
     let new_job = runtime.jobs().unwrap().remove(0);
     assert_eq!(new_job.execution.worktree, first.execution.worktree);
     assert_eq!(new_job.execution.before, first.execution.before);
     assert_eq!(new_job.task, "edited parent");
     // The edited run changed the result, so the descendant recomputes.
-    runtime.emit(EventKind::Finished {
-        execution_id: new_job.execution.id.clone(), head: "changed-parent".into(), output: "edited".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
-    assert_eq!(runtime.state.nodes["parent"].head.as_deref(), Some("changed-parent"));
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: new_job.execution.id.clone(),
+            head: "changed-parent".into(),
+            output: "edited".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    assert_eq!(
+        runtime.state.nodes["parent"].head.as_deref(),
+        Some("changed-parent")
+    );
     assert_eq!(runtime.state.nodes["child"].status, "dirty");
 }
 
@@ -1569,12 +2595,21 @@ fn editing_graph_node_uses_earlier_checkpoint_and_propagates_change() {
 fn dependency_chain_hands_off_one_workspace_and_earlier_node_messages_use_the_terminal_tree() {
     let graph = Graph {
         original_goal: "chain".into(),
-        nodes: ["a", "b", "c"].into_iter().map(|name| Node {
-            name: name.into(), task: name.into(),
-        }).collect(),
-        edges: [("a", "b"), ("b", "c")].into_iter().map(|(from, to)| Edge {
-            from: from.into(), to: to.into(), feedback: false,
-        }).collect(),
+        nodes: ["a", "b", "c"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: [("a", "b"), ("b", "c")]
+            .into_iter()
+            .map(|(from, to)| Edge {
+                from: from.into(),
+                to: to.into(),
+                feedback: false,
+            })
+            .collect(),
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     let script = _temp.path().join("chain-agent.sh");
@@ -1594,26 +2629,55 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let job = runtime.jobs().unwrap().remove(0);
         assert_eq!(job.execution.node, name);
         if let Some(path) = &shared_path {
-            assert_eq!(&job.execution.worktree, path, "a dependency must take over its parent's directory");
+            assert_eq!(
+                &job.execution.worktree, path,
+                "a dependency must take over its parent's directory"
+            );
             assert!(job.inherit_workspace);
         }
         let root_dir = runtime.root.clone();
-        let result = perform(&job, &root_dir, &[], |_| {}, |head| runtime.emit(EventKind::Prepared {
-            execution_id: job.execution.id.clone(), head,
-        }));
+        let result = perform(
+            &job,
+            &root_dir,
+            &[],
+            |_| {},
+            |head| {
+                runtime.emit(EventKind::Prepared {
+                    execution_id: job.execution.id.clone(),
+                    head,
+                })
+            },
+        );
         let head = result.as_ref().unwrap().0.clone();
         runtime.finish(&job.execution, result).unwrap();
         shared_path = Some(job.execution.worktree.clone());
         terminal_head = Some(head);
     }
     let path = PathBuf::from(shared_path.unwrap());
-    assert!(path.join("a.txt").exists() && path.join("b.txt").exists() && path.join("c.txt").exists());
+    assert!(
+        path.join("a.txt").exists() && path.join("b.txt").exists() && path.join("c.txt").exists()
+    );
     let root = runtime.run_workspace_root();
-    let worktree_count = fs::read_dir(root).unwrap().filter_map(Result::ok)
-        .filter(|entry| entry.file_name() != ".files" && entry.file_name() != ".grapher-git" && entry.file_name() != ".grapher-state" && entry.file_type().unwrap().is_dir()).count();
-    assert_eq!(worktree_count, 1, "linear dependencies should retain exactly one physical worktree");
+    let worktree_count = fs::read_dir(root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_name() != ".files"
+                && entry.file_name() != ".grapher-git"
+                && entry.file_name() != ".grapher-state"
+                && entry.file_type().unwrap().is_dir()
+        })
+        .count();
+    assert_eq!(
+        worktree_count, 1,
+        "linear dependencies should retain exactly one physical worktree"
+    );
 
-    let old_session = runtime.latest_node_execution("a").unwrap().session_id.clone();
+    let old_session = runtime
+        .latest_node_execution("a")
+        .unwrap()
+        .session_id
+        .clone();
     runtime.intervene("a", "add a final adjustment").unwrap();
     let reply = runtime.jobs().unwrap().remove(0);
     assert_eq!(reply.execution.node, "a");
@@ -1622,16 +2686,31 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     assert_eq!(reply.execution.session_id, old_session);
     assert!(reply.inherit_workspace);
     let root_dir = runtime.root.clone();
-    let result = perform(&reply, &root_dir, &[], |_| {}, |head| runtime.emit(EventKind::Prepared {
-        execution_id: reply.execution.id.clone(), head,
-    }));
+    let result = perform(
+        &reply,
+        &root_dir,
+        &[],
+        |_| {},
+        |head| {
+            runtime.emit(EventKind::Prepared {
+                execution_id: reply.execution.id.clone(),
+                head,
+            })
+        },
+    );
     let new_head = result.as_ref().unwrap().0.clone();
     runtime.finish(&reply.execution, result).unwrap();
     for name in ["a", "b", "c"] {
         assert_eq!(runtime.state.nodes[name].status, "completed");
-        assert_eq!(runtime.state.nodes[name].head.as_deref(), Some(new_head.as_str()));
+        assert_eq!(
+            runtime.state.nodes[name].head.as_deref(),
+            Some(new_head.as_str())
+        );
     }
-    assert!(runtime.jobs().unwrap().is_empty(), "editing a node in the terminal workspace must not rerun descendants");
+    assert!(
+        runtime.jobs().unwrap().is_empty(),
+        "editing a node in the terminal workspace must not rerun descendants"
+    );
     assert!(path.join("from-a-followup.txt").exists());
 }
 
@@ -1639,13 +2718,26 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 fn fanout_allocates_one_workspace_per_parallel_branch_and_fanin_reclaims_extras() {
     let graph = Graph {
         original_goal: "fanout".into(),
-        nodes: ["root", "left", "right", "join"].into_iter().map(|name| Node {
-            name: name.into(), task: name.into(),
-        }).collect(),
-        edges: [("root", "left"), ("root", "right"), ("left", "join"), ("right", "join")]
-            .into_iter().map(|(from, to)| Edge {
-                from: from.into(), to: to.into(), feedback: false,
-            }).collect(),
+        nodes: ["root", "left", "right", "join"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: [
+            ("root", "left"),
+            ("root", "right"),
+            ("left", "join"),
+            ("right", "join"),
+        ]
+        .into_iter()
+        .map(|(from, to)| Edge {
+            from: from.into(),
+            to: to.into(),
+            feedback: false,
+        })
+        .collect(),
     };
     let (_temp, source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
@@ -1653,21 +2745,42 @@ fn fanout_allocates_one_workspace_per_parallel_branch_and_fanin_reclaims_extras(
     let root_path = PathBuf::from(&root_job.execution.worktree);
     workspace::prepare(&source, &root_path, &root_job.execution.before, &[]).unwrap();
     fs::write(root_path.join("root.txt"), "root").unwrap();
-    let root_head = workspace::snapshot_node_for_run(&root_path, &source, "root", Some(&runtime.state.run_id)).unwrap();
-    runtime.finish(&root_job.execution, Ok((root_head, "completed".into()))).unwrap();
+    let root_head =
+        workspace::snapshot_node_for_run(&root_path, &source, "root", Some(&runtime.state.run_id))
+            .unwrap();
+    runtime
+        .finish(&root_job.execution, Ok((root_head, "completed".into())))
+        .unwrap();
 
     let branches = runtime.jobs().unwrap();
     assert_eq!(branches.len(), 2);
-    assert_ne!(branches[0].execution.worktree, branches[1].execution.worktree);
-    assert!(branches.iter().any(|job| Path::new(&job.execution.worktree) == root_path));
+    assert_ne!(
+        branches[0].execution.worktree,
+        branches[1].execution.worktree
+    );
+    assert!(branches
+        .iter()
+        .any(|job| Path::new(&job.execution.worktree) == root_path));
     let mut branch_count = 0;
     for job in &branches {
         let path = Path::new(&job.execution.worktree);
         workspace::prepare(&source, path, &job.execution.before, &job.parent_heads).unwrap();
-        fs::write(path.join(format!("{}.txt", job.execution.node)), &job.execution.node).unwrap();
-        let head = workspace::snapshot_node_for_run(path, &source, &job.execution.node, Some(&runtime.state.run_id)).unwrap();
+        fs::write(
+            path.join(format!("{}.txt", job.execution.node)),
+            &job.execution.node,
+        )
+        .unwrap();
+        let head = workspace::snapshot_node_for_run(
+            path,
+            &source,
+            &job.execution.node,
+            Some(&runtime.state.run_id),
+        )
+        .unwrap();
         branch_count += 1;
-        runtime.finish(&job.execution, Ok((head, "completed".into()))).unwrap();
+        runtime
+            .finish(&job.execution, Ok((head, "completed".into())))
+            .unwrap();
     }
     let join = runtime.jobs().unwrap().remove(0);
     assert_eq!(join.execution.node, "join");
@@ -1677,13 +2790,33 @@ fn fanout_allocates_one_workspace_per_parallel_branch_and_fanin_reclaims_extras(
         assert!(path.join(format!("{name}.txt")).exists());
     }
     fs::write(path.join("join.txt"), "joined").unwrap();
-    let head = workspace::snapshot_node_for_run(path, &source, "join", Some(&runtime.state.run_id)).unwrap();
-    runtime.finish(&join.execution, Ok((head, "completed".into()))).unwrap();
-    let worktree_count = fs::read_dir(runtime.run_workspace_root()).unwrap().filter_map(Result::ok)
-        .filter(|entry| entry.file_name() != ".files" && entry.file_name() != ".grapher-git" && entry.file_name() != ".grapher-state" && entry.file_type().unwrap().is_dir()).count();
-    assert_eq!(worktree_count, 1, "after fan-in only its final workspace remains");
-    assert_eq!(runtime.state.nodes["left"].head, runtime.state.nodes["join"].head);
-    assert_eq!(runtime.state.nodes["right"].head, runtime.state.nodes["join"].head);
+    let head = workspace::snapshot_node_for_run(path, &source, "join", Some(&runtime.state.run_id))
+        .unwrap();
+    runtime
+        .finish(&join.execution, Ok((head, "completed".into())))
+        .unwrap();
+    let worktree_count = fs::read_dir(runtime.run_workspace_root())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_name() != ".files"
+                && entry.file_name() != ".grapher-git"
+                && entry.file_name() != ".grapher-state"
+                && entry.file_type().unwrap().is_dir()
+        })
+        .count();
+    assert_eq!(
+        worktree_count, 1,
+        "after fan-in only its final workspace remains"
+    );
+    assert_eq!(
+        runtime.state.nodes["left"].head,
+        runtime.state.nodes["join"].head
+    );
+    assert_eq!(
+        runtime.state.nodes["right"].head,
+        runtime.state.nodes["join"].head
+    );
     assert_eq!(branch_count, 2);
 }
 
@@ -1691,23 +2824,43 @@ fn fanout_allocates_one_workspace_per_parallel_branch_and_fanin_reclaims_extras(
 fn graph_followup_on_terminal_workspace_updates_without_rerunning_descendants() {
     let graph = Graph {
         original_goal: "graph".into(),
-        nodes: ["parent", "child", "independent"].into_iter().map(|name| Node {
-            name: name.into(), task: name.into(),
-        }).collect(),
-        edges: vec![Edge { from: "parent".into(), to: "child".into(), feedback: false }],
+        nodes: ["parent", "child", "independent"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "parent".into(),
+            to: "child".into(),
+            feedback: false,
+        }],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let first = runtime.jobs().unwrap();
     for job in &first {
-        runtime.emit(EventKind::Finished {
-            execution_id: job.execution.id.clone(), head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-        }).unwrap();
+        runtime
+            .emit(EventKind::Finished {
+                execution_id: job.execution.id.clone(),
+                head: runtime.state.base.clone(),
+                output: "completed".into(),
+                output_bytes: 0,
+                metrics: None,
+            })
+            .unwrap();
     }
     let child = runtime.jobs().unwrap().remove(0);
-    runtime.emit(EventKind::Finished {
-        execution_id: child.execution.id, head: runtime.state.base.clone(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: child.execution.id,
+            head: runtime.state.base.clone(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     runtime.intervene("parent", "continue parent").unwrap();
     assert_eq!(runtime.state.nodes["parent"].status, "dirty");
     // Unchanged until the follow-up actually produces a new result.
@@ -1717,14 +2870,26 @@ fn graph_followup_on_terminal_workspace_updates_without_rerunning_descendants() 
     assert_eq!(next.execution.node, "parent");
     assert_eq!(next.task, "continue parent");
     assert!(next.resume_execution_id.is_some());
-    runtime.emit(EventKind::Finished {
-        execution_id: next.execution.id.clone(), head: "changed-parent".into(), output: "completed".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Finished {
+            execution_id: next.execution.id.clone(),
+            head: "changed-parent".into(),
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     assert_eq!(runtime.state.nodes["parent"].status, "completed");
     assert_eq!(runtime.state.nodes["child"].status, "completed");
-    assert_eq!(runtime.state.nodes["child"].head.as_deref(), Some("changed-parent"));
+    assert_eq!(
+        runtime.state.nodes["child"].head.as_deref(),
+        Some("changed-parent")
+    );
     assert_eq!(runtime.state.nodes["independent"].status, "completed");
-    assert!(runtime.jobs().unwrap().is_empty(), "the terminal descendant is not rerun after a shared-workspace reply");
+    assert!(
+        runtime.jobs().unwrap().is_empty(),
+        "the terminal descendant is not rerun after a shared-workspace reply"
+    );
 }
 
 #[test]
@@ -1737,11 +2902,21 @@ fn resolved_preparation_is_not_a_completed_node_execution() {
     fs::write(path.join("tracked.txt"), "human merged inputs").unwrap();
     workspace::git(path, &["add", "-A"]).unwrap();
     workspace::git(path, &["commit", "-q", "-m", "resolved"]).unwrap();
-    runtime.emit(EventKind::Failed {
-        node: "task".into(), execution_id: Some(first.execution.id.clone()),
-        error: "Workspace composition blocked".into(), output_bytes: 0, metrics: None,
-    }).unwrap();
-    runtime.emit(EventKind::Blocked { node: "task".into(), error: "Resolve".into() }).unwrap();
+    runtime
+        .emit(EventKind::Failed {
+            node: "task".into(),
+            execution_id: Some(first.execution.id.clone()),
+            error: "Workspace composition blocked".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Blocked {
+            node: "task".into(),
+            error: "Resolve".into(),
+        })
+        .unwrap();
     runtime.resolved("task").unwrap();
     assert_eq!(runtime.state.executions[0].status, "resolved");
     assert_eq!(runtime.state.executions[0].after, None);
@@ -1760,9 +2935,18 @@ fn planner_revision_refreshes_future_node_inputs_without_replacing_running_works
     for standard_git in [true, false] {
         let graph = Graph {
             original_goal: "test".into(),
-            nodes: ["parent", "running", "child"].into_iter()
-                .map(|name| Node { name: name.into(), task: name.into() }).collect(),
-            edges: vec![Edge { from: "parent".into(), to: "child".into(), feedback: false }],
+            nodes: ["parent", "running", "child"]
+                .into_iter()
+                .map(|name| Node {
+                    name: name.into(),
+                    task: name.into(),
+                })
+                .collect(),
+            edges: vec![Edge {
+                from: "parent".into(),
+                to: "child".into(),
+                feedback: false,
+            }],
         };
         let (_temp, source, mut runtime) = setup(standard_git, graph.clone());
         let mut config = runtime.state.config.clone().unwrap();
@@ -1774,13 +2958,27 @@ fn planner_revision_refreshes_future_node_inputs_without_replacing_running_works
         for job in roots.iter_mut() {
             attach(&mut runtime, job);
         }
-        let parent = roots.iter().find(|job| job.execution.node == "parent").unwrap();
-        let running = roots.iter().find(|job| job.execution.node == "running").unwrap();
+        let parent = roots
+            .iter()
+            .find(|job| job.execution.node == "parent")
+            .unwrap();
+        let running = roots
+            .iter()
+            .find(|job| job.execution.node == "running")
+            .unwrap();
         let parent_path = Path::new(&parent.execution.worktree);
         workspace::prepare(&source, parent_path, &parent.execution.before, &[]).unwrap();
         fs::write(parent_path.join("parent.txt"), "parent result").unwrap();
-        let head = workspace::snapshot_node_for_run(parent_path, &source, "parent", Some(&runtime.state.run_id)).unwrap();
-        runtime.finish(&parent.execution, Ok((head, "completed".into()))).unwrap();
+        let head = workspace::snapshot_node_for_run(
+            parent_path,
+            &source,
+            "parent",
+            Some(&runtime.state.run_id),
+        )
+        .unwrap();
+        runtime
+            .finish(&parent.execution, Ok((head, "completed".into())))
+            .unwrap();
         let running_path = Path::new(&running.execution.worktree);
         workspace::prepare(&source, running_path, &running.execution.before, &[]).unwrap();
         fs::write(running_path.join("in-flight.txt"), "do not overwrite").unwrap();
@@ -1790,14 +2988,34 @@ fn planner_revision_refreshes_future_node_inputs_without_replacing_running_works
         fs::write(source.join("planner.txt"), "new source file").unwrap();
         fs::remove_file(source.join("deleted.txt")).unwrap();
         let mut revised = graph;
-        revised.nodes.push(Node { name: "added".into(), task: "new task".into() });
-        runtime.revise_graph(revised, PlanningSummary { planning_id: "revision".into(), ..Default::default() }).unwrap();
+        revised.nodes.push(Node {
+            name: "added".into(),
+            task: "new task".into(),
+        });
+        runtime
+            .revise_graph(
+                revised,
+                PlanningSummary {
+                    planning_id: "revision".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let source_head = runtime.latest_source_head().to_owned();
         assert_ne!(source_head, approval);
-        assert_eq!(runtime.state.base, approval, "approval history stays immutable");
+        assert_eq!(
+            runtime.state.base, approval,
+            "approval history stays immutable"
+        );
         assert_eq!(runtime.state.nodes["running"].status, "running");
-        assert_eq!(fs::read_to_string(running_path.join("tracked.txt")).unwrap(), "original");
-        assert_eq!(fs::read_to_string(running_path.join("in-flight.txt")).unwrap(), "do not overwrite");
+        assert_eq!(
+            fs::read_to_string(running_path.join("tracked.txt")).unwrap(),
+            "original"
+        );
+        assert_eq!(
+            fs::read_to_string(running_path.join("in-flight.txt")).unwrap(),
+            "do not overwrite"
+        );
 
         let run_id = runtime.state.run_id.clone();
         runtime.state = runtime.store.load(&run_id).unwrap(); // Replay without interrupting the running node.
@@ -1808,19 +3026,41 @@ fn planner_revision_refreshes_future_node_inputs_without_replacing_running_works
             assert_eq!(job.execution.before, source_head);
             assert_eq!(job.expected_source_head, source_head);
             let path = Path::new(&job.execution.worktree);
-            workspace::prepare_with_merger_expected_for_run(&source, path, &job.execution.before,
-                &job.parent_heads, &job.expected_source_head, Some(&run_id), || Err("unexpected conflict".into())).unwrap();
-            assert_eq!(fs::read_to_string(path.join("tracked.txt")).unwrap(), "latest planner content");
-            assert_eq!(fs::read_to_string(path.join("planner.txt")).unwrap(), "new source file");
+            workspace::prepare_with_merger_expected_for_run(
+                &source,
+                path,
+                &job.execution.before,
+                &job.parent_heads,
+                &job.expected_source_head,
+                Some(&run_id),
+                || Err("unexpected conflict".into()),
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(path.join("tracked.txt")).unwrap(),
+                "latest planner content"
+            );
+            assert_eq!(
+                fs::read_to_string(path.join("planner.txt")).unwrap(),
+                "new source file"
+            );
             assert!(!path.join("deleted.txt").exists());
             if job.execution.node == "child" {
-                assert_eq!(fs::read_to_string(path.join("parent.txt")).unwrap(), "parent result");
+                assert_eq!(
+                    fs::read_to_string(path.join("parent.txt")).unwrap(),
+                    "parent result"
+                );
             } else {
                 assert_eq!(job.execution.node, "added");
-                assert!(!path.join("parent.txt").exists(), "unrelated node results must not leak");
+                assert!(
+                    !path.join("parent.txt").exists(),
+                    "unrelated node results must not leak"
+                );
             }
         }
-        if !standard_git { fs::remove_dir_all(workspace::shadow_repo_dir(&source).unwrap()).unwrap(); }
+        if !standard_git {
+            fs::remove_dir_all(workspace::shadow_repo_dir(&source).unwrap()).unwrap();
+        }
     }
 }
 
@@ -1836,10 +3076,25 @@ fn retained_node_result_is_composed_with_subsequent_planner_source_writes() {
         let path = Path::new(&first.execution.worktree);
         workspace::prepare(&source, path, &first.execution.before, &[]).unwrap();
         fs::write(path.join("node.txt"), "retained node result").unwrap();
-        let node_head = workspace::snapshot_node_for_run(path, &source, "task", Some(&runtime.state.run_id)).unwrap();
-        runtime.finish(&first.execution, Ok((node_head.clone(), "completed".into()))).unwrap();
+        let node_head =
+            workspace::snapshot_node_for_run(path, &source, "task", Some(&runtime.state.run_id))
+                .unwrap();
+        runtime
+            .finish(
+                &first.execution,
+                Ok((node_head.clone(), "completed".into())),
+            )
+            .unwrap();
         fs::write(source.join("planner.txt"), "latest source").unwrap();
-        runtime.revise_graph(single(), PlanningSummary { planning_id: "revision".into(), ..Default::default() }).unwrap();
+        runtime
+            .revise_graph(
+                single(),
+                PlanningSummary {
+                    planning_id: "revision".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         runtime.intervene("task", "continue").unwrap();
         let mut job = runtime.jobs().unwrap().remove(0);
         attach(&mut runtime, &mut job);
@@ -1850,9 +3105,17 @@ fn retained_node_result_is_composed_with_subsequent_planner_source_writes() {
         job.config.pi_command = "/bin/sh".into();
         job.config.pi_args = vec![script.to_string_lossy().into()];
         perform(&job, &runtime.root, &[], |_| {}, |_| Ok(())).unwrap();
-        assert_eq!(fs::read_to_string(path.join("node.txt")).unwrap(), "retained node result");
-        assert_eq!(fs::read_to_string(path.join("planner.txt")).unwrap(), "latest source");
-        if !standard_git { fs::remove_dir_all(workspace::shadow_repo_dir(&source).unwrap()).unwrap(); }
+        assert_eq!(
+            fs::read_to_string(path.join("node.txt")).unwrap(),
+            "retained node result"
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("planner.txt")).unwrap(),
+            "latest source"
+        );
+        if !standard_git {
+            fs::remove_dir_all(workspace::shadow_repo_dir(&source).unwrap()).unwrap();
+        }
     }
 }
 
@@ -1874,8 +3137,13 @@ fn new_runs_force_collect_gitignored_project_files_without_creating_run_file_sna
     let workspace_path = Path::new(&job.execution.worktree);
     workspace::prepare(&source, workspace_path, &job.execution.before, &[]).unwrap();
     workspace::copy_ordinary_files(&source, workspace_path, &[], &runtime.root).unwrap();
-    assert_eq!(fs::read_to_string(workspace_path.join(".cache/package")).unwrap(), "ordinary bytes");
-    assert!(workspace::git(workspace_path, &["ls-files"]).unwrap().contains(".cache/package"));
+    assert_eq!(
+        fs::read_to_string(workspace_path.join(".cache/package")).unwrap(),
+        "ordinary bytes"
+    );
+    assert!(workspace::git(workspace_path, &["ls-files"])
+        .unwrap()
+        .contains(".cache/package"));
     assert!(!run_root.join(".files").exists());
     let serialized = serde_json::to_value(&runtime.state).unwrap();
     assert!(serialized.get("sourceFiles").is_none());
@@ -1885,12 +3153,14 @@ fn new_runs_force_collect_gitignored_project_files_without_creating_run_file_sna
 fn legacy_run_file_channel_records_are_read_only_and_deserialize_without_reemitting_fields() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
-    runtime.emit(EventKind::SourceFilesRecorded {
-        files: SourceFiles {
-            head: runtime.state.base.clone(),
-            version: Uuid::new_v4().to_string(),
-        },
-    }).unwrap();
+    runtime
+        .emit(EventKind::SourceFilesRecorded {
+            files: SourceFiles {
+                head: runtime.state.base.clone(),
+                version: Uuid::new_v4().to_string(),
+            },
+        })
+        .unwrap();
     let error = match runtime.jobs() {
         Ok(_) => panic!("legacy file-channel Run must not schedule"),
         Err(error) => error,
@@ -1904,7 +3174,12 @@ fn legacy_run_file_channel_records_are_read_only_and_deserialize_without_reemitt
     legacy_json["filesChanged"] = serde_json::json!(true);
     let legacy: NodeState = serde_json::from_value(legacy_json).unwrap();
     let encoded = serde_json::to_value(legacy).unwrap();
-    for key in ["filesOverride", "filesVersion", "baselineFilesVersion", "filesChanged"] {
+    for key in [
+        "filesOverride",
+        "filesVersion",
+        "baselineFilesVersion",
+        "filesChanged",
+    ] {
         assert!(encoded.get(key).is_none());
     }
 }
@@ -2050,7 +3325,13 @@ fn reworked_node_discards_its_previous_session_while_unaffected_nodes_keep_their
     for job in roots {
         let name = job.execution.node.clone();
         let path = Path::new(&job.execution.worktree);
-        workspace::prepare(&source, path, &job.execution.before, &runtime.parents(&name)).unwrap();
+        workspace::prepare(
+            &source,
+            path,
+            &job.execution.before,
+            &runtime.parents(&name),
+        )
+        .unwrap();
         fs::write(path.join(format!("{name}.txt")), name.clone()).unwrap();
         let head = workspace::snapshot_node(path, &source, &name).unwrap();
         runtime
@@ -2080,24 +3361,21 @@ fn reworked_node_discards_its_previous_session_while_unaffected_nodes_keep_their
         .unwrap()
         .task = "new task".into();
     runtime
-        .revise_graph(revised, PlanningSummary {
-            planning_id: "revision".into(),
-            ..Default::default()
-        })
+        .revise_graph(
+            revised,
+            PlanningSummary {
+                planning_id: "revision".into(),
+                ..Default::default()
+            },
+        )
         .unwrap();
     // The reworked node's whole previous session is discarded, exactly like a
     // superseded edit; unaffected nodes keep their conversation.
     assert_eq!(runtime.state.nodes["change"].status, "dirty");
     assert_eq!(runtime.state.nodes["child"].status, "waiting");
     assert_eq!(runtime.state.nodes["keep"].status, "completed");
-    assert!(runtime
-        .state
-        .superseded_execution_ids
-        .contains(&changed.id));
-    assert!(!runtime
-        .state
-        .superseded_execution_ids
-        .contains(&kept.id));
+    assert!(runtime.state.superseded_execution_ids.contains(&changed.id));
+    assert!(!runtime.state.superseded_execution_ids.contains(&kept.id));
     let run_id = runtime.state.run_id.clone();
     let replay = runtime.store.load(&run_id).unwrap();
     assert!(replay.superseded_execution_ids.contains(&changed.id));
@@ -2129,7 +3407,9 @@ fn planning_revision_defers_publication_but_not_ready_jobs() {
         .emit(EventKind::Finished {
             execution_id: jobs[0].execution.id.clone(),
             head: runtime.state.base.clone(),
-            output: "completed".into(), output_bytes: 0, metrics: None,
+            output: "completed".into(),
+            output_bytes: 0,
+            metrics: None,
         })
         .unwrap();
     assert!(runtime.jobs_with_publication(false).unwrap().is_empty());
@@ -2170,7 +3450,9 @@ fn live_revision_keeps_unaffected_running_and_resets_only_changed_failed_or_wait
         .emit(EventKind::Failed {
             node: "failed".into(),
             execution_id: Some(failed.execution.id.clone()),
-            error: "failed".into(), output_bytes: 0, metrics: None,
+            error: "failed".into(),
+            output_bytes: 0,
+            metrics: None,
         })
         .unwrap();
     assert_eq!(runtime.state.nodes["waiting"].status, "waiting");
@@ -2246,7 +3528,9 @@ fn graph_revision_invalidates_only_nodes_with_new_inputs() {
     let jobs = runtime.jobs().unwrap();
     for job in jobs {
         runtime
-            .emit(EventKind::Finished { output_bytes: 0, metrics: None,
+            .emit(EventKind::Finished {
+                output_bytes: 0,
+                metrics: None,
                 execution_id: job.execution.id,
                 head: runtime.state.base.clone(),
                 output: "completed".into(),
@@ -2256,7 +3540,9 @@ fn graph_revision_invalidates_only_nodes_with_new_inputs() {
     // The consumer has actually executed, so changing its input invalidates its result.
     for job in runtime.jobs().unwrap() {
         runtime
-            .emit(EventKind::Finished { output_bytes: 0, metrics: None,
+            .emit(EventKind::Finished {
+                output_bytes: 0,
+                metrics: None,
                 execution_id: job.execution.id,
                 head: runtime.state.base.clone(),
                 output: "completed".into(),
@@ -2310,16 +3596,20 @@ fn shadow_prepare_uses_approved_snapshot_despite_live_edits() {
         fs::read_to_string(node.join("tracked.txt")).unwrap(),
         "original"
     );
-    assert!(!workspace::repository_status(&source, &[]).unwrap().is_empty());
+    assert!(!workspace::repository_status(&source, &[])
+        .unwrap()
+        .is_empty());
     // Publication commits the live edit as its base instead of rejecting it.
-    let published = crate::graph_merge::merge_graph(&source, &[], || panic!("no merge expected"))
-        .unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &[], || panic!("no merge expected")).unwrap();
     assert_ne!(published, base);
     assert_eq!(
         fs::read_to_string(source.join("tracked.txt")).unwrap(),
         "edited after approval"
     );
-    assert!(workspace::repository_status(&source, &[]).unwrap().is_empty());
+    assert!(workspace::repository_status(&source, &[])
+        .unwrap()
+        .is_empty());
     // The earlier recorded base remains composable for nodes scheduled against it.
     workspace::prepare(&source, node, &base, &[]).unwrap();
     assert_eq!(
@@ -2345,8 +3635,14 @@ fn shadow_source_edits_do_not_block_downstream_handoff() {
     let graph = Graph {
         original_goal: "handoff".into(),
         nodes: vec![
-            Node { name: "parent".into(), task: "parent task".into() },
-            Node { name: "child".into(), task: "child task".into() },
+            Node {
+                name: "parent".into(),
+                task: "parent task".into(),
+            },
+            Node {
+                name: "child".into(),
+                task: "child task".into(),
+            },
         ],
         edges: vec![Edge {
             from: "parent".into(),
@@ -2403,7 +3699,9 @@ fn shadow_source_edits_do_not_block_downstream_handoff() {
         fs::read_to_string(source.join("parent.txt")).unwrap(),
         "parent result"
     );
-    assert!(workspace::repository_status(&source, &[]).unwrap().is_empty());
+    assert!(workspace::repository_status(&source, &[])
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -2412,17 +3710,19 @@ fn feedback_transfers_the_review_workspace_and_forks_the_owner_history() {
         original_goal: "feedback rework".into(),
         nodes: ["owner", "review"]
             .into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() })
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
             .collect(),
-        edges: [
-            ("owner", "review", false),
-            ("review", "owner", true),
-        ]
-        .into_iter()
-        .map(|(from, to, feedback)| Edge {
-            from: from.into(), to: to.into(), feedback,
-        })
-        .collect(),
+        edges: [("owner", "review", false), ("review", "owner", true)]
+            .into_iter()
+            .map(|(from, to, feedback)| Edge {
+                from: from.into(),
+                to: to.into(),
+                feedback,
+            })
+            .collect(),
     };
     let (_temp, source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
@@ -2432,23 +3732,49 @@ fn feedback_transfers_the_review_workspace_and_forks_the_owner_history() {
     let owner_path = Path::new(&owner.execution.worktree);
     workspace::prepare(&source, owner_path, &owner.execution.before, &[]).unwrap();
     fs::write(owner_path.join("tracked.txt"), "owner result").unwrap();
-    let owner_head = workspace::snapshot_node_for_run(owner_path, &source, "owner", Some(&runtime.state.run_id)).unwrap();
-    runtime.finish(&owner.execution, Ok((owner_head, "completed".into()))).unwrap();
+    let owner_head =
+        workspace::snapshot_node_for_run(owner_path, &source, "owner", Some(&runtime.state.run_id))
+            .unwrap();
+    runtime
+        .finish(&owner.execution, Ok((owner_head, "completed".into())))
+        .unwrap();
 
     let review = runtime.jobs().unwrap().remove(0);
     assert_eq!(review.execution.node, "review");
     let review_path = Path::new(&review.execution.worktree);
-    workspace::prepare(&source, review_path, &review.execution.before, &review.parent_heads).unwrap();
+    workspace::prepare(
+        &source,
+        review_path,
+        &review.execution.before,
+        &review.parent_heads,
+    )
+    .unwrap();
     fs::create_dir(review_path.join("reports")).unwrap();
     fs::write(review_path.join("reports/audit.json"), "review evidence").unwrap();
-    let review_head = workspace::snapshot_node_for_run(review_path, &source, "review", Some(&runtime.state.run_id)).unwrap();
-    runtime.finish(&review.execution, Ok((review_head.clone(), "please adjust\n<FEEDBACK>".into()))).unwrap();
-    runtime.apply_feedback("review", "please adjust\n<FEEDBACK>").unwrap();
+    let review_head = workspace::snapshot_node_for_run(
+        review_path,
+        &source,
+        "review",
+        Some(&runtime.state.run_id),
+    )
+    .unwrap();
+    runtime
+        .finish(
+            &review.execution,
+            Ok((review_head.clone(), "please adjust\n<FEEDBACK>".into())),
+        )
+        .unwrap();
+    runtime
+        .apply_feedback("review", "please adjust\n<FEEDBACK>")
+        .unwrap();
 
     assert_eq!(runtime.state.nodes["owner"].status, "dirty");
     assert!(runtime.state.nodes["review"].head.is_none());
     let jobs = runtime.jobs_with_pending_feedback(true, &[]).unwrap();
-    let rework = jobs.iter().find(|job| job.execution.node == "owner").unwrap();
+    let rework = jobs
+        .iter()
+        .find(|job| job.execution.node == "owner")
+        .unwrap();
     assert_ne!(rework.execution.session_id, owner_session);
     assert!(rework.resume_execution_id.is_none());
     assert_eq!(rework.session_fork.as_ref().unwrap().id, owner_id);
@@ -2456,10 +3782,21 @@ fn feedback_transfers_the_review_workspace_and_forks_the_owner_history() {
     assert_eq!(rework.execution.before, review_head);
     assert_eq!(rework.task, "Feedback:\nplease adjust");
     assert!(!rework.task.contains("<FEEDBACK>"));
-    let before = workspace::prepare_with_merger_expected_for_run(&source, review_path, &rework.execution.before,
-        &rework.parent_heads, &runtime.state.base, Some(&runtime.state.run_id), || Err("unexpected merge".into())).unwrap();
+    let before = workspace::prepare_with_merger_expected_for_run(
+        &source,
+        review_path,
+        &rework.execution.before,
+        &rework.parent_heads,
+        &runtime.state.base,
+        Some(&runtime.state.run_id),
+        || Err("unexpected merge".into()),
+    )
+    .unwrap();
     assert_eq!(before, review_head);
-    assert_eq!(fs::read_to_string(review_path.join("reports/audit.json")).unwrap(), "review evidence");
+    assert_eq!(
+        fs::read_to_string(review_path.join("reports/audit.json")).unwrap(),
+        "review evidence"
+    );
     assert!(runtime.state.pending_feedback.is_empty());
 }
 
@@ -2468,8 +3805,14 @@ fn completed_shadow_graph_intervention_accepts_source_changes() {
     let graph = Graph {
         original_goal: "test".into(),
         nodes: vec![
-            Node { name: "parent".into(), task: "parent task".into() },
-            Node { name: "child".into(), task: "child task".into() },
+            Node {
+                name: "parent".into(),
+                task: "parent task".into(),
+            },
+            Node {
+                name: "child".into(),
+                task: "child task".into(),
+            },
         ],
         edges: vec![Edge {
             from: "parent".into(),
@@ -2487,7 +3830,9 @@ fn completed_shadow_graph_intervention_accepts_source_changes() {
         workspace::prepare(&source, path, &job.execution.before, &runtime.parents(name)).unwrap();
         fs::write(path.join(format!("{name}.txt")), name).unwrap();
         let head = workspace::snapshot_node(path, &source, name).unwrap();
-        runtime.finish(&job.execution, Ok((head, "completed".into()))).unwrap();
+        runtime
+            .finish(&job.execution, Ok((head, "completed".into())))
+            .unwrap();
     }
     runtime.jobs().unwrap();
     let publication = runtime.state.publication.clone().unwrap();
@@ -2496,7 +3841,9 @@ fn completed_shadow_graph_intervention_accepts_source_changes() {
     })
     .unwrap();
     runtime
-        .emit(EventKind::PublicationCompleted { head: published.clone() })
+        .emit(EventKind::PublicationCompleted {
+            head: published.clone(),
+        })
         .unwrap();
     assert_ne!(published, base);
     fs::write(source.join("tracked.txt"), "external edit").unwrap();
@@ -2658,11 +4005,16 @@ fn node_merger_events_do_not_enter_publication_phase() {
     runtime
         .emit(EventKind::MergerFinished {
             execution_id: merger.id,
-            head: runtime.state.base.clone(), output_bytes: 0, metrics: None,
+            head: runtime.state.base.clone(),
+            output_bytes: 0,
+            metrics: None,
         })
         .unwrap();
     assert_eq!(runtime.state.phase, "running");
-    assert_eq!(runtime.state.nodes["task"].status, "running", "initial composition must not requeue its active node");
+    assert_eq!(
+        runtime.state.nodes["task"].status, "running",
+        "initial composition must not requeue its active node"
+    );
     assert!(runtime.state.publication.is_none());
 }
 
@@ -2682,9 +4034,12 @@ fn running_merger_reserves_its_workspace() {
         before: runtime.state.base.clone(),
         workspace_lineage: vec![],
         after: None,
-        input: None, result: None,
+        input: None,
+        result: None,
         status: "running".into(),
-        output: String::new(), output_bytes: 0, pid: None,
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
         started_at: now(),
         completed_at: None,
         metrics: None,
@@ -2711,23 +4066,53 @@ fn running_merger_reserves_its_workspace() {
 fn failed_node_merger_marks_posterior_node_blocked_and_descendants_recover_on_node_start() {
     let graph = Graph {
         original_goal: "merger failure blocks target node".into(),
-        nodes: ["left", "right", "join", "after"].into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() })
+        nodes: ["left", "right", "join", "after"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
             .collect(),
         edges: vec![
-            Edge { from: "left".into(), to: "join".into(), feedback: false },
-            Edge { from: "right".into(), to: "join".into(), feedback: false },
-            Edge { from: "join".into(), to: "after".into(), feedback: false },
+            Edge {
+                from: "left".into(),
+                to: "join".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "right".into(),
+                to: "join".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "join".into(),
+                to: "after".into(),
+                feedback: false,
+            },
         ],
     };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
     assert_eq!(jobs.len(), 2);
-    let left = jobs.iter().find(|j| j.execution.node == "left").unwrap().execution.clone();
-    let right = jobs.iter().find(|j| j.execution.node == "right").unwrap().execution.clone();
-    runtime.finish(&left, Ok(("head-left".into(), "ok".into()))).unwrap();
-    runtime.finish(&right, Ok(("head-right".into(), "ok".into()))).unwrap();
+    let left = jobs
+        .iter()
+        .find(|j| j.execution.node == "left")
+        .unwrap()
+        .execution
+        .clone();
+    let right = jobs
+        .iter()
+        .find(|j| j.execution.node == "right")
+        .unwrap()
+        .execution
+        .clone();
+    runtime
+        .finish(&left, Ok(("head-left".into(), "ok".into())))
+        .unwrap();
+    runtime
+        .finish(&right, Ok(("head-right".into(), "ok".into())))
+        .unwrap();
 
     // Now start a merger for node "join".
     let merger_id = Uuid::new_v4().to_string();
@@ -2740,23 +4125,39 @@ fn failed_node_merger_marks_posterior_node_blocked_and_descendants_recover_on_no
         worktree: "test-tree".into(),
         before: "head-left".into(),
         workspace_lineage: vec![],
-        after: None, input: None, result: None,
+        after: None,
+        input: None,
+        result: None,
         status: "running".into(),
-        output: String::new(), output_bytes: 0, pid: None,
-        started_at: now(), completed_at: None, metrics: None,
+        output: String::new(),
+        output_bytes: 0,
+        pid: None,
+        started_at: now(),
+        completed_at: None,
+        metrics: None,
     };
-    runtime.emit(EventKind::MergerStarted { execution: merger.clone() }).unwrap();
+    runtime
+        .emit(EventKind::MergerStarted {
+            execution: merger.clone(),
+        })
+        .unwrap();
 
     // Merger fails: its corresponding posterior node "join" must be "blocked", NOT "failed".
-    runtime.emit(EventKind::MergerFailed {
-        execution_id: merger_id.clone(),
-        error: "conflict could not be resolved".into(),
-        output_bytes: 0,
-        metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::MergerFailed {
+            execution_id: merger_id.clone(),
+            error: "conflict could not be resolved".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
 
     assert_eq!(runtime.state.nodes["join"].status, "blocked");
-    assert!(runtime.state.nodes["join"].error.as_deref().unwrap().contains("Merger failed"));
+    assert!(runtime.state.nodes["join"]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("Merger failed"));
 
     // Schedule passes: descendants of "join" ("after") are blocked as well.
     runtime.jobs().unwrap();
@@ -2768,30 +4169,44 @@ fn failed_node_merger_marks_posterior_node_blocked_and_descendants_recover_on_no
     let mut retry_merger = merger.clone();
     retry_merger.id = merger_retry_id.clone();
     retry_merger.attempt = 2;
-    runtime.emit(EventKind::MergerStarted { execution: retry_merger.clone() }).unwrap();
-    runtime.emit(EventKind::Steered {
-        execution_id: merger_retry_id.clone(),
-        node: "merge:join".into(),
-        instruction: "please fix conflict".into(),
-        images: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::MergerStarted {
+            execution: retry_merger.clone(),
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::Steered {
+            execution_id: merger_retry_id.clone(),
+            node: "merge:join".into(),
+            instruction: "please fix conflict".into(),
+            images: None,
+        })
+        .unwrap();
 
     // Nodes still remain blocked while the merger is retrying.
     assert_eq!(runtime.state.nodes["join"].status, "blocked");
     assert_eq!(runtime.state.nodes["after"].status, "blocked");
 
     // Once the merger finishes and "join" starts running (Started), its descendants return to "waiting".
-    runtime.emit(EventKind::MergerFinished {
-        execution_id: merger_retry_id,
-        head: "merged-head".into(),
-        output_bytes: 0,
-        metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::MergerFinished {
+            execution_id: merger_retry_id,
+            head: "merged-head".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
 
     // Emitting Started for "join" resets its blocked descendants to waiting.
     let mut join_exec = merger.clone();
     join_exec.node = "join".into();
-    runtime.emit(EventKind::Started { execution: join_exec, message_sequences: None, fresh_restart: false }).unwrap();
+    runtime
+        .emit(EventKind::Started {
+            execution: join_exec,
+            message_sequences: None,
+            fresh_restart: false,
+        })
+        .unwrap();
     assert_eq!(runtime.state.nodes["after"].status, "waiting");
 }
 
@@ -2808,7 +4223,9 @@ fn reset_cleans_only_its_run_worktrees() {
         .emit(EventKind::Failed {
             node: job.execution.node,
             execution_id: Some(job.execution.id),
-            error: "test".into(), output_bytes: 0, metrics: None,
+            error: "test".into(),
+            output_bytes: 0,
+            metrics: None,
         })
         .unwrap();
     runtime.reset_workspace().unwrap();
@@ -2900,10 +4317,9 @@ fn publish_single_node() -> (TempDir, PathBuf, Runtime, String) {
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     let publication = runtime.state.publication.clone().unwrap();
-    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
-        Err("conflict".into())
-    })
-    .unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into()))
+            .unwrap();
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
@@ -2919,7 +4335,11 @@ fn resume_after_stopped_post_task_review_settles_instead_of_republishing() {
     runtime.cleanup_worktrees().unwrap();
     runtime.reclaim_shadow(&source).unwrap();
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_some());
-    assert!(workspace::git(&source, &["cat-file", "-e", &format!("{task_head}^{{commit}}")]).is_err());
+    assert!(workspace::git(
+        &source,
+        &["cat-file", "-e", &format!("{task_head}^{{commit}}")]
+    )
+    .is_err());
 
     // A post-task review stopped by the user walks completed -> planning ->
     // paused; resuming returns the Run to running with unchanged results.
@@ -2983,7 +4403,10 @@ fn retry_publication_settles_a_redundant_attempt_over_published_heads() {
     // publication record no longer advertises a recoverable failure.
     let publication = runtime.state.publication.clone().unwrap();
     assert_eq!(publication.status, "completed");
-    assert_eq!(publication.head.as_deref(), runtime.state.published_head.as_deref());
+    assert_eq!(
+        publication.head.as_deref(),
+        runtime.state.published_head.as_deref()
+    );
     assert!(publication.error.is_none());
 }
 
@@ -3001,10 +4424,16 @@ fn deleting_last_plain_directory_run_removes_only_unused_shadow_repo() {
     assert!(shadow.exists());
 
     runtime.delete_run(&first).unwrap();
-    assert!(shadow.exists(), "a remaining run still needs the shadow repo");
+    assert!(
+        shadow.exists(),
+        "a remaining run still needs the shadow repo"
+    );
 
     runtime.delete_run(&second).unwrap();
-    assert!(!shadow.exists(), "the final conversation should release the shadow repo");
+    assert!(
+        !shadow.exists(),
+        "the final conversation should release the shadow repo"
+    );
 }
 
 #[test]
@@ -3060,14 +4489,16 @@ fn post_publication_revision_rebuilds_from_published_head_and_merges_new_termina
     fs::write(path.join("child.txt"), "child v1").unwrap();
     let child_head = workspace::snapshot_node(path, &source, "child").unwrap();
     runtime
-        .finish(&child_job.execution, Ok((child_head.clone(), "completed".into())))
+        .finish(
+            &child_job.execution,
+            Ok((child_head.clone(), "completed".into())),
+        )
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     let publication = runtime.state.publication.clone().unwrap();
-    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
-        Err("conflict".into())
-    })
-    .unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into()))
+            .unwrap();
     runtime
         .emit(EventKind::PublicationCompleted {
             head: published.clone(),
@@ -3108,10 +4539,24 @@ fn post_publication_revision_rebuilds_from_published_head_and_merges_new_termina
     names.sort();
     assert_eq!(names, vec!["extra".to_string(), "root".to_string()]);
     let revision_base = runtime.latest_source_head().to_string();
-    assert_eq!(workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(), runtime.state.base);
-    assert_eq!(workspace::repository_git(&source, &["rev-parse", &format!("{revision_base}^{{tree}}")]).unwrap(),
-        workspace::repository_git(&source, &["rev-parse", &format!("{published}^{{tree}}")]).unwrap());
-    assert!(workspace::git(&source, &["cat-file", "-e", &format!("{published}^{{commit}}")]).is_err());
+    assert_eq!(
+        workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(),
+        runtime.state.base
+    );
+    assert_eq!(
+        workspace::repository_git(
+            &source,
+            &["rev-parse", &format!("{revision_base}^{{tree}}")]
+        )
+        .unwrap(),
+        workspace::repository_git(&source, &["rev-parse", &format!("{published}^{{tree}}")])
+            .unwrap()
+    );
+    assert!(workspace::git(
+        &source,
+        &["cat-file", "-e", &format!("{published}^{{commit}}")]
+    )
+    .is_err());
     for job in &jobs {
         // The private bridge has the delivered tree plus internal ancestry,
         // without adding any snapshot commit to the user's branch.
@@ -3136,7 +4581,10 @@ fn post_publication_revision_rebuilds_from_published_head_and_merges_new_termina
     fs::write(path.join("extra.txt"), "extra v1").unwrap();
     let extra_head = workspace::snapshot_node(path, &source, "extra").unwrap();
     runtime
-        .finish(&extra_job.execution, Ok((extra_head.clone(), "completed".into())))
+        .finish(
+            &extra_job.execution,
+            Ok((extra_head.clone(), "completed".into())),
+        )
         .unwrap();
     let child_job = runtime.jobs().unwrap().remove(0);
     assert_eq!(child_job.execution.node, "child");
@@ -3152,16 +4600,29 @@ fn post_publication_revision_rebuilds_from_published_head_and_merges_new_termina
     fs::write(path.join("child.txt"), "child v2").unwrap();
     let child_head = workspace::snapshot_node(path, &source, "child").unwrap();
     runtime
-        .finish(&child_job.execution, Ok((child_head.clone(), "completed".into())))
+        .finish(
+            &child_job.execution,
+            Ok((child_head.clone(), "completed".into())),
+        )
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     let publication = runtime.state.publication.clone().unwrap();
     assert!(publication.heads.contains(&child_head));
     assert!(publication.heads.contains(&extra_head));
-    crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into())).unwrap();
-    assert_eq!(fs::read_to_string(source.join("root.txt")).unwrap(), "root v2");
-    assert_eq!(fs::read_to_string(source.join("child.txt")).unwrap(), "child v2");
-    assert_eq!(fs::read_to_string(source.join("extra.txt")).unwrap(), "extra v1");
+    crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into()))
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(source.join("root.txt")).unwrap(),
+        "root v2"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("child.txt")).unwrap(),
+        "child v2"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("extra.txt")).unwrap(),
+        "extra v1"
+    );
 }
 
 #[test]
@@ -3248,10 +4709,9 @@ fn publication_reclaims_shadow_and_failure_retains_it() {
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_some());
     // Retry succeeds: the merged result is written back and the snapshot freed.
     let publication = runtime.state.publication.clone().unwrap();
-    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
-        Err("conflict".into())
-    })
-    .unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into()))
+            .unwrap();
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
@@ -3281,10 +4741,9 @@ fn shared_source_reclaims_after_last_incomplete_run() {
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.phase, "publishing");
     let publication = runtime.state.publication.clone().unwrap();
-    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
-        Err("conflict".into())
-    })
-    .unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into()))
+            .unwrap();
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
@@ -3366,10 +4825,9 @@ fn post_publication_node_followup_runs_in_source() {
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     let publication = runtime.state.publication.clone().unwrap();
-    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
-        Err("conflict".into())
-    })
-    .unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into()))
+            .unwrap();
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
@@ -3391,7 +4849,10 @@ printf '%s\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"c
     followup.config.pi_args = vec![script.to_string_lossy().into()];
     let result = perform(&followup, &runtime.root, &[], |_| {}, |_| Ok(()));
     runtime.finish(&followup.execution, result).unwrap();
-    assert_eq!(runtime.state.executions.last().unwrap().after.as_deref(), Some(""));
+    assert_eq!(
+        runtime.state.executions.last().unwrap().after.as_deref(),
+        Some("")
+    );
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.phase, "completed");
@@ -3492,10 +4953,9 @@ fn standard_git_post_publication_followup_runs_in_source() {
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     let publication = runtime.state.publication.clone().unwrap();
-    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
-        Err("conflict".into())
-    })
-    .unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into()))
+            .unwrap();
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
@@ -3541,10 +5001,9 @@ fn post_publication_planner_revision_materializes_only_on_dispatch() {
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     let publication = runtime.state.publication.clone().unwrap();
-    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
-        Err("conflict".into())
-    })
-    .unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into()))
+            .unwrap();
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
@@ -3612,10 +5071,9 @@ fn post_publication_revision_with_completed_parent_ignores_stale_commit() {
     }
     assert!(runtime.jobs().unwrap().is_empty());
     let publication = runtime.state.publication.clone().unwrap();
-    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
-        Err("conflict".into())
-    })
-    .unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &publication.heads, || Err("conflict".into()))
+            .unwrap();
     runtime
         .emit(EventKind::PublicationCompleted { head: published })
         .unwrap();
@@ -3675,8 +5133,14 @@ fn post_publication_revision_with_completed_parent_ignores_stale_commit() {
         .finish(&job.execution, Ok((head, "completed".into())))
         .unwrap();
     assert_eq!(runtime.state.nodes["late"].status, "completed");
-    assert_eq!(fs::read_to_string(worktree.join("late.txt")).unwrap(), "late");
-    assert_eq!(fs::read_to_string(worktree.join("child.txt")).unwrap(), "child");
+    assert_eq!(
+        fs::read_to_string(worktree.join("late.txt")).unwrap(),
+        "late"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("child.txt")).unwrap(),
+        "child"
+    );
 }
 
 #[test]
@@ -3725,7 +5189,9 @@ fn failed_node_intervention_resumes_running_phase_and_clears_needs_attention() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
-    runtime.finish(&job.execution, Err("Model error".into())).unwrap();
+    runtime
+        .finish(&job.execution, Err("Model error".into()))
+        .unwrap();
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.phase, "needs_attention");
     assert_eq!(runtime.state.nodes["task"].status, "failed");
@@ -3742,16 +5208,24 @@ fn failed_node_intervention_resumes_running_phase_and_clears_needs_attention() {
 
     // If phase somehow stayed needs_attention before Started or Steered, verify they clear it
     runtime.state.phase = "needs_attention".into();
-    runtime.emit(EventKind::Started { execution: retry_job.execution.clone(), message_sequences: None, fresh_restart: false }).unwrap();
+    runtime
+        .emit(EventKind::Started {
+            execution: retry_job.execution.clone(),
+            message_sequences: None,
+            fresh_restart: false,
+        })
+        .unwrap();
     assert_eq!(runtime.state.phase, "running");
 
     runtime.state.phase = "needs_attention".into();
-    runtime.emit(EventKind::Steered {
-        execution_id: retry_job.execution.id.clone(),
-        node: "task".into(),
-        instruction: "steer msg".into(),
-        images: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Steered {
+            execution_id: retry_job.execution.id.clone(),
+            node: "task".into(),
+            instruction: "steer msg".into(),
+            images: None,
+        })
+        .unwrap();
     assert_eq!(runtime.state.phase, "running");
 
     runtime.state.phase = "needs_attention".into();
@@ -3775,6 +5249,10 @@ fn failed_node_intervention_resumes_running_phase_and_clears_needs_attention() {
         completed_at: None,
         metrics: None,
     };
-    runtime.emit(EventKind::MergerStarted { execution: merger_exec }).unwrap();
+    runtime
+        .emit(EventKind::MergerStarted {
+            execution: merger_exec,
+        })
+        .unwrap();
     assert_eq!(runtime.state.phase, "running");
 }

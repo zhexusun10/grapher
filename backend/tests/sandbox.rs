@@ -100,25 +100,36 @@ fn grapher_installation_and_shared_engine_are_write_protected() {
     }
     let profile = base.join("profile.sb");
     sandbox::write_execution_profile(
-        &profile, &source, &root, &current, &data, &session, &engine, &installation,
+        &profile,
+        &source,
+        &root,
+        &current,
+        &data,
+        &session,
+        &engine,
+        &installation,
     )
     .unwrap();
     for target in [&engine, &installation] {
         // The shared engine copy and the original installation stay readable so
         // linked dependency targets resolve, but an execution may never write.
         let read = run(&profile, &current, "/bin/cat \"$1/marker\"", &[target]);
-        assert!(
-            read.status.success(),
-            "read blocked: {}",
-            target.display()
+        assert!(read.status.success(), "read blocked: {}", target.display());
+        let write = run(
+            &profile,
+            &current,
+            "echo overwrite > \"$1/marker\"",
+            &[target],
         );
-        let write = run(&profile, &current, "echo overwrite > \"$1/marker\"", &[target]);
         assert!(
             !write.status.success(),
             "write escaped policy: {}",
             target.display()
         );
-        assert_eq!(fs::read_to_string(target.join("marker")).unwrap(), "original");
+        assert_eq!(
+            fs::read_to_string(target.join("marker")).unwrap(),
+            "original"
+        );
     }
     let scratch = run(&profile, &current, "echo ok > \"$1/scratch\"", &[&session]);
     assert!(
@@ -236,7 +247,10 @@ fn node_network_and_upstream_tools_work_inside_sandbox() {
     );
     let lock: serde_json::Value =
         serde_json::from_slice(&fs::read(project.join("engine/pi-lock.json")).unwrap()).unwrap();
-    assert_eq!(String::from_utf8_lossy(&cli.stdout).trim(), lock["packageVersion"].as_str().unwrap());
+    assert_eq!(
+        String::from_utf8_lossy(&cli.stdout).trim(),
+        lock["packageVersion"].as_str().unwrap()
+    );
 }
 
 #[test]

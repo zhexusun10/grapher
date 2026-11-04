@@ -1,15 +1,18 @@
 //! Local-only Provider/Auth transport. The child owns upstream ModelRuntime;
 //! Grapher never reads auth.json or implements credential refresh/storage.
+#[cfg(not(feature = "fixture"))]
+use crate::engine::prewarm::{Pool, Ticket, Worker};
 use serde_json::Value;
 use std::{
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{atomic::{AtomicBool, Ordering}, mpsc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Mutex, OnceLock,
+    },
     thread,
     time::{Duration, Instant},
 };
-#[cfg(not(feature = "fixture"))]
-use crate::engine::prewarm::{Pool, Ticket, Worker};
 
 static TRANSPORT: OnceLock<Transport> = OnceLock::new();
 
@@ -38,7 +41,9 @@ impl Bridge {
             // extension hosts; no tsx install/download on the startup path.
             .arg("--import")
             .arg("./pi/packages/coding-agent/src/experimental/source-resolver.ts")
-            .arg(crate::native::host_path(&root.join("engine/provider-host.ts")))
+            .arg(crate::native::host_path(
+                &root.join("engine/provider-host.ts"),
+            ))
             .current_dir(&root)
             .env("PI_CODING_AGENT_DIR", crate::native::agent_dir()?)
             .stdin(Stdio::piped())
@@ -54,11 +59,13 @@ impl Bridge {
             .map_err(|_| "Cannot start Provider/Auth Adapter. Run npm run pi:setup.")?;
         // Shared credential/login transport is backend-owned, even on a cold
         // miss initiated inside a Run. Cancelling that Run must not kill it.
-        let process_tree = crate::process_control::with_owner("", || crate::process_control::track(&child)).map_err(|error| {
-            let _ = child.kill();
-            let _ = child.wait();
-            error
-        })?;
+        let process_tree =
+            crate::process_control::with_owner("", || crate::process_control::track(&child))
+                .map_err(|error| {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    error
+                })?;
         let input = child.stdin.take().ok_or("Adapter input unavailable")?;
         let stdout = child.stdout.take().ok_or("Adapter output unavailable")?;
         let stderr = child.stderr.take();
@@ -89,8 +96,15 @@ impl Bridge {
         })
     }
 
-    fn call(&mut self, body: &Value, timeout: Duration, cancelled: impl Fn() -> bool) -> Result<Value, String> {
-        if cancelled() { return Err("Provider/Auth Adapter stopped".into()); }
+    fn call(
+        &mut self,
+        body: &Value,
+        timeout: Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Value, String> {
+        if cancelled() {
+            return Err("Provider/Auth Adapter stopped".into());
+        }
         let mut encoded = serde_json::to_vec(body).map_err(|_| "Invalid adapter request")?;
         if encoded.len() > 128 * 1024 {
             return Err("Adapter request too large".into());
@@ -102,10 +116,17 @@ impl Bridge {
         self.input.flush().map_err(|_| "Adapter disconnected")?;
         let deadline = Instant::now() + timeout;
         let line = loop {
-            if cancelled() { return Err("Provider/Auth Adapter stopped".into()); }
+            if cancelled() {
+                return Err("Provider/Auth Adapter stopped".into());
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() { return Err("Adapter timed out or stopped. Restart login.".into()); }
-            match self.output.recv_timeout(remaining.min(Duration::from_millis(50))) {
+            if remaining.is_zero() {
+                return Err("Adapter timed out or stopped. Restart login.".into());
+            }
+            match self
+                .output
+                .recv_timeout(remaining.min(Duration::from_millis(50)))
+            {
                 Ok(line) => break line,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(_) => return Err("Adapter disconnected".into()),
@@ -122,13 +143,19 @@ impl Bridge {
 #[cfg(not(feature = "fixture"))]
 impl Bridge {
     fn prepare(ticket: Ticket) -> Result<Self, String> {
-        if ticket.cancelled() { return Err("Superseded Provider/Auth preparation".into()); }
+        if ticket.cancelled() {
+            return Err("Superseded Provider/Auth preparation".into());
+        }
         let started = Instant::now();
         let mut bridge = Self::start()?;
         let id = uuid::Uuid::new_v4().to_string();
-        let response = bridge.call(&serde_json::json!({
-            "version": 1, "operation": "grapher_prepare", "id": id,
-        }), Duration::from_secs(30), || ticket.cancelled())?;
+        let response = bridge.call(
+            &serde_json::json!({
+                "version": 1, "operation": "grapher_prepare", "id": id,
+            }),
+            Duration::from_secs(30),
+            || ticket.cancelled(),
+        )?;
         if response["id"] != id || response["result"]["ready"] != true {
             return Err("Invalid Provider/Auth readiness response".into());
         }
@@ -139,9 +166,15 @@ impl Bridge {
 
 #[cfg(not(feature = "fixture"))]
 impl Worker for Bridge {
-    fn alive(&mut self) -> bool { matches!(self.child.try_wait(), Ok(None)) }
-    fn ready_ms(&self) -> u128 { self.ready_ms }
-    fn retire(self) { drop(self); }
+    fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+    fn ready_ms(&self) -> u128 {
+        self.ready_ms
+    }
+    fn retire(self) {
+        drop(self);
+    }
 }
 
 struct Transport {
@@ -163,12 +196,17 @@ impl Transport {
 
     #[cfg(not(feature = "fixture"))]
     fn warm_with(&self, prepare: impl FnOnce(Ticket) -> Result<Bridge, String> + Send + 'static) {
-        if self.stopped.load(Ordering::SeqCst) { return; }
+        if self.stopped.load(Ordering::SeqCst) {
+            return;
+        }
         // A busy/claimed host already owns login jobs. Never wait for it or
         // start a spare host. Initialization happens outside both pool/IPC locks.
-        let Ok(active) = self.active.try_lock() else { return; };
+        let Ok(active) = self.active.try_lock() else {
+            return;
+        };
         if active.is_none() {
-            self.prepared.request((), move |ticket| prepare(ticket).map(|bridge| ((), bridge)));
+            self.prepared
+                .request((), move |ticket| prepare(ticket).map(|bridge| ((), bridge)));
         }
     }
 
@@ -176,13 +214,23 @@ impl Transport {
         self.request_with(body, Bridge::start)
     }
 
-    fn request_with(&self, body: Value, start: impl FnOnce() -> Result<Bridge, String>) -> Result<Value, String> {
-        if body["version"] != 1 || !matches!(body["operation"].as_str(),
-            Some("catalog" | "login" | "poll" | "respond" | "cancel" | "logout")) {
+    fn request_with(
+        &self,
+        body: Value,
+        start: impl FnOnce() -> Result<Bridge, String>,
+    ) -> Result<Value, String> {
+        if body["version"] != 1
+            || !matches!(
+                body["operation"].as_str(),
+                Some("catalog" | "login" | "poll" | "respond" | "cancel" | "logout")
+            )
+        {
             return Err("Invalid Provider/Auth Adapter operation".into());
         }
         let mut active = self.active.lock().map_err(|_| "Adapter lock unavailable")?;
-        if self.stopped.load(Ordering::SeqCst) { return Err("Provider/Auth Adapter stopped".into()); }
+        if self.stopped.load(Ordering::SeqCst) {
+            return Err("Provider/Auth Adapter stopped".into());
+        }
         if active.is_none() {
             #[cfg(not(feature = "fixture"))]
             let ready = self.prepared.take_if(&(), |_| true);
@@ -194,13 +242,26 @@ impl Transport {
                 #[cfg(not(feature = "fixture"))]
                 self.prepared.invalidate();
             }
-            *active = Some(match ready { Some(bridge) => bridge, None => start()? });
+            *active = Some(match ready {
+                Some(bridge) => bridge,
+                None => start()?,
+            });
         }
-        let response = active.as_mut().unwrap().call(&body, Duration::from_secs(40), || self.stopped.load(Ordering::SeqCst));
+        let response = active
+            .as_mut()
+            .unwrap()
+            .call(&body, Duration::from_secs(40), || {
+                self.stopped.load(Ordering::SeqCst)
+            });
         match response {
             Ok(value) if value.get("error").is_none() => Ok(value["result"].clone()),
-            Ok(_) => Err("Provider/Auth operation failed. Refresh providers or restart login.".into()),
-            Err(error) => { *active = None; Err(error) }
+            Ok(_) => {
+                Err("Provider/Auth operation failed. Refresh providers or restart login.".into())
+            }
+            Err(error) => {
+                *active = None;
+                Err(error)
+            }
         }
     }
 
@@ -212,7 +273,9 @@ impl Transport {
 
     fn shutdown(&self) {
         self.begin_shutdown();
-        if let Ok(mut active) = self.active.lock() { *active = None; }
+        if let Ok(mut active) = self.active.lock() {
+            *active = None;
+        }
         #[cfg(not(feature = "fixture"))]
         if !self.prepared.wait_idle(Duration::from_secs(5)) {
             eprintln!("[Grapher] Provider/Auth preparation shutdown timed out");
@@ -223,14 +286,20 @@ impl Transport {
 pub fn request(body: Value) -> Result<Value, String> {
     let catalog = body["operation"] == "catalog";
     let result = TRANSPORT.get_or_init(Transport::new).request(body)?;
-    if catalog { crate::model_window::remember_catalog(&result); }
+    if catalog {
+        crate::model_window::remember_catalog(&result);
+    }
     Ok(result)
 }
 
 /// Import-only readiness. Does not enumerate/check credentials or call a model.
 #[cfg(not(feature = "fixture"))]
 pub(crate) fn warm() {
-    if !cfg!(test) { TRANSPORT.get_or_init(Transport::new).warm_with(Bridge::prepare); }
+    if !cfg!(test) {
+        TRANSPORT
+            .get_or_init(Transport::new)
+            .warm_with(Bridge::prepare);
+    }
 }
 
 pub(crate) fn begin_shutdown() {
@@ -255,7 +324,11 @@ mod tests {
             "operation": "catalog",
             "refresh": false,
         }));
-        assert!(result.is_ok(), "Expected catalog to succeed, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Expected catalog to succeed, got: {:?}",
+            result.err()
+        );
         let val = result.unwrap();
         assert!(val.get("providers").is_some());
         transport.shutdown();
@@ -264,9 +337,11 @@ mod tests {
     #[cfg(not(feature = "fixture"))]
     mod prewarm {
         use super::*;
-        use std::sync::{Arc, atomic::AtomicUsize};
+        use std::sync::{atomic::AtomicUsize, Arc};
 
-        fn catalog() -> Value { serde_json::json!({"version": 1, "operation": "catalog", "refresh": false}) }
+        fn catalog() -> Value {
+            serde_json::json!({"version": 1, "operation": "catalog", "refresh": false})
+        }
         fn fake_bridge() -> Result<Bridge, String> {
             let mut command = Command::new("node");
             command.args(["-e", "require('node:readline').createInterface({input:process.stdin}).on('line',()=>console.log(JSON.stringify({version:1,result:{pid:process.pid}})))"])
@@ -280,17 +355,28 @@ mod tests {
             let starts = Arc::new(AtomicUsize::new(0));
             for _ in 0..3 {
                 let starts = starts.clone();
-                transport.warm_with(move |_| { starts.fetch_add(1, Ordering::SeqCst); fake_bridge() });
+                transport.warm_with(move |_| {
+                    starts.fetch_add(1, Ordering::SeqCst);
+                    fake_bridge()
+                });
             }
             assert!(transport.prepared.wait_idle(Duration::from_secs(5)));
             let pid = crate::process_control::with_owner("auth-prewarm-caller", || {
-                transport.request_with(catalog(), || panic!("ready host must be claimed")).unwrap()["pid"].clone()
+                transport
+                    .request_with(catalog(), || panic!("ready host must be claimed"))
+                    .unwrap()["pid"]
+                    .clone()
             });
             crate::process_control::terminate_owner("auth-prewarm-caller");
             assert_eq!(transport.request(catalog()).unwrap()["pid"], pid);
             transport.warm_with(|_| panic!("active auth host must not be duplicated"));
             assert_eq!(starts.load(Ordering::SeqCst), 1);
-            assert!(transport.request(serde_json::json!({"version":1,"operation":"grapher_prepare"})).is_err(), "private readiness is not a public auth operation");
+            assert!(
+                transport
+                    .request(serde_json::json!({"version":1,"operation":"grapher_prepare"}))
+                    .is_err(),
+                "private readiness is not a public auth operation"
+            );
             transport.shutdown();
             assert!(transport.request(catalog()).is_err());
             transport.warm_with(|_| panic!("shutdown must not rearm preparation"));
@@ -326,8 +412,17 @@ mod tests {
             assert!(transport.prepared.wait_idle(Duration::from_secs(5)));
             transport.warm_with(|_| fake_bridge());
             assert!(transport.prepared.wait_idle(Duration::from_secs(5)));
-            transport.request_with(catalog(), || panic!("retry must be claimable")).unwrap();
-            transport.active.lock().unwrap().as_ref().unwrap().process_tree.terminate();
+            transport
+                .request_with(catalog(), || panic!("retry must be claimable"))
+                .unwrap();
+            transport
+                .active
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .process_tree
+                .terminate();
             assert!(transport.request(catalog()).is_err());
             assert!(transport.active.lock().unwrap().is_none());
             transport.request_with(catalog(), fake_bridge).unwrap();
@@ -339,14 +434,19 @@ mod tests {
             let transport = Arc::new(Transport::new());
             let (entered_tx, entered_rx) = mpsc::channel();
             let caller = transport.clone();
-            let request = thread::spawn(move || caller.request_with(catalog(), || {
-                let mut command = Command::new("node");
-                command.args(["-e", "process.stdin.resume();setInterval(()=>{},1000)"])
-                    .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-                let bridge = Bridge::spawn(&mut command)?;
-                entered_tx.send(()).unwrap();
-                Ok(bridge)
-            }));
+            let request = thread::spawn(move || {
+                caller.request_with(catalog(), || {
+                    let mut command = Command::new("node");
+                    command
+                        .args(["-e", "process.stdin.resume();setInterval(()=>{},1000)"])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped());
+                    let bridge = Bridge::spawn(&mut command)?;
+                    entered_tx.send(()).unwrap();
+                    Ok(bridge)
+                })
+            });
             entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             transport.begin_shutdown();
             assert!(request.join().unwrap().is_err());
@@ -360,7 +460,9 @@ mod tests {
             let (entered_tx, entered_rx) = mpsc::channel();
             transport.warm_with(move |ticket| {
                 entered_tx.send(()).unwrap();
-                while !ticket.cancelled() { thread::sleep(Duration::from_millis(5)); }
+                while !ticket.cancelled() {
+                    thread::sleep(Duration::from_millis(5));
+                }
                 Err("cancelled".into())
             });
             entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();

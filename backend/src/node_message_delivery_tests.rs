@@ -28,46 +28,108 @@ sys.stdin.read()
         "piCommand": if cfg!(windows) { "python" } else { "python3" },
         "piArgs": ["-u", script.to_str().unwrap()], "maxParallel": 1, "maxFeedback": 0,
         "postTaskReview": false,
-    })).unwrap();
+    }))
+    .unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime.state.run_id = Uuid::new_v4().to_string();
-    runtime.emit(EventKind::Created {
-        graph: Graph { original_goal: "original".into(), nodes: vec![Node { name: "task".into(), task: "original".into() }], edges: vec![] },
-        config: config.clone(), planning_id: None, planning: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "original".into(),
+                nodes: vec![Node {
+                    name: "task".into(),
+                    task: "original".into(),
+                }],
+                edges: vec![],
+            },
+            config: config.clone(),
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     let run_id = runtime.state.run_id.clone();
     let execution_id = job.execution.id.clone();
     let root = runtime.root.clone();
-    let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
-        drive_signal: (Mutex::new(0), std::sync::Condvar::new()), planning: AtomicBool::new(false), extension: temp.path().join("unused.ts") });
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let worker = thread::spawn(move || {
-        crate::engine::run_pi(crate::engine::PiRequest {
-            role: crate::engine::PiRole::NodeAgent, config: &config, cwd: &repository, task: "original",
-            session_dir: &root.join("sessions").join(&job.execution.id), extension: None, tools: None,
-            session_id: None, extra_args: vec![], environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
-            system_prompt: None, images: None,
-        }, |line| { if line.contains("tool_execution_start") { let _ = ready_tx.send(()); } })
+        crate::engine::run_pi(
+            crate::engine::PiRequest {
+                role: crate::engine::PiRole::NodeAgent,
+                config: &config,
+                cwd: &repository,
+                task: "original",
+                session_dir: &root.join("sessions").join(&job.execution.id),
+                extension: None,
+                tools: None,
+                session_id: None,
+                extra_args: vec![],
+                environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
+                system_prompt: None,
+                images: None,
+            },
+            |line| {
+                if line.contains("tool_execution_start") {
+                    let _ = ready_tx.send(());
+                }
+            },
+        )
     });
-    ready_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-    for (index, text) in ["stale browser message", "same", "same"].into_iter().enumerate() {
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    for (index, text) in ["stale browser message", "same", "same"]
+        .into_iter()
+        .enumerate()
+    {
         let started = std::time::Instant::now();
-        let snapshot = control(if index == 0 { "intervene" } else { "steer" }.into(), Some("task".into()),
-            Some(text.into()), Some(run_id.clone()), (index > 0).then(|| execution_id.clone()),
-            Some(vec![crate::model::ImageAttachment { r#type: "image".into(), mime_type: "image/png".into(), data: index.to_string(), name: None }]), &service).unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_millis(500),
-            "control must not wait for Pi's steer acknowledgement");
+        let snapshot = control(
+            if index == 0 { "intervene" } else { "steer" }.into(),
+            Some("task".into()),
+            Some(text.into()),
+            Some(run_id.clone()),
+            (index > 0).then(|| execution_id.clone()),
+            Some(vec![crate::model::ImageAttachment {
+                r#type: "image".into(),
+                mime_type: "image/png".into(),
+                data: index.to_string(),
+                name: None,
+            }]),
+            &service,
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "control must not wait for Pi's steer acknowledgement"
+        );
         assert_eq!(snapshot.executions.len(), 1);
         assert!(snapshot.nodes["task"].pending_messages.is_empty());
     }
     assert_eq!(worker.join().unwrap().unwrap(), "all received");
     let runtime = service.runtime.lock().unwrap();
     let replayed = runtime.store.load(&run_id).unwrap();
-    let messages = replayed.events.iter().filter_map(|event| match &event.kind {
-        EventKind::Steered { execution_id: id, instruction, .. } => { assert_eq!(id, &execution_id); Some(instruction.as_str()) },
-        _ => None,
-    }).collect::<Vec<_>>();
+    let messages = replayed
+        .events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::Steered {
+                execution_id: id,
+                instruction,
+                ..
+            } => {
+                assert_eq!(id, &execution_id);
+                Some(instruction.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert_eq!(messages, ["stale browser message", "same", "same"]);
 }

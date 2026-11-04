@@ -23,14 +23,14 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-mod tool_output;
-mod output_buffer;
 mod context_stats;
+mod output_buffer;
+mod tool_output;
 
 #[cfg(not(feature = "fixture"))]
-pub(crate) mod prewarm;
-#[cfg(not(feature = "fixture"))]
 mod lingering;
+#[cfg(not(feature = "fixture"))]
+pub(crate) mod prewarm;
 #[cfg(not(feature = "fixture"))]
 mod process_prewarm;
 #[cfg(not(feature = "fixture"))]
@@ -48,8 +48,12 @@ struct WarmNode {
 
 #[cfg(not(feature = "fixture"))]
 impl Worker for WarmNode {
-    fn alive(&mut self) -> bool { matches!(self.child.try_wait(), Ok(None)) }
-    fn ready_ms(&self) -> u128 { self.ready_ms }
+    fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+    fn ready_ms(&self) -> u128 {
+        self.ready_ms
+    }
     fn retire(mut self) {
         self.tree.terminate();
         let _ = self.child.wait();
@@ -64,7 +68,12 @@ static PREWARM_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 /// Prepare all three source roles concurrently, without constructing a Run.
 #[cfg(not(feature = "fixture"))]
 pub fn warm_planning_engines(config: Config) {
-    if cfg!(test) || PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) || config.repository.trim().is_empty() { return; }
+    if cfg!(test)
+        || PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst)
+        || config.repository.trim().is_empty()
+    {
+        return;
+    }
     crate::native::warm_graph_runtime(PathBuf::from(&config.repository));
     for role in [PiRole::Partitioner, PiRole::Planner, PiRole::NodeAgent] {
         process_prewarm::request(&config, role, false);
@@ -77,12 +86,16 @@ pub fn stop_partition_prewarm() {
     process_prewarm::shutdown();
     if let Some(pool) = WARM_NODE.get() {
         pool.shutdown();
-        if !pool.wait_idle(Duration::from_secs(5)) { eprintln!("[Grapher] Node prewarm shutdown timed out"); }
+        if !pool.wait_idle(Duration::from_secs(5)) {
+            eprintln!("[Grapher] Node prewarm shutdown timed out");
+        }
     }
 }
 
 #[cfg(not(feature = "fixture"))]
-pub fn invalidate_prepared_processes() { process_prewarm::invalidate(); }
+pub fn invalidate_prepared_processes() {
+    process_prewarm::invalidate();
+}
 
 #[cfg(not(feature = "fixture"))]
 fn node_session_file(session_dir: &Path, session_id: &str) -> Result<PathBuf, String> {
@@ -153,7 +166,9 @@ fn node_key(
     session_dir: &Path,
     session_id: &str,
 ) -> Result<(NodeKey, u64), String> {
-    if config.environment.is_some() { return Err("Managed views require a fresh, exact environment binding".into()); }
+    if config.environment.is_some() {
+        return Err("Managed views require a fresh, exact environment binding".into());
+    }
     let repo = crate::path_identity::actual_path(Path::new(&config.repository))
         .map_err(|e| e.to_string())?;
     let cwd = crate::path_identity::actual_path(&cwd).map_err(|e| e.to_string())?;
@@ -185,17 +200,23 @@ pub fn warm_node(config: Config, cwd: PathBuf, session_dir: PathBuf, session_id:
     }
     match node_key(&config, &cwd, &session_dir, &session_id) {
         Ok((key, hash)) => {
-            WARM_NODE.get_or_init(|| Pool::new("Node"))
-                .request((key.clone(), hash), move |ticket| prepare_warm_node(&config, key, hash, &ticket));
+            WARM_NODE
+                .get_or_init(|| Pool::new("Node"))
+                .request((key.clone(), hash), move |ticket| {
+                    prepare_warm_node(&config, key, hash, &ticket)
+                });
         }
         Err(error) => eprintln!("[Grapher] Node prewarm unavailable: {error}"),
     }
 }
 
 #[cfg(not(feature = "fixture"))]
-fn prepare_warm_node(config: &Config, key: NodeKey, initial_hash: u64, ticket: &Ticket)
-    -> Result<((NodeKey, u64), WarmNode), String>
-{
+fn prepare_warm_node(
+    config: &Config,
+    key: NodeKey,
+    initial_hash: u64,
+    ticket: &Ticket,
+) -> Result<((NodeKey, u64), WarmNode), String> {
     if PREWARM_SHUTTING_DOWN.load(Ordering::SeqCst) || ticket.cancelled() {
         return Err("Backend prewarm stopped".into());
     }
@@ -246,12 +267,22 @@ fn prepare_warm_node(config: &Config, key: NodeKey, initial_hash: u64, ticket: &
         return Err("Backend prewarm stopped".into());
     }
     let (child, tree, startup_output, ready_ms) = process.commit();
-    Ok(((key, hash), WarmNode { child, tree, startup_output, ready_ms }))
+    Ok((
+        (key, hash),
+        WarmNode {
+            child,
+            tree,
+            startup_output,
+            ready_ms,
+        },
+    ))
 }
 
 #[cfg(not(feature = "fixture"))]
 pub fn invalidate_warm_node() {
-    if let Some(pool) = WARM_NODE.get() { pool.invalidate(); }
+    if let Some(pool) = WARM_NODE.get() {
+        pool.invalidate();
+    }
 }
 
 #[cfg(not(feature = "fixture"))]
@@ -262,7 +293,9 @@ fn claim_warm_node(
     session_id: &str,
 ) -> Option<WarmNode> {
     let key = node_key(config, cwd, session_dir, session_id).ok()?;
-    WARM_NODE.get()?.take_if(&key, |worker| process_control::assign_to_current_owner(&worker.tree).is_ok())
+    WARM_NODE.get()?.take_if(&key, |worker| {
+        process_control::assign_to_current_owner(&worker.tree).is_ok()
+    })
 }
 
 #[derive(Clone)]
@@ -408,7 +441,9 @@ fn send_steer(
         }
         return Err("Node RPC input closed".into());
     }
-    let Some(rx) = pending else { return Ok(()); };
+    let Some(rx) = pending else {
+        return Ok(());
+    };
     let result = rx
         .recv_timeout(Duration::from_secs(10))
         .map_err(|_| "Node did not acknowledge the steer request".to_string());
@@ -521,7 +556,11 @@ impl PiModelConfig {
         let model = std::env::var(role.model_env_var())
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| settings.map(|value| value.model.clone()).filter(|value| !value.trim().is_empty()))
+            .or_else(|| {
+                settings
+                    .map(|value| value.model.clone())
+                    .filter(|value| !value.trim().is_empty())
+            })
             .unwrap_or_else(|| base_config.model.clone());
         let thinking = std::env::var(role.thinking_env_var())
             .ok()
@@ -534,7 +573,10 @@ impl PiModelConfig {
                     base_config.thinking_level.clone()
                 }
             });
-        Self { model: model.trim().into(), thinking: Some(thinking) }
+        Self {
+            model: model.trim().into(),
+            thinking: Some(thinking),
+        }
     }
 
     pub fn effective_config(&self, base_config: &Config) -> Config {
@@ -737,16 +779,13 @@ pub fn clean_model_error(error: &str) -> String {
         let code_clean = code.trim();
         if !code_clean.contains('{') && !code_clean.contains('"') {
             if let Ok(value) = serde_json::from_str::<Value>(rest) {
-                let extracted = value
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .or_else(|| {
-                        value.get("error").and_then(|e| {
-                            e.get("message")
-                                .and_then(|m| m.as_str())
-                                .or_else(|| e.as_str())
-                        })
-                    });
+                let extracted = value.get("message").and_then(|m| m.as_str()).or_else(|| {
+                    value.get("error").and_then(|e| {
+                        e.get("message")
+                            .and_then(|m| m.as_str())
+                            .or_else(|| e.as_str())
+                    })
+                });
                 if let Some(msg) = extracted {
                     return format!("{}: {}", code_clean, msg.trim());
                 }
@@ -754,16 +793,13 @@ pub fn clean_model_error(error: &str) -> String {
         }
     }
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        let extracted = value
-            .get("message")
-            .and_then(|m| m.as_str())
-            .or_else(|| {
-                value.get("error").and_then(|e| {
-                    e.get("message")
-                        .and_then(|m| m.as_str())
-                        .or_else(|| e.as_str())
-                })
-            });
+        let extracted = value.get("message").and_then(|m| m.as_str()).or_else(|| {
+            value.get("error").and_then(|e| {
+                e.get("message")
+                    .and_then(|m| m.as_str())
+                    .or_else(|| e.as_str())
+            })
+        });
         if let Some(msg) = extracted {
             return msg.trim().to_string();
         }
@@ -797,11 +833,28 @@ fn run_pi_with_timeout(
     // legacy command fields cannot select a different engine implementation.
     #[cfg(not(feature = "fixture"))]
     let planner_workspaces = if request.role == PiRole::Planner {
-        let targets = request.environment.iter().find(|(key, _)| *key == "GRAPHER_PLANNER_WORKSPACES")
-            .map(|(_, value)| serde_json::from_str::<serde_json::Value>(value)).transpose().map_err(|e| e.to_string())?;
-        targets.as_ref().and_then(serde_json::Value::as_object).into_iter().flat_map(|targets| targets.values())
-            .filter_map(|target| target.get("workspace").and_then(serde_json::Value::as_str).map(PathBuf::from)).collect::<Vec<_>>()
-    } else { Vec::new() };
+        let targets = request
+            .environment
+            .iter()
+            .find(|(key, _)| *key == "GRAPHER_PLANNER_WORKSPACES")
+            .map(|(_, value)| serde_json::from_str::<serde_json::Value>(value))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        targets
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flat_map(|targets| targets.values())
+            .filter_map(|target| {
+                target
+                    .get("workspace")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     #[cfg(not(feature = "fixture"))]
     let mut command = crate::native::execution_command_scoped(
         request.role,
@@ -937,11 +990,13 @@ fn run_pi_with_timeout(
             fs::write(&path, system_prompt).map_err(|error| error.to_string())?;
             path
         };
-        command.arg(if request.role == PiRole::Merger {
-            "--append-system-prompt"
-        } else {
-            "--system-prompt"
-        }).arg(crate::native::host_path(&prompt_path));
+        command
+            .arg(if request.role == PiRole::Merger {
+                "--append-system-prompt"
+            } else {
+                "--system-prompt"
+            })
+            .arg(crate::native::host_path(&prompt_path));
     }
     let session_dir = request.session_dir;
     command
@@ -1045,12 +1100,28 @@ fn run_pi_with_timeout(
             .iter()
             .any(|(key, _)| *key == "GRAPHER_NODE_EXECUTION_ID");
     if managed {
-        let environment = config.environment.as_ref().ok_or("Missing managed launch policy")?;
-        let data = request.environment.iter().find(|(key, _)| *key == "GRAPHER_ENVIRONMENT_DATA")
-            .map(|(_, value)| PathBuf::from(value)).ok_or("Missing environment data binding")?;
-        let execution = request.environment.iter().find(|(key, _)| *key == "GRAPHER_NODE_EXECUTION_ID")
-            .map(|(_, value)| value.as_str()).ok_or("Missing managed execution identity")?;
-        let run = request.cwd.parent().and_then(Path::file_name).and_then(|name| name.to_str()).ok_or("Missing native Run layout")?;
+        let environment = config
+            .environment
+            .as_ref()
+            .ok_or("Missing managed launch policy")?;
+        let data = request
+            .environment
+            .iter()
+            .find(|(key, _)| *key == "GRAPHER_ENVIRONMENT_DATA")
+            .map(|(_, value)| PathBuf::from(value))
+            .ok_or("Missing environment data binding")?;
+        let execution = request
+            .environment
+            .iter()
+            .find(|(key, _)| *key == "GRAPHER_NODE_EXECUTION_ID")
+            .map(|(_, value)| value.as_str())
+            .ok_or("Missing managed execution identity")?;
+        let run = request
+            .cwd
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .ok_or("Missing native Run layout")?;
         let store = crate::environment::Environments::new(&data, run, environment)?;
         // The owning native writer validated live/stored bytes during prepare.
         // Bind that sealed generation; do not hash the whole environment again.
@@ -1087,37 +1158,62 @@ fn run_pi_with_timeout(
             request.session_id.unwrap(),
         )
     })
-        .flatten();
+    .flatten();
     #[cfg(not(feature = "fixture"))]
     if request.role == PiRole::NodeAgent {
         invalidate_warm_node();
     }
     #[cfg(not(feature = "fixture"))]
-    let source_role = !managed && request.role != PiRole::Merger
-        && request.cwd.canonicalize().ok().is_some_and(|cwd|
-            Path::new(&config.repository).canonicalize().ok()
-                .is_some_and(|repository| crate::path_identity::same_path(&cwd, &repository)));
+    let source_role = !managed
+        && request.role != PiRole::Merger
+        && request.cwd.canonicalize().ok().is_some_and(|cwd| {
+            Path::new(&config.repository)
+                .canonicalize()
+                .ok()
+                .is_some_and(|repository| crate::path_identity::same_path(&cwd, &repository))
+        });
     #[cfg(feature = "fixture")]
     let source_role = false;
     #[cfg(not(feature = "fixture"))]
     let prepared = if warm_node.is_none() && source_role {
         process_prewarm::claim(config, request.role, request.cwd)
-    } else { None };
+    } else {
+        None
+    };
     #[cfg(not(feature = "fixture"))]
-    if source_role { process_prewarm::request(config, request.role, false); }
+    if source_role {
+        process_prewarm::request(config, request.role, false);
+    }
     let launch_preparation_ms = launch_started.elapsed().as_millis();
     #[cfg(not(feature = "fixture"))]
     let (prepared, task_binding_ms) = if let Some(process) = prepared {
         let (process, elapsed) = process_prewarm::bind(process, request.role, &command)?;
         (Some(process), Some(elapsed))
-    } else { (None, None::<u128>) };
+    } else {
+        (None, None::<u128>)
+    };
     #[cfg(not(feature = "fixture"))]
-    let prewarm_stage = if warm_node.is_some() { "session" } else if prepared.is_some() { "process" } else { "cold" };
+    let prewarm_stage = if warm_node.is_some() {
+        "session"
+    } else if prepared.is_some() {
+        "process"
+    } else {
+        "cold"
+    };
     #[cfg(not(feature = "fixture"))]
-    let warm_startup_output = warm_node.as_ref().map(|worker| worker.startup_output.clone())
-        .or_else(|| prepared.as_ref().map(|worker| worker.startup_output.clone())).unwrap_or_default();
+    let warm_startup_output = warm_node
+        .as_ref()
+        .map(|worker| worker.startup_output.clone())
+        .or_else(|| {
+            prepared
+                .as_ref()
+                .map(|worker| worker.startup_output.clone())
+        })
+        .unwrap_or_default();
     #[cfg(not(feature = "fixture"))]
-    let prewarm_ready_ms = warm_node.as_ref().map(|worker| worker.ready_ms)
+    let prewarm_ready_ms = warm_node
+        .as_ref()
+        .map(|worker| worker.ready_ms)
         .or_else(|| prepared.as_ref().map(|worker| worker.ready_ms));
     #[cfg(feature = "fixture")]
     let (prewarm_ready_ms, task_binding_ms, prewarm_stage) = (None::<u128>, None::<u128>, "cold");
@@ -1281,7 +1377,12 @@ fn run_pi_with_timeout(
             }
         }
     });
-    let mut channels = SessionChannels { receiver, input_receiver, rpc_sender, rpc_pending };
+    let mut channels = SessionChannels {
+        receiver,
+        input_receiver,
+        rpc_sender,
+        rpc_pending,
+    };
     let outcome = run_turn(
         request.role,
         rpc_agent,
@@ -1365,13 +1466,16 @@ fn run_turn(
             Duration::from_millis(500)
         };
         if rpc_agent && agent_ended.is_some_and(|t| t.elapsed() > handoff) {
-            let pending_empty = channels.rpc_pending
+            let pending_empty = channels
+                .rpc_pending
                 .as_ref()
                 .is_some_and(|p| p.lock().is_ok_and(|p| p.is_empty()));
             // Allow the final Pi projection to arrive, but never let an
             // unsupported or stalled stats request hold a settled process.
-            if pending_empty && (!context_stats.waiting()
-                || agent_ended.is_some_and(|t| t.elapsed() > handoff + Duration::from_secs(1))) {
+            if pending_empty
+                && (!context_stats.waiting()
+                    || agent_ended.is_some_and(|t| t.elapsed() > handoff + Duration::from_secs(1)))
+            {
                 break;
             }
         }
@@ -1411,7 +1515,9 @@ fn run_turn(
                     }
                 }
                 if let Some(current) = event.as_ref() {
-                    if let Some(response) = context_stats.response(current, channels.rpc_sender.as_ref()) {
+                    if let Some(response) =
+                        context_stats.response(current, channels.rpc_sender.as_ref())
+                    {
                         // Do not persist Pi's entire session stats/cost payload.
                         let Some(response) = response else { continue };
                         event = Some(response);
@@ -1435,7 +1541,8 @@ fn run_turn(
                                 );
                                 agent_ended = Some(Instant::now());
                             }
-                            if let (Some(id), Some(pending)) = (event["id"].as_str(), &channels.rpc_pending)
+                            if let (Some(id), Some(pending)) =
+                                (event["id"].as_str(), &channels.rpc_pending)
                             {
                                 if let Ok(mut pending) = pending.lock() {
                                     if let Some(reply) = pending.remove(id) {
@@ -1517,7 +1624,9 @@ fn run_turn(
                 // outbound display log is projected; Pi's session/tool context
                 // is untouched and old persisted byte ranges are not rewritten.
                 if let Some(event) = event.as_mut() {
-                    if !tool_output.project(event) { continue; }
+                    if !tool_output.project(event) {
+                        continue;
+                    }
                 }
                 if let Some(object) = event.as_mut().and_then(Value::as_object_mut) {
                     object.insert("grapherReceivedAt".into(), crate::model::now().into());
@@ -1593,9 +1702,8 @@ fn finish_turn(
     let config = request.config;
     let _ = config;
     drop(rpc_guard);
-    let settled_response = outcome.settled
-        && outcome.agent_error.is_none()
-        && !outcome.final_text.trim().is_empty();
+    let settled_response =
+        outcome.settled && outcome.agent_error.is_none() && !outcome.final_text.trim().is_empty();
     // A Serial (source-native) conversation stays resident: park the whole shell
     // instead of terminating it, so the next turn reuses it and any service it
     // started survives. Graph node agents are reclaimed below as before.
@@ -1681,12 +1789,24 @@ fn finish_turn(
         let stderr_summary = if !outcome.stderr_tail.trim().is_empty() {
             outcome.stderr_tail.trim().to_string()
         } else {
-            outcome.stderr_lines.iter().rev().find(|l| !l.trim().is_empty()).cloned().unwrap_or_default()
+            outcome
+                .stderr_lines
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .cloned()
+                .unwrap_or_default()
         };
         let tail = if !stderr_summary.is_empty() {
             stderr_summary
         } else {
-            outcome.raw_stdout_lines.iter().rev().find(|l| !l.trim().is_empty()).cloned().unwrap_or_default()
+            outcome
+                .raw_stdout_lines
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .cloned()
+                .unwrap_or_default()
         };
         return Err(if tail.is_empty() {
             format!("Pi exited with {status}")
@@ -1754,20 +1874,33 @@ pub(crate) fn park_test_shell(run_id: &str, session_id: &str) {
         command
     };
     process_control::configure_command(&mut command);
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let child = command.spawn().unwrap();
     let tree = process_control::with_owner(run_id, || process_control::track(&child).unwrap());
     let (_line_tx, receiver) = mpsc::channel::<(bool, String)>();
     let (_input_tx, input_receiver) = mpsc::channel::<Result<(), std::io::Error>>();
     let (rpc_tx, _rpc_rx) = mpsc::channel::<String>();
     let channels = SessionChannels {
-        receiver, input_receiver, rpc_sender: Some(rpc_tx),
+        receiver,
+        input_receiver,
+        rpc_sender: Some(rpc_tx),
         rpc_pending: Some(Arc::new(Mutex::new(HashMap::new()))),
     };
     lingering_pool().park(
-        lingering::SessionKey { repository: PathBuf::new(), session_id: session_id.into() },
+        lingering::SessionKey {
+            repository: PathBuf::new(),
+            session_id: session_id.into(),
+        },
         run_id.into(),
-        ParkedSerial { child, tree, channels, selection: (String::new(), None) },
+        ParkedSerial {
+            child,
+            tree,
+            channels,
+            selection: (String::new(), None),
+        },
     );
 }
 
@@ -1830,7 +1963,9 @@ fn serial_linger_key(request: &PiRequest<'_>) -> Option<lingering::SessionKey> {
 // finalization fails. Do not resume it with stale model settings on retry.
 #[cfg(not(feature = "fixture"))]
 fn serial_selection(request: &PiRequest<'_>) -> (String, Option<String>) {
-    let thinking = request.extra_args.windows(2)
+    let thinking = request
+        .extra_args
+        .windows(2)
         .find(|args| args[0] == "--thinking")
         .map(|args| args[1].to_string());
     (request.config.model.clone(), thinking)
@@ -1918,8 +2053,8 @@ fn run_resumed(
     timeout: Option<Duration>,
     launch_started: Instant,
 ) -> Result<String, String> {
-    let owner = process_control::current_owner()
-        .ok_or("A resumed session requires an owning execution")?;
+    let owner =
+        process_control::current_owner().ok_or("A resumed session requires an owning execution")?;
     process_control::reassign_owner(&host.tree, &owner)?;
     // Drop anything the settled turn left buffered: a stale agent_settled must
     // not make the next turn exit immediately.
@@ -1965,7 +2100,8 @@ pub(crate) const FEEDBACK_INSTRUCTIONS: &str = "\n\nEnd your response with exact
 /// synchronously pushes this repair turn into the node's own session before
 /// giving up. Two repairs keep the protocol nudge bounded like the runtime's
 /// feedback budget cap.
-pub(crate) const FEEDBACK_REPAIR_PROMPT: &str = "Feedback Protocol Error: final line must be exactly <ACCEPT> or <FEEDBACK>.";
+pub(crate) const FEEDBACK_REPAIR_PROMPT: &str =
+    "Feedback Protocol Error: final line must be exactly <ACCEPT> or <FEEDBACK>.";
 pub(crate) const FEEDBACK_REPAIR_ATTEMPTS: usize = 2;
 
 pub fn execute(
@@ -1998,10 +2134,18 @@ pub fn execute(
     // pause preceded the first launch and no saved conversation exists. Missing
     // sessions from actual interrupted turns must still fail validation.
     if resume_execution_id.is_some() && !initial_recovery && !cfg!(feature = "fixture") {
-        crate::session_branch::validate_session(&session_dir, &execution.session_id, Path::new(&execution.worktree))
-            .map_err(|error| format!("Cannot resume node session: {error}"))?;
-        crate::session_branch::rebind_session_cwd(&session_dir, &execution.session_id, Path::new(&execution.worktree))
-            .map_err(|error| format!("Cannot resume node session: {error}"))?;
+        crate::session_branch::validate_session(
+            &session_dir,
+            &execution.session_id,
+            Path::new(&execution.worktree),
+        )
+        .map_err(|error| format!("Cannot resume node session: {error}"))?;
+        crate::session_branch::rebind_session_cwd(
+            &session_dir,
+            &execution.session_id,
+            Path::new(&execution.worktree),
+        )
+        .map_err(|error| format!("Cannot resume node session: {error}"))?;
     }
     let model_config = PiModelConfig::resolve(PiRole::NodeAgent, config);
     let effective_config = model_config.effective_config(config);
@@ -2046,7 +2190,9 @@ pub fn feedback(output: &str) -> Result<bool, String> {
     match output.trim().lines().last().map(str::trim) {
         Some("<ACCEPT>") => Ok(false),
         Some("<FEEDBACK>") => Ok(true),
-        _ => Err("Feedback protocol error: final line must be exactly <ACCEPT> or <FEEDBACK>".into()),
+        _ => {
+            Err("Feedback protocol error: final line must be exactly <ACCEPT> or <FEEDBACK>".into())
+        }
     }
 }
 
@@ -2096,7 +2242,9 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     pub(super) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
@@ -2152,23 +2300,48 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
             thinking_level: "medium".into(),
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             max_parallel: 1,
             max_feedback: 3,
             auto_approve: false,
             role_models: Default::default(),
         };
         let execution = Execution {
-            id: "feedback-prompt".into(), node: "review".into(), revision: 1, attempt: 1,
-            session_id: "feedback-prompt".into(), worktree: temp.path().to_string_lossy().into(),
-            before: String::new(), workspace_lineage: vec![], after: None, status: "running".into(),
-            input: None, result: None,
-            output: String::new(), output_bytes: 0, pid: None, started_at: 0,
-            completed_at: None, metrics: None,
+            id: "feedback-prompt".into(),
+            node: "review".into(),
+            revision: 1,
+            attempt: 1,
+            session_id: "feedback-prompt".into(),
+            worktree: temp.path().to_string_lossy().into(),
+            before: String::new(),
+            workspace_lineage: vec![],
+            after: None,
+            status: "running".into(),
+            input: None,
+            result: None,
+            output: String::new(),
+            output_bytes: 0,
+            pid: None,
+            started_at: 0,
+            completed_at: None,
+            metrics: None,
         };
         let task = "Inspect the result";
         for feedback_source in [false, true] {
-            let captured = execute(&config, &execution, task, feedback_source, None, false, false, None, temp.path(), |_| {}).unwrap();
+            let captured = execute(
+                &config,
+                &execution,
+                task,
+                feedback_source,
+                None,
+                false,
+                false,
+                None,
+                temp.path(),
+                |_| {},
+            )
+            .unwrap();
             if feedback_source {
                 assert_eq!(captured, format!("{task}\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker."));
             } else {
@@ -2195,7 +2368,9 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
         let mut after = before.to_vec();
         after.extend_from_slice(appended.as_bytes());
         assert!(startup_session_hash(before, &after, &model, "high").is_ok());
-        assert!(startup_session_hash(before, &after, &format!("{provider}/other"), "high").is_err());
+        assert!(
+            startup_session_hash(before, &after, &format!("{provider}/other"), "high").is_err()
+        );
     }
 
     #[cfg(not(feature = "fixture"))]
@@ -2225,14 +2400,20 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             environment: None,
             repository: repository.to_string_lossy().into(),
             model: "openai-codex/gpt-6-sol".into(),
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             thinking_level: "high".into(),
             max_parallel: 1,
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
         };
-        warm_node(config.clone(), repository.clone(), session_dir.clone(), session_id.clone());
+        warm_node(
+            config.clone(),
+            repository.clone(),
+            session_dir.clone(),
+            session_id.clone(),
+        );
         assert!(WARM_NODE.get().unwrap().wait_idle(Duration::from_secs(30)));
         let mut other = config.clone();
         other.model = "other/model".into();
@@ -2269,7 +2450,12 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             .unwrap();
         assert!(status.success(), "{status}: {stderr}");
 
-        warm_node(config.clone(), repository.clone(), session_dir.clone(), session_id.clone());
+        warm_node(
+            config.clone(),
+            repository.clone(),
+            session_dir.clone(),
+            session_id.clone(),
+        );
         assert!(WARM_NODE.get().unwrap().wait_idle(Duration::from_secs(30)));
         fs::write(
             &session_file,
@@ -2312,38 +2498,89 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
-            environment: None, engine: "pi".into(), pi_command: test_python(),
+            environment: None,
+            engine: "pi".into(),
+            pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
-            repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
-            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
-            role_models: Default::default(), post_task_review: false, planner_write_tools: true,
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+            role_models: Default::default(),
+            post_task_review: false,
+            planner_write_tools: true,
         };
         let mut output = String::new();
-        let result = run_pi(PiRequest {
-            role: PiRole::Partitioner, config: &config, cwd: temp.path(), task: "test",
-            session_dir: &temp.path().join("session"), extension: None, tools: Some(""), session_id: None,
-            extra_args: vec![], environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None, images: None,
-        }, |line| output.push_str(&line)).unwrap();
+        let result = run_pi(
+            PiRequest {
+                role: PiRole::Partitioner,
+                config: &config,
+                cwd: temp.path(),
+                task: "test",
+                session_dir: &temp.path().join("session"),
+                extension: None,
+                tools: Some(""),
+                session_id: None,
+                extra_args: vec![],
+                environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
+                system_prompt: None,
+                images: None,
+            },
+            |line| output.push_str(&line),
+        )
+        .unwrap();
         assert_eq!(result, "FINAL_UNCHANGED");
-        assert!(fs::read_to_string(temp.path().join("original-tool-result.txt")).unwrap().ends_with("original tail"));
-        assert!(fs::metadata(temp.path().join("original-tool-result.txt")).unwrap().len() > 1_000_000);
-        let events: Vec<Value> = output.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
-        let deltas: Vec<_> = events.iter().filter(|event| event["type"] == "message_update").collect();
-        assert!(deltas.len() < 100, "tiny deltas must be coalesced by the actual reader");
+        assert!(
+            fs::read_to_string(temp.path().join("original-tool-result.txt"))
+                .unwrap()
+                .ends_with("original tail")
+        );
+        assert!(
+            fs::metadata(temp.path().join("original-tool-result.txt"))
+                .unwrap()
+                .len()
+                > 1_000_000
+        );
+        let events: Vec<Value> = output
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event["type"] == "message_update")
+            .collect();
+        assert!(
+            deltas.len() < 100,
+            "tiny deltas must be coalesced by the actual reader"
+        );
         assert!(deltas.iter().all(|event| event.get("usage").is_none()));
-        let thinking: String = deltas.iter().map(|event| event["assistantMessageEvent"]["delta"].as_str().unwrap()).collect();
+        let thinking: String = deltas
+            .iter()
+            .map(|event| event["assistantMessageEvent"]["delta"].as_str().unwrap())
+            .collect();
         assert_eq!(thinking, "中🚀".repeat(2000));
-        let updates: Vec<_> = events.iter().filter(|event| event["type"] == "tool_execution_update").collect();
+        let updates: Vec<_> = events
+            .iter()
+            .filter(|event| event["type"] == "tool_execution_update")
+            .collect();
         assert_eq!(updates.len(), 1);
         assert!(updates[0].get("partialResult").is_none());
-        let tool = events.iter().find(|event| event["type"] == "tool_execution_end").unwrap();
+        let tool = events
+            .iter()
+            .find(|event| event["type"] == "tool_execution_end")
+            .unwrap();
         let preview = tool["result"]["content"][0]["text"].as_str().unwrap();
         assert!(preview.len() <= 100 * 1024);
         assert!(preview.ends_with("\n..."));
         assert_eq!(tool["result"]["details"]["displayTruncated"], true);
         assert_eq!(tool["result"]["details"]["exitCode"], 0);
         assert_eq!(tool["durationMs"], 42);
-        assert!(output.len() < 400 * 1024, "repeated progress and aggregate copies must not restore giant output");
+        assert!(
+            output.len() < 400 * 1024,
+            "repeated progress and aggregate copies must not restore giant output"
+        );
         let metrics = crate::model::parse_execution_metrics(&output, 0, 0);
         assert_eq!(metrics.usage.total_tokens, 42);
         assert_eq!(metrics.assistant_messages, 1);
@@ -2360,19 +2597,26 @@ sys.stdin.read()
         fs::write(&bg, "require('fs').writeFileSync(process.argv[2], String(process.pid)); setTimeout(()=>{}, 60000);").unwrap();
         let cmd = format!(
             "(nohup node \"{}\" \"{}\" > /dev/null 2>&1 &); sleep 1",
-            bg.display(), pidfile.display()
+            bg.display(),
+            pidfile.display()
         );
         let mut command = std::process::Command::new("C:\\Program Files\\Git\\usr\\bin\\bash.exe");
         command.args(["-c", &cmd]);
         process_control::configure_command(&mut command);
-        command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         let mut child = command.spawn().unwrap();
         let tree = process_control::track(&child).unwrap();
         let _ = child.wait();
         // A held boundary keeps a clone, exactly as the registry does.
         let held = tree.clone();
         drop(ProcessGuard(tree.clone()));
-        assert!(held.has_live_members(), "the guard must not kill a boundary held elsewhere");
+        assert!(
+            held.has_live_members(),
+            "the guard must not kill a boundary held elsewhere"
+        );
         held.terminate();
     }
 
@@ -2390,7 +2634,10 @@ sys.stdin.read()
             command
         };
         process_control::configure_command(&mut command);
-        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let child = command.spawn().unwrap();
         let tree =
             process_control::with_owner("linger-run", || process_control::track(&child).unwrap());
@@ -2460,18 +2707,32 @@ sys.stdin.read()
         .unwrap();
         assert_eq!(result, "done");
         assert!(output.contains("grapher_session_parked"));
-        assert_eq!(lingering_pool().len(), 1, "a settled Serial shell must be parked");
+        assert_eq!(
+            lingering_pool().len(),
+            1,
+            "a settled Serial shell must be parked"
+        );
         let key = serial_linger_key(&request).expect("a parked Serial shell has a session key");
         let claimed = claim_matching_serial(&request)
             .expect("the same selection must reuse the parked shell");
         request.extra_args = vec!["--thinking", "high"];
-        assert_ne!(claimed.selection, serial_selection(&request), "thinking-only changes also require a fresh shell");
+        assert_ne!(
+            claimed.selection,
+            serial_selection(&request),
+            "thinking-only changes also require a fresh shell"
+        );
         request.extra_args = vec!["--thinking", "medium"];
         lingering_pool().park(key, "linger-run".into(), claimed);
         let mut replacement = config.clone();
         replacement.model = "replacement/model".into();
-        let changed = PiRequest { config: &replacement, ..request };
-        assert!(claim_matching_serial(&changed).is_none(), "a changed model must cold-launch the saved session");
+        let changed = PiRequest {
+            config: &replacement,
+            ..request
+        };
+        assert!(
+            claim_matching_serial(&changed).is_none(),
+            "a changed model must cold-launch the saved session"
+        );
         stop_lingering_for_run("linger-run");
         assert_eq!(lingering_pool().len(), 0);
     }
@@ -2498,23 +2759,52 @@ delta('FAILED_SUFFIX')
 sys.exit(2) # No message_end/agent_settled: the partial text must still survive.
 "#).unwrap();
         let config = Config {
-            environment: None, engine: "pi".into(), pi_command: test_python(),
+            environment: None,
+            engine: "pi".into(),
+            pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
-            repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
-            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
-            role_models: Default::default(), post_task_review: false, planner_write_tools: true,
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+            role_models: Default::default(),
+            post_task_review: false,
+            planner_write_tools: true,
         };
         let mut output = String::new();
-        let result = run_pi_with_timeout(PiRequest {
-            role: PiRole::Partitioner, config: &config, cwd: temp.path(), task: "test",
-            session_dir: &temp.path().join("session"), extension: None, tools: Some(""), session_id: None,
-            extra_args: vec![], environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None, images: None,
-        }, |line| {
-            if line.contains("IDLE_VISIBLE") { fs::write(temp.path().join("idle-observed"), "ok").unwrap(); }
-            output.push_str(&line);
-        }, Some(Duration::from_secs(5)));
-        assert!(result.is_err(), "failed children must not become successful completions");
-        assert!(temp.path().join("idle-observed").exists(), "idle delta was not delivered before EOF");
+        let result = run_pi_with_timeout(
+            PiRequest {
+                role: PiRole::Partitioner,
+                config: &config,
+                cwd: temp.path(),
+                task: "test",
+                session_dir: &temp.path().join("session"),
+                extension: None,
+                tools: Some(""),
+                session_id: None,
+                extra_args: vec![],
+                environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
+                system_prompt: None,
+                images: None,
+            },
+            |line| {
+                if line.contains("IDLE_VISIBLE") {
+                    fs::write(temp.path().join("idle-observed"), "ok").unwrap();
+                }
+                output.push_str(&line);
+            },
+            Some(Duration::from_secs(5)),
+        );
+        assert!(
+            result.is_err(),
+            "failed children must not become successful completions"
+        );
+        assert!(
+            temp.path().join("idle-observed").exists(),
+            "idle delta was not delivered before EOF"
+        );
         assert!(output.contains("[stderr] stderr diagnostic"));
         let idle = output.find("IDLE_VISIBLE").unwrap();
         let before = output.find("BEFORE_RAW").unwrap();
@@ -2536,18 +2826,39 @@ print(json.dumps({'type':'message_update','assistantMessageEvent':{'type':'text_
 time.sleep(10)
 "#).unwrap();
         let config = Config {
-            environment: None, engine: "pi".into(), pi_command: test_python(),
+            environment: None,
+            engine: "pi".into(),
+            pi_command: test_python(),
             pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
-            repository: temp.path().to_string_lossy().into(), model: "mock/model".into(),
-            thinking_level: "medium".into(), max_parallel: 1, max_feedback: 0, auto_approve: false,
-            role_models: Default::default(), post_task_review: false, planner_write_tools: true,
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+            role_models: Default::default(),
+            post_task_review: false,
+            planner_write_tools: true,
         };
         let mut output = String::new();
-        let result = run_pi_with_timeout(PiRequest {
-            role: PiRole::Partitioner, config: &config, cwd: temp.path(), task: "test",
-            session_dir: &temp.path().join("session"), extension: None, tools: Some(""), session_id: None,
-            extra_args: vec![], environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())], system_prompt: None, images: None,
-        }, |line| output.push_str(&line), Some(Duration::from_secs(1)));
+        let result = run_pi_with_timeout(
+            PiRequest {
+                role: PiRole::Partitioner,
+                config: &config,
+                cwd: temp.path(),
+                task: "test",
+                session_dir: &temp.path().join("session"),
+                extension: None,
+                tools: Some(""),
+                session_id: None,
+                extra_args: vec![],
+                environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
+                system_prompt: None,
+                images: None,
+            },
+            |line| output.push_str(&line),
+            Some(Duration::from_secs(1)),
+        );
         assert!(result.unwrap_err().contains("Partitioner timed out"));
         let suffix = output.find("TIMED_OUT_SUFFIX").unwrap();
         let exited = output.find("grapher_process_exited").unwrap();
@@ -2583,23 +2894,24 @@ sys.stdin.read() # RPC shutdown is requested by closing stdin.
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
         };
         let mut events = String::new();
         let result = run_pi(
             PiRequest {
-            role: PiRole::Partitioner,
-            config: &config,
-            cwd: temp.path(),
-            task: "test",
-            session_dir: &temp.path().join("partition-session"),
-            extension: None,
-            tools: Some(""),
-            session_id: None,
-            extra_args: vec![],
-            environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
-            system_prompt: None,
-            images: None,
+                role: PiRole::Partitioner,
+                config: &config,
+                cwd: temp.path(),
+                task: "test",
+                session_dir: &temp.path().join("partition-session"),
+                extension: None,
+                tools: Some(""),
+                session_id: None,
+                extra_args: vec![],
+                environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
+                system_prompt: None,
+                images: None,
             },
             |line| events.push_str(&line),
         );
@@ -2654,7 +2966,10 @@ sys.exit(3)  # Windows fail-fast teardown cannot be represented portably; any no
             |line| events.push_str(&line),
         );
         assert_eq!(result.unwrap(), "parallel");
-        assert!(events.contains("after the turn settled"), "the abnormal exit stays visible in the log");
+        assert!(
+            events.contains("after the turn settled"),
+            "the abnormal exit stays visible in the log"
+        );
         assert!(events.contains("\"success\":false"));
     }
 
@@ -2690,7 +3005,8 @@ sys.stdin.read()
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
         };
         let session = temp.path().join("planning-1").join("planner-session");
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -2763,7 +3079,8 @@ sys.stdin.read()
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
         };
         // Both the first-attempt layout and manual Graph revisions must keep
         // independent RPC channels. Manual revisions share the parent directory
@@ -2847,7 +3164,8 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -2893,10 +3211,21 @@ sys.stdin.read()
             }
         });
         ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        for (index, text) in ["new instruction", "same instruction", "same instruction"].into_iter().enumerate() {
-            steer(&id, text, Some(vec![crate::model::ImageAttachment {
-                r#type: "image".into(), mime_type: "image/png".into(), data: index.to_string(), name: None,
-            }])).unwrap();
+        for (index, text) in ["new instruction", "same instruction", "same instruction"]
+            .into_iter()
+            .enumerate()
+        {
+            steer(
+                &id,
+                text,
+                Some(vec![crate::model::ImageAttachment {
+                    r#type: "image".into(),
+                    mime_type: "image/png".into(),
+                    data: index.to_string(),
+                    name: None,
+                }]),
+            )
+            .unwrap();
         }
         let (result, output) = worker.join().unwrap();
         assert_eq!(result.unwrap(), "steered result");
@@ -2925,7 +3254,8 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -3005,7 +3335,8 @@ sys.stdin.read()
             max_feedback: 0,
             auto_approve: false,
             role_models: Default::default(),
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
         };
         let result = run_pi_with_timeout(
             PiRequest {
@@ -3046,7 +3377,8 @@ sys.stdin.read()
                 model: "mock/model".into(),
                 role_models: Default::default(),
                 thinking_level: "medium".into(),
-                post_task_review: false, planner_write_tools: true,
+                post_task_review: false,
+                planner_write_tools: true,
                 max_parallel: 1,
                 max_feedback: 0,
                 auto_approve: false,
@@ -3180,7 +3512,8 @@ sys.stdin.read()
         let _guard = lock_env();
         let original = std::env::var_os("PLANNER_THINKING");
         let mut config = Config {
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             environment: None,
             repository: "/tmp/fake".into(),
             model: "mock/model".into(),
@@ -3248,7 +3581,8 @@ sys.stdin.read()
         std::env::remove_var("PARTITIONER_THINKING");
 
         let custom_config = Config {
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             environment: None,
             repository: "/tmp/fake".into(),
             model: "anthropic/claude-3-7-sonnet".into(),
@@ -3286,7 +3620,8 @@ sys.stdin.read()
         let config = Config {
             environment: None,
             repository: "/tmp/fake".into(),
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             model: String::new(),
             role_models: Default::default(),
             thinking_level: "medium".into(),
@@ -3314,7 +3649,8 @@ sys.stdin.read()
         let config = Config {
             environment: None,
             repository: "/tmp/fake".into(),
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             model: "some-model".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
@@ -3358,14 +3694,25 @@ sys.stdin.read()
                 }
             }
         }
-        let _restore = Restore([
-            "PARTITIONER_MODEL", "PARTITIONER_THINKING", "PLANNER_MODEL", "PLANNER_THINKING",
-            "NODE_AGENT_MODEL", "NODE_AGENT_THINKING", "MERGER_MODEL", "MERGER_THINKING",
-        ].into_iter().map(|key| {
-            let value = std::env::var_os(key);
-            std::env::remove_var(key);
-            (key, value)
-        }).collect());
+        let _restore = Restore(
+            [
+                "PARTITIONER_MODEL",
+                "PARTITIONER_THINKING",
+                "PLANNER_MODEL",
+                "PLANNER_THINKING",
+                "NODE_AGENT_MODEL",
+                "NODE_AGENT_THINKING",
+                "MERGER_MODEL",
+                "MERGER_THINKING",
+            ]
+            .into_iter()
+            .map(|key| {
+                let value = std::env::var_os(key);
+                std::env::remove_var(key);
+                (key, value)
+            })
+            .collect(),
+        );
         let config: Config = serde_json::from_value(serde_json::json!({
             "repository": "/tmp/fake", "model": "legacy/default", "thinkingLevel": "medium",
             "maxParallel": 2, "roleModels": {
@@ -3373,7 +3720,8 @@ sys.stdin.read()
                 "planner": {"model": "example/large", "thinkingLevel": "high"},
                 "nodeAgent": {"model": "example/coder", "thinkingLevel": "low"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         for (role, model, thinking) in [
             (PiRole::Partitioner, "example/small", "off"),
             (PiRole::Planner, "example/large", "high"),
@@ -3389,17 +3737,47 @@ sys.stdin.read()
         partial.role_models = serde_json::from_value(serde_json::json!({
             "partitioner": {"model": "example/small"},
             "planner": {"thinkingLevel": "max"}
-        })).unwrap();
-        assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &partial).thinking.as_deref(), Some("low"));
-        assert_eq!(PiModelConfig::resolve(PiRole::Planner, &partial).model, "legacy/default");
-        assert_eq!(PiModelConfig::resolve(PiRole::Planner, &partial).thinking.as_deref(), Some("max"));
-        assert_eq!(PiModelConfig::resolve(PiRole::NodeAgent, &partial).thinking.as_deref(), Some("medium"));
+        }))
+        .unwrap();
+        assert_eq!(
+            PiModelConfig::resolve(PiRole::Partitioner, &partial)
+                .thinking
+                .as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            PiModelConfig::resolve(PiRole::Planner, &partial).model,
+            "legacy/default"
+        );
+        assert_eq!(
+            PiModelConfig::resolve(PiRole::Planner, &partial)
+                .thinking
+                .as_deref(),
+            Some("max")
+        );
+        assert_eq!(
+            PiModelConfig::resolve(PiRole::NodeAgent, &partial)
+                .thinking
+                .as_deref(),
+            Some("medium")
+        );
 
         std::env::set_var("PLANNER_MODEL", "env/planner");
         std::env::set_var("PARTITIONER_THINKING", "high");
-        assert_eq!(PiModelConfig::resolve(PiRole::Planner, &config).model, "env/planner");
-        assert_eq!(PiModelConfig::resolve(PiRole::Partitioner, &config).thinking.as_deref(), Some("high"));
-        assert_eq!(PiModelConfig::resolve(PiRole::NodeAgent, &config).model, "example/coder");
+        assert_eq!(
+            PiModelConfig::resolve(PiRole::Planner, &config).model,
+            "env/planner"
+        );
+        assert_eq!(
+            PiModelConfig::resolve(PiRole::Partitioner, &config)
+                .thinking
+                .as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            PiModelConfig::resolve(PiRole::NodeAgent, &config).model,
+            "example/coder"
+        );
     }
 
     #[test]
@@ -3409,7 +3787,8 @@ sys.stdin.read()
         let config = Config {
             environment: None,
             repository: "/tmp/fake".into(),
-            post_task_review: false, planner_write_tools: true,
+            post_task_review: false,
+            planner_write_tools: true,
             model: "claude-3-7-sonnet".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
@@ -3443,12 +3822,18 @@ sys.stdin.read()
         );
 
         let error_nested = r#"{"error":{"message":"You exceeded your current quota"}}"#;
-        assert_eq!(clean_model_error(error_nested), "You exceeded your current quota");
+        assert_eq!(
+            clean_model_error(error_nested),
+            "You exceeded your current quota"
+        );
 
         let plain = "Authentication failed";
         assert_eq!(clean_model_error(plain), "Authentication failed");
 
         let code_and_plain = "401: Unauthorized access";
-        assert_eq!(clean_model_error(code_and_plain), "401: Unauthorized access");
+        assert_eq!(
+            clean_model_error(code_and_plain),
+            "401: Unauthorized access"
+        );
     }
 }

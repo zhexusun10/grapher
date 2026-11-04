@@ -1,15 +1,23 @@
 //! Acceptance regression for the workspace-cleanliness target: the slot the
 //! agent sees is the project tree, and Grapher state lives outside it.
 
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 fn source(temp: &tempfile::TempDir) -> PathBuf {
     let root = temp.path().join("source");
     fs::create_dir(&root).unwrap();
     crate::workspace::git(&root, &["init", "-q"]).unwrap();
-    crate::workspace::project_git(&root, &["symbolic-ref", "HEAD", "refs/heads/feature/current"]).unwrap();
+    crate::workspace::project_git(
+        &root,
+        &["symbolic-ref", "HEAD", "refs/heads/feature/current"],
+    )
+    .unwrap();
     crate::workspace::project_git(&root, &["config", "user.name", "Project Author"]).unwrap();
-    crate::workspace::project_git(&root, &["config", "user.email", "project@example.invalid"]).unwrap();
+    crate::workspace::project_git(&root, &["config", "user.email", "project@example.invalid"])
+        .unwrap();
     crate::workspace::project_git(&root, &["config", "core.autocrlf", "false"]).unwrap();
     fs::create_dir_all(root.join("src/empty")).unwrap();
     fs::write(root.join("src/main.txt"), "project\n").unwrap();
@@ -87,36 +95,75 @@ fn workspace_is_the_project_tree_and_runtime_state_reclaims_outside_it() {
     let refs = crate::workspace::project_git(&target, &["show-ref"]).unwrap();
     assert!(!refs.contains("refs/grapher/"), "{refs}");
     assert!(!refs.contains("refs/heads/grapher-node"), "{refs}");
-    assert!(crate::workspace::project_git(&target, &["status", "--porcelain"]).unwrap().is_empty());
+    assert!(
+        crate::workspace::project_git(&target, &["status", "--porcelain"])
+            .unwrap()
+            .is_empty()
+    );
 
     // The managed environment materializes no state inside the project tree.
-    let config = crate::environment_automatic::resolve(&source, false).unwrap().0.unwrap();
+    let config = crate::environment_automatic::resolve(&source, false)
+        .unwrap()
+        .0
+        .unwrap();
     assert!(config.launch.state_bound());
     let run = "48b8e1d1-2428-42a2-9b28-9d90f631f9d1";
-    let store = crate::environment::Environments::new(&temp.path().join("data"), run, &config).unwrap();
+    let store =
+        crate::environment::Environments::new(&temp.path().join("data"), run, &config).unwrap();
     let initial = store.initialize(&source).unwrap();
     let generation = uuid::Uuid::new_v4().to_string();
-    store.prepare(&target, &initial, &generation, &base, vec![], false, false).unwrap();
+    store
+        .prepare(&target, &initial, &generation, &base, vec![], false, false)
+        .unwrap();
 
-    assert_eq!(tree(&target), tree(&source), "environment must not change the project tree");
+    assert_eq!(
+        tree(&target),
+        tree(&source),
+        "environment must not change the project tree"
+    );
     assert!(!target.join(".agent-home").exists());
     assert!(!target.join(".runtime-cache").exists());
     let state = store.state_root(&target).unwrap();
     assert!(state.exists(), "{}", state.display());
-    assert!(!crate::workspace::scope_contains(&state, &target), "{}", state.display());
-    assert!(!crate::workspace::scope_contains(&target, &state), "{}", state.display());
+    assert!(
+        !crate::workspace::scope_contains(&state, &target),
+        "{}",
+        state.display()
+    );
+    assert!(
+        !crate::workspace::scope_contains(&target, &state),
+        "{}",
+        state.display()
+    );
     let launch = config.launch.expanded(&target);
-    for key in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CACHE_HOME", "npm_config_cache"] {
-        assert!(crate::workspace::scope_contains(Path::new(&launch.variables[key]), &state), "{key}");
+    for key in [
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CACHE_HOME",
+        "npm_config_cache",
+    ] {
+        assert!(
+            crate::workspace::scope_contains(Path::new(&launch.variables[key]), &state),
+            "{key}"
+        );
     }
 
     // Runtime-only writes under the state root do not enter the project view.
     fs::create_dir_all(state.join(".runtime-cache")).unwrap();
     fs::write(state.join(".runtime-cache/probe"), "runtime only").unwrap();
-    assert_eq!(tree(&target), tree(&source), "runtime state must not enter the project tree");
+    assert_eq!(
+        tree(&target),
+        tree(&source),
+        "runtime state must not enter the project tree"
+    );
 
     // Private work never mutates the bound source.
-    assert_eq!(crate::workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(), source_head);
+    assert_eq!(
+        crate::workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+        source_head
+    );
     assert_eq!(fs::read(source.join(".git/index")).unwrap(), source_index);
     assert!(!source.join(".grapher-state").exists());
 
@@ -138,12 +185,22 @@ fn windows_spaces_unicode_and_readonly_paths_keep_the_project_view_clean() {
     let source = base.join("源 项目 source");
     fs::create_dir_all(&source).unwrap();
     crate::workspace::git(&source, &["init", "-q"]).unwrap();
-    crate::workspace::project_git(&source, &["symbolic-ref", "HEAD", "refs/heads/feature/current"]).unwrap();
+    crate::workspace::project_git(
+        &source,
+        &["symbolic-ref", "HEAD", "refs/heads/feature/current"],
+    )
+    .unwrap();
     crate::workspace::project_git(&source, &["config", "user.name", "Project Author"]).unwrap();
-    crate::workspace::project_git(&source, &["config", "user.email", "project@example.invalid"]).unwrap();
+    crate::workspace::project_git(
+        &source,
+        &["config", "user.email", "project@example.invalid"],
+    )
+    .unwrap();
     fs::write(source.join("中文 文件.txt"), "unicode\n").unwrap();
     fs::write(source.join("readonly.txt"), "readonly\n").unwrap();
-    let mut permissions = fs::metadata(source.join("readonly.txt")).unwrap().permissions();
+    let mut permissions = fs::metadata(source.join("readonly.txt"))
+        .unwrap()
+        .permissions();
     permissions.set_readonly(true);
     fs::set_permissions(source.join("readonly.txt"), permissions).unwrap();
     crate::workspace::git(&source, &["add", "-A"]).unwrap();
@@ -157,7 +214,10 @@ fn windows_spaces_unicode_and_readonly_paths_keep_the_project_view_clean() {
 
     assert_eq!(tree(&target), tree(&source));
     assert!(target.join("中文 文件.txt").is_file());
-    assert!(fs::metadata(target.join("readonly.txt")).unwrap().permissions().readonly());
+    assert!(fs::metadata(target.join("readonly.txt"))
+        .unwrap()
+        .permissions()
+        .readonly());
     assert!(target.join(".git").is_dir());
     assert!(!target.join(".agent-home").exists());
     assert!(!target.join(".runtime-cache").exists());

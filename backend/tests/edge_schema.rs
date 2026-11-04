@@ -38,40 +38,72 @@ fn legacy_graph_events_and_checkpoints_replay_without_relation() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.sqlite");
     let store = Store::open(&path).unwrap();
-    let mut state = Snapshot { run_id: "legacy".into(), ..Default::default() };
+    let mut state = Snapshot {
+        run_id: "legacy".into(),
+        ..Default::default()
+    };
     let graph = Graph {
         original_goal: "Review the implementation".into(),
-        nodes: ["owner", "review"].into_iter()
-            .map(|name| Node { name: name.into(), task: name.into() }).collect(),
+        nodes: ["owner", "review"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
         edges: vec![
-            Edge { from: "owner".into(), to: "review".into(), feedback: false },
-            Edge { from: "review".into(), to: "owner".into(), feedback: true },
+            Edge {
+                from: "owner".into(),
+                to: "review".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "review".into(),
+                to: "owner".into(),
+                feedback: true,
+            },
         ],
     };
     let config: Config = serde_json::from_value(json!({
         "repository": "/repo", "model": "test", "maxParallel": 1
-    })).unwrap();
+    }))
+    .unwrap();
     for kind in [
         EventKind::Created {
-            graph: graph.clone(), config: config.clone(), planning_id: None, planning: None,
+            graph: graph.clone(),
+            config: config.clone(),
+            planning_id: None,
+            planning: None,
         },
-        EventKind::DraftEdited { graph: graph.clone(), config },
+        EventKind::DraftEdited {
+            graph: graph.clone(),
+            config,
+        },
         EventKind::GraphRevised {
-            graph: graph.clone(), planning_id: "revision".into(),
-            planning: PlanningSummary { planning_id: "revision".into(), ..Default::default() },
-            invalidated: vec![], source_head: None,
+            graph: graph.clone(),
+            planning_id: "revision".into(),
+            planning: PlanningSummary {
+                planning_id: "revision".into(),
+                ..Default::default()
+            },
+            invalidated: vec![],
+            source_head: None,
         },
     ] {
         store.append(&mut state, kind).unwrap();
     }
     let expected_events = serde_json::to_value(&state.events).unwrap();
     let db = Connection::open(&path).unwrap();
-    assert_eq!(db.execute(
-        "UPDATE events SET payload=json_set(payload,
+    assert_eq!(
+        db.execute(
+            "UPDATE events SET payload=json_set(payload,
             '$.graph.edges[0].relation', 'legacy dependency',
             '$.graph.edges[1].relation', 'legacy feedback') WHERE run_id=?1",
-        [&state.run_id],
-    ).unwrap(), 3);
+            [&state.run_id],
+        )
+        .unwrap(),
+        3
+    );
     drop(store);
     let store = Store::open(&path).unwrap();
     let mut checkpoint = serde_json::to_value(&state).unwrap();
@@ -80,18 +112,38 @@ fn legacy_graph_events_and_checkpoints_replay_without_relation() {
         edge["relation"] = json!("legacy description");
     }
     // Checkpoint decoding must succeed, not merely fall back to event replay.
-    assert_eq!(serde_json::from_value::<Snapshot>(checkpoint.clone()).unwrap().graph, graph);
+    assert_eq!(
+        serde_json::from_value::<Snapshot>(checkpoint.clone())
+            .unwrap()
+            .graph,
+        graph
+    );
     for use_checkpoint in [false, true] {
         if use_checkpoint {
-            db.execute("INSERT INTO checkpoints(run_id,sequence,payload) VALUES(?1,?2,?3)",
-                params![state.run_id, state.events.last().unwrap().sequence, checkpoint.to_string()],
-            ).unwrap();
+            db.execute(
+                "INSERT INTO checkpoints(run_id,sequence,payload) VALUES(?1,?2,?3)",
+                params![
+                    state.run_id,
+                    state.events.last().unwrap().sequence,
+                    checkpoint.to_string()
+                ],
+            )
+            .unwrap();
         }
         let loaded = store.load(&state.run_id).unwrap();
         assert_eq!(loaded.graph, graph);
-        assert_eq!(serde_json::to_value(&loaded.graph).unwrap(), serde_json::to_value(&graph).unwrap());
-        assert_eq!(serde_json::to_value(&loaded.events).unwrap(), expected_events);
-        assert_eq!(loaded.plan.unwrap().execution_batches, state.plan.as_ref().unwrap().execution_batches);
+        assert_eq!(
+            serde_json::to_value(&loaded.graph).unwrap(),
+            serde_json::to_value(&graph).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&loaded.events).unwrap(),
+            expected_events
+        );
+        assert_eq!(
+            loaded.plan.unwrap().execution_batches,
+            state.plan.as_ref().unwrap().execution_batches
+        );
     }
     // Compatibility is read-only: historical business events are not migrated.
     let preserved: usize = db.query_row(

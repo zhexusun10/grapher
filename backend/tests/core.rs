@@ -47,7 +47,8 @@ fn config() -> Config {
         max_parallel: 2,
         max_feedback: 3,
         auto_approve: false,
-        post_task_review: false, planner_write_tools: true,
+        post_task_review: false,
+        planner_write_tools: true,
         role_models: Default::default(),
     }
 }
@@ -93,12 +94,21 @@ fn settings_do_not_change_approved_run_or_future_jobs() {
     rt.save_default_config(&next).unwrap();
     assert_eq!(serde_json::to_value(&rt.state).unwrap(), original);
     assert_eq!(rt.snapshot_version(), version);
-    assert_eq!(serde_json::to_value(rt.store.load(&rt.state.run_id).unwrap()).unwrap(), original);
+    assert_eq!(
+        serde_json::to_value(rt.store.load(&rt.state.run_id).unwrap()).unwrap(),
+        original
+    );
     for job in rt.jobs().unwrap() {
         assert_eq!(job.config.repository, config().repository);
         assert_eq!(job.config.model, config().model);
     }
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(temp.path().join("config.json")).unwrap()).unwrap()["model"], next.model);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(temp.path().join("config.json")).unwrap()
+        )
+        .unwrap()["model"],
+        next.model
+    );
 }
 
 #[test]
@@ -109,7 +119,10 @@ fn workspace_selection_survives_restart_and_missing_load_preserves_state() {
     rt.create(graph(), config()).unwrap();
     let second = rt.state.run_id.clone();
     let before = serde_json::to_value(&rt.state).unwrap();
-    assert!(rt.load_run("missing").unwrap_err().contains("does not exist"));
+    assert!(rt
+        .load_run("missing")
+        .unwrap_err()
+        .contains("does not exist"));
     assert_eq!(serde_json::to_value(&rt.state).unwrap(), before);
     rt.load_run(&first).unwrap();
     drop(rt);
@@ -130,13 +143,27 @@ fn workspace_selection_survives_restart_and_missing_load_preserves_state() {
 
 #[test]
 fn arbitrary_node_names_map_to_safe_internal_ids() {
-    for name in ["a b".into(), "节点".into(), "a.b".into(), "a/../b".into(), "x".repeat(65)] {
-        let graph = Graph { nodes: vec![Node { name: name.clone(), task: "task".into() }], ..Graph::default() };
+    for name in [
+        "a b".into(),
+        "节点".into(),
+        "a.b".into(),
+        "a/../b".into(),
+        "x".repeat(65),
+    ] {
+        let graph = Graph {
+            nodes: vec![Node {
+                name: name.clone(),
+                task: "task".into(),
+            }],
+            ..Graph::default()
+        };
         compile(&graph, true).unwrap();
         let id = node_id(&name);
         assert!(!id.is_empty());
         assert!(id.len() <= 64);
-        assert!(id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-' || c == b'.'));
+        assert!(id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-' || c == b'.'));
         assert!(!id.contains('/') && !id.contains('\\'));
         assert!(!id.starts_with('.') && !id.ends_with('.'));
         assert!(!id.contains(".."));
@@ -146,12 +173,27 @@ fn arbitrary_node_names_map_to_safe_internal_ids() {
     assert_ne!(node_id("a b"), node_id("a-b"));
     assert_ne!(node_id(""), node_id("node"));
     // The empty name stays a presence error, not a format constraint.
-    let graph = Graph { nodes: vec![Node { name: String::new(), task: "task".into() }], ..Graph::default() };
-    assert!(compile(&graph, true).unwrap_err().iter().any(|e| e.code == "E201"));
+    let graph = Graph {
+        nodes: vec![Node {
+            name: String::new(),
+            task: "task".into(),
+        }],
+        ..Graph::default()
+    };
+    assert!(compile(&graph, true)
+        .unwrap_err()
+        .iter()
+        .any(|e| e.code == "E201"));
     // Legacy-safe names keep their identity so existing refs and worktrees stay valid.
     for name in ["a-dep-b_9".into(), "x".repeat(64)] {
         assert_eq!(node_id(&name), name);
-        let graph = Graph { nodes: vec![Node { name, task: "task".into() }], ..Graph::default() };
+        let graph = Graph {
+            nodes: vec![Node {
+                name,
+                task: "task".into(),
+            }],
+            ..Graph::default()
+        };
         compile(&graph, true).unwrap();
     }
 }
@@ -262,7 +304,10 @@ fn compiler_warns_about_identical_tasks_without_rejecting_the_graph() {
             ("case", "shared task"),
         ]
         .into_iter()
-        .map(|(name, task)| Node { name: name.into(), task: task.into() })
+        .map(|(name, task)| Node {
+            name: name.into(),
+            task: task.into(),
+        })
         .collect(),
         edges: vec![],
     };
@@ -275,8 +320,18 @@ fn compiler_warns_about_identical_tasks_without_rejecting_the_graph() {
     // Group names deterministically, but do not normalize text or infer similarity.
     candidate.nodes.reverse();
     assert_eq!(compile(&candidate, true).unwrap().warnings, expected);
-    candidate.nodes.iter_mut().find(|node| node.name == "first").unwrap().task = "First task".into();
-    candidate.nodes.iter_mut().find(|node| node.name == "other_a").unwrap().task = "Another task".into();
+    candidate
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "first")
+        .unwrap()
+        .task = "First task".into();
+    candidate
+        .nodes
+        .iter_mut()
+        .find(|node| node.name == "other_a")
+        .unwrap()
+        .task = "Another task".into();
     assert!(compile(&candidate, true).unwrap().warnings.is_empty());
 }
 
@@ -284,16 +339,34 @@ fn compiler_warns_about_identical_tasks_without_rejecting_the_graph() {
 fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
     let mut candidate = graph();
     for name in ["inspect", "delivery"] {
-        candidate.nodes.push(Node { name: name.into(), task: format!("Implement {name}") });
+        candidate.nodes.push(Node {
+            name: name.into(),
+            task: format!("Implement {name}"),
+        });
     }
     candidate.edges.extend([
-        Edge { from: "frontend".into(), to: "inspect".into(), feedback: false },
-        Edge { from: "inspect".into(), to: "spec".into(), feedback: true },
-        Edge { from: "review".into(), to: "delivery".into(), feedback: false },
+        Edge {
+            from: "frontend".into(),
+            to: "inspect".into(),
+            feedback: false,
+        },
+        Edge {
+            from: "inspect".into(),
+            to: "spec".into(),
+            feedback: true,
+        },
+        Edge {
+            from: "review".into(),
+            to: "delivery".into(),
+            feedback: false,
+        },
     ]);
     let plan = compile(&candidate, true).unwrap();
     assert_eq!(plan.warnings.len(), 2);
-    assert!(plan.warnings.iter().all(|warning| warning.starts_with("W303:")));
+    assert!(plan
+        .warnings
+        .iter()
+        .all(|warning| warning.starts_with("W303:")));
     assert!(plan.warnings.iter().any(|warning| warning ==
         "W303: If <FEEDBACK> from review to frontend is applied, the target and dependency descendants will be invalidated: delivery, frontend, inspect, review. Completed results must be recomputed; frontend continues from its own conversation history. Nodes outside this set are unaffected."
     ));
@@ -305,7 +378,11 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
     let temp = TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     runtime.create(candidate, config()).unwrap();
-    runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+    runtime
+        .emit(EventKind::Approved {
+            base: "base".into(),
+        })
+        .unwrap();
     finish_wave(&mut runtime, "<ACCEPT>");
     finish_wave(&mut runtime, "<ACCEPT>");
     let unaffected = ["backend", "spec"].map(|name| {
@@ -314,16 +391,33 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
     });
     let jobs = runtime.jobs().unwrap();
     for job in jobs {
-        let output = if job.execution.node == "review" { "Additional instruction\n<FEEDBACK>" } else { "<ACCEPT>" };
-        let verdict = runtime.finish(&job.execution, Ok(("fake-head".into(), output.into()))).unwrap();
-        if let Some((from, output)) = verdict { runtime.apply_feedback(&from, &output).unwrap(); }
+        let output = if job.execution.node == "review" {
+            "Additional instruction\n<FEEDBACK>"
+        } else {
+            "<ACCEPT>"
+        };
+        let verdict = runtime
+            .finish(&job.execution, Ok(("fake-head".into(), output.into())))
+            .unwrap();
+        if let Some((from, output)) = verdict {
+            runtime.apply_feedback(&from, &output).unwrap();
+        }
     }
     runtime.jobs().unwrap();
-    let invalidated = runtime.state.events.iter().rev().find_map(|event| match &event.kind {
-        EventKind::Invalidated { nodes, target, .. } if target == "frontend" => Some(nodes),
-        _ => None,
-    }).unwrap();
-    assert_eq!(invalidated, &vec!["delivery", "frontend", "inspect", "review"]);
+    let invalidated = runtime
+        .state
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::Invalidated { nodes, target, .. } if target == "frontend" => Some(nodes),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        invalidated,
+        &vec!["delivery", "frontend", "inspect", "review"]
+    );
     assert_eq!(
         ["backend", "spec"].map(|name| {
             let node = &runtime.state.nodes[name];
@@ -350,7 +444,10 @@ fn unremovable_published_nodes_report_a_removal_diagnostic_at_the_tool_boundary(
     assert!(removed[0].message.contains("review"));
     assert!(removed[0].message.contains("already published"));
     // Keeping the node but reworking its task is the sanctioned alternative.
-    candidate.nodes.push(Node { name: "review".into(), task: "Review again".into() });
+    candidate.nodes.push(Node {
+        name: "review".into(),
+        task: "Review again".into(),
+    });
     assert!(unremovable_node_diagnostics(&candidate, &["review".into()]).is_empty());
     assert!(compile(&candidate, true).is_ok());
 }
@@ -363,7 +460,8 @@ fn compiler_warns_when_feedback_marker_cannot_route_an_instruction() {
         .iter_mut()
         .find(|node| node.name == "review")
         .unwrap()
-        .task = "Check acceptance and finish with <FEEDBACK> if an additional instruction is needed".into();
+        .task =
+        "Check acceptance and finish with <FEEDBACK> if an additional instruction is needed".into();
     assert!(!compile(&candidate, true)
         .unwrap()
         .warnings
@@ -392,14 +490,27 @@ fn compiler_rejects_multiple_feedback_targets_from_one_source() {
     assert!(error.message.contains("review"));
     assert!(error.message.contains("backend, frontend"));
     assert!(error.message.contains("at most one feedback target"));
-    assert!(error.message.contains("Consider restructuring feedback ownership rather than merely dropping routes"));
-    assert!(error.message.contains("possible approaches include separate feedback sources"));
-    assert!(error.message.contains("a shared owner responsible for reworking the combined result"));
-    assert!(error.message.contains("node tasks remain consistent with the resulting feedback routes"));
+    assert!(error
+        .message
+        .contains("Consider restructuring feedback ownership rather than merely dropping routes"));
+    assert!(error
+        .message
+        .contains("possible approaches include separate feedback sources"));
+    assert!(error
+        .message
+        .contains("a shared owner responsible for reworking the combined result"));
+    assert!(error
+        .message
+        .contains("node tasks remain consistent with the resulting feedback routes"));
     // The suggestions add no graph-shape or task-wording requirements.
     assert!(compile(&graph(), true).is_ok());
     let mut retargeted = graph();
-    retargeted.edges.iter_mut().find(|edge| edge.feedback).unwrap().to = "backend".into();
+    retargeted
+        .edges
+        .iter_mut()
+        .find(|edge| edge.feedback)
+        .unwrap()
+        .to = "backend".into();
     assert!(compile(&retargeted, true).is_ok());
 }
 
@@ -453,7 +564,10 @@ fn compiler_rejects_meaningless_feedback() {
     // Arbitrary labels are valid; only their internal id must stay safe.
     let arbitrary = Graph {
         original_goal: "g".into(),
-        nodes: vec![Node { name: "../../escape".into(), task: "task".into() }],
+        nodes: vec![Node {
+            name: "../../escape".into(),
+            task: "task".into(),
+        }],
         edges: Vec::new(),
     };
     compile(&arbitrary, true).unwrap();
@@ -503,7 +617,10 @@ fn invalid_replacement_leaves_current_graph_unchanged() {
 
 #[test]
 fn feedback_has_exact_final_line_protocol() {
-    assert_eq!(feedback("Additional instruction\n<FEEDBACK>\n").unwrap(), true);
+    assert_eq!(
+        feedback("Additional instruction\n<FEEDBACK>\n").unwrap(),
+        true
+    );
     assert_eq!(
         feedback("Earlier text mentions <FEEDBACK>\n<ACCEPT>").unwrap(),
         false
@@ -515,7 +632,10 @@ fn feedback_has_exact_final_line_protocol() {
     assert!(feedback("<Feedback>").is_err());
     assert!(feedback("<feedback>").is_err());
     assert!(feedback("<FEEDBACK>\nAdditional instruction").is_err());
-    assert_eq!(feedback("").unwrap_err(), "Feedback protocol error: final line must be exactly <ACCEPT> or <FEEDBACK>");
+    assert_eq!(
+        feedback("").unwrap_err(),
+        "Feedback protocol error: final line must be exactly <ACCEPT> or <FEEDBACK>"
+    );
 }
 
 #[test]
@@ -546,7 +666,12 @@ fn feedback_reexecutes_only_affected_branch_in_place() {
     assert_eq!(frontend.len(), 2);
     // The owner's history is forked, but the reviewer's completed tree is used.
     assert_ne!(frontend[0].session_id, frontend[1].session_id);
-    let review = runtime.state.executions.iter().find(|execution| execution.node == "review").unwrap();
+    let review = runtime
+        .state
+        .executions
+        .iter()
+        .find(|execution| execution.node == "review")
+        .unwrap();
     assert_eq!(frontend[1].worktree, review.worktree);
     assert_eq!(frontend[1].before, review.after.clone().unwrap());
     assert_eq!(
@@ -567,13 +692,24 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
         let mut runtime = Runtime::open(temp.path()).unwrap();
         let mut graph = graph();
         for name in ["delivery", "also_delivery"] {
-            graph.nodes.push(Node { name: name.into(), task: format!("Implement {name}") });
-            graph.edges.push(Edge { from: "review".into(), to: name.into(), feedback: false });
+            graph.nodes.push(Node {
+                name: name.into(),
+                task: format!("Implement {name}"),
+            });
+            graph.edges.push(Edge {
+                from: "review".into(),
+                to: name.into(),
+                feedback: false,
+            });
         }
         let mut config = config();
         config.max_feedback = configured_limit;
         runtime.create(graph, config).unwrap();
-        runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+        runtime
+            .emit(EventKind::Approved {
+                base: "base".into(),
+            })
+            .unwrap();
         finish_wave(&mut runtime, "<ACCEPT>");
         finish_wave(&mut runtime, "<ACCEPT>");
         let limit = configured_limit.min(5);
@@ -583,12 +719,29 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
         }
         let review = runtime.jobs().unwrap().remove(0);
         assert_eq!(review.execution.node, "review");
-        assert!(!runtime.feedback_source_busy("review"), "exhausted edges cannot invalidate running work");
+        assert!(
+            !runtime.feedback_source_busy("review"),
+            "exhausted edges cannot invalidate running work"
+        );
         // Even a large final response must not change consumers' task text.
-        let body = format!("请处理未解决的问题🚀\n{}\n── Final response ──\nLast instruction", "反馈内容🚀".repeat(6000));
+        let body = format!(
+            "请处理未解决的问题🚀\n{}\n── Final response ──\nLast instruction",
+            "反馈内容🚀".repeat(6000)
+        );
         let output = format!("{body}\n<FEEDBACK>\n");
-        runtime.emit(EventKind::Output { execution_id: review.execution.id.clone(), text: "Earlier stream text must not be forwarded\n".into() }).unwrap();
-        let (from, final_output) = runtime.finish(&review.execution, Ok(("review-head".into(), output.clone()))).unwrap().unwrap();
+        runtime
+            .emit(EventKind::Output {
+                execution_id: review.execution.id.clone(),
+                text: "Earlier stream text must not be forwarded\n".into(),
+            })
+            .unwrap();
+        let (from, final_output) = runtime
+            .finish(
+                &review.execution,
+                Ok(("review-head".into(), output.clone())),
+            )
+            .unwrap()
+            .unwrap();
         let counts = runtime.state.feedback_counts.clone();
         let event_count = runtime.state.events.len();
         let frontend_head = runtime.state.nodes["frontend"].head.clone();
@@ -599,11 +752,28 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
         assert_eq!(runtime.state.nodes["frontend"].status, "completed");
         assert_eq!(runtime.state.nodes["backend"].status, "completed");
         assert_eq!(runtime.state.feedback_counts, counts);
-        assert_eq!(runtime.state.feedback_counts.get("review->frontend").copied().unwrap_or(0), limit);
-        let warning: Vec<_> = runtime.state.events[event_count..].iter().filter(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. })).collect();
+        assert_eq!(
+            runtime
+                .state
+                .feedback_counts
+                .get("review->frontend")
+                .copied()
+                .unwrap_or(0),
+            limit
+        );
+        let warning: Vec<_> = runtime.state.events[event_count..]
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. }))
+            .collect();
         assert_eq!(warning.len(), 1);
         match &warning[0].kind {
-            EventKind::FeedbackExhausted { from, to, execution_id, count, limit: recorded_limit } => {
+            EventKind::FeedbackExhausted {
+                from,
+                to,
+                execution_id,
+                count,
+                limit: recorded_limit,
+            } => {
                 assert_eq!(from, "review");
                 assert_eq!(to, "frontend");
                 assert_eq!(execution_id, &review.execution.id);
@@ -611,18 +781,45 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
             }
             other => panic!("Expected exhaustion warning, got {other:?}"),
         }
-        assert!(!serde_json::to_string(&runtime.state).unwrap().contains("Last instruction"), "do not duplicate the body in node state or events");
+        assert!(
+            !serde_json::to_string(&runtime.state)
+                .unwrap()
+                .contains("Last instruction"),
+            "do not duplicate the body in node state or events"
+        );
         // Event replay preserves the warning without altering task inputs.
         runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
         let jobs = runtime.jobs().unwrap();
-        assert_eq!(jobs.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), vec!["delivery", "also_delivery"]);
+        assert_eq!(
+            jobs.iter()
+                .map(|job| job.execution.node.as_str())
+                .collect::<Vec<_>>(),
+            vec!["delivery", "also_delivery"]
+        );
         for job in jobs {
-            assert_eq!(job.task, format!("Implement {}", job.execution.node), "dependency consumers receive no upstream text");
+            assert_eq!(
+                job.task,
+                format!("Implement {}", job.execution.node),
+                "dependency consumers receive no upstream text"
+            );
             assert_eq!(job.parent_heads, vec!["review-head".to_string()]);
-            runtime.finish(&job.execution, Ok(("delivery-head".into(), "completed".into()))).unwrap();
+            runtime
+                .finish(
+                    &job.execution,
+                    Ok(("delivery-head".into(), "completed".into())),
+                )
+                .unwrap();
         }
         assert_eq!(runtime.state.feedback_counts, counts);
-        assert_eq!(runtime.state.executions.iter().filter(|execution| execution.node == "frontend").count(), limit + 1);
+        assert_eq!(
+            runtime
+                .state
+                .executions
+                .iter()
+                .filter(|execution| execution.node == "frontend")
+                .count(),
+            limit + 1
+        );
         assert!(runtime.jobs().unwrap().is_empty());
         assert_eq!(runtime.state.phase, "publishing");
     }
@@ -634,19 +831,49 @@ fn exhausted_feedback_does_not_wait_for_running_siblings() {
     let mut runtime = Runtime::open(temp.path()).unwrap();
     let graph = Graph {
         original_goal: "exhausted feedback with a running sibling".into(),
-        nodes: ["owner", "review", "related", "consumer"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
-        edges: [("owner", "review", false), ("owner", "related", false), ("review", "consumer", false), ("review", "owner", true)]
-            .into_iter().map(|(from, to, feedback)| Edge { from: from.into(), to: to.into(), feedback }).collect(),
+        nodes: ["owner", "review", "related", "consumer"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: [
+            ("owner", "review", false),
+            ("owner", "related", false),
+            ("review", "consumer", false),
+            ("review", "owner", true),
+        ]
+        .into_iter()
+        .map(|(from, to, feedback)| Edge {
+            from: from.into(),
+            to: to.into(),
+            feedback,
+        })
+        .collect(),
     };
     let mut config = config();
     config.max_feedback = 0;
     runtime.create(graph, config).unwrap();
-    runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+    runtime
+        .emit(EventKind::Approved {
+            base: "base".into(),
+        })
+        .unwrap();
     finish_wave(&mut runtime, "<ACCEPT>");
     let jobs = runtime.jobs().unwrap();
     assert_eq!(jobs.len(), 2);
-    let review = jobs.iter().find(|job| job.execution.node == "review").unwrap();
-    let (from, output) = runtime.finish(&review.execution, Ok(("review-head".into(), "Unresolved issue\n<FEEDBACK>".into()))).unwrap().unwrap();
+    let review = jobs
+        .iter()
+        .find(|job| job.execution.node == "review")
+        .unwrap();
+    let (from, output) = runtime
+        .finish(
+            &review.execution,
+            Ok(("review-head".into(), "Unresolved issue\n<FEEDBACK>".into())),
+        )
+        .unwrap()
+        .unwrap();
     assert_eq!(runtime.state.nodes["related"].status, "running");
     assert!(!runtime.feedback_source_busy(&from));
     runtime.apply_feedback(&from, &output).unwrap();
@@ -660,23 +887,41 @@ fn exhausted_feedback_does_not_wait_for_running_siblings() {
 
 #[test]
 fn exhausted_budget_does_not_mask_execution_or_protocol_failures() {
-    for result in [Err("Pi failed".into()), Ok(("review-head".into(), "Missing final marker".into()))] {
+    for result in [
+        Err("Pi failed".into()),
+        Ok(("review-head".into(), "Missing final marker".into())),
+    ] {
         let temp = TempDir::new().unwrap();
         let mut runtime = Runtime::open(temp.path()).unwrap();
         let mut graph = graph();
-        graph.nodes.push(Node { name: "consumer".into(), task: "consume".into() });
-        graph.edges.push(Edge { from: "review".into(), to: "consumer".into(), feedback: false });
+        graph.nodes.push(Node {
+            name: "consumer".into(),
+            task: "consume".into(),
+        });
+        graph.edges.push(Edge {
+            from: "review".into(),
+            to: "consumer".into(),
+            feedback: false,
+        });
         let mut config = config();
         config.max_feedback = 0;
         runtime.create(graph, config).unwrap();
-        runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+        runtime
+            .emit(EventKind::Approved {
+                base: "base".into(),
+            })
+            .unwrap();
         finish_wave(&mut runtime, "<ACCEPT>");
         finish_wave(&mut runtime, "<ACCEPT>");
         let review = runtime.jobs().unwrap().remove(0);
         assert!(runtime.finish(&review.execution, result).unwrap().is_none());
         assert_eq!(runtime.state.nodes["review"].status, "failed");
         assert_eq!(runtime.state.executions.last().unwrap().status, "failed");
-        assert!(!runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. })));
+        assert!(!runtime
+            .state
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. })));
         assert!(runtime.jobs().unwrap().is_empty());
         assert_eq!(runtime.state.nodes["consumer"].status, "blocked");
         assert_eq!(runtime.state.phase, "needs_attention");
@@ -690,14 +935,26 @@ fn acceptance_at_exhausted_budget_is_not_a_skipped_feedback_warning() {
     let mut config = config();
     config.max_feedback = 0;
     runtime.create(graph(), config).unwrap();
-    runtime.emit(EventKind::Approved { base: "base".into() }).unwrap();
+    runtime
+        .emit(EventKind::Approved {
+            base: "base".into(),
+        })
+        .unwrap();
     finish_wave(&mut runtime, "<ACCEPT>");
     finish_wave(&mut runtime, "<ACCEPT>");
     finish_wave(&mut runtime, "Summary\n<ACCEPT>");
     assert_eq!(runtime.state.nodes["review"].status, "completed");
     assert!(runtime.state.feedback_counts.is_empty());
-    assert!(!runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. })));
-    assert!(runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::Feedback { accepted: true, .. })));
+    assert!(!runtime
+        .state
+        .events
+        .iter()
+        .any(|event| matches!(event.kind, EventKind::FeedbackExhausted { .. })));
+    assert!(runtime
+        .state
+        .events
+        .iter()
+        .any(|event| matches!(event.kind, EventKind::Feedback { accepted: true, .. })));
 }
 
 #[test]
@@ -749,11 +1006,20 @@ fn pause_drains_and_intervention_preserves_history() {
     assert_eq!(runtime.state.executions.len(), 1);
     assert_eq!(runtime.state.nodes["spec"].instruction, "Use Svelte");
     let replay = runtime.store.load(&runtime.state.run_id).unwrap();
-    assert_eq!(replay.nodes["spec"].pending_messages.iter().map(|message| message.instruction.as_str()).collect::<Vec<_>>(),
-        ["Use Svelte", "Switch to React"]);
+    assert_eq!(
+        replay.nodes["spec"]
+            .pending_messages
+            .iter()
+            .map(|message| message.instruction.as_str())
+            .collect::<Vec<_>>(),
+        ["Use Svelte", "Switch to React"]
+    );
     runtime.pause(false).unwrap();
     let follow_up = runtime.jobs().unwrap().remove(0);
-    assert!(follow_up.task.find("Use Svelte").unwrap() < follow_up.task.find("Switch to React").unwrap());
+    assert!(
+        follow_up.task.find("Use Svelte").unwrap()
+            < follow_up.task.find("Switch to React").unwrap()
+    );
     assert!(runtime.state.nodes["spec"].pending_messages.is_empty());
     assert_eq!(follow_up.execution.session_id, job.execution.session_id);
     assert_eq!(follow_up.execution.worktree, job.execution.worktree);
@@ -789,7 +1055,10 @@ fn steer_does_not_invalidate_and_unrelated_running_node_does_not_block_follow_up
         .iter()
         .all(|node| runtime.state.nodes[&node.name].status != "dirty"));
     runtime
-        .finish(&spec.execution, Ok(("spec-head".into(), "completed".into())))
+        .finish(
+            &spec.execution,
+            Ok(("spec-head".into(), "completed".into())),
+        )
         .unwrap();
     let jobs = runtime.jobs().unwrap();
     let frontend = jobs
@@ -816,20 +1085,27 @@ fn steer_attachments_survive_replay_and_legacy_events_remain_readable() {
     let mut runtime = runtime(temp.path());
     let instruction = "<file name=\"notes.txt\">\nunique token\n</file>\nclarify";
     let image = ImageAttachment {
-        r#type: "image".into(), mime_type: "image/png".into(),
-        data: "aW1hZ2U=".into(), name: Some("sample.png".into()),
+        r#type: "image".into(),
+        mime_type: "image/png".into(),
+        data: "aW1hZ2U=".into(),
+        name: Some("sample.png".into()),
     };
-    runtime.emit(EventKind::Steered {
-        execution_id: "execution".into(), node: "spec".into(),
-        instruction: instruction.into(), images: Some(vec![image.clone()]),
-    }).unwrap();
+    runtime
+        .emit(EventKind::Steered {
+            execution_id: "execution".into(),
+            node: "spec".into(),
+            instruction: instruction.into(),
+            images: Some(vec![image.clone()]),
+        })
+        .unwrap();
     let replay = runtime.store.load(&runtime.state.run_id).unwrap();
     let event = serde_json::to_value(replay.events.last().unwrap()).unwrap();
     assert_eq!(event["instruction"], instruction);
     assert_eq!(event["images"][0], serde_json::to_value(image).unwrap());
     let legacy: EventKind = serde_json::from_value(serde_json::json!({
         "type": "steered", "execution_id": "old", "node": "spec", "instruction": "old turn"
-    })).unwrap();
+    }))
+    .unwrap();
     assert!(matches!(legacy, EventKind::Steered { images: None, .. }));
 }
 
@@ -1005,7 +1281,9 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     // Arbitrary labels are accepted but reach the ref namespace only as safe ids.
     let invalid_ref = format!("refs/grapher/nodes/{}", node_id("../invalid"));
     assert!(workspace::snapshot_node(&node_a, &repository, "../invalid").is_ok());
-    assert!(workspace::repository_git(&repository, &["rev-parse", "--verify", &invalid_ref]).is_ok());
+    assert!(
+        workspace::repository_git(&repository, &["rev-parse", "--verify", &invalid_ref]).is_ok()
+    );
     assert!(workspace::git(&repository, &["rev-parse", "--verify", &invalid_ref]).is_err());
     let head_a = workspace::snapshot_node(&node_a, &repository, "nodeA").unwrap();
 
@@ -1072,9 +1350,15 @@ fn serial_snapshot_does_not_commit_stage_or_move_graph_refs() {
 
     let head = workspace::snapshot_execution(&repository, &repository, "task").unwrap();
     assert_eq!(head, "");
-    assert_eq!(workspace::git(&repository, &["rev-parse", "HEAD"]).unwrap(), before);
+    assert_eq!(
+        workspace::git(&repository, &["rev-parse", "HEAD"]).unwrap(),
+        before
+    );
     assert_eq!(fs::read(repository.join(".git/index")).unwrap(), index);
-    assert_eq!(workspace::git(&repository, &["status", "--porcelain"]).unwrap(), status);
+    assert_eq!(
+        workspace::git(&repository, &["status", "--porcelain"]).unwrap(),
+        status
+    );
     assert!(workspace::git(
         &repository,
         &["rev-parse", "--verify", "refs/heads/grapher-node"]
@@ -1140,7 +1424,11 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
         .unwrap(),
         resolved_head
     );
-    assert!(workspace::git(&repository, &["cat-file", "-e", &format!("{resolved_head}^{{commit}}")]).is_err());
+    assert!(workspace::git(
+        &repository,
+        &["cat-file", "-e", &format!("{resolved_head}^{{commit}}")]
+    )
+    .is_err());
 
     runtime.pause(false).unwrap();
     let retry = runtime.jobs().unwrap().remove(0);

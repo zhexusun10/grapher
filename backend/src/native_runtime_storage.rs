@@ -750,16 +750,17 @@ mod tests {
         let parent = temp.path().to_path_buf();
         let (completed, result) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            completed.send(
-                get_or_prepare(
-                    &parent,
-                    &"a".repeat(64),
-                    || worker_cancelled.load(Ordering::SeqCst),
-                    |_| panic!("cancelled preparation must not start"),
+            completed
+                .send(
+                    get_or_prepare(
+                        &parent,
+                        &"a".repeat(64),
+                        || worker_cancelled.load(Ordering::SeqCst),
+                        |_| panic!("cancelled preparation must not start"),
+                    )
+                    .err(),
                 )
-                .err(),
-            )
-            .unwrap();
+                .unwrap();
         });
         cancelled.store(true, Ordering::SeqCst);
         assert!(result

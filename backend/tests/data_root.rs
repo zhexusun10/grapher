@@ -33,12 +33,27 @@ fn data_root_resolves_parent_traversal_before_building_session_paths() {
         let profile = base.join("profile.sb");
         let installation = grapher::native::installation_root();
         sandbox::write_execution_profile(
-            &profile, &source, &worktrees, &current, &data, &session, &engine, &installation,
-        ).unwrap();
+            &profile,
+            &source,
+            &worktrees,
+            &current,
+            &data,
+            &session,
+            &engine,
+            &installation,
+        )
+        .unwrap();
         // Do not relax the sandbox's rejection of unnormalized exception paths.
         assert!(sandbox::write_execution_profile(
-            &profile, &source, &worktrees, &current, &data,
-            &alias.join("planning/attempt/planner-session"), &engine, &installation,
-        ).is_err());
+            &profile,
+            &source,
+            &worktrees,
+            &current,
+            &data,
+            &alias.join("planning/attempt/planner-session"),
+            &engine,
+            &installation,
+        )
+        .is_err());
     }
 }

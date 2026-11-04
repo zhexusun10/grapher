@@ -6,11 +6,24 @@ const WRITE: &str = "{\"type\":\"tool_execution_start\",\"toolCallId\":\"write\"
 
 fn execution(bytes: usize, running: bool) -> Execution {
     Execution {
-        id: uuid::Uuid::new_v4().to_string(), node: "worker".into(), revision: 1, attempt: 1,
-        session_id: "session".into(), worktree: "/repo".into(), before: String::new(),
-        workspace_lineage: vec![], after: None, input: None, result: None,
-        status: if running { "running" } else { "completed" }.into(), output: String::new(),
-        output_bytes: bytes, pid: None, started_at: 1, completed_at: None, metrics: None,
+        id: uuid::Uuid::new_v4().to_string(),
+        node: "worker".into(),
+        revision: 1,
+        attempt: 1,
+        session_id: "session".into(),
+        worktree: "/repo".into(),
+        before: String::new(),
+        workspace_lineage: vec![],
+        after: None,
+        input: None,
+        result: None,
+        status: if running { "running" } else { "completed" }.into(),
+        output: String::new(),
+        output_bytes: bytes,
+        pid: None,
+        started_at: 1,
+        completed_at: None,
+        metrics: None,
     }
 }
 
@@ -22,8 +35,14 @@ fn capture_fence(state: &Snapshot, scope: Option<&[String]>) -> WarmFence {
         match capture_warm_fence(state, scope) {
             Ok(fence) => return fence,
             Err(error) => {
-                assert!(error.contains("retry the read"), "unexpected warm-fence error: {error}");
-                assert!(std::time::Instant::now() < deadline, "file-change cache stayed busy: {error}");
+                assert!(
+                    error.contains("retry the read"),
+                    "unexpected warm-fence error: {error}"
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "file-change cache stayed busy: {error}"
+                );
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
@@ -33,7 +52,11 @@ fn capture_fence(state: &Snapshot, scope: Option<&[String]>) -> WarmFence {
 // Sequential tests capture their fence at the snapshot boundary. Race tests
 // retain an earlier token explicitly and call the production helper directly.
 fn snapshot_token(run: &str, exec: &Execution) -> CacheToken {
-    let state = Snapshot { run_id: run.into(), executions: vec![exec.clone()], ..Default::default() };
+    let state = Snapshot {
+        run_id: run.into(),
+        executions: vec![exec.clone()],
+        ..Default::default()
+    };
     capture_fence(&state, None).logs[&exec.id]
 }
 
@@ -51,17 +74,29 @@ fn note_read_only_append(run: &str, exec: &Execution, bytes: usize, running: boo
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         note_read_only_log_append(run, &exec.id, bytes, running);
-        let applied = cache().lock().unwrap().log_state.get(&key).is_some_and(|entry| entry.scanned == Some((bytes, running)));
+        let applied = cache()
+            .lock()
+            .unwrap()
+            .log_state
+            .get(&key)
+            .is_some_and(|entry| entry.scanned == Some((bytes, running)));
         if applied {
             return;
         }
-        assert!(std::time::Instant::now() < deadline, "read-only append hint was not applied");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "read-only append hint was not applied"
+        );
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
-fn warm_execution_log(run: &str, exec: &Execution, repository: &str,
-    read: impl FnOnce(usize) -> Result<String, String>) {
+fn warm_execution_log(
+    run: &str,
+    exec: &Execution,
+    repository: &str,
+    read: impl FnOnce(usize) -> Result<String, String>,
+) {
     super::warm_execution_log(run, exec, repository, snapshot_token(run, exec), read);
 }
 
@@ -77,11 +112,19 @@ fn unchanged_empty_logs_are_parsed_once_but_new_bytes_and_status_revalidate() {
     };
     warm_execution_log(&run, &exec, "/repo", read);
     warm_execution_log(&run, &exec, "/repo", read);
-    assert_eq!(reads.get(), 1, "an authoritative empty parse must be a cache hit");
+    assert_eq!(
+        reads.get(),
+        1,
+        "an authoritative empty parse must be a cache hit"
+    );
     assert!(get_cached_execution_changes(&run, &exec).is_none());
     exec.status = "completed".into();
     warm_execution_log(&run, &exec, "/repo", read);
-    assert_eq!(reads.get(), 2, "terminal status changes invalidate the live parse");
+    assert_eq!(
+        reads.get(),
+        2,
+        "terminal status changes invalidate the live parse"
+    );
     warm_execution_log(&run, &exec, "/repo", read);
     assert_eq!(reads.get(), 2);
     let changed = format!("{READ_ONLY}{WRITE}");
@@ -91,7 +134,10 @@ fn unchanged_empty_logs_are_parsed_once_but_new_bytes_and_status_revalidate() {
         Ok(changed)
     });
     assert_eq!(reads.get(), 3);
-    assert_eq!(get_cached_execution_changes(&run, &exec).unwrap().files[0].path, "new.ts");
+    assert_eq!(
+        get_cached_execution_changes(&run, &exec).unwrap().files[0].path,
+        "new.ts"
+    );
     invalidate_run(&run);
 }
 
@@ -102,9 +148,16 @@ fn known_read_only_appends_advance_the_cursor_without_parsing_history() {
     warm_execution_log(&run, &exec, "/repo", |_| Ok(READ_ONLY.into()));
     exec.output_bytes *= 2;
     note_read_only_append(&run, &exec, exec.output_bytes, true);
-    warm_execution_log(&run, &exec, "/repo", |_| panic!("assistant-only appends do not require a full read"));
+    warm_execution_log(&run, &exec, "/repo", |_| {
+        panic!("assistant-only appends do not require a full read")
+    });
     update_from_log_chunk(&run, &exec.id, "worker", "/repo", "/repo", WRITE, true);
-    assert_eq!(get_cached_execution_changes(&run, &exec).unwrap().total_files, 1);
+    assert_eq!(
+        get_cached_execution_changes(&run, &exec)
+            .unwrap()
+            .total_files,
+        1
+    );
     invalidate_run(&run);
 }
 
@@ -112,7 +165,9 @@ fn known_read_only_appends_advance_the_cursor_without_parsing_history() {
 fn failed_or_partial_reads_do_not_poison_the_empty_cache() {
     let run = uuid::Uuid::new_v4().to_string();
     let exec = execution(READ_ONLY.len(), false);
-    warm_execution_log(&run, &exec, "/repo", |_| Err("temporary read failure".into()));
+    warm_execution_log(&run, &exec, "/repo", |_| {
+        Err("temporary read failure".into())
+    });
     warm_execution_log(&run, &exec, "/repo", |_| Ok("partial".into()));
     let reads = Cell::new(0);
     for _ in 0..2 {
@@ -121,7 +176,11 @@ fn failed_or_partial_reads_do_not_poison_the_empty_cache() {
             Ok(READ_ONLY.into())
         });
     }
-    assert_eq!(reads.get(), 1, "a successful retry is cached, earlier failures are not");
+    assert_eq!(
+        reads.get(),
+        1,
+        "a successful retry is cached, earlier failures are not"
+    );
     invalidate_run(&run);
 }
 
@@ -133,7 +192,12 @@ fn cold_parses_cannot_overwrite_live_output_or_terminal_settlement() {
         update_from_log_chunk(&run, &exec.id, "worker", "/repo", "/repo", WRITE, true);
         Ok(READ_ONLY.into())
     });
-    assert_eq!(get_cached_execution_changes(&run, &exec).unwrap().total_files, 1);
+    assert_eq!(
+        get_cached_execution_changes(&run, &exec)
+            .unwrap()
+            .total_files,
+        1
+    );
     invalidate_run(&run);
 
     let pending = WRITE.lines().next().unwrap().to_string() + "\n";
@@ -143,7 +207,10 @@ fn cold_parses_cannot_overwrite_live_output_or_terminal_settlement() {
         settle(&run, &exec.id);
         Ok(pending)
     });
-    assert!(get_cached_execution_changes(&run, &exec).is_none(), "stale pending writes must not reappear");
+    assert!(
+        get_cached_execution_changes(&run, &exec).is_none(),
+        "stale pending writes must not reappear"
+    );
     invalidate_run(&run);
 }
 
@@ -161,7 +228,12 @@ fn invalidation_fences_its_own_readers_without_discarding_other_runs() {
         invalidate_run(&other);
         Ok(WRITE.into())
     });
-    assert_eq!(get_cached_execution_changes(&run, &exec).unwrap().total_files, 1);
+    assert_eq!(
+        get_cached_execution_changes(&run, &exec)
+            .unwrap()
+            .total_files,
+        1
+    );
     invalidate_run(&run);
 }
 
@@ -171,9 +243,18 @@ fn an_empty_warm_does_not_hide_later_live_tool_changes() {
     let exec = execution(READ_ONLY.len(), true);
     warm_execution_log(&run, &exec, "/repo", |_| Ok(READ_ONLY.into()));
     update_from_log_chunk(&run, &exec.id, "worker", "/repo", "/repo", WRITE, true);
-    assert_eq!(get_cached_execution_changes(&run, &exec).unwrap().total_files, 1);
+    assert_eq!(
+        get_cached_execution_changes(&run, &exec)
+            .unwrap()
+            .total_files,
+        1
+    );
     settle(&run, &exec.id);
-    assert!(!get_cached_execution_changes(&run, &exec).unwrap().is_running);
+    assert!(
+        !get_cached_execution_changes(&run, &exec)
+            .unwrap()
+            .is_running
+    );
     invalidate_run(&run);
 }
 
@@ -185,11 +266,21 @@ fn scoped_warming_skips_other_executions_and_reader_cannot_write() {
     let run = uuid::Uuid::new_v4().to_string();
     let first = execution(0, false);
     let second = execution(0, false);
-    let mut state = Snapshot { run_id: run.clone(), executions: vec![first.clone(), second.clone()], ..Default::default() };
+    let mut state = Snapshot {
+        run_id: run.clone(),
+        executions: vec![first.clone(), second.clone()],
+        ..Default::default()
+    };
     for exec in [&first, &second] {
-        store.append(&mut state, crate::model::EventKind::Output {
-            execution_id: exec.id.clone(), text: READ_ONLY.into(),
-        }).unwrap();
+        store
+            .append(
+                &mut state,
+                crate::model::EventKind::Output {
+                    execution_id: exec.id.clone(),
+                    text: READ_ONLY.into(),
+                },
+            )
+            .unwrap();
     }
     let reader = crate::store::Store::open_reader(&path).unwrap();
     let scope = Some(std::slice::from_ref(&first.id));
@@ -197,20 +288,38 @@ fn scoped_warming_skips_other_executions_and_reader_cannot_write() {
     warm_scoped_changes(&state, &reader, None, scope, &fence);
     {
         let guard = cache().lock().unwrap();
-        let scanned = guard.log_state.get(&(run.clone(), first.id.clone())).and_then(|state| state.scanned);
-        let warmed_second = guard.log_state.contains_key(&(run.clone(), second.id.clone()));
+        let scanned = guard
+            .log_state
+            .get(&(run.clone(), first.id.clone()))
+            .and_then(|state| state.scanned);
+        let warmed_second = guard
+            .log_state
+            .contains_key(&(run.clone(), second.id.clone()));
         drop(guard);
         assert_eq!(scanned, Some((READ_ONLY.len(), false)));
-        assert!(!warmed_second, "a scoped read must not warm unrelated history");
+        assert!(
+            !warmed_second,
+            "a scoped read must not warm unrelated history"
+        );
     }
     let fence = capture_fence(&state, Some(&[]));
     warm_scoped_changes(&state, &reader, None, Some(&[]), &fence);
-    let warmed_second = cache().lock().unwrap().log_state.contains_key(&(run.clone(), second.id.clone()));
+    let warmed_second = cache()
+        .lock()
+        .unwrap()
+        .log_state
+        .contains_key(&(run.clone(), second.id.clone()));
     assert!(!warmed_second);
     let before = reader.log_bytes(&run, &first.id).unwrap();
-    assert!(reader.append(&mut state, crate::model::EventKind::Output {
-        execution_id: first.id.clone(), text: "cannot write".into(),
-    }).is_err());
+    assert!(reader
+        .append(
+            &mut state,
+            crate::model::EventKind::Output {
+                execution_id: first.id.clone(),
+                text: "cannot write".into(),
+            }
+        )
+        .is_err());
     assert_eq!(reader.log_bytes(&run, &first.id).unwrap(), before);
     invalidate_run(&run);
 }
@@ -226,9 +335,14 @@ fn stale_running_snapshot_cannot_replace_a_newer_terminal_empty_result() {
     terminal.status = "failed".into();
     terminal.output_bytes = closed.len();
     warm_execution_log(&run, &terminal, "/repo", |_| Ok(closed.clone()));
-    super::warm_execution_log(&run, &stale, "/repo", token, |_| panic!("stale snapshot must be rejected before I/O"));
+    super::warm_execution_log(&run, &stale, "/repo", token, |_| {
+        panic!("stale snapshot must be rejected before I/O")
+    });
     warm_execution_log(&run, &terminal, "/repo", |_| Ok(closed));
-    assert!(get_cached_execution_changes(&run, &terminal).is_none(), "a failed write cannot reappear in the final summary");
+    assert!(
+        get_cached_execution_changes(&run, &terminal).is_none(),
+        "a failed write cannot reappear in the final summary"
+    );
     invalidate_run(&run);
 }
 
@@ -240,7 +354,9 @@ fn settlement_before_cold_io_invalidates_the_snapshot_fence() {
     update_from_log_chunk(&run, &exec.id, "worker", "/repo", "/repo", &pending, true);
     let token = snapshot_token(&run, &exec);
     settle(&run, &exec.id);
-    super::warm_execution_log(&run, &exec, "/repo", token, |_| panic!("settled writer has superseded this snapshot"));
+    super::warm_execution_log(&run, &exec, "/repo", token, |_| {
+        panic!("settled writer has superseded this snapshot")
+    });
     assert!(get_cached_execution_changes(&run, &exec).is_none());
     invalidate_run(&run);
 }
@@ -252,11 +368,16 @@ fn snapshot_fence_preserves_reads_that_arrived_before_cold_io() {
     let token = snapshot_token(&run, &exec);
     let read_start = "{\"type\":\"tool_execution_start\",\"toolCallId\":\"read\",\"toolName\":\"read\",\"args\":{\"path\":\"new.ts\"}}\n";
     update_from_log_chunk(&run, &exec.id, "worker", "/repo", "/repo", read_start, true);
-    super::warm_execution_log(&run, &exec, "/repo", token, |_| panic!("older prefix must not overwrite a newer pending read"));
+    super::warm_execution_log(&run, &exec, "/repo", token, |_| {
+        panic!("older prefix must not overwrite a newer pending read")
+    });
     let read_end = "{\"type\":\"tool_execution_end\",\"toolCallId\":\"read\",\"toolName\":\"read\",\"isError\":false}\n";
     update_from_log_chunk(&run, &exec.id, "worker", "/repo", "/repo", read_end, true);
     update_from_log_chunk(&run, &exec.id, "worker", "/repo", "/repo", WRITE, true);
-    assert_eq!(get_cached_execution_changes(&run, &exec).unwrap().files[0].status, "modified");
+    assert_eq!(
+        get_cached_execution_changes(&run, &exec).unwrap().files[0].status,
+        "modified"
+    );
     invalidate_run(&run);
 }
 
@@ -267,20 +388,33 @@ fn read_only_cursor_hints_do_not_block_another_runs_event_commit() {
     let writer = crate::store::Store::open(&path).unwrap();
     let other = crate::store::Store::open(&path).unwrap();
     let exec = execution(0, true);
-    let mut a = Snapshot { run_id: uuid::Uuid::new_v4().to_string(), executions: vec![exec.clone()], ..Default::default() };
-    let mut b = Snapshot { run_id: uuid::Uuid::new_v4().to_string(), ..Default::default() };
+    let mut a = Snapshot {
+        run_id: uuid::Uuid::new_v4().to_string(),
+        executions: vec![exec.clone()],
+        ..Default::default()
+    };
+    let mut b = Snapshot {
+        run_id: uuid::Uuid::new_v4().to_string(),
+        ..Default::default()
+    };
     // A display reader may hold this global cache while merging a large Run.
     let reading = cache().lock().unwrap();
     let (a_tx, a_rx) = std::sync::mpsc::channel();
     let thread_a = std::thread::spawn(move || {
-        a_tx.send(writer.append(&mut a, crate::model::EventKind::Output {
-            execution_id: exec.id, text: READ_ONLY.into(),
-        })).unwrap();
+        a_tx.send(writer.append(
+            &mut a,
+            crate::model::EventKind::Output {
+                execution_id: exec.id,
+                text: READ_ONLY.into(),
+            },
+        ))
+        .unwrap();
     });
     let a_done = a_rx.recv_timeout(std::time::Duration::from_secs(1));
     let (b_tx, b_rx) = std::sync::mpsc::channel();
     let thread_b = std::thread::spawn(move || {
-        b_tx.send(other.append(&mut b, crate::model::EventKind::Paused { paused: true })).unwrap();
+        b_tx.send(other.append(&mut b, crate::model::EventKind::Paused { paused: true }))
+            .unwrap();
     });
     let b_done = b_rx.recv_timeout(std::time::Duration::from_secs(1));
     // Release before asserting/joining, so a regression fails rather than
@@ -288,19 +422,31 @@ fn read_only_cursor_hints_do_not_block_another_runs_event_commit() {
     drop(reading);
     thread_a.join().unwrap();
     thread_b.join().unwrap();
-    assert!(matches!(a_done, Ok(Ok(()))), "text output waited for the display cache: {a_done:?}");
-    assert!(matches!(b_done, Ok(Ok(()))), "an unrelated Run commit was blocked: {b_done:?}");
+    assert!(
+        matches!(a_done, Ok(Ok(()))),
+        "text output waited for the display cache: {a_done:?}"
+    );
+    assert!(
+        matches!(b_done, Ok(Ok(()))),
+        "an unrelated Run commit was blocked: {b_done:?}"
+    );
 }
 
 #[test]
 fn snapshot_fence_capture_does_not_wait_while_the_run_is_locked() {
     let reading = cache().lock().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let thread = std::thread::spawn(move || tx.send(capture_warm_fence(&Snapshot::default(), None).map(|_| ())).unwrap());
+    let thread = std::thread::spawn(move || {
+        tx.send(capture_warm_fence(&Snapshot::default(), None).map(|_| ()))
+            .unwrap()
+    });
     let result = rx.recv_timeout(std::time::Duration::from_secs(1));
     drop(reading);
     thread.join().unwrap();
-    assert!(matches!(result, Ok(Err(_))), "cache contention must be retryable, not block the Run mutex");
+    assert!(
+        matches!(result, Ok(Err(_))),
+        "cache contention must be retryable, not block the Run mutex"
+    );
 }
 
 #[test]
@@ -312,10 +458,19 @@ fn empty_planner_warms_are_cached_and_live_writes_supersede_them() {
     let directory = temp.path().join("planning").join(&planning);
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join("planner.jsonl"), READ_ONLY).unwrap();
-    let state = Snapshot { run_id: run.clone(), planning_id: Some(planning.clone()), ..Default::default() };
+    let state = Snapshot {
+        run_id: run.clone(),
+        planning_id: Some(planning.clone()),
+        ..Default::default()
+    };
     warm_run(&state, &store, Some(temp.path()));
     let planning_key = (run.clone(), planning.clone());
-    let warmed = cache().lock().unwrap().planning_changes.get(&planning_key).cloned();
+    let warmed = cache()
+        .lock()
+        .unwrap()
+        .planning_changes
+        .get(&planning_key)
+        .cloned();
     assert!(warmed.is_some_and(|summary| summary.is_empty()));
     update_planning_from_log_chunk(&run, &planning, "/repo", "/repo", WRITE);
     warm_run(&state, &store, Some(temp.path()));

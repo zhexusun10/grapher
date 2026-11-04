@@ -78,7 +78,14 @@ impl Target {
             Self::Data { bucket, id } => {
                 if !matches!(
                     bucket.as_str(),
-                    "sessions" | "planning" | "mergers" | "planner-sessions" | "partition-workers" | "environments" | "file-changes" | "attachment-inputs"
+                    "sessions"
+                        | "planning"
+                        | "mergers"
+                        | "planner-sessions"
+                        | "partition-workers"
+                        | "environments"
+                        | "file-changes"
+                        | "attachment-inputs"
                 ) || !safe_id(id)
                 {
                     return Err("Invalid owned session directory".into());
@@ -223,7 +230,10 @@ pub(crate) fn remember_event(
         targets.extend(configuration_targets(root, &state.run_id, config)?);
     }
     match kind {
-        EventKind::EnvironmentPolicyResolved { environment: Some(_), .. } => {
+        EventKind::EnvironmentPolicyResolved {
+            environment: Some(_),
+            ..
+        } => {
             targets.insert(Target::data("environments", &state.run_id));
         }
         EventKind::Started { execution, .. } => {
@@ -461,7 +471,6 @@ pub(crate) fn validate(root: &Path, run_id: &str, manifest: &Manifest) -> Result
     Ok(())
 }
 
-
 /// Commits that another live Run may still resolve while its node results are
 /// prepared. They keep their `refs/grapher/heads/*` pins during a deleted Run's
 /// object reclamation even if no current ref points at them yet.
@@ -511,7 +520,10 @@ fn protected_shadow_objects(store: &Store, excluded: &str) -> Result<BTreeSet<St
                     source_head: Some(head),
                     ..
                 }
-                | EventKind::ManualGraphRevised { source_head: Some(head), .. } => add(head),
+                | EventKind::ManualGraphRevised {
+                    source_head: Some(head),
+                    ..
+                } => add(head),
                 _ => {}
             }
         }
@@ -580,11 +592,21 @@ pub(crate) fn execute(root: &Path, store: &Store, task: &Task) -> Result<(), Str
                     if let Some(source) = source {
                         let lock = crate::workspace::host_ref_lock(source)?;
                         let _guard = lock.lock().map_err(|error| error.to_string())?;
-                        crate::workspace::prune_shadow_run_refs(&path, &task.run_id, &protected, true)?;
+                        crate::workspace::prune_shadow_run_refs(
+                            &path,
+                            &task.run_id,
+                            &protected,
+                            true,
+                        )?;
                     } else {
                         // Legacy ownership lacks the source lock. Refs are safe
                         // to remove; object GC waits for an offline cleanup.
-                        crate::workspace::prune_shadow_run_refs(&path, &task.run_id, &protected, false)?;
+                        crate::workspace::prune_shadow_run_refs(
+                            &path,
+                            &task.run_id,
+                            &protected,
+                            false,
+                        )?;
                     }
                 }
             }

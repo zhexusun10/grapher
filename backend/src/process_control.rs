@@ -117,15 +117,24 @@ pub(crate) fn planning_owner(run: &str) -> String {
     format!("{run}:planner")
 }
 pub(crate) fn stop_owner(owner: &str) -> Result<(), String> {
-    stopped_owners().lock().map_err(|e| e.to_string())?.insert(owner.into());
+    stopped_owners()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(owner.into());
     terminate_owner(owner);
     Ok(())
 }
 pub(crate) fn clear_owner_stop(owner: &str) {
-    if let Ok(mut stopped) = stopped_owners().lock() { stopped.remove(owner); }
+    if let Ok(mut stopped) = stopped_owners().lock() {
+        stopped.remove(owner);
+    }
 }
 fn check_owner_stop(owner: &str) -> Result<(), String> {
-    if stopped_owners().lock().map_err(|e| e.to_string())?.contains(owner) {
+    if stopped_owners()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .contains(owner)
+    {
         Err("Execution paused by user".into())
     } else {
         Ok(())
@@ -873,12 +882,18 @@ mod tests {
             command.stdout(Stdio::null()).stderr(Stdio::null());
             configure_command(&mut command);
             let mut child = command.spawn().unwrap();
-            assert!(track(&child).is_err(), "late process must acknowledge cancellation");
+            assert!(
+                track(&child).is_err(),
+                "late process must acknowledge cancellation"
+            );
             assert!(!child.wait().unwrap().success());
         });
-        with_owner(&execution_owner("late-pause-test", "worker", "next"), || {
-            check_current_owner_stop().unwrap();
-        });
+        with_owner(
+            &execution_owner("late-pause-test", "worker", "next"),
+            || {
+                check_current_owner_stop().unwrap();
+            },
+        );
         clear_owner_stop(&owner);
         assert!(check_owner_stop(&owner).is_ok());
     }
@@ -941,7 +956,10 @@ mod tests {
         let (mut worker, worker_tree) = spawn(&execution);
         stop_owner(&planning).unwrap();
         assert!(!planner.wait().unwrap().success());
-        assert!(worker.try_wait().unwrap().is_none(), "planning cancellation must not touch a node agent");
+        assert!(
+            worker.try_wait().unwrap().is_none(),
+            "planning cancellation must not touch a node agent"
+        );
         // A run-wide termination still matches the planning owner by prefix.
         terminate_owner(run);
         assert!(!worker.wait().unwrap().success());
@@ -1077,7 +1095,10 @@ child.once('error',()=>process.exit(1)); child.unref();
 const deadline=setTimeout(()=>process.exit(2),5000);
 const ready=setInterval(()=>{if(fs.existsSync(started)){clearInterval(ready);clearTimeout(deadline)}},10);"#;
         let mut command = Command::new(crate::native::trusted_node().unwrap());
-        command.args(["-e", parent, writer]).arg(&started).arg(&done);
+        command
+            .args(["-e", parent, writer])
+            .arg(&started)
+            .arg(&done);
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
