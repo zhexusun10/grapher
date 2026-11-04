@@ -204,7 +204,10 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       const onScrollbar = scrollbarWidth > 0
         ? event.clientX >= body.getBoundingClientRect().right - scrollbarWidth
         : event.target === body && event.clientX >= body.getBoundingClientRect().right - 14;
-      if (onScrollbar) stopFollowingInsideCard();
+      // A stable scrollbar gutter is reserved even on a short card where no
+      // scrollbar exists. A pointer there cannot move the body, so it must not
+      // turn the card's own follow state off.
+      if (onScrollbar && cardBodyCanScroll()) stopFollowingInsideCard();
     };
 
     const handleCopy = (e: React.MouseEvent) => {

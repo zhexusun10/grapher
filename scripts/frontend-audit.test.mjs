@@ -38,8 +38,8 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await server?.close(); });
 
-async function fixture(name, handler = async () => false, reducedMotion = "reduce", autoExpandCot = undefined, clockTime = undefined) {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion });
+async function fixture(name, handler = async () => false, reducedMotion = "reduce", autoExpandCot = undefined, clockTime = undefined, browserInstance = browser) {
+  const context = await browserInstance.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion });
   await context.addInitScript(enabled => {
     localStorage.setItem("grapher_language_v1", "en");
     // COT cards auto-expand by default; "0" disables, "1" enables.
@@ -915,6 +915,58 @@ test("scrolling over a short reasoning card does not leave its future content un
     assert.ok(gap <= 2, `the card must resume following its own newest reasoning: ${gap}`);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
+});
+
+test("a growing reasoning card reserves its scrollbar track instead of rewrapping mid-stream", { timeout: 30_000 }, async () => {
+  // Playwright hides scrollbars by default, while Grapher paints its own 10px
+  // track. Launch with classic scrollbars so the width change is observable.
+  const scrollbarBrowser = await chromium.launch({
+    channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"),
+    headless: true, ignoreDefaultArgs: ["--hide-scrollbars"],
+  });
+  let context;
+  try {
+    const view = await fixture("thinking", undefined, "reduce", undefined, undefined, scrollbarBrowser);
+    context = view.context;
+    const { page, errors } = view;
+    await page.evaluate(() => {
+      window.audit.append({ type: "message_start", message: { role: "assistant", content: [] } });
+      window.audit.append({ type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } });
+      window.audit.append({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "SHORT_REASONING" } });
+    });
+    const body = page.locator('[data-thinking-view="live"] .thinking-card-body');
+    await body.waitFor();
+    await body.getByText("SHORT_REASONING").waitFor();
+    const measure = () => body.evaluate(element => ({
+      clientWidth: element.clientWidth, offsetWidth: element.offsetWidth,
+      scrollable: element.scrollHeight > element.clientHeight + 1,
+      gutter: getComputedStyle(element).scrollbarGutter,
+    }));
+    const short = await measure();
+    assert.equal(short.scrollable, false, "the initial card does not need a scrollbar");
+    assert.equal(short.gutter, "stable");
+    // The reserved gutter is not a scrollbar yet. Clicking it on this short card
+    // must not count as a scrollbar gesture and stop the card's own following.
+    const bounds = await body.boundingBox();
+    await page.mouse.click(bounds.x + bounds.width - 4, bounds.y + 20);
+    await page.evaluate(() => window.audit.append({ type: "message_update", assistantMessageEvent: {
+      type: "thinking_delta", contentIndex: 0,
+      delta: "\n\n" + Array.from({ length: 60 }, (_, index) => `GROWING_REASONING_${index} with enough detail to wrap`).join("\n\n"),
+    } }));
+    await page.waitForFunction(() => {
+      const element = document.querySelector('[data-thinking-view="live"] .thinking-card-body');
+      return element && element.scrollHeight > element.clientHeight + 1;
+    });
+    const tall = await measure();
+    assert.equal(tall.scrollable, true, "the grown card scrolls internally");
+    assert.equal(tall.clientWidth, short.clientWidth,
+      `the scrollbar must not narrow the reasoning: ${JSON.stringify({ short, tall })}`);
+    assert.equal(tall.offsetWidth, short.offsetWidth);
+    await page.waitForTimeout(100);
+    const gap = await body.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight);
+    assert.ok(gap <= 2, `the card still follows its newest reasoning after the gutter click: ${gap}`);
+    assert.deepEqual(errors, []);
+  } finally { await context?.close(); await scrollbarBrowser.close(); }
 });
 
 test("focusing an older reasoning card keeps keyboard navigation in place during live output", { timeout: 30_000 }, async () => {

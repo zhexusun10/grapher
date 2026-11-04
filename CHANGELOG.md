@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A streaming Chain of Thought card now reserves its internal scrollbar track before the body reaches its height cap. Letting the app-painted scrollbar appear only at the cap narrowed the Markdown and rewrapped every reasoning line mid-stream, which looked like the card's content jittering during fast output.
 - A Node or Planner history page that finishes loading after the reader has already scrolled up now keeps that visible row in place. Background auto-fill started while the conversation was still following the bottom no longer jumps the reader into an earlier part of the loaded history when the older page commits.
 - Opening a reviewed Graph Run now seeds the preceding Planner turn even when the latest review fills the viewport by itself, so the earlier Planner conversation remains in scrollback instead of appearing to vanish. A live review also keeps committed earlier Planner turns while its recovery markers are still settling.
 - Planner follow-ups can safely continue in a prepared workspace after its execution was superseded by a graph revision. Historical Planner writes are retained separately without reassigning the workspace to an older attempt or advancing the new node's result.

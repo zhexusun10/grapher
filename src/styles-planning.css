@@ -347,6 +347,10 @@
   max-height: 420px;
   overflow-y: auto;
   overflow-anchor: none;
+  /* Reserve the track from the first reasoning line. With the app-painted
+     10px scrollbars, letting it appear only when the body overflows would
+     narrow the Markdown and rewrap every line mid-stream. */
+  scrollbar-gutter: stable;
   /* Keep wheel/touch scrolling inside the reasoning viewport. Chaining it to
      the conversation would turn an inner read into an outer scroll-up. */
   overscroll-behavior: contain;
