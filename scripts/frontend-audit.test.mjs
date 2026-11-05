@@ -1849,6 +1849,12 @@ for (const fixtureName of ["landingPrompt", "compactModePrompt"]) {
             "the pill settles on the selected mode");
           assert.equal(await selector.getByRole("button", { name: mode, exact: true }).getAttribute("aria-pressed"), "true");
         }
+        // The pill reprojects from the previous button, so it paints outside the
+        // button it belongs to for most of its flight. Any clipping ancestor
+        // (overflow other than visible) swallows the slide into a sudden pop.
+        const clippedBy = await selector.evaluate(element => [element, ...element.querySelectorAll("button")]
+          .filter(node => getComputedStyle(node).overflow !== "visible").map(node => node.className));
+        assert.deepEqual(clippedBy, [], "the sliding pill must not be clipped by the mode selector or its buttons");
         // Repeated reversals arrive before the spring settles, not only after
         // completed animations. The track and labels must not accumulate drift.
         const rapidFrames = await selector.evaluate(selector => new Promise(resolve => {

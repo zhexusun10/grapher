@@ -2197,7 +2197,11 @@ a,
   line-height: 1;
   height: 25px;
   min-width: 0;
-  overflow: hidden;
+  /* The sliding pill is an absolutely positioned child of the selected button
+     and reprojects from the previously selected one, so it spends most of its
+     flight outside its own button. Clipping here hides the slide and the pill
+     just pops in; the label clips itself instead (see .prompt-box-mode-text). */
+  overflow: visible;
   display: inline-grid;
   align-items: center;
   justify-content: center;
