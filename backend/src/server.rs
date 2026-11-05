@@ -1393,6 +1393,7 @@ fn validate_planning_models_preflight(
     Ok(())
 }
 
+#[cfg(not(feature = "fixture"))]
 fn provider_for_model<'a>(providers: &'a [serde_json::Value], model: &str) -> Option<&'a str> {
     // Provider ids may contain "/" themselves, so match known ids longest
     // first instead of taking the first path segment. This mirrors Pi's own

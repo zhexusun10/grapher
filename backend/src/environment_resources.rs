@@ -229,6 +229,25 @@ print(json.dumps({'backend':'cuda','framework':torch.__version__,'runtime':torch
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `flock` is per open file description and `fork` shares it, so a
+    /// concurrently forked child (any test that spawns a process) can still
+    /// hold an inherited description for a moment after this process drops it.
+    /// Require the lease to be free, but allow that brief window: a real fd leak
+    /// never releases, so it still fails.
+    fn acquire_released(root: &Path, ids: &[String]) -> DeviceLease {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match acquire_ids(root, ids) {
+                Ok(lease) => return lease,
+                Err(error) if error.contains("busy") && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("Device leases were not released: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn leases_are_exclusive_across_threads_and_release_partial_multi_device_acquisition() {
         let root = tempfile::tempdir().unwrap();
@@ -240,7 +259,9 @@ mod tests {
             conflict.contains("busy"),
             "expected lease conflict, got: {conflict}"
         );
-        let a_lease = acquire_ids(root.path(), &[a.clone()]).unwrap();
+        // The rejected multi-device attempt must release the device it already
+        // took, so a single-device acquisition of it succeeds again.
+        let a_lease = acquire_released(root.path(), &[a.clone()]);
         let path = root.path().to_path_buf();
         let other = b.clone();
         assert!(
@@ -250,21 +271,7 @@ mod tests {
         );
         drop(held);
         drop(a_lease);
-        // `flock` is per open file description and `fork` shares it, so a
-        // concurrently forked child (any test that spawns a process) can still
-        // hold the inherited description for a moment after this process drops
-        // it. Require the leases to be released, but allow that brief window: a
-        // real fd leak never releases, so it still fails.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            match acquire_ids(root.path(), &[a.clone(), b.clone()]) {
-                Ok(_reacquired) => break,
-                Err(_) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(error) => panic!("Device leases were not released: {error}"),
-            }
-        }
+        drop(acquire_released(root.path(), &[a, b]));
     }
     #[test]
     fn lease_subprocess() {
@@ -312,7 +319,7 @@ mod tests {
             acquired && busy,
             "Independent native process must hold the same exclusive lease"
         );
-        acquire_ids(root.path(), &[id]).unwrap();
+        drop(acquire_released(root.path(), &[id]));
     }
 
     #[cfg(windows)]
