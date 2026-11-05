@@ -8,9 +8,6 @@ on:
 permissions:
   contents: read
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-
 jobs:
   npm-audit:
     name: npm audit / ${{ matrix.scope }}
@@ -21,10 +18,10 @@ jobs:
       matrix:
         scope: [grapher, pi]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22.19.0'
           cache: npm
@@ -49,7 +46,7 @@ jobs:
         run: npm audit --prefix engine/pi-dependencies --omit=dev --audit-level=high --json | tee npm-audit-production.json
       - name: Retain audit evidence even when advisories fail the job
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: npm-audit-${{ matrix.scope }}
           path: npm-audit*.json
@@ -60,7 +57,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Install a pinned audit client
         run: cargo install cargo-audit --version 0.22.0 --locked
@@ -69,7 +66,7 @@ jobs:
         run: cargo audit --file backend/Cargo.lock --json | tee rust-audit.json
       - name: Retain Rust audit evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rust-audit
           path: rust-audit.json

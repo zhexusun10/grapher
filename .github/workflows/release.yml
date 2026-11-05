@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-
 jobs:
   build-release:
     name: Build and smoke-test release
@@ -36,10 +33,10 @@ jobs:
             arch: x64
             artifact: grapher-windows-x64.zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22.19.0'
           cache: npm
@@ -67,7 +64,7 @@ jobs:
         run: node scripts/smoke-release.mjs ${{ matrix.artifact }} ${{ matrix.platform }} ${{ matrix.arch }}
       - name: Generate checksum
         run: node --input-type=module -e "import {createHash} from 'node:crypto'; import {readFileSync,writeFileSync} from 'node:fs'; const file='${{ matrix.artifact }}'; writeFileSync(file+'.sha256', createHash('sha256').update(readFileSync(file)).digest('hex')+'  '+file+'\n');"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.platform }}-${{ matrix.arch }}
           path: |
@@ -79,8 +76,8 @@ jobs:
     needs: build-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
         with:
           path: release-assets
           merge-multiple: true
