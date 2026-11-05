@@ -5803,6 +5803,33 @@ pub(crate) fn perform_result(
     })
 }
 
+/// Whether `input` is still an input composition would merge. A post-publication
+/// rebaseline recreates a plain folder's shadow snapshot, which reclaims the
+/// parent commits and project views recorded before it; composition skips such
+/// an input because the prepared source snapshot already carries its content.
+/// Recovery must apply the same rule, or a reclaimed head would be reported as a
+/// changed input and block the preserved partial work forever. Standard Git keeps
+/// its strict inputs: there a vanished commit means real repository damage.
+fn prepared_input_available(
+    repository: &Path,
+    path: &Path,
+    standard_git: bool,
+    input: &str,
+) -> bool {
+    if standard_git {
+        return true;
+    }
+    if workspace::repository_git(
+        repository,
+        &["cat-file", "-e", &format!("{input}^{{commit}}")],
+    )
+    .is_err()
+    {
+        return false;
+    }
+    !crate::workspace_view::is_bound(path) || crate::workspace_view::has_record(repository, input)
+}
+
 pub fn perform_with_merger(
     job: &Job,
     root: &Path,
@@ -5878,6 +5905,9 @@ fn perform_with_merger_inner(
             return Err("Recovery workspace is missing or reassigned; refusing to replace preserved partial work".into());
         }
         workspace::verify_prepared_ancestor(path, &previous.before)?;
+        // Only inputs that composition would still merge can have moved. A head
+        // reclaimed by a rebaseline is already part of the prepared snapshot.
+        let standard_git = workspace::is_standard_git(&repository);
         for input in job
             .parent_heads
             .iter()
@@ -5889,6 +5919,7 @@ fn perform_with_merger_inner(
             )
         {
             if !input.is_empty()
+                && prepared_input_available(&repository, path, standard_git, input)
                 && workspace::git(
                     path,
                     &["merge-base", "--is-ancestor", input, &previous.before],

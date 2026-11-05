@@ -374,7 +374,11 @@ After interruption:
   snapshot. Recovery never stashes, checks out or resets that directory. If the
   recorded inputs changed after preparation, the workspace is missing, or the
   prepared Git history was rewritten, the retry fails explicitly while
-  retaining the partial work instead of silently rebuilding it.
+  retaining the partial work instead of silently rebuilding it. An input whose
+  evidence was reclaimed—an older parent commit or project view removed by a
+  post-publication rebaseline—is not a change: composition already ignores it
+  because the prepared snapshot carries its delivered content, and recovery
+  would otherwise block the preserved work forever.
 - Interrupted planning becomes failed, preserving available output.
 - Interrupted publication or its Merger becomes `publication_failed` for explicit retry.
 - An interrupted node-composition Merger is recorded as failed without entering the publication phase; inspect the node workspace and rerun or resolve it.

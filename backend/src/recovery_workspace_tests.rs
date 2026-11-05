@@ -490,6 +490,92 @@ fn recovery_refuses_changed_inputs_without_resetting_partial_work() {
 }
 
 #[test]
+fn recovery_ignores_a_reclaimed_parent_head_instead_of_calling_it_a_changed_input() {
+    // A post-publication rebaseline recreates a plain folder's shadow snapshot,
+    // reclaiming the parent commit recorded before it. Composition already drops
+    // such an input because the prepared snapshot carries its content, so recovery
+    // must not report the dangling head as a changed input.
+    let (temp, source, mut runtime, worker) = prepared_worker(false);
+    let path = PathBuf::from(&worker.execution.worktree);
+    let head = workspace::git(&path, &["rev-parse", "HEAD"]).unwrap();
+    dirty_workspace(&path);
+    runtime
+        .finish(
+            &worker.execution,
+            Err("Application stopped during this execution".into()),
+        )
+        .unwrap();
+    runtime.pause(false).unwrap();
+    let mut retry = runtime.jobs().unwrap().remove(0);
+    let reclaimed = "0".repeat(40);
+    assert!(
+        workspace::repository_git(
+            &source,
+            &["cat-file", "-e", &format!("{reclaimed}^{{commit}}")],
+        )
+        .is_err(),
+        "the fixture must use an input no longer present in the repository"
+    );
+    retry.parent_heads = vec![reclaimed];
+    local_agent(&mut retry, &temp);
+    let root = runtime.root.clone();
+    let result = perform(
+        &retry,
+        &root,
+        &[],
+        |_| {},
+        |prepared| {
+            assert_eq!(
+                prepared, head,
+                "a reclaimed input must not recompose preserved work"
+            );
+            runtime.emit(EventKind::Prepared {
+                execution_id: retry.execution.id.clone(),
+                head: prepared,
+            })
+        },
+    );
+    runtime.finish(&retry.execution, result.clone()).unwrap();
+    result.expect("a reclaimed parent head must not block preserved recovery");
+    assert_eq!(runtime.state.nodes["worker"].status, "completed");
+    assert_partial_work(&path);
+}
+
+#[test]
+fn recovery_still_refuses_an_unresolvable_parent_head_for_standard_git() {
+    // Standard Git never rebaselines its history, so a recorded parent that no
+    // longer resolves means the repository lost evidence. Keep refusing there.
+    let (temp, _source, mut runtime, worker) = prepared_worker(true);
+    let path = PathBuf::from(&worker.execution.worktree);
+    let head = workspace::git(&path, &["rev-parse", "HEAD"]).unwrap();
+    dirty_workspace(&path);
+    runtime
+        .finish(
+            &worker.execution,
+            Err("Application stopped during this execution".into()),
+        )
+        .unwrap();
+    runtime.pause(false).unwrap();
+    let mut retry = runtime.jobs().unwrap().remove(0);
+    retry.parent_heads = vec!["0".repeat(40)];
+    local_agent(&mut retry, &temp);
+    let error = perform(
+        &retry,
+        &runtime.root,
+        &[],
+        |_| {},
+        |_| panic!("must fail before Prepared"),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("input") && error.contains("preserv"),
+        "{error}"
+    );
+    assert_eq!(workspace::git(&path, &["rev-parse", "HEAD"]).unwrap(), head);
+    assert_partial_work(&path);
+}
+
+#[test]
 fn recovery_refuses_missing_workspace_without_creating_a_replacement() {
     let (temp, _source, mut runtime, worker) = prepared_worker(true);
     let path = PathBuf::from(&worker.execution.worktree);
