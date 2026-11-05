@@ -237,7 +237,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
   const panelRef = useRef<HTMLDivElement>(null);
 
   return (
-    <div ref={panelRef} className={`workspace-details ${isOpen ? "open" : ""}`} style={{ marginTop: 12 }}>
+    <div ref={panelRef} className={`workspace-details ${isOpen ? "open" : ""}`}>
       {showWorking && (
         <div className="working-indicator" role="status" aria-live="polite">
           <span className="working-indicator-dot" />
@@ -514,12 +514,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     : isNodeMergerSelected
       ? t("merger · {0}", nodeMergerTarget)
       : (selectedNode?.name ?? "");
-  const placeholderNodeName = useMemo(() => {
-    if (!selectedNode?.name) return "";
-    return selectedNode.name.length > 16
-      ? `${selectedNode.name.slice(0, 14)}…`
-      : selectedNode.name;
-  }, [selectedNode?.name]);
   const selectedMergerContinuable = !!selectedMerger && !selectedMergerRunning &&
     (selectedMerger.node === "merger" || selectedMerger.status === "failed");
   const nodeMessages = useMemo(() => {
@@ -2081,6 +2075,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     (state.approved && state.phase === "running" && serialNodeState?.status === "waiting")
   );
   const isMainViewWorking = routeType === "serial" ? (isPlanning || isSerialAwaitingStart || isSerialWorking) : isPlanning;
+  // A disabled composer keeps an empty placeholder; an idle one invites typing.
+  const nodeComposerDisabled = locked || !!editingMessage || !state.approved ||
+    (!!selectedMerger && !selectedMergerRunning && !selectedMergerContinuable);
+  const mainComposerDisabled = !!editingMessage || (locked && !isPlanning);
   // Live SSE and the durable-JSONL poller can both observe the Planner's
   // compaction; either source is enough to relabel the working indicator.
   const isMainViewCompacting = isMainViewWorking &&
@@ -2720,32 +2718,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 runId={state.runId}
                 node={conversationNode}
                 onSubmit={handleSendMessageWithScroll}
-                placeholder={
-                  !state.approved
-                    ? t("图规划审批启动后，可在此向选定节点发送介入指令…")
-                    : selectedMerger
-                      ? (selectedMergerRunning
-                        ? t("向 merger 实时发送 Steer（当前工具调用后生效）…")
-                        : selectedMergerContinuable
-                          ? (selectedMerger.status === "failed"
-                            ? t("向 merger 发送消息并重跑…")
-                            : t("向 publication merger 追加消息…"))
-                          : t("merger 已结束，只能查看执行记录"))
-                      : isSelectedNodeWorking
-                        ? t("向 @{0} 实时发送 Steer（当前工具调用后生效）…", placeholderNodeName)
-                        : selectedState?.status === "completed"
-                          ? t("向 @{0} 发送消息并继续执行…", placeholderNodeName)
-                          : t("向 @{0} 发送介入指令…", placeholderNodeName)
-                }
+                placeholder={nodeComposerDisabled ? "" : isSelectedNodeWorking || selectedMergerRunning ? t("Steer...") : t("Type...")}
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(selectedNode?.name); onInterrupt(selectedNode?.name); } : undefined}
-                disabled={
-                  locked ||
-                  !!editingMessage ||
-                  !state.approved ||
-                  (!!selectedMerger && !selectedMergerRunning && !selectedMergerContinuable)
-                }
+                disabled={nodeComposerDisabled}
               />
             </motion.div>
           </div>
@@ -3165,22 +3142,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 runId={state.runId}
                 node={isSerialExecution ? state.graph.nodes[0]?.name : undefined}
                 onSubmit={handleSendMessageWithScroll}
-                placeholder={
-                  isPlanning
-                    ? t("输入补充规划或纠偏要求，发送将实时转向 (Steer)…")
-                    : isSerialExecution
-                      ? t("向当前任务发送介入指令，直接在对话框中继续对话…")
-                      : state.approved
-                        ? t("向规划器修改当前图，保留未受影响的节点结果…")
-                        : t("向规划器追加指令，直接在对话框中继续对话并调整图规划…")
-                }
+                placeholder={mainComposerDisabled ? "" : isMainViewWorking ? t("Steer...") : t("Type...")}
                 isExecuting={isMainViewWorking}
                 isWorking={isMainViewWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(); onInterrupt(); } : undefined}
-                disabled={
-                  !!editingMessage ||
-                  (locked && !isPlanning)
-                }
+                disabled={mainComposerDisabled}
               />
             </motion.div>
           </div>

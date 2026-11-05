@@ -65,6 +65,10 @@ try {
     plan: { executionBatches: [["join"]], roots: ["join"], terminals: ["join"], warnings: [] },
     mergers: [{ ...mergerState.mergers[0], id: "publish-merger", node: "merger", status: "completed" }],
   };
+  const runningMergerState = {
+    ...mergerState,
+    mergers: [{ ...mergerState.mergers[0], id: "merger-running", status: "running", completedAt: null }],
+  };
   const cases = [
     ["layout/Sidebar", "Sidebar", { projects: [], activeRepo: "", runs: [], currentRunId: "", runIndicators: {}, onSelectProject: noop, onOpenProject: noop, onRemoveProject: noop, onLoadRun: noop, onDeleteRun: noop, onNewConversation: noop, onOpenSettings: noop }],
     ["modals/SettingsModal", "SettingsModal", { isOpen: true, config, setConfig: noop, dataPath: "", onClose: noop, onSaveConfig: noop }],
@@ -81,6 +85,7 @@ try {
     ["views/GraphWorkbench", "GraphWorkbench", { state: mergerState, routeType: "graph", selected: "join", setSelected: noop, selectedMergerId: "merger-1", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onOpenFile: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
     ["views/GraphWorkbench", "GraphWorkbench", { state: failedMergerState, routeType: "graph", selected: "join", setSelected: noop, selectedMergerId: "merger-failed", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onOpenFile: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
     ["views/GraphWorkbench", "GraphWorkbench", { state: publicationMergerState, routeType: "graph", selected: "merger:publication", setSelected: noop, selectedMergerId: "publish-merger", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onOpenFile: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
+    ["views/GraphWorkbench", "GraphWorkbench", { state: runningMergerState, routeType: "graph", selected: "join", setSelected: noop, selectedMergerId: "merger-running", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onOpenFile: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
   ];
   for (const [path, name, props] of cases) {
     const module = await vite.ssrLoadModule(`/src/components/${path}.tsx`);
@@ -106,15 +111,14 @@ try {
     if (name === "GraphWorkbench") {
       if (props.activity) assert.ok(html.includes(t("正在复制节点工作区：{0}", "foundation_contract")), "activity status must render localized copy");
       if (props.selectedMergerId) {
-        if (props.selected === "merger:publication") {
-          assert.ok(html.includes(t("publication merger")), "publication merger heading must render");
-          assert.ok(html.includes(t("向 publication merger 追加消息…")), "a settled publication merger still accepts follow-ups");
-        } else if (props.selectedMergerId === "merger-failed") {
-          assert.ok(html.includes(t("merger · {0}", "join")), "merger card heading must render localized copy");
-          assert.ok(html.includes(t("向 merger 发送消息并重跑…")), "failed node merger allows sending message to re-run");
+        assert.ok(html.includes(t("merger · {0}", "join")) || html.includes(t("publication merger")), "merger card heading must render localized copy");
+        if (props.selectedMergerId === "merger-running") {
+          assert.ok(html.includes('placeholder="Steer..."'), "a live merger composer is labeled Steer");
+        } else if (props.selectedMergerId === "merger-failed" || props.selected === "merger:publication") {
+          assert.ok(html.includes('placeholder="Type..."'), "a continuable idle merger composer invites typing");
         } else {
-          assert.ok(html.includes(t("merger · {0}", "join")), "merger card heading must render localized copy");
-          assert.ok(html.includes(t("merger 已结束，只能查看执行记录")), "settled node merger must render the read-only notice");
+          assert.ok(!html.includes('placeholder="Type..."') && !html.includes("Steer..."),
+            "a disabled merger composer keeps an empty placeholder");
         }
       }
     }

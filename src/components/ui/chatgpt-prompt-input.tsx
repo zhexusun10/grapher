@@ -11,6 +11,9 @@ import {
   Sparkles,
   Maximize2,
   Minimize2,
+  ChevronUp,
+  ChevronDown,
+  CornerDownLeft,
 } from "lucide-react";
 import { runtimeService } from "../../services/runtime";
 import { formatFileSize, getFileIcon } from "../../utils/attachmentUtils";
@@ -167,6 +170,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const [dismissedTrigger, setDismissedTrigger] = useState<{ start: number; query: string } | null>(null);
     const activeItemRef = useRef<HTMLDivElement | null>(null);
     const suggestionsListRef = useRef<HTMLDivElement | null>(null);
+    // Arrow keys move the selection past the visible rows, so only they may
+    // scroll the list. Mouse hover must not shift the rows under the pointer.
+    const keyboardNavRef = useRef(false);
 
     const loadedRepoRef = useRef<string | null>(null);
     const loadingRepoRef = useRef<string | null>(null);
@@ -377,9 +383,13 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     useEffect(() => {
       setActiveIndex(0);
+      // A new query reorders the candidates; start the list from the top again.
+      suggestionsListRef.current?.scrollTo({ top: 0 });
     }, [triggerMode, triggerQuery]);
 
     useEffect(() => {
+      if (!keyboardNavRef.current) return;
+      keyboardNavRef.current = false;
       if (activeItemRef.current) {
         activeItemRef.current.scrollIntoView({ block: "nearest" });
       }
@@ -790,11 +800,13 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         if (suggestions.length > 0) {
           if (e.key === "ArrowDown") {
             e.preventDefault();
+            keyboardNavRef.current = true;
             setActiveIndex((prev) => (prev + 1) % suggestions.length);
             return;
           }
           if (e.key === "ArrowUp") {
             e.preventDefault();
+            keyboardNavRef.current = true;
             setActiveIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
             return;
           }
@@ -887,21 +899,34 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                     </>
                   )}
                 </span>
-                <button
-                  type="button"
-                  className="suggestions-header-close-btn"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setDismissedTrigger({ start: triggerStart, query: triggerQuery });
-                  }}
-                  aria-label={t("关闭 (Esc)")}
-                >
-                  <span className="suggestions-header-hints">
-                    <span className="key-hint">↑↓</span>{t(" 选择 ")}<span className="key-hint">↵ / Tab</span>{t(" 确认 ")}<span className="key-hint">Esc</span>{t(" 关闭")}
+                <span className="suggestions-header-actions">
+                  <span className="suggestions-header-hints" aria-hidden="true">
+                    <kbd className="key-hint">
+                      <ChevronUp size={10} />
+                      <ChevronDown size={10} />
+                    </kbd>
+                    <span className="hint-label">{t("选择")}</span>
+                    <kbd className="key-hint">
+                      <CornerDownLeft size={10} />
+                    </kbd>
+                    <kbd className="key-hint">Tab</kbd>
+                    <span className="hint-label">{t("确认")}</span>
+                    <kbd className="key-hint">Esc</kbd>
+                    <span className="hint-label">{t("关闭建议")}</span>
                   </span>
-                  <X size={12} className="suggestions-close-icon" />
-                </button>
+                  <button
+                    type="button"
+                    className="suggestions-header-close-btn"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDismissedTrigger({ start: triggerStart, query: triggerQuery });
+                    }}
+                    aria-label={t("关闭 (Esc)")}
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
               </div>
               <div className="prompt-box-suggestions-list" ref={suggestionsListRef}>
                 {suggestions.length === 0 ? (
@@ -1060,6 +1085,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             placeholder={placeholder}
+            aria-label={placeholder || t("消息输入框")}
             disabled={disabled || isBusy || isPreparing || isSubmitting}
             className="prompt-box-textarea"
           />

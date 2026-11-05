@@ -43,6 +43,8 @@
   --status-success-strong: #047857;
   --status-warning: #F59E0B;
   --status-warning-subtle: #FFFBEB;
+  --status-warning-border: #FDE68A;
+  --status-warning-text: #92400E;
 
   /* 阻塞与等待状态（灰色体系） */
   --status-blocked: #64748B;

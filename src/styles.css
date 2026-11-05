@@ -279,7 +279,13 @@ h3 {
   margin-right: calc(-1 * var(--sidebar-scrollbar-offset, 10px));
   padding-right: var(--sidebar-scrollbar-offset, 10px);
   box-sizing: border-box;
-  flex-shrink: 0;
+}
+
+/* The workspace list may shrink before the pinned footer. Otherwise a short
+   window with several workspaces pushes Settings past the clipped sidebar. */
+.sidebar .projects-list {
+  flex-shrink: 1;
+  min-height: 0;
 }
 
 /* ---------- Content fade / slide shared transition ---------- */
@@ -532,6 +538,21 @@ a,
   filter: brightness(0.96);
 }
 
+/* Below the workbench's single-pane breakpoint the expanded sidebar becomes an
+   overlay. The conversation keeps the full width instead of being squeezed by
+   a 184px sidebar next to a narrow composer. */
+@media (max-width: 720px) {
+  .sidebar:not(.is-collapsed) {
+    position: absolute;
+    top: 12px;
+    bottom: 12px;
+    left: 12px;
+    z-index: 40;
+    margin: 0;
+    box-shadow: 0 18px 48px rgba(15, 23, 42, 0.18);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sidebar,
   .sidebar .brand,
@@ -593,8 +614,9 @@ a,
   gap: 4px;
   overflow-y: auto;
   overflow-x: hidden;
-  max-height: 240px;
-  flex-shrink: 0;
+  max-height: min(240px, 30vh);
+  flex-shrink: 1;
+  min-height: 0;
   margin-bottom: 12px;
   margin-right: calc(-1 * var(--sidebar-scrollbar-offset, 10px));
   padding-right: var(--sidebar-scrollbar-offset, 10px);
@@ -1851,7 +1873,10 @@ a,
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   width: 100%;
+  min-width: 0;
   margin-top: 6px;
   padding-top: 2px;
   flex-shrink: 0;
@@ -1866,6 +1891,7 @@ a,
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   position: relative;
 }
 
@@ -1896,6 +1922,9 @@ a,
 .prompt-box-icon-btn:hover:not(:disabled) {
   background: var(--bg-surface-hover);
   color: var(--text-primary);
+  /* The global hover filter re-rasterizes these round targets and nudges their
+     icons; the painted surface already gives the pointer feedback. */
+  filter: none;
 }
 
 /* Attachment preview clips while its height animates in/out. */
@@ -2119,8 +2148,13 @@ a,
 .prompt-box-right-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  flex: 0 1 auto;
+  max-width: 100%;
+  min-width: 0;
+  margin-left: auto;
 }
 
 .prompt-box-container.compact .prompt-box-right-actions {
@@ -2137,6 +2171,8 @@ a,
   padding: 2.5px 3px;
   gap: 3px;
   height: 32px;
+  max-width: 100%;
+  min-width: 0;
   position: relative;
   box-sizing: border-box;
 }
@@ -2160,6 +2196,8 @@ a,
   cursor: pointer;
   line-height: 1;
   height: 25px;
+  min-width: 0;
+  overflow: hidden;
   display: inline-grid;
   align-items: center;
   justify-content: center;
@@ -2205,6 +2243,10 @@ a,
   grid-area: 1 / 1;
   position: relative;
   z-index: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: inherit;
   transition: color 0.16s ease;
 }
@@ -2216,4 +2258,24 @@ a,
 .prompt-box-mode-btn.active .prompt-box-mode-text {
   color: #ffffff;
   font-weight: 600;
+}
+
+/* Keep the composer controls from overflowing when the viewport is narrower
+   than the normal desktop range. */
+@media (max-width: 360px) {
+  .prompt-box-container {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .prompt-box-mode-selector {
+    gap: 2px;
+    padding: 1.5px 2px;
+  }
+
+  .prompt-box-mode-btn,
+  .prompt-box-container.compact .prompt-box-mode-btn {
+    font-size: 11px;
+    padding: 0 5px;
+  }
 }

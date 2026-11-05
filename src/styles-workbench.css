@@ -7,8 +7,8 @@
   left: 0;
   right: 0;
   max-height: 320px;
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
   border-radius: inherit;
   box-shadow: inherit;
   display: flex;
@@ -16,77 +16,116 @@
   z-index: 1000;
   overflow: hidden;
   user-select: none;
+  /* The hints collapse against the popover's own width, not the window's. */
+  container-type: inline-size;
 }
 
 .prompt-box-suggestions-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 12px;
-  border-bottom: 1px solid #e2e8f0;
-  background: #f8fafc;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-surface);
   font-size: 12px;
-  color: #64748b;
+  color: var(--text-secondary);
+  gap: 8px;
 }
 
 .suggestions-header-title {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--text-primary);
+}
+
+.suggestions-header-title > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header-icon-file {
-  color: #2563eb;
+  color: var(--brand-default);
 }
 
 .header-icon-skill {
-  color: #d97706;
+  color: var(--status-warning);
+}
+
+.suggestions-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .suggestions-header-hints {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 4px;
   font-size: 12px;
-  color: #64748b;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .suggestions-header-hints .key-hint {
-  color: #334155;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  height: 16px;
+  padding: 0 5px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
   font-family: inherit;
   font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.suggestions-header-hints .hint-label {
+  margin-right: 4px;
+}
+
+.suggestions-header-hints .hint-label:last-child {
+  margin-right: 0;
+}
+
+/* Narrow composers keep the title, list and close button; the shortcuts are
+   the only part that can go without hiding an action. */
+@container (max-width: 460px) {
+  .suggestions-header-hints {
+    display: none;
+  }
 }
 
 .suggestions-header-close-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  background: transparent;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   border: none;
-  padding: 2px 4px;
-  margin: -2px -4px;
-  border-radius: 8px;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
   cursor: pointer;
-  color: #64748b;
-  font-family: inherit;
-  font-size: inherit;
-  transition: background 0.15s ease, color 0.15s ease;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
-.suggestions-header-close-btn:hover {
-  background: rgba(0, 0, 0, 0.05);
-  color: #0f172a;
-}
-
-.suggestions-close-icon {
-  opacity: 0.6;
-  transition: opacity 0.15s ease;
-}
-
-.suggestions-header-close-btn:hover .suggestions-close-icon {
-  opacity: 1;
+/* Outrank the global `button:not(:disabled):hover` filter: inside a 20px round
+   target it re-rasterizes the icon edge and shifts the glyph, which read as the
+   X jittering under the pointer. The button paints its own hover surface. */
+.suggestions-header-close-btn:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+  filter: none;
 }
 
 .prompt-box-suggestions-list {
@@ -96,7 +135,7 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  background: #ffffff;
+  background: var(--bg-canvas);
 }
 
 
@@ -113,7 +152,7 @@
 
 .prompt-box-suggestion-item:hover,
 .prompt-box-suggestion-item.active {
-  background: #f1f5f9;
+  background: var(--bg-surface-hover);
 }
 
 .prompt-box-suggestion-item.active::before {
@@ -124,21 +163,9 @@
   width: 3px;
   height: 16px;
   border-radius: 999px;
-  background: #2563eb;
+  background: var(--brand-default);
   transform: translateY(-50%);
   pointer-events: none;
-}
-
-.prompt-box-file-icon-code {
-  color: #2563eb;
-}
-
-.prompt-box-file-icon-text {
-  color: #0284c7;
-}
-
-.prompt-box-file-icon-generic {
-  color: #64748b;
 }
 
 .suggestion-item-main {
@@ -157,9 +184,9 @@
 }
 
 .suggestion-item-title {
-  font-size: 12.5px;
-  font-weight: 550;
-  color: #0f172a;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -167,7 +194,7 @@
 
 .suggestion-item-subtitle {
   font-size: 12px;
-  color: #64748b;
+  color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -176,31 +203,29 @@
 
 .suggestion-item-badge {
   flex-shrink: 0;
-  font-size: 10.5px;
-  font-weight: 600;
-  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 550;
+  padding: 2px 7px;
   border-radius: 4px;
-  letter-spacing: 0.02em;
 }
 
 .suggestion-item-badge.skill {
-  background: #fef3c7;
-  color: #92400e;
-  border: 1px solid #fde68a;
+  background: var(--status-warning-subtle);
+  color: var(--status-warning-text);
+  border: 1px solid var(--status-warning-border);
 }
 
 .suggestion-item-badge.file {
-  background: #f8fafc;
-  color: #475569;
-  border: 1px solid #e2e8f0;
-  text-transform: uppercase;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
 }
 
 .prompt-box-suggestions-empty {
   padding: 24px 16px;
   text-align: center;
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--text-secondary);
 }
 
 
@@ -2003,7 +2028,9 @@ button.session-label-toggle:focus-visible {
 }
 
 .workspace-details {
-  padding: 8px 0 6px;
+  /* Conversation columns already space their rows; the footer only adds the
+     small optical gap that separates meta rows from the turn above it. */
+  padding: 4px 0 0;
   font-size: 13px;
   color: var(--text-secondary);
   overflow-wrap: anywhere;
@@ -2067,12 +2094,20 @@ button.session-label-toggle:focus-visible {
   appearance: none;
   -webkit-appearance: none;
   outline: none;
-  transition: color 0.15s ease, background-color 0.15s ease;
+  /* Hover feedback switches instantly. A colour fade plus the global button
+     hover filter made the label look like it jumped while the pointer moved. */
+  transition: none;
 }
 
-.workspace-details-trigger:hover {
+/* Specific enough to outrank the global `button:not(:disabled):hover` filter.
+   Hover changes the label colour only: no background card and no fade, because
+   the painted box plus the global hover filter made the row look like it jumped.
+   The filter is also what switches text to grayscale rasterization and shifts
+   glyphs by up to a pixel. */
+.workspace-details .workspace-details-trigger:hover {
   color: var(--text-primary);
-  background-color: var(--bg-hover, rgba(255, 255, 255, 0.05));
+  background-color: transparent;
+  filter: none;
 }
 
 .workspace-details-chevron {
@@ -2347,6 +2382,15 @@ button.session-label-toggle:focus-visible {
   box-shadow: 0 16px 36px -4px rgba(15, 23, 42, 0.16), 0 4px 12px -2px rgba(15, 23, 42, 0.06);
 }
 
+/* The global button hover dim is a `filter`, which promotes the button to its
+   own layer and switches its label from subpixel to grayscale antialiasing: the
+   text looked blurred for as long as the pointer rested on it. Every button in
+   Settings already paints its own hover surface (background, border or colour),
+   so drop the filter here and keep the labels crisp. */
+.settings-modal button:not(:disabled):hover {
+  filter: none;
+}
+
 .settings-modal-header {
   display: flex;
   align-items: center;
@@ -2397,6 +2441,10 @@ button.session-label-toggle:focus-visible {
 .settings-modal-content .settings-sections {
   padding: 10px 20px 16px;
   overflow-y: auto;
+  /* Reserve the track before the pane first overflows (expanding the provider
+     list, opening a login panel): letting it appear afterwards narrowed the
+     pane and shifted every card to the left mid-interaction. */
+  scrollbar-gutter: stable;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -2810,6 +2858,13 @@ button.session-label-toggle:focus-visible {
     visibility: hidden !important;
     pointer-events: none !important;
     transition: none !important;
+  }
+
+  /* The 48px view switcher sits above the conversation pane, so 80dvh can
+     cover it in a short single-pane window. Keep expansion inside the pane. */
+  .workbench.graph-mode .pane-bottom-chat .prompt-box-container.expanded,
+  .workbench.graph-collapsed .pane-bottom-chat .prompt-box-container.expanded {
+    max-height: calc(100dvh - 96px);
   }
 }
 

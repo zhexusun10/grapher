@@ -222,15 +222,13 @@
 }
 
 .thinking-icon-box {
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  background: rgba(139, 92, 246, 0.11);
+  width: 14px;
+  height: 14px;
   color: #7c3aed;
   display: grid;
   place-items: center;
   flex-shrink: 0;
-  transition: background-color 0.25s ease, color 0.25s ease, box-shadow 0.25s ease;
+  transition: color 0.25s ease, opacity 0.25s ease;
 }
 
 .thinking-icon-glyph {
@@ -239,18 +237,17 @@
 }
 
 .thinking-icon-box.pulse {
-  background: rgba(139, 92, 246, 0.2);
   color: #6d28d9;
   animation: thinking-glow 2s infinite alternate;
 }
 
 @keyframes thinking-glow {
   0% {
-    box-shadow: 0 0 4px rgba(139, 92, 246, 0.2);
+    opacity: 0.65;
   }
 
   100% {
-    box-shadow: 0 0 10px rgba(139, 92, 246, 0.45);
+    opacity: 1;
   }
 }
 
@@ -260,6 +257,9 @@
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: 0.2px;
+  /* Slight breathing room between the icon and the title; not aligned with a
+     tool card's badge text, which sits 7px inside its box. */
+  padding-left: 2px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1310,6 +1310,8 @@
 .provider-settings-container {
   display: flex;
   flex-direction: column;
+  /* Keep in sync with `collapseGap` on the supported-provider body: the collapsed
+     body still owns this gap while its exit animation runs. */
   gap: 12px;
 }
 
@@ -1434,9 +1436,10 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 10px;
-  max-height: 320px;
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* The provider list grows with the catalogue and the Settings pane scrolls.
+     A second scroll container here meant a floating scrollbar track could sit
+     over the right-hand cards (and its appearance/narrowing reflowed the grid),
+     so the grid never scrolls on its own. */
   padding: 6px;
   box-sizing: border-box;
   margin-top: 8px;
@@ -1456,10 +1459,9 @@
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.provider-card:hover {
-  border-color: rgba(255, 255, 255, 0.25);
-}
-
+/* The cards themselves are not clickable (only the buttons inside them are), so
+ * hovering a card has no effect: a hover border made the whole grid look
+ * interactive while nothing happened. */
 .provider-card.configured {
   border-color: rgba(34, 197, 94, 0.35);
   background: linear-gradient(180deg, rgba(34, 197, 94, 0.04) 0%, var(--bg-surface) 100%);
@@ -1555,7 +1557,9 @@
 }
 
 .card-action-btn.login-btn:hover {
-  filter: brightness(1.1);
+  /* Hovering must not switch the label to grayscale rasterization; darken the
+     surface instead of filtering the whole button. */
+  background: var(--brand-hover);
 }
 
 .card-action-btn.reauth-btn {
@@ -1616,8 +1620,16 @@
   user-select: none;
 }
 
-.configured-card-header:hover {
-  opacity: 0.92;
+/* Hover feedback must stay crisp: fading the whole row with `opacity` switched
+   the label to grayscale rasterization, which made the text look like it
+   jittered while the pointer was on it. Only the chevron reacts instead. */
+.configured-card-header:hover .configured-chevron {
+  color: var(--text-primary);
+}
+
+.configured-chevron {
+  color: var(--text-secondary);
+  flex-shrink: 0;
 }
 
 .configured-title-group {
@@ -2036,11 +2048,11 @@
   text-decoration: none;
   margin-top: 6px;
   align-self: flex-start;
-  transition: filter 0.15s ease;
+  transition: background-color 0.15s ease;
 }
 
 .provider-oauth-btn:hover {
-  filter: brightness(1.1);
+  background: var(--brand-hover);
 }
 
 .pending-poll-indicator {

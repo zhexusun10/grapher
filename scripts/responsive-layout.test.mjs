@@ -8,6 +8,11 @@ for (const reducedMotion of ["reduce", "no-preference"]) {
 test(`desktop workbench adapts to available width and short windows (${reducedMotion})`, { timeout: 60_000 }, async () => {
   const repository = "/mock/responsive-project";
   const config = { repository, model: "test/model", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  // A full workspace list exercises the sidebar's short-window layout.
+  const projects = [
+    { id: repository, path: repository, name: "Project", lastOpened: 1 },
+    ...Array.from({ length: 7 }, (_, index) => ({ id: `${repository}-${index}`, path: `${repository}-${index}`, name: `Project ${index}`, lastOpened: 1 })),
+  ];
   const graph = { originalGoal: "Responsive layout test", nodes: [
     { name: "first", task: "Inspect the first task" },
     { name: "second", task: "Inspect the second task" },
@@ -28,12 +33,12 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     await server.listen();
     browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US", reducedMotion });
-    await context.addInitScript(({ repository, config }) => {
+    await context.addInitScript(({ config, projects }) => {
       localStorage.setItem("grapher_language_v1", "en");
-      localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Project", lastOpened: 1 }]));
+      localStorage.setItem("grapher_projects", JSON.stringify(projects));
       localStorage.setItem("grapher_config", JSON.stringify(config));
       localStorage.setItem("grapher_workbench_split_ratio", "0.15");
-    }, { repository, config });
+    }, { config, projects });
     await context.route("**/api/*", async route => {
       const command = new URL(route.request().url()).pathname.slice(5);
       const body = route.request().postDataJSON();
@@ -140,6 +145,39 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     });
     assert.ok(geometry.canvasHeight > 80, `graph remains usable: ${JSON.stringify(geometry)}`);
     assert.ok(geometry.bottom <= geometry.workbenchBottom && geometry.workbenchBottom <= geometry.viewport);
+    const sidebarFit = await page.evaluate(() => {
+      const sidebar = document.querySelector(".sidebar").getBoundingClientRect();
+      const footer = document.querySelector(".sidebar-bottom").getBoundingClientRect();
+      const runs = document.querySelector(".runs-list").getBoundingClientRect();
+      return { reachable: footer.top >= sidebar.top && footer.bottom <= sidebar.bottom,
+        footer: footer.bottom, sidebar: sidebar.bottom, runsHeight: runs.height };
+    });
+    assert.equal(sidebarFit.reachable, true, `a full workspace list cannot hide the sidebar footer: ${JSON.stringify(sidebarFit)}`);
+
+    // Below the single-pane breakpoint the sidebar starts as a rail and opens
+    // over the workspace, so the conversation keeps the full available width.
+    await page.setViewportSize({ width: 640, height: 700 });
+    await page.waitForFunction(() => document.querySelector(".sidebar")?.classList.contains("is-collapsed"));
+    await conversation.click();
+    const composerFit = await page.evaluate(() => {
+      const box = document.querySelector(".conversation-pane .prompt-box-container");
+      const row = document.querySelector(".conversation-pane .prompt-box-actions-row");
+      return { box: box.scrollWidth - box.clientWidth, row: row.scrollWidth - row.clientWidth };
+    });
+    assert.ok(composerFit.box <= 0 && composerFit.row <= 0, `narrow composer controls wrap instead of overflowing: ${JSON.stringify(composerFit)}`);
+    const mainWidth = await page.locator(".main").evaluate(element => element.getBoundingClientRect().width);
+    await page.getByRole("button", { name: "Expand sidebar" }).click();
+    const overlay = await page.evaluate(() => ({
+      position: getComputedStyle(document.querySelector(".sidebar")).position,
+      main: document.querySelector(".main").getBoundingClientRect().width,
+    }));
+    assert.equal(overlay.position, "absolute", "the narrow sidebar opens as an overlay");
+    assert.ok(overlay.main >= mainWidth, "opening the overlay must not squeeze the workspace");
+    await page.getByRole("button", { name: "Collapse sidebar" }).click();
+
+    // Restore the expanded sidebar before testing the short desktop window.
+    await page.setViewportSize({ width: 900, height: 420 });
+    await page.getByRole("button", { name: "Expand sidebar" }).click();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     const modal = page.locator(".settings-modal");
     await modal.waitFor();

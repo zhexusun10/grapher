@@ -2872,7 +2872,7 @@ test("node follow-ups keep records expanded and completed nodes continue instead
     await openNode();
     assert.equal(await headers.count(), 0, "a single execution stays open without a toggle header");
     const composer = page.locator(".pane-bottom-chat textarea");
-    assert.equal(await composer.getAttribute("placeholder"), "Send a message to @task and continue execution…");
+    assert.equal(await composer.getAttribute("placeholder"), "Type...", "an idle composer invites typing");
     await composer.fill("First follow-up");
     await composer.press("Enter");
     await waitFor(() => controls.length === 1);

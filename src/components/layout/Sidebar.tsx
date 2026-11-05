@@ -13,6 +13,14 @@ export { normalizeWorkspacePath } from "../../services/workspaceConversations";
 // workspace or conversation fades out before the list closes the gap.
 const CARD_EASE: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
+// Matches the CSS overlay breakpoint below which the sidebar would otherwise
+// take a large share of the width from the single-pane workbench.
+const NARROW_SIDEBAR_QUERY = "(max-width: 720px)";
+
+function startsCollapsed(): boolean {
+  return typeof window !== "undefined" && window.matchMedia(NARROW_SIDEBAR_QUERY).matches;
+}
+
 function cardMotion(reduceMotion: boolean, index: number) {
   if (reduceMotion) {
     return {
@@ -106,9 +114,13 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   switchingProjectPath = null,
   loadingRunId = null,
 }) => {
-  // Every app launch starts expanded; collapsing remains session-local.
-  const [isCollapsed, setIsCollapsed] = useState(false);
+  // Wide launches start expanded; narrow windows start with the rail so the
+  // composer keeps its room. Collapsing remains session-local.
+  const [isCollapsed, setIsCollapsed] = useState(startsCollapsed);
+  // Only undo a collapse we caused by resizing; a user's manual choice wins.
+  const autoCollapsedRef = React.useRef(isCollapsed);
   const toggleCollapsed = () => {
+    autoCollapsedRef.current = false;
     setIsCollapsed(!isCollapsed);
     setProjectContextMenu(null);
     setRunContextMenu(null);
@@ -117,6 +129,25 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; project: ProjectItem } | null>(null);
   const [runContextMenu, setRunContextMenu] = useState<{ x: number; y: number; runId: string; provisionalPrompt?: string } | null>(null);
   const reduceMotion = useReducedMotion() ?? false;
+
+  React.useEffect(() => {
+    const query = window.matchMedia(NARROW_SIDEBAR_QUERY);
+    const sync = (narrow: boolean) => {
+      if (narrow) {
+        setIsCollapsed(previous => {
+          if (!previous) autoCollapsedRef.current = true;
+          return true;
+        });
+      } else if (autoCollapsedRef.current) {
+        autoCollapsedRef.current = false;
+        setIsCollapsed(false);
+      }
+    };
+    sync(query.matches);
+    const handleChange = (event: MediaQueryListEvent) => sync(event.matches);
+    query.addEventListener("change", handleChange);
+    return () => query.removeEventListener("change", handleChange);
+  }, []);
 
   React.useEffect(() => {
     const handleClose = () => {

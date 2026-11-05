@@ -28,6 +28,12 @@ import {
   type ProviderInfo,
 } from "../services/providerAuth";
 
+// The Settings modal unmounts while it is closed, so local state alone would
+// collapse both lists again every time the user reopens Settings: an expanded
+// list silently shrank back to its header. Keep the user's choice for this
+// page session instead of resetting it on every mount.
+const sectionExpansion = { providers: false, credentials: false };
+
 function AuthLink({ url, label }: { url?: string; label?: string }) {
   if (!url) return null;
   try {
@@ -112,6 +118,24 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   useEffect(() => {
     setAnswer("");
   }, [login?.prompt?.id]);
+
+  // A remembered section mounts collapsed and opens on the next frame, so
+  // reopening Settings still plays the open animation instead of popping the
+  // body in fully rendered (motion skips the mount animation otherwise).
+  useEffect(() => {
+    if (sectionExpansion.providers) setShowProviders(true);
+    if (sectionExpansion.credentials) setShowConfigured(true);
+  }, []);
+
+  function setProvidersExpanded(expanded: boolean) {
+    sectionExpansion.providers = expanded;
+    setShowProviders(expanded);
+  }
+
+  function setCredentialsExpanded(expanded: boolean) {
+    sectionExpansion.credentials = expanded;
+    setShowConfigured(expanded);
+  }
 
   useEffect(() => {
     if (login?.status === "complete") {
@@ -333,7 +357,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
               onChange={(e) => {
                 setSearchQuery(e.target.value);
                 if (e.target.value.trim() !== "") {
-                  setShowProviders(true);
+                  setProvidersExpanded(true);
                 }
               }}
             />
@@ -360,14 +384,14 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
         <div className="configured-credentials-card">
           <div
             className="configured-card-header"
-            onClick={() => setShowConfigured(!showConfigured)}
+            onClick={() => setCredentialsExpanded(!showConfigured)}
             role="button"
             tabIndex={0}
             aria-expanded={showConfigured}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
-                setShowConfigured(!showConfigured);
+                setCredentialsExpanded(!showConfigured);
               }
             }}
             style={{ cursor: "pointer", userSelect: "none" }}
@@ -377,6 +401,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             </div>
             <ChevronDown
               size={16}
+              className="configured-chevron"
               style={{
                 transition: mounted.current ? "transform 0.2s ease" : "none",
                 transform: showConfigured ? "rotate(180deg)" : "rotate(0deg)",
@@ -703,14 +728,14 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       {/* Provider List Grid */}
       <div
         className="providers-grid-title"
-        onClick={() => setShowProviders(!showProviders)}
+        onClick={() => setProvidersExpanded(!showProviders)}
         role="button"
         tabIndex={0}
         aria-expanded={showProviders}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            setShowProviders(!showProviders);
+            setProvidersExpanded(!showProviders);
           }
         }}
         style={{ cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", userSelect: "none" }}
@@ -728,7 +753,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
         />
       </div>
 
-      <CollapsibleCardBody expanded={showProviders}>
+      <CollapsibleCardBody expanded={showProviders} collapseGap={12}>
         {() => (
           <div className="providers-card-grid">
             {filteredProviders.map((p) => {
