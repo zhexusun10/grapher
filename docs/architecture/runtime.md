@@ -32,6 +32,19 @@ approved revisions still commit atomically in Rust. Backend evidence:
 browser regressions:
 [Planner streaming and auto-fit](../../scripts/graph-planning-fit.test.mjs).
 
+The Planner conversation itself is projected the same way: the newest turn's
+live rows own the transcript while it streams, and a turn that ends without
+committing (failed, stopped or rejected by a provider) keeps those live rows —
+including the user's edited instruction, its partial output and the error —
+until the next turn or a reload retires the stream. Its durable log can be empty
+when the provider fails before Pi writes the turn, so handing the pane over to
+the replay immediately would drop what the user was reading and shorten the
+conversation. Earlier turns keep replaying underneath, the failed turn is
+withheld from that replay while it is still live, and a reader who was following
+the output is taken to the failure notice rather than the top of the shortened
+conversation. A deliberate scroll-up is preserved. Focused evidence:
+[edited follow-up failure regression](../../scripts/conversation-history-ui.test.mjs).
+
 ## Manual graph nodes
 
 Right-clicking the topology background adds one node to the current Graph Run, without a Planner turn. The optional `from` is an ordinary dependency into the new node; optional `to` is an outgoing dependency, or a feedback edge when `feedback` is true. If an ordinary insertion splits an existing direct `from` → `to` edge, that edge is replaced. Compiler validation remains authoritative, including the feedback-ancestor and DAG rules.

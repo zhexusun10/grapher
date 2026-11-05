@@ -298,7 +298,9 @@ test('bundled continuity recovers capped provider turns only while selected for 
       assert.equal(assistants.at(-1)?.message.stopReason, recover ? 'stop' : 'length');
       assert.ok(events.some(event => event.type === 'agent_settled'));
       if (recover) {
-        assert.ok(JSON.stringify(requests[1].messages).includes('partial progress'), 'bounded checkpoint reaches the recovery request');
+        const recovery = JSON.stringify(requests[1].messages);
+        assert.ok(recovery.includes('Complete CONTINUITY_AUDIT'), 'recovery request keeps the original instruction');
+        assert.ok(!recovery.includes('partial progress'), 'interrupted partial text is dropped instead of replayed');
         assert.ok(!requests[1].messages.some(message => message.role === 'assistant'), 'interrupted assistant protocol is omitted');
       }
     }

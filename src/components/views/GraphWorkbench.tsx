@@ -836,6 +836,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // The panel also carries the planner's working indicator, so it must exist
   // for the whole live-planning window, before the summary reaches a snapshot.
   const showPlannerDetails = routeType !== "serial";
+  // A failed turn's durable log can be missing or truncated: a provider may
+  // reject the turn before Pi writes anything, while the live stream already
+  // holds the user turn, its partial output and the error. Keep those rows
+  // visible until the next turn or a reload retires the stream, and replay the
+  // earlier turns without this one so the failed turn is not rendered twice.
+  const failedLivePlanningId = !isPlanning && plannerStream.stage === "error"
+    ? (failedPlanning?.planningId || state.planning?.planningId || state.planningId || "")
+    : "";
   // A run owns one Planner conversation, although each planning attempt has
   // its own durable output log. Replay every recorded turn after a reload —
   // including aborted revision turns — excluding turns still live-streaming.
@@ -849,7 +857,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     recoveredPlanningId,
     routeType,
     representedIds: plannerStream.representedPlanningIds,
-  }), [routeType, isPlanning, backgroundReview, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.isContinuation, plannerStream.representedPlanningIds]);
+  }).filter(id => id !== failedLivePlanningId), [routeType, isPlanning, backgroundReview, recoveredPlanningId, state.events, savedPlannerId, showLivePlanner, plannerStream.isContinuation, plannerStream.representedPlanningIds, failedLivePlanningId]);
   const plannerEdits = useMemo(() => plannerConversationEdits(state.events), [state.events]);
   const savedPlannerKey = savedPlannerIds.join(":");
   const [readySavedPlannerKey, setReadySavedPlannerKey] = useState("");
@@ -920,7 +928,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   ]);
   const useSavedPlanner = savedPlannerIds.length > 0 &&
     (!showLivePlanner || readySavedPlannerKey === savedPlannerKey || Boolean(plannerStream.isContinuation));
-  const renderLivePlanner = showLivePlanner && (isPlanning || !useSavedPlanner);
+  // A failure (or a stop) leaves the live rows as the only complete record of
+  // the turn, so the durable replay must not replace them until the next turn.
+  const renderLivePlanner = showLivePlanner &&
+    (isPlanning || Boolean(failedLivePlanningId) || !useSavedPlanner);
   // A saved transcript only replaces optimistic user turns while it actually
   // renders user rows; hiding a message the transcript suppresses would lose it.
   const savedPlannerShowsUserTurns = !isPlanning || backgroundReview || !!recoveredPlanningId
@@ -954,6 +965,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const { workbenchRef, isResizing, splitRatio, handleStartResize, handleResizeKeyDown, handleResetResizer } =
     useWorkbenchResizer({ onCollapse: collapseGraphPane });
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const failureNoticeRef = useRef<HTMLDivElement>(null);
   const expandedCardObserverRef = useRef<ResizeObserver | null>(null);
   const expandedCardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isUserScrolledUpRef = useRef(false);
@@ -1211,6 +1223,36 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       setScrollBottomVisible(false);
     });
   }, [stopLatestScroll, setScrollBottomVisible, setUserScrolledUp]);
+
+  // The failure notice and the reinstated result cards are siblings of the
+  // transcript, so mounting them changes the scroller's content without
+  // resizing the observed stream. A follower must be taken to the failure the
+  // turn reports instead of being left at the top of a conversation whose live
+  // rows were replaced by a shorter durable replay. A reader who deliberately
+  // scrolled away keeps their position.
+  const failureNoticeKey = failedPlanning && !isPlanning &&
+    (failedPlanning.error || failedPlanning.status === "failed")
+    ? `${failedPlanning.planningId}:${failedPlanning.error ?? ""}` : "";
+  useLayoutEffect(() => {
+    if (!failureNoticeKey) return;
+    const el = chatScrollRef.current;
+    if (!el) return;
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        const notice = failureNoticeRef.current;
+        if (!notice || !shouldFollowOutput()) return;
+        const pane = el.getBoundingClientRect();
+        const noticeBox = notice.getBoundingClientRect();
+        if (noticeBox.top >= pane.top && noticeBox.bottom <= pane.bottom) return;
+        el.scrollTop += noticeBox.bottom > pane.bottom
+          ? noticeBox.bottom - pane.bottom + 12
+          : noticeBox.top - pane.top - 12;
+        lastScrollTopRef.current = el.scrollTop;
+        prevScrollHeightRef.current = el.scrollHeight;
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [failureNoticeKey, hidePlannerResultCards, shouldFollowOutput]);
 
   const handleSendMessageWithScroll = useCallback(async (val: string, options?: PromptBoxSubmitOptions) => {
     const submittedDraft = composerDrafts?.get(composerDraftKey);
@@ -3051,6 +3093,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               {/* 规划失败提示 */}
               {failedPlanning && !isPlanning && (failedPlanning.error || failedPlanning.status === "failed") && (
                 <div
+                  ref={failureNoticeRef}
                   className="planning-error-notice"
                   style={{
                     margin: "10px auto",

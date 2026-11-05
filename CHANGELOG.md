@@ -13,10 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Upgrade the bundled `pi-continuity` extension from 0.3.1 to 0.4.0, validated against the pinned Pi 1.5.0 public boundary: recovery no longer injects a synthetic checkpoint prompt into the turn, so an interrupted partial text/reasoning tail is dropped and continuation relies on Pi's public context-edit and `continue` boundary decisions instead. `--continuity-checkpoint-max-chars` and `checkpointMaxChars` are accepted as deprecated no-ops, and legacy `pi-continuity` custom messages are always omitted from model context.
 - Planner graph tools now return each node's direct dependencies, separate feedback routes, and the compiler's short list of nodes that inherit nothing, making inherited inputs and unintended extra roots visible without changing the Graph IR or scheduler.
 
 ### Fixed
 
+- A Planner turn that fails, stops or is rejected by its provider now keeps the turn the user was reading instead of handing the pane over to an empty durable replay. The live rows retain an edited follow-up instruction, its partial reasoning/tools and the error, earlier turns keep replaying underneath, and a following reader is moved to the `规划未通过` notice instead of the top of a conversation that just became much shorter. Provider failures that happen before Pi writes the turn (for example an OAuth refresh rejection) no longer look like the edit was lost. A deliberate scroll-up is still preserved.
 - While an auto-routed Planner conversation is still resolving its route, scrolling up to read the reasoning no longer snaps back to the newest row when the Partitioner answers. The Planner pane is the same before and after the route is known, so resolving it no longer counts as switching conversations and no longer discards the reader's position or follow state.
 - A streaming Chain of Thought card now reserves its internal scrollbar track before the body reaches its height cap. Letting the app-painted scrollbar appear only at the cap narrowed the Markdown and rewrapped every reasoning line mid-stream, which looked like the card's content jittering during fast output.
 - A Node or Planner history page that finishes loading after the reader has already scrolled up now keeps that visible row in place. Background auto-fill started while the conversation was still following the bottom no longer jumps the reader into an earlier part of the loaded history when the older page commits.

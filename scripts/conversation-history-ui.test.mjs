@@ -2289,3 +2289,117 @@ test("switching conversations on a large viewport stays anchored to the newest r
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+test("an edited Planner follow-up keeps its turn and the failure notice", { timeout: 45_000 }, async () => {
+  // A rejected provider turn (for example an OAuth 403) fails before Pi writes
+  // the turn's JSONL. The durable replay therefore has no rows for it, and the
+  // live stream is the only record of the edited message and the error. Keeping
+  // the live rows also stops the conversation from collapsing to its top.
+  const config = { repository: "/mock/edit-failure", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const reason = Array.from({ length: 40 }, (_, index) => `EDIT_REASONING_${index} ` + "detail ".repeat(12)).join("\n\n");
+  const current = { ...empty, runId: "edit-run", config, planType: "graph", phase: "completed", approved: true,
+    planningId: "follow-plan",
+    planning: { planningId: "follow-plan", status: "success", createdAt: 2, repository: config.repository, runId: "edit-run",
+      roles: { planner: { sessionId: "planner-session", sessionStart: 1 } } },
+    graph: { originalGoal: "EDIT GOAL", nodes: [{ name: "worker", task: "Worker" }], edges: [] },
+    nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
+    executions: [{ id: "done-execution", node: "worker", status: "completed", revision: 1, attempt: 1,
+      startedAt: 1, completedAt: 2, sessionId: "worker-session", worktree: "/mock/edit-worker",
+      before: "", after: "head", output: "", outputBytes: 0 }],
+    events: [
+      { type: "created", sequence: 1, planning_id: "old-plan", timestamp: 1,
+        planning: { planningId: "old-plan", status: "success", createdAt: 1 } },
+      { type: "created", sequence: 2, planning_id: "follow-plan", timestamp: 2,
+        planning: { planningId: "follow-plan", status: "success", createdAt: 2 } },
+    ] };
+  const failure = { planningId: "edit-plan", status: "failed", createdAt: 3, repository: config.repository,
+    runId: "edit-run", planType: "graph",
+    error: "OAuth refresh failed for openai: OpenAI OAuth token request failed (403): unsupported_country_region_territory",
+    roles: { planner: { sessionId: "planner-session", sessionStart: 1 } } };
+  // `edit-plan` is empty on purpose: the failed turn never reached the writer.
+  const outputs = {
+    "old-plan": assistant("OLD TURN ANSWER"),
+    "follow-plan": line({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "FIRST FOLLOW UP" }] } }) + assistant("FOLLOW ANSWER"),
+    "edit-plan": "",
+  };
+  let edited = null;
+  onPlanStream = (body, res) => {
+    edited = body;
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    res.write(`event: run_started\ndata: ${JSON.stringify({ runId: "edit-run" })}\n\n`);
+    res.write(`event: planner\ndata: ${JSON.stringify({ event: { type: "message_start", message: { role: "assistant", content: [] } } })}\n\n`);
+    res.write(`event: planner\ndata: ${JSON.stringify({ event: { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: reason } } })}\n\n`);
+    setTimeout(() => {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: failure.error, planningId: failure.planningId, summary: failure })}\n\n`);
+      res.end();
+    }, 400);
+  };
+  const { context, page, errors } = await newPage(async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    if (command === "plan_goal_stream") return route.continue();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: config.repository, name: "Edit failure", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = current; break;
+      case "snapshot_if_changed": result = { version: "fixed", snapshot: current }; break;
+      case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "edit_planner": result = current; break;
+      case "get_planning_output": {
+        const content = outputs[body.planningId] ?? "";
+        result = { planningId: body.planningId, role: "planner", content: body.offset ? "" : content,
+          startOffset: 0, nextOffset: Buffer.byteLength(content), totalBytes: Buffer.byteLength(content), complete: true, running: false };
+        break;
+      }
+      case "get_execution_output": result = { runId: body.runId, executionId: body.executionId, content: "",
+        startOffset: body.offset ?? 0, nextOffset: 0, totalBytes: 0, complete: true, status: "completed" }; break;
+      default: result = {};
+    }
+    return route.fulfill({ json: { result } });
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="edit-run"]').click();
+    await page.getByText("FOLLOW ANSWER", { exact: true }).waitFor();
+    await page.waitForTimeout(800);
+    const row = page.locator(".chat-message-row.user", { hasText: "FIRST FOLLOW UP" }).first();
+    await row.locator(".chat-user-message-card-wrapper").hover();
+    await row.locator(".chat-message-edit-btn").click();
+    const editor = page.locator(".chat-bubble-edit-textarea");
+    await editor.fill("EDITED FOLLOW UP");
+    await editor.press("Enter");
+    await page.locator(".planning-error-notice").waitFor();
+    await page.waitForTimeout(1200);
+    assert.equal(edited?.goal, "EDITED FOLLOW UP", "the edit starts a replacement Planner turn");
+    const view = await page.evaluate(() => {
+      const scroll = document.querySelector(".initial-query-scroll");
+      const pane = scroll.getBoundingClientRect();
+      const notice = document.querySelector(".planning-error-notice")?.getBoundingClientRect();
+      const visibleText = element => !!element && element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+      const text = selector => document.querySelector(selector)?.textContent ?? "";
+      return { top: scroll.scrollTop, height: scroll.scrollHeight, client: scroll.clientHeight,
+        notice: notice && { top: notice.top, bottom: notice.bottom }, pane: { top: pane.top, bottom: pane.bottom },
+        editedTurn: text(".planner-transcript"), priorTurn: text(".planning-activity"),
+        liveError: [...document.querySelectorAll(".node-error, .conversation-error-message")]
+          .some(element => element.textContent.includes("OAuth refresh failed") && visibleText(element)) };
+    });
+    assert.ok(view.editedTurn.includes("EDITED FOLLOW UP"),
+      `the failed replacement turn stays visible: ${JSON.stringify(view)}`);
+    assert.ok(view.liveError, `the live failure row stays visible: ${JSON.stringify(view)}`);
+    assert.ok(view.priorTurn.includes("FIRST FOLLOW UP"),
+      `earlier Planner turns stay replayed: ${JSON.stringify(view)}`);
+    assert.ok(view.height > view.client + 1,
+      `the conversation must not collapse to its top: ${JSON.stringify(view)}`);
+    assert.ok(view.notice && view.notice.top >= view.pane.top && view.notice.bottom <= view.pane.bottom,
+      `the failure notice must be visible: ${JSON.stringify(view)}`);
+    assert.deepEqual(errors, []);
+  } finally {
+    onPlanStream = undefined;
+    await context.close();
+  }
+});
