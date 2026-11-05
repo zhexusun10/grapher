@@ -21,7 +21,7 @@ function startsCollapsed(): boolean {
   return typeof window !== "undefined" && window.matchMedia(NARROW_SIDEBAR_QUERY).matches;
 }
 
-function cardMotion(reduceMotion: boolean, index: number) {
+function cardMotion(reduceMotion: boolean, index: number, skipEntrance = false) {
   if (reduceMotion) {
     return {
       initial: false,
@@ -30,7 +30,9 @@ function cardMotion(reduceMotion: boolean, index: number) {
     };
   }
   return {
-    initial: { opacity: 0, y: 6 },
+    // Cards restored from the initial paint are already part of the sidebar's
+    // entrance; replaying a per-card fade makes them blink on every reload.
+    initial: skipEntrance ? false : { opacity: 0, y: 6 },
     animate: { opacity: 1, y: 0, transition: { duration: 0.24, ease: CARD_EASE, delay: Math.min(index, 12) * 0.028 } },
     exit: { opacity: 0, y: -4, scale: 0.98, transition: { duration: 0.18, ease: CARD_EASE } },
   };
@@ -45,18 +47,19 @@ const RunItem: React.FC<{
   runId: string;
   index: number;
   reduceMotion: boolean;
+  skipEntrance?: boolean;
   className?: string;
   onClick: () => void;
   onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
-}> = ({ runId, index, reduceMotion, className = "", onClick, onContextMenu, children }) => {
+}> = ({ runId, index, reduceMotion, skipEntrance = false, className = "", onClick, onContextMenu, children }) => {
   return (
     <motion.button
       data-run-id={runId}
       className={`run-item ${className}`.trim()}
       onClick={onClick}
       onContextMenu={onContextMenu}
-      {...cardMotion(reduceMotion, index)}
+      {...cardMotion(reduceMotion, index, skipEntrance)}
     >
       {children}
     </motion.button>
@@ -129,6 +132,19 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; project: ProjectItem } | null>(null);
   const [runContextMenu, setRunContextMenu] = useState<{ x: number; y: number; runId: string; provisionalPrompt?: string } | null>(null);
   const reduceMotion = useReducedMotion() ?? false;
+  // Cards restored on the first paint keep their final visual state; only cards
+  // that arrive later (bootstrap, opening a project, or switching workspaces)
+  // play the entrance. Run cards behind a skeleton are arrivals too, so only a
+  // warm sidebar contributes them here.
+  const restoredKeysRef = React.useRef<{ projects: Set<string>; runs: Set<string> } | null>(null);
+  if (restoredKeysRef.current === null) {
+    restoredKeysRef.current = {
+      projects: new Set(projects.map(proj => workspaceKey(proj.path))),
+      runs: new Set(isReady ? runs.map(id => runCardKeys[id] ?? id) : []),
+    };
+  }
+  const restoredProjectKeys = restoredKeysRef.current.projects;
+  const restoredRunKeys = restoredKeysRef.current.runs;
 
   React.useEffect(() => {
     const query = window.matchMedia(NARROW_SIDEBAR_QUERY);
@@ -178,7 +194,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           setRunContextMenu(null);
           setProjectContextMenu({ x: e.clientX, y: e.clientY, project: proj });
         }}
-        {...cardMotion(reduceMotion, index)}
+        {...cardMotion(reduceMotion, index, restoredProjectKeys.has(workspaceKey(proj.path)))}
       >
         <div className="proj-details">
           <div className="proj-name-row">
@@ -211,6 +227,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         runId={id}
         index={index}
         reduceMotion={reduceMotion}
+        skipEntrance={restoredRunKeys.has(runCardKeys[id] ?? id)}
         className={`${isChosen ? "chosen" : ""} ${isLoadingThisRun ? "is-loading" : ""}`}
         onClick={() => onLoadRun(id)}
         onContextMenu={(e) => {

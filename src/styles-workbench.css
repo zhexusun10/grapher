@@ -2391,7 +2391,10 @@ button.session-label-toggle:focus-visible {
   filter: none;
 }
 
-.settings-modal-header {
+/* `.modal > header` (0,1,1) would otherwise keep its 20px bottom margin and
+   push the first card away from the header; match that specificity so the
+   gap above the first card equals the gap between cards. */
+.modal.settings-modal > .settings-modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2439,7 +2442,9 @@ button.session-label-toggle:focus-visible {
 }
 
 .settings-modal-content .settings-sections {
-  padding: 10px 20px 16px;
+  /* Top padding matches the inter-card gap so the first card sits as far from
+     the header as it does from the next card. */
+  padding: 14px 20px 16px;
   overflow-y: auto;
   /* Reserve the track before the pane first overflows (expanding the provider
      list, opening a login panel): letting it appear afterwards narrowed the

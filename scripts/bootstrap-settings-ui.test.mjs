@@ -26,8 +26,8 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await server?.close(); });
 
-async function app(handler, projects = [{ id: repository, path: repository, name: "Responsiveness", lastOpened: 1 }], cachedRuns, connectedEvents = false) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "en-US", reducedMotion: "reduce" });
+async function app(handler, projects = [{ id: repository, path: repository, name: "Responsiveness", lastOpened: 1 }], cachedRuns, connectedEvents = false, reducedMotion = "reduce") {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "en-US", reducedMotion });
   await context.addInitScript(({ projects, config, cachedRuns, connectedEvents }) => {
     localStorage.setItem("grapher_language_v1", "en");
     if (projects !== null) localStorage.setItem("grapher_projects", JSON.stringify(projects));
@@ -692,6 +692,21 @@ test("a stalled Provider catalog cannot leave settings controls permanently busy
     await page.clock.fastForward(15_001);
     await page.waitForFunction(() => document.querySelector(".save-config-btn")?.disabled === false);
     assert.match(await page.locator(".settings-modal").innerText(), /backend response timed out/i);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("restored workspace and conversation cards paint at their final state instead of replaying a launch entrance", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await app(async () => false, undefined, { [repository]: ["fast"] }, false, "no-preference");
+  try {
+    // The harness freezes the animation clock, so a replayed entrance would stay
+    // at opacity 0 here even though the cards are already in the DOM.
+    const workspaceCard = page.locator(".project-workspace-item");
+    const conversationCard = page.locator('[data-run-id="fast"]');
+    await workspaceCard.waitFor();
+    await conversationCard.waitFor();
+    assert.equal(await workspaceCard.evaluate(element => getComputedStyle(element).opacity), "1");
+    assert.equal(await conversationCard.evaluate(element => getComputedStyle(element).opacity), "1");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

@@ -80,11 +80,13 @@ export default function App() {
       const saved = localStorage.getItem("grapher_projects");
       if (!saved) return [];
       const items: ProjectItem[] = JSON.parse(saved);
+      // Match the order bootstrap derives from `lastOpened`; otherwise the
+      // first authoritative sort visibly rearranges the restored cards.
       return items.map((p) => ({
         ...p,
         path: normalizeWorkspacePath(p.path),
         id: normalizeWorkspacePath(p.id || p.path),
-      }));
+      })).sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
     } catch {
       return [];
     }

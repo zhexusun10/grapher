@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-11-06
+
 ### Added
 
 - On macOS, the backend now keeps the display and system awake while it runs and refreshes user activity so the screen saver cannot lock the session during a long Run. Set `GRAPHER_KEEP_AWAKE=0` to disable.
@@ -19,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Sidebar workspace and conversation cards no longer replay their entrance fade on every reload or first entry into the app. Cards restored from the browser cache on the first paint render at their final state, while cards that genuinely arrive later (bootstrap discovery, opening a workspace, switching workspaces, or leaving the loading skeleton) keep the staggered entrance. Restored workspaces are also ordered by `lastOpened` before bootstrap resolves, so the first authoritative sort no longer rearranges the cards.
 - The prompt box completion popover header no longer flashes a wide hover block across its shortcut legend: the legend is now plain text with real keycaps (`↑↓`, `↵`, `Tab`, `Esc`, drawn with the app's icon set instead of loose arrow glyphs) and the close affordance is a dedicated 20px icon button, so the pointer only highlights the small target it can actually activate. That button and the composer's round icon buttons now drop the global `button:not(:disabled):hover` brightness filter, which re-rasterized those small targets and made the X appear to jitter; the X also keeps a constant opacity instead of fading in. Moving the pointer over candidates no longer scrolls the list either, since only ArrowUp/ArrowDown bring the active row into view; the legend collapses on composers narrower than 460px instead of squeezing the title and list.
 - A Planner turn that fails, stops or is rejected by its provider now keeps the turn the user was reading instead of handing the pane over to an empty durable replay. The live rows retain an edited follow-up instruction, its partial reasoning/tools and the error, earlier turns keep replaying underneath, and a following reader is moved to the `规划未通过` notice instead of the top of a conversation that just became much shorter. Provider failures that happen before Pi writes the turn (for example an OAuth refresh rejection) no longer look like the edit was lost. A deliberate scroll-up is still preserved.
 - While an auto-routed Planner conversation is still resolving its route, scrolling up to read the reasoning no longer snaps back to the newest row when the Partitioner answers. The Planner pane is the same before and after the route is known, so resolving it no longer counts as switching conversations and no longer discards the reader's position or follow state.
