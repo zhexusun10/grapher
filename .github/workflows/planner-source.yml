@@ -27,11 +27,13 @@ jobs:
     # ubuntu/macOS run the cross-platform backend/environment/merger/native
     # suites; Windows skips the ones whose failures also surface on macOS (they
     # cost ~1h there) and keeps its own library and Windows-native acceptance
-    # coverage. The host-neutral environment/chain/merger suites run on Linux for
-    # every push and on macOS only for pull requests, the schedule and dispatch,
-    # so a push does not pay for the same behavior twice. Rust builds dominate the
-    # rest, so the job reuses one target cache per OS instead of recompiling from
-    # scratch, and the budgets below are sized to a warm run.
+    # coverage. The host-neutral suites run on Linux for every push and on
+    # macOS/Windows only for pull requests, the schedule and dispatch, so a push
+    # does not pay three times for behavior that is not host-specific. Platform
+    # suites (native launchers, the seatbelt policy, Windows acceptance) keep
+    # running on their own host. Rust builds dominate the rest, so the job reuses
+    # one target cache per OS instead of recompiling, and the budgets below are
+    # sized to a warm run.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -110,8 +112,13 @@ jobs:
         if: runner.os == 'Linux' || github.event_name != 'push'
         timeout-minutes: 10
         run: npm run test:merger
+      # The Windows library suite is the same host-neutral Rust suite Linux and
+      # macOS already run for a push; Windows keeps it for pull requests, the
+      # weekly schedule and manual dispatch, while its Windows-only surface stays
+      # covered on every push by the acceptance step below.
       - name: Run the full backend library test suite on Windows
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.event_name != 'push'
+        timeout-minutes: 25
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --lib
       - name: Verify Windows native Planner and production Graph acceptance (local model responses)
         if: runner.os == 'Windows'
