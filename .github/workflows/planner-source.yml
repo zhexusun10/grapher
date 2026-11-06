@@ -27,9 +27,11 @@ jobs:
     # ubuntu/macOS run the cross-platform backend/environment/merger/native
     # suites; Windows skips the ones whose failures also surface on macOS (they
     # cost ~1h there) and keeps its own library and Windows-native acceptance
-    # coverage. Rust builds dominate the cost, so the job reuses one target cache
-    # per OS instead of recompiling from scratch, and the budgets below are sized
-    # to a warm run with headroom for fixtures and post-job cleanup.
+    # coverage. The host-neutral environment/chain/merger suites run on Linux for
+    # every push and on macOS only for pull requests, the schedule and dispatch,
+    # so a push does not pay for the same behavior twice. Rust builds dominate the
+    # rest, so the job reuses one target cache per OS instead of recompiling from
+    # scratch, and the budgets below are sized to a warm run.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -91,16 +93,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: '"GRAPHER_ENV_TEST_PARENT=C:\g-env-tests" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
+      # The three suites below are host-neutral behavior (native environment
+      # admission, Graph chain discovery, merger/publication) and Linux already
+      # runs them for every push on the same commit. macOS keeps them for pull
+      # requests, the weekly schedule and manual dispatch, where a host-specific
+      # drift would show up, instead of adding ~11 minutes to every push.
       - name: Verify managed E/L with real native Python, editable package and lifecycle
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux' || github.event_name != 'push'
         timeout-minutes: 25
         run: npm run test:environment
       - name: Verify default environment discovery across a Graph chain (local model)
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux' || github.event_name != 'push'
         timeout-minutes: 10
         run: npm run test:environment-chain
       - name: Verify production Planner revisions, dependency composition and Merger (local model)
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux' || github.event_name != 'push'
         timeout-minutes: 10
         run: npm run test:merger
       - name: Run the full backend library test suite on Windows
