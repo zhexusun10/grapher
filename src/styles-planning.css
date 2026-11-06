@@ -19,7 +19,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workbench.graph-collapsed .conversation-pane {
+  .workbench .conversation-pane {
     transition: none !important;
   }
 }
@@ -92,7 +92,8 @@
   transform: none !important;
 }
 
-.initial-query-scroll.conversation-preparing .thinking-card {
+.initial-query-scroll.conversation-preparing .thinking-card,
+.initial-query-scroll.conversation-preparing .card-reveal.entering {
   animation: none !important;
   transform: none !important;
 }
@@ -103,7 +104,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 14px;
-  border-radius: 20px;
+  border-radius: 8px;
   font-size: 12.5px;
   font-weight: 500;
   margin: 2px 0 0;
@@ -125,15 +126,15 @@
 }
 
 .route-decision-pill.serial {
-  background: rgba(16, 185, 129, 0.12);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.28);
+  background: #64748b;
+  color: #f8fafc;
+  border: 1px solid #64748b;
 }
 
 .route-decision-pill.graph {
-  background: rgba(99, 102, 241, 0.12);
-  color: #818cf8;
-  border: 1px solid rgba(99, 102, 241, 0.28);
+  background: #0f172a;
+  color: #f8fafc;
+  border: 1px solid #0f172a;
 }
 
 /* Shared entrance effect; exactly matches text message entrance animation. */
@@ -154,10 +155,44 @@
   animation: transcript-card-appear 0.3s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* A presented card takes its height over the same window, so the rows above it
+   are pushed up smoothly instead of jumping by the card's full height at once.
+   The track carries the growth; the card stays one stretched grid item, keeps its
+   final width and wrapping, and clips its own content while it is squashed. */
+.card-reveal {
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.card-reveal.entering {
+  /* Slower and gentler than the fade: a long layout push that snaps at the end
+     reads as a jump, which is exactly what this replaces. */
+  animation: transcript-card-reveal 0.34s cubic-bezier(0.25, 1, 0.5, 1) both;
+}
+
+.card-reveal>.tool-call-card,
+.card-reveal>.thinking-card {
+  min-height: 0;
+}
+
+@keyframes transcript-card-reveal {
+  from {
+    grid-template-rows: 0fr;
+  }
+
+  to {
+    grid-template-rows: 1fr;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
 
   .tool-call-card.appear-active,
   .thinking-card.appear-active {
+    animation: none;
+  }
+
+  .card-reveal.entering {
     animation: none;
   }
 }
@@ -174,7 +209,8 @@
   border: 1px solid rgba(139, 92, 246, 0.2);
   background: rgba(139, 92, 246, 0.032);
   overflow: hidden;
-  margin: 4px 2px;
+  /* Same row rhythm as the tool card: the list gap owns the vertical space. */
+  margin: 0 2px;
   transition: border-color 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
 }
 
@@ -352,7 +388,10 @@
      narrow the Markdown and rewrap every line mid-stream. */
   scrollbar-gutter: stable;
   /* Keep wheel/touch scrolling inside the reasoning viewport. Chaining it to
-     the conversation would turn an inner read into an outer scroll-up. */
+     the conversation would turn an inner read into an outer scroll-up. This is
+     the default only: ThinkingCard disables containment per axis while the
+     body has nothing to scroll, otherwise Chromium would swallow the wheel
+     instead of forwarding it to the conversation. */
   overscroll-behavior: contain;
   border-top: 1px solid rgba(139, 92, 246, 0.09);
   background: #fdfdfe;
@@ -454,13 +493,13 @@
 
 .transcript-row.thinking-row {
   width: 100%;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .transcript-row.tool-row {
   width: 100%;
   box-sizing: border-box;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 /* ==========================================================================
@@ -476,7 +515,11 @@
   border: 1px solid var(--border-default);
   background: var(--bg-canvas);
   overflow: hidden;
-  margin: 4px 2px;
+  /* Vertical rhythm belongs to the transcript list's own gap. A vertical
+     margin here added to that gap, so two adjacent cards sat 16px apart while
+     a card next to a text row sat 12px apart: the card spacing alternated.
+     Only the horizontal inset stays. */
+  margin: 0 2px;
   transition: border-color 0.25s ease, background-color 0.25s ease, box-shadow 0.25s ease;
 }
 
@@ -824,6 +867,8 @@
   border-radius: 8px;
   overflow-x: auto;
   max-height: 220px;
+  /* ToolCallCard aligns containment with measured overflow; a short block must
+     not swallow the conversation wheel gesture. */
   overscroll-behavior: contain;
   border: 1px solid rgba(255, 255, 255, 0.05);
   margin: 0;
@@ -1066,7 +1111,7 @@
 }
 
 /* Execution transcripts share the Planner transcript's card rhythm: the list
-   owns the 8px gap, so the scroll area must not add its own inset. */
+   owns the 10px gap, so the scroll area must not add its own inset. */
 .virtualized-transcript-container.transcript-compact .transcript-scroll-area {
   padding: 0;
 }
@@ -1090,6 +1135,16 @@
   display: flex;
   justify-content: flex-start;
   margin: 4px 0;
+}
+
+/* A post-task Planner review continues the same conversation but starts a new
+   section. The rule marks where the planned work ended and the review's durable
+   output begins, so the reply does not read as part of the preceding turn. */
+.transcript-divider {
+  height: 1px;
+  margin: 16px 0 8px;
+  border-radius: 1px;
+  background: var(--border-default);
 }
 
 .system-pill {
@@ -1148,18 +1203,21 @@
 /* A new user turn starts a new request: give it more air from the previous
    Planner reply. The tighter 8px above still applies to non-Planner rows.
    Execution transcripts use the same rhythm for steers rendered inline; they
-   are not inside .planner-transcript, so they need the equivalent scope. */
+   are not inside .planner-transcript, so they need the equivalent scope. The
+   list gap is 10px, so 46px + 10px keeps the same 56px above and 20px below a
+   follow-up turn as the conversation column (44px + 12px gap). */
 .virtualized-transcript-container.transcript-compact .chat-message-row.user.planner-user-turn,
 .planning-activity .chat-message-row.user,
 .planner-transcript .chat-message-row.user.planner-user-turn {
-  margin-top: 48px;
-  margin-bottom: 8px;
+  margin-top: 46px;
+  margin-bottom: 10px;
 }
 
 /* Follow-up turns rendered outside the Planner transcript (serial/node views
    and the live Planner fallback) keep the same 56px total air, counting the
-   shared column gap. Pending steers sit directly in an execution panel until
-   their inline row is parsed. */
+   shared column gap. A pending node steer that predates the parsed transcript
+   stays under its execution header; unread steers after it, like serial pending
+   steers, join the conversation column so they keep this rhythm too. */
 .serial-execution-panel>.chat-message-row.user.planner-follow-up,
 .chat-messages-stream>.chat-message-row.user.planner-follow-up,
 .serial-turns-container>.chat-message-row.user.planner-follow-up {

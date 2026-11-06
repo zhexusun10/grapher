@@ -23,6 +23,9 @@ import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay, r
 import { executionIdForMessage, executionIdForVersion, nodeConversationExecutions } from "./services/conversationBranch";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./services/thinkingTranscript";
 import { appendItemDelta } from "./services/transcriptUpdates";
+import { plannerContentSteerId, plannerContentText, stripPlannerContext } from "./services/plannerText";
+import { plannerSteerOwner, withoutPlannerSteerIdentity } from "./services/plannerSteers";
+import { upsertToolCall } from "./services/toolCallUpdates";
 import { mapWithConcurrency } from "./services/boundedRequests";
 import { useSnapshotState } from "./hooks/useSnapshotState";
 import { useConversationTranscriptCache } from "./hooks/useConversationTranscriptCache";
@@ -30,28 +33,24 @@ import { useFrameBatchedState } from "./hooks/useFrameBatchedState";
 import { useStableCallback } from "./hooks/useStableCallback";
 import { resetPresentedCardIds } from "./services/cardAnimations";
 
-import { TaskNode } from "./components/graph/TaskNode";
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
 import { plannerEdgeEdits, plannerNodeEdits } from "./lib/plannerGraphEdits";
 import { nodeInstructionText, steerRollbackKey } from "./lib/pendingSteers";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
-import { SmoothWorkflowEdge } from "./components/graph/WorkflowEdge";
 import { Sidebar } from "./components/layout/Sidebar";
 import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspacePath, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "./services/workspaceConversations";
 import { loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
+import { useLandingBackground } from "./services/displayPreferences";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
-import { GraphWorkbench } from "./components/views/GraphWorkbench";
-import { PublicationPanel } from "./components/PublicationPanel";
 import { ApprovalModal } from "./components/modals/ApprovalModal";
 import { ConfirmModal, type ConfirmModalState } from "./components/modals/ConfirmModal";
 
 import { SettingsModal } from "./components/modals/SettingsModal";
 import { EditorModal } from "./components/modals/EditorModal";
 
-const nodeTypes = { work: TaskNode };
-const edgeTypes = { workflow: SmoothWorkflowEdge };
+type WorkbenchComponent = typeof import("./components/views/AppGraphWorkbench").AppGraphWorkbench;
 
 // A conversation without an explicit override keeps the model composition it
 // was created with. Snapshots always describe their own Run, never whichever
@@ -74,6 +73,7 @@ function snapshotModelConfig(snapshot: Snapshot | null | undefined, repository: 
 }
 
 export default function App() {
+  const landingBackground = useLandingBackground();
   const [state, setState] = useSnapshotState(emptySnapshot);
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
     try {
@@ -137,6 +137,11 @@ export default function App() {
     saveLandingDraft(config.repository, val);
   }, [config.repository]);
   const [selected, setSelected] = useState<string>("");
+  // The Run the browser is showing. Background Planner recovery can discover a
+  // turn before or after the reader navigated; only a real Run switch may reset
+  // the conversation they opened.
+  const displayedRunIdRef = useRef(state.runId);
+  displayedRunIdRef.current = state.runId;
   const [selectedMergerId, setSelectedMergerId] = useState<string>("");
   // A merger card is only meaningful together with its owning node selection.
   useEffect(() => {
@@ -441,6 +446,11 @@ export default function App() {
   const rolledBackSteerKeys = useMemo(
     () => new Set(rolledBackSteers[state.runId] ?? []),
     [rolledBackSteers, state.runId]);
+  // Planner steer requests whose send was rejected and whose text went back to
+  // the composer. Their durable submission must not rebuild the card as a
+  // second copy of that draft. Request IDs are unique, so this stays
+  // conversation-independent while the page lives.
+  const [revertedPlannerSteers, setRevertedPlannerSteers] = useState<ReadonlySet<string>>(() => new Set());
   const planningAbortControllerRef = useRef<AbortController | null>(null);
 
   // 规划路由模式选择：graph (默认，Planner跳过Partitioner) / serial (单Agent跳过Partitioner) / auto (Partitioner评估)
@@ -632,11 +642,18 @@ export default function App() {
     const fileAttachments: FileAttachment[] | undefined = options?.files && options.files.length > 0
       ? options.files.map(f => ({ name: f.name, size: f.size, type: f.type }))
       : undefined;
-    const recordMessage = (textToRecord: string, delivery?: ChatMessage["delivery"], executionId?: string) => {
+    const recordMessage = (textToRecord: string, delivery?: ChatMessage["delivery"], executionId?: string, plannerSteer = false) => {
+      const id = crypto.randomUUID();
       const message: ChatMessage = {
-        id: `msg-${crypto.randomUUID()}`, parentId: (sessionEntries.at(-1) || effectiveMessages.at(-1))?.id ?? null,
+        id: `msg-${id}`, parentId: (sessionEntries.at(-1) || effectiveMessages.at(-1))?.id ?? null,
         role: "user", text: textToRecord, images: options?.images, files: fileAttachments, timestamp: Date.now(),
-        runId: state.runId || plannerStream.runId, node: targetNodeName, delivery, executionId, animateAppear: true,
+        runId: state.runId || plannerStream.runId,
+        // A Planner steer belongs to the Planner conversation even when a graph
+        // node happens to be selected; a node tag would hide it from the
+        // pending area and from the Planner history it is sent to.
+        node: plannerSteer ? undefined : targetNodeName,
+        delivery, executionId, animateAppear: true,
+        ...(plannerSteer ? { plannerSteerId: id, plannerSteerStatus: "submitting" as const } : {}),
       };
       if (delivery === "steered" && executionId) {
         const clean = nodeInstructionText(textToRecord);
@@ -674,7 +691,14 @@ export default function App() {
         // Once accepted, resuming the originating Run is independent of navigation.
         if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
         const applied = applyForegroundSnapshot(snapshot, generation);
-        if (applied) onAccepted?.(snapshot);
+        if (applied) {
+          onAccepted?.(snapshot);
+        } else {
+          // A snapshot this conversation did not accept is not a delivered
+          // message: return it to the composer instead of leaving a card beside
+          // the restored draft.
+          removeMessage(message);
+        }
         return applied;
       } catch (error) {
         removeMessage(message);
@@ -718,26 +742,87 @@ export default function App() {
         setError(t("任务路由器仍在工作，请等待 Planner 启动后再追加消息。"));
         return false;
       }
-      const message = recordMessage(displayMsg);
-      setPlannerStream(prev => ({
-        ...prev,
-        startedAt: prev.startedAt || Date.now(),
-        items: [...closeRunningThinkingItem(prev.items), {
-          id: message.id, type: "text", role: "user", content: displayMsg, timestamp: message.timestamp, animateAppear: true,
-        }],
-      }));
+      // Pending steer is presentation state, not a Pi user turn. Inserting it
+      // into the stream here would reorder output and close ongoing thinking.
+      const message = recordMessage(displayMsg, undefined, undefined, true);
+      // A steer the send did not hand to the Planner belongs to the composer:
+      // drop the card, keep the failure reason, and remember the request ID so
+      // the durable submission cannot render the same instruction a second
+      // time beside the draft it was returned to.
+      const revertToComposer = (reason: string) => {
+        const requestId = message.plannerSteerId;
+        removeMessage(message);
+        if (requestId) setRevertedPlannerSteers(prev => prev.has(requestId) ? prev : new Set([...prev, requestId]));
+        setError(reason);
+        return false;
+      };
+      // A thrown request proves nothing on its own. Only the durable log knows
+      // whether the Planner holds this instruction; an unreadable log keeps the
+      // card, because preserving an uncertain copy is safer than a second copy
+      // that could be sent again.
+      const recoverPlannerSteer = async (runId: string, requestId?: string) => {
+        if (!requestId) return { recorded: false, status: undefined, error: undefined };
+        try {
+          const snapshot = await runtimeService.snapshotForRun(runId);
+          const events = (snapshot.events ?? []).filter(event => event.request_id === requestId);
+          const latest = [...events].reverse().find(event => event.type === "planner_steer_status");
+          return {
+            recorded: events.some(event => event.type === "planner_steer_submitted"),
+            status: latest?.status,
+            error: latest?.error,
+          };
+        } catch {
+          return { recorded: true, status: "unknown" as const, error: undefined };
+        }
+      };
       return run(async () => {
         try {
-          await runtimeService.control("steer_planner", { runId: planningRunId, instruction: text, images: options?.images });
-          return isCurrent();
+          const snapshot = await runtimeService.control("steer_planner", {
+            runId: planningRunId, instruction: text, images: options?.images, requestId: message.plannerSteerId,
+          });
+          const events = snapshot.events ?? [];
+          const submitted = events.some(event => event.type === "planner_steer_submitted" && event.request_id === message.plannerSteerId);
+          const latest = [...events].reverse().find(event => event.type === "planner_steer_status" && event.request_id === message.plannerSteerId);
+          // An older backend ignores the request ID and has no durable
+          // submission. Keep its established optimistic behavior instead of
+          // reporting a delivery that this client cannot verify.
+          const legacy = !events.some(event => event.request_id === message.plannerSteerId);
+          const status: ChatMessage["plannerSteerStatus"] | undefined = legacy ? undefined : !submitted ? "unknown"
+            : latest?.status === "queued" || latest?.status === "accepted" || latest?.status === "consumed" || latest?.status === "handled" || latest?.status === "failed" || latest?.status === "unknown"
+              ? latest.status : "submitted";
+          // A send the reader left behind is owned by the durable record: the
+          // card must not linger as "submitting" in the conversation it left.
+          if (!isCurrent()) { removeMessage(message); return false; }
+          // A rejected or unrecorded submission never became a Planner turn, so
+          // it is still the user's draft rather than a delivered message.
+          if (plannerSteerOwner({ recorded: submitted, status, legacy }) === "composer") {
+            return revertToComposer(latest?.error
+              ? t("提交失败：{0}", localizeError(latest.error))
+              : t("Planner 未接收这条消息，请检查后重试。"));
+          }
+          setSessionEntries(prev => prev.map(entry => entry.id === message.id
+            ? { ...entry, plannerSteerId: legacy ? undefined : entry.plannerSteerId, plannerSteerStatus: status, plannerSteerError: latest?.error } : entry));
+          return true;
         } catch (error) {
-          removeMessage(message);
-          if (!isCurrent()) return false;
+          if (!isCurrent()) { removeMessage(message); return false; }
           const failure = error instanceof Error ? error.message : String(error);
           if (/no longer accepting messages|No active Planner/i.test(failure)) {
+            removeMessage(message);
             return startPlanGoal(text, options, "graph", planningRunId, false, undefined, true).accepted;
           }
-          throw error;
+          // The response proves neither delivery nor rejection, so let the
+          // durable log decide who owns the instruction: a request the log
+          // records stays a card (and is never resent), one it never recorded
+          // is still the user's draft.
+          const durable = await recoverPlannerSteer(planningRunId, message.plannerSteerId);
+          if (!isCurrent()) { removeMessage(message); return false; }
+          if (plannerSteerOwner(durable) === "pending") {
+            setSessionEntries(prev => prev.map(entry => entry.id === message.id
+              ? { ...entry, plannerSteerStatus: "unknown", plannerSteerError: durable.error ?? failure } : entry));
+            setError(t("送达状态未知，请检查对话后再重试：{0}", localizeError(durable.error ?? failure)));
+            return true;
+          }
+          return revertToComposer(t("提交失败：{0}", localizeError(durable.error ?? failure)));
         }
       });
     }
@@ -1965,13 +2050,38 @@ export default function App() {
           } else if (event.type === "planner") {
             queuePlannerStream((prev) => (prev.stage !== "planning" ? { ...prev, stage: "planning" } : prev));
             const pEvent = event.event;
-            if (pEvent?.type === "message_start" && pEvent.message?.role === "assistant") {
+            if (pEvent?.type === "message_start" && pEvent.message?.role === "user") {
+              const content = pEvent.message.content;
+              const id = plannerContentSteerId(content);
+              if (id) setPlannerStream(prev => {
+                if (prev.items.some(item => item.id === `msg-${id}`)) return prev;
+                const images = Array.isArray(content) ? content.filter((part: any) => part?.type === "image") : [];
+                return { ...prev, items: [...closeRunningThinkingItem(prev.items), {
+                  id: `msg-${id}`, type: "text", role: "user", content: stripPlannerContext(plannerContentText(content)).trim(),
+                  images: images.length ? images : undefined, timestamp: Date.now(), animateAppear: true,
+                }] };
+              });
+            } else if (pEvent?.type === "message_start" && pEvent.message?.role === "assistant") {
               setPlannerStream(prev => ({
                 ...prev, items: closeThinkingItems(prev.items), plannerMessageStart: prev.items.length,
               }));
             } else if (pEvent?.type === "message_update") {
               const aEvent = pEvent.assistantMessageEvent;
-              if (["thinking_start", "thinking_delta", "thinking_end"].includes(aEvent?.type)) {
+              if (aEvent?.type === "toolcall_start" || aEvent?.type === "toolcall_end") {
+                const part = aEvent.type === "toolcall_end" ? aEvent.toolCall : aEvent.partial?.content?.[aEvent.contentIndex];
+                const toolCallId = aEvent.id || part?.id;
+                const toolName = aEvent.toolName || part?.name;
+                const args = aEvent.arguments || part?.arguments;
+                if (aEvent.type === "toolcall_end" && (toolCallId || toolName)) {
+                  pendingToolArgsRef.current.set(toolCallId || toolName, args || {});
+                }
+                setPlannerStream(prev => {
+                  const items = upsertToolCall(prev.items, { toolCallId, toolName, args,
+                    argsTruncated: !!(aEvent.argsTruncated || part?.argsTruncated), contentIndex: aEvent.contentIndex,
+                    phase: aEvent.type === "toolcall_start" ? "generating" : "pending" }, prev.plannerMessageStart);
+                  return { ...prev, items, tools: items.filter(item => item.type === "tool_call") };
+                });
+              } else if (["thinking_start", "thinking_delta", "thinking_end"].includes(aEvent?.type)) {
                 queuePlannerStream(prev => {
                   const items = updateThinkingItems(prev.items, aEvent, prev.plannerMessageStart);
                   return {
@@ -2050,8 +2160,14 @@ export default function App() {
               const failureStopReason = pEvent.message?.stopReason;
               const failureMessage = pEvent.message?.errorMessage;
               setPlannerStream(prev => {
-                let items = finalizeThinkingItems(prev.items,
-                  Array.isArray(pEvent.message.content) ? pEvent.message.content : [], prev.plannerMessageStart);
+                const content = Array.isArray(pEvent.message.content) ? pEvent.message.content : [];
+                let items = finalizeThinkingItems(prev.items, content, prev.plannerMessageStart);
+                content.forEach((part: any, contentIndex: number) => {
+                  if (part?.type === "toolCall") items = upsertToolCall(items, {
+                    toolCallId: part.id, toolName: part.name, args: part.arguments,
+                    argsTruncated: !!part.argsTruncated, contentIndex, phase: "pending",
+                  }, prev.plannerMessageStart);
+                });
                 if ((failureStopReason === "error" || failureStopReason === "aborted") && failureMessage) {
                   const alreadyHas = items.some(i => (i.isError || i.status === "error") && i.content === failureMessage);
                   if (!alreadyHas) {
@@ -2070,7 +2186,7 @@ export default function App() {
                   }
                 }
                 return {
-                  ...prev, items, plannerMessageStart: items.length,
+                  ...prev, items, tools: items.filter(item => item.type === "tool_call"), plannerMessageStart: items.length,
                   plannerThinking: items.filter(item => item.type === "thinking" && item.content).map(item => item.content).join("\n\n"),
                   plannerThinkingActive: false,
                 };
@@ -2079,21 +2195,13 @@ export default function App() {
               if (pEvent.toolCallId || pEvent.toolName) {
                 pendingToolArgsRef.current.set(pEvent.toolCallId || pEvent.toolName, pEvent.args || {});
               }
-              const toolItem: TranscriptItem = {
-                id: pEvent.toolCallId || `plan_tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                type: "tool_call",
-                toolName: pEvent.toolName,
-                toolCallId: pEvent.toolCallId,
-                args: pEvent.args || {},
-                status: "running",
-                timestamp: Date.now(),
-              };
-              setPlannerStream((prev) => ({
-                ...prev,
-                items: [...closeRunningThinkingItem(prev.items), toolItem],
-                plannerThinkingActive: false,
-                tools: [...prev.tools, toolItem],
-              }));
+              setPlannerStream(prev => {
+                const items = upsertToolCall(closeRunningThinkingItem(prev.items), {
+                  toolCallId: pEvent.toolCallId, toolName: pEvent.toolName, args: pEvent.args,
+                  argsTruncated: !!pEvent.argsTruncated, phase: "executing",
+                }, prev.plannerMessageStart);
+                return { ...prev, items, plannerThinkingActive: false, tools: items.filter(item => item.type === "tool_call") };
+              });
             } else if (pEvent?.type === "tool_execution_end") {
               const resText = (pEvent.result?.content ?? [])
                 .filter((i: any) => i.type === "text")
@@ -2230,37 +2338,22 @@ export default function App() {
                   status: isErr ? ("error" as const) : ("success" as const),
                 });
 
-                let matchedItem = false;
-                const nextItems = prev.items.map((item) => {
-                  if (
-                    item.type === "tool_call" &&
-                    ((pEvent.toolCallId && item.toolCallId === pEvent.toolCallId) ||
-                      (!pEvent.toolCallId && item.toolName === pEvent.toolName && item.status === "running"))
-                  ) {
-                    matchedItem = true;
-                    return updateTool(item);
-                  }
-                  return item;
-                });
-                if (!matchedItem) {
+                let nextItems = prev.items.slice();
+                let index = pEvent.toolCallId
+                  ? nextItems.findIndex(item => item.type === "tool_call" && item.toolCallId === pEvent.toolCallId)
+                  : -1;
+                if (!pEvent.toolCallId) {
                   for (let i = nextItems.length - 1; i >= 0; i--) {
-                    if (nextItems[i].type === "tool_call" && nextItems[i].status === "running") {
-                      nextItems[i] = updateTool(nextItems[i]);
-                      break;
-                    }
+                    if (nextItems[i].type === "tool_call" && nextItems[i].toolName === pEvent.toolName && nextItems[i].status === "running") { index = i; break; }
                   }
                 }
-
-                return {
-                  ...prev,
-                  items: nextItems,
-                  tools: prev.tools.map((t) =>
-                    t.toolCallId === pEvent.toolCallId ||
-                      (!pEvent.toolCallId && t.toolName === pEvent.toolName && t.status === "running")
-                      ? updateTool(t)
-                      : t
-                  ),
-                };
+                if (index < 0) {
+                  nextItems = upsertToolCall(nextItems, { toolCallId: pEvent.toolCallId, toolName: pEvent.toolName,
+                    args, phase: "executing" }, prev.plannerMessageStart);
+                  index = nextItems.length - 1;
+                }
+                nextItems[index] = updateTool(nextItems[index]);
+                return { ...prev, items: nextItems, tools: nextItems.filter(item => item.type === "tool_call") };
               });
             } else if (pEvent?.type === "compaction_start" || pEvent?.type === "compaction_end") {
               const compacting = pEvent.type === "compaction_start";
@@ -2327,7 +2420,9 @@ export default function App() {
         return updated;
       });
       void planningRecovery.finish(scope);
-      setSelected("");
+      // Settling a Planner turn is not a view change. The reader may have opened
+      // a node conversation while the Planner was still working, and clearing
+      // the selection here would force them back to the Planner.
       setPlannerStream((prev) => ({
         ...prev,
         runId: snapshot.runId,
@@ -2559,7 +2654,7 @@ export default function App() {
           );
           const next = index >= 0 ? [...base] : [...base, selectedMessage];
           if (index >= 0) next[index] = selectedMessage;
-          const subsequent = selectedVersionData.subsequentEntries ?? [];
+          const subsequent = (selectedVersionData.subsequentEntries ?? []).map(withoutPlannerSteerIdentity);
           setSessionEntries(index >= 0 ? [...next.slice(0, index + 1), ...subsequent] : next);
           const nextMerger = (snapshot.mergers ?? []).filter(item => item.node === targetMerger.node).at(-1);
           if (nextMerger && nextMerger.id !== targetMerger.id) setSelectedMergerId(nextMerger.id);
@@ -2580,12 +2675,12 @@ export default function App() {
       const selectedExecution = selectedExecutionId
         ? state.executions.find(item => item.id === selectedExecutionId)
         : undefined;
-      const selectedMessage = {
+      const selectedMessage = withoutPlannerSteerIdentity({
         ...targetMsg,
         text: selectedText,
         images: selectedVersionData.images,
         currentVersionIndex: selectedVersion,
-      };
+      });
       try {
         if (!await requireEditRepository()) return false;
         if (!selectedNodeName) {
@@ -2627,7 +2722,7 @@ export default function App() {
           if (index < 0) return [selectedMessage];
           const next = [...prev];
           next[index] = selectedMessage;
-          const subsequent = selectedVersionData.subsequentEntries ?? [];
+          const subsequent = (selectedVersionData.subsequentEntries ?? []).map(withoutPlannerSteerIdentity);
           return [...next.slice(0, index + 1), ...subsequent];
         });
         setEditingMessage(null);
@@ -2669,11 +2764,11 @@ export default function App() {
         ...(current.versions ?? [{ id: "v1", text: current.text, files: current.files, images: current.images, timestamp: current.timestamp || Date.now() }]),
         { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
       ];
-      const updatedPlannerMessage: ChatMessage = {
+      const updatedPlannerMessage: ChatMessage = withoutPlannerSteerIdentity({
         ...current, id: current.id || targetMsg.id, parentId: previousEntry?.id ?? null,
         text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, runId: state.runId,
         timestamp: Date.now(), versions, currentVersionIndex: versions.length - 1,
-      };
+      });
       try {
         if (!await requireEditRepository()) return false;
         const snap = await runtimeService.editPlanner({
@@ -2910,7 +3005,7 @@ export default function App() {
       };
       const versions = [...(current.versions || [initialVersion]), newVersion];
 
-      updatedMsg = {
+      updatedMsg = withoutPlannerSteerIdentity({
         ...current,
         delivery: state.nodes[targetMsg.node || selected]?.status === "completed" ? undefined : current.delivery,
         text: cleanText,
@@ -2919,14 +3014,14 @@ export default function App() {
         parentId,
         versions,
         currentVersionIndex: versions.length - 1,
-      };
+      });
       rolledBackEntries = [...prevEntries, updatedMsg];
     } else {
       const versions = [
         ...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, files: targetMsg.files, images: targetMsg.images, timestamp: targetMsg.timestamp || Date.now() }]),
         { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
       ];
-      updatedMsg = {
+      updatedMsg = withoutPlannerSteerIdentity({
         ...targetMsg,
         delivery: state.nodes[targetMsg.node || selected]?.status === "completed" ? undefined : targetMsg.delivery,
         text: cleanText,
@@ -2934,7 +3029,7 @@ export default function App() {
         timestamp: Date.now(),
         versions,
         currentVersionIndex: versions.length - 1,
-      };
+      });
       rolledBackEntries = [...sessionEntries, updatedMsg];
     }
 
@@ -3051,6 +3146,11 @@ export default function App() {
       (hasCurrentPlan && !persistedRunningPlanning)) return;
     const repository = config.repository;
     const abort = new AbortController();
+    // A background turn never owns the reader's selected conversation in the
+    // Run already on screen; only adopting a different Run resets the view.
+    const selectRunIfSwitched = (runId?: string) => {
+      if (runId && runId !== displayedRunIdRef.current) setSelected("");
+    };
     let timer: ReturnType<typeof setTimeout>;
     let planningId: string | undefined;
     let finished = false;
@@ -3066,7 +3166,7 @@ export default function App() {
           planningId = summary.planningId;
           if (summary.status === "running") {
             setRecoveredPlanning(summary);
-            setSelected("");
+            selectRunIfSwitched(summary.runId);
             if (summary.goal) {
               setGoal(prev => prev || summary.goal!);
             }
@@ -3102,10 +3202,10 @@ export default function App() {
             if (summary.status === "success") {
               const snapshot = await runtimeService.getPlanningSnapshot(planningId, repository, abort.signal);
               if (abort.signal.aborted || !planningRecovery.current(scope)) return;
+              selectRunIfSwitched(snapshot.runId);
               setState(snapshot);
               setGoal(snapshot.graph.originalGoal);
               setRouteType(deduceRouteType(snapshot));
-              setSelected("");
               recordRunToWorkspace(snapshot.runId, repository);
             } else {
               const scope = planningRecovery.begin(repository);
@@ -3142,9 +3242,10 @@ export default function App() {
     setRecoveredPlanning(next);
     if (next) {
       // The durable turn is now visible; do not keep a stale transport error
-      // above the recovered Planner conversation.
+      // above the recovered Planner conversation. Adopting it does not steal a
+      // node conversation the reader opened within the same Run.
       setError("");
-      setSelected("");
+      if (next.runId && next.runId !== state.runId) setSelected("");
     }
   }, [state.planning, isPlanning, busy, recoveredPlanning]);
 
@@ -3226,6 +3327,33 @@ export default function App() {
     !recoveredPlanning &&
     !failedPlanning &&
     state.phase !== "planning_failed";
+  const [Workbench, setWorkbench] = useState<WorkbenchComponent | null>(null);
+  const [workbenchLoadFailed, setWorkbenchLoadFailed] = useState(false);
+  useEffect(() => {
+    if (isLandingView || Workbench) return;
+    let active = true;
+    setWorkbenchLoadFailed(false);
+    void import("./components/views/AppGraphWorkbench").then(module => {
+      if (active) setWorkbench(() => module.AppGraphWorkbench);
+    }).catch(() => {
+      if (active) setWorkbenchLoadFailed(true);
+    });
+    return () => { active = false; };
+  }, [isLandingView, Workbench]);
+  // Keep the existing, opaque composer on screen until the destination is
+  // ready; switching to an empty Suspense fallback would break its handoff.
+  const waitingForWorkbench = !isLandingView && !Workbench;
+  const showLandingView = isLandingView || waitingForWorkbench;
+  // A warm cache resolves in a frame; announce the wait only once it is real.
+  const [showLoadNotice, setShowLoadNotice] = useState(false);
+  useEffect(() => {
+    if (!waitingForWorkbench) {
+      setShowLoadNotice(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowLoadNotice(true), 150);
+    return () => clearTimeout(timer);
+  }, [waitingForWorkbench]);
 
   const handleCopyRunPrompt = async (runId: string, provisionalPrompt?: string) => {
     const request = ++copyPromptRequestRef.current;
@@ -3294,11 +3422,10 @@ export default function App() {
     edit: useStableCallback(handleEditMessageSubmit), switchVersion: useStableCallback(handleSwitchMessageVersion),
     control: useStableCallback(control), save: useStableCallback(save), addManualNode: useStableCallback(addManualNode),
     openSettings: useStableCallback(handleOpenSettings), openEditor: useStableCallback(() => setModal("editor")),
-    openApproval: useStableCallback(() => setModal("approval")), retryPublication: useStableCallback(() => control("retry_publication")),
+    openApproval: useStableCallback(() => setModal("approval")),
     openFile: handleOpenFile,
     plan: useStableCallback(async (val: string, options?: Parameters<typeof handlePlanGoal>[1]) => (await handlePlanGoal(val, options)) !== false),
   };
-  const publicationMergers = useMemo(() => (state.mergers ?? []).filter(merger => merger.node === "merger"), [state.mergers]);
   const handleLoadRun = useStableCallback((id: string) => {
     if (!runs.includes(id)) return;
     if (id.startsWith("pending-")) {
@@ -3375,13 +3502,14 @@ export default function App() {
   });
 
   return (
-    <div className={`app-background-root ${isLandingView ? "landing-active" : ""}`}>
+    <div className={`app-background-root ${showLandingView ? "landing-active" : ""}`}>
       <FloatingPathsBackground
         className="aspect-16/9 flex items-center justify-center"
         position={-1}
-        active={isLandingView && !modal && !confirmModal}
+        active={showLandingView && !modal && !confirmModal}
+        background={landingBackground}
       >
-        <div className={`app-shell ${isLandingView ? "landing-active" : ""}`}>
+        <div className={`app-shell ${showLandingView ? "landing-active" : ""} ${landingBackground === "dots" ? "dots-active" : ""}`}>
           <Sidebar
             projects={projects}
             activeRepo={config.repository}
@@ -3409,6 +3537,15 @@ export default function App() {
           <main className="main">
             {/* 全局悬浮横幅 (居中于工作区主体，排除侧边栏) */}
             <div className="floating-error-banner-container">
+              {waitingForWorkbench && (showLoadNotice || workbenchLoadFailed) && modal !== "settings" && (
+                <div className={`workbench-module-status${workbenchLoadFailed ? " is-error" : ""}`}
+                  role={workbenchLoadFailed ? "alert" : "status"}>
+                  <span>{workbenchLoadFailed
+                    ? t("无法加载对话界面。刷新页面可重试，但未发送的附件可能丢失；后台任务不受影响。")
+                    : t("正在加载对话界面…")}</span>
+                  {workbenchLoadFailed && <button type="button" onClick={() => window.location.reload()}>{t("刷新页面")}</button>}
+                </div>
+              )}
               <AnimatePresence>
                 {/* Settings owns its own save/language/auth errors; unrelated
                     application failures must not float over the modal. */}
@@ -3445,13 +3582,14 @@ export default function App() {
             <LayoutGroup id="main-conversation">
             <div className="main-view-stage">
             <AnimatePresence initial={false}>
-              {isLandingView ? (
+              {showLandingView || !Workbench ? (
                 <LandingView
                   key="landing-view"
+                  background={landingBackground}
                   goal={landingGoal}
                   setGoal={handleLandingGoalChange}
                   onPlanGoal={actions.plan}
-                  isBusy={busy || isPlanning || backendPlanning || repositoryBlocked}
+                  isBusy={waitingForWorkbench || busy || isPlanning || backendPlanning || repositoryBlocked}
                   planMode={planMode}
                   onPlanModeChange={handlePlanModeChange}
                   isWorking={isAgentWorking}
@@ -3469,16 +3607,7 @@ export default function App() {
                   exit={{ opacity: 0 }}
                   transition={{ duration: 0 }}
                 >
-                  <PublicationPanel
-                    key={state.runId.startsWith("pending-") ? "provisional" : state.runId}
-                    runId={state.runId}
-                    publication={state.publication}
-                    mergers={publicationMergers}
-                    busy={busy || repositoryBlocked}
-                    onRetry={actions.retryPublication}
-                  />
-
-                  <GraphWorkbench
+                  <Workbench
                     key={workbenchIdentityRef.current.key}
                     state={state}
                     transcriptRunId={transcriptRunId}
@@ -3505,6 +3634,7 @@ export default function App() {
                     onEditMessageSubmit={actions.edit}
                     onSwitchMessageVersion={actions.switchVersion}
                     rolledBackSteerKeys={rolledBackSteerKeys}
+                    revertedPlannerSteerIds={revertedPlannerSteers}
                     onRollbackSteers={handleRollbackSteers}
                     onInterrupt={handleInterrupt}
                     isPlanning={isPlanning || backendPlanning || !!recoveredPlanning}
@@ -3527,8 +3657,6 @@ export default function App() {
                     publicationFailed={publicationFailed}
                     nodes={nodes}
                     edges={edges}
-                    nodeTypes={nodeTypes}
-                    edgeTypes={edgeTypes}
                     tokens={tokens}
                   />
                 </motion.div>

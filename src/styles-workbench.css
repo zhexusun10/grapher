@@ -334,6 +334,13 @@
   font-family: inherit;
 }
 
+/* Hint text stays attached to its input instead of becoming a separate block. */
+.create-node-form .form-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .create-node-description, .create-node-hint, .create-node-error {
   margin: 0;
   color: var(--text-secondary);
@@ -342,7 +349,35 @@
 }
 
 .create-node-error { color: var(--status-danger); }
-.create-node-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.create-node-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.create-node-actions>button {
+  height: 38px;
+  line-height: 1.2;
+}
+
+/* Matches the Settings footer cancel button. */
+.create-node-actions .create-node-cancel-btn {
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 16px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.create-node-actions .create-node-cancel-btn:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
 
 /* 节点系统任务目标卡片 (Node Task Directive Card) */
 .node-task-card {
@@ -549,8 +584,8 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent-running, #06b6d4);
-  box-shadow: 0 0 8px rgba(6, 182, 212, 0.5);
+  background: var(--brand-default, #2563EB);
+  box-shadow: 0 0 8px rgba(37, 99, 235, 0.5);
   animation: workingPulse 1.4s ease-in-out infinite;
 }
 
@@ -560,13 +595,13 @@
   100% {
     opacity: .4;
     transform: scale(.85);
-    box-shadow: 0 0 3px rgba(6, 182, 212, 0.3);
+    box-shadow: 0 0 3px rgba(37, 99, 235, 0.3);
   }
 
   50% {
     opacity: 1;
     transform: scale(1.15);
-    box-shadow: 0 0 10px rgba(6, 182, 212, 0.7);
+    box-shadow: 0 0 10px rgba(37, 99, 235, 0.7);
   }
 }
 
@@ -749,6 +784,25 @@
   white-space: pre-wrap;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
 }
+
+.planner-steer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.planner-steer-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.planner-steer-message { width: 100%; }
+.planner-steer-state { color: var(--text-secondary); font-size: 12px; text-align: right; }
+.planner-steer-entry.failed .planner-steer-state,
+.planner-steer-entry.unknown .planner-steer-state { color: var(--status-error, #dc2626); }
 
 .chat-bubble-user.editing {
   box-sizing: border-box;
@@ -1231,6 +1285,9 @@ button.session-label-toggle:focus-visible {
   overflow: hidden;
   box-shadow: var(--surface-card-shadow);
   position: relative;
+  /* The graph's inner canvas uses this width, not its animated aperture, so it
+     stays measured at the final split size while the pane opens and closes. */
+  container-type: inline-size;
 }
 
 .workbench.resizing {
@@ -1256,9 +1313,9 @@ button.session-label-toggle:focus-visible {
   /* Keep a moving composer visible across split/full-width panes. The outer
    * workbench still clips the workspace's rounded border and viewport. */
   overflow: visible;
-  /* Splitting into graph mode slides the conversation pane open smoothly;
-   * manual resizer drags opt out via .workbench.resizing. */
-  transition: width 0.50s cubic-bezier(0.22, 1, 0.36, 1), max-width 0.50s cubic-bezier(0.22, 1, 0.36, 1);
+  /* Match the graph pane's fade in GraphWorkbench; manual drags opt out via
+   * .workbench.resizing. */
+  transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1), max-width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .workbench-view-switcher {
@@ -1431,13 +1488,32 @@ button.session-label-toggle:focus-visible {
   background: var(--brand-hover);
 }
 
-/* 图形画布区 */
-.graph-pane {
+/* The aperture follows the divider while the canvas keeps its full width.
+   This avoids reflowing the toolbar and refitting React Flow on every frame. */
+.graph-pane-presence {
+  display: contents;
+}
+
+.graph-pane-aperture {
   flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.graph-pane {
+  position: absolute;
+  inset: 0 0 0 auto;
+  /* Mirror .conversation-pane.split's width, minimum and maximum constraints. */
+  width: calc(100cqw - max(280px, min(calc(100cqw * var(--workbench-split-ratio)), 85cqw, calc(100cqw - 320px))));
   min-width: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-canvas);
+}
+
+.workbench.graph-collapsed .graph-pane {
+  width: var(--graph-exit-width, 100%);
 }
 
 .graph-pane-expand {
@@ -1871,7 +1947,6 @@ button.session-label-toggle:focus-visible {
 .progress-track>div {
   height: 3px;
   background: var(--brand-default);
-  transition: width 0.5s;
   border-radius: 3px;
 }
 
@@ -1905,6 +1980,15 @@ button.session-label-toggle:focus-visible {
   padding: 8px;
 }
 
+/* Write-back failures surface under the topology footer instead of a banner. */
+.publication-failure {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--status-danger-strong);
+  overflow-wrap: anywhere;
+}
+
 .text-button {
   font-size: 12px;
   color: var(--text-secondary);
@@ -1927,6 +2011,40 @@ button.session-label-toggle:focus-visible {
   gap: 8px;
   pointer-events: none;
   z-index: 99999;
+}
+
+/* Loading the on-demand workbench must not move or hide the home composer. */
+.workbench-module-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(680px, calc(100% - 32px));
+  padding: 10px 16px;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  box-shadow: var(--surface-card-shadow);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: auto;
+}
+
+.workbench-module-status.is-error {
+  border-color: var(--status-danger-border);
+  color: var(--status-danger);
+}
+
+.workbench-module-status button {
+  flex-shrink: 0;
+  color: var(--brand-default);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.workbench-module-status button:focus-visible {
+  outline: 2px solid var(--brand-default);
+  outline-offset: 3px;
 }
 
 /* 全局悬浮报错横幅 (Floating Error Banner) - 浮动展示，不占用页面流，白底告警风格 */
@@ -2259,7 +2377,7 @@ button.session-label-toggle:focus-visible {
   background: var(--bg-canvas);
   border: 1px solid var(--border-default);
   border-radius: 13px;
-  box-shadow: 0 16px 36px -4px rgba(15, 23, 42, 0.16), 0 4px 12px -2px rgba(15, 23, 42, 0.06);
+  box-shadow: var(--shadow-modal);
   width: 530px;
   max-width: 100%;
   max-height: min(90vh, calc(100dvh - 60px));
@@ -2351,23 +2469,34 @@ button.session-label-toggle:focus-visible {
 }
 
 /* 3. 运行配置悬浮窗与视图 */
-/* 轻量遮罩：不做全屏 backdrop-filter（它会把浏览器推入较慢的合成路径，
-   连弹窗内部滚动都会卡）；仅用一层半透明遮罩，并以合成器 opacity 淡入。 */
-.modal-backdrop.settings-backdrop {
+/* Large dialogs (Settings, the Graph IR editor) share one light veil instead of
+   the dark small-dialog overlay: a full-screen backdrop-filter pushed the
+   browser onto a slow compositing path (even modal scrolling got janky), so
+   only a cheap compositor-opacity tint fades in. */
+.modal-backdrop.subtle-backdrop {
   background: transparent;
 }
 
-.settings-backdrop-tint {
+.modal-backdrop-tint {
   position: absolute;
   inset: 0;
   z-index: 0;
-  background: rgba(15, 23, 42, 0.12);
+  background: var(--bg-scrim);
   pointer-events: none;
 }
 
-.modal.settings-modal {
+/* Shared shell for those dialogs: one surface, radius and shadow token so a new
+   large dialog matches Settings instead of restating the values. The specific
+   dialog only chooses its width and internal layout. `.modal` still supplies
+   the background, border and text colour. */
+.modal.surface-modal {
   position: relative;
   z-index: 1;
+  border-radius: var(--radius-surface);
+  box-shadow: var(--shadow-modal);
+}
+
+.modal.settings-modal {
   will-change: transform, opacity;
   transform: translateZ(0);
   width: 740px;
@@ -2377,9 +2506,6 @@ button.session-label-toggle:focus-visible {
   flex-direction: column;
   padding: 0;
   overflow: hidden;
-  border-radius: var(--radius-surface);
-  border: 1px solid var(--border-default);
-  box-shadow: 0 16px 36px -4px rgba(15, 23, 42, 0.16), 0 4px 12px -2px rgba(15, 23, 42, 0.06);
 }
 
 /* The global button hover dim is a `filter`, which promotes the button to its
@@ -2450,6 +2576,11 @@ button.session-label-toggle:focus-visible {
      list, opening a login panel): letting it appear afterwards narrowed the
      pane and shifted every card to the left mid-interaction. */
   scrollbar-gutter: stable;
+  /* The pane is the only scroller, so a fling that reaches its end must not be
+     chained to the shell behind the translucent veil (the app shell carries
+     hidden overflow of its own). Every other scroller in the app contains its
+     overscroll the same way. */
+  overscroll-behavior: contain;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -2525,6 +2656,95 @@ button.session-label-toggle:focus-visible {
   margin-top: 8px;
   color: var(--status-danger);
   font-size: 12px;
+}
+
+.settings-background-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+  margin: 10px 0 2px;
+  padding: 0;
+  border: 0;
+}
+
+.settings-background-option {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.16s, box-shadow 0.16s;
+}
+
+.settings-background-option:hover {
+  border-color: var(--text-secondary);
+}
+
+.settings-background-option.is-selected {
+  border-color: var(--brand-default);
+  box-shadow: 0 0 0 1px var(--brand-default);
+}
+
+.settings-background-options:disabled .settings-background-option {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.settings-background-preview {
+  position: relative;
+  display: block;
+  height: 76px;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.settings-background-preview-paths svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  stroke: #64748b;
+  stroke-width: 0.8;
+  stroke-opacity: 0.7;
+  stroke-dasharray: 45 18;
+}
+
+.settings-background-option-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+}
+
+.settings-background-option-label input {
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--brand-default);
+}
+
+.settings-background-option-label strong,
+.settings-background-option-label small {
+  display: block;
+}
+
+.settings-background-option-label strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-background-option-label small {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+@media (max-width: 440px) {
+  .settings-background-options {
+    grid-template-columns: 1fr;
+  }
 }
 
 .settings-sections {
@@ -2800,7 +3020,7 @@ button.session-label-toggle:focus-visible {
 
 /* Switch on available workspace width, including changes from the sidebar,
    rather than the browser width. Keep both panes mounted and measurable. */
-@container (max-width: 720px) {
+@container workspace-stage (max-width: 720px) {
   .workbench.graph-mode,
   .workbench.graph-collapsed {
     flex-direction: column;
@@ -2848,14 +3068,23 @@ button.session-label-toggle:focus-visible {
     display: none;
   }
 
-  .workbench.graph-mode .graph-pane {
+  .workbench.graph-mode .graph-pane-aperture {
     position: absolute;
     inset: 48px 0 0;
     z-index: 2;
   }
 
+  .workbench.graph-mode .graph-pane {
+    width: 100%;
+  }
+
+  .workbench.graph-collapsed .graph-pane-aperture {
+    display: none;
+  }
+
   /* React Flow nodes and the Latest button set their own visibility, so hiding
      only the parent would leave descendants painted or keyboard-accessible. */
+  .workbench.graph-mode:not(.narrow-graph-visible) .graph-pane-aperture,
   .workbench.graph-mode:not(.narrow-graph-visible) .graph-pane,
   .workbench.graph-mode:not(.narrow-graph-visible) .graph-pane *,
   .workbench.narrow-graph-visible .conversation-pane,

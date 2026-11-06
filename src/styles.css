@@ -1407,8 +1407,11 @@ a,
   /* Let the workbench shadow reach the main area's padding; .main clips it. */
   overflow: visible;
   isolation: isolate;
-  /* The workspace can be narrow even in a wide window when the sidebar is open. */
+  /* The workspace can be narrow even in a wide window when the sidebar is open.
+     Name this container so a nested graph sizing container cannot change the
+     breakpoint used by individual workbench descendants. */
   container-type: inline-size;
+  container-name: workspace-stage;
 }
 
 .main-view-stage > .landing-screen,
@@ -1545,6 +1548,13 @@ a,
   overscroll-behavior: none;
 }
 
+/* Let the title-anchored dots reach the canvas behind the sidebar, while the
+   app shell clips them to the viewport. Keep workbench clipping intact. */
+.app-shell.landing-active.dots-active .main,
+.app-shell.landing-active.dots-active .landing-screen {
+  overflow: visible;
+}
+
 .landing-center-content {
   width: 100%;
   max-width: 680px;
@@ -1564,8 +1574,25 @@ a,
   width: -moz-fit-content;
   width: fit-content;
   max-width: 100%;
-  transform: translateX(clamp(0px, 12.5vw, 200px));
+  transform: translateX(clamp(0px, 10vw, 120px));
   transition: transform 0.2s ease;
+}
+
+/* Keep the fade centered on the title as the sidebar and viewport move it. */
+.landing-title-dot-pattern {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 200vw;
+  height: 200vh;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.landing-title-dot-pattern svg {
+  -webkit-mask-image: radial-gradient(ellipse 50% 50% at center, white 0%, rgba(255, 255, 255, 0.72) 30%, rgba(255, 255, 255, 0.34) 65%, rgba(255, 255, 255, 0.24) 100%, transparent 145%);
+  mask-image: radial-gradient(ellipse 50% 50% at center, white 0%, rgba(255, 255, 255, 0.72) 30%, rgba(255, 255, 255, 0.34) 65%, rgba(255, 255, 255, 0.24) 100%, transparent 145%);
 }
 
 /* Copy fade/exit motion must not overwrite the responsive horizontal placement. */

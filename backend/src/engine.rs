@@ -390,7 +390,7 @@ pub fn steer(
     instruction: &str,
     images: Option<Vec<crate::model::ImageAttachment>>,
 ) -> Result<(), String> {
-    send_steer(execution_id, instruction, images, true)
+    send_steer(execution_id, instruction, images, true, None)
 }
 
 /// Delivery to a live RPC input, without waiting for the model process to
@@ -401,7 +401,23 @@ pub fn steer_nowait(
     instruction: &str,
     images: Option<Vec<crate::model::ImageAttachment>>,
 ) -> Result<(), String> {
-    send_steer(execution_id, instruction, images, false)
+    send_steer(execution_id, instruction, images, false, None)
+}
+
+/// The Planner's durable request ID also identifies Pi's asynchronous response.
+pub fn steer_planner_for_run_with_id(
+    run_id: &str,
+    instruction: &str,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+    request_id: &str,
+) -> Result<(), String> {
+    send_steer(
+        &planner_for_run(run_id)?,
+        instruction,
+        images,
+        false,
+        Some(request_id),
+    )
 }
 
 fn send_steer(
@@ -409,6 +425,7 @@ fn send_steer(
     instruction: &str,
     images: Option<Vec<crate::model::ImageAttachment>>,
     acknowledge: bool,
+    request_id: Option<&str>,
 ) -> Result<(), String> {
     let rpc = NODE_RPC
         .get_or_init(Default::default)
@@ -417,8 +434,14 @@ fn send_steer(
         .get(execution_id)
         .cloned()
         .ok_or("Node execution is no longer accepting messages")?;
-    let id = uuid::Uuid::new_v4().to_string();
-    let pending = if acknowledge {
+    let id = request_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // A tracked asynchronous Planner request must also keep the handoff open
+    // until Pi responds. Otherwise an earlier agent_settled can close the pipe
+    // between acceptance and the next turn_start.
+    let tracked_async = !acknowledge && request_id.is_some();
+    let pending = if acknowledge || tracked_async {
         let (tx, rx) = mpsc::channel();
         rpc.pending
             .lock()
@@ -444,6 +467,16 @@ fn send_steer(
     let Some(rx) = pending else {
         return Ok(());
     };
+    if tracked_async {
+        let pending = rpc.pending.clone();
+        thread::spawn(move || {
+            let _ = rx.recv_timeout(Duration::from_secs(10));
+            if let Ok(mut pending) = pending.lock() {
+                pending.remove(&id);
+            }
+        });
+        return Ok(());
+    }
     let result = rx
         .recv_timeout(Duration::from_secs(10))
         .map_err(|_| "Node did not acknowledge the steer request".to_string());
@@ -1556,7 +1589,9 @@ fn run_turn(
                                         };
                                         // Acceptance can precede the next turn_start. Do not
                                         // exit on an earlier agent_settled and drop this turn.
-                                        if result.is_ok() {
+                                        if result.is_ok()
+                                            && event["data"]["disposition"] != "handled"
+                                        {
                                             agent_ended = None;
                                         }
                                         let _ = reply.send(result);

@@ -269,6 +269,20 @@ pub fn branch_before_user(
     .commit()
 }
 
+fn without_planner_steer_marker(text: &str) -> &str {
+    let Some((prefix, tail)) = text.rsplit_once("\n\n<grapher-steer-id>") else {
+        return text;
+    };
+    let Some(id) = tail.strip_suffix("</grapher-steer-id>") else {
+        return text;
+    };
+    if Uuid::parse_str(id).is_ok() {
+        prefix
+    } else {
+        text
+    }
+}
+
 pub fn branch_before_planner_user(
     session_dir: &Path,
     session_id: &str,
@@ -491,6 +505,11 @@ fn prepare_user_branch(
     for entry in values.iter().skip(1) {
         let content = user_text(entry);
         let matches_text = content.as_deref().is_some_and(|text| {
+            let text = if planner {
+                without_planner_steer_marker(text)
+            } else {
+                text
+            };
             text == old_text
                 || (!planner
                     && text.strip_suffix(crate::engine::FEEDBACK_INSTRUCTIONS) == Some(old_text))
@@ -688,6 +707,34 @@ impl UserBranch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planner_steer_marker_does_not_break_editing_the_recorded_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4().to_string();
+        let steer = Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("test_{id}.jsonl"));
+        let entries = [
+            json!({"type":"session", "id":id, "cwd":temp.path()}),
+            json!({"type":"message", "id":"goal", "parentId":null, "message":{"role":"user","content":"goal"}}),
+            json!({"type":"message", "id":"steer", "parentId":"goal", "message":{"role":"user",
+                "content":format!("inspect\n\n<grapher-steer-id>{steer}</grapher-steer-id>")}}),
+        ];
+        fs::write(
+            &path,
+            entries
+                .iter()
+                .map(|entry| format!("{entry}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let branch = branch_before_planner_user(temp.path(), &id, temp.path(), "inspect").unwrap();
+        assert!(!branch.first_user_turn);
+        let marker: Value =
+            serde_json::from_str(fs::read_to_string(path).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert_eq!(marker["parentId"], "goal");
+    }
 
     #[test]
     fn truncating_a_live_transcript_keeps_utf8_scalars_intact() {

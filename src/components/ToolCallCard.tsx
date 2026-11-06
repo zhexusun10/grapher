@@ -1,6 +1,7 @@
 import { t } from "../i18n";
-import React, { useState, useMemo, useRef } from "react";
+import React, { useState, useMemo, useRef, useLayoutEffect } from "react";
 import { CollapsibleCardBody } from "./CollapsibleCardBody";
+import { CardReveal } from "./CardReveal";
 import { useCardAppear } from "../services/cardAnimations";
 import {
   Terminal,
@@ -23,6 +24,7 @@ import {
 import { TranscriptItem } from "../types";
 import { formatToolDuration } from "../utils/toolTiming";
 import { truncateToolText } from "../services/toolOutput";
+import { syncOverscrollContainment } from "../services/transcriptScroll";
 
 interface ToolCallCardProps {
   item: TranscriptItem;
@@ -57,6 +59,49 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
   ({ item, defaultExpanded = false, expanded, onExpandedChange }) => {
     const [isCopied, setIsCopied] = useState(false);
     const cardRef = useRef<HTMLDivElement>(null);
+    // Code blocks are scrollable only when their own content overflows. A
+    // contained but non-scrollable block would swallow the conversation wheel.
+    // One observer per mounted card watches the blocks that exist now and any
+    // block React adds later, instead of rebuilding observers on every streamed
+    // token (the card re-renders for each delta).
+    useLayoutEffect(() => {
+      const card = cardRef.current;
+      if (!card) return;
+      const selector = "pre.tool-command-code, pre.tool-args-code, pre.tool-result-code";
+      const resize = typeof ResizeObserver === "undefined" ? null
+        : new ResizeObserver(entries => {
+            for (const entry of entries) syncOverscrollContainment(entry.target as HTMLElement);
+          });
+      const observed = new Set<HTMLElement>();
+      const sync = () => {
+        const current = new Set(card.querySelectorAll<HTMLElement>(selector));
+        for (const node of current) {
+          if (!observed.has(node)) {
+            observed.add(node);
+            resize?.observe(node);
+          }
+          syncOverscrollContainment(node);
+        }
+        for (const node of observed) {
+          if (current.has(node)) continue;
+          observed.delete(node);
+          resize?.unobserve(node);
+        }
+      };
+      sync();
+      if (typeof MutationObserver === "undefined") return () => resize?.disconnect();
+      // Text deltas mutate the existing <pre> content without changing its
+      // identity, so watch character data as well as inserted/removed blocks.
+      // Mutation callbacks are delivered at the microtask checkpoint before
+      // paint, so syncing there updates containment in the same frame; deferring
+      // to requestAnimationFrame would leave one frame with stale overscroll.
+      const mutations = new MutationObserver(sync);
+      mutations.observe(card, { childList: true, characterData: true, subtree: true });
+      return () => {
+        mutations.disconnect();
+        resize?.disconnect();
+      };
+    }, []);
 
     const toolName = item.toolName || "tool";
     const args = item.args || {};
@@ -197,152 +242,162 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
     }, [toolName, item.durationMs]);
 
     return (
-      <div
-        ref={cardRef}
-        className={`tool-call-card ${meta.type} ${status}${
-          isError ? " error" : hasSubcommandWarning ? " warning" : ""
-        }${animateAppear ? " appear-active" : ""}`}
-        data-testid="tool-call-card"
-      >
+      <CardReveal animate={animateAppear}>
         <div
-          className="tool-call-header"
-          onClick={toggleExpanded}
-          onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleExpanded(); } }}
-          role="button"
-          aria-expanded={isExpanded}
-          tabIndex={0}
+          ref={cardRef}
+          className={`tool-call-card ${meta.type} ${status}${
+            isError ? " error" : hasSubcommandWarning ? " warning" : ""
+          }${animateAppear ? " appear-active" : ""}`}
+          data-testid="tool-call-card"
         >
-          <div className="tool-header-left">
-            <span className="tool-expand-icon">
-              <ChevronRight size={14} className={`tool-expand-chevron ${isExpanded ? "open" : ""}`} />
-            </span>
-            {meta.icon}
-            <span className="tool-badge">{meta.badge}</span>
-            <span className="tool-summary">
-              {meta.summary}
-            </span>
-          </div>
+          <div
+            className="tool-call-header"
+            onClick={toggleExpanded}
+            onMouseDown={(event) => {
+              // Match the reasoning cards: a pointer click is only a disclosure
+              // toggle, so it must not pull keyboard focus (and its Enter/Space
+              // handling) out of the composer. Tab still focuses the header.
+              if ((event.target as HTMLElement).closest("button")) return;
+              event.preventDefault();
+            }}
+            onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleExpanded(); } }}
+            role="button"
+            aria-expanded={isExpanded}
+            tabIndex={0}
+          >
+            <div className="tool-header-left">
+              <span className="tool-expand-icon">
+                <ChevronRight size={14} className={`tool-expand-chevron ${isExpanded ? "open" : ""}`} />
+              </span>
+              {meta.icon}
+              <span className="tool-badge">{meta.badge}</span>
+              <span className="tool-summary">
+                {meta.summary}
+              </span>
+            </div>
 
-          <div className="tool-header-right">
-            {isTruncated && (
-              <span className="tool-truncated-pill">
-                {t("已截断")}</span>
-            )}
-            {status === "running" && (
-              <span className="tool-status running">
-                <Loader2 size={12} className="spin" />
-                <span>{t("执行中...")}</span>
-              </span>
-            )}
-            {status === "interrupted" && (
-              <span className="tool-status interrupted">
-                <AlertCircle size={13} />
-                <span>{t("已中断")}</span>
-              </span>
-            )}
-            {status !== "running" && status !== "interrupted" && !isError && !hasSubcommandWarning && (
-              <span className="tool-status success">
-                <CheckCircle2 size={13} />
-                <span>
-                  {toolName === "bash"
-                    ? exitCode !== null
-                      ? t("完成 (Exit {0})", exitCode)
-                      : t("完成")
-                    : t("完成")}
+            <div className="tool-header-right">
+              {isTruncated && (
+                <span className="tool-truncated-pill">
+                  {t("已截断")}</span>
+              )}
+              {status === "running" && (
+                <span className="tool-status running">
+                  <Loader2 size={12} className="spin" />
+                  <span>{item.toolPhase === "generating" ? t("正在生成调用…")
+                    : item.toolPhase === "pending" ? t("等待执行…") : t("执行中...")}</span>
                 </span>
-              </span>
-            )}
-            {status !== "running" && status !== "interrupted" && !isError && hasSubcommandWarning && (
-              <span className="tool-status warning">
-                <AlertTriangle size={13} />
-                <span>{t("包含警告/错误")}</span>
-              </span>
-            )}
-            {isError && (
-              <span className="tool-status error">
-                <AlertCircle size={13} />
-                <span>
-                  {toolName === "bash"
-                    ? exitCode !== null
-                      ? t("失败 (Exit {0})", exitCode)
+              )}
+              {status === "interrupted" && (
+                <span className="tool-status interrupted">
+                  <AlertCircle size={13} />
+                  <span>{t("已中断")}</span>
+                </span>
+              )}
+              {status !== "running" && status !== "interrupted" && !isError && !hasSubcommandWarning && (
+                <span className="tool-status success">
+                  <CheckCircle2 size={13} />
+                  <span>
+                    {toolName === "bash"
+                      ? exitCode !== null
+                        ? t("完成 (Exit {0})", exitCode)
+                        : t("完成")
+                      : t("完成")}
+                  </span>
+                </span>
+              )}
+              {status !== "running" && status !== "interrupted" && !isError && hasSubcommandWarning && (
+                <span className="tool-status warning">
+                  <AlertTriangle size={13} />
+                  <span>{t("包含警告/错误")}</span>
+                </span>
+              )}
+              {isError && (
+                <span className="tool-status error">
+                  <AlertCircle size={13} />
+                  <span>
+                    {toolName === "bash"
+                      ? exitCode !== null
+                        ? t("失败 (Exit {0})", exitCode)
+                        : isInterrupted
+                          ? t("已中断")
+                          : t("失败 (退出码未知)")
                       : isInterrupted
                         ? t("已中断")
-                        : t("失败 (退出码未知)")
-                    : isInterrupted
-                      ? t("已中断")
-                      : t("失败")}
+                        : t("失败")}
+                  </span>
                 </span>
-              </span>
-            )}
-            <button
-              type="button"
-              className="tool-copy-btn"
-              onClick={handleCopy}
-              aria-label={t("复制调用参数与结果")}
-            >
-              {isCopied ? <Check size={12} className="copy-icon-check" /> : <Copy size={12} className="copy-icon-copy" />}
-            </button>
+              )}
+              <button
+                type="button"
+                className="tool-copy-btn"
+                onClick={handleCopy}
+                aria-label={t("复制调用参数与结果")}
+              >
+                {isCopied ? <Check size={12} className="copy-icon-check" /> : <Copy size={12} className="copy-icon-copy" />}
+              </button>
+            </div>
           </div>
+
+          <CollapsibleCardBody expanded={isExpanded}>{() => (
+            <div className="tool-call-body">
+              {toolName === "bash" && (
+                <div className="tool-meta-bar">
+                  <div className="tool-meta-item">
+                    <span className="meta-lbl">{t("退出码:")}</span>
+                    <span
+                      className={`meta-val ${
+                        exitCode === 0 ? "success" : exitCode !== null ? "error" : "neutral"
+                      }`}
+                    >
+                      {exitCode !== null ? exitCode : t("退出码未知")}
+                    </span>
+                  </div>
+                  <div className="tool-meta-item">
+                    <span className="meta-lbl">{t("输出状态:")}</span>
+                    <span className={`meta-val ${isTruncated ? "warning" : "neutral"}`}>
+                      {isTruncated ? t("已截断 (Truncated)") : t("完整 (Complete)")}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {args.command && (
+                <div className="tool-command-section">
+                  <div className="section-label">{t("命令 (Command)")}</div>
+                  <pre className="tool-command-code">{args.command}</pre>
+                </div>
+              )}
+
+              {Object.keys(args).length > 0 && (
+                <div className="tool-args-section">
+                  <div className="section-label">{t("参数 (Arguments)")}</div>
+                  <pre className="tool-args-code">
+                    {argsText.text}
+                  </pre>
+                </div>
+              )}
+
+              {item.result !== undefined && item.result !== null && (
+                <div className="tool-result-section">
+                  <div className="section-label">
+                    {isError ? t("错误输出 (Error Output)") : t("执行结果 (Result Output)")}
+                  </div>
+                  <pre className={`tool-result-code ${isError ? "error" : ""}`}>
+                    {resultText.trim() || t("(无文本输出)")}
+                  </pre>
+                </div>
+              )}
+              {timing && (
+                <div className="tool-timing">
+                  <span className="tool-timing-lbl">{timing.label}</span>
+                  <span className="tool-timing-val">{timing.value}</span>
+                </div>
+              )}
+            </div>
+          )}</CollapsibleCardBody>
         </div>
-
-        <CollapsibleCardBody expanded={isExpanded}>{() => (
-          <div className="tool-call-body">
-            {toolName === "bash" && (
-              <div className="tool-meta-bar">
-                <div className="tool-meta-item">
-                  <span className="meta-lbl">{t("退出码:")}</span>
-                  <span
-                    className={`meta-val ${
-                      exitCode === 0 ? "success" : exitCode !== null ? "error" : "neutral"
-                    }`}
-                  >
-                    {exitCode !== null ? exitCode : t("退出码未知")}
-                  </span>
-                </div>
-                <div className="tool-meta-item">
-                  <span className="meta-lbl">{t("输出状态:")}</span>
-                  <span className={`meta-val ${isTruncated ? "warning" : "neutral"}`}>
-                    {isTruncated ? t("已截断 (Truncated)") : t("完整 (Complete)")}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {args.command && (
-              <div className="tool-command-section">
-                <div className="section-label">{t("命令 (Command)")}</div>
-                <pre className="tool-command-code">{args.command}</pre>
-              </div>
-            )}
-
-            {Object.keys(args).length > 0 && (
-              <div className="tool-args-section">
-                <div className="section-label">{t("参数 (Arguments)")}</div>
-                <pre className="tool-args-code">
-                  {argsText.text}
-                </pre>
-              </div>
-            )}
-
-            {item.result !== undefined && item.result !== null && (
-              <div className="tool-result-section">
-                <div className="section-label">
-                  {isError ? t("错误输出 (Error Output)") : t("执行结果 (Result Output)")}
-                </div>
-                <pre className={`tool-result-code ${isError ? "error" : ""}`}>
-                  {resultText.trim() || t("(无文本输出)")}
-                </pre>
-              </div>
-            )}
-            {timing && (
-              <div className="tool-timing">
-                <span className="tool-timing-lbl">{timing.label}</span>
-                <span className="tool-timing-val">{timing.value}</span>
-              </div>
-            )}
-          </div>
-        )}</CollapsibleCardBody>
-      </div>
+      </CardReveal>
     );
   }
 );

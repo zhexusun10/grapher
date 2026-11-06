@@ -56,6 +56,10 @@ export function CreateNodeForm({ state, busy, onCancel, onSave, onRequestConfirm
       setError(t("反馈边需要选择目标节点。"));
       return;
     }
+    if (!feedback && from && to && from === to) {
+      setError(t("前驱和目标不能是同一个节点；如需让新节点反馈给该节点，请将 feedback 设为 true。"));
+      return;
+    }
     if (feedback && (!from || !dependencyDescendants(state, to).has(from))) {
       setError(t("反馈目标必须是前驱节点或其依赖祖先。"));
       return;
@@ -111,18 +115,20 @@ export function CreateNodeForm({ state, busy, onCancel, onSave, onRequestConfirm
           {state.graph.nodes.map(node => <option key={node.name} value={node.name}>{node.name}</option>)}
         </select>
       </label>
-      <label className="form-field"><span>feedback</span>
-        <select value={String(feedback)} onChange={event => setFeedback(event.target.value === "true")} disabled={busy}>
-          <option value="false">false</option><option value="true">true</option>
-        </select>
-      </label>
-      <p className="create-node-hint">{t("from → 新节点为普通依赖；feedback 决定新节点 → to 是否为反馈边。反馈目标必须是新节点的依赖祖先。")}</p>
+      <div className="form-field-group">
+        <label className="form-field"><span>feedback</span>
+          <select value={String(feedback)} onChange={event => setFeedback(event.target.value === "true")} disabled={busy}>
+            <option value="false">false</option><option value="true">true</option>
+          </select>
+        </label>
+        <p className="create-node-hint">{t("from → 新节点为普通依赖；feedback 决定新节点 → to 是否为反馈边。反馈目标必须是新节点的依赖祖先。")}</p>
+      </div>
       {from && to && !feedback && state.graph.edges.some(edge => !edge.feedback && edge.from === from && edge.to === to) &&
         <p className="create-node-hint">{t("保存后，新节点将插入这两个节点之间，替换原有的直接依赖边。")}</p>}
       {error && <p className="create-node-error" role="alert">{error}</p>}
       <div className="create-node-actions">
-        <button type="button" className="secondary" disabled={busy} onClick={onCancel}>{t("取消")}</button>
-        <button type="submit" className="primary" disabled={busy}><Check size={14} />{t("保存节点")}</button>
+        <button type="button" className="create-node-cancel-btn" disabled={busy} onClick={onCancel}>{t("取消")}</button>
+        <button type="submit" className="primary save-config-btn" disabled={busy}><Check size={14} />{t("保存")}</button>
       </div>
     </form>
   </div>;

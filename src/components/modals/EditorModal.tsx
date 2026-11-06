@@ -3,6 +3,7 @@ import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { Check, X } from "lucide-react";
 import { Graph, emptyGraph } from "../../types";
+import { dialogVeilMotion, largeDialogMotion } from "./dialogMotion";
 
 interface EditorModalProps {
   isOpen: boolean;
@@ -44,26 +45,25 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
 
   if (!isOpen) return null;
 
+  const dialogMotion = largeDialogMotion(reduceMotion);
+  const veilMotion = dialogVeilMotion(reduceMotion);
+
   return (
-    <motion.div
-      className="modal-backdrop"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: reduceMotion ? 0 : 0.16, ease: "easeOut" }}
+    <div
+      className="modal-backdrop subtle-backdrop"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
+      {/* Same light veil as Settings; it is inert so a click still lands on the
+          backdrop and closes the editor. */}
+      <motion.div className="modal-backdrop-tint" aria-hidden="true" {...veilMotion} />
       <motion.section
-        className="modal wide"
+        className="modal wide surface-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
-        initial={{ opacity: 0, scale: reduceMotion ? 1 : 0.98, y: reduceMotion ? 0 : 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: reduceMotion ? 1 : 0.98, y: reduceMotion ? 0 : 6 }}
-        transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.16, 1, 0.3, 1] }}
+        {...dialogMotion}
       >
         <header>
           <h2 id="modal-title">{t("Graph IR · 编辑与编译")}</h2>
@@ -105,7 +105,7 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
             <Check size={14} />{t("校验并应用")}</button>
         </footer>
       </motion.section>
-    </motion.div>
+    </div>
   );
 });
 

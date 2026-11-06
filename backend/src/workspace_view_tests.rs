@@ -1672,3 +1672,340 @@ fn reused_slot_rebinds_project_git_to_the_new_base() {
     );
     assert_eq!(bytes(&target.join("src/pkg/mod.py")), b"pkg\n");
 }
+
+#[test]
+fn source_snapshots_advance_when_only_project_metadata_changes() {
+    for (plain, scoped) in [(false, false), (false, true), (true, false), (true, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = if plain {
+            let source = temp.path().join("plain");
+            fs::create_dir(&source).unwrap();
+            fs::write(source.join("tracked.txt"), "committed\n").unwrap();
+            source
+        } else {
+            source(&temp)
+        };
+        let exclusions = if scoped {
+            vec!["managed".to_string()]
+        } else {
+            vec![]
+        };
+        fs::create_dir(source.join("managed")).unwrap();
+        fs::write(source.join("managed/cache"), "cache").unwrap();
+        let first = workspace::snapshot_repository_scoped(&source, &exclusions).unwrap();
+        fs::create_dir_all(source.join("source-empty/nested")).unwrap();
+        let second = workspace::snapshot_repository_scoped(&source, &exclusions).unwrap();
+        assert_ne!(
+            first, second,
+            "metadata-only change needs a new view reference"
+        );
+        let follow = slot(&temp, "source-metadata-follow");
+        workspace::prepare(&source, &follow, &second, &[]).unwrap();
+        assert!(follow.join("source-empty/nested").is_dir());
+
+        // The normal plain-folder entry point must also advance on metadata-only
+        // changes instead of reusing stale evidence.
+        if plain {
+            fs::create_dir(source.join("another-empty")).unwrap();
+            let third = workspace::materialize_shadow_repo(&source, &exclusions).unwrap();
+            assert_ne!(second, third);
+            let follow = slot(&temp, "source-metadata-materialized");
+            workspace::prepare(&source, &follow, &third, &[]).unwrap();
+            assert!(follow.join("another-empty").is_dir());
+        }
+    }
+}
+
+#[test]
+fn publication_retains_empty_directories_added_to_source_after_fork() {
+    for (plain, hardlinks, source_file_edit) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+    ] {
+        if hardlinks && !cfg!(unix) {
+            continue;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let source = if plain {
+            let source = temp.path().join("plain");
+            fs::create_dir(&source).unwrap();
+            fs::write(source.join("tracked.txt"), "committed\n").unwrap();
+            source
+        } else {
+            source(&temp)
+        };
+        if hardlinks {
+            fs::hard_link(source.join("tracked.txt"), source.join("alias.txt")).unwrap();
+        }
+        let base = workspace::snapshot_repository(&source).unwrap();
+        let node = slot(&temp, "source-late-node");
+        workspace::prepare(&source, &node, &base, &[]).unwrap();
+        fs::write(node.join("result"), "result").unwrap();
+        let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+        fs::create_dir_all(source.join("late-empty/nested")).unwrap();
+        if source_file_edit {
+            fs::write(source.join("late-file"), "source edit").unwrap();
+        }
+        let published =
+            crate::graph_merge::merge_graph(&source, &[head], || panic!("no conflict")).unwrap();
+        let recorded = load(&record_path(&source, &published).unwrap()).unwrap();
+        let follow = slot(&temp, "source-late-follow");
+        workspace::prepare(&source, &follow, &published, &[]).unwrap();
+        assert!(
+            follow.join("late-empty/nested").is_dir(),
+            "plain={plain}, hardlinks={hardlinks}, source_file_edit={source_file_edit}, recorded={:?}",
+            recorded.entries.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn publication_refuses_to_guess_when_common_view_evidence_is_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "missing-common-node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(node.join("result"), "result").unwrap();
+    let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+    fs::create_dir(source.join("late-empty")).unwrap();
+    let input = workspace::snapshot_repository(&source).unwrap();
+    assert_ne!(base, input);
+    fs::remove_dir_all(record_path(&source, &base).unwrap()).unwrap();
+    let error =
+        crate::graph_merge::merge_graph(&source, &[head], || panic!("no conflict")).unwrap_err();
+    assert!(error.contains("common project-view evidence"), "{error}");
+    assert!(!source.join("result").exists());
+    assert!(source.join("late-empty").is_dir());
+}
+
+#[test]
+fn publication_keeps_source_metadata_when_the_user_commits_after_the_fork() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    fs::write(source.join("untracked"), "initial dirty file").unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "source-commit-node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(node.join("result"), "result").unwrap();
+    let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+    fs::write(source.join("user-commit"), "user history").unwrap();
+    workspace::project_git(&source, &["add", "user-commit"]).unwrap();
+    workspace::project_git(&source, &["commit", "-qm", "user commit"]).unwrap();
+    fs::create_dir_all(source.join("late-empty/nested")).unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &[head], || panic!("no conflict")).unwrap();
+    let follow = slot(&temp, "source-commit-follow");
+    workspace::prepare(&source, &follow, &published, &[]).unwrap();
+    assert!(follow.join("late-empty/nested").is_dir());
+}
+
+#[test]
+fn publication_does_not_reintroduce_source_changes_reverted_after_fork() {
+    for capture_clean_first in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = source(&temp);
+        if capture_clean_first {
+            workspace::snapshot_repository(&source).unwrap();
+        }
+        fs::write(source.join("tracked.txt"), "temporary source edit\n").unwrap();
+        let base = workspace::snapshot_repository(&source).unwrap();
+        let node = slot(&temp, "reverted-source-node");
+        workspace::prepare(&source, &node, &base, &[]).unwrap();
+        fs::write(node.join("result"), "result").unwrap();
+        let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+        fs::write(source.join("tracked.txt"), "committed\n").unwrap();
+        crate::graph_merge::merge_graph(&source, &[head], || panic!("no conflict")).unwrap();
+        assert_eq!(
+            bytes(&source.join("tracked.txt")),
+            b"committed\n",
+            "capture_clean_first={capture_clean_first}"
+        );
+        assert_eq!(bytes(&source.join("result")), b"result");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_free_publication_preserves_file_metadata_and_empty_directories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    fs::create_dir_all(source.join("source-empty/nested")).unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "metadata-publication-node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(node.join("tracked.txt"), "updated bytes\n").unwrap();
+    fs::set_permissions(node.join("tracked.txt"), fs::Permissions::from_mode(0o600)).unwrap();
+    fs::create_dir_all(node.join("node-empty/nested")).unwrap();
+    let head = workspace::snapshot_node(&node, &source, "metadata-publication").unwrap();
+
+    let published =
+        crate::graph_merge::merge_graph(&source, &[head], || panic!("no conflict")).unwrap();
+    let follow = slot(&temp, "metadata-publication-follow");
+    workspace::prepare(&source, &follow, &published, &[]).unwrap();
+    assert_eq!(bytes(&follow.join("tracked.txt")), b"updated bytes\n");
+    assert_eq!(
+        fs::metadata(follow.join("tracked.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(follow.join("source-empty/nested").is_dir());
+    assert!(follow.join("node-empty/nested").is_dir());
+    verify_result(&follow, &source, &published).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_free_publication_rejects_conflicting_file_metadata() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let mut heads = Vec::new();
+    for (name, mode) in [("metadata-left", 0o600), ("metadata-right", 0o640)] {
+        let node = slot(&temp, name);
+        workspace::prepare(&source, &node, &base, &[]).unwrap();
+        fs::set_permissions(node.join("tracked.txt"), fs::Permissions::from_mode(mode)).unwrap();
+        heads.push(workspace::snapshot_node(&node, &source, name).unwrap());
+    }
+    let error =
+        crate::graph_merge::merge_graph(&source, &heads, || panic!("no Git conflict")).unwrap_err();
+    assert!(error.contains("metadata composition conflict"), "{error}");
+    assert_eq!(bytes(&source.join("tracked.txt")), b"committed\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_free_publication_keeps_link_target_whitespace() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    symlink(" target \n", source.join("link")).unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "link-publication-node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(node.join("result"), "result").unwrap();
+    let head = workspace::snapshot_node(&node, &source, "link-publication").unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &[head], || panic!("no conflict")).unwrap();
+    let follow = slot(&temp, "link-publication-follow");
+    workspace::prepare(&source, &follow, &published, &[]).unwrap();
+    assert_eq!(
+        fs::read_link(follow.join("link")).unwrap(),
+        Path::new(" target \n")
+    );
+    verify_result(&follow, &source, &published).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn publication_rejects_hardlinks_with_divergent_composed_contents() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    fs::write(source.join("a"), "same\n").unwrap();
+    fs::write(source.join("b"), "same\n").unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let linked = slot(&temp, "hardlink-publication-linked");
+    workspace::prepare(&source, &linked, &base, &[]).unwrap();
+    fs::remove_file(linked.join("b")).unwrap();
+    fs::hard_link(linked.join("a"), linked.join("b")).unwrap();
+    let linked_head = workspace::snapshot_node(&linked, &source, "link").unwrap();
+    let edited = slot(&temp, "hardlink-publication-edited");
+    workspace::prepare(&source, &edited, &base, &[]).unwrap();
+    fs::write(edited.join("a"), "different\n").unwrap();
+    let edited_head = workspace::snapshot_node(&edited, &source, "edit").unwrap();
+
+    let error = crate::graph_merge::merge_graph(&source, &[linked_head, edited_head], || {
+        panic!("no Git conflict")
+    })
+    .unwrap_err();
+    assert!(error.contains("Hardlinked task paths"), "{error}");
+    assert_eq!(bytes(&source.join("a")), b"same\n");
+    assert_eq!(bytes(&source.join("b")), b"same\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn publication_retains_unchanged_special_entries_in_the_composed_view() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::FileTypeExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let fifo = CString::new(source.join("events").as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "fifo-publication-node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(node.join("result"), "result").unwrap();
+    let head = workspace::snapshot_node(&node, &source, "fifo-publication").unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &[head], || panic!("no conflict")).unwrap();
+    let follow = slot(&temp, "fifo-publication-follow");
+    workspace::prepare(&source, &follow, &published, &[]).unwrap();
+    assert!(fs::symlink_metadata(follow.join("events"))
+        .unwrap()
+        .file_type()
+        .is_fifo());
+    verify_result(&follow, &source, &published).unwrap();
+}
+
+/// A publication that changes only a file's executable bit must record that
+/// mode: the composed view is what a later result workspace is verified against.
+#[cfg(unix)]
+#[test]
+fn workspace_free_composition_records_a_mode_only_change() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::set_permissions(node.join("tracked.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+    let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &[head], || Err("no conflict".into())).unwrap();
+    assert!(
+        source
+            .join("tracked.txt")
+            .metadata()
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111
+            != 0,
+        "delivery keeps the tree's executable bit"
+    );
+
+    // The composed record must agree with the tree's executable bit, not with
+    // the earlier view that still describes the unchanged bytes.
+    let recorded = load(&record_path(&source, &published).unwrap()).unwrap();
+    match recorded.entries.get("tracked.txt") {
+        Some(Entry::File { mode, .. }) => {
+            assert_eq!(
+                mode & 0o111,
+                0o111,
+                "composed view keeps the executable bit"
+            )
+        }
+        other => panic!("missing recorded file entry: {other:?}"),
+    }
+    let follow = slot(&temp, "follow-up");
+    workspace::prepare(&source, &follow, &published, &[]).unwrap();
+    verify_result(&follow, &source, &published).unwrap();
+}

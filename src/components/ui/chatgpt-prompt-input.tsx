@@ -64,6 +64,11 @@ interface PromptBoxProps
 
 export const PROMPT_BOX_RESIZE_DURATION = 0.3;
 const COMPOSER_EASE = [0.22, 1, 0.36, 1] as const;
+// A pointer click leaves the send button under the cursor. Do not repaint it
+// as the red Stop control in that same click; wait briefly for the pointer to
+// leave, then show the live control.
+const SEND_GRACE_MS = 500;
+const SEND_GRACE_FALLBACK_MS = 1500;
 
 const MODE_OPTIONS: Array<{ id: "auto" | "serial" | "graph"; label: string }> = [
   { id: "auto", label: "Auto" },
@@ -137,7 +142,25 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const [isPreparing, setIsPreparing] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isAwaitingAcceptance, setIsAwaitingAcceptance] = useState(false);
+    const [sendGrace, setSendGrace] = useState(false);
+    const sendGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const sendPointerInsideRef = useRef(false);
     const submittingRef = useRef(false);
+    const endSendGrace = () => {
+      if (sendGraceTimerRef.current !== null) {
+        clearTimeout(sendGraceTimerRef.current);
+        sendGraceTimerRef.current = null;
+      }
+      setSendGrace(false);
+    };
+    const scheduleSendGrace = (delay = SEND_GRACE_MS) => {
+      if (sendGraceTimerRef.current !== null) clearTimeout(sendGraceTimerRef.current);
+      setSendGrace(true);
+      sendGraceTimerRef.current = setTimeout(() => {
+        sendGraceTimerRef.current = null;
+        setSendGrace(false);
+      }, delay);
+    };
     const pillLayoutId = useId();
     const animateSendArrowRef = useRef(false);
     const composingRef = useRef(false);
@@ -159,7 +182,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       setIsPreparing(false);
       setIsSubmitting(false);
       setIsAwaitingAcceptance(false);
-      return () => { attachmentGenerationRef.current += 1; };
+      endSendGrace();
+      return () => {
+        attachmentGenerationRef.current += 1;
+        if (sendGraceTimerRef.current !== null) {
+          clearTimeout(sendGraceTimerRef.current);
+          sendGraceTimerRef.current = null;
+        }
+      };
     }, [repository, runId, node]);
 
     // 智能补全联想状态（@ 文件/智能体，/ Skills）
@@ -666,11 +696,15 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       // send may already have delivered its uniquely named attachment.
     };
 
-    const handleSubmitAction = async () => {
+    const handleSubmitAction = async (fromPointer = false) => {
       const trimmed = currentText.trim();
       if ((!trimmed && !selectedFile) || disabled || isBusy || isPreparing || submittingRef.current) return;
       submittingRef.current = true;
       setIsSubmitting(true);
+      // Only pointer sends can leave a click over the future Stop control.
+      // Keyboard sends must expose Stop as soon as the submission settles.
+      if (fromPointer) scheduleSendGrace(SEND_GRACE_FALLBACK_MS);
+      else endSendGrace();
       setAttachmentError("");
 
       const generation = attachmentGenerationRef.current;
@@ -779,6 +813,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           submittingRef.current = false;
           setIsSubmitting(false);
           setIsAwaitingAcceptance(false);
+          // Do not restart the grace if the pointer left while the request was
+          // in flight; the future Stop control is no longer under the cursor.
+          if (fromPointer && sendPointerInsideRef.current) scheduleSendGrace();
+          else endSendGrace();
         }
       }
     };
@@ -840,6 +878,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     };
 
     const canSubmit = (hasText || !!selectedFile) && !disabled && !isBusy && !isPreparing && !isSubmitting;
+    const showWorkingStop = isWorking && !hasText && !selectedFile && !sendGrace && !isSubmitting && !isPreparing;
 
     const prompt = (
       <motion.div
@@ -1193,29 +1232,40 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               type="submit"
               onClick={(e) => {
                 e.stopPropagation();
-                if (isWorking && !hasText && !selectedFile) {
+                // The grace protects the empty send button from turning into
+                // Stop under the pointer. A new or restored draft is a real
+                // send, even if it arrives before that grace expires.
+                if (sendGrace && !hasText && !selectedFile) return;
+                if (showWorkingStop) {
                   onInterrupt?.();
                 } else {
-                  handleSubmitAction();
+                  const fromPointer = e.detail > 0;
+                  if (fromPointer) sendPointerInsideRef.current = true;
+                  handleSubmitAction(fromPointer);
                 }
               }}
-              disabled={isSubmitting || (isWorking ? (!hasText && !selectedFile && !onInterrupt) : !canSubmit)}
+              onPointerEnter={() => { sendPointerInsideRef.current = true; }}
+              onPointerLeave={() => { sendPointerInsideRef.current = false; endSendGrace(); }}
+              disabled={isSubmitting || (showWorkingStop ? !onInterrupt : !canSubmit)}
               className={`prompt-box-send-btn ${
-                isWorking && !hasText && !selectedFile
+                showWorkingStop
                   ? "working active"
                   : canSubmit
                   ? "active"
                   : ""
               }`}
+              aria-busy={isSubmitting || isPreparing || undefined}
               aria-label={
-                isWorking
-                  ? hasText || selectedFile
-                    ? t("发送以实时调整方向 (Steer)")
-                    : t("点击打断执行")
-                  : t("发送消息")
+                isSubmitting || isPreparing
+                  ? t("正在发送…")
+                  : showWorkingStop
+                    ? t("点击打断执行")
+                    : isWorking && (hasText || selectedFile)
+                      ? t("发送以实时调整方向 (Steer)")
+                      : t("发送消息")
               }
             >
-              {isWorking && !hasText && !selectedFile ? (
+              {showWorkingStop ? (
                 <Square size={compact ? 8 : 10} className="prompt-box-stop-icon" />
               ) : isPreparing || isSubmitting ? (
                 <LoaderCircle size={compact ? 14 : 16} className="prompt-box-spin" />

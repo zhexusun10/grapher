@@ -218,7 +218,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   });
   // The shared engine policy owns read/bash and their stable path view.
   // Keep this extension limited to graph mutations, regardless of cwd.
-  function mutate(change: (graph: Graph) => Diagnostic[] | void) {
+  function mutate(kind: "node" | "edge", change: (graph: Graph) => Diagnostic[] | void) {
     const saved: Graph = JSON.parse(readFileSync(graphPath, "utf8"));
     const graph: Graph = structuredClone(saved);
     const rejected = (diagnostics: Diagnostic[]) => result(JSON.stringify({
@@ -236,12 +236,14 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     if (output.diagnostics?.length) return rejected(output.diagnostics);
     if (!output.plan) return rejected([{ code: "compiler-response", message: "Compiler returned no plan." }]);
     writeFileSync(graphPath, JSON.stringify(graph));
-    // `roots` is the compiler's own list, not a second definition, and it stays
-    // first inside the topology it describes. A short list keeps an unintended
-    // extra root visible; scanning a 40-key map for `[]` hides it.
+    // The first node batch has no edges yet, so its compiler roots merely repeat
+    // every node and can be mistaken for the intended final roots. Later edits
+    // expose the compiler's sorted list as rootNodes to make extra roots visible.
+    const initialNodeBatch = kind === "node" && saved.nodes.length === 0
+      && saved.edges.length === 0 && graph.nodes.length > 0;
     return result(JSON.stringify({
       applied: true,
-      topology: { roots: output.plan.roots, ...topology(graph) },
+      topology: { ...(initialNodeBatch ? {} : { rootNodes: output.plan.rootNodes ?? output.plan.roots }), ...topology(graph) },
       ...(output.plan.warnings?.length ? { warnings: output.plan.warnings.map(stripDiagnosticCode) } : {}),
     }));
   }
@@ -270,7 +272,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     }, { additionalProperties: false }),
     prepareArguments: raw => prepareWithContext(() => editArguments(raw, "nodes", ["name"], ["name", "task", "delete"], '{"nodes":[{"name":"...","task":"..."}]}')),
     async execute(_id, parameters) {
-      return mutate(graph => {
+      return mutate("node", graph => {
         const duplicates = duplicateTargets("nodes", parameters.nodes.map(edit => edit.name));
         if (duplicates.length) return duplicates;
         for (const edit of parameters.nodes) applyNode(graph, edit);
@@ -292,7 +294,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     }, { additionalProperties: false }),
     prepareArguments: raw => prepareWithContext(() => editArguments(raw, "edges", ["from", "to"], ["from", "to", "feedback", "delete"], '{"edges":[{"from":"...","to":"..."}]}')),
     async execute(_id, parameters) {
-      return mutate(graph => {
+      return mutate("edge", graph => {
         const duplicates = duplicateTargets("edges", parameters.edges.map(edit => JSON.stringify([edit.from, edit.to])));
         if (duplicates.length) return duplicates;
         for (const edit of parameters.edges) applyEdge(graph, edit);

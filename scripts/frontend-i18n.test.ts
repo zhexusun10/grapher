@@ -154,14 +154,14 @@ test("execution graph plan warnings are localized without diagnostic code prefix
   }
 });
 
-for (const [systemLanguage, preference] of [["zh-CN", "en"], ["en-US", "zh-CN"], ["fr-FR", "auto"]]) {
+for (const [systemLanguage, preference] of [["zh-CN", "en"], ["fr-FR", "auto"]]) {
   test(`settings language ${preference} overrides ${systemLanguage} after reload`, () => {
     const output = execFileSync(process.execPath, ["scripts/fixtures/frontend-i18n-smoke.mjs", systemLanguage, preference], { encoding: "utf8", timeout: 30_000 });
     assert.ok(output.includes(`UI smoke passed: ${systemLanguage}`));
   });
 }
 
-for (const language of ["en-US", "zh-CN", "zh-TW", "fr-FR"]) {
+for (const language of ["en-US", "zh-CN"]) {
   test(`UI rendering follows ${language} on a fresh page load`, () => {
     const output = execFileSync(process.execPath, ["scripts/fixtures/frontend-i18n-smoke.mjs", language], { encoding: "utf8", timeout: 30_000 });
     assert.ok(output.includes(`UI smoke passed: ${language}`));

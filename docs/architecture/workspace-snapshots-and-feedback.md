@@ -25,8 +25,11 @@ not filtered listings. Workspace/tool path adaptation still applies.
 Immutable `agent-views/<codeRef>/` records under the source shadow store retain
 project Git and supplemental directory/permission/link/ACL/xattr/ADS evidence.
 Project bytes remain Git blobs. Portable metadata-only work advances an internal
-code/view reference as well; it is not silently dropped when the Git tree is
-unchanged.
+code/view reference as well, including changes observed in the source; it is
+not silently dropped when the Git tree is unchanged. Source snapshots retain
+observed ancestry, including a later revert, and publication composes recorded
+metadata against the common source/node ancestor. Missing or ambiguous common
+view evidence fails closed rather than guessing which metadata to retain.
 Preparation compares the complete physical result before recording readiness;
 legacy/missing/corrupt evidence and unsupported layouts fail rather than exposing
 an incomplete workspace. Unix UID/GID are host ownership, not portable project
@@ -324,9 +327,14 @@ Publication is Git-only, with internal composition separated from delivery:
    collection rules, but their snapshot is internal. Staged changes under an
    excluded scope remain staged and unpublished; they are not silently
    unstaged or removed.
-2. Compose valid terminal heads and that source snapshot in a private,
-   Run-owned publication workspace. Normal merge ancestry and Merger repair stay
-   internal. Failed composition does not dirty the source or advance its branch.
+2. Compose valid terminal heads and that source snapshot in the private,
+   Run-owned host database. A clean composition merges trees and records the
+   composed project view without checking the project out when its metadata can
+   be established from the recorded views. A conflict, nested repository,
+   submodule, hardlink, special entry or insufficient metadata instead uses a
+   materialized workspace and its complete-view verification. Only a real Git
+   conflict invokes Merger repair. Normal merge ancestry and Merger repair stay
+   internal; failed composition does not dirty the source or advance its branch.
 3. Deliver the composed project tree as ordinary file changes. Do **not**
    fetch internal commits, create a `Grapher Work` commit, move the user's
    branch, or replace the user's index. The source's real index bytes and
@@ -338,7 +346,9 @@ Publication is Git-only, with internal composition separated from delivery:
    filter.
 
 Immutable attempt journals beside the publication workspace retain inputs,
-branch identity, original index and the composed result across restarts. All
+branch identity, original index and the composed result across restarts. A
+Run-owned internal ref pins an unfinished result against other Runs' cleanup;
+recorded delivery releases it, and deleting the owning Run reclaims it. All
 earlier source inputs remain owned recovery heads when rebasing the same
 publication. Crashes after a partial checkout finish the original delivery
 rather than refreshing against the old input tree. The installed marker records

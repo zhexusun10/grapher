@@ -1183,12 +1183,9 @@ pub fn materialize_shadow_repo(target: &Path, exclusions: &[String]) -> Result<S
             fs::remove_file(&lock).map_err(|error| error.to_string())?;
         }
     }
-    let identity = if exclusions.is_empty() {
-        Some(crate::workspace_view::source_identity(&canonical)?)
-    } else {
-        None
-    };
-    if identity.is_some() {
+    let view = crate::workspace_view::inspect_source_scoped(&canonical, exclusions)?;
+    let identity = crate::workspace_view::view_identity(&view)?;
+    if exclusions.is_empty() {
         crate::workspace_view::stage_project(&canonical, &shadow)?;
     } else {
         stage_scoped(&canonical, exclusions)?;
@@ -1210,31 +1207,31 @@ pub fn materialize_shadow_repo(target: &Path, exclusions: &[String]) -> Result<S
     let mut commit = vec!["--git-dir", git_dir, "--work-tree", work_tree, "commit"];
     if staged.trim().is_empty() {
         if head_exists {
-            // Nothing changed and a usable HEAD already exists; reuse it instead
-            // of adding a redundant empty commit (idempotent re-materialization
-            // for crash recovery and shared sources).
+            // Git omits empty directories and most filesystem metadata. Reuse
+            // HEAD only when its recorded project view is still equivalent.
             let head = bridge_plain_snapshot(&canonical)?;
-            if !crate::workspace_view::has_record(&canonical, &head) {
-                if let Some(identity) = &identity {
-                    crate::workspace_view::capture_source(&canonical, &head, identity)?;
-                } else {
-                    crate::workspace_view::capture_source_scoped(&canonical, &head, exclusions)?;
+            if !crate::workspace_view::source_record_changed(&canonical, &head, &view)? {
+                if !crate::workspace_view::has_record(&canonical, &head) {
+                    crate::workspace_view::capture_source_with_view(
+                        &canonical, &head, &identity, exclusions, view,
+                    )?;
                 }
+                return Ok(head);
             }
-            return Ok(head);
+            commit.push("--allow-empty");
         }
-        // First collection of an empty directory: still create a HEAD.
-        commit.push("--allow-empty");
+        // First collection of an empty directory also needs a HEAD.
+        if !head_exists {
+            commit.push("--allow-empty");
+        }
     }
     commit.extend(["-m", "Grapher source snapshot"]);
     git(&canonical, &commit)?;
     let head = bridge_plain_snapshot(&canonical)?;
     if !crate::workspace_view::has_record(&canonical, &head) {
-        if let Some(identity) = &identity {
-            crate::workspace_view::capture_source(&canonical, &head, identity)?;
-        } else {
-            crate::workspace_view::capture_source_scoped(&canonical, &head, exclusions)?;
-        }
+        crate::workspace_view::capture_source_with_view(
+            &canonical, &head, &identity, exclusions, view,
+        )?;
     }
     Ok(head)
 }
@@ -2446,6 +2443,30 @@ pub fn prepare(
     })
 }
 
+/// Materialize a private composition workspace (git base checkout and pinned
+/// refs) without preparing its visible project view yet. Publication composes
+/// several heads first and prepares/seals the composed view once, so preparing
+/// the same tree twice would duplicate the whole evidence pass. The Merger's
+/// conflict entry point prepares the view itself before any agent sees it.
+pub(crate) fn prepare_composition(
+    repository: &Path,
+    path: &Path,
+    base: &str,
+    parents: &[String],
+) -> Result<String, String> {
+    prepare_with_merger_expected_for_run_scoped(
+        repository,
+        path,
+        base,
+        parents,
+        base,
+        None,
+        &[],
+        false,
+        || Err("Workspace composition blocked; resolve and commit the merge manually".into()),
+    )
+}
+
 pub fn prepare_with_merger(
     repository: &Path,
     path: &Path,
@@ -2492,6 +2513,21 @@ fn git_file_url_handles_windows_extended_paths() {
     );
 }
 
+/// Materializing a private workspace is dominated by writing the project files.
+/// Git's own parallel checkout writes them on several workers, which is roughly
+/// 40% faster on a few thousand files. Unknown configuration keys are ignored by
+/// older Git versions, so this stays a pure speed-up.
+fn checkout_parallelism() -> (String, &'static str) {
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(8);
+    (
+        format!("checkout.workers={workers}"),
+        "checkout.thresholdForParallelism=0",
+    )
+}
+
 /// Allow a previously published graph to rerun from its original base, but
 /// only if the user directory still matches the exact published snapshot.
 pub fn prepare_with_merger_expected(
@@ -2530,6 +2566,7 @@ pub(crate) fn prepare_with_merger_expected_for_run(
         expected_source_head,
         run_id,
         &[],
+        true,
         resolve,
     )
 }
@@ -2542,6 +2579,7 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
     expected_source_head: &str,
     run_id: Option<&str>,
     exclusions: &[String],
+    prepare_view: bool,
     mut resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
     if let Some(id) = run_id {
@@ -2722,9 +2760,14 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
         // No fetch or pack copying: pin just the needed refs in this isolated repo.
         git(path, &["update-ref", "refs/grapher/base", &base_head])?;
     }
+    let (workers, threshold) = checkout_parallelism();
     git(
         path,
         &[
+            "-c",
+            &workers,
+            "-c",
+            threshold,
             "checkout",
             "-q",
             "-f",
@@ -2811,13 +2854,22 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
         }
     }
     let head = git(path, &["rev-parse", "HEAD"])?;
+    if private_slot_layout(path) && !prepare_view {
+        return Ok(head);
+    }
     if private_slot_layout(path) {
         let mut views = resolved_heads;
         if head != base_head && crate::workspace_view::has_record(&canonical_repo, &head) {
             views.push(head.clone());
         }
-        crate::workspace_view::prepare(&canonical_repo, path, &base_head, &views, exclusions)?;
-        return crate::workspace_view::seal_prepared_scoped(path, &canonical_repo, exclusions);
+        let observed =
+            crate::workspace_view::prepare(&canonical_repo, path, &base_head, &views, exclusions)?;
+        return crate::workspace_view::seal_prepared_scoped(
+            path,
+            &canonical_repo,
+            exclusions,
+            observed,
+        );
     }
     Ok(head)
 }
@@ -3676,7 +3728,31 @@ pub(crate) fn snapshot_repository_scoped(
     path: &Path,
     exclusions: &[String],
 ) -> Result<String, String> {
+    snapshot_source_scoped(path, exclusions, true)
+}
+
+/// Inspect the live worktree without creating a snapshot commit, ref or
+/// project-view evidence. Publication only needs this to compare the source
+/// against a retained input, so it must not pay for the durable record that a
+/// real snapshot requires. The result is a tree object; `rev-parse <result>^{tree}`
+/// and `read-tree` accept it exactly like a snapshot commit.
+pub(crate) fn live_tree_scoped(path: &Path, exclusions: &[String]) -> Result<String, String> {
+    snapshot_source_scoped(path, exclusions, false)
+}
+
+fn snapshot_source_scoped(
+    path: &Path,
+    exclusions: &[String],
+    evidence: bool,
+) -> Result<String, String> {
     if private_slot_layout(path) {
+        if !evidence {
+            if !git(path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
+                return Err("Unresolved merge conflicts remain".into());
+            }
+            stage_scoped_local(path, exclusions)?;
+            return git(path, &["write-tree"]);
+        }
         return snapshot_private_workspace_scoped(path, exclusions);
     }
     if is_standard_git(path) {
@@ -3687,11 +3763,19 @@ pub(crate) fn snapshot_repository_scoped(
         }
         let index_lock = host_index_lock(path)?;
         let _index_guard = index_lock.lock().map_err(|e| e.to_string())?;
-        let identity = if exclusions.is_empty() {
-            Some(crate::workspace_view::source_identity(path)?)
+        // A source view embeds the project's own Git state, so only a durable
+        // snapshot inspects it; a live tree check compares collected content.
+        let source_view = if evidence {
+            Some(crate::workspace_view::inspect_source_scoped(
+                path, exclusions,
+            )?)
         } else {
             None
         };
+        let identity = source_view
+            .as_ref()
+            .map(crate::workspace_view::view_identity)
+            .transpose()?;
         let head = git(path, &["rev-parse", "HEAD"]).ok();
         let shadow = {
             let lock = host_ref_lock(path)?;
@@ -3726,12 +3810,15 @@ pub(crate) fn snapshot_repository_scoped(
             // repository.
             repository_git(path, &["read-tree", "--empty"])?;
         }
-        if identity.is_some() {
+        if exclusions.is_empty() {
             crate::workspace_view::stage_project(path, &shadow)?;
         } else {
             stage_scoped(path, exclusions)?;
         }
         let tree = repository_git(path, &["write-tree"])?;
+        if !evidence {
+            return Ok(tree);
+        }
         let original = match head.as_deref() {
             Some(head) => Some(repository_git(
                 path,
@@ -3771,37 +3858,70 @@ pub(crate) fn snapshot_repository_scoped(
             .as_ref()
             .map(|identity| format!("snapshot\n\nworkspace-view:{identity}"))
             .unwrap_or_else(|| SNAPSHOT_COMMIT_MESSAGE.into());
-        let snapshot =
-            if let Ok(existing) = repository_git(path, &["rev-parse", "--verify", &input_ref]) {
-                existing
-            } else {
-                let snapshot = match (head.as_deref(), bridge) {
-                    // Carry delivered node ancestry only in the internal history,
-                    // so later revisions don't reapply already published changes.
-                    (Some(head), Some(composed)) => repository_git(
-                        path,
-                        &[
-                            "commit-tree",
-                            &tree,
-                            "-p",
-                            head,
-                            "-p",
-                            composed,
-                            "-m",
-                            &message,
-                        ],
-                    )?,
-                    (Some(head), None) if original.as_deref() == Some(tree.as_str()) => {
-                        head.to_string()
-                    }
-                    (Some(head), None) => {
-                        repository_git(path, &["commit-tree", &tree, "-p", head, "-m", &message])?
-                    }
-                    (None, _) => repository_git(path, &["commit-tree", &tree, "-m", &message])?,
-                };
-                repository_git(path, &["update-ref", &input_ref, &snapshot])?;
-                snapshot
+        // Source snapshots follow the observed source history. Reusing an older
+        // matching tree after the user reverted an edit would otherwise make the
+        // fork's dirty baseline an incoming change and restore the reverted file.
+        let previous = repository_git(path, &["rev-parse", "--verify", "HEAD"])
+            .ok()
+            .filter(|previous| {
+                head.as_deref().is_some_and(|head| {
+                    previous != head
+                        && crate::workspace_view::has_record(path, previous)
+                        && repository_git(path, &["merge-base", head, previous]).is_ok()
+                        && repository_git(path, &["merge-base", "--is-ancestor", previous, head])
+                            .is_err()
+                })
+            });
+        let existing = repository_git(path, &["rev-parse", "--verify", &input_ref])
+            .ok()
+            .filter(|existing| {
+                previous.as_deref().is_none_or(|previous| {
+                    repository_git(path, &["merge-base", "--is-ancestor", previous, existing])
+                        .is_ok()
+                })
+            });
+        let snapshot = if let Some(existing) = existing {
+            existing
+        } else {
+            let changed_view = match (head.as_deref(), source_view.as_ref()) {
+                (Some(head), Some(view)) if original.as_deref() == Some(tree.as_str()) => {
+                    crate::workspace_view::source_record_changed(path, head, view)?
+                }
+                _ => false,
             };
+            let snapshot = match head.as_deref() {
+                Some(head)
+                    if bridge.is_none()
+                        && previous.is_none()
+                        && original.as_deref() == Some(tree.as_str())
+                        && !changed_view =>
+                {
+                    head.to_string()
+                }
+                _ => {
+                    // Include both the current user commit and the preceding
+                    // observed source view when they diverged (for example the
+                    // user committed while nodes were running). A published
+                    // result is a third possible parent, never user history.
+                    let parents: Vec<String> = head
+                        .as_deref()
+                        .into_iter()
+                        .chain(previous.as_deref())
+                        .chain(bridge)
+                        .map(str::to_owned)
+                        .collect();
+                    let parents = independent_heads(path, &parents)?;
+                    let mut args = vec!["commit-tree", tree.as_str()];
+                    for parent in &parents {
+                        args.extend(["-p", parent.as_str()]);
+                    }
+                    args.extend(["-m", message.as_str()]);
+                    repository_git(path, &args)?
+                }
+            };
+            repository_git(path, &["update-ref", &input_ref, &snapshot])?;
+            snapshot
+        };
         repository_git(path, &["update-ref", "HEAD", &snapshot])?;
         repository_git(
             path,
@@ -3812,7 +3932,11 @@ pub(crate) fn snapshot_repository_scoped(
             ],
         )?;
         if !crate::workspace_view::has_record(path, &snapshot) {
-            if let Some(identity) = identity {
+            if let (Some(identity), Some(view)) = (identity.as_deref(), source_view) {
+                crate::workspace_view::capture_source_with_view(
+                    path, &snapshot, identity, exclusions, view,
+                )?;
+            } else if let Some(identity) = identity {
                 crate::workspace_view::capture_source(path, &snapshot, &identity)?;
             } else {
                 // A scoped snapshot (managed environment/cache scopes excluded)
@@ -3832,15 +3956,33 @@ pub(crate) fn snapshot_repository_scoped(
         };
         let git_dir_str = shadow.to_str().ok_or("Invalid shadow path")?;
         let work_tree_str = canonical.to_str().ok_or("Invalid target path")?;
-        let identity = if exclusions.is_empty() {
-            Some(crate::workspace_view::source_identity(&canonical)?)
+        let source_view = if evidence {
+            Some(crate::workspace_view::inspect_source_scoped(
+                &canonical, exclusions,
+            )?)
         } else {
             None
         };
-        if identity.is_some() {
+        let identity = source_view
+            .as_ref()
+            .map(crate::workspace_view::view_identity)
+            .transpose()?;
+        if exclusions.is_empty() {
             crate::workspace_view::stage_project(&canonical, &shadow)?;
         } else {
             stage_scoped(&canonical, exclusions)?;
+        }
+        if !evidence {
+            return git(
+                &canonical,
+                &[
+                    "--git-dir",
+                    git_dir_str,
+                    "--work-tree",
+                    work_tree_str,
+                    "write-tree",
+                ],
+            );
         }
         let status = git(
             &canonical,
@@ -3861,7 +4003,17 @@ pub(crate) fn snapshot_repository_scoped(
         .is_err();
         let lock = host_ref_lock(&canonical)?;
         let _guard = lock.lock().map_err(|e| e.to_string())?;
-        if !status.trim().is_empty() || unborn {
+        let changed_view = if status.trim().is_empty() && !unborn {
+            let head = repository_git(&canonical, &["rev-parse", "HEAD"])?;
+            crate::workspace_view::source_record_changed(
+                &canonical,
+                &head,
+                source_view.as_ref().ok_or("Missing source view")?,
+            )?
+        } else {
+            false
+        };
+        if !status.trim().is_empty() || unborn || changed_view {
             let mut commit = vec![
                 "--git-dir",
                 git_dir_str,
@@ -3877,7 +4029,11 @@ pub(crate) fn snapshot_repository_scoped(
         }
         let head = bridge_plain_snapshot(&canonical)?;
         if !crate::workspace_view::has_record(&canonical, &head) {
-            if let Some(identity) = &identity {
+            if let (Some(identity), Some(view)) = (identity.as_deref(), source_view) {
+                crate::workspace_view::capture_source_with_view(
+                    &canonical, &head, identity, exclusions, view,
+                )?;
+            } else if let Some(identity) = &identity {
                 crate::workspace_view::capture_source(&canonical, &head, identity)?;
             } else {
                 crate::workspace_view::capture_source_scoped(&canonical, &head, exclusions)?;

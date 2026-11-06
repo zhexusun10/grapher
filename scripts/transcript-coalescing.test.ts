@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseTranscriptChunkLines, type ParseTranscriptChunkState } from "../src/services/transcriptParser.ts";
+import { laterToolPhase, toolNameUpdate } from "../src/services/toolCallUpdates.ts";
+import type { TranscriptItem } from "../src/types.ts";
 
 const update = (type: string, contentIndex: number, extra = {}) => ({
   type: "message_update", assistantMessageEvent: { type, contentIndex, ...extra },
@@ -17,6 +19,31 @@ function parse(events: unknown[]) {
     { showUserTurns: false, skipFirstUser: false }).currentItems
     .map(({ id: _id, timestamp: _timestamp, ...item }) => item);
 }
+
+test("a retained tool row advances phases without losing its real name", () => {
+  const state: ParseTranscriptChunkState = {
+    source: "output", byteOffset: 0, leadingFragment: false, inTagThinking: false,
+    inFinalResponse: false, finalResponseSuppressed: false, seenFirstUser: false,
+    pendingUserStart: false, assistantStartIndex: 0, userMessageStarts: new Set(), compacting: false,
+  };
+  const tail: TranscriptItem[] = [{ id: "retained", type: "tool_call", toolName: "bash",
+    toolCallId: "tool", toolPhase: "generating", args: {}, status: "running", timestamp: 0 }];
+  const pending = new Map<string, TranscriptItem>([["tool", tail[0]]]);
+  parseTranscriptChunkLines([JSON.stringify(update("toolcall_end", 0, {
+    toolCall: { id: "tool", arguments: { command: "echo ok" } },
+  }))], [], pending, state, { showUserTurns: false, skipFirstUser: false }, tail);
+  assert.equal(tail[0].toolPhase, "pending", "generating must advance to pending inside a retained tail");
+  assert.equal(tail[0].toolName, "bash", "the generic 'tool' fallback must not replace the real name");
+});
+
+test("tool phase and name merge helpers never rewind or erase evidence", () => {
+  assert.equal(laterToolPhase("executing", "generating"), "executing");
+  assert.equal(laterToolPhase("generating", "pending"), "pending");
+  assert.equal(laterToolPhase("pending", undefined), "pending");
+  assert.equal(toolNameUpdate("bash", "tool"), "bash");
+  assert.equal(toolNameUpdate("bash", "read"), "read");
+  assert.equal(toolNameUpdate(undefined, "tool"), "tool");
+});
 
 test("coalesced UTF-8 deltas preserve thinking, whitespace, replies and message boundaries", () => {
   const thoughts = ["检查", "中文🚀", "\n", "  next step  "];

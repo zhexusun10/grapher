@@ -7,6 +7,7 @@ import { EditableUserBubble } from "../../src/components/views/ChatBubbles";
 import { PromptBox } from "../../src/components/ui/chatgpt-prompt-input";
 import { LandingView } from "../../src/components/views/LandingView";
 import { useSnapshotPolling } from "../../src/hooks/useSnapshotPolling";
+import { useAutoTranscriptHistory } from "../../src/hooks/useAutoTranscriptHistory";
 import { runtimeService } from "../../src/services/runtime";
 import { ThinkingCard } from "../../src/components/ThinkingCard";
 import { MarkdownRenderer } from "../../src/components/MarkdownRenderer";
@@ -103,7 +104,11 @@ function InterruptPromptFixture() {
   const [value, setValue] = useState("");
   audit.interrupts = 0;
   return <PromptBox isWorking value={value} onChange={event => setValue(event.target.value)}
-    onInterrupt={() => { audit.interrupts += 1; }} onSubmit={() => { audit.submissions = (audit.submissions ?? 0) + 1; return true; }} />;
+    onInterrupt={() => { audit.interrupts += 1; }} onSubmit={() => {
+      audit.submissions = (audit.submissions ?? 0) + 1;
+      if (audit.deferSubmit) return new Promise<boolean>(resolve => { audit.resolve = resolve; });
+      return true;
+    }} />;
 }
 function TranscriptFixture() {
   const outputBytes = Number(new URLSearchParams(location.search).get("bytes"));
@@ -144,6 +149,19 @@ function HistoryStatusFixture() {
   </div>;
 }
 
+function HeldHistoryFixture() {
+  const ref = React.useRef<HTMLDivElement>(null);
+  const [holding, setHolding] = useState(true);
+  const [loads, setLoads] = useState(0);
+  const ready = useAutoTranscriptHistory(ref, true, false, "", null, () => setLoads(value => value + 1), true, 0, holding);
+  audit.releaseHeldHistory = () => setHolding(false);
+  return <div data-held-scroller data-transcript-history-reading="true" style={{ height: 300, overflowY: "auto" }}>
+    <div ref={ref} data-held-ready={ready} data-held-loads={loads}>
+      <div className="virtualized-transcript-container" style={{ height: 100 }}><div data-transcript-id="held-row">Retained row</div></div>
+    </div>
+  </div>;
+}
+
 function HistoryRegressionFixture() {
   const [view, setView] = useState("node");
   const [running, setRunning] = useState(true);
@@ -181,7 +199,7 @@ function LatestScrollFixture() {
   const layout = new URLSearchParams(location.search).get("layout");
   const pagedLive = layout === "live-paged";
   const live = layout === "live-tool" || layout === "live-empty" || pagedLive;
-  const nodeView = live && new URLSearchParams(location.search).get("view") === "node";
+  const nodeView = (live || layout === "thinking-card") && new URLSearchParams(location.search).get("view") === "node";
   const assistant = (text: string) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
   const [output, setOutput] = useState(() => {
     if (layout === "long") return assistant(Array.from({ length: 300 }, (_, index) => `Paragraph ${index}: long message 中文🚀 with enough text to span the viewport.\n\n`).join("")) + assistant("LATEST_VISIBLE_MARKER");
@@ -223,10 +241,17 @@ function PlannerRouteFixture() {
   const [route, setRoute] = React.useState<"undecided" | "graph">("undecided");
   audit.setRoute = value => setRoute(value);
   const [messages] = React.useState([{ id: "msg-goal", role: "user" as const, text: "ROUTE_FLIP_GOAL" }]);
-  const items = React.useMemo(() => Array.from({ length: 60 }, (_, index): TranscriptItem => ({
+  const longThinking = new URLSearchParams(location.search).get("longThinking") === "1";
+  const items = React.useMemo(() => longThinking ? [
+    ...Array.from({ length: 60 }, (_, index): TranscriptItem => ({
+      id: `planner-history-${index}`, type: "text", role: "assistant", content: `Planner history ${index}`, status: "success",
+    })),
+    { id: "planner-thinking", type: "thinking", role: "assistant", status: "success",
+      content: Array.from({ length: 30 }, (_, index) => `Card output line ${index}`).join("\n\n") } as TranscriptItem,
+  ] : Array.from({ length: 60 }, (_, index): TranscriptItem => ({
     id: `flip-${index}`, type: index % 2 ? "thinking" : "text", role: "assistant",
     content: `LIVE_FLIP_ROW_${index} ` + "reasoning detail ".repeat(6), status: "running",
-  })), []);
+  })), [longThinking]);
   const state = { ...emptySnapshot, runId: "planner-route", config, phase: "planning", paused: false, approved: true,
     planning: { planningId: "route-plan", status: "running", createdAt: 1, repository: "/mock", runId: "planner-route",
       roles: { planner: { sessionId: "route-session", sessionStart: 1 } } },
@@ -417,7 +442,7 @@ const cases: Record<string, React.ComponentType> = {
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
-  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture,
+  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, heldHistory: HeldHistoryFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
   timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture,
 };

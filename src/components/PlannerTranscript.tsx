@@ -26,12 +26,13 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
   if (item.role === "user") return <AnimatedUserTurn id={item.id} animateAppear={item.animateAppear}
     className="chat-message-row user planner-user-turn">
-    <EditableUserBubble text={stripPlannerContext(item.content || "")} editing={editing} draft={draft} onDraftChange={onDraftChange}
+    <EditableUserBubble text={stripPlannerContext(item.content || "")} images={item.images} files={item.files} editing={editing} draft={draft} onDraftChange={onDraftChange}
       onEdit={onEditMessage ? () => onEditMessage({ id: item.id, parentId: null, role: "user", text: stripPlannerContext(item.content || "") }) : undefined}
       onCancel={() => onCancelEdit?.()}
       onSend={value => onEditSubmit ? onEditSubmit({ id: item.id, parentId: null, role: "user", text: stripPlannerContext(item.content || "") }, value) : onSendMessage(value)}
       disabled={locked} />
   </AnimatedUserTurn>;
+  if (item.type === "divider") return <div className="transcript-divider" role="separator" aria-hidden="true" />;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}>
     <span className={`system-pill${item.isError && item.role === "assistant" ? " conversation-error-message" : ""}`}>{item.content}</span>
@@ -70,5 +71,5 @@ export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
     expanded={expanded.current.get(item.id)} onExpandedChange={expand}
     onDraftChange={props.onDraftChange || noop} onEditMessage={props.onEditMessage} onCancelEdit={props.onCancelEdit}
     onEditSubmit={props.onEditSubmit} onSendMessage={props.onSendMessage} />;
-  return <div className="planner-transcript"><VirtualizedList items={props.items} renderRow={renderRow} gap={8} /></div>;
+  return <div className="planner-transcript"><VirtualizedList items={props.items} renderRow={renderRow} gap={10} /></div>;
 });

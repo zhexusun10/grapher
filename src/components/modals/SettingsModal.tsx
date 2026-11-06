@@ -1,7 +1,7 @@
 import { t, localizeError, languagePreference, restartFrontendWithLanguage, type LanguagePreference } from "../../i18n";
 import React, { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Settings2, RotateCcw, Terminal, Cpu, Check, X, Copy, GitBranch, Languages, RefreshCw, FilePenLine, Brain } from "lucide-react";
+import { RotateCcw, Terminal, Cpu, Check, X, Copy, GitBranch, Languages, RefreshCw, FilePenLine, Brain, Wallpaper } from "lucide-react";
 import { Config } from "../../types";
 import { normalizeModelThinkingLevels } from "../../modelConfig";
 import { providerAuth, type ProviderCatalog } from "../../services/providerAuth";
@@ -9,8 +9,10 @@ import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
 import { ExtensionSettings } from "../ExtensionSettings";
 import { normalizeWorkspacePath } from "../../services/workspaceConversations";
-import { autoExpandCotEnabled, setAutoExpandCot } from "../../services/displayPreferences";
+import { autoExpandCotEnabled, setAutoExpandCot, currentLandingBackground, setLandingBackground } from "../../services/displayPreferences";
+import { DotPattern } from "../ui/dot-pattern";
 import { ConfirmModal } from "./ConfirmModal";
+import { dialogVeilMotion, largeDialogMotion } from "./dialogMotion";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -39,6 +41,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   // Display-only preference, but it follows the same contract as the other
   // toggles: staged here, committed only when the settings save is accepted.
   const [autoExpandCot, setAutoExpandCotDraft] = useState(() => autoExpandCotEnabled());
+  const [landingBackground, setLandingBackgroundDraft] = useState(() => currentLandingBackground());
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveError] = useState("");
@@ -76,6 +79,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
       // The backend accepted the save, so the browser draft may commit too:
       // cancelling or failing the save leaves the stored preference untouched.
       setAutoExpandCot(autoExpandCot);
+      setLandingBackground(landingBackground);
     } catch (error) {
       savingRef.current = false;
       setSaving(false);
@@ -104,32 +108,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
 
   if (!isOpen) return null;
 
+  const dialogMotion = largeDialogMotion(reduceMotion);
+  const veilMotion = dialogVeilMotion(reduceMotion);
+
   return (
-    <div className="modal-backdrop settings-backdrop">
+    <div className="modal-backdrop subtle-backdrop">
       {/* Light translucent veil only: a full-screen backdrop-filter forced the
           browser onto a slow compositing path and made even modal scrolling
           janky. Only this layer fades, via a cheap compositor opacity change. */}
       <motion.div
-        className="settings-backdrop-tint"
+        className="modal-backdrop-tint"
         aria-hidden="true"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: reduceMotion ? 0 : 0.2, ease: "easeOut" }}
+        {...veilMotion}
       />
       <motion.section
-        className="modal settings-modal"
+        className="modal settings-modal surface-modal"
         inert={pendingLanguage !== null}
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-title"
-        initial={{ opacity: 0, scale: 0.985, y: reduceMotion ? 0 : 8 }}
-        animate={{ opacity: 1, scale: 1, y: 0, transition: { duration: reduceMotion ? 0 : 0.32, ease: [0.22, 1, 0.36, 1] } }}
-        exit={{ opacity: 0, scale: 0.99, y: reduceMotion ? 0 : 6, transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.4, 0, 1, 1] } }}
+        {...dialogMotion}
       >
         <header className="settings-modal-header">
           <div className="settings-header-title-wrap">
-            <Settings2 size={18} />
             <h2 id="modal-title">Settings</h2>
           </div>
           <button className="icon-button" aria-label={t("关闭弹窗")} disabled={saving} onClick={onClose}>
@@ -287,6 +288,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 </div>
               </div>
             </div>
+
+            <section className="settings-card" aria-labelledby="background-settings-title">
+              <div className="settings-card-title">
+                <Wallpaper size={16} />
+                <h4 id="background-settings-title">{t("首页背景")}</h4>
+              </div>
+              <p className="section-desc">{t("选择首页背景，保存后在此浏览器中生效。")}</p>
+              <fieldset className="settings-background-options" disabled={saving}>
+                <legend className="sr-only">{t("首页背景")}</legend>
+                <label className={`settings-background-option ${landingBackground === "paths" ? "is-selected" : ""}`}>
+                  <span className="settings-background-preview settings-background-preview-paths" aria-hidden="true">
+                    <svg viewBox="0 0 240 80" preserveAspectRatio="xMidYMid slice" fill="none">
+                      <path d="M-25 8 C25 -4 45 72 107 58 S188 0 265 20" />
+                      <path d="M-25 20 C25 8 45 84 107 70 S188 12 265 32" />
+                      <path d="M-25 -4 C25 -16 45 60 107 46 S188 -12 265 8" />
+                      <path d="M-25 32 C25 20 45 96 107 82 S188 24 265 44" />
+                    </svg>
+                  </span>
+                  <span className="settings-background-option-label">
+                    <input type="radio" name="landing-background" value="paths" checked={landingBackground === "paths"}
+                      onChange={() => setLandingBackgroundDraft("paths")} />
+                    <span><strong>{t("动态线条")}</strong><small>{t("流动的动态线条")}</small></span>
+                  </span>
+                </label>
+                <label className={`settings-background-option ${landingBackground === "dots" ? "is-selected" : ""}`}>
+                  <span className="settings-background-preview" aria-hidden="true">
+                    <DotPattern width={18} height={18} cr={1} className="[mask-image:radial-gradient(130px_circle_at_center,white,transparent)]" />
+                  </span>
+                  <span className="settings-background-option-label">
+                    <input type="radio" name="landing-background" value="dots" checked={landingBackground === "dots"}
+                      onChange={() => setLandingBackgroundDraft("dots")} />
+                    <span><strong>{t("点阵")}</strong><small>{t("默认的静态渐隐点阵")}</small></span>
+                  </span>
+                </label>
+              </fieldset>
+            </section>
           </div>
 
           {saveError && <p role="alert" className="settings-language-error">{localizeError(saveError)}</p>}

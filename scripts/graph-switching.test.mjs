@@ -190,6 +190,15 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         await page.mouse.move(bounds.x + boundary + 16, dragY, { steps: 3 });
         assert.equal(await page.locator(".workbench.graph-collapsed").count(), 0,
           "small overshoots leave room to stop or reverse the drag");
+        // Let the viewport settle at the actual dragged width before sampling
+        // the transition; restoring the saved ratio must not jump back to it.
+        await page.waitForTimeout(150);
+        const beforeCollapse = await page.evaluate(() => ({
+          conversation: document.querySelector(".conversation-pane").getBoundingClientRect().width,
+          graph: document.querySelector(".graph-pane").getBoundingClientRect().width,
+          canvas: document.querySelector(".graph-canvas").clientWidth,
+          transform: getComputedStyle(document.querySelector(".react-flow__viewport")).transform,
+        }));
         await page.evaluate(() => {
           window.collapseFrames = [];
           window.sampleCollapse = true;
@@ -202,6 +211,9 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
                 width: workbench.querySelector(".conversation-pane").getBoundingClientRect().width,
                 fullWidth: workbench.clientWidth,
                 opacity: graph ? Number(getComputedStyle(graph).opacity) : 0,
+                graphWidth: graph?.getBoundingClientRect().width,
+                canvasWidth: graph?.querySelector(".graph-canvas")?.clientWidth,
+                viewport: flow && getComputedStyle(flow.querySelector(".react-flow__viewport")).transform,
                 canvasPainted: flow && Number(getComputedStyle(flow).opacity) > 0.99,
               });
             }
@@ -228,28 +240,109 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
             "conversation expands through intermediate widths rather than jumping to full width");
           assert.ok(frames.some(frame => frame.opacity > 0.05 && frame.opacity < 0.95 && frame.canvasPainted),
             "the graph canvas stays painted while its panel fades out");
+          assert.ok(frames.every(frame => frame.width >= beforeCollapse.conversation - 2),
+            `the divider never jumps back to the saved split before collapsing: ${JSON.stringify({ beforeCollapse, frames })}`);
+          const painted = frames.filter(frame => frame.opacity > 0.05 && frame.canvasPainted);
+          assert.ok(painted.every(frame => Math.abs(frame.graphWidth - beforeCollapse.graph) < 1 &&
+            frame.canvasWidth === beforeCollapse.canvas && frame.viewport === beforeCollapse.transform),
+            `the exiting graph is clipped at its original size instead of repeatedly reflowing and refitting: ${JSON.stringify({ beforeCollapse, painted })}`);
         }
         assert.equal(await page.locator(".pane-bottom-chat textarea").inputValue(), draft,
           "collapsing preserves the current conversation draft");
         assert.equal(await page.getByRole("button", { name: "Expand execution graph", exact: true }).evaluate(button =>
           button === document.activeElement), true, "keyboard focus moves to the expand control");
+        await page.evaluate(() => {
+          window.openFrames = [];
+          window.sampleOpen = true;
+          const sample = () => {
+            const workbench = document.querySelector(".workbench");
+            const graph = workbench.querySelector(".graph-pane");
+            const flow = graph?.querySelector(".react-flow");
+            if (graph) window.openFrames.push({
+              conversation: workbench.querySelector(".conversation-pane").getBoundingClientRect().width,
+              graph: graph.getBoundingClientRect().width,
+              canvas: graph.querySelector(".graph-canvas").clientWidth,
+              ready: Number(getComputedStyle(flow).opacity) > 0.99,
+              viewport: getComputedStyle(flow.querySelector(".react-flow__viewport")).transform,
+            });
+            if (window.sampleOpen) requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+        });
         await page.keyboard.press("Enter");
         await assertGraphVisible(id);
         await page.waitForFunction(width => Math.abs(document.querySelector(".conversation-pane").getBoundingClientRect().width - width) < 1, originalWidth);
+        await page.waitForTimeout(100);
+        const openFrames = await page.evaluate(() => { window.sampleOpen = false; return window.openFrames; });
+        if (reducedMotion === "reduce") {
+          const durations = await pane.evaluate(element => getComputedStyle(element).transitionDuration.split(",").map(parseFloat));
+          assert.ok(durations.every(duration => duration === 0), "reduced motion also disables the reopening width transition");
+        }
+        if (reducedMotion === "no-preference") {
+          const final = openFrames.at(-1);
+          assert.ok(openFrames.some(frame => frame.conversation > originalWidth + 2 && frame.conversation < bounds.width - 2),
+            "opening the graph also moves through intermediate split widths");
+          assert.ok(openFrames.every(frame => Math.abs(frame.graph - final.graph) < 1 && frame.canvas === final.canvas),
+            `the opening graph is measured at its final width from its first frame: ${JSON.stringify(openFrames)}`);
+          const ready = openFrames.filter(frame => frame.ready);
+          assert.ok(ready.length > 1 && ready.every(frame => frame.viewport === ready.at(-1).viewport),
+            `the opening animation does not continuously zoom or recenter the graph: ${JSON.stringify(ready)}`);
+        }
         assert.equal(await page.evaluate(() => localStorage.getItem("grapher_workbench_split_ratio")), storedRatio,
           "reopening preserves the saved split ratio");
         assert.equal(await page.locator(".pane-bottom-chat textarea").inputValue(), draft);
         assert.equal(await splitter.evaluate(element => element === document.activeElement), true,
           "keyboard focus returns to the resizable separator");
         // The separator retains keyboard access without a toolbar collapse icon.
-        // Reopen before its exit ends: exactly one fresh canvas must initialize.
+        // Reopen before the exit ends: reverse the same canvas, without a blank
+        // pause or allowing the exiting graph to retain interactive controls.
+        if (reducedMotion === "no-preference") await page.locator(".react-flow__controls-zoomin").click();
+        await page.evaluate(() => {
+          window.canvasBeforeReversal = document.querySelector(".react-flow");
+          window.viewportBeforeReversal = getComputedStyle(document.querySelector(".react-flow__viewport")).transform;
+        });
         await splitter.press("Enter");
+        if (reducedMotion === "no-preference") {
+          assert.equal(await page.locator(".graph-pane-presence").getAttribute("inert"), "");
+          assert.equal(await page.locator(".graph-pane-presence").getAttribute("aria-hidden"), "true");
+        }
         await page.keyboard.press("Enter");
         await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Resize execution graph");
         await assertGraphVisible(id);
         assert.equal(await page.locator(".graph-pane").count(), 1,
-          "interrupting an exit mounts exactly one fresh, visible graph");
+          "interrupting an exit leaves exactly one visible graph");
+        if (reducedMotion === "no-preference") {
+          assert.equal(await page.evaluate(() => window.canvasBeforeReversal === document.querySelector(".react-flow")), true,
+            "reversing an unfinished exit keeps the existing canvas and viewport");
+          assert.equal(await page.locator(".graph-pane-presence").getAttribute("inert"), null,
+            "the reopened graph becomes interactive again");
+        }
         await page.waitForFunction(width => Math.abs(document.querySelector(".conversation-pane").getBoundingClientRect().width - width) < 1, originalWidth);
+        if (reducedMotion === "no-preference") {
+          await page.waitForTimeout(150);
+          assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector(".react-flow__viewport")).transform),
+            await page.evaluate(() => window.viewportBeforeReversal), "a reversed exit keeps the user's zoom and pan");
+        }
+
+        // The same reversal must work after an overshoot drag, when the canvas
+        // started exiting at the minimum width rather than the saved split.
+        await page.evaluate(() => { window.canvasBeforeDragReversal = document.querySelector(".react-flow"); });
+        const nextHandle = await splitter.boundingBox();
+        await page.mouse.move(nextHandle.x + nextHandle.width / 2, dragY);
+        await page.mouse.down();
+        await page.mouse.move(bounds.x + boundary + 64, dragY, { steps: 8 });
+        await page.mouse.up();
+        await page.getByRole("button", { name: "Expand execution graph", exact: true }).waitFor();
+        await page.keyboard.press("Enter");
+        await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Resize execution graph");
+        await assertGraphVisible(id);
+        if (reducedMotion === "no-preference") {
+          assert.equal(await page.evaluate(() => window.canvasBeforeDragReversal === document.querySelector(".react-flow")), true,
+            "reversing a drag collapse does not unmount the graph");
+        }
+        await page.waitForFunction(width => Math.abs(document.querySelector(".conversation-pane").getBoundingClientRect().width - width) < 1, originalWidth);
+        assert.equal(await page.evaluate(() => localStorage.getItem("grapher_workbench_split_ratio")), storedRatio);
+        assert.equal(await page.locator(".pane-bottom-chat textarea").inputValue(), draft);
       };
       const switchAndMeasure = async id => {
         await page.waitForFunction(() => !document.querySelector(".pane-bottom-chat .prompt-box-container")?.hasAttribute("data-resizing"));
@@ -271,10 +364,14 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
           let previousWorkbench = document.querySelector(".workbench");
           const sourceWorkbench = previousWorkbench;
           const started = performance.now();
+          let enteredAt = null;
           const sample = () => {
             const workbench = document.querySelector(".workbench");
             if (workbench !== previousWorkbench) {
-              if (workbench) window.workbenchChanges++;
+              if (workbench) {
+                window.workbenchChanges++;
+                if (enteredAt === null) enteredAt = performance.now();
+              }
               previousWorkbench = workbench;
             }
             const composer = workbench !== sourceWorkbench && workbench?.querySelector(".prompt-box-container");
@@ -327,7 +424,11 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
               }
               window.switchFrames.push(frame);
             }
-            if (performance.now() - started < 900) requestAnimationFrame(sample);
+            // A cold, on-demand workbench can still be loading while the
+            // landing composer stays visible. Measure 900ms after its first
+            // paint, while retaining a bound if the module never arrives.
+            const now = performance.now();
+            if (enteredAt === null ? now - started < 10_000 : now - enteredAt < 900) requestAnimationFrame(sample);
             else window.switchSamplingCompleted = true;
           };
           requestAnimationFrame(sample);

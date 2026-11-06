@@ -178,6 +178,53 @@ test("sidebar summaries seed live status and watchdogs without polling settled R
   } finally { await context.close(); }
 });
 
+test("sidebar keeps the live dot through planning, follow-ups and standalone Mergers", { timeout: 30_000 }, async () => {
+  const running = { id: "merger", node: "merger", status: "running", output: "" };
+  const snapshots = {
+    // The Planner turn owns the card before any node executes.
+    planning: { ...fast, runId: "planning", phase: "planning" },
+    // Source-direct work keeps `followup` while its executions still write.
+    followup: { ...fast, runId: "followup", phase: "followup", executions: [{ ...running, node: "edit" }] },
+    // A settled source-direct edit also leaves `followup` behind it.
+    edited: { ...fast, runId: "edited", phase: "followup" },
+    // A standalone publication Merger leaves the Run phase `completed`.
+    standalone: { ...fast, runId: "standalone", mergers: [running] },
+    settled: { ...fast, runId: "settled" },
+  };
+  const summaries = [
+    { runId: "planning", phase: "planning", hasActiveExecutions: false },
+    { runId: "followup", phase: "followup", hasActiveExecutions: true },
+    { runId: "edited", phase: "followup", hasActiveExecutions: false },
+    { runId: "standalone", phase: "completed", hasActiveExecutions: true },
+    { runId: "settled", phase: "completed", hasActiveExecutions: false },
+  ].map(item => ({ ...item, repository, title: item.runId }));
+  const { context, page, errors } = await app(async (route, command, body) => {
+    if (command === "bootstrap") {
+      await route.fulfill({ json: { result: { ...bootstrap, snapshot: snapshots.settled,
+        conversations: summaries, runs: summaries.map(item => item.runId) } } });
+      return true;
+    }
+    if (command === "snapshot_if_changed") {
+      const snapshot = snapshots[body.runId];
+      await route.fulfill({ json: { result: { version: snapshot.phase, snapshot } } });
+      return true;
+    }
+    return false;
+  }, undefined, undefined, true);
+  try {
+    for (const runId of ["planning", "followup", "standalone"]) {
+      await page.locator(`[data-run-id="${runId}"] .running-pulse`).waitFor();
+    }
+    assert.equal(await page.locator('[data-run-id="settled"] .run-dot').count(), 0, "a settled Run keeps its card quiet");
+    assert.equal(await page.locator('[data-run-id="edited"] .run-dot').count(), 0, "a settled source-direct edit is not live work");
+    snapshots.standalone = { ...snapshots.standalone, mergers: [{ ...running, status: "success" }] };
+    // No SSE change is delivered: the bounded watchdog must retire the dot.
+    await page.clock.runFor(4500);
+    await until(async () => await page.locator('[data-run-id="standalone"] .running-pulse').count() === 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("sidebar preserves unavailable cached cards but removes confirmed stale cards", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await app(async (route, command) => {
     if (command !== "bootstrap") return false;

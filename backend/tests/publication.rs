@@ -446,3 +446,113 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         "left\nright\n"
     );
 }
+
+#[test]
+fn a_clean_publication_records_its_view_without_materializing_a_workspace() {
+    test_data();
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("viewless");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("base.txt"), "base\n").unwrap();
+    workspace::git(&source, &["init", "-q"]).unwrap();
+    workspace::repository_git(&source, &["add", "-A"]).unwrap();
+    workspace::repository_git(&source, &["commit", "-qm", "base"]).unwrap();
+    let base = workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap();
+    let node = branch(
+        &source,
+        &base,
+        &temp.path().join("node"),
+        "node.txt",
+        "node result\n",
+    );
+    let heads = [node];
+    let published = graph_merge::merge_graph(&source, &heads, || panic!("no conflict")).unwrap();
+    assert_eq!(
+        fs::read_to_string(source.join("node.txt")).unwrap(),
+        "node result\n"
+    );
+
+    // The clean composition must not have checked the project out at all.
+    let materialized = graph_merge::publication_workspace(&source, &heads).unwrap();
+    assert!(
+        !materialized.exists(),
+        "a clean publication must not materialize a composition workspace"
+    );
+
+    // The composed head still carries a complete project view: preparing a
+    // follow-up workspace from it yields the published content and metadata.
+    workspace::prepare(&source, &temp.path().join("follow-up"), &published, &[]).unwrap();
+    let follow_up = temp.path().join("follow-up");
+    assert_eq!(
+        fs::read_to_string(follow_up.join("node.txt")).unwrap(),
+        "node result\n"
+    );
+    assert_eq!(
+        fs::read_to_string(follow_up.join("base.txt")).unwrap(),
+        "base\n"
+    );
+    assert!(workspace::git(&follow_up, &["status", "--porcelain"])
+        .unwrap()
+        .is_empty());
+
+    // And the recorded view is reproducible, so the published head can be
+    // published again without recomposing anything.
+    assert_eq!(
+        published,
+        graph_merge::merge_graph(&source, &heads, || panic!("no conflict")).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_composed_view_keeps_a_mode_only_change() {
+    use std::os::unix::fs::PermissionsExt;
+
+    test_data();
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("mode-change");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    workspace::git(&source, &["init", "-q"]).unwrap();
+    workspace::repository_git(&source, &["add", "-A"]).unwrap();
+    workspace::repository_git(&source, &["commit", "-qm", "base"]).unwrap();
+    let base = workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap();
+    // The node changes only the executable bit: Git records a mode change while
+    // the bytes the composed view reuses stay identical.
+    let node_workspace = temp.path().join("node");
+    let _ = branch(&source, &base, &node_workspace, "node.txt", "x");
+    fs::set_permissions(
+        node_workspace.join("run.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let node = workspace::snapshot_node(&node_workspace, &source, "node").unwrap();
+    let published = graph_merge::merge_graph(&source, &[node], || panic!("no conflict")).unwrap();
+    assert!(
+        source
+            .join("run.sh")
+            .metadata()
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111
+            != 0,
+        "delivered file must stay executable"
+    );
+
+    // Preparing from the composed view must reproduce the executable bit, not
+    // the pre-change permission recorded in the earlier view.
+    let follow_up = temp.path().join("follow-up-mode");
+    workspace::prepare(&source, &follow_up, &published, &[]).unwrap();
+    assert!(
+        follow_up
+            .join("run.sh")
+            .metadata()
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111
+            != 0,
+        "the composed view must record the tree's executable bit"
+    );
+}

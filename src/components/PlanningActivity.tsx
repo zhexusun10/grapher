@@ -9,8 +9,8 @@ import { useAutoTranscriptHistory } from "../hooks/useAutoTranscriptHistory";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
 import { cacheTranscriptWindow, composePlanningOutput, planningTranscriptCache, planningTranscriptKey, transcriptFromCache } from "../services/transcriptCache";
 import { activePlannerOutput } from "../lib/plannerOutput";
-import { appendTranscriptPage, prependTranscriptPage, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
-import { markTranscriptPrepend, markTranscriptPrependIfReading } from "../services/transcriptScroll";
+import { appendTranscriptPage, prependTranscriptPage, validateTranscriptPrepend, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
+import { markTranscriptPrepend, markTranscriptPrependIfReading, olderPageFits, onTranscriptScroll } from "../services/transcriptScroll";
 import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES } from "../services/transcriptPaging";
 import { TranscriptHistoryStatus } from "./TranscriptHistoryStatus";
 export { planningTranscriptCache } from "../services/transcriptCache";
@@ -30,6 +30,8 @@ type Props = {
   running?: boolean;
   /** The only composed revision that is still live; older turns stay settled. */
   livePlanningId?: string;
+  /** Revisions whose output starts a new conversation section (post-task review). */
+  dividerSources?: ReadonlySet<string>;
   onCompactingChange?: (compacting: boolean) => void;
 };
 
@@ -42,12 +44,18 @@ function olderTarget(ids: string[], segments: ReadonlyMap<string, TranscriptWind
   return null;
 }
 
+/** The writer can notify once per committed line. A wake re-composes the whole
+ * loaded conversation, so bound live re-reads instead of following the writer's
+ * cadence; a terminal notification is still delivered well before a reader
+ * would notice. */
+const MIN_LIVE_REREAD_MS = 120;
+
 export const PlanningActivity = memo(function PlanningActivity(props: Props) {
   return <PlanningHistory key={`${props.runId ?? ""}:${props.planningIds.join(":")}`} {...props} />;
 });
 
 function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onLoadingChange, showUserTurns = false,
-  skipFirstUser = false, onUserResize, onEditUser, edits = [], running = false, livePlanningId, onCompactingChange }: Props) {
+  skipFirstUser = false, onUserResize, onEditUser, edits = [], running = false, livePlanningId, dividerSources, onCompactingChange }: Props) {
   const key = planningIds.join(":");
   const [initialSegments] = useState(() => {
     const loaded = new Map<string, TranscriptWindow>();
@@ -61,9 +69,12 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
   const [output, setOutput] = useState(() => composePlanningOutput(planningIds, initialSegments));
   const [ready, setReady] = useState(!planningIds.length || initialSegments.has(planningIds.at(-1)!));
   const [error, setError] = useState("");
+  const failedOlder = useRef(false);
   const [retry, setRetry] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [showOlderLoading, setShowOlderLoading] = useState(false);
   const olderBusy = useRef(false);
+  const olderRequested = useRef(false);
   const announcedRef = useRef(false);
   const sectionRef = useRef<HTMLElement>(null);
   const lifetime = useTranscriptReader("planning", `${runId}:view:${key}`);
@@ -84,27 +95,80 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     setOutput(composePlanningOutput(planningIds, segments.current));
   }, [runId, key]);
 
-  const loadOlder = useStableCallback(async (preserveReading = true, requestedId?: string, quiet = false) => {
+  // A page the reader has not scrolled to yet: it stays out of the layout (and
+  // out of the byte cursor) until its insertion point reaches the viewport top.
+  const pendingOlder = useRef<{ id: string; page: Awaited<ReturnType<typeof runtimeService.getPlanningOutput>> } | null>(null);
+  const [holdingOlder, setHoldingOlder] = useState(false);
+  const commitPendingOlder = useStableCallback(() => {
+    const pending = pendingOlder.current;
+    if (!pending || lifetime.current?.aborted || !olderPageFits(sectionRef.current, pending.id)) return false;
+    pendingOlder.current = null;
+    try {
+      markTranscriptPrependIfReading(sectionRef.current);
+      const latest = segments.current.get(pending.id);
+      publish(pending.id, latest
+        ? prependTranscriptPage(latest, pending.page) : windowFromPage(pending.page, !pending.page.running));
+    } catch (caught) { failedOlder.current = true; setError(caught instanceof Error ? caught.message : String(caught)); }
+    return true;
+  });
+  useEffect(() => {
+    if (!holdingOlder) return;
+    if (commitPendingOlder()) { setHoldingOlder(false); return; }
+    return onTranscriptScroll(sectionRef.current, () => { if (commitPendingOlder()) setHoldingOlder(false); });
+  }, [holdingOlder, commitPendingOlder]);
+
+  const loadOlder = useStableCallback(async (preserveReading: boolean = true, requestedId?: string, quiet = false) => {
     const signal = lifetime.current;
+    if (!ready || !signal || signal.aborted) return false;
+    if (olderBusy.current) {
+      if (preserveReading) { olderRequested.current = true; setShowOlderLoading(true); }
+      return false;
+    }
+    // A page the reader has not reached yet is already in memory; retry its
+    // landing here instead of reading the same bytes again.
+    if (pendingOlder.current) {
+      if (commitPendingOlder()) setHoldingOlder(false);
+      return true;
+    }
     // The generic scrollback target completes the newest revision first. A
     // reviewed Run also needs its preceding revision mounted even when the
     // newer review fills the viewport on its own.
     const id = requestedId && planningIds.includes(requestedId)
       ? requestedId : olderTarget(planningIds, segments.current);
-    if (!ready || !id || olderBusy.current || !signal || signal.aborted) return false;
+    if (!id) return false;
     const before = segments.current.get(id);
-    olderBusy.current = true; setLoadingOlder(true); if (!quiet) setError("");
+    olderBusy.current = true; olderRequested.current = preserveReading;
+    setLoadingOlder(true); setShowOlderLoading(preserveReading);
+    if (!quiet) { failedOlder.current = false; setError(""); }
     if (preserveReading) markTranscriptPrepend(sectionRef.current);
     try {
       const page = await runtimeService.getPlanningOutput(id, "planner", 0, signal, true, before?.start, OLDER_TRANSCRIPT_BYTES);
       if (signal.aborted) return;
       if (page.planningId !== id || page.role !== "planner") throw new Error(t("执行记录与请求不匹配"));
+      if (before) validateTranscriptPrepend(before, page);
+      else windowFromPage(page, !page.running);
+      // Older bytes extend the history above the reader. Keep them out of the
+      // layout until the reader reaches that point, so the page lands where
+      // they scrolled to instead of compensating the scroll position under
+      // their gesture.
+      if (preserveReading && !olderPageFits(sectionRef.current, id)) {
+        pendingOlder.current = { id, page };
+        setHoldingOlder(true);
+        return true;
+      }
       if (!preserveReading) markTranscriptPrependIfReading(sectionRef.current);
       const latest = segments.current.get(id);
       const next = latest ? prependTranscriptPage(latest, page) : windowFromPage(page, !page.running);
       publish(id, next);
-    } catch (caught) { if (!signal.aborted && !quiet) setError(caught instanceof Error ? caught.message : String(caught)); }
-    finally { olderBusy.current = false; if (!signal.aborted) setLoadingOlder(false); }
+    } catch (caught) {
+      if (!signal.aborted && (!quiet || olderRequested.current)) {
+        failedOlder.current = true;
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
+    } finally {
+      olderBusy.current = false; olderRequested.current = false;
+      if (!signal.aborted) { setLoadingOlder(false); setShowOlderLoading(false); }
+    }
     return true;
   });
 
@@ -127,7 +191,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
 
   const loadedBytes = [...segments.current.values()].reduce((sum, window) => sum + window.end - window.start, 0);
   const initialReady = useAutoTranscriptHistory(sectionRef, hasOlder, loadingOlder, error, activeOutput,
-    preserveReading => { void loadOlder(preserveReading); }, ready, loadedBytes);
+    preserveReading => { void loadOlder(preserveReading); }, ready, loadedBytes, holdingOlder);
 
   useLayoutEffect(() => { notifyOutput(output); }, [output, notifyOutput]);
   useLayoutEffect(() => {
@@ -195,35 +259,52 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         // only authority on a log being final, and it must still be able to wake us.
         return Infinity;
       } catch (caught) {
-        if (!signal.aborted) { setError(caught instanceof Error ? caught.message : String(caught)); setReady(true); }
+        if (!signal.aborted) { failedOlder.current = false; setError(caught instanceof Error ? caught.message : String(caught)); setReady(true); }
         return null;
       }
     });
+    let wakeTimer: ReturnType<typeof setTimeout> | undefined;
+    // Monotonic, so a wall-clock adjustment cannot postpone a live read.
+    let lastWakeAt = -Infinity;
     const unsubscribe = subscribePlanningOutput(event => {
       if (event.runId !== runId || !planningIds.includes(event.planningId)) return;
-      // The backend publishes this once a turn's log is final. An earlier read
-      // may have settled at a stale EOF, so re-read that revision from its
-      // cursor instead of trusting the cached window.
+      // The writer notifies after appending live bytes and again at settlement.
+      // A read can race either boundary, so revalidate even a cached EOF.
       const segment = segments.current.get(event.planningId);
       if (segment?.settled) segments.current.set(event.planningId, { ...segment, settled: false });
-      stop.wake();
+      if (wakeTimer !== undefined) return;
+      const wait = Math.max(0, MIN_LIVE_REREAD_MS - (performance.now() - lastWakeAt));
+      wakeTimer = setTimeout(() => {
+        wakeTimer = undefined;
+        lastWakeAt = performance.now();
+        stop.wake();
+      }, wait);
     });
-    return () => { unsubscribe(); abort.abort(); stop(); };
+    return () => {
+      unsubscribe();
+      if (wakeTimer !== undefined) clearTimeout(wakeTimer);
+      abort.abort();
+      stop();
+    };
   }, [key, retry, running, publish, lifetime]);
 
   return <section ref={sectionRef} className="planning-activity" aria-label={t("规划活动记录")} aria-busy={!initialReady}>
-    {error && <p role="alert">{localizeError(error)} <button type="button" onClick={() => setRetry(value => value + 1)}>{t("重试")}</button></p>}
+    {error && <p role="alert">{localizeError(error)} <button type="button" onClick={() => {
+      if (failedOlder.current) { setError(""); void loadOlder(); }
+      else setRetry(value => value + 1);
+    }}>{t("重试")}</button></p>}
     {/* Idle Planner history must not reserve a blank line between the user card
         and the first reply. The line only takes height while its label is shown,
         and stays put through brief gaps between paging requests. */}
-    <TranscriptHistoryStatus loading={loadingOlder} reserve={false} />
+    <TranscriptHistoryStatus loading={loadingOlder && showOlderLoading} reserve={false} />
     {ready && !error && !output && <p>{t("没有可用的规划输出。")}</p>}
     {output && <div className="planning-activity-output">
-      <VirtualizedTranscript output={activeOutput} inline
+      <VirtualizedTranscript output={activeOutput} inline sourceOrder={planningIds}
         onReachTop={hasOlder && !error ? () => { void loadOlder(); } : undefined}
         showUserTurns={showUserTurns} skipFirstUser={skipInitialUser} onUserResize={onUserResize}
         settled={!running}
         liveSource={running ? livePlanningId : undefined}
+        dividerSources={dividerSources}
         onCompactingChange={onCompactingChange}
         onEditUser={onEditUser ? editUser : undefined} />
     </div>}

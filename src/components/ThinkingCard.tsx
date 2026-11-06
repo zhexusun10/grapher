@@ -1,14 +1,15 @@
 import { t } from "../i18n";
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { ChevronRight, Copy, Check, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { TranscriptItem } from "../types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { useSmoothStreamText } from "../hooks/useSmoothStreamText";
 import { CollapsibleCardBody } from "./CollapsibleCardBody";
+import { CardReveal } from "./CardReveal";
 import { useCardAppear } from "../services/cardAnimations";
 import { useAutoExpandCot } from "../services/displayPreferences";
-import { notifyTranscriptContentGrowth } from "../services/transcriptScroll";
+import { notifyTranscriptContentGrowth, syncOverscrollContainment } from "../services/transcriptScroll";
 
 interface ThinkingCardProps {
   item?: TranscriptItem;
@@ -65,7 +66,6 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     const stillTypingRef = useRef(false);
     const lastScrollTopRef = useRef(0);
     const lastTouchYRef = useRef(0);
-    const wasStreamingRef = useRef(isStreaming);
 
     // Auto-scroll within the thinking box while text is still being revealed if
     // the user hasn't scrolled up. `smoothContent` trails `rawContent` during the
@@ -77,17 +77,24 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
       const body = bodyRef.current;
       if (!body) return;
       const target = body.scrollHeight - body.clientHeight;
-      if (body.scrollTop >= target - 1) return;
-      body.scrollTop = target;
+      if (body.scrollTop < target - 1) body.scrollTop = target;
       lastScrollTopRef.current = body.scrollTop;
     };
+
+    // A newly mounted body starts at scrollTop 0 even when its reasoning has
+    // already finished. Open on its newest line before paint, just as a live
+    // card does; subsequent reader gestures still own the inner position.
+    useLayoutEffect(() => {
+      if (!isExpanded) return;
+      userScrolledUpRef.current = false;
+      readerUpIntentRef.current = false;
+      pinBodyToBottom();
+    }, [isExpanded]);
+
     useEffect(() => {
-      const justFinished = wasStreamingRef.current && !isStreaming;
-      wasStreamingRef.current = isStreaming;
-      if ((stillTyping || justFinished) && isExpanded && !userScrolledUpRef.current && bodyRef.current) {
-        bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-        lastScrollTopRef.current = bodyRef.current.scrollTop;
-      }
+      // A completed block can receive its visible text in a later summary as
+      // well. Follow that backfill unless the reader has scrolled up inside it.
+      if (isExpanded && !userScrolledUpRef.current) pinBodyToBottom();
       // The card body can be capped while the conversation still has a working
       // footer below it. Re-check that footer on every streamed line so a
       // following conversation never leaves it outside the viewport.
@@ -112,12 +119,18 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
           lastScrollTopRef.current = target;
         }
       };
-      const observer = new ResizeObserver(followContent);
+      const observer = new ResizeObserver(() => {
+        // A short body cannot scroll; containing its overscroll would swallow
+        // the conversation wheel gesture instead of forwarding it.
+        syncOverscrollContainment(body);
+        followContent();
+      });
       observer.observe(content);
       observer.observe(body);
+      syncOverscrollContainment(body);
       followContent();
       return () => observer.disconnect();
-    }, [isExpanded, isStreaming, stillTyping]);
+    }, [isExpanded, isStreaming, stillTyping, hasVisibleContent]);
 
     const handleScroll = () => {
       const el = bodyRef.current;
@@ -237,99 +250,102 @@ export const ThinkingCard: React.FC<ThinkingCardProps> = React.memo(
     // A provider block can settle without visible text (private or encrypted
     // reasoning). Keep its card and say so instead of making the card vanish.
     return (
-      <div ref={cardRef} className={`thinking-card ${isStreaming ? "streaming" : "settled"} ${isExpanded ? "expanded" : "collapsed"}${animateAppear ? " appear-active" : ""} ${className}`.trim()}>
-        <div
-          className="thinking-card-header"
-          onClick={toggleExpand}
-          onMouseDown={(e) => {
-            // Keep pointer focus from scrolling a short conversation to the card
-            // title. Clicking still toggles and the header stays keyboard-focusable.
-            if ((e.target as HTMLElement).closest("button")) return;
-            e.preventDefault();
-            e.currentTarget.focus({ preventScroll: true });
-          }}
-          role="button"
-          aria-expanded={isExpanded}
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              toggleExpand();
-            }
-          }}
-        >
-          <div className="thinking-header-left">
-            <span className="thinking-expand-icon">
-              <ChevronRight size={14} className={`thinking-expand-chevron ${isExpanded ? "open" : ""}`} />
-            </span>
-            <div className={`thinking-icon-box ${isStreaming ? "pulse" : ""}`}>
-              <span className="thinking-icon-glyph">
-                <Sparkles size={14} />
-              </span>
-            </div>
-            <span className="thinking-title">{title}</span>
-          </div>
-
-          <div className="thinking-header-right">
-            <AnimatePresence>
-              {isStreaming && (
-                <motion.span
-                  key="thinking-streaming-status"
-                  className="thinking-status streaming"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.15 }}
-                >
-                  <span className="thinking-pulse-dot" />
-                  <span>{t("思考中...")}</span>
-                </motion.span>
-              )}
-            </AnimatePresence>
-            {charCount > 0 && (
-              <button
-                type="button"
-                className="thinking-copy-btn"
-                onClick={handleCopy}
-                aria-label={t("复制思维链内容")}
-              >
-                {isCopied ? <Check size={12} className="copy-icon-check" /> : <Copy size={12} className="copy-icon-copy" />}
-              </button>
-            )}
-          </div>
-        </div>
-
-        <CollapsibleCardBody expanded={isExpanded}>{() => (
+      <CardReveal animate={animateAppear}>
+        <div ref={cardRef} className={`thinking-card ${isStreaming ? "streaming" : "settled"} ${isExpanded ? "expanded" : "collapsed"}${animateAppear ? " appear-active" : ""} ${className}`.trim()}>
           <div
-            ref={bodyRef}
-            className="thinking-card-body"
-            onScroll={handleScroll}
-            onWheel={handleWheel}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onKeyDown={handleKeyDown}
-            onPointerDown={handlePointerDown}
+            className="thinking-card-header"
+            onClick={toggleExpand}
+            onMouseDown={(e) => {
+              // A pointer click is only a disclosure toggle: keep the composer's
+              // caret where it was instead of moving keyboard focus (and its
+              // Enter/Space handlers) onto the card. The header stays reachable
+              // with Tab and keeps handling keys while it actually has focus.
+              if ((e.target as HTMLElement).closest("button")) return;
+              e.preventDefault();
+            }}
+            role="button"
+            aria-expanded={isExpanded}
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                toggleExpand();
+              }
+            }}
           >
-            {hasVisibleContent ? (
-              <div ref={contentRef} className="thinking-content-container">
-                <MarkdownRenderer
-                  content={smoothContent}
-                  isStreaming={isStreaming}
-                  streamingCursor={isStreaming}
-                  className="thinking-markdown"
-                />
+            <div className="thinking-header-left">
+              <span className="thinking-expand-icon">
+                <ChevronRight size={14} className={`thinking-expand-chevron ${isExpanded ? "open" : ""}`} />
+              </span>
+              <div className={`thinking-icon-box ${isStreaming ? "pulse" : ""}`}>
+                <span className="thinking-icon-glyph">
+                  <Sparkles size={14} />
+                </span>
               </div>
-            ) : isStreaming ? (
-              <div className="thinking-shimmer">
-                <span className="shimmer-line" />
-                <span className="thinking-shimmer-text">{t("模型正在生成分析与推演逻辑...")}</span>
-              </div>
-            ) : (
-              <div className="thinking-no-output">{t("此次思考未输出可见内容")}</div>
-            )}
+              <span className="thinking-title">{title}</span>
+            </div>
+
+            <div className="thinking-header-right">
+              <AnimatePresence>
+                {isStreaming && (
+                  <motion.span
+                    key="thinking-streaming-status"
+                    className="thinking-status streaming"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.15 }}
+                  >
+                    <span className="thinking-pulse-dot" />
+                    <span>{t("思考中...")}</span>
+                  </motion.span>
+                )}
+              </AnimatePresence>
+              {charCount > 0 && (
+                <button
+                  type="button"
+                  className="thinking-copy-btn"
+                  onClick={handleCopy}
+                  aria-label={t("复制思维链内容")}
+                >
+                  {isCopied ? <Check size={12} className="copy-icon-check" /> : <Copy size={12} className="copy-icon-copy" />}
+                </button>
+              )}
+            </div>
           </div>
-        )}</CollapsibleCardBody>
-      </div>
+
+          <CollapsibleCardBody expanded={isExpanded}>{() => (
+            <div
+              ref={bodyRef}
+              className="thinking-card-body"
+              onScroll={handleScroll}
+              onWheel={handleWheel}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onKeyDown={handleKeyDown}
+              onPointerDown={handlePointerDown}
+            >
+              {hasVisibleContent ? (
+                <div ref={contentRef} className="thinking-content-container">
+                  <MarkdownRenderer
+                    content={smoothContent}
+                    isStreaming={isStreaming}
+                    streamingCursor={isStreaming}
+                    className="thinking-markdown"
+                  />
+                </div>
+              ) : isStreaming ? (
+                <div className="thinking-shimmer">
+                  <span className="shimmer-line" />
+                  <span className="thinking-shimmer-text">{t("模型正在生成分析与推演逻辑...")}</span>
+                </div>
+              ) : (
+                <div className="thinking-no-output">{t("此次思考未输出可见内容")}</div>
+              )}
+            </div>
+          )}</CollapsibleCardBody>
+        </div>
+      </CardReveal>
     );
   }
 );

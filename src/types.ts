@@ -11,7 +11,7 @@ export interface ManualNodeRequest {
   feedback: boolean;
   confirmedCompleted: ManualNodeConfirmation[];
 }
-export interface Plan { executionBatches: string[][]; roots: string[]; terminals: string[]; warnings: string[] }
+export interface Plan { executionBatches: string[][]; rootNodes: string[]; terminals: string[]; warnings: string[] }
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ModelRole = "partitioner" | "planner" | "nodeAgent";
 export interface RoleModelConfig { model: string; thinkingLevel?: ThinkingLevel }
@@ -97,7 +97,7 @@ export interface OpenWorkspaceFileRequest {
 }
 
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null; fileChanges?: FileChangeSummary | null }
-export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Pick<Execution, "id" | "node">; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; requested_node?: string; actual_node?: string; reason?: string; message_sequences?: number[]; from_execution_id?: string; from_event_sequence?: number; from_output_offset?: number; old_instruction?: string; first_turn?: boolean; fresh_restart?: boolean; selected_version?: number; human?: boolean; planning_id?: string; planning?: PlanningSummary; plan_type?: string; planType?: string }
+export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Pick<Execution, "id" | "node">; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; requested_node?: string; actual_node?: string; reason?: string; message_sequences?: number[]; from_execution_id?: string; from_event_sequence?: number; from_output_offset?: number; old_instruction?: string; first_turn?: boolean; fresh_restart?: boolean; selected_version?: number; human?: boolean; planning_id?: string; request_id?: string; status?: string; planning?: PlanningSummary; plan_type?: string; planType?: string }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
 export interface TokenUsage {
   input: number;
@@ -303,6 +303,10 @@ export interface ChatMessage {
   steerOrdinal?: number;
   /** Display identity across attachment and text steers with the same text. */
   inlineSteerOrdinal?: number;
+  /** Planner steer identity remains stable from optimistic submission to Pi. */
+  plannerSteerId?: string;
+  plannerSteerStatus?: "submitting" | "submitted" | "queued" | "accepted" | "consumed" | "handled" | "failed" | "unknown";
+  plannerSteerError?: string;
   versions?: ChatMessageVersion[];
   currentVersionIndex?: number;
   /** A just-sent or just-appended turn; one-shot entrance animation only. */
@@ -323,11 +327,12 @@ export interface PlanStreamEvent {
 
 export interface TranscriptItem {
   id: string;
-  type: "text" | "thinking" | "tool_call" | "system";
+  type: "text" | "thinking" | "tool_call" | "system" | "divider";
   role?: "user" | "assistant" | "system";
   content?: string;
   userTurnOffset?: number;
   images?: ImageAttachment[];
+  files?: FileAttachment[];
   // Native reasoning block identity, scoped to its assistant message.
   thinkingContentIndex?: number;
   // Raw stdout is displayed as text but is not assistant RPC stream content.
@@ -337,6 +342,10 @@ export interface TranscriptItem {
   finalResponseCopy?: { source: string; offset: number };
   toolName?: string;
   toolCallId?: string;
+  /** Assistant content block identity before the provider finalizes a call ID. */
+  toolContentIndex?: number;
+  /** Generating a call is not evidence that the tool has started executing. */
+  toolPhase?: "generating" | "pending" | "executing";
   args?: Record<string, any>;
   /** Display preview only: `write`/`edit` arguments can carry whole file bodies. */
   argsTruncated?: boolean;

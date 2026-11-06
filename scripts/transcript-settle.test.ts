@@ -25,6 +25,16 @@ const interruptedTool = [
     partialResult: { content: [{ type: "text", text: "partial stdout" }] } },
 ];
 
+test("a clean process exit never invents a tool result for a generated call", () => {
+  const output = [
+    JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, id: "call", toolName: "bash" } }),
+    JSON.stringify({ type: "grapher_process_exited", success: true }),
+  ].join("\n") + "\n";
+  const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output, inline: true }));
+  assert.match(html, /interrupted/);
+  assert.doesNotMatch(html, /tool-status success/);
+});
+
 test("a settled transcript shows unterminated tool calls as interrupted, not executing", () => {
   const html = render(interruptedTool, true);
   assert.match(html, /tool-call-card terminal interrupted/);

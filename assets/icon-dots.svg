@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Grapher</title>
+  <style>
+    /* Transparent canvas: keep the same mid grey fallback for browsers that do
+       not evaluate the colour scheme, and adapt for the tab strip otherwise. */
+    circle { fill: #7d7d7d; }
+    @media (prefers-color-scheme: light) { circle { fill: #4a4a4a; } }
+    @media (prefers-color-scheme: dark) { circle { fill: #c9c9c9; } }
+  </style>
+  <circle cx="192" cy="64" r="23.9"/>
+  <circle cx="320" cy="64" r="23.9"/>
+  <circle cx="64" cy="192" r="23.9"/>
+  <circle cx="192" cy="192" r="29.8"/>
+  <circle cx="320" cy="192" r="29.8"/>
+  <circle cx="448" cy="192" r="23.9"/>
+  <circle cx="64" cy="320" r="23.9"/>
+  <circle cx="192" cy="320" r="29.8"/>
+  <circle cx="320" cy="320" r="29.8"/>
+  <circle cx="448" cy="320" r="23.9"/>
+  <circle cx="192" cy="448" r="23.9"/>
+  <circle cx="320" cy="448" r="23.9"/>
+</svg>

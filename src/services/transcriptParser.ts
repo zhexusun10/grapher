@@ -1,15 +1,9 @@
 import type { ImageAttachment, TranscriptItem } from "../types";
 import { utf8Bytes } from "../lib/BoundedLruCache";
-import { stripPlannerContext } from "./plannerText";
+import { plannerContentSteerId, plannerContentText, stripPlannerContext } from "./plannerText";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./thinkingTranscript";
 import { toolOutputPreview, truncateToolArgs } from "./toolOutput";
-
-function textContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.filter((part: any) => part?.type === "text")
-    .map((part: any) => typeof part.text === "string" ? part.text : "").join("\n");
-}
+import { findToolCallIndex, laterToolPhase, toolNameUpdate, type ToolCallPhase } from "./toolCallUpdates";
 
 function imageContent(content: unknown): ImageAttachment[] | undefined {
   if (!Array.isArray(content)) return undefined;
@@ -79,6 +73,8 @@ export function parseTranscriptChunkLines(
     args: Record<string, any>,
     status: "running" | "success" = "running",
     flaggedTruncated = false,
+    contentIndex?: number,
+    phase?: ToolCallPhase,
   ) => {
     const boundedArgs = truncateToolArgs(args);
     args = boundedArgs.args;
@@ -88,9 +84,10 @@ export function parseTranscriptChunkLines(
       if (existingInTail) {
         const updated = {
           ...existingInTail,
-          toolName: toolName || existingInTail.toolName,
+          toolName: toolNameUpdate(existingInTail.toolName, toolName),
           args: Object.keys(args).length ? args : existingInTail.args,
           argsTruncated: existingInTail.argsTruncated || argsTruncated || undefined,
+          toolPhase: laterToolPhase(existingInTail.toolPhase, phase),
           status: existingInTail.result !== undefined ? existingInTail.status : status,
         };
         tailItems[tailItems.indexOf(existingInTail)] = updated;
@@ -99,17 +96,19 @@ export function parseTranscriptChunkLines(
         return updated;
       }
     }
-    const existing = toolCallId
-      ? currentItems.find(item => item.type === "tool_call" && item.toolCallId === toolCallId)
-      : undefined;
+    const existingIndex = findToolCallIndex(currentItems, toolCallId || undefined, contentIndex, state.assistantStartIndex);
+    const existing = existingIndex >= 0 ? currentItems[existingIndex] : undefined;
+    const nextPhase = laterToolPhase(existing?.toolPhase, phase);
     const item = existing
-      ? { ...existing, toolName, args: Object.keys(args).length ? args : existing.args,
+      ? { ...existing, toolName: toolNameUpdate(existing.toolName, toolName),
+          toolCallId: toolCallId || existing.toolCallId, toolContentIndex: contentIndex ?? existing.toolContentIndex,
+          toolPhase: nextPhase, args: Object.keys(args).length ? args : existing.args,
           argsTruncated: existing.argsTruncated || argsTruncated || undefined,
           status: existing.result !== undefined ? existing.status : status }
       : {
           id: toolCallId || rowId("tool"),
-          type: "tool_call" as const, toolName, toolCallId, args, status, timestamp: Date.now(),
-          argsTruncated: argsTruncated || undefined,
+          type: "tool_call" as const, toolName, toolCallId: toolCallId || undefined, toolContentIndex: contentIndex,
+          toolPhase: phase, args, status, timestamp: Date.now(), argsTruncated: argsTruncated || undefined,
         };
     if (existing) currentItems[currentItems.indexOf(existing)] = item;
     else currentItems.push(item);
@@ -175,13 +174,14 @@ export function parseTranscriptChunkLines(
     if (!message || typeof message !== "object") return;
     if (message.role === "user") {
       if (!options.showUserTurns) return;
-      const text = stripPlannerContext(textContent(message.content)).trim();
+      const steerId = plannerContentSteerId(message.content);
+      const text = stripPlannerContext(plannerContentText(message.content)).trim();
       if (!text || (entryId && currentItems.some(item => item.id === `session_user_${entryId}`))) return;
       if (options.userTurnTexts && !options.userTurnTexts.includes(text)) return;
       const first = !state.seenFirstUser;
       state.seenFirstUser = true;
       if (first && options.skipFirstUser) return;
-      currentItems.push({ id: `session_user_${entryId || rowId("user")}`, type: "text", role: "user", content: text, userTurnOffset: lineOffset, images: imageContent(message.content), timestamp: Date.now() });
+      currentItems.push({ id: steerId ? `msg-${steerId}` : `session_user_${entryId || rowId("user")}`, type: "text", role: "user", content: text, userTurnOffset: lineOffset, images: imageContent(message.content), timestamp: Date.now() });
       return;
     }
     if (message.role === "toolResult") {
@@ -234,7 +234,8 @@ export function parseTranscriptChunkLines(
 
       if (options.showUserTurns && (event.type === "message_start" || event.type === "message_end") && event.message?.role === "user") {
         const content = event.message.content;
-        const display = stripPlannerContext(textContent(content)).trim();
+        const steerId = plannerContentSteerId(content);
+        const display = stripPlannerContext(plannerContentText(content)).trim();
         if (options.userTurnTexts && !options.userTurnTexts.includes(display)) continue;
         const messageId = event.message.id;
         if (event.type === "message_end") {
@@ -250,7 +251,7 @@ export function parseTranscriptChunkLines(
         state.seenFirstUser = true;
         if (first && options.skipFirstUser) continue;
         if (display.trim()) currentItems.push({
-          id: messageId ? `user_${messageId}` : rowId("user"),
+          id: steerId ? `msg-${steerId}` : messageId ? `user_${messageId}` : rowId("user"),
           type: "text", role: "user", content: display, userTurnOffset: lineOffset, images: imageContent(content), timestamp: Date.now(),
         });
         continue;
@@ -271,13 +272,13 @@ export function parseTranscriptChunkLines(
       if (event.type === "message_update" && thinkingEvent?.type === "toolcall_start") {
         const tool = thinkingEvent.partial?.content?.[thinkingEvent.contentIndex];
         addToolCall(thinkingEvent.id || tool?.id, thinkingEvent.toolName || tool?.name || "tool", thinkingEvent.arguments || tool?.arguments || {},
-          "running", !!(thinkingEvent.argsTruncated || tool?.argsTruncated));
+          "running", !!(thinkingEvent.argsTruncated || tool?.argsTruncated), thinkingEvent.contentIndex, "generating");
         continue;
       }
 
       if (event.type === "message_update" && thinkingEvent?.type === "toolcall_end" && thinkingEvent.toolCall) {
         const tool = thinkingEvent.toolCall;
-        addToolCall(tool.id, tool.name || "tool", tool.arguments || {}, "running", !!tool.argsTruncated);
+        addToolCall(tool.id, tool.name || "tool", tool.arguments || {}, "running", !!tool.argsTruncated, thinkingEvent.contentIndex, "pending");
         continue;
       }
 
@@ -403,7 +404,7 @@ export function parseTranscriptChunkLines(
       // still identifies its card even when the start is many megabytes earlier.
       // Do not accumulate cumulative partialResult snapshots as transcript rows.
       if (event.type === "tool_execution_update") {
-        addToolCall(event.toolCallId, event.toolName || "tool", event.args || {}, "running", !!event.argsTruncated);
+        addToolCall(event.toolCallId, event.toolName || "tool", event.args || {}, "running", !!event.argsTruncated, undefined, "executing");
         continue;
       }
 
@@ -411,7 +412,7 @@ export function parseTranscriptChunkLines(
       if (event.type === "tool_execution_start") {
         currentItems = closeThinkingItems(currentItems);
         state.inTagThinking = false;
-        const toolItem = addToolCall(event.toolCallId, event.toolName || "tool", event.args || {}, "running", !!event.argsTruncated);
+        const toolItem = addToolCall(event.toolCallId, event.toolName || "tool", event.args || {}, "running", !!event.argsTruncated, undefined, "executing");
         if (event.toolCallId) pendingTools.set(event.toolCallId, toolItem);
         continue;
       }
@@ -440,9 +441,9 @@ export function parseTranscriptChunkLines(
         }
         if (message?.role === "assistant" && Array.isArray(message.content)) {
           currentItems = finalizeThinkingItems(currentItems, message.content, state.assistantStartIndex);
-          for (const part of message.content) {
-            if (part?.type === "toolCall") addToolCall(part.id, part.name || "tool", part.arguments || {}, "running", !!part.argsTruncated);
-          }
+          message.content.forEach((part: any, contentIndex: number) => {
+            if (part?.type === "toolCall") addToolCall(part.id, part.name || "tool", part.arguments || {}, "running", !!part.argsTruncated, contentIndex, "pending");
+          });
           const fullText = message.content.filter((c: { type: string }) => c.type === "text")
             .map((c: { text?: string }) => c.text || "").join("");
           // A cold tail can show only the runtime fallback when a large
@@ -486,7 +487,9 @@ export function parseTranscriptChunkLines(
           currentItems = closeThinkingItems(currentItems);
           for (const toolCallId of pendingTools.keys()) {
             const index = currentItems.findIndex(item => item.type === "tool_call" && item.toolCallId === toolCallId);
-            if (index >= 0) currentItems[index] = { ...currentItems[index], status: event.success ? "success" : "error", isError: !event.success };
+            // A clean process exit is not a tool result. A generated or
+            // executing call with no result was interrupted, not completed.
+            if (index >= 0) currentItems[index] = { ...currentItems[index], status: "interrupted" };
           }
           pendingTools.clear();
         }

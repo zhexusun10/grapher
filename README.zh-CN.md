@@ -184,7 +184,7 @@ npm run test:backend          # Rust 固定样例；无需付费模型
 
 **使用 Grapher：** [使用指南](docs/user-guide.md) · [安全政策](SECURITY.md)。
 
-**开发 Grapher：** [架构契约](docs/architecture/overview.md) · [开发指南](docs/development/contributing.md) · [Benchmark / Evaluation](docs/benchmarks/harbor.md)。
+**开发 Grapher：** [架构契约](docs/architecture/overview.md) · [贡献指南](CONTRIBUTING.md) · [Benchmark / Evaluation](docs/benchmarks/harbor.md)。
 
 [文档索引](docs/index.md)区分用户指南与开发者任务路由。Coding Agent 应使用 [AGENTS.md](AGENTS.md) 了解仓库约束。
 

@@ -44,10 +44,14 @@ try {
   async function call(name: string, parameters: Record<string, unknown>) {
     const tool = (extension.tools.get(name) ?? loaded.extensions[1].tools.get(name))!.definition;
     const args = validateToolArguments(tool, { type: "toolCall", id: "test", name, arguments: parameters });
+    const before = name === "node" || name === "edge"
+      ? JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8")) : undefined;
     const response = await tool.execute("test", args, undefined, undefined, context);
     if (name === "node" || name === "edge") {
       const feedback = JSON.parse(response.content[0].text);
       const saved = JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8"));
+      const initialNodeBatch = name === "node" && before.nodes.length === 0
+        && before.edges.length === 0 && saved.nodes.length > 0;
       for (const edge of saved.edges) assert.deepEqual(Object.keys(edge), ["from", "to", "feedback"]);
       assert.equal(typeof feedback.applied, "boolean");
       const hasWarnings = Object.hasOwn(feedback, "warnings");
@@ -57,8 +61,8 @@ try {
       const consumed = new Set(saved.edges.filter((edge: { to: string; feedback: boolean }) => !edge.feedback)
         .map((edge: { to: string }) => edge.to));
       assert.deepEqual(feedback.topology, {
-        // The compiler's own root list, sorted, inside the topology it describes.
-        ...(feedback.applied ? { roots: saved.nodes.map((node: { name: string }) => node.name)
+        // Except for the initial node batch, report the compiler's sorted roots.
+        ...(feedback.applied && !initialNodeBatch ? { rootNodes: saved.nodes.map((node: { name: string }) => node.name)
           .filter((name: string) => !consumed.has(name)).sort() } : {}),
         directDependencies: Object.fromEntries(saved.nodes.map((node: { name: string }) => [
           node.name,
@@ -177,7 +181,7 @@ try {
     "tolerant-bare", "tolerant-array", "tolerant-object", "tolerant-mixed", "tolerant-string",
   ].map(name => ({ name, delete: true })) })).content[0].text);
   assert.equal(cleanedTolerant.applied, true);
-  assert.deepEqual(cleanedTolerant.topology, { roots: [], directDependencies: {}, feedbackTo: {} });
+  assert.deepEqual(cleanedTolerant.topology, { rootNodes: [], directDependencies: {}, feedbackTo: {} });
 
   // Node names are arbitrary strings, not safe object-property identifiers.
   // Direct dependencies, transitive ancestors and feedback remain distinct.
@@ -190,7 +194,7 @@ try {
     { from: "任务•完成", to: "__proto__", feedback: true },
   ] })).content[0].text);
   assert.deepEqual(unusual.topology.directDependencies["__proto__"], []);
-  assert.deepEqual(unusual.topology.roots, ["__proto__"], "only the node with no ordinary parent is a root");
+  assert.deepEqual(unusual.topology.rootNodes, ["__proto__"], "only the node with no ordinary parent is a root");
   assert.deepEqual(unusual.topology.directDependencies.constructor, ["__proto__"]);
   assert.deepEqual(unusual.topology.directDependencies["任务•完成"], ["constructor"],
     "an ancestor must not be reported as a direct dependency");
@@ -235,16 +239,28 @@ try {
   await node({ name: "nullable-build", task: null, delete: true });
   const emptyGraph = JSON.parse((await node({ name: "nullable-review", delete: true })).content[0].text);
   assert.equal(emptyGraph.applied, true, "Mutation checks are not final graph validation");
-  assert.deepEqual(emptyGraph.topology, { roots: [], directDependencies: {}, feedbackTo: {} });
+  assert.deepEqual(emptyGraph.topology, { rootNodes: [], directDependencies: {}, feedbackTo: {} });
   assert.equal(emptyGraph.warnings, undefined);
+  const initialWarnings = JSON.parse((await call("node", { nodes: [
+    { name: "initial-a", task: "Same task" }, { name: "initial-b", task: "Same task" },
+  ] })).content[0].text);
+  assert.deepEqual(initialWarnings.topology, {
+    directDependencies: { "initial-a": [], "initial-b": [] }, feedbackTo: {},
+  });
+  assert.deepEqual(initialWarnings.warnings, ["Nodes initial-a, initial-b have identical task text; they may duplicate work. Confirm that this is intentional."]);
+  await call("node", { nodes: [{ name: "initial-a", delete: true }, { name: "initial-b", delete: true }] });
+  const rejectedFirst = JSON.parse((await node({ name: "build" })).content[0].text);
+  assert.equal(rejectedFirst.applied, false);
+  assert.deepEqual(rejectedFirst.topology, { directDependencies: {}, feedbackTo: {} });
   const firstMutation = await node({ name: "build", task: "Build it" });
   assert.deepEqual(Object.keys(firstMutation), ["content"]);
   const firstResult = JSON.parse(firstMutation.content[0].text);
   assert.deepEqual(firstResult, {
     applied: true,
-    topology: { roots: ["build"], directDependencies: { build: [] }, feedbackTo: {} },
+    topology: { directDependencies: { build: [] }, feedbackTo: {} },
   });
-  await node({ name: "review", task: "Review it" });
+  const secondMutation = JSON.parse((await node({ name: "review", task: "Review it" })).content[0].text);
+  assert.deepEqual(secondMutation.topology.rootNodes, ["build", "review"], "Later node edits still expose current roots");
   const beforeFeedback = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   const prematureFeedback = JSON.parse((await edge({ from: "review", to: "build", feedback: true })).content[0].text);
   assert.equal(prematureFeedback.applied, false);
@@ -259,7 +275,7 @@ try {
   assert.deepEqual(JSON.parse(dependency.content[0].text), {
     applied: true,
     topology: {
-      roots: ["build"],
+      rootNodes: ["build"],
       directDependencies: { build: [], review: ["build"] },
       feedbackTo: {},
     },
@@ -269,11 +285,11 @@ try {
   // expose it directly, because scanning a 40-key map for an empty list hid
   // exactly this case in a reported plan.
   const secondRoot = JSON.parse((await node({ name: "leftover", task: "Leftover" })).content[0].text);
-  assert.deepEqual(secondRoot.topology.roots, ["build", "leftover"]);
+  assert.deepEqual(secondRoot.topology.rootNodes, ["build", "leftover"]);
   const linked = JSON.parse((await edge({ from: "build", to: "leftover" })).content[0].text);
-  assert.deepEqual(linked.topology.roots, ["build"], "Connecting the new node removes it from the root list");
+  assert.deepEqual(linked.topology.rootNodes, ["build"], "Connecting the new node removes it from the root list");
   const removedAgain = JSON.parse((await node({ name: "leftover", delete: true })).content[0].text);
-  assert.deepEqual(removedAgain.topology.roots, ["build"]);
+  assert.deepEqual(removedAgain.topology.rootNodes, ["build"]);
   assert.deepEqual(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges,
     [{ from: "build", to: "review", feedback: false }]);
   const before = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
@@ -308,7 +324,7 @@ try {
   const repairedFeedback = JSON.parse(repaired.content[0].text);
   assert.equal(repairedFeedback.applied, true);
   assert.deepEqual(repairedFeedback.topology, {
-    roots: ["build"],
+    rootNodes: ["build"],
     directDependencies: { build: [], review: ["build"] },
     feedbackTo: { review: "build" },
   });
@@ -328,7 +344,7 @@ try {
   assert.equal(readFileSync(join(repository, "changed"), "utf8"), "changed");
   assert.equal(extension.handlers.has("context"), false, "Planner must preserve file contents and tool results");
   const deletedBuild = JSON.parse((await node({ name: "build", delete: true })).content[0].text);
-  assert.deepEqual(deletedBuild.topology, { roots: ["review"], directDependencies: { review: [] }, feedbackTo: {} });
+  assert.deepEqual(deletedBuild.topology, { rootNodes: ["review"], directDependencies: { review: [] }, feedbackTo: {} });
   assert.equal(deletedBuild.warnings.length, 1);
   assert.match(deletedBuild.warnings[0], /review mentions <FEEDBACK>/, "Deleting the feedback target removes the scope warning and exposes the missing-route warning again");
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
@@ -400,16 +416,21 @@ fn main() {
   const nodeBatch = JSON.parse((await call("node", { nodes: batchNodes })).content[0].text);
   assert.equal(nodeBatch.applied, true);
   assert.deepEqual(nodeBatch.topology, {
-    roots: ["contract", "integration", "parser", "search", "verification"],
     directDependencies: { contract: [], parser: [], search: [], integration: [], verification: [] },
     feedbackTo: {},
   });
   assert.equal(nodeBatch.warnings, undefined);
-  assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
+  const initialGraph = JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"));
+  assert.equal(initialGraph.edges.length, 0);
+  const initialFinalPlan = JSON.parse(execFileSync(compilerPath, ["--compile"], {
+    input: JSON.stringify({ graph: initialGraph, finalCheck: true }), encoding: "utf8",
+  }));
+  assert.deepEqual(initialFinalPlan.plan.rootNodes, ["contract", "integration", "parser", "search", "verification"],
+    "A deliberately edgeless final graph must still compile with all roots");
   const batchResult = JSON.parse((await call("edge", { edges: batchEdges })).content[0].text);
   assert.equal(batchResult.applied, true);
   assert.deepEqual(batchResult.topology, {
-    roots: ["contract"],
+    rootNodes: ["contract"],
     directDependencies: {
       contract: [], parser: ["contract"], search: ["contract"],
       integration: ["parser", "search"], verification: ["integration"],
@@ -518,7 +539,7 @@ fn main() {
   ] })).content[0].text);
   assert.equal(rewired.applied, true);
   assert.deepEqual(rewired.topology, {
-    roots: ["parser"],
+    rootNodes: ["parser"],
     directDependencies: {
       contract: ["parser"], parser: [], search: ["contract"],
       integration: ["search"], verification: ["integration"],
@@ -557,6 +578,30 @@ fn main() {
   assert.match(unavailable.content[0].text, /missing-compiler ENOENT/);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeUnavailable);
   process.env.GRAPHER_COMPILER_PATH = compilerPath;
+
+  // A hot-reloaded Planner can temporarily use an older compiler binary whose
+  // Plan still reports `roots`. Emit only the new tool projection in that case.
+  const beforeLegacyCompiler = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
+  const legacyCompiler = join(root, process.platform === "win32" ? "legacy-compiler.exe" : "legacy-compiler.mjs");
+  const legacyResponse = JSON.stringify({ plan: { roots: ["legacy"], warnings: [] }, diagnostics: [] });
+  if (process.platform === "win32") {
+    const legacySource = join(root, "legacy_compiler.rs");
+    writeFileSync(legacySource, `fn main() { print!("{}", ${JSON.stringify(legacyResponse)}); }`);
+    execFileSync("rustc", ["--crate-name", "legacy_compiler", legacySource, "-o", legacyCompiler], { stdio: "pipe" });
+  } else {
+    writeFileSync(legacyCompiler, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(legacyResponse)});\n`);
+    chmodSync(legacyCompiler, 0o755);
+  }
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({
+    originalGoal: "Legacy compiler", nodes: [{ name: "legacy", task: "Original" }], edges: [],
+  }));
+  process.env.GRAPHER_COMPILER_PATH = legacyCompiler;
+  const legacyCompilerResult = JSON.parse((await node({ name: "legacy", task: "Updated" })).content[0].text);
+  assert.deepEqual(legacyCompilerResult.topology, {
+    rootNodes: ["legacy"], directDependencies: { legacy: [] }, feedbackTo: {},
+  });
+  process.env.GRAPHER_COMPILER_PATH = compilerPath;
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, beforeLegacyCompiler);
 
   // Graph mutations remain self-contained; the shared adapter owns read/bash/write/edit.
   process.env.GRAPHER_MODE = "planner";

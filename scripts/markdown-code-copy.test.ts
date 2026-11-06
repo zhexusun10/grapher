@@ -24,6 +24,7 @@ test("fenced and indented blocks each get an accessible copy button without chan
   assert.ok(html.includes("<code>echo indented\n</code>"));
   assert.equal((html.match(/type="button"/g) ?? []).length, 3);
   assert.equal((html.match(/aria-label=/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /\stitle=/, "code copy buttons must not show a native browser tooltip");
 });
 
 test("unfinished streamed fences remain copyable without including the cursor in code text", () => {

@@ -67,7 +67,9 @@ pub struct Route {
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
     pub execution_batches: Vec<Vec<String>>,
-    pub roots: Vec<String>,
+    // Older checkpoints and snapshots used `roots`; serialize only rootNodes.
+    #[serde(alias = "roots")]
+    pub root_nodes: Vec<String>,
     pub terminals: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -808,6 +810,22 @@ pub enum EventKind {
     PlanningFailed {
         planning: PlanningSummary,
     },
+    /// A Planner steer has been accepted by Grapher, but not necessarily by Pi.
+    PlannerSteerSubmitted {
+        planning_id: String,
+        request_id: String,
+        instruction: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageAttachment>>,
+    },
+    /// RPC acknowledgement and consumption are separate, append-only evidence.
+    PlannerSteerStatus {
+        planning_id: String,
+        request_id: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Per-turn cwd evidence; does not replace the committed graph/planning ID.
     PlannerWorkspaceSelected {
         planning: PlanningSummary,
@@ -1270,9 +1288,12 @@ pub struct Snapshot {
     /// publication leaves the user's branch/index unchanged.
     #[serde(default)]
     pub published_head: Option<String>,
-    /// Terminal heads already merged into the published source. Settling and
-    /// publication retry compare against this to skip republication of
-    /// unchanged results whose snapshot Git objects may already be reclaimed.
+    /// Every terminal head a completed publication already merged into the
+    /// source, accumulated across this Run's publications. Later publications
+    /// and retries deliver only heads that are not listed here: an already
+    /// delivered result is part of the source snapshot, while its internal Git
+    /// objects may already be reclaimed (a plain folder drops its snapshot
+    /// database at completion).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub published_heads: Vec<String>,
     pub feedback_counts: BTreeMap<String, usize>,
@@ -2200,7 +2221,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.planning_id = Some(planning.planning_id.clone());
             state.planning = Some(planning.clone());
         }
-        EventKind::PlannerReworkNoteInjected => {}
+        EventKind::PlannerReworkNoteInjected
+        | EventKind::PlannerSteerSubmitted { .. }
+        | EventKind::PlannerSteerStatus { .. } => {}
         EventKind::PlannerWorkspaceRedirected { .. } => {}
         EventKind::PlannerWorkspaceSnapshotted {
             execution_id,
@@ -3237,8 +3260,19 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::PublicationCompleted { head } => {
             state.published_head = Some(head.clone());
+            // Accumulate instead of replacing: a post-review publication must
+            // not re-request earlier heads whose objects were reclaimed.
+            for delivered in state
+                .publication
+                .as_ref()
+                .map(|publication| publication.heads.clone())
+                .unwrap_or_default()
+            {
+                if !state.published_heads.contains(&delivered) {
+                    state.published_heads.push(delivered);
+                }
+            }
             if let Some(publication) = &mut state.publication {
-                state.published_heads = publication.heads.clone();
                 publication.status = "completed".into();
                 publication.head = Some(head.clone());
                 publication.completed_at = Some(event.timestamp);

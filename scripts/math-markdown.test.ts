@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { marked } from "marked";
+import katex from "katex";
 import { sanitizeHtml, StreamingMarkdownCache, repairStreamingMarkdown } from "../src/services/streamingMarkdown.ts";
 
 const formula = String.raw`\text{Robust Score} = 0.40 \times \text{Sharpe} + 0.30 \times \text{CAGR} - 0.20 \times \text{MDD} + 0.10 \times \text{Min Fold Sharpe} + 0.10 \times \text{Cost Retention}`;
@@ -59,6 +60,14 @@ test("math uses KaTeX's untrusted-input mode and cannot inject HTML", () => {
   const spoofed = sanitizeHtml('<span class="grapher-math">0%5Ctext%7B%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E%7D</span>');
   assert.doesNotMatch(spoofed, /<img\b|<script\b/i);
   assert.match(spoofed, /&lt;img/);
+});
+
+test("KaTeX ignores an inherited trust option when rendering untrusted math", () => {
+  const tex = String.raw`\href{javascript:alert(1)}{x}`;
+  const inheritedTrust = Object.assign(Object.create({ trust: true }), { throwOnError: false });
+  assert.doesNotMatch(katex.renderToString(tex, inheritedTrust), /<a\b/i);
+  assert.match(katex.renderToString(tex, { trust: true, throwOnError: false }), /<a\b/i,
+    "the expression exercises the trusted-rendering boundary");
 });
 
 test("incremental math Markdown matches a full parse at every streaming prefix", () => {

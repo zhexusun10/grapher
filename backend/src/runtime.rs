@@ -144,6 +144,21 @@ enum RecoveryScope {
     InterruptedOnly,
 }
 
+/// A checkpoint may predate accumulated delivered heads. The event log is the
+/// durable record of what a completed publication already wrote into the source,
+/// so union it in before scheduling or retrying a publication.
+fn repair_delivered_heads(store: &Store, state: &mut Snapshot) -> Result<(), String> {
+    if state.published_head.is_none() || state.run_id.is_empty() {
+        return Ok(());
+    }
+    for head in store.delivered_heads(&state.run_id)? {
+        if !state.published_heads.contains(&head) {
+            state.published_heads.push(head);
+        }
+    }
+    Ok(())
+}
+
 pub struct Runtime {
     pub store: Store,
     pub state: Snapshot,
@@ -189,6 +204,7 @@ impl Runtime {
                 config.engine = "pi".into();
             }
         }
+        repair_delivered_heads(&store, &mut state)?;
         let mut runtime = Self {
             store,
             state,
@@ -254,6 +270,7 @@ impl Runtime {
                 config.engine = "pi".into();
             }
         }
+        repair_delivered_heads(&store, &mut state)?;
         let mut runtime = Self {
             store,
             state,
@@ -673,23 +690,28 @@ impl Runtime {
             .publication
             .clone()
             .ok_or("No publication to retry")?;
-        // A failed attempt over terminal heads that a completed publication
-        // already merged cannot add anything, and the published snapshot's Git
-        // objects may be reclaimed, so retrying would fail forever. Resolve the
-        // attempt as completed at the already-published head: this restores the
-        // completed phase and marks the publication record successful without
-        // touching reclaimed Git state.
-        if let Some(published_head) = self.state.published_head.clone() {
-            if Self::same_published_heads(&self.state.published_heads, &publication.heads) {
-                return self.emit_outputs(vec![EventKind::PublicationCompleted {
-                    head: published_head,
-                }]);
+        // Heads a completed publication already merged stay out of the retry:
+        // the source snapshot carries their files and the published snapshot's
+        // Git objects may be reclaimed, so re-merging them would fail forever.
+        let heads = match self.state.published_head.clone() {
+            Some(published_head) => {
+                let heads =
+                    Self::undelivered_heads(&self.state.published_heads, &publication.heads);
+                if heads.is_empty() {
+                    // Nothing new to deliver: restore the completed phase and mark
+                    // the record successful without touching reclaimed Git state.
+                    return self.emit_outputs(vec![EventKind::PublicationCompleted {
+                        head: published_head,
+                    }]);
+                }
+                heads
             }
-        }
+            None => publication.heads,
+        };
         workspace::validate_binding(Path::new(&publication.repository))?;
         self.emit(EventKind::PublicationStarted {
             repository: publication.repository,
-            heads: publication.heads,
+            heads,
         })
     }
 
@@ -3164,8 +3186,16 @@ impl Runtime {
 
     /// Terminal result sets match when they contain exactly the same commits;
     /// order follows plan terminals and is not stable across revisions.
-    fn same_published_heads(published: &[String], heads: &[String]) -> bool {
-        published.len() == heads.len() && heads.iter().all(|head| published.contains(head))
+    /// Terminal results that still need delivery. A completed publication
+    /// already wrote the listed heads into the source, so asking publication to
+    /// compose them again adds nothing and can fail once their internal objects
+    /// are reclaimed.
+    fn undelivered_heads(published: &[String], heads: &[String]) -> Vec<String> {
+        heads
+            .iter()
+            .filter(|head| !published.contains(head))
+            .cloned()
+            .collect()
     }
 
     /// During a live Planner revision, schedule ready nodes but defer publishing
@@ -4292,14 +4322,19 @@ impl Runtime {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 // Terminal results that a completed publication already merged
-                // do not need another publication pass: a resumed Run or a
-                // stopped post-task review replays this settle decision with
-                // unchanged heads, while the published snapshot's Git objects
-                // may already be reclaimed. Settling restores the completed
-                // phase instead of failing a redundant merge forever.
-                if self.state.published_head.is_some()
-                    && Self::same_published_heads(&self.state.published_heads, &heads)
-                {
+                // do not need another publication pass: a resumed Run, a stopped
+                // post-task review or a later Planner revision replays this
+                // settle decision for unchanged work, while the published
+                // snapshot's Git objects may already be reclaimed. Delivered
+                // heads are dropped from the request, so new work still
+                // publishes and an all-delivered graph settles instead of
+                // failing a redundant merge forever.
+                let heads = if self.state.published_head.is_some() {
+                    Self::undelivered_heads(&self.state.published_heads, &heads)
+                } else {
+                    heads
+                };
+                if self.state.published_head.is_some() && heads.is_empty() {
                     self.emit(EventKind::Settled)?;
                 } else {
                     let repository = resolve_repository(&self.root, &config)?
@@ -5550,6 +5585,7 @@ impl PublicationJob {
                 head,
                 Some(&self.run_id),
                 &exclusions,
+                true,
                 || Err("Publication descriptor requires a clean composed code result".into()),
             )?;
             if !present {
@@ -5696,6 +5732,7 @@ pub(crate) fn perform_result(
                         &job.descriptor.result.code_ref,
                         Some(&job.run_id),
                         &exclusions,
+                        true,
                         || Err("Result reconstruction cannot require a Merger".into()),
                     )?;
                 }
@@ -6249,6 +6286,7 @@ fn perform_with_merger_inner(
             expected_source_head,
             Some(&job.run_id),
             &exclusions,
+            true,
             || {
                 // Conflict preparation re-materializes the composed view and can
                 // take far longer than the merge itself; report it distinctly so

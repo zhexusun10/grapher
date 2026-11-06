@@ -53,9 +53,27 @@ test("Markdown links open outside the app and cannot be retargeted by model HTML
   const cache = new StreamingMarkdownCache();
   const output = cache.render('[文档](https://example.com/docs "标题") and [local](/workspace/file.md)', false);
   assert.match(output, /<a href="https:\/\/example.com\/docs" title="标题" target="_blank" rel="noopener noreferrer">文档<\/a>/);
-  assert.match(output, /<a href="\/workspace\/file.md">local<\/a>/);
+  // A workspace path is not a URL: rendering it as an anchor would navigate the
+  // Grapher tab (and drop the Run), so it degrades to plain text with the path.
+  assert.doesNotMatch(output, /<a href="\/workspace\/file.md"/);
+  // Latin link text keeps ASCII parentheses; CJK prose gets the full-width pair.
+  assert.match(output, /local\(\/workspace\/file\.md\)/);
   assert.equal(sanitizeHtml('<a href="https://example.com" target="_self" rel="opener">x</a>'),
     '<a href="https://example.com" target="_blank" rel="noopener noreferrer">x</a>');
+});
+
+test("Workspace paths degrade to readable text and raw-HTML paths stay inert", () => {
+  const cache = new StreamingMarkdownCache();
+  const output = cache.render('[下一步探索文档](docs/strategy_exploration_next_steps.md)\n\n'
+    + '[`reports/a.md`](../reports/a.md)\n\n[跳转](#section-1)\n\n[mail](mailto:a@b.test)', false);
+  assert.match(output, /下一步探索文档（docs\/strategy_exploration_next_steps\.md）/);
+  assert.match(output, /<code>reports\/a\.md<\/code>\(\.\.\/reports\/a\.md\)/);
+  assert.match(output, /<a href="#section-1">跳转<\/a>/);
+  assert.match(output, /<a href="mailto:a@b\.test">mail<\/a>/);
+  assert.doesNotMatch(output, /href="docs\/|href="\.\.\/reports/);
+  // Raw model HTML cannot reintroduce the same navigation, and it keeps no
+  // link styling either: only the text survives.
+  assert.equal(sanitizeHtml('<a href="docs/x.md">x</a>'), '<span>x</span>');
 });
 
 test("GFM autolinks stop before Chinese punctuation and prose while keeping raw URL paths", () => {

@@ -706,6 +706,9 @@ mod node_message_delivery_tests;
 #[path = "planner_review_tests.rs"]
 mod planner_review_tests;
 #[cfg(all(test, feature = "fixture"))]
+#[path = "planner_steer_tests.rs"]
+mod planner_steer_tests;
+#[cfg(all(test, feature = "fixture"))]
 #[path = "planner_workspace_tests.rs"]
 mod planner_workspace_tests;
 #[cfg(test)]
@@ -2626,8 +2629,19 @@ fn plan_goal_internal_with_started(
                                     else {
                                         return;
                                     };
-                                    if let Err(error) = planner_log.write_all(text.as_bytes()) {
-                                        log_error = Some(error.to_string());
+                                    match planner_log.write_all(text.as_bytes()) {
+                                        Ok(()) => {
+                                            // Commit the user row before recording consumption;
+                                            // a crash must not hide an accepted message.
+                                            observe_planner_steer_line(
+                                                &service,
+                                                &owner,
+                                                &planning_id,
+                                                &text,
+                                            );
+                                            notify_planning_output(&owner, &planning_id);
+                                        }
+                                        Err(error) => log_error = Some(error.to_string()),
                                     }
                                     log.push_str(&text);
                                     crate::file_changes::update_planning_from_log_chunk(
@@ -3804,6 +3818,142 @@ fn drive(service: Arc<Service>) {
     }
 }
 
+/// The identity marker lives in Pi's session and event stream, not its model
+/// context. An extension that removes it makes delivery unknown, never guessed
+/// from text (which may be repeated or transformed).
+fn planner_steer_marker(request_id: &str) -> String {
+    format!("\n\n<grapher-steer-id>{request_id}</grapher-steer-id>")
+}
+
+fn planner_steer_status(state: &Snapshot, planning_id: &str, request_id: &str) -> Option<String> {
+    let mut status = None;
+    for event in &state.events {
+        match &event.kind {
+            EventKind::PlannerSteerSubmitted {
+                planning_id: plan,
+                request_id: id,
+                ..
+            } if plan == planning_id && id == request_id => status = Some("submitted".to_string()),
+            EventKind::PlannerSteerStatus {
+                planning_id: plan,
+                request_id: id,
+                status: next,
+                ..
+            } if plan == planning_id && id == request_id && status.is_some() => {
+                status = Some(next.clone())
+            }
+            _ => {}
+        }
+    }
+    status
+}
+
+fn expire_planner_steer_confirmation(
+    service: &Arc<Service>,
+    owner: &str,
+    planning_id: &str,
+    request_id: &str,
+) {
+    let Ok(mut runtime) = service.runtime.lock() else {
+        return;
+    };
+    if runtime.state.run_id != owner
+        || planner_steer_status(&runtime.state, planning_id, request_id).as_deref()
+            != Some("submitted")
+    {
+        return;
+    }
+    if let Err(error) = runtime.emit(EventKind::PlannerSteerStatus {
+        planning_id: planning_id.into(),
+        request_id: request_id.into(),
+        status: "unknown".into(),
+        error: None,
+    }) {
+        eprintln!("[Grapher] Cannot record Planner steer confirmation timeout: {error}");
+    }
+}
+
+/// Translate Pi's asynchronous RPC response and exact marked user turn into
+/// durable evidence. Repeated text and extension input transformations never
+/// manufacture a consumption acknowledgement.
+fn observe_planner_steer_line(service: &Arc<Service>, owner: &str, planning_id: &str, line: &str) {
+    // Text/thinking deltas dominate the log and can never acknowledge an RPC
+    // request or inject a user turn; skip a second JSON parse for them.
+    if line.contains("\"assistantMessageEvent\"") {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return;
+    };
+    let (request_id, next, error) = match value["type"].as_str() {
+        Some("response") if value["command"] == "prompt" => {
+            let Some(id) = value["id"].as_str() else {
+                return;
+            };
+            let status = if value["success"] != true {
+                "failed"
+            } else {
+                match value["data"]["disposition"].as_str() {
+                    Some("queued") => "queued",
+                    Some("handled") => "handled",
+                    _ => "accepted",
+                }
+            };
+            (
+                id.to_string(),
+                status,
+                value["error"].as_str().map(str::to_owned),
+            )
+        }
+        Some("message_start") if value["message"]["role"] == "user" => {
+            let texts: Vec<&str> = match &value["message"]["content"] {
+                serde_json::Value::String(text) => vec![text],
+                serde_json::Value::Array(parts) => parts
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect(),
+                _ => vec![],
+            };
+            let ids: BTreeSet<String> = texts
+                .iter()
+                .filter_map(|text| {
+                    let (_, tail) = text.rsplit_once("\n\n<grapher-steer-id>")?;
+                    let id = tail.strip_suffix("</grapher-steer-id>")?;
+                    Uuid::parse_str(id).ok().map(|_| id.to_string())
+                })
+                .collect();
+            if ids.len() != 1 {
+                return;
+            }
+            (ids.into_iter().next().unwrap(), "consumed", None)
+        }
+        _ => return,
+    };
+    let Ok(mut runtime) = service.runtime.lock() else {
+        return;
+    };
+    if runtime.state.run_id != owner {
+        return;
+    }
+    let Some(current) = planner_steer_status(&runtime.state, planning_id, &request_id) else {
+        return;
+    };
+    if current == next
+        || (matches!(current.as_str(), "consumed" | "handled" | "failed") && next != "consumed")
+    {
+        return;
+    }
+    if let Err(error) = runtime.emit(EventKind::PlannerSteerStatus {
+        planning_id: planning_id.to_string(),
+        request_id,
+        status: next.to_string(),
+        error,
+    }) {
+        eprintln!("[Grapher] Cannot record Planner steer status: {error}");
+    }
+}
+
+#[cfg(test)]
 fn control(
     action: String,
     node: Option<String>,
@@ -3811,6 +3961,29 @@ fn control(
     run_id: Option<String>,
     execution_id: Option<String>,
     images: Option<Vec<crate::model::ImageAttachment>>,
+    service: &Arc<Service>,
+) -> Result<Snapshot, String> {
+    control_with_request_id(
+        action,
+        node,
+        instruction,
+        run_id,
+        execution_id,
+        images,
+        None,
+        service,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn control_with_request_id(
+    action: String,
+    node: Option<String>,
+    instruction: Option<String>,
+    run_id: Option<String>,
+    execution_id: Option<String>,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+    request_id: Option<String>,
     service: &Arc<Service>,
 ) -> Result<Snapshot, String> {
     // A viewed historical Run is not necessarily the backend's active Run.
@@ -3825,6 +3998,44 @@ fn control(
         let instruction = instruction.ok_or("Enter a planning message")?;
         if instruction.trim().is_empty() {
             return Err("Enter a planning message".into());
+        }
+        // An omitted list and an explicitly empty one are the same request;
+        // normalizing keeps a retry with the same identity idempotent.
+        let images = images.filter(|items| !items.is_empty());
+        // Retries with the same identity never enqueue a second command, even
+        // if the turn has already ended or the first HTTP response was lost.
+        if let Some(id) = request_id.as_deref() {
+            if Uuid::parse_str(id)
+                .map(|uuid| uuid.to_string() != id)
+                .unwrap_or(true)
+            {
+                return Err("Invalid Planner steer request ID".into());
+            }
+            let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+            if let Some(existing) =
+                runtime
+                    .state
+                    .events
+                    .iter()
+                    .find_map(|event| match &event.kind {
+                        EventKind::PlannerSteerSubmitted {
+                            request_id,
+                            instruction,
+                            images,
+                            ..
+                        } if request_id == id => Some((instruction, images)),
+                        _ => None,
+                    })
+            {
+                if existing.0 != instruction.trim()
+                    || serde_json::to_value(existing.1).ok() != serde_json::to_value(&images).ok()
+                {
+                    return Err(
+                        "Planner steer request ID was already used for another message".into(),
+                    );
+                }
+                return Ok(runtime.state.clone());
+            }
         }
         if !service.planning.load(Ordering::SeqCst) {
             return Err("Planner is no longer accepting messages".into());
@@ -3853,6 +4064,34 @@ fn control(
             }
         };
         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        // Another HTTP retry may have passed the first check while waiting for
+        // Planner registration. Recheck under the same lock used to enqueue.
+        if let Some(id) = request_id.as_deref() {
+            if let Some(existing) =
+                runtime
+                    .state
+                    .events
+                    .iter()
+                    .find_map(|event| match &event.kind {
+                        EventKind::PlannerSteerSubmitted {
+                            request_id,
+                            instruction,
+                            images,
+                            ..
+                        } if request_id == id => Some((instruction, images)),
+                        _ => None,
+                    })
+            {
+                if existing.0 != instruction.trim()
+                    || serde_json::to_value(existing.1).ok() != serde_json::to_value(&images).ok()
+                {
+                    return Err(
+                        "Planner steer request ID was already used for another message".into(),
+                    );
+                }
+                return Ok(runtime.state.clone());
+            }
+        }
         if active_run_id
             .as_ref()
             .is_some_and(|id| id != &runtime.state.run_id)
@@ -3952,6 +4191,50 @@ fn control(
                 std::path::Path::new(&worktree),
                 true,
             )?;
+        }
+        if let (Some(id), Some(run)) = (request_id, run_id.as_deref()) {
+            let planning_id = runtime
+                .state
+                .planning
+                .as_ref()
+                .filter(|planning| planning.status.as_deref() == Some("running"))
+                .map(|planning| planning.planning_id.clone())
+                .ok_or("Planner is no longer accepting messages")?;
+            // The Run mutex serializes durable acceptance and pipe ordering for
+            // concurrent submitters. No RPC acknowledgement is awaited here.
+            runtime.emit(EventKind::PlannerSteerSubmitted {
+                planning_id: planning_id.clone(),
+                request_id: id.clone(),
+                instruction: instruction.trim().to_string(),
+                images: images.clone(),
+            })?;
+            // Do not alter slash-command parsing; handled commands have an RPC
+            // disposition but no user message whose consumption can be marked.
+            let transport = if message.starts_with('/') {
+                message
+            } else {
+                format!("{message}{}", planner_steer_marker(&id))
+            };
+            if let Err(error) =
+                crate::engine::steer_planner_for_run_with_id(run, &transport, images, &id)
+            {
+                runtime.emit(EventKind::PlannerSteerStatus {
+                    planning_id,
+                    request_id: id,
+                    status: "failed".into(),
+                    error: Some(error),
+                })?;
+            } else {
+                let service = Arc::downgrade(service);
+                let owner = runtime.state.run_id.clone();
+                thread::spawn(move || {
+                    thread::sleep(std::time::Duration::from_secs(10));
+                    if let Some(service) = service.upgrade() {
+                        expire_planner_steer_confirmation(&service, &owner, &planning_id, &id);
+                    }
+                });
+            }
+            return Ok(runtime.state.clone());
         }
         let snapshot = runtime.state.clone();
         drop(runtime);
@@ -6126,13 +6409,14 @@ pub fn dispatch(
                 argument(&body, "images").ok(),
                 service,
             )?),
-            "control" => Some(control(
+            "control" => Some(control_with_request_id(
                 argument(&body, "action")?,
                 argument(&body, "node")?,
                 argument(&body, "instruction")?,
                 argument(&body, "runId")?,
                 argument(&body, "executionId")?,
                 argument(&body, "images").ok(),
+                argument(&body, "requestId").ok(),
                 service,
             )?),
             "edit_planner" => Some(edit_planner(
@@ -6336,13 +6620,14 @@ pub fn dispatch(
         )?),
         "get_planning" => to_value(get_planning(argument(&body, "planningId")?, service)?),
         "list_plannings" => to_value(list_plannings(service, argument(&body, "repository").ok())?),
-        "control" => to_value(control(
+        "control" => to_value(control_with_request_id(
             argument(&body, "action")?,
             argument(&body, "node")?,
             argument(&body, "instruction")?,
             argument(&body, "runId")?,
             argument(&body, "executionId")?,
             argument(&body, "images").ok(),
+            argument(&body, "requestId").ok(),
             service,
         )?),
         "edit_planner" => to_value(edit_planner(

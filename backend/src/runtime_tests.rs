@@ -4305,9 +4305,14 @@ fn moved_binding_blocks_scheduling_and_publication() {
 /// Complete the single node and run a successful publication for it, leaving
 /// the Run in the completed phase with reclaimed publication inputs.
 fn publish_single_node() -> (TempDir, PathBuf, Runtime, String) {
-    let (temp, source, mut runtime) = setup(true, single());
+    publish_single_node_in(true)
+}
+
+fn publish_single_node_in(git: bool) -> (TempDir, PathBuf, Runtime, String) {
+    let (temp, source, mut runtime) = setup(git, single());
     runtime.approve().unwrap();
-    let job = runtime.jobs().unwrap().remove(0);
+    let mut job = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut job);
     let path = Path::new(&job.execution.worktree);
     workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
     fs::write(path.join("task.txt"), "v1").unwrap();
@@ -4375,6 +4380,71 @@ fn resume_after_stopped_post_task_review_settles_instead_of_republishing() {
     let publication = runtime.state.publication.clone().unwrap();
     assert_eq!(publication.status, "completed");
     assert!(publication.completed_at.is_some());
+}
+
+#[test]
+fn plain_directory_post_review_publication_delivers_only_undelivered_heads() {
+    let (_temp, source, mut runtime, delivered) = publish_single_node_in(false);
+    // A plain folder drops its internal snapshot database once the Run
+    // completes, so the delivered head's Git objects are gone afterwards.
+    runtime.cleanup_worktrees().unwrap();
+    runtime.reclaim_shadow(&source).unwrap();
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+
+    // A Planner revision adds one node while the delivered terminal result
+    // stays completed on the same head.
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: ["task", "more"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: "self-contained task".into(),
+            })
+            .collect(),
+        edges: vec![],
+    };
+    runtime
+        .emit(EventKind::GraphRevised {
+            graph,
+            planning_id: Uuid::new_v4().to_string(),
+            planning: Default::default(),
+            invalidated: Vec::new(),
+            source_head: None,
+        })
+        .unwrap();
+    assert_eq!(runtime.state.phase, "running");
+
+    let mut job = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut job);
+    let path = Path::new(&job.execution.worktree);
+    workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
+    fs::write(path.join("more.txt"), "v2").unwrap();
+    let head = workspace::snapshot_node(path, &source, "more").unwrap();
+    assert_ne!(head, delivered);
+    runtime
+        .finish(&job.execution, Ok((head.clone(), "completed".into())))
+        .unwrap();
+
+    // The new publication must not ask for the already delivered head: its
+    // objects were reclaimed and its files are already in the source snapshot.
+    assert!(runtime.jobs().unwrap().is_empty());
+    let publication = runtime.state.publication.clone().unwrap();
+    assert_eq!(runtime.state.phase, "publishing");
+    assert_eq!(publication.heads, vec![head.clone()]);
+
+    let published = crate::graph_merge::merge_graph(&source, &publication.heads, || {
+        Err("merge conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head: published })
+        .unwrap();
+    assert_eq!(runtime.state.phase, "completed");
+    assert_eq!(fs::read_to_string(source.join("more.txt")).unwrap(), "v2");
+    assert_eq!(fs::read_to_string(source.join("task.txt")).unwrap(), "v1");
+    // Delivered heads accumulate so a later revision keeps skipping them.
+    assert_eq!(runtime.state.published_heads, vec![delivered, head]);
 }
 
 #[test]

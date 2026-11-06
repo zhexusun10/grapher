@@ -17,7 +17,7 @@ function needsInitialTranscriptFill(element: HTMLElement | null, hasOlder: boole
  * burst by bytes, then reveal measured rows and wait for another upward gesture. */
 export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, hasOlder: boolean,
   busy: boolean, error: string, progress: unknown, loadOlder: (preserveReading: boolean) => void,
-  ready: boolean, loadedBytes: number): boolean {
+  ready: boolean, loadedBytes: number, holdingOlder = false): boolean {
   const load = useStableCallback(loadOlder);
   const [initialReady, setInitialReady] = useState(false);
   const initialReadyRef = useRef(false);
@@ -60,10 +60,18 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
         const relativeTop = parent.getBoundingClientRect().top - element.getBoundingClientRect().top;
         const threshold = Math.max(480, parent.clientHeight * TRANSCRIPT_VIEWPORT_BUFFER);
         const readingNearTop = hasOlder && parent.dataset.transcriptHistoryReading === "true" && relativeTop >= -threshold && relativeTop <= threshold;
+        // Background viewport filling is not the reader asking for a page: it
+        // commits immediately even when they sit somewhere in the middle of the
+        // history. Only a page that extends the history they are reading waits
+        // for them to reach its insertion point.
+        const needsFill = needsInitialTranscriptFill(element, hasOlder, error);
         const withinBudget = loadedBytes - autoFillStartRef.current < MAX_AUTO_TRANSCRIPT_BYTES;
-        if (withinBudget && (needsInitialTranscriptFill(element, hasOlder, error) || readingNearTop)) {
+        // A prefetched page may be waiting for the reader to reach its
+        // insertion point. It is not an in-flight fill: retrying it on every
+        // layout leaves initial readiness stuck until the reader scrolls.
+        if (!holdingOlder && withinBudget && (needsFill || readingNearTop)) {
           measuredViewportRef.current = "";
-          load(readingNearTop);
+          load(needsFill ? false : readingNearTop);
           return;
         }
         if (!initialReadyRef.current) {
@@ -104,6 +112,6 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
       if (frame !== null) cancelAnimationFrame(frame);
       if (busyRetryRef.current !== null) { clearTimeout(busyRetryRef.current); busyRetryRef.current = null; }
     };
-  }, [ref, ready, hasOlder, busy, error, progress, loadedBytes, load]);
+  }, [ref, ready, hasOlder, busy, error, progress, loadedBytes, holdingOlder, load]);
   return initialReady;
 }

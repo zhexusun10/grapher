@@ -13,6 +13,10 @@
 
 More agents help only when work can progress independently. Repeatedly splitting edits to the same files can add conflicts instead of useful parallelism.
 
+## Customize the home screen
+
+At the bottom of **Settings**, choose the static **Dot pattern** (the default) or **Animated paths**, then save. The choice affects the home screen and is stored in the current browser; it does not change a conversation or backend settings.
+
 ## Before you approve
 
 **Approval starts execution; it is not a “no changes yet” checkpoint.**
@@ -33,7 +37,7 @@ For Graph, inspect tasks and dependencies, then choose **Approve**. Independent 
 | Guide a running task | Send an instruction to that node's live conversation. |
 | Add work to a completed node | Send a follow-up; it starts another execution using that node's own conversation. After publication, it edits the source directly. |
 | Change the overall plan | Send a Graph follow-up without selecting a node; the Planner revises the graph. |
-| Add a Graph node yourself | Right-click empty space in the execution graph and choose **New node**. Enter a name and task; optionally choose a predecessor (`from`), a target (`to`), and whether the outgoing edge is feedback. Saving validates the graph. Connecting to completed work asks for confirmation because the target and its downstream results may need to run again; feedback triggers rework only if applied. An approved, unpaused Run starts the new work when ready; a paused Run waits for **Continue**. If affected nodes are running, pause or wait for them first. |
+| Add a Graph node yourself | Right-click empty graph space and choose **New node**. Enter a name and task, optionally connecting a predecessor (`from`) and target (`to`), with feedback on the outgoing edge if needed. Saving validates the graph. Connecting to completed work requires confirmation and may rerun downstream results; feedback triggers rework only if applied. Pause or wait for affected running nodes first. An approved, unpaused Run starts new work when ready; a paused Run waits for **Continue**. |
 | Copy a conversation's original prompt | Right-click it in the sidebar and choose **Copy prompt**; saved conversations use the backend's original goal. |
 | Find running Graph work | Use the topology's **Fit View** button. If the whole graph cannot fit at the minimum zoom, it centers running cards where possible; otherwise it fits the whole graph. |
 | Collapse or reopen the Graph | Drag the divider past the graph's minimum width to collapse it; use the edge arrow to reopen it at the previous width. You can also focus the divider and press Enter. |
@@ -43,13 +47,19 @@ For Graph, inspect tasks and dependencies, then choose **Approve**. Independent 
 
 On macOS, the backend keeps the display and system awake while it runs and refreshes user activity so the idle screen saver cannot lock the session during a long task. This does not override a manual lock or closing the lid. Set `GRAPHER_KEEP_AWAKE=0` to allow normal sleep and locking.
 
-A completed Serial task stays resident: its agent process — and any server it started, such as a dev server — keeps running so you can open the running app and follow up in the same session. Deleting the Run or workspace, stopping the backend, editing history, or resuming with different model/thinking settings stops that process and its services; the saved conversation remains available for the new process. Planner turns and Graph node agents are reclaimed at the end of their turn as usual. See [Process lifecycle](architecture/filesystem-isolation.md#parked-serial-shells).
+A completed Serial agent and any server it started stay running for follow-ups. Deleting the Run or workspace, stopping the backend, editing history, or resuming with different model/thinking settings stops them; the saved conversation remains available. Planner and Graph node agents are reclaimed after their turns. See [Process lifecycle](architecture/filesystem-isolation.md#parked-serial-shells).
 
-After sending, the submitted text clears from the input immediately; a rejected or failed send restores the draft for retry. Once a running node has read a steering message, you can edit it in the conversation, including after reload. Editing branches from that message without turning it into a new task goal. Earlier replies and tool records stay visible, and earlier steering messages remain editable, even if their text is repeated. If a text steer is still unread, pause the node to return its text to the composer instead; a steer whose consumption the loaded history cannot yet prove is left in place rather than resent.
+### Steers and attachments
 
-Switching conversations does not stop background Runs. Unsent text drafts survive conversation switching only in browser memory; reload clears them, and unsent attachments are not retained. Selecting or removing an attachment does not change project files. Sending stores it under a unique path without replacing an existing same-name file. For a completed node, the file is staged separately and delivered when its follow-up execution is prepared, leaving the completed snapshot unchanged. If the workspace is unavailable or the backend is too old to support safe uploads, the draft and attachment stay in the composer for retry.
+Accepted text clears from the input; a rejected send keeps the draft. Planner steers appear in a separate pending area and join the conversation when taken, usually after the current tool-call batch; they do not interrupt tools. A steer proven unaccepted returns to the input. A recorded steer keeps its pending place even if queued, taken, failed or uncertain. Inspect the conversation before retrying an uncertain steer: Grapher will not resend it automatically. Tool cards distinguish calls being generated from calls running.
 
-Planner follow-ups may work in a current node workspace, even alongside its active writer. They do not present a merged view of every parallel branch. Use **Planning session details** to inspect the actual directory used for each turn. While the newest node workspace has not finished preparing, the turn continues in your source project instead of failing, and that node's partial workspace is never used.
+After a node reads a steer, you can edit it, even after reload; this branches the conversation without creating a new task goal. Earlier replies and tool records stay visible, and earlier steers remain editable even when repeated. Pause the node to return an unread text steer to the composer. If loaded history cannot prove consumption, the steer stays in place rather than being resent.
+
+Switching conversations does not stop Runs. Unsent text survives switches only in browser memory, not reload; unsent attachments are not retained. Selecting or removing an attachment does not change project files. Sending uses a unique path without overwriting existing files. For a completed node, the attachment is staged for its follow-up without changing the completed snapshot. If the workspace is unavailable or the backend lacks safe upload support, the draft and attachment remain for retry.
+
+### Planner follow-ups and review
+
+Planner follow-ups may use a current node workspace alongside its active writer, not a merged view of parallel branches. Check **Planning session details** for the directory used. If the newest workspace is still preparing, the Planner uses the source project, never that partial workspace.
 
 Review nodes can send bounded feedback to their graph-defined target. The target continues its own conversation with explicit instructions and completed file state; agent chat histories are not passed between nodes. An exhausted feedback budget means the requested rework was **not applied**, not that the review passed.
 
@@ -66,17 +76,17 @@ The **Continue** control below is available in Graph. In Serial, after fixing th
 | Conflict while combining parent results | Inspect the node's Merger conversation and retained workspace. Retry the node to re-attempt preparation; publication retry does not fix this conflict. |
 | Final publication failed | Inspect the publication panel and any publication Merger, then retry publication. It reuses retained results rather than rerunning the graph. A changed branch is not silently written; interrupted-checkout recovery may require restoring the captured branch. Staged changes in excluded environment/runtime scopes stay staged and are not published; commit or unstage them explicitly. |
 
-When you change the Node Agent model in a conversation, its failed nodes use the new selection on retry. An already running attempt keeps its current model, but if it fails or is paused, its next attempt uses the saved selection. Saving does not restart tasks. Session details show the retry selection separately from the previous attempt's model. Environment overrides still take precedence.
+Changing the Node Agent model affects failed or paused nodes on their next attempt. A running attempt keeps its current model and is not restarted. Session details show the retry selection separately from the previous model. Environment overrides take precedence.
 
-In Graph, Continue first resumes paused or queued work without retrying unrelated failures. Once that work settles, use Continue again to retry the failed nodes in that Run; completed branches are left intact. Retained workspaces preserve partial work for recovery. Missing or changed recovery evidence may require explicit repair; Grapher does not silently reset it. Editing an old message branches conversation history: in Serial it does **not** rewind project files; Graph history edits retain Git rollback semantics.
+In Graph, Continue resumes paused or queued work first; after it settles, Continue again retries failed nodes without rerunning completed branches. Retained workspaces preserve partial work; missing or changed recovery evidence may require explicit repair. Editing an old message branches history: Serial does **not** rewind project files, while Graph retains Git rollback semantics.
 
 ## Know when the result is delivered
 
 **Graph is complete only after successful publication to your project.** Green task cards or a model's final answer are not delivery evidence.
 
-Publication combines valid terminal results with your source changes in a private workspace. It writes files only: no commit is created, your branch/HEAD is not advanced, and your existing staging area is preserved. Ordinary Graph nodes do not expose internal Git history in their working directory. Real Git conflicts invoke a Merger privately; a failed composition leaves your source untouched and can be retried. Repository/permission failures remain publication failures. Ordinary folders use temporary external Git metadata—Grapher does not add `.git` to your folder.
+Publication combines terminal results with source changes privately and writes files only: no commit, branch/HEAD advance or staging-area change. Graph workspaces do not expose internal Git history. A private Merger handles Git conflicts; failed composition leaves the source untouched and can be retried. Repository and permission errors remain failures. Ordinary folders use external Git metadata; Grapher does not add `.git`.
 
-**Post-task Planner review** is enabled by default for new Graph Runs. After successful publication it invokes the existing Planner to inspect, report, wrap up or propose more work. With **Auto Approve**, new work can run without another approval click, leading to further iterations and model calls; each additional publication again writes files without committing them. Post-task review is captured when a Run is created, so configure it before starting a new Run; **Auto Approve** applies live, so enabling it approves a Graph that is already waiting (or still planning). An interrupted review is not silently repeated.
+**Post-task Planner review** defaults on for new Graph Runs. After publication, the Planner can inspect, report, wrap up or propose more work. With **Auto Approve**, further work and model calls can run without another click; publication still writes files without commits. Set review before creating the Run; Auto Approve applies live, including to a waiting or planning Graph. Interrupted reviews are not silently repeated.
 
 Native environment support is **experimental**. There is no user environment-mode selector; tasks use native tools and backend-verified bindings when available. Reuse is best-effort, not a promise of portable environments. Managed environments are not copied into source. Published result descriptors and launch/retry/cancel controls are not exposed in the interface; they remain available only through the local API.
 

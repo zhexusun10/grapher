@@ -36,6 +36,8 @@ for (const mode of ["serial", "graph"]) {
       await input.press("Enter");
       const steer = page.locator(".chat-bubble-user", { hasText: "STEER MARKER" });
       await steer.waitFor();
+      assert.equal(await steer.evaluate(element => !element.closest(".serial-execution-panel")), true,
+        "an unread steer keeps the conversation column spacing instead of nesting inside the execution panel");
       const follows = () => page.evaluate(() => {
         const output = [...document.querySelectorAll("*")].find(e => e.textContent === "OUTPUT BEFORE STEER");
         const steer = [...document.querySelectorAll(".chat-bubble-user")].find(e => e.textContent.includes("STEER MARKER"));
@@ -49,6 +51,43 @@ for (const mode of ["serial", "graph"]) {
       await page.getByText("OUTPUT AFTER STEER", { exact: true }).waitFor();
       assert.equal(await steer.count(), 1, "the inline turn replaces the pending card");
       assert.equal(await follows(), true);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+
+  test(`${mode}: a consumed steer renders once after a settled reload`, { timeout: 30_000 }, async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    await context.route("**/api/*", route => route.fulfill({ json: { result: {} } }));
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    try {
+      await page.goto(`${origin}/__steer?mode=${mode}&presettled=true`);
+      await page.getByText("OUTPUT AFTER STEER", { exact: true }).waitFor();
+      const bubble = page.locator(".chat-bubble-user", { hasText: "CONSUMED STEER" });
+      await bubble.waitFor();
+      await page.waitForTimeout(300);
+      assert.equal(await bubble.count(), 1, "the parsed inline turn must not also render as an outer fallback card");
+      const row = page.locator(".chat-message-row.user", { hasText: "CONSUMED STEER" });
+      assert.equal(await row.count(), 1);
+      const metrics = await row.evaluate(element => {
+        const style = getComputedStyle(element);
+        const list = element.closest(".virtualized-transcript-container");
+        return {
+          marginTop: style.marginTop, marginBottom: style.marginBottom,
+          inline: element.classList.contains("planner-user-turn"),
+          inTranscript: !!list && !!list.closest("[data-execution-id]"),
+          listGap: list ? getComputedStyle(list.querySelector(".transcript-scroll-area")?.firstElementChild ?? list).gap : "",
+        };
+      });
+      assert.equal(metrics.inline, true);
+      assert.equal(metrics.inTranscript, true);
+      // 46px margin + the 10px list gap keeps the same 56px above the turn as
+      // the 44px margin + 12px conversation gap used outside the transcript.
+      assert.equal(metrics.marginTop, "46px");
+      assert.equal(metrics.marginBottom, "10px");
+      assert.equal(metrics.listGap, "10px");
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   });

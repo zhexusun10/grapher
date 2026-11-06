@@ -26,12 +26,18 @@ export function sanitizeHtml(html: string): string {
     transformTags: {
       // A model link must not navigate the Grapher tab away from the current
       // Run. Open absolute web links outside the app and never trust a
-      // model-supplied target/rel pair; relative links stay in the document.
+      // model-supplied target/rel pair; a raw-HTML local path is reduced to its
+      // text so it carries neither an href nor link styling. (Markdown links
+      // render as `text（path）` upstream; transformTags output is not re-filtered
+      // against allowedTags, so the plain span survives while its attribs do.)
       a: (_tag, attributes) => {
         const { target: _target, rel: _rel, ...attribs } = attributes;
-        return /^https?:\/\//i.test(attribs.href || "")
-          ? { tagName: "a", attribs: { ...attribs, target: "_blank", rel: "noopener noreferrer" } }
-          : { tagName: "a", attribs };
+        if (/^https?:\/\//i.test(attribs.href || "")) {
+          return { tagName: "a", attribs: { ...attribs, target: "_blank", rel: "noopener noreferrer" } };
+        }
+        return /^(?:mailto:|tel:|#)/i.test(attribs.href || "")
+          ? { tagName: "a", attribs }
+          : { tagName: "span", attribs: {} };
       },
       // Preserve GFM task lists without allowing interactive HTML inputs.
       input: (_tag, attributes) => ({ tagName: "input", attribs: {
@@ -205,6 +211,44 @@ const mathExtensions: TokenizerAndRendererExtension[] = [
 ];
 
 marked.use({ extensions: mathExtensions });
+
+// A model-authored workspace path is not a URL. Grapher is served from its own
+// origin with no Run state in the address, so a relative link would navigate the
+// tab to the app shell and drop the current Run. Render those links as
+// `text(path)` and keep anchors only for real web/mail targets and in-page refs.
+const webLink = /^(?:https?:\/\/|mailto:|tel:)/i;
+
+function isNavigableHref(href: string): boolean {
+  return webLink.test(href) || href.startsWith("#");
+}
+
+function escapeLinkText(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// Marked percent-encodes link targets; show the path the model actually named.
+function displayHref(href: string): string {
+  try { return decodeURI(href); } catch { return href; }
+}
+
+// CJK prose reads with the full-width pair, Latin text with the ASCII pair, so
+// the suffix never looks like a typo in either script.
+const cjkText = /[\u2e80-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+
+function pathSuffix(text: string, path: string): string {
+  const [open, close] = cjkText.test(text) || cjkText.test(path) ? ["（", "）"] : ["(", ")"];
+  return `${open}${escapeLinkText(path)}${close}`;
+}
+
+marked.use({
+  renderer: {
+    link(this: { parser: { parseInline(tokens: Token[]): string } }, token: Tokens.Link): string | false {
+      if (isNavigableHref(token.href)) return false;
+      const text = token.autolink ? escapeLinkText(token.text) : this.parser.parseInline(token.tokens);
+      return token.href ? text + pathSuffix(token.text, displayHref(token.href)) : text;
+    },
+  } as any,
+});
 
 // Marked's GFM autolink consumes every non-space character. In Chinese prose
 // that turns the sentence punctuation and following words into the URL. Stop at

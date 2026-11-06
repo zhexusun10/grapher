@@ -30,9 +30,17 @@ export function appendTranscriptPage(window: TranscriptWindow, page: TranscriptP
   return { ...window, text: window.text + next.text, end: next.end, total: next.total, settled };
 }
 
-export function prependTranscriptPage(window: TranscriptWindow, page: TranscriptPage): TranscriptWindow {
+/** Validate a fetched page before holding it outside the layout. A malformed or
+ * non-contiguous response must be reported immediately, not from a later scroll
+ * event after the request's error handler has already finished. */
+export function validateTranscriptPrepend(window: TranscriptWindow, page: TranscriptPage): TranscriptWindow {
   const older = windowFromPage(page, window.settled);
   if (older.end !== window.start || older.start >= window.start) throw new Error("Non-contiguous transcript history");
+  return older;
+}
+
+export function prependTranscriptPage(window: TranscriptWindow, page: TranscriptPage): TranscriptWindow {
+  const older = validateTranscriptPrepend(window, page);
   return { ...window, text: older.text + window.text, start: older.start, total: Math.max(window.total, older.total) };
 }
 

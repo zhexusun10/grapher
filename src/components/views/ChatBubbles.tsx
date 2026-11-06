@@ -85,6 +85,12 @@ export function EditableUserBubble({
   // `draft` changes would jump the caret to the end on every keystroke.
   const editingRef = useRef(false);
   const [copied, setCopied] = useState(false);
+  // The confirmation outlives its 1.5s timer by one fade: `.copied` is what
+  // keeps this hover-only button visible, so dropping the checkmark with it
+  // showed the copy icon through the fade and, on a still-revealed card,
+  // reverted it a beat before the button went away. `copyHold` keeps the
+  // checkmark until the button has really faded out (`onCopyFadeEnd`).
+  const [copyHold, setCopyHold] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -110,9 +116,8 @@ export function EditableUserBubble({
     }
     const onSuccess = () => {
       setCopied(true);
-      copyTimeoutRef.current = setTimeout(() => {
-        setCopied(false);
-      }, 1500);
+      setCopyHold(true);
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), 1500);
     };
 
     if (navigator?.clipboard?.writeText) {
@@ -123,6 +128,24 @@ export function EditableUserBubble({
       copyFallback(targetText, onSuccess);
     }
   };
+
+  // Only the fade-out ends the confirmation: the reveal rules (hover, focus
+  // within the card) hand the button back at full opacity without a transition,
+  // so a visible button never resets its icon. Editing swaps the button out
+  // entirely, so it drops the held checkmark instead of restoring it later.
+  const onCopyFadeEnd = (event: React.TransitionEvent<HTMLButtonElement>) => {
+    if (event.propertyName !== "opacity") return;
+    if (Number(getComputedStyle(event.currentTarget).opacity) !== 0) return;
+    setCopyHold(false);
+  };
+
+  useEffect(() => {
+    if (!editing) return;
+    setCopied(false);
+    setCopyHold(false);
+  }, [editing]);
+
+  const showCopied = copied || copyHold;
 
   useLayoutEffect(() => {
     if (!editing) {
@@ -181,7 +204,6 @@ export function EditableUserBubble({
               className="chat-bubble-action-btn"
               onClick={onCancel}
               disabled={submitting}
-              title={t("取消修改 (Esc)")}
               aria-label={t("取消修改")}
             >
               <X size={14} />
@@ -194,7 +216,6 @@ export function EditableUserBubble({
               className="chat-bubble-action-btn send"
               onClick={submit}
               disabled={disabled || submitting || !isChanged || !draft.trim()}
-              title={t("回退并重试 (Enter)")}
               aria-label={t("回退并重试")}
             >
               <ArrowUp size={14} />
@@ -206,10 +227,10 @@ export function EditableUserBubble({
               type="button"
               className={`chat-message-copy-btn${copied ? " copied" : ""}`}
               onClick={handleCopy}
-              title={copied ? t("已复制") : t("复制消息")}
-              aria-label={copied ? t("已复制") : t("复制消息")}
+              onTransitionEnd={onCopyFadeEnd}
+              aria-label={showCopied ? t("已复制") : t("复制消息")}
             >
-              {copied ? <Check size={14} /> : <Copy size={14} />}
+              {showCopied ? <Check size={14} /> : <Copy size={14} />}
             </button>
             {onEdit ? (
               <button
@@ -217,7 +238,6 @@ export function EditableUserBubble({
                 className="chat-message-edit-btn"
                 onClick={beginEdit}
                 disabled={disabled}
-                title={t("修改消息并回退重试")}
                 aria-label={t("修改消息并回退重试")}
               >
                 <Pencil size={14} />

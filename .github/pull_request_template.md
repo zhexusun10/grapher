@@ -12,7 +12,7 @@
 
 ## Checklist
 
-- [ ] I followed the [development guide](https://github.com/zhexusun10/grapher/blob/main/docs/development/contributing.md).
+- [ ] I followed the [development guide](https://github.com/zhexusun10/grapher/blob/main/CONTRIBUTING.md).
 - [ ] I added or updated relevant tests, or explained why none are needed.
 - [ ] I reviewed affected contracts/task routes and updated applicable canonical docs and summaries.
 - [ ] I reviewed logs/assets for secrets and private data.

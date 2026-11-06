@@ -125,6 +125,60 @@ fn delta(root: &Path) -> Result<Delta, String> {
         .collect())
 }
 
+/// `diff-index` only compares content and modes, so an index whose entries
+/// differ solely by `assume-unchanged`/`skip-worktree` flags looks clean while
+/// `compose` must still carry those flags. `ls-files -v` tags every ordinary
+/// cached entry with `H`; any other tag (lowercase assume-unchanged, `S`
+/// skip-worktree, unmerged, ...) needs the full composition.
+fn index_has_flag_delta(root: &Path, workspace_root: bool) -> Result<bool, String> {
+    let args = ["ls-files", "-v", "-z"];
+    let output = if workspace_root {
+        workspace::project_git(root, &args)?
+    } else {
+        git(root, &args)?
+    };
+    Ok(output
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| entry.as_bytes().first() != Some(&b'H')))
+}
+
+/// No record has a staged delta and the workspace index already follows its own
+/// project HEAD, so composing native indexes cannot change any staged entry.
+/// This is the ordinary publication case: reading every index twice per record
+/// only to apply zero changes is the expensive part of preparation.
+fn nothing_staged(
+    workspace: &Path,
+    base: &Path,
+    inputs: &[PathBuf],
+    selected: &Path,
+) -> Result<bool, String> {
+    // An index that matches its own HEAD tree has no staged work. A missing
+    // repository or an unborn HEAD is not proof, so it falls through to the full
+    // composition instead.
+    let args = ["diff-index", "--cached", "--quiet", "HEAD", "--"];
+    for record in std::iter::once(base)
+        .chain(inputs.iter().map(PathBuf::as_path))
+        .chain(std::iter::once(selected))
+    {
+        if git(record, &args).is_err() {
+            return Ok(false);
+        }
+        // A failed flag probe is not proof of a clean index. Fall back to the
+        // full composition instead of aborting publication early.
+        match index_has_flag_delta(record, false) {
+            Ok(false) => {}
+            Ok(true) | Err(_) => return Ok(false),
+        }
+    }
+    // A record addresses its own Git database by directory; the workspace keeps
+    // its project Git view in `.git` or in private metadata.
+    if workspace::project_git(workspace, &args).is_err() {
+        return Ok(false);
+    }
+    Ok(matches!(index_has_flag_delta(workspace, true), Ok(false)))
+}
+
 /// Each record is an immutable project Git database, never graph Git. Merge
 /// staged deltas against their own real HEADs, including staged deletions and
 /// assume-unchanged/skip-worktree/intent-to-add flags.
@@ -135,6 +189,9 @@ pub(crate) fn compose(
     selected: &Path,
 ) -> Result<(), String> {
     if !path.join(".git").exists() {
+        return Ok(());
+    }
+    if nothing_staged(path, base, inputs, selected)? {
         return Ok(());
     }
     let baseline = delta(base)?;
@@ -294,4 +351,51 @@ pub(crate) fn compose(
         return Err("Native project index did not preserve the composed staging state".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repository(temp: &tempfile::TempDir) -> PathBuf {
+        let root = temp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        workspace::git(&root, &["init", "-q"]).unwrap();
+        workspace::project_git(&root, &["config", "user.name", "Index Test"]).unwrap();
+        workspace::project_git(&root, &["config", "user.email", "index@example.invalid"]).unwrap();
+        fs::write(root.join("tracked.txt"), "committed\n").unwrap();
+        workspace::git(&root, &["add", "tracked.txt"]).unwrap();
+        workspace::git(&root, &["commit", "-qm", "base"]).unwrap();
+        root
+    }
+
+    #[test]
+    fn fast_path_rejects_flag_only_index_deltas() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = repository(&temp);
+        let git_dir = root.join(".git");
+        assert!(
+            nothing_staged(&root, &git_dir, &[], &git_dir).unwrap(),
+            "an index that matches its own HEAD has no work to compose"
+        );
+        workspace::project_git(
+            &root,
+            &["update-index", "--assume-unchanged", "tracked.txt"],
+        )
+        .unwrap();
+        assert!(
+            !nothing_staged(&root, &git_dir, &[], &git_dir).unwrap(),
+            "assume-unchanged is a staged flag even when content matches HEAD"
+        );
+        workspace::project_git(
+            &root,
+            &["update-index", "--no-assume-unchanged", "tracked.txt"],
+        )
+        .unwrap();
+        workspace::project_git(&root, &["update-index", "--skip-worktree", "tracked.txt"]).unwrap();
+        assert!(
+            !nothing_staged(&root, &git_dir, &[], &git_dir).unwrap(),
+            "skip-worktree is a staged flag even when content matches HEAD"
+        );
+    }
 }

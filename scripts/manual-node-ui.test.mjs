@@ -95,18 +95,18 @@ test("graph background menu creates nodes with explicit completed-result confirm
     await form.getByLabel("Predecessor (from)").selectOption("up");
     await form.getByLabel("Target (to)").selectOption("target");
     assert.match(await form.innerText(), /replacing their direct dependency edge/);
-    await form.getByRole("button", { name: "Save node" }).click();
+    await form.getByRole("button", { name: "Save" }).click();
     const dialog = page.getByRole("alertdialog");
     await dialog.waitFor();
     assert.match(await dialog.innerText(), /target, child/);
     await dialog.getByRole("button", { name: "Cancel" }).click();
     assert.equal(requests.length, 0, "cancelling must not mutate the graph");
-    await form.getByRole("button", { name: "Save node" }).click();
+    await form.getByRole("button", { name: "Save" }).click();
     await dialog.getByRole("button", { name: "Confirm and save" }).click();
     await page.getByRole("alert").filter({ hasText: "Mock save failure" }).waitFor();
     assert.equal(await form.getByLabel("Name (name)").inputValue(), "inserted", "failed saves retain the draft");
     await page.locator(".floating-error-close").click();
-    await form.getByRole("button", { name: "Save node" }).click();
+    await form.getByRole("button", { name: "Save" }).click();
     await dialog.getByRole("button", { name: "Confirm and save" }).click();
     await page.locator('.react-flow__node[data-id="inserted"]').waitFor();
     await page.getByRole("heading", { name: "inserted" }).waitFor();
@@ -121,13 +121,17 @@ test("graph background menu creates nodes with explicit completed-result confirm
     await form.getByLabel("Name (name)").fill("review");
     await form.getByLabel("Task (task)").fill("Review the result");
     await form.getByLabel("Predecessor (from)").selectOption("up");
+    await form.getByLabel("Target (to)").selectOption("up");
+    await form.getByRole("button", { name: "Save" }).click();
+    assert.match(await form.getByRole("alert").innerText(), /cannot be the same node/i);
+    assert.equal(requests.length, 2, "an identical predecessor and target is not submitted");
     await form.getByLabel("Target (to)").selectOption("child");
     await form.getByLabel("feedback").selectOption("true");
-    await form.getByRole("button", { name: "Save node" }).click();
+    await form.getByRole("button", { name: "Save" }).click();
     assert.match(await form.getByRole("alert").innerText(), /feedback target must be the predecessor/i);
     assert.equal(requests.length, 2, "invalid feedback is not submitted");
     await form.getByLabel("Target (to)").selectOption("up");
-    await form.getByRole("button", { name: "Save node" }).click();
+    await form.getByRole("button", { name: "Save" }).click();
     assert.match(await dialog.innerText(), /may run again/);
     await dialog.getByRole("button", { name: "Confirm and save" }).click();
     await page.locator('.react-flow__node[data-id="review"]').waitFor();
@@ -137,14 +141,14 @@ test("graph background menu creates nodes with explicit completed-result confirm
     await page.getByRole("menuitem", { name: "New node" }).click();
     await form.getByLabel("Name (name)").fill("independent");
     await form.getByLabel("Task (task)").fill("Independent work");
-    await form.getByRole("button", { name: "Save node" }).click();
+    await form.getByRole("button", { name: "Save" }).click();
     await page.locator('.react-flow__node[data-id="independent"]').waitFor();
     assert.equal(await dialog.count(), 0, "an independent node does not require confirmation");
     assert.equal(requests[3].request.to, null);
     assert.deepEqual(requests[3].request.confirmedCompleted, []);
 
     snapshot = { ...snapshot, phase: "launching_result" };
-    await page.waitForFunction(() => document.querySelector(".progress-label")?.textContent?.includes("launching_result"));
+    await page.waitForFunction(() => document.querySelector(".approval-row")?.textContent?.includes("launching_result"));
     await openMenu();
     assert.equal(await page.getByRole("menuitem", { name: "New node" }).isDisabled(), true,
       "a running published result must finish before a node can be added");

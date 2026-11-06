@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stripPlannerContext } from "../src/services/plannerText.ts";
-import { plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../src/services/plannerUserTurns.ts";
+import { plannerContentSteerId, plannerContentText, plannerSteerId, stripPlannerContext } from "../src/services/plannerText.ts";
+import { plannerSteerOwner, plannerSteerRows, planningOutputSteerIds, withoutPlannerSteerIdentity } from "../src/services/plannerSteers.ts";
+import { plannerSteerContext } from "../engine/planner-steer.ts";
+import { firstPlannerUserIsSteer, plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../src/services/plannerUserTurns.ts";
 
 test("Planner status context is not shown as conversation text", () => {
   assert.equal(stripPlannerContext("Current graph node status:\n- worker: completed\n继续优化"), "继续优化");
@@ -145,4 +147,105 @@ test("a partial transcript window keeps a later steer when the header is absent"
   // the conversation header shows only the clean text.
   assert.equal(skipsFirstPersistedTurn(['<file name="a.txt">content</file>Initial goal'], "Initial goal"), true);
   assert.equal(skipsFirstPersistedTurn(['<file name="a.txt">content</file>Steer'], "Initial goal"), false);
+});
+
+test("Planner transport identity survives replay but is absent from model context", () => {
+  const id = "12345678-1234-4234-8234-123456789abc";
+  const text = `Current graph node status:\n- worker: completed\n\ninspect 🚀\n\n<grapher-steer-id>${id}</grapher-steer-id>`;
+  const image = { type: "image", mimeType: "image/png", data: "abc" };
+  const messages = [{ role: "user", content: [{ type: "text", text }, image] },
+    { role: "assistant", content: [{ type: "text", text }] }];
+  const projected = plannerSteerContext(messages);
+  assert.equal(projected[0].content[0].text, text.replace(/\n\n<grapher-steer-id>.*$/, ""));
+  assert.equal(projected[0].content[1], image);
+  assert.equal(projected[1], messages[1], "assistant output is never rewritten");
+  assert.equal(plannerSteerId(text), id);
+  const extended = [{ type: "text", text }, { type: "text", text: "extension note" }];
+  assert.equal(plannerContentSteerId(extended), id, "a later extension text block does not hide the identity");
+  assert.equal(stripPlannerContext(plannerContentText(extended)), "inspect 🚀\nextension note");
+  assert.equal(plannerContentSteerId([...extended, { type: "text", text: `other\n\n<grapher-steer-id>12345678-1234-4234-8234-123456789abd</grapher-steer-id>` }]), undefined,
+    "conflicting identities do not prove which request was consumed");
+  assert.equal(stripPlannerContext(text), "inspect 🚀");
+  const output = JSON.stringify({ type: "message_start", message: messages[0] });
+  assert.deepEqual(plannerUserTurns(output), ["inspect 🚀"]);
+  assert.equal(firstPlannerUserIsSteer(output), true, "a partial window's marked steer is never the header, even with identical text");
+  assert.equal(firstPlannerUserIsSteer(JSON.stringify({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "inspect 🚀" }] } }) + "\n" + output), false);
+  assert.deepEqual([...planningOutputSteerIds(output)], [id]);
+  assert.equal(planningOutputSteerIds(JSON.stringify({ type: "queue_update", steering: [text] })).size, 0,
+    "a queued marker in Pi's queue update is not a consumed transcript row");
+  assert.equal(planningOutputSteerIds(JSON.stringify({ type: "agent_end", messages: [messages[0]] })).size, 0,
+    "an aggregate event does not itself render the user turn");
+  assert.equal(stripPlannerContext("literal <grapher-steer-id>not-a-uuid</grapher-steer-id>"),
+    "literal <grapher-steer-id>not-a-uuid</grapher-steer-id>");
+});
+
+test("editing or branching a steer starts a new turn without its delivery identity", () => {
+  const steer = { id: "msg-1", role: "user" as const, text: "inspect",
+    plannerSteerId: "12345678-1234-4234-8234-123456789abc", plannerSteerStatus: "consumed" as const,
+    plannerSteerError: "stale" };
+  const edited = withoutPlannerSteerIdentity({ ...steer, text: "edited" });
+  assert.equal(edited.plannerSteerId, undefined);
+  assert.equal(edited.plannerSteerStatus, undefined);
+  assert.equal(edited.plannerSteerError, undefined);
+  assert.equal(edited.text, "edited");
+  assert.equal(steer.plannerSteerId, "12345678-1234-4234-8234-123456789abc", "the pending card is not mutated");
+  const plain = { id: "msg-2", role: "user" as const, text: "goal" };
+  assert.equal(withoutPlannerSteerIdentity(plain), plain, "a message without identity is reused");
+});
+
+test("repeated Planner steers hand off by ID, not by equal text", () => {
+  const ids = ["12345678-1234-4234-8234-123456789abc", "12345678-1234-4234-8234-123456789abd"];
+  const messages = ids.map(id => ({ id: `msg-${id}`, role: "user" as const, text: "again", plannerSteerId: id }));
+  const events = [
+    ...ids.map((request_id, i) => ({ type: "planner_steer_submitted", sequence: i + 1, timestamp: i + 1,
+      planning_id: "turn", request_id, instruction: "again" })),
+    { type: "planner_steer_status", sequence: 3, timestamp: 3, planning_id: "turn", request_id: ids[0], status: "consumed" },
+    { type: "planner_steer_status", sequence: 4, timestamp: 4, planning_id: "turn", request_id: ids[1], status: "queued" },
+  ];
+  const options = { planning: true, activePlanningId: "turn", visibleIds: new Set([ids[0]]) };
+  assert.deepEqual(plannerSteerRows(events, messages, options).map(row => [row.id, row.status]), [[ids[1], "queued"]]);
+  assert.deepEqual(plannerSteerRows(events, [], { ...options, planning: false, visibleIds: new Set<string>() })
+    .map(row => [row.id, row.status]), [[ids[1], "unknown"]], "reload/stop never silently retries an uncertain steer");
+  assert.deepEqual(plannerSteerRows(events, messages, { ...options, visibleIds: new Set<string>() })
+    .map(row => row.status), ["consumed", "queued"], "a consumed optimistic turn remains until its own row appears");
+  assert.deepEqual(plannerSteerRows(events, messages, { ...options, planning: false, visibleIds: new Set<string>() })
+    .map(row => row.status), ["unknown"],
+    "a settled turn's consumed handoff card does not outlive a tail window that starts later");
+});
+
+test("a rejected Planner steer returns to the composer instead of staying as a card", () => {
+  const rejected = "12345678-1234-4234-8234-123456789abc";
+  const delivered = "12345678-1234-4234-8234-123456789abd";
+  const events = [
+    { type: "planner_steer_submitted", sequence: 1, timestamp: 1, planning_id: "turn", request_id: rejected, instruction: "refused" },
+    { type: "planner_steer_status", sequence: 2, timestamp: 2, planning_id: "turn", request_id: rejected, status: "failed", error: "prompt rejected" },
+    { type: "planner_steer_submitted", sequence: 3, timestamp: 3, planning_id: "turn", request_id: delivered, instruction: "accepted" },
+    { type: "planner_steer_status", sequence: 4, timestamp: 4, planning_id: "turn", request_id: delivered, status: "queued" },
+  ];
+  const options = { planning: true, activePlanningId: "turn", visibleIds: new Set<string>() };
+  assert.deepEqual(plannerSteerRows(events, [], options).map(row => [row.id, row.status]),
+    [[rejected, "failed"], [delivered, "queued"]],
+    "a refused steer stays visible only until the client that sent it returns the text");
+  const reverted = new Set([rejected]);
+  assert.deepEqual(plannerSteerRows(events, [], { ...options, revertedIds: reverted }).map(row => [row.id, row.status]),
+    [[delivered, "queued"]], "the draft owns the rejected instruction, so no card repeats it");
+  const local = [{ id: `msg-${rejected}`, role: "user" as const, text: "refused", plannerSteerId: rejected }];
+  assert.deepEqual(plannerSteerRows(events, local, { ...options, revertedIds: reverted }).map(row => row.id), [delivered],
+    "a card the composer already owns is not rebuilt from the durable submission");
+  assert.deepEqual(plannerSteerRows(events, local, options).map(row => row.id), [rejected, delivered],
+    "an async rejection still keeps the card when its draft never returned");
+});
+
+test("a Planner steer send has exactly one owner", () => {
+  assert.equal(plannerSteerOwner({ recorded: true, status: "queued" }), "pending");
+  assert.equal(plannerSteerOwner({ recorded: true, status: "consumed" }), "pending");
+  assert.equal(plannerSteerOwner({ recorded: true, status: "submitted" }), "pending");
+  assert.equal(plannerSteerOwner({ recorded: true, status: "unknown" }), "pending",
+    "a recorded but uncertain turn stays a card rather than an editable draft");
+  assert.equal(plannerSteerOwner({ recorded: true, status: "failed" }), "composer",
+    "an RPC rejection delivered nothing, so its text goes back to the input");
+  assert.equal(plannerSteerOwner({ recorded: false, status: "unknown" }), "composer",
+    "a submission the durable record never showed is still the user's draft");
+  assert.equal(plannerSteerOwner({ recorded: false, legacy: true }), "pending",
+    "an older backend without request IDs keeps its optimistic behavior");
 });

@@ -81,6 +81,25 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     assert.equal(stats.withinRow && stats.wraps, true, "overview statistics wrap rather than overflow a narrow split");
     const storedRatio = await page.evaluate(() => localStorage.getItem("grapher_workbench_split_ratio"));
 
+    // The graph canvas has its own sizing container. Both the workbench and
+    // its children must still switch on the same outer stage at the exact
+    // breakpoint, including the two pixels occupied by the workbench border.
+    for (const width of [719, 720, 721, 722]) {
+      await page.locator(".main-view-stage").evaluate((stage, width) => { stage.style.width = `${width}px`; }, width);
+      await page.waitForFunction(width => document.querySelector(".main-view-stage").clientWidth === width, width);
+      const layout = await page.evaluate(() => ({
+        direction: getComputedStyle(document.querySelector(".workbench")).flexDirection,
+        switcher: getComputedStyle(document.querySelector(".workbench-view-switcher")).display,
+        splitter: getComputedStyle(document.querySelector(".workbench-resizer")).display,
+        aperture: getComputedStyle(document.querySelector(".graph-pane-aperture")).position,
+      }));
+      assert.deepEqual(layout, width <= 720
+        ? { direction: "column", switcher: "flex", splitter: "none", aperture: "absolute" }
+        : { direction: "row", switcher: "none", splitter: "flex", aperture: "relative" },
+      `the entire workbench switches together at stage width ${width}`);
+    }
+    await page.locator(".main-view-stage").evaluate(stage => stage.style.removeProperty("width"));
+
     await page.setViewportSize({ width: 900, height: 700 });
     await switcher.waitFor({ state: "visible" });
     assert.equal(await conversation.getAttribute("aria-pressed"), "true");

@@ -38,27 +38,97 @@ fn pending(repository: &Path) -> Option<String> {
     git(repository, &["rev-parse", "--verify", "MERGE_HEAD"]).ok()
 }
 
-fn finish_merge(repository: &Path, head: &str, exclusions: &[String]) -> Result<(), String> {
-    if !git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
-        return Err("Merger left unresolved conflicts".into());
+/// Compose terminal heads at the tree level, without materializing a worktree.
+///
+/// Publication only needs the composed tree, the internal commits and the
+/// recorded project view, so a clean composition never has to check out (or
+/// stage, or scan) the whole project. `Ok(None)` means this composition needs a
+/// real workspace: a real conflict, a nested repository or submodule, or a Git
+/// old enough to lack `merge-tree --write-tree`. The caller then falls back to
+/// the materialized path, which also owns Merger repair.
+fn compose_graph_virtual(
+    repository: &Path,
+    input: &str,
+    heads: &[String],
+) -> Result<Option<String>, String> {
+    if workspace::shadow_repo_if_exists(repository)?.is_none() {
+        // Without the private host database, `repository_git` would compose in
+        // the user's own repository.
+        return Ok(None);
     }
-    if pending(repository).is_some() {
-        workspace::stage_scoped_local(repository, exclusions)?;
-        // A Merger may have staged a managed environment/cache scope itself;
-        // never let a runtime-owned path enter the merge commit.
-        workspace::unstage_scoped(repository, exclusions)?;
-        git(repository, &["commit", "--no-edit"])?;
-    } else if git(repository, &["diff", "--cached", "--name-only"])?.is_empty()
-        && workspace::has_tracked_scoped(repository, exclusions)?
-    {
-        // A Merger that committed the merge itself still must not carry a
-        // managed scope. Amend its commit; the live files stay in place.
-        workspace::unstage_scoped(repository, exclusions)?;
-        git(repository, &["commit", "--amend", "--no-edit"])?;
+    let mut current = input.to_string();
+    for head in workspace::independent_heads(repository, heads)? {
+        if git(
+            repository,
+            &["merge-base", "--is-ancestor", &head, &current],
+        )
+        .is_ok()
+        {
+            continue;
+        }
+        let tree = match git(repository, &["merge-tree", "--write-tree", &current, &head]) {
+            Ok(output) => output
+                .lines()
+                .next()
+                .map(|line| line.trim().to_string())
+                .unwrap_or_default(),
+            // A conflict, a missing object or an unsupported option: only a real
+            // workspace can resolve or diagnose it.
+            Err(_) => return Ok(None),
+        };
+        if !matches!(tree.len(), 40 | 64) || !tree.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(None);
+        }
+        let message = format!("Merge commit '{head}'");
+        current = git(
+            repository,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &current,
+                "-p",
+                &head,
+                "-m",
+                &message,
+            ],
+        )?;
+    }
+    Ok(Some(current))
+}
+
+/// `resolved` distinguishes a merge Git completed by itself from one a Merger
+/// had to repair. Only a repair can leave unresolved entries, a staged managed
+/// scope or uncommitted leftovers, and only then are the full-tree status walks
+/// worth their cost; a clean merge is already committed by Git.
+fn finish_merge(
+    repository: &Path,
+    head: &str,
+    exclusions: &[String],
+    resolved: bool,
+) -> Result<(), String> {
+    if resolved {
+        if !git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
+            return Err("Merger left unresolved conflicts".into());
+        }
+        if pending(repository).is_some() {
+            workspace::stage_scoped_local(repository, exclusions)?;
+            // A Merger may have staged a managed environment/cache scope itself;
+            // never let a runtime-owned path enter the merge commit.
+            workspace::unstage_scoped(repository, exclusions)?;
+            git(repository, &["commit", "--no-edit"])?;
+        } else if git(repository, &["diff", "--cached", "--name-only"])?.is_empty()
+            && workspace::has_tracked_scoped(repository, exclusions)?
+        {
+            // A Merger that committed the merge itself still must not carry a
+            // managed scope. Amend its commit; the live files stay in place.
+            workspace::unstage_scoped(repository, exclusions)?;
+            git(repository, &["commit", "--amend", "--no-edit"])?;
+        }
     }
     git(repository, &["merge-base", "--is-ancestor", head, "HEAD"])
         .map_err(|_| "Merger did not preserve the incoming commit".to_string())?;
-    if !workspace::repository_status(repository, exclusions)?.is_empty() {
+    if resolved && !workspace::repository_status(repository, exclusions)?.is_empty() {
         return Err("Merge left uncommitted changes; inspect the affected workspace".into());
     }
     Ok(())
@@ -70,7 +140,7 @@ pub(crate) fn finish_project_resolution(
 ) -> Result<(), String> {
     crate::workspace_view::accept_resolution(repository, true)?;
     if let Some(incoming) = pending(repository) {
-        finish_merge(repository, &incoming, exclusions)?;
+        finish_merge(repository, &incoming, exclusions, true)?;
     }
     Ok(())
 }
@@ -113,11 +183,15 @@ pub(crate) fn merge_graph_scoped_at(
     publication::publish(repository, heads, exclusions, Some(path), resolve)
 }
 
+/// `fresh` means the caller just materialized this workspace from a snapshot, so
+/// it already holds exactly the collected base: staging it again would only walk
+/// the whole tree. Any retained or agent-written workspace stages as usual.
 fn compose_graph_scoped(
     repository: &Path,
     source: &Path,
     heads: &[String],
     exclusions: &[String],
+    fresh: bool,
     mut resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
     workspace::validate_binding(repository)?;
@@ -138,17 +212,19 @@ fn compose_graph_scoped(
         if !git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
             resolve()?;
         }
-        finish_merge(repository, &head, exclusions)?;
+        finish_merge(repository, &head, exclusions, true)?;
     }
     // Commit pending user edits as the base before node results merge on top.
     // The user's work is always accepted; a real conflict with node results is
     // handled by the ordinary merge/Merger path below, not by refusing here.
-    workspace::stage_scoped_local(repository, exclusions)?;
-    if !git(repository, &["diff", "--cached", "--name-only"])?.is_empty() {
-        git(
-            repository,
-            &["commit", "-m", workspace::SNAPSHOT_COMMIT_MESSAGE],
-        )?;
+    if !fresh {
+        workspace::stage_scoped_local(repository, exclusions)?;
+        if !git(repository, &["diff", "--cached", "--name-only"])?.is_empty() {
+            git(
+                repository,
+                &["commit", "-m", workspace::SNAPSHOT_COMMIT_MESSAGE],
+            )?;
+        }
     }
     // Complete a pending merge above before pruning, so publication retries
     // retain their original incoming commit even if it is now redundant.
@@ -156,6 +232,7 @@ fn compose_graph_scoped(
         if git(repository, &["merge-base", "--is-ancestor", head, "HEAD"]).is_ok() {
             continue;
         }
+        let mut resolved = false;
         if let Err(error) = git(repository, &["merge", "--no-edit", "--no-ff", head]) {
             if pending(repository).as_deref() != Some(head.as_str())
                 || git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty()
@@ -163,18 +240,31 @@ fn compose_graph_scoped(
                 return Err(format!("Graph publication failed: {error}"));
             }
             resolve()?;
+            resolved = true;
         }
-        finish_merge(repository, head, exclusions)?;
+        finish_merge(repository, head, exclusions, resolved)?;
     }
-    if crate::workspace_view::is_bound(repository) {
-        let base = git(repository, &["rev-parse", "refs/grapher/base"])?;
+    // A plain-folder or bound composition carries a recorded source view, so the
+    // composed head needs its own project-view record. Host-only fixture
+    // checkouts without that evidence keep their bare head.
+    let recorded_base = git(repository, &["rev-parse", "refs/grapher/base"])
+        .ok()
+        .filter(|base| crate::workspace_view::has_record(source, base));
+    if let Some(base) = recorded_base {
         let current = git(repository, &["rev-parse", "HEAD"])?;
         let mut inputs = heads.to_vec();
+        // A Merger's newly resolved head may still exist only in this private
+        // workspace. Choose the common source baseline from the imported inputs
+        // before adding that local view to the metadata composition.
+        let base = crate::workspace_view::composition_base(source, &base, &inputs)?;
         if crate::workspace_view::has_record(source, &current) {
             inputs.push(current);
         }
-        crate::workspace_view::prepare(source, repository, &base, &inputs, exclusions)?;
-        return crate::workspace_view::seal_prepared_scoped(repository, source, exclusions);
+        let observed =
+            crate::workspace_view::prepare(source, repository, &base, &inputs, exclusions)?;
+        return crate::workspace_view::seal_prepared_scoped(
+            repository, source, exclusions, observed,
+        );
     }
     git(repository, &["rev-parse", "HEAD"])
 }
@@ -344,12 +434,13 @@ pub(crate) fn resolve_with_merger_for_node(
             .map(|environment| environment.exclusions())
             .unwrap_or_default();
         crate::workspace_view::import_resolution(repository)?;
-        finish_merge(repository, &incoming, &exclusions)?;
+        finish_merge(repository, &incoming, &exclusions, true)?;
         if crate::workspace_view::is_bound(repository) {
             crate::workspace_view::seal_prepared_scoped(
                 repository,
                 Path::new(&config.repository),
                 &exclusions,
+                None,
             )?;
         }
         Ok(())
@@ -406,6 +497,15 @@ pub fn continue_merger_for_node(
         .canonicalize()
         .map_err(|e| e.to_string())?;
     let repository = canonical.as_path();
+    // A resumed Merger conversation may target a composition workspace that was
+    // never prepared for an agent (publication materializes the composed view
+    // only after its merges). Materialize the conflict view first; a workspace
+    // that is already prepared keeps the Merger's own pending edits untouched.
+    if !crate::path_identity::same_path(repository, Path::new(&config.repository))
+        && !crate::workspace_view::is_bound(repository)
+    {
+        crate::workspace_view::prepare_conflicts(Path::new(&config.repository), repository)?;
+    }
     let _git_view = if crate::path_identity::same_path(repository, Path::new(&config.repository)) {
         None
     } else {
@@ -503,7 +603,7 @@ pub fn continue_merger_for_node(
             if !git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
                 return Err("Merger left unresolved conflicts".into());
             }
-            finish_merge(repository, &head, &exclusions)
+            finish_merge(repository, &head, &exclusions, true)
         } else if crate::workspace_view::is_bound(repository) {
             workspace::snapshot_node_scoped(
                 repository,
@@ -617,7 +717,7 @@ mod tests {
         git(&["add", "-f", ".agent-home"]);
         assert!(git(&["diff", "--cached", "--name-only"]).contains(".agent-home"));
 
-        super::finish_merge(&repo, &incoming, &[".agent-home".to_string()]).unwrap();
+        super::finish_merge(&repo, &incoming, &[".agent-home".to_string()], true).unwrap();
 
         let tree = git(&["ls-tree", "-r", "--name-only", "HEAD"]);
         assert!(
@@ -661,7 +761,7 @@ mod tests {
             crate::workspace::git(&repo, &["rev-parse", "--verify", "-q", "MERGE_HEAD"]).is_err()
         );
 
-        super::finish_merge(&repo, &incoming, &[".agent-home".to_string()]).unwrap();
+        super::finish_merge(&repo, &incoming, &[".agent-home".to_string()], true).unwrap();
 
         let tree = git(&["ls-tree", "-r", "--name-only", "HEAD"]);
         assert!(

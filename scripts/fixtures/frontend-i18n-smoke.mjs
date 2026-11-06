@@ -47,7 +47,6 @@ try {
       warnings: ["W303: If <FEEDBACK> from qa_review to frontend is applied, the target and dependency descendants will be invalidated: frontend, qa_review. Completed results must be recomputed; frontend continues its conversation. Nodes outside this set are unaffected."],
     },
   };
-  const planning = { planningId: "plan-123", roles: {}, totalPlanningDuration: 65, modelDuration: 61, status: "failed", error: "用户已停止本次执行；可以修改消息或重新运行。" };
   const mergerState = {
     ...state,
     approved: true,
@@ -77,9 +76,10 @@ try {
     ["modals/ConfirmModal", "ConfirmModal", { config: { title: t("删除历史"), message: t("确定清空当前工作区的所有历史运行记录吗？"), confirmText: t("清空全部"), onConfirm: noop }, onClose: noop }],
     ["views/LandingView", "LandingView", { goal: "", setGoal: noop, onPlanGoal: noop }],
     ["ThinkingCard", "ThinkingCard", { content: "", isStreaming: true }],
+    ["ThinkingCard", "ThinkingCard", { content: "Inspect:\n\n```sh\necho hello\n```", isStreaming: false }],
+    ["views/NodeTaskCard", "NodeTaskCard", { nodeName: "worker", taskText: "Inspect:\n\n```sh\necho hello\n```", editing: false, draft: "", onDraftChange: noop, onEdit: noop, onCancel: noop, onSave: noop }],
     ["graph/TaskNode", "TaskNode", { data: { name: "review", task: "Review result", status: "completed", attempts: 4, hint: "", reviewer: true, selected: false, worktree: "", feedbackExhaustion: { from: "review", to: "owner", count: 3, limit: 3 } } }],
     ["ToolCallCard", "ToolCallCard", { item: { id: "tool", type: "tool_call", toolName: "bash", status: "running", args: {} } }],
-    ["PublicationPanel", "PublicationPanel", { publication: { repository: "/project", heads: ["abc"], status: "failed", error: planning.error, head: null }, mergers: [], onRetry: noop }],
     ["PublicationCompletedDetails", "PublicationCompletedDetails", { state: { ...state, phase: "completed" } }],
     ["views/GraphWorkbench", "GraphWorkbench", { state, activity: [{ kind: "workspace_prepare", nodes: ["foundation_contract"] }], routeType: "graph", selected: "", setSelected: noop, selectedMergerId: "", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onOpenFile: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
     ["views/GraphWorkbench", "GraphWorkbench", { state: mergerState, routeType: "graph", selected: "join", setSelected: noop, selectedMergerId: "merger-1", setSelectedMergerId: noop, effectiveMessages: [], plannerStream: {}, isPlanning: false, onSendMessage: noop, onRequestConfirmation: noop, onControl: noop, onSave: noop, onOpenEditor: noop, onOpenApproval: noop, onOpenFile: noop, onPickRepository: noop, onDetectRepository: noop, repoInfo: null, config, goal: "", nodes: [], edges: [], nodeTypes: {}, edgeTypes: {}, tokens: {} }],
@@ -129,6 +129,9 @@ try {
       assert.ok(html.includes(t("反馈次数耗尽，本次反馈未应用；未向 {0} 反馈，后续节点继续执行。", "owner")));
       const plain = renderToStaticMarkup(taskNodeCanvas(module[name], { ...props.data, feedbackExhaustion: undefined }));
       assert.doesNotMatch(plain, /\stitle=/, "plain nodes must not show native hover tooltips");
+    }
+    if (name === "ToolCallCard" || name === "ThinkingCard" || name === "NodeTaskCard") {
+      assert.doesNotMatch(html, /\stitle=/, `${name} must not show native hover tooltips`);
     }
   }
   assert.equal(locale, preference === "auto" ? (language.startsWith("zh") ? "zh-CN" : "en") : preference);

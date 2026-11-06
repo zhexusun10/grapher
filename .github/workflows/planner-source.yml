@@ -12,6 +12,14 @@ on:
 permissions:
   contents: read
 
+# A push that supersedes another push (or a PR update) would otherwise keep a
+# whole three-OS matrix queued behind code nobody is waiting for. Keep only the
+# newest run per ref; scheduled runs are never cancelled, they are the weekly
+# drift check.
+concurrency:
+  group: planner-source-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
 jobs:
   planner-source:
     name: Planner source / ${{ matrix.os }}
@@ -19,10 +27,10 @@ jobs:
     # ubuntu/macOS run the cross-platform backend/environment/merger/native
     # suites; Windows skips the ones whose failures also surface on macOS (they
     # cost ~1h there) and keeps its own library and Windows-native acceptance
-    # coverage. Budgets total 80 minutes on ubuntu/macOS and ~15 on Windows,
-    # leaving headroom for dependency setup, cold Rust builds, fixtures and
-    # post-job cleanup.
-    timeout-minutes: 90
+    # coverage. Rust builds dominate the cost, so the job reuses one target cache
+    # per OS instead of recompiling from scratch, and the budgets below are sized
+    # to a warm run with headroom for fixtures and post-job cleanup.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -36,6 +44,13 @@ jobs:
           node-version: '22.19.0'
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+      # Compiling the backend cold is the slowest part of every suite below.
+      # The cache key follows backend/Cargo.lock and the active toolchain, so a
+      # dependency change still rebuilds while a re-run of the same code does not.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+          save-if: ${{ github.event_name != 'pull_request' }}
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -63,11 +78,11 @@ jobs:
         run: npm run test:planner-bash
       - name: Verify production native launchers and filesystem boundaries
         if: runner.os != 'Windows'
-        timeout-minutes: 8
+        timeout-minutes: 6
         run: npm run test:native
       - name: Verify Windows native launchers and the prewarm contract
         if: runner.os == 'Windows'
-        timeout-minutes: 8
+        timeout-minutes: 6
         run: npm run test:native:scripts
       - name: Verify macOS filesystem policy with real child processes
         if: runner.os == 'macOS'
@@ -78,20 +93,20 @@ jobs:
         run: '"GRAPHER_ENV_TEST_PARENT=C:\g-env-tests" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
       - name: Verify managed E/L with real native Python, editable package and lifecycle
         if: runner.os != 'Windows'
-        timeout-minutes: 45
+        timeout-minutes: 25
         run: npm run test:environment
       - name: Verify default environment discovery across a Graph chain (local model)
         if: runner.os != 'Windows'
-        timeout-minutes: 15
+        timeout-minutes: 10
         run: npm run test:environment-chain
       - name: Verify production Planner revisions, dependency composition and Merger (local model)
         if: runner.os != 'Windows'
-        timeout-minutes: 12
+        timeout-minutes: 10
         run: npm run test:merger
       - name: Run the full backend library test suite on Windows
         if: runner.os == 'Windows'
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --lib
       - name: Verify Windows native Planner and production Graph acceptance (local model responses)
         if: runner.os == 'Windows'
-        timeout-minutes: 10
+        timeout-minutes: 8
         run: npm run test:windows-native

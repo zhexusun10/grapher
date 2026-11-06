@@ -35,6 +35,11 @@ interface VirtualizedTranscriptProps {
   /** In a composed Planning transcript only this revision is still live. Older
    * revisions' unterminated rows stay interrupted even while a new turn runs. */
   liveSource?: string;
+  /** Conversation order, including revisions whose first page is not loaded yet. */
+  sourceOrder?: readonly string[];
+  /** Composed sources that start a new section, such as a post-task Planner
+   * review. A divider row precedes such a source once it has earlier content. */
+  dividerSources?: ReadonlySet<string>;
   onEditUser?: (text: string, replacement: string, userTurnOffset?: number, images?: ImageAttachment[]) => boolean | void | Promise<unknown>;
   /** Called when the user reaches the top of a shared history scroller. */
   onReachTop?: () => void;
@@ -209,6 +214,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   userTurnTexts,
   settled = false,
   liveSource,
+  sourceOrder,
+  dividerSources,
   onEditUser,
   onReachTop,
   onCompactingChange,
@@ -234,7 +241,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const leadingFragmentRef = useRef(startOffset > 0);
   const inputStartRef = useRef(startOffset);
   const userTurnTextsKey = userTurnTexts?.join("\u0000") ?? "";
-  const parseOptionsRef = useRef(`${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}`);
+  // Divider placement is part of the parse identity: a newly known review turn
+  // must rebuild the composed rows even when every loaded segment is unchanged.
+  const dividerKey = dividerSources?.size ? `:${[...dividerSources].sort().join("\u0000")}` : "";
+  const parseOptionsRef = useRef(`${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}${dividerKey}`);
   const settledRef = useRef(settled);
   const liveSourceRef = useRef(liveSource);
   const sharedViewport = inline || compact;
@@ -253,6 +263,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   // Per-revision parse cache for composed planning transcripts: paging re-parses
   // only the revision whose window changed instead of the whole composition.
   const segmentStatesRef = useRef(new Map<string, SegmentParseState>());
+  const segmentStartsRef = useRef(new Map<string, number>());
   const segmentedRef = useRef(false);
   // Auto-compaction visibility: parse state survives incremental chunks and
   // re-parses; reporting is deferred to an effect so a parent never setState
@@ -306,6 +317,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         finalResponseSuppressedRef.current = false;
         lastRawOutputRef.current = "";
         segmentStatesRef.current.clear();
+        segmentStartsRef.current.clear();
         segmentedRef.current = false;
         compactingRef.current = false;
         lastSegmentSourceRef.current = "";
@@ -314,7 +326,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       return false;
     }
 
-    const parseOptions = `${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}`;
+    const parseOptions = `${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}${dividerKey}`;
     // Steady-state renders hand back the identical string; skip all scanning.
     // A changed live revision still rebuilds the composed rows from cached
     // segment states so older turns can settle without re-reading their JSONL.
@@ -338,6 +350,19 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       for (const source of states.keys()) if (!live.has(source)) states.delete(source);
       let changed = false;
       const combined: TranscriptItem[] = [];
+      const starts = new Map<string, number>();
+      let hasContent = false;
+      // A review turn is its own section of the conversation. The divider is
+      // emitted between segments rather than parsed into the review's rows, so
+      // paging inside that turn can never duplicate or misplace it.
+      const pushSegment = (segment: PlanningSegment, rows: TranscriptItem[]) => {
+        if (rows.length && hasContent && dividerSources?.has(segment.source)) {
+          combined.push({ id: `divider_${segment.source}`, type: "divider", role: "assistant", timestamp: 0 });
+        }
+        starts.set(segment.source, combined.length);
+        combined.push(...rows);
+        if (rows.length) hasContent = true;
+      };
       // A composed transcript is durable history. Once the caller is live, a
       // segment that is not named by the live revision has already ended; an
       // as-yet-unknown live revision (undefined) leaves every segment settled
@@ -380,7 +405,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           const forward = lastRawOutputRef.current.length > 0 && rawOutput.startsWith(lastRawOutputRef.current);
           if (forward && (segment.source === liveSource || segment.source === previousLiveSource) &&
               hasNewAssistantText(state?.items ?? [], fresh.items)) liveTextVersionRef.current += 1;
-          combined.push(...segmentItems(fresh));
+          pushSegment(segment, segmentItems(fresh));
           return;
         }
         if (unchanged) {
@@ -399,7 +424,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           const lastNewline = chunkToProcess.lastIndexOf("\n");
           if (lastNewline === -1) {
             const fresh = parseFresh(segment, segmentOptions);
-            combined.push(...segmentItems(fresh));
+            pushSegment(segment, segmentItems(fresh));
             return;
           }
           const previousItems = state.items;
@@ -453,9 +478,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
           state.startOffset = segment.startOffset;
           state.text = segment.text;
         }
-        for (const item of segmentItems(state)) combined.push(item);
+        pushSegment(segment, segmentItems(state));
       });
       const shared = shareJson(itemsRef.current, combined);
+      segmentStartsRef.current = starts;
       itemsRef.current = shared;
       lastRawOutputRef.current = rawOutput;
       parseOptionsRef.current = parseOptions;
@@ -468,6 +494,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     if (segmentedRef.current) {
       // A non-composed output cannot reuse per-revision state.
       segmentStatesRef.current.clear();
+      segmentStartsRef.current.clear();
       segmentedRef.current = false;
       compactingRef.current = false;
       lastSegmentSourceRef.current = "";
@@ -661,7 +688,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     itemsRef.current = shareJson(previousItems, currentItems);
     lastRawOutputRef.current = rawOutput;
     return itemsRef.current !== previousItems;
-  }, [showUserTurns, skipFirstUser, userTurnTextsKey, startOffset, settled, liveSource, inline]);
+  }, [showUserTurns, skipFirstUser, userTurnTextsKey, dividerKey, startOffset, settled, liveSource, inline]);
 
   const computeCompacting = (): boolean => {
     if (segmentedRef.current) {
@@ -709,6 +736,18 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   // text explains itself instead of disappearing from the transcript.
   const items = useMemo(() => (settled ? settleInterruptedItems(parsedItems) : parsedItems),
     [parsedItems, settled]);
+  // Missing revisions will be inserted immediately before the next loaded
+  // revision, or at the end if none follows. Keep those boundaries even when
+  // every row of a revision has been virtualized out of the DOM.
+  const sourceStarts: Array<{ source: string; index: number }> = [];
+  if (segmentedRef.current) {
+    let next = items.length;
+    for (const source of [...(sourceOrder ?? segmentStartsRef.current.keys())].reverse()) {
+      next = segmentStartsRef.current.get(source) ?? next;
+      sourceStarts.push({ source, index: next });
+    }
+    sourceStarts.reverse();
+  }
   const liveSteerRows = useMemo(() => {
     const rows = new Map<string, LiveSteerMarker>();
     for (const steer of liveSteers ?? []) {
@@ -968,7 +1007,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         style={{ overflowAnchor: "none", minHeight: inline || compact ? 0 : 200 }}
       >
         {!output && items.length === 0 && emptyText && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
-        {sharedViewport ? <VirtualizedList items={items} renderRow={renderRow} gap={8} /> :
+        {sharedViewport ? <VirtualizedList items={items} renderRow={renderRow} gap={10} sourceStarts={sourceStarts} /> :
           <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
             {visibleItems.map(item => <MeasuredRow key={item.id} id={item.id} measure={measure}>{renderRow(item)}</MeasuredRow>)}
           </div>}

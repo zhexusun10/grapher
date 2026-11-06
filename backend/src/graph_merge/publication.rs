@@ -159,7 +159,36 @@ fn tree(repository: &Path, commit: &str) -> Result<String, String> {
     repository_git(repository, &["rev-parse", &format!("{commit}^{{tree}}")])
 }
 
-fn record_delivery(repository: &Path, prepared: &Prepared, standard: bool) -> Result<(), String> {
+/// An in-flight result is not yet in Runtime state, so cleanup of another Run
+/// cannot discover it from protected heads. A Run-owned ref keeps it reachable
+/// across concurrent GC and process restarts until delivery is recorded.
+fn publication_pin(path: &Path, head: &str) -> Result<String, String> {
+    let parent = path.parent().ok_or("Invalid publication workspace")?;
+    let owner = parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let owner = uuid::Uuid::parse_str(owner).unwrap_or_else(|_| {
+        // Nonstandard callers can still use an isolated custom workspace. Its
+        // deterministic owner is released on successful delivery as usual.
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        parent.hash(&mut hash);
+        uuid::Uuid::from_u128(hash.finish() as u128)
+    });
+    Ok(format!("refs/grapher/runs/{owner}/publications/{head}"))
+}
+
+fn release_publication_pin(repository: &Path, pin: &str) -> Result<(), String> {
+    repository_git(repository, &["update-ref", "-d", pin])?;
+    Ok(())
+}
+
+fn record_delivery(
+    repository: &Path,
+    prepared: &Prepared,
+    standard: bool,
+    pin: &str,
+) -> Result<(), String> {
     let index_lock = workspace::host_index_lock(repository)?;
     let _index_guard = index_lock.lock().map_err(|e| e.to_string())?;
     let lock = workspace::host_ref_lock(repository)?;
@@ -172,7 +201,7 @@ fn record_delivery(repository: &Path, prepared: &Prepared, standard: bool) -> Re
             if repository_git(repository, &["rev-parse", "HEAD"])? == prepared.result {
                 repository_git(repository, &["read-tree", &prepared.result])?;
             }
-            return Ok(());
+            return release_publication_pin(repository, pin);
         }
         if repository_git(
             repository,
@@ -180,7 +209,7 @@ fn record_delivery(repository: &Path, prepared: &Prepared, standard: bool) -> Re
         )
         .is_ok()
         {
-            return Ok(());
+            return release_publication_pin(repository, pin);
         }
     }
     // source is the unchanged user HEAD, not the internal result. A later
@@ -206,7 +235,7 @@ fn record_delivery(repository: &Path, prepared: &Prepared, standard: bool) -> Re
         Some(refs.as_bytes()),
     )?;
     repository_git(repository, &["read-tree", &prepared.result])?;
-    Ok(())
+    release_publication_pin(repository, pin)
 }
 
 pub(super) fn publish(
@@ -229,7 +258,7 @@ pub(super) fn publish(
         let prepared: Prepared =
             serde_json::from_slice(&fs::read(prepared_path).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
-        return deliver(repository, &journal, &prepared, standard, exclusions);
+        return deliver(repository, &path, &journal, &prepared, standard, exclusions);
     }
     fs::create_dir_all(&journal).map_err(|e| e.to_string())?;
     let input_path = journal.join("input.json");
@@ -283,9 +312,10 @@ pub(super) fn publish(
         )?;
         (source_head, input)
     };
-    if !workspace::has_private_git(&path) {
-        workspace::prepare(repository, &path, &input, &[])?;
-    }
+    // Only a workspace created by this attempt is guaranteed to hold exactly
+    // the collected base. A pre-existing directory (even one without private
+    // Git yet) can still carry unrecorded files, so it stages as usual.
+    let fresh = !path.exists() && !workspace::has_private_git(&path);
     let mut inputs = heads.to_vec();
     // Earlier inputs remain owned MERGE_HEAD candidates across rebaselines.
     for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
@@ -310,28 +340,62 @@ pub(super) fn publish(
     if !inputs.contains(&input) {
         inputs.push(input.clone());
     }
-    let result = compose_graph_scoped(&path, repository, &inputs, exclusions, || resolve(&path))?;
-    for head in heads {
-        git(&path, &["merge-base", "--is-ancestor", head, &result])?;
-    }
-    let metadata = workspace::private_git_dir(&path);
-    let url = workspace::git_file_url(metadata.as_deref().unwrap_or(&path))?;
-    {
-        let lock = workspace::host_ref_lock(repository)?;
-        let _guard = lock.lock().map_err(|e| e.to_string())?;
-        repository_git(
-            repository,
-            &[
-                "fetch",
-                "-q",
-                "--no-tags",
-                "--no-write-fetch-head",
-                "--no-auto-gc",
-                &url,
-                &format!("+{result}:refs/grapher/heads/{result}"),
-            ],
-        )?;
-    }
+    // A clean composition needs no workspace at all: the merge is computed from
+    // the recorded trees and only the composed project view is recorded. A
+    // conflict or project state needing physical verification falls back to the
+    // materialized path below, which also owns Merger repair.
+    let virtual_result = if fresh {
+        compose_virtual_publication(repository, &path, &input, &inputs, exclusions)?
+    } else {
+        None
+    };
+    let result = match virtual_result {
+        Some(result) => {
+            for head in heads {
+                repository_git(repository, &["merge-base", "--is-ancestor", head, &result])?;
+            }
+            result
+        }
+        None => {
+            if !workspace::has_private_git(&path) {
+                // Composition prepares and seals the composed project view once
+                // below; preparing it here first would repeat the evidence pass.
+                workspace::prepare_composition(repository, &path, &input, &[])?;
+            }
+            let result =
+                compose_graph_scoped(&path, repository, &inputs, exclusions, fresh, || {
+                    resolve(&path)
+                })?;
+            for head in heads {
+                git(&path, &["merge-base", "--is-ancestor", head, &result])?;
+            }
+            let metadata = workspace::private_git_dir(&path);
+            let url = workspace::git_file_url(metadata.as_deref().unwrap_or(&path))?;
+            let lock = workspace::host_ref_lock(repository)?;
+            let _guard = lock.lock().map_err(|e| e.to_string())?;
+            repository_git(
+                repository,
+                &[
+                    "fetch",
+                    "-q",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--no-auto-gc",
+                    &url,
+                    &format!("+{result}:{}", publication_pin(&path, &result)?),
+                ],
+            )?;
+            repository_git(
+                repository,
+                &[
+                    "update-ref",
+                    &format!("refs/grapher/heads/{result}"),
+                    &result,
+                ],
+            )?;
+            result
+        }
+    };
     let prepared = Prepared {
         source_head,
         input,
@@ -341,7 +405,70 @@ pub(super) fn publish(
         &prepared_path,
         &serde_json::to_vec(&prepared).map_err(|e| e.to_string())?,
     )?;
-    deliver(repository, &journal, &prepared, standard, exclusions)
+    deliver(repository, &path, &journal, &prepared, standard, exclusions)
+}
+
+/// Directory that holds the composed project view of a workspace-free
+/// publication. It stays a sibling of the composition workspace so it remains a
+/// managed slot (private metadata and cleanup ownership), but it never receives
+/// project files.
+fn composition_view_path(workspace: &Path) -> Result<PathBuf, String> {
+    let name = workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Invalid publication workspace")?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hash);
+    Ok(workspace.with_file_name(format!("publication-view-{:016x}", hash.finish())))
+}
+
+/// Compose and seal a publication that needs no workspace. Returns `None` when
+/// the composition must be materialized after all.
+fn compose_virtual_publication(
+    repository: &Path,
+    workspace: &Path,
+    input: &str,
+    parents: &[String],
+    exclusions: &[String],
+) -> Result<Option<String>, String> {
+    let head = {
+        // Merge-tree and commit-tree create unreachable objects. Keep cleanup's
+        // ref lock throughout composition, not just while pinning the final
+        // commit, so gc --prune=now cannot remove an intermediate merge.
+        let lock = workspace::host_ref_lock(repository)?;
+        let _guard = lock.lock().map_err(|error| error.to_string())?;
+        let Some(head) = super::compose_graph_virtual(repository, input, parents)? else {
+            return Ok(None);
+        };
+        repository_git(
+            repository,
+            &["update-ref", &publication_pin(workspace, &head)?, &head],
+        )?;
+        repository_git(
+            repository,
+            &["update-ref", &format!("refs/grapher/heads/{head}"), &head],
+        )?;
+        head
+    };
+    if !crate::workspace_view::has_record(repository, input) {
+        // Host-only fixture checkouts record no project view.
+        return Ok(Some(head));
+    }
+    let view = composition_view_path(workspace)?;
+    validate_private_paths(repository, &view)?;
+    fs::create_dir_all(&view).map_err(|e| e.to_string())?;
+    let base = crate::workspace_view::composition_base(repository, input, parents)?;
+    match crate::workspace_view::seal_composed_view(
+        repository, &view, &base, parents, exclusions, &head,
+    )? {
+        Some(_) => Ok(Some(head)),
+        None => {
+            let lock = workspace::host_ref_lock(repository)?;
+            let _guard = lock.lock().map_err(|error| error.to_string())?;
+            release_publication_pin(repository, &publication_pin(workspace, &head)?)?;
+            Ok(None)
+        }
+    }
 }
 
 fn select_attempt(
@@ -395,8 +522,8 @@ fn select_attempt(
     } else {
         false
     };
-    let live = workspace::snapshot_repository_scoped(repository, exclusions)?;
-    if changed_git || tree(repository, &live)? != tree(repository, &input)? {
+    let live = workspace::live_tree_scoped(repository, exclusions)?;
+    if changed_git || live != tree(repository, &input)? {
         next()
     } else {
         Ok(current)
@@ -491,6 +618,7 @@ fn valid_partial_checkout(
 
 fn deliver(
     repository: &Path,
+    path: &Path,
     journal: &Path,
     prepared: &Prepared,
     standard: bool,
@@ -502,16 +630,17 @@ fn deliver(
         workspace::shadow_repo_dir(repository)?.join("publication.lock")
     };
     let marker = format!("Grapher publication {}\n", journal.display());
+    let pin = publication_pin(path, &prepared.result)?;
     if installed(journal, &prepared.result)? {
         release_owned_lock(&lock_path, marker.as_bytes())?;
-        record_delivery(repository, prepared, standard)?;
+        record_delivery(repository, prepared, standard, &pin)?;
         return Ok(prepared.result.clone());
     }
     if standard {
         verify_source(repository, journal, prepared)?;
     }
-    let live = workspace::snapshot_repository_scoped(repository, exclusions)?;
-    let live_tree = tree(repository, &live)?;
+    let live = workspace::live_tree_scoped(repository, exclusions)?;
+    let live_tree = live.clone();
     let input_tree = tree(repository, &prepared.input)?;
     let final_tree = tree(repository, &prepared.result)?;
     let applying = journal.join("applying");
@@ -610,7 +739,7 @@ fn deliver(
             verify_source(repository, journal, prepared)?;
         }
         save_once(&journal.join("installed"), prepared.result.as_bytes())?;
-        record_delivery(repository, prepared, standard)?;
+        record_delivery(repository, prepared, standard, &pin)?;
         Ok(prepared.result.clone())
     })();
     let released = release_owned_lock(&lock_path, marker.as_bytes());
@@ -663,6 +792,96 @@ mod tests {
         assert!(!source.join("result.txt").exists());
         assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), source_head);
         crate::path_safety::remove_directory_link(&path);
+    }
+
+    #[test]
+    fn interrupted_publication_survives_another_run_pruning_the_shadow() {
+        interrupted_publication_survives_pruning(false);
+    }
+
+    #[test]
+    fn interrupted_materialized_publication_survives_another_run_pruning_the_shadow() {
+        interrupted_publication_survives_pruning(true);
+    }
+
+    fn interrupted_publication_survives_pruning(materialized: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-q"]).unwrap();
+        fs::write(source.join("base.txt"), "base").unwrap();
+        git(&source, &["add", "-A"]).unwrap();
+        git(&source, &["commit", "-qm", "base"]).unwrap();
+        let original_head = git(&source, &["rev-parse", "HEAD"]).unwrap();
+        let base = workspace::snapshot_repository(&source).unwrap();
+        let node = temp.path().join("node");
+        workspace::prepare(&source, &node, &base, &[]).unwrap();
+        fs::write(node.join("result.txt"), "result").unwrap();
+        let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let path = temp
+            .path()
+            .join(".grapher-worktrees")
+            .join(&run_id)
+            .join("publication");
+        if materialized {
+            fs::create_dir_all(&path).unwrap();
+        }
+        let lock_file = source_index(&source).unwrap().with_extension("lock");
+        fs::write(&lock_file, "foreign lease").unwrap();
+        assert!(
+            publish(&source, &[head.clone()], &[], Some(&path), |_| panic!(
+                "no conflict"
+            ))
+            .is_err()
+        );
+        let journal = path.with_extension("publication").join("00000000");
+        let prepared: Prepared =
+            serde_json::from_slice(&fs::read(journal.join("prepared.json")).unwrap()).unwrap();
+        assert!(!journal.join("installed").exists());
+        assert_eq!(workspace::has_private_git(&path), materialized);
+
+        // Deleting another Run also prunes unreferenced generic head pins and
+        // runs gc --prune=now. The prepared result is not yet in Runtime state.
+        let other = uuid::Uuid::new_v4().to_string();
+        repository_git(
+            &source,
+            &[
+                "update-ref",
+                &format!("refs/grapher/runs/{other}/test"),
+                &base,
+            ],
+        )
+        .unwrap();
+        let shadow = workspace::shadow_repo_dir(&source).unwrap();
+        {
+            let lock = workspace::host_ref_lock(&source).unwrap();
+            let _guard = lock.lock().unwrap();
+            workspace::prune_shadow_run_refs(&shadow, &other, &Default::default(), true).unwrap();
+        }
+        repository_git(
+            &source,
+            &["cat-file", "-e", &format!("{}^{{commit}}", prepared.result)],
+        )
+        .unwrap();
+        fs::remove_file(lock_file).unwrap();
+        let delivered = publish(&source, &[head], &[], Some(&path), |_| {
+            panic!("no conflict")
+        })
+        .unwrap();
+        assert_eq!(delivered, prepared.result);
+        assert_eq!(fs::read(source.join("result.txt")).unwrap(), b"result");
+        assert_eq!(git(&source, &["rev-parse", "HEAD"]).unwrap(), original_head);
+        assert!(repository_git(
+            &source,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                &format!("refs/grapher/runs/{run_id}/publications/")
+            ]
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]

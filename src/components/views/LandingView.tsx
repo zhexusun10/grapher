@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { motion, useIsPresent, useReducedMotion } from "motion/react";
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
+import { DotPattern } from "../ui/dot-pattern";
+import type { LandingBackground } from "../../services/displayPreferences";
 import type { PlanMode } from "../../types";
 
 interface LandingViewProps {
@@ -13,6 +15,7 @@ interface LandingViewProps {
   isWorking?: boolean;
   onInterrupt?: () => void;
   repository?: string;
+  background?: LandingBackground;
 }
 
 const TITLE_EXIT_DURATION = 0.2;
@@ -27,6 +30,7 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
   isWorking,
   onInterrupt,
   repository,
+  background = "paths",
 }) => {
   const reduceMotion = useReducedMotion();
   const isPresent = useIsPresent();
@@ -44,6 +48,12 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
     >
       <div className="landing-center-content">
         <div className="landing-title-container">
+          {background === "dots" && (
+            <div className="landing-title-dot-pattern" aria-hidden="true">
+              {/* Wide spacing keeps the dots as a quiet texture rather than a grid. */}
+              <DotPattern width={24} height={24} cr={1} />
+            </div>
+          )}
           <motion.div
             className="landing-title-copy"
             initial={false}

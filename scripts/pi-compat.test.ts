@@ -13,6 +13,18 @@ import {
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
 } from '../engine/pi-compat.ts';
 
+test('bundled extension peer providers match the reviewed Pi baseline', () => {
+  const project = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
+  const baseline = JSON.parse(readFileSync(new URL('../engine/pi-lock.json', import.meta.url), 'utf8'));
+  for (const name of ['@earendil-works/pi-ai', '@earendil-works/pi-coding-agent']) {
+    const installed = JSON.parse(readFileSync(new URL(`../node_modules/${name}/package.json`, import.meta.url), 'utf8'));
+    assert.equal(project.dependencies[name], baseline.packageVersion, `${name} must track the source baseline`);
+    assert.equal(lock.packages[`node_modules/${name}`].version, baseline.packageVersion);
+    assert.equal(installed.version, baseline.packageVersion);
+  }
+});
+
 for (const [name, entry] of [
   ['pi-trim', './extensions/index.ts'],
   ['pi-continuity', './extensions/index.ts'],

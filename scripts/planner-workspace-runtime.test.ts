@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { configurePlannerWorkspace, switchPlannerWorkspace, plannerWorkspaceState } from '../engine/planner-workspace.ts';
 import { managedBashOptions, rebindWorkspaceEnvironment } from '../engine/launch-binding.mjs';
+import workspacePolicy from '../engine/prompt-extension.ts';
 
 test('backend Planner target rebinds cwd, HOME/cache/Git and native Bash together', () => {
   const original = process.cwd();
@@ -60,5 +61,34 @@ test('backend Planner target rebinds cwd, HOME/cache/Git and native Bash togethe
     for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
     Object.assign(process.env, originalEnvironment);
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the mandatory Planner extension removes steer identity from every model context', async () => {
+  const previous = { ...process.env };
+  try {
+    process.env.GRAPHER_MODE = 'planner';
+    delete process.env.GRAPHER_EXECUTION_KIND;
+    delete process.env.GRAPHER_CONTINUE_INTERRUPTED;
+    delete process.env.GRAPHER_PLANNER_FOLLOWUP;
+    const handlers = new Map<string, Array<(event: any) => any>>();
+    const pi = { on(name: string, handler: (event: any) => any) {
+      const list = handlers.get(name) ?? []; list.push(handler); handlers.set(name, list);
+    }, registerTool() {} };
+    workspacePolicy(pi as any);
+    const id = '12345678-1234-4234-8234-123456789abc';
+    const marked = `inspect 🚀\n\n<grapher-steer-id>${id}</grapher-steer-id>`;
+    const image = { type: 'image', mimeType: 'image/png', data: 'abc' };
+    const stored = [{ role: 'user', content: [{ type: 'text', text: marked }, image] }];
+    let messages: any[] = stored;
+    for (const handler of handlers.get('context') ?? []) {
+      messages = (await handler({ type: 'context', messages }))?.messages ?? messages;
+    }
+    assert.equal(messages[0].content[0].text, 'inspect 🚀');
+    assert.deepEqual(messages[0].content[1], image);
+    assert.equal(stored[0].content[0].text, marked, 'the durable Pi session is not rewritten');
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
   }
 });

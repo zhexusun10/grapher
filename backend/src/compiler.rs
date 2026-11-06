@@ -354,7 +354,7 @@ fn compile_with_policy(
     }
     Ok(Plan {
         execution_batches: batches,
-        roots,
+        root_nodes: roots,
         terminals,
         warnings,
     })

@@ -81,9 +81,11 @@ platform from the target.
 ## 2. Problem inventory
 
 Observed in a real run (`run 219780ea…`, node `extract_module_b`, merger
-`95014a73`); sizes below are observations, not newly measured acceptance evidence.
+`95014a73`); these are historical observations, not a current implementation
+inventory or newly measured acceptance evidence. See the architecture links above
+for current behavior.
 
-| Artifact | Current origin / behavior | Required change |
+| Artifact | Observed origin / behavior in that run | Required change |
 | --- | --- | --- |
 | `.agent-home/` | `environment_automatic.rs` redirects HOME/USERPROFILE into the workspace; observed npm cache was ~598 MB | External process state; no staging coupling |
 | `.runtime-cache/` | `environment.rs` eagerly creates cache paths during prepare | External cache paths; no project entry, even empty |
@@ -94,8 +96,8 @@ Observed in a real run (`run 219780ea…`, node `extract_module_b`, merger
 
 The `.agent-home` staging bug in `finish_merge(repository, &incoming, &[])`
 was fixed (`02637b8`, `806ae4a`). Exclusions still do not solve physical pollution.
-The current hidden-Git and forced-snapshot contracts also mean that merely
-exposing the existing internal repository would not meet §1.
+The hidden-Git and forced-snapshot behavior observed in that run also shows why
+merely exposing an internal repository would not meet §1.
 
 ## 3. Required architecture, flexible layout
 

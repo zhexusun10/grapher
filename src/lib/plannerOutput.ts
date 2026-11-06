@@ -1,6 +1,6 @@
 // Planner output filtering logic
 // Extracted for use in tests without requiring TSX support
-import { stripPlannerContext } from "../services/plannerText";
+import { plannerContentText, stripPlannerContext } from "../services/plannerText";
 
 export type PlannerEvent = { type?: string; planning_id?: string; old_instruction?: string; planning?: { planningId?: string; createdAt?: number } | null };
 
@@ -20,6 +20,20 @@ export const PLANNER_TURN_EVENTS: ReadonlySet<string> = new Set([
  * `planner_turn_aborted`. Recovery records an interrupted turn when the backend
  * restarts, after later turns, so order falls back to the attempt start time.
  */
+/** Post-task review attempts, in event order. A review continues the Planner
+ * conversation but is a new section of it, so the saved transcript separates
+ * its durable output from the turns that produced the published graph.
+ * Ordinary revisions and follow-ups continue the conversation without one. */
+export function reviewPlanningIds(events: ReadonlyArray<PlannerEvent>): Set<string> {
+  const ids = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "planner_review_started") continue;
+    const id = event.planning_id || event.planning?.planningId;
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
 export function plannerTurnIds(events: ReadonlyArray<PlannerEvent>): string[] {
   const turns: Array<{ id: string; createdAt: number; index: number }> = [];
   const seen = new Set<string>();
@@ -112,8 +126,7 @@ export function activePlannerOutput(output: string, edits: Array<{ old_instructi
         const event = JSON.parse(line);
         if (event.type !== "message_start" && event.type !== "message_end") return false;
         if (event.message?.role !== "user") return false;
-        const text = stripPlannerContext((event.message.content || []).filter((part: { type: string }) => part.type === "text")
-          .map((part: { text: string }) => part.text).join("\n"));
+        const text = stripPlannerContext(plannerContentText(event.message.content));
         return text === edit.old_instruction || text.endsWith(`\n${edit.old_instruction}`);
       } catch { return false; }
     });

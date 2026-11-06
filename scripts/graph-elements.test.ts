@@ -165,7 +165,7 @@ function publicationMergerState(): Snapshot {
     ...emptySnapshot,
     graph: { originalGoal: "publish", nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }],
       edges: [{ from: "a", to: "b", feedback: false }] },
-    plan: { executionBatches: [["a"], ["b"]], roots: ["a"], terminals: ["b"], warnings: [] },
+    plan: { executionBatches: [["a"], ["b"]], rootNodes: ["a"], terminals: ["b"], warnings: [] },
     nodes: { a: { status: "completed", revision: 1, head: "ha", instruction: "", error: null },
       b: { status: "completed", revision: 1, head: "hb", instruction: "", error: null } },
     mergers: [{

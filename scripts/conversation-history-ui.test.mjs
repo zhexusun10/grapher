@@ -467,12 +467,23 @@ test("completed write-back details live inside the topology overview with copy a
     const overview = page.locator(".plan-summary-card");
     const details = overview.getByTestId("publication-completed-details");
     await overview.waitFor();
-    for (const status of ["failed", "publishing", "merging"]) {
+    for (const [status, label] of [
+      ["failed", "Publication failed. Action required"],
+      ["publishing", "Writing to the workspace"],
+      ["merging", "merger is resolving conflicts"],
+    ]) {
       await page.evaluate(async status => {
         window.audit.setPublicationResult({ status });
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       }, status);
       assert.equal(await details.count(), 0, `${status} must not claim results were written back`);
+      // Write-back progress and failure live in the topology footer, not a banner.
+      const footer = page.locator(".graph-bottom .approval-row");
+      assert.equal(await footer.locator(":scope > span").innerText(), label);
+      assert.equal(await footer.getByRole("button", { name: "Retry publication", exact: true }).count(),
+        status === "failed" ? 1 : 0);
+      assert.equal(await page.locator(".publication-panel").count(), 0,
+        "write-back must not render as a separate banner");
     }
     await page.evaluate(({ publication, attempts }) => window.audit.setPublicationResult(publication, attempts), { publication, attempts });
     await details.waitFor();
@@ -806,6 +817,8 @@ for (const [mode, turn] of [
       }
       const working = page.locator(".workspace-details .working-indicator");
       await working.waitFor();
+      // Let the indicator finish its reveal before sampling the settled footer.
+      await page.waitForTimeout(260);
       const before = { button: await trigger.evaluate(element => element.getBoundingClientRect().top),
         working: await working.evaluate(element => element.getBoundingClientRect().top) };
       await page.evaluate(turn => {
@@ -1025,6 +1038,83 @@ test("actual App re-attaches a running revision plan without locking or stale ro
   }
 });
 
+test("a live Planner turn keeps the node conversation the reader opened", { timeout: 45_000 }, async () => {
+  // The Planner turn settles while the reader is inspecting a node. Settling it
+  // updates the Planner transcript and graph, but it is not a view change: the
+  // node the reader opened must stay mounted.
+  const config = { repository: "/mock/live-node-view", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const running = { ...empty, runId: "live-node-view-run", config, planType: "graph", phase: "running", approved: true, planningId: "old-plan",
+    graph: { originalGoal: "Original goal", nodes: [{ name: "worker", task: "Worker" }], edges: [] },
+    nodes: { worker: { status: "completed", revision: 1, instruction: "", error: null } },
+    executions: [{ id: "worker-execution", node: "worker", status: "completed", revision: 1, attempt: 1,
+      startedAt: 1, completedAt: 2, sessionId: "worker-session", worktree: "/mock/live-node-view-worker",
+      before: "", after: "head", output: "", outputBytes: 0 }],
+    events: [{ type: "created", sequence: 1, planning_id: "old-plan", timestamp: 1 }] };
+  const completed = { ...running, planningId: "new-plan",
+    events: [...running.events, { type: "graph_revised", sequence: 2, planning_id: "new-plan", timestamp: 2,
+      planning: { planningId: "new-plan", status: "success", createdAt: 2 } }] };
+  let streamed = null;
+  onPlanStream = (_body, res) => {
+    streamed = res;
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+    res.write(`event: run_started\ndata: ${JSON.stringify({ runId: running.runId })}\n\n`);
+  };
+  const { context, page, errors } = await newPage(route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    if (command === "plan_goal_stream") return route.continue();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [running.runId], repositoryInfo: { path: config.repository, name: "Live node view", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = running; break;
+      case "snapshot_if_changed": result = { version: "live-node-view", snapshot: running }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_planning_output": {
+        const content = assistant("Old planner turn");
+        result = { planningId: body.planningId, role: "planner", content: body.offset ? "" : content,
+          startOffset: body.offset ?? 0, nextOffset: Buffer.byteLength(content), totalBytes: Buffer.byteLength(content), complete: true, running: false };
+        break;
+      }
+      case "get_execution_output": result = { runId: body.runId, executionId: body.executionId, content: assistant("WORKER_REPLY"),
+        startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, status: "completed" }; break;
+      default: result = {};
+    }
+    return route.fulfill({ json: { result } });
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="live-node-view-run"]').click();
+    const input = page.locator(".pane-bottom-chat textarea");
+    await input.waitFor();
+    await input.fill("REVISE WHILE READING NODE"); await input.press("Enter");
+    for (let i = 0; !streamed && i < 100; i++) await page.waitForTimeout(20);
+    assert.ok(streamed, "the Planner turn started");
+    await page.locator('.react-flow__node[data-id="worker"]').click();
+    const heading = page.locator(".conversation-heading h2");
+    await heading.waitFor();
+    assert.equal(await heading.textContent(), "worker");
+    await page.waitForTimeout(2500);
+    assert.equal(await heading.textContent(), "worker",
+      "a running Planner stream must not close the node conversation");
+    streamed.write(`event: planner\ndata: ${JSON.stringify({ event: { type: "message_start", message: { role: "assistant", content: [] } } })}\n\n`);
+    streamed.write(`event: planner\ndata: ${JSON.stringify({ event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REVISED ANSWER" }] } } })}\n\n`);
+    streamed.write(`event: complete\ndata: ${JSON.stringify({ snapshot: completed })}\n\n`);
+    streamed.end(); streamed = null;
+    await page.waitForTimeout(800);
+    assert.equal(await heading.textContent(), "worker",
+      "a settled Planner turn must not unmount the node conversation the reader opened");
+    assert.deepEqual(errors, []);
+  } finally {
+    onPlanStream = undefined; streamed?.destroy();
+    await context.close();
+  }
+});
+
 test("actual App renders a Planner goal once even when the saved replay contains it", { timeout: 45_000 }, async () => {
   // A conversation stopped before any follow-up still has its goal in the
   // durable planner.jsonl. The saved replay must skip that turn (it is already
@@ -1207,7 +1297,13 @@ test("actual App: first Serial message keeps the footer still through approval a
     releaseApproval();
     await page.waitForTimeout(150);
     snapshot = running;
-    await page.locator('[data-execution-id="first-execution"]').waitFor();
+    // A running transcript with only a process header has no renderable rows,
+    // so its collapsed status line leaves it at zero height. Startup is the
+    // attachment, not a visible row.
+    await page.locator('[data-execution-id="first-execution"]').waitFor({ state: "attached" });
+    await page.waitForFunction(() =>
+      Number(getComputedStyle(document.querySelector(".chat-messages-stream")).opacity) > 0.99,
+    null, { message: "starting the first execution must not leave the conversation hidden" });
     await page.waitForTimeout(200);
     const frames = await page.evaluate(() => { window.sampleFooter = false; return window.footerFrames; });
     const first = frames[0];
@@ -1383,14 +1479,13 @@ for (const role of ["node", "planner"]) {
       await scroller.hover(); await page.mouse.wheel(0, -80);
       await page.waitForTimeout(100);
       const anchor = await scroller.evaluate(element => {
-        const top = element.getBoundingClientRect().top;
-        const row = [...element.querySelectorAll("[data-transcript-id]")].find(row => {
-          const rect = row.getBoundingClientRect();
-          return rect.top >= top && rect.bottom <= top + element.clientHeight;
-        });
+        // Track the last rendered row: the page commits below and above it, and
+        // a short fixture tail must not depend on an exactly full row landing in
+        // the viewport for this measurement to exist.
+        const row = [...element.querySelectorAll("[data-transcript-id]")].at(-1);
         return row ? { id: row.dataset.transcriptId, top: row.getBoundingClientRect().top } : null;
       });
-      assert.ok(anchor, "the reader has a fully visible retained row");
+      assert.ok(anchor, "the reader has a retained row while the page is in flight");
       releaseOlder();
       await page.waitForFunction(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.startOffset === 0, role);
       await page.waitForTimeout(200);
@@ -1455,10 +1550,13 @@ for (const role of ["node", "planner"]) {
       await page.waitForTimeout(100);
       const anchor = await scroller.evaluate(element => {
         const top = element.getBoundingClientRect().top;
-        const row = [...element.querySelectorAll("[data-transcript-id]")].find(row => {
+        // The page below the preceding Planner turn lands above the newest
+        // rows, so track a row under that insertion instead of the older
+        // section that stays above it.
+        const row = [...element.querySelectorAll("[data-transcript-id]")].filter(row => {
           const rect = row.getBoundingClientRect();
           return rect.top >= top && rect.bottom <= top + element.clientHeight;
-        });
+        }).at(-1);
         return row ? { id: row.dataset.transcriptId, top: row.getBoundingClientRect().top } : null;
       });
       assert.ok(anchor, "the virtualized reader has a fully visible retained row");
@@ -1486,6 +1584,294 @@ for (const role of ["node", "planner"]) {
       assert.equal(await page.getByRole("button", { name: "Load earlier history", exact: true }).count(), 0);
       assert.deepEqual(errors, []);
     } finally { waiting.forEach(release => release()); await context.close(); }
+  });
+}
+
+for (const role of ["node", "planner"]) {
+  test(`${role}: an older page lands at the beginning of the loaded history`, { timeout: 30_000 }, async () => {
+    // Older bytes are inserted above the reader, so the virtualizer has to
+    // compensate the scroll position. That compensation belongs at the point the
+    // reader scrolled to: extending the history below them must never move the
+    // rows they are reading.
+    const rows = [...Array.from({ length: 80 }, (_, i) => assistant(`BOUNDARY_OLDER_${i}`)),
+      ...Array.from({ length: 4 }, (_, i) => assistant(`BOUNDARY_VISIBLE_${i}`))];
+    const offsets = [0];
+    for (const row of rows) offsets.push(offsets.at(-1) + Buffer.byteLength(row));
+    // Start with more than two viewports so initial auto-fill has finished
+    // before this test asks for a separate user-driven page.
+    const data = Buffer.from(rows.join("")), tailStart = offsets[50], pageRows = 8;
+    const pending = [];
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      const command = new URL(route.request().url()).pathname.slice(5);
+      if (command !== (role === "node" ? "get_execution_output" : "get_planning_output") ||
+          (role === "planner" && body.planningId !== "planner-latest")) return route.fulfill({ json: { result: {} } });
+      let start, end;
+      if (body.before !== undefined) {
+        end = body.before;
+        start = offsets[Math.max(0, offsets.indexOf(end) - pageRows)];
+        await new Promise(resolve => { pending.push(resolve); });
+      } else if (body.tail) {
+        start = tailStart; end = data.length;
+      } else {
+        start = Math.min(body.offset ?? 0, data.length); end = data.length;
+      }
+      try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        planningId: body.planningId, role: "planner", content: data.subarray(start, end).toString(), startOffset: start,
+        nextOffset: end, totalBytes: data.length, complete: end === data.length, status: "running", running: true } } }); } catch {}
+    });
+    try {
+      await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.selectHistory);
+      await page.evaluate(role => {
+        if (role === "planner") window.audit.setPlanningIds(["planner-latest"]);
+        window.audit.selectHistory(role);
+      }, role);
+      await page.waitForFunction(role => !!(role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning()), role);
+      const scroller = page.locator("[data-shared-scroll]");
+      const cache = () => page.evaluate(role => role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning(), role);
+      const busySelector = role === "node" ? "[data-execution-id]" : ".planning-activity";
+      await page.waitForFunction(selector => document.querySelector(selector)?.getAttribute("aria-busy") === "false", busySelector);
+      await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) > 0.99);
+      assert.equal(pending.length, 0, "the initial tail already fills the viewport");
+      const filled = await cache();
+      assert.ok(filled.startOffset > 0, "the fixture keeps older bytes for an on-demand page");
+      // Put the reader inside the loaded history, one viewport below its start.
+      await scroller.evaluate(element => { element.scrollTop = element.scrollHeight; });
+      await page.waitForTimeout(60);
+      const listStart = await scroller.evaluate(element => {
+        const list = element.querySelector(".virtualized-transcript-container");
+        return element.scrollTop + list.getBoundingClientRect().top - element.getBoundingClientRect().top;
+      });
+      await scroller.evaluate((element, top) => {
+        element.scrollTop = top;
+        element.dispatchEvent(new WheelEvent("wheel", { deltaY: -60, bubbles: true }));
+      }, listStart + 200);
+      for (let i = 0; i < 100 && !pending.length; i++) await page.waitForTimeout(10);
+      assert.ok(pending.length, "scrolling inside the loaded history requests the next older page");
+      // The page is ready while the reader is still below its insertion point.
+      pending.shift()();
+      await page.waitForTimeout(300);
+      assert.equal((await cache()).startOffset, filled.startOffset,
+        "a page fetched above the reader must not take part in the layout yet");
+      // Reaching the beginning of the loaded history is where the page belongs.
+      await scroller.evaluate(element => { element.scrollTop = 0; });
+      await page.waitForFunction(({ role, before }) => {
+        const current = role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning();
+        return current && current.startOffset < before;
+      }, { role, before: filled.startOffset }, { timeout: 5000 });
+      assert.deepEqual(errors, []);
+    } finally { pending.splice(0).forEach(release => release()); await context.close(); }
+  });
+}
+
+test("planner: a prefetched page waits for its revision boundary even when the first rows are tools", { timeout: 30_000 }, async () => {
+  const previous = Buffer.from(Array.from({ length: 5 }, (_, i) => assistant(`BOUNDARY_PREVIOUS_${i}`)).join(""));
+  const prefix = Array.from({ length: 20 }, (_, i) => assistant(`BOUNDARY_MISSING_${i}`)).join("");
+  const tail = Array.from({ length: 8 }, (_, i) => startTool(`boundary-tool-${i}`, `command ${i}`) + endTool(`boundary-tool-${i}`, "done")).join("") +
+    Array.from({ length: 40 }, (_, i) => assistant(`BOUNDARY_TEXT_${i}`)).join("");
+  const latest = Buffer.from(prefix + tail), split = Buffer.byteLength(prefix);
+  let releaseOlder;
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    const command = new URL(route.request().url()).pathname.slice(5);
+    if (command !== "get_planning_output") return route.fulfill({ json: { result: {} } });
+    const bytes = body.planningId === "planner-latest" ? latest : previous;
+    const end = body.before ?? bytes.length;
+    const start = body.before !== undefined ? 0 : body.tail && bytes === latest ? split : body.offset;
+    if (body.before !== undefined) await new Promise(resolve => { releaseOlder = resolve; });
+    try { await route.fulfill({ json: { result: { planningId: body.planningId, role: "planner", running: false,
+      content: bytes.subarray(start, end).toString(), startOffset: start, nextOffset: end,
+      totalBytes: bytes.length, complete: end === bytes.length } } }); } catch {}
+  });
+  try {
+    await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.selectHistory);
+    await page.evaluate(() => { window.audit.setRunning(false); window.audit.selectHistory("planner"); });
+    await page.waitForFunction(() => window.audit.planningCacheKeys().includes("regression:planner-previous"));
+    await page.waitForFunction(() => document.querySelector(".planning-activity")?.getAttribute("aria-busy") === "false");
+    const scroller = page.locator("[data-shared-scroll]");
+    assert.equal(await page.locator('[data-transcript-id="boundary-tool-0"]').count(), 0,
+      "the revision boundary must exist even when its first row is virtualized out");
+    await scroller.evaluate(element => {
+      const boundary = element.querySelector('[data-transcript-source-start="planner-latest"]');
+      element.scrollTop += boundary.getBoundingClientRect().top - element.getBoundingClientRect().top + 100;
+      element.dispatchEvent(new WheelEvent("wheel", { deltaY: -60, bubbles: true }));
+    });
+    await page.locator('[data-transcript-id="boundary-tool-0"]').waitFor({ state: "attached" });
+    const boundaryDelta = await scroller.evaluate(element => element.querySelector('[data-transcript-source-start="planner-latest"]').getBoundingClientRect().top -
+      element.querySelector('[data-transcript-id="boundary-tool-0"]').getBoundingClientRect().top);
+    assert.ok(Math.abs(boundaryDelta) <= 2, `virtualized boundary differs from its first row by ${boundaryDelta}px`);
+    for (let i = 0; i < 100 && !releaseOlder; i++) await page.waitForTimeout(20);
+    assert.ok(releaseOlder, "scrolling near the revision starts a prefetch");
+    const before = await page.evaluate(() => window.audit.cachedPlanning().startOffset);
+    releaseOlder(); releaseOlder = undefined;
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => window.audit.cachedPlanning().startOffset), before,
+      "a later text row is not the insertion boundary when tool rows precede it");
+    await scroller.evaluate(element => {
+      const firstTool = element.querySelector('[data-transcript-id="boundary-tool-0"]');
+      element.scrollTop += firstTool.getBoundingClientRect().top - element.getBoundingClientRect().top - 1;
+    });
+    await page.waitForFunction(() => window.audit.cachedPlanning().startOffset === 0);
+    assert.deepEqual(errors, []);
+  } finally { releaseOlder?.(); await context.close(); }
+});
+
+test("a held prefetch does not keep initial history readiness busy", { timeout: 20_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  try {
+    await page.goto(`${origin}/__history?case=heldHistory`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelector("[data-held-ready]")?.dataset.heldReady === "true");
+    assert.equal(await page.locator("[data-held-ready]").getAttribute("data-held-loads"), "0",
+      "do not repeatedly request a page that is already held");
+    await page.evaluate(() => window.audit.releaseHeldHistory());
+    await page.waitForFunction(() => Number(document.querySelector("[data-held-loads]")?.dataset.heldLoads) > 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("planner: slow background revision preloading does not display a paging notice", { timeout: 30_000 }, async () => {
+  const latest = Buffer.from(Array.from({ length: 60 }, (_, i) => assistant(`SILENT_LATEST_${i}`)).join(""));
+  const previous = Buffer.from(assistant("SILENT_PREVIOUS"));
+  let releasePrevious;
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    if (!route.request().url().endsWith("/get_planning_output")) return route.fulfill({ json: { result: {} } });
+    const bytes = body.planningId === "planner-previous" ? previous : latest;
+    if (body.planningId === "planner-previous") await new Promise(resolve => { releasePrevious = resolve; });
+    const start = body.offset ?? 0;
+    try { await route.fulfill({ json: { result: { planningId: body.planningId, role: "planner", running: false,
+      content: bytes.subarray(start).toString(), startOffset: start, nextOffset: bytes.length,
+      totalBytes: bytes.length, complete: true } } }); } catch {}
+  });
+  try {
+    await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.selectHistory);
+    await page.evaluate(() => { window.audit.setRunning(false); window.audit.selectHistory("planner"); });
+    await page.getByText("SILENT_LATEST_59", { exact: true }).waitFor();
+    for (let i = 0; i < 100 && !releasePrevious; i++) await page.waitForTimeout(20);
+    assert.ok(releasePrevious, "the preceding revision is being preloaded");
+    await page.waitForTimeout(450);
+    assert.equal(await page.locator(".transcript-history-status").innerText(), "",
+      "background reads should not suggest that the reader must wait");
+    await page.locator("[data-shared-scroll]").evaluate(element => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+    });
+    await page.locator(".transcript-history-status").filter({ hasText: "Loading earlier records" }).waitFor();
+    releasePrevious(); releasePrevious = undefined;
+    await page.waitForFunction(() => window.audit.planningCacheKeys().includes("regression:planner-previous"));
+    assert.deepEqual(errors, []);
+  } finally { releasePrevious?.(); await context.close(); }
+});
+
+test("planner: retry repeats a failed background preload that the reader requested", { timeout: 30_000 }, async () => {
+  const latest = Buffer.from(Array.from({ length: 60 }, (_, i) => assistant(`PRELOAD_RETRY_LATEST_${i}`)).join(""));
+  const previous = Buffer.from(assistant("PRELOAD_RETRY_PREVIOUS"));
+  let releasePrevious, previousReads = 0;
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    if (!route.request().url().endsWith("/get_planning_output")) return route.fulfill({ json: { result: {} } });
+    const isPrevious = body.planningId === "planner-previous", bytes = isPrevious ? previous : latest;
+    if (isPrevious && ++previousReads === 1) await new Promise(resolve => { releasePrevious = resolve; });
+    const start = body.offset ?? 0;
+    const content = bytes.subarray(start).toString();
+    try { await route.fulfill({ json: { result: { planningId: body.planningId, role: "planner", running: false,
+      content: isPrevious && previousReads === 1 ? content.slice(1) : content, startOffset: start,
+      nextOffset: bytes.length, totalBytes: bytes.length, complete: true } } }); } catch {}
+  });
+  try {
+    await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.selectHistory);
+    await page.evaluate(() => { window.audit.setRunning(false); window.audit.selectHistory("planner"); });
+    await page.getByText("PRELOAD_RETRY_LATEST_59", { exact: true }).waitFor();
+    for (let i = 0; i < 100 && !releasePrevious; i++) await page.waitForTimeout(20);
+    assert.ok(releasePrevious);
+    await page.locator("[data-shared-scroll]").evaluate(element => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+    });
+    await page.locator(".transcript-history-status").filter({ hasText: "Loading earlier records" }).waitFor();
+    releasePrevious(); releasePrevious = undefined;
+    await page.getByRole("alert").waitFor();
+    await page.getByRole("button", { name: "Retry", exact: true }).click();
+    for (let i = 0; i < 100 && previousReads < 2; i++) await page.waitForTimeout(20);
+    assert.equal(previousReads, 2, "retry must issue the failed older read without another scroll gesture");
+    await page.waitForFunction(() => window.audit.planningCacheKeys().includes("regression:planner-previous"));
+    assert.deepEqual(errors, []);
+  } finally { releasePrevious?.(); await context.close(); }
+});
+
+for (const role of ["node", "planner"]) {
+  test(`${role}: retry still recovers an initial output read failure`, { timeout: 20_000 }, async () => {
+    const content = assistant(`RETRY_INITIAL_${role}`), total = Buffer.byteLength(content);
+    let reads = 0;
+    const { context, page, errors } = await newPage(route => {
+      const body = route.request().postDataJSON();
+      if (++reads === 1) return route.fulfill({ status: 500, json: { error: "temporary failure" } });
+      return route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        planningId: body.planningId, role: "planner", content, startOffset: 0, nextOffset: total,
+        totalBytes: total, complete: true, status: "completed", running: false } } });
+    });
+    try {
+      await page.goto(`${origin}/__history?case=${role === "node" ? `transcript&bytes=${total}` : "plannerTranscript"}`, { waitUntil: "domcontentloaded" });
+      await page.getByRole("alert").waitFor();
+      await page.getByRole("button", { name: "Retry", exact: true }).click();
+      await page.getByText(`RETRY_INITIAL_${role}`, { exact: true }).waitFor();
+      assert.ok(reads >= 2);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+
+  test(`${role}: an invalid prefetched page is reported and can be retried without scrolling to it`, { timeout: 30_000 }, async () => {
+    const prefix = Array.from({ length: 20 }, (_, i) => assistant(`RETRY_OLDER_${i}`)).join("");
+    const tail = Array.from({ length: 60 }, (_, i) => assistant(`RETRY_TAIL_${i}`)).join("");
+    const data = Buffer.from(prefix + tail), split = Buffer.byteLength(prefix);
+    let olderReads = 0;
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      const command = new URL(route.request().url()).pathname.slice(5);
+      if (command !== (role === "node" ? "get_execution_output" : "get_planning_output")) return route.fulfill({ json: { result: {} } });
+      const end = body.before ?? data.length;
+      const start = body.before !== undefined ? 0 : body.tail ? split : body.offset;
+      const content = data.subarray(start, end).toString();
+      if (body.before !== undefined) olderReads++;
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        planningId: body.planningId, role: "planner", running: false, status: "completed",
+        content: body.before !== undefined && olderReads === 1 ? content.slice(1) : content,
+        startOffset: start, nextOffset: end, totalBytes: data.length, complete: end === data.length } } });
+    });
+    try {
+      await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.selectHistory);
+      await page.evaluate(role => {
+        window.audit.setRunning(false);
+        if (role === "planner") { window.audit.setPlanningIds(["planner-latest"]); window.audit.selectHistory("planner"); }
+      }, role);
+      await page.waitForFunction(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.startOffset > 0, role);
+      await page.waitForFunction(selector => document.querySelector(selector)?.getAttribute("aria-busy") === "false",
+        role === "node" ? "[data-execution-id]" : ".planning-activity");
+      const scroller = page.locator("[data-shared-scroll]");
+      await scroller.evaluate(element => {
+        const transcript = element.querySelector(".virtualized-transcript-container");
+        element.scrollTop += transcript.getBoundingClientRect().top - element.getBoundingClientRect().top + 150;
+        element.dispatchEvent(new WheelEvent("wheel", { deltaY: -60, bubbles: true }));
+      });
+      for (let i = 0; i < 100 && !olderReads; i++) await page.waitForTimeout(20);
+      assert.equal(olderReads, 1, "approaching the boundary starts the older read");
+      await page.getByRole("alert").waitFor({ timeout: 4000 });
+      await page.getByRole("button", { name: "Retry", exact: true }).click();
+      for (let i = 0; i < 100 && olderReads < 2; i++) await page.waitForTimeout(20);
+      assert.equal(olderReads, 2, "retry repeats the failed page without requiring another gesture");
+      await scroller.evaluate(element => {
+        element.scrollTop = 0;
+        element.dispatchEvent(new WheelEvent("wheel", { deltaY: -60, bubbles: true }));
+      });
+      await page.waitForFunction(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.startOffset === 0, role);
+      assert.ok(olderReads >= 2);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
   });
 }
 
@@ -1875,10 +2261,20 @@ test("actual App preserves scrollback and releases RAM on Node/Conversation navi
       return { id: row.dataset.transcriptId, top: row.getBoundingClientRect().top };
     });
     releaseOlder();
+    await page.waitForTimeout(200);
+    assert.equal(await page.evaluate(() => window.reviewCaches.executionTranscriptCache.get("run-a:exec-run-a")?.startOffset), Buffer.byteLength(prefix),
+      "the fetched page stays outside the layout while its boundary is above the reader");
+    const heldTop = await page.locator(`[data-transcript-id="${anchor.id}"]`).evaluate(row => row.getBoundingClientRect().top);
+    assert.ok(Math.abs(heldTop - anchor.top) <= 3, `Workbench auto-follow dragged the reading anchor ${heldTop - anchor.top}px`);
+    const boundaryTop = await scroller.evaluate((element, id) => {
+      const transcript = element.querySelector(".virtualized-transcript-container");
+      element.scrollTop += transcript.getBoundingClientRect().top - element.getBoundingClientRect().top - 1;
+      return element.querySelector(`[data-transcript-id="${id}"]`).getBoundingClientRect().top;
+    }, anchor.id);
     await page.waitForFunction(() => window.reviewCaches.executionTranscriptCache.get("run-a:exec-run-a")?.startOffset === 0);
     await page.waitForTimeout(200);
     const top = await page.locator(`[data-transcript-id="${anchor.id}"]`).evaluate(row => row.getBoundingClientRect().top);
-    assert.ok(Math.abs(top - anchor.top) <= 3, `Workbench auto-follow dragged the reading anchor ${top - anchor.top}px`);
+    assert.ok(Math.abs(top - boundaryTop) <= 3, `landing the older page moved the reading anchor ${top - boundaryTop}px`);
     await page.emulateMedia({ reducedMotion: "no-preference" });
     const latest = page.getByRole("button", { name: "Latest", exact: true });
     await latest.waitFor({ state: "visible" }); await latest.click();
@@ -1992,6 +2388,83 @@ test("Node navigation keeps history painted after the fade while older pages fil
     }
     assert.deepEqual(errors, []);
   } finally { releaseOlder?.(); await context.close(); }
+});
+
+test("a Node reveal waits for its first viewport fill instead of re-laying out mid-fade", { timeout: 30_000 }, async () => {
+  const config = { repository: "/mock/node-fill", model: "test/old", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const prefix = Array.from({ length: 65 }, (_, i) => startTool(`fill-tool-${i}`, `echo ${i}`) +
+    endTool(`fill-tool-${i}`, `Result ${i}`) + assistant(`FILLED_OLDER_${i}`)).join("");
+  const tail = assistant("FILL_TAIL_ONLY");
+  const data = Buffer.from(prefix + tail), split = Buffer.byteLength(prefix);
+  const snapshot = { ...empty, runId: "node-fill", config, planType: "graph", phase: "completed", approved: true,
+    graph: { originalGoal: "Node fill regression", nodes: [{ name: "paged", task: "Task paged" }], edges: [] },
+    nodes: { paged: { status: "completed", revision: 1, instruction: "", error: null } },
+    executions: [{ id: "paged", node: "paged", status: "completed", output: "", outputBytes: data.length,
+      revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "session-paged", worktree: "/mock", before: "", after: "" }] };
+  const { context, page, errors } = await newPage(async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], repositoryInfo: { path: config.repository, name: "Node fill", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = snapshot; break;
+      case "snapshot_if_changed": result = { version: "1", snapshot: null }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_execution_output": {
+        // A local older read is fast but never synchronous. Keep it inside the
+        // reveal fallback so this asserts the normal path, not the stall path.
+        if (body.before !== undefined) await new Promise(resolve => setTimeout(resolve, 120));
+        const start = body.before !== undefined ? 0 : body.tail ? split : 0;
+        const end = body.before ?? data.length;
+        result = { runId: body.runId, executionId: body.executionId, content: data.subarray(start, end).toString(),
+          startOffset: start, nextOffset: end, totalBytes: data.length, complete: end === data.length, status: "completed" }; break;
+      }
+      default: throw new Error(`Unexpected API ${command}`);
+    }
+    try { await route.fulfill({ json: { result } }); } catch { /* navigation can abort its reader. */ }
+  });
+  try {
+    // The fade is the behavior under test, so opt back into motion.
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.locator(`[data-run-id="${snapshot.runId}"]`).click();
+    await page.locator('.react-flow__node[data-id="paged"]').click();
+    await page.getByText("FILL_TAIL_ONLY", { exact: true }).waitFor();
+    await page.evaluate(() => {
+      window.revealFillFrames = [];
+      window.sampleRevealFill = true;
+      const sample = () => {
+        const scroll = document.querySelector(".initial-query-scroll");
+        if (scroll) {
+          const row = [...scroll.querySelectorAll("[data-transcript-id]")]
+            .find(candidate => candidate.textContent?.includes("FILL_TAIL_ONLY"));
+          window.revealFillFrames.push({ opacity: Number(getComputedStyle(scroll).opacity),
+            rowTop: row?.getBoundingClientRect().top ?? null,
+            filled: scroll.scrollHeight > 2000,
+            status: [...scroll.querySelectorAll(".transcript-history-status")].some(element => element.textContent) });
+        }
+        if (window.sampleRevealFill) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) === 1);
+    await page.waitForTimeout(300);
+    const frames = await page.evaluate(() => { window.sampleRevealFill = false; return window.revealFillFrames; });
+    const fading = frames.filter(frame => frame.opacity > 0.01 && frame.opacity < 0.99);
+    assert.ok(fading.length >= 3, "sample the opacity transition itself");
+    assert.ok(fading.every(frame => frame.filled), "the fill must commit before the fade paints");
+    assert.ok(fading.every(frame => frame.rowTop !== null));
+    const tops = fading.map(frame => frame.rowTop);
+    assert.ok(Math.max(...tops) - Math.min(...tops) <= 1.5,
+      `the newest row must not move while the conversation fades in: ${JSON.stringify(fading)}`);
+    assert.ok(fading.every(frame => !frame.status), "automatic fill stays silent, so it cannot shift the transcript");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
 });
 
 test("actual App stop preserves a sent Planner follow-up and the next unsent draft", { timeout: 45_000 }, async () => {

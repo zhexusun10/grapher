@@ -9,7 +9,7 @@ This page owns maintenance and acceptance methods, **not a published performance
 
 The canonical [event/output contract](../architecture/runtime.md#event-and-output-storage) defines append-only events, UTF-8 byte cursors, metadata-first loading, and page sizes. Browser transcript caching is UI behavior, not a storage limit. Do not maintain a second copy of these limits here.
 
-Legacy output remains readable through per-execution compatibility migration without rewriting historical business events during normal reads. The browser opens selected execution/Planner history from a bounded tail and extends it toward older bytes on upward scroll; `full=true` is reserved for explicit full-output callers. See [store.rs](../../backend/src/store.rs) and [transcriptCache.ts](../../src/services/transcriptCache.ts).
+Legacy output migrates per execution without rewriting historical business events on normal reads. The browser loads a bounded tail and fetches older bytes on upward scroll; `full=true` is reserved for explicit full-output callers. Background fills and revision preloads show no paging notice unless the reader requests history. Pages are validated and user-requested pages stay out of the layout until their insertion point is reached. Revision boundaries survive unloaded or virtualized rows; insertion anchors the first visible row it moves. See [store.rs](../../backend/src/store.rs) and [transcriptCache.ts](../../src/services/transcriptCache.ts).
 
 ## Offline maintenance
 

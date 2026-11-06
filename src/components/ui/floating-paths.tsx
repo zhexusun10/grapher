@@ -2,6 +2,7 @@
 
 import React from "react";
 import { cn } from "@/lib/utils";
+import type { LandingBackground } from "@/services/displayPreferences";
 import "./floating-paths.css";
 
 interface PathData {
@@ -42,11 +43,13 @@ const FloatingPathItem = React.memo(function FloatingPathItem({ path, active }: 
 export function FloatingPathsBackground({
   position,
   active,
+  background = "paths",
   children,
   className,
 }: {
   position: number;
   active: boolean;
+  background?: LandingBackground;
   className?: string;
   children: React.ReactNode;
 }) {
@@ -67,17 +70,19 @@ export function FloatingPathsBackground({
 
   return (
     <div className={cn("w-full relative", className)}>
-      <div className="absolute inset-0 pointer-events-none">
-        <svg
-          className="w-full h-full text-slate-950 dark:text-white"
-          viewBox="0 0 696 316"
-          fill="none"
-          style={{ overflow: "visible" }}
-        >
-          {paths.map((path) => (
-            <FloatingPathItem key={path.id} path={path} active={active} />
-          ))}
-        </svg>
+      <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
+        {background === "paths" && (
+          <svg
+            className="w-full h-full text-slate-950 dark:text-white"
+            viewBox="0 0 696 316"
+            fill="none"
+            style={{ overflow: "visible" }}
+          >
+            {paths.map((path) => (
+              <FloatingPathItem key={path.id} path={path} active={active} />
+            ))}
+          </svg>
+        )}
       </div>
       {children}
     </div>

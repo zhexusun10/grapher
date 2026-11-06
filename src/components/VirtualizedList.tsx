@@ -28,8 +28,9 @@ const MeasuredListRow = memo(function MeasuredListRow({ id, measure, children }:
 /** Window document-flow rows using the *shared parent's* viewport, not a private scroll area.
  * The conversation remains responsible for following output and revealing expanded cards.
  */
-export function VirtualizedList<T extends { id: string }>({ items, renderRow, gap = 0 }: {
+export function VirtualizedList<T extends { id: string }>({ items, renderRow, gap = 0, sourceStarts = [] }: {
   items: T[]; renderRow: (item: T, index: number) => React.ReactNode; gap?: number;
+  sourceStarts?: Array<{ source: string; index: number }>;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const parentRef = useRef<HTMLElement | null>(null);
@@ -77,7 +78,14 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const restoredScrollTop = useRef<number | null>(null);
   const stabilizingAnchorRef = useRef(false);
   const beforeIds = previousOffsetIds.current;
-  const prefixChanged = beforeIds.length > 0 && ids[0] !== beforeIds[0];
+  // Rows can be inserted anywhere in the list, not only at its very start: a
+  // composed Planner conversation pages older bytes of a later revision in
+  // below the turn that precedes it, and a serial conversation pages one Node's
+  // transcript in the middle of several. Any identity change in the rendered
+  // id list means rows were added or removed somewhere, so the reading anchor
+  // is recaptured below instead of trusting `ids[0]` alone.
+  const structureChanged = beforeIds.length > 0 && ids !== beforeIds;
+  const prefixChanged = structureChanged && ids[0] !== beforeIds[0];
   if (prefixChanged) {
     stabilizingAnchorRef.current = true;
   }
@@ -86,12 +94,18 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const readingHistory = !followingLatest && parent?.dataset.transcriptHistoryReading === "true";
   let anchor = !readingHistory || (parent && !stabilizingAnchorRef.current && restoredScrollTop.current !== null && Math.abs(parent.scrollTop - restoredScrollTop.current) > 1)
     ? null : readingAnchor.current;
-  if (readingHistory && prefixChanged && parent && ref.current) {
+  if (readingHistory && structureChanged && parent && ref.current) {
     const top = parent.getBoundingClientRect().top + parent.clientTop - ref.current.getBoundingClientRect().top;
     if (top + parent.clientHeight > 0) {
-      const retained = retainedRowAnchor(beforeIds, ids, previousOffsets.current, offsets, top);
+      const retained = retainedRowAnchor(beforeIds, ids, previousOffsets.current, offsets, top, top + parent.clientHeight);
       const row = retained && ref.current.querySelector<HTMLElement>(`[data-transcript-id="${retained.id.replace(/["\\]/g, "\\$&")}"]`);
-      if (row && retained) anchor = { id: retained.id, visualTop: row.getBoundingClientRect().top };
+      if (row && retained) {
+        anchor = { id: retained.id, visualTop: row.getBoundingClientRect().top };
+        // Newly inserted rows start with estimated heights; keep the anchor
+        // through the measurements that replace them, or the reader is dragged
+        // by the difference a frame later.
+        stabilizingAnchorRef.current = true;
+      }
     }
   }
   const anchorIndex = anchor ? ids.indexOf(anchor.id) : -1;
@@ -241,13 +255,29 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
           cancelGestureTimer();
         }
         const row = ref.current?.querySelector<HTMLElement>(`[data-transcript-id="${gesture.id.replace(/["\\]/g, "\\$&")}"]`);
-        const expectedTop = gesture.visualTop - (parent.scrollTop - gesture.scrollTop);
-        // Release an anchor the reader deliberately scrolled past. Use its
-        // expected position without reflow: the actual row can temporarily be
-        // outside the viewport precisely because the CoT above it grew.
-        if (!row || expectedTop >= bounds.bottom || expectedTop + row.getBoundingClientRect().height <= bounds.top) {
+        if (!row) {
           cancelGestureTimer();
           gestureRowAnchor.current = null;
+        } else {
+          const expectedTop = gesture.visualTop - (parent.scrollTop - gesture.scrollTop);
+          const actualTop = row.getBoundingClientRect().top;
+          // The snapshot is taken before a wheel/touch gesture moves scrollTop,
+          // and the browser can apply that movement over several scroll events.
+          // Rebase once the row itself has not moved relative to the gesture:
+          // otherwise a later layout commit mistakes the gesture's remaining
+          // scroll delta for content resizing and shifts the reader. A real
+          // row resize keeps the old snapshot so the commit can compensate it.
+          if (!gesture.awaitingScroll && Math.abs(actualTop - expectedTop) <= 1) {
+            gesture.visualTop = actualTop;
+            gesture.scrollTop = parent.scrollTop;
+          }
+          // Release an anchor the reader deliberately scrolled past. Use its
+          // expected position without reflow: the actual row can temporarily be
+          // outside the viewport precisely because the CoT above it grew.
+          if (expectedTop >= bounds.bottom || expectedTop + row.getBoundingClientRect().height <= bounds.top) {
+            cancelGestureTimer();
+            gestureRowAnchor.current = null;
+          }
         }
       }
       if (!stabilizingAnchorRef.current && parent && restoredScrollTop.current !== null && Math.abs(parent.scrollTop - restoredScrollTop.current) > 1) releaseAnchor();
@@ -320,7 +350,13 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       }
       updateViewport();
     } else if (bottomPinnedNow && parent) {
-      if (before !== offsets) parent.scrollTop = parent.scrollHeight;
+      if (before !== offsets) {
+        parent.scrollTop = parent.scrollHeight;
+        // A follower's own pin is not the reader scrolling back down. Report it
+        // like any other row-height correction so a gesture that just turned
+        // following off cannot be undone by a scroll it did not make.
+        parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
+      }
       updateViewport();
     }
     // Keep the row under the user's gesture steady as rows above it resize.
@@ -336,15 +372,23 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
           gesture.awaitingScroll = false;
         }
         if (!gesture.awaitingScroll) {
-          // The snapshot is taken before the gesture moves scrollTop. Compare
-          // actual geometry rather than cached heights so a measurement already
-          // pending at that moment is not compensated twice.
-          const expectedTop = gesture.visualTop - (parent.scrollTop - gesture.scrollTop);
-          const delta = row.getBoundingClientRect().top - expectedTop;
-          if (Math.abs(delta) > 1) {
-            parent.scrollTop += delta;
-            parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
+          // Only a measured row change justifies moving scrollTop here. A route,
+          // pane or animation re-render can momentarily report different
+          // geometry while the commit settles; compensating that transient
+          // would move a reader whose conversation did not actually change.
+          if (hasResize) {
+            // The snapshot is taken before the gesture moves scrollTop. Compare
+            // actual geometry rather than cached heights so a measurement already
+            // pending at that moment is not compensated twice.
+            const expectedTop = gesture.visualTop - (parent.scrollTop - gesture.scrollTop);
+            const delta = row.getBoundingClientRect().top - expectedTop;
+            if (Math.abs(delta) > 1) {
+              parent.scrollTop += delta;
+              parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
+            }
           }
+          // Rebase either way, so a later unrelated commit cannot apply this
+          // gesture's stale measurement to a settled viewport.
           gesture.visualTop = row.getBoundingClientRect().top;
           gesture.scrollTop = parent.scrollTop;
         }
@@ -369,8 +413,12 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const top = anchorTop ?? (pinnedToBottom ? Math.max(viewport.top, totalHeight - height) : viewport.top);
   const range = virtual ? visibleRows(offsets, top, height, 16)
     : { start: 0, end: items.length, paddingTop: 0, paddingBottom: 0 };
-  return <div ref={ref} style={{ display: "flex", flexDirection: "column", gap,
+  return <div ref={ref} style={{ display: "flex", flexDirection: "column", gap, position: "relative",
     paddingTop: range.paddingTop, paddingBottom: range.paddingBottom, overflowAnchor: "none" }}>
+    {/* These zero-height boundaries survive row virtualization and identify
+        tool-only, empty, and not-yet-loaded Planner revisions as well. */}
+    {sourceStarts.map(({ source, index }) => <span key={source} aria-hidden="true" data-transcript-source-start={source}
+      style={{ position: "absolute", top: offsets[index] ?? totalHeight, height: 0, pointerEvents: "none" }} />)}
     {items.slice(range.start, range.end).map((item, index) =>
       <MeasuredListRow key={item.id} id={item.id} measure={measure}>{renderRow(item, range.start + index)}</MeasuredListRow>)}
   </div>;

@@ -1,4 +1,5 @@
 import { createWorkspacePaths } from './workspace-paths.mjs';
+import { plannerSteerContext } from './planner-steer.ts';
 import { registerWorkspaceTools } from './workspace-tools.ts';
 import { configurePlannerWorkspace, onPlannerWorkspaceChanged, plannerWorkspaceState, switchPlannerWorkspace } from './planner-workspace.ts';
 import { managedLaunch, managedBashOptions, managedBashCommand } from './launch-binding.mjs';
@@ -92,6 +93,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   const planner = process.env.GRAPHER_MODE === 'planner';
+  // Correlation is retained in Pi's stored user turn for replay and recovery,
+  // but must not change the prompt sent to the model on this or later turns.
+  if (planner) pi.on('context', event => ({ messages: plannerSteerContext(event.messages) }));
   const plannerWriteTools = process.env.GRAPHER_PLANNER_WRITE_TOOLS === 'true';
   const partition = process.env.GRAPHER_MODE === 'partition';
   const graph = process.env.GRAPHER_EXECUTION_KIND === 'graph';

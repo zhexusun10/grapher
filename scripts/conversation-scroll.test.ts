@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { smoothScrollToLatest } from "../src/services/smoothConversationScroll.ts";
+import { syncOverscrollContainment } from "../src/services/transcriptScroll.ts";
 import {
   CONVERSATION_BOTTOM_THRESHOLD,
   calculateExpandedCardScrollDelta,
@@ -13,6 +14,28 @@ import {
 
 const metrics = (scrollTop: number, scrollHeight: number, clientHeight: number): ScrollMetrics =>
   ({ scrollTop, scrollHeight, clientHeight });
+
+test("a nested scroll box only contains the axes that can actually move", () => {
+  // `overscroll-behavior: contain` on a box with no scroll range makes Chromium
+  // swallow the wheel instead of chaining it to the conversation.
+  const box = (height: number, width: number) => ({
+    clientHeight: 50, scrollHeight: height, clientWidth: 100, scrollWidth: width,
+    style: {} as CSSStyleDeclaration,
+  }) as unknown as HTMLElement;
+  const short = box(50, 100);
+  syncOverscrollContainment(short);
+  assert.equal(short.style.overscrollBehaviorY, "auto");
+  assert.equal(short.style.overscrollBehaviorX, "auto");
+  const tall = box(80, 100);
+  syncOverscrollContainment(tall);
+  assert.equal(tall.style.overscrollBehaviorY, "contain");
+  assert.equal(tall.style.overscrollBehaviorX, "auto");
+  const wide = box(50, 160);
+  syncOverscrollContainment(wide);
+  assert.equal(wide.style.overscrollBehaviorY, "auto");
+  assert.equal(wide.style.overscrollBehaviorX, "contain");
+  syncOverscrollContainment(null);
+});
 
 test("distanceFromBottom measures the remaining scroll range", () => {
   assert.equal(distanceFromBottom(metrics(0, 1000, 200)), 800);

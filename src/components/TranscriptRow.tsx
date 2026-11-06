@@ -17,8 +17,9 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
 }) {
   const expand = useCallback((value: boolean, card?: HTMLElement) => onExpandedChange(item.id, value, card), [item.id, onExpandedChange]);
   // Keep execution rows in the exact same layout as the Planner transcript:
-  // rows sit directly in the shared list (which owns the 8px card rhythm),
+  // rows sit directly in the shared list (which owns the 10px card rhythm),
   // and text uses the shared chat bubble classes.
+  if (item.type === "divider") return <div className="transcript-divider" role="separator" aria-hidden="true" />;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
   if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={item.status === "running"}
     title="Chain of Thought"

@@ -14,10 +14,23 @@ const assistant = (text: string) => line({ type: "message_end", message: { role:
 function Fixture() {
   const graph = new URLSearchParams(location.search).get("mode") === "graph";
   const paged = new URLSearchParams(location.search).get("paged") === "true";
-  const [output, setOutput] = useState(assistant("OUTPUT BEFORE STEER"));
-  const [messages, setMessages] = useState<ChatMessage[]>([{ id: "initial", role: "user", text: "Original task" }]);
-  const [events, setEvents] = useState<Snapshot["events"]>([]);
-  const [running, setRunning] = useState(true);
+  // A settled reload with a consumed steer already in the transcript: its
+  // inline row and the outer fallback card must not both render.
+  const presettled = new URLSearchParams(location.search).get("presettled") === "true";
+  const beforeSteer = assistant("OUTPUT BEFORE STEER");
+  const steerLine = line({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "CONSUMED STEER" }] } });
+  const [output, setOutput] = useState(presettled
+    ? beforeSteer + steerLine + assistant("OUTPUT AFTER STEER")
+    : beforeSteer);
+  const [messages, setMessages] = useState<ChatMessage[]>(presettled
+    ? [{ id: "initial", role: "user", text: "Original task" },
+      { id: "consumed", role: "user", text: "CONSUMED STEER", node: "task", runId: "steer-run",
+        delivery: "steered", executionId: "exec", steerOrdinal: 0, inlineSteerOrdinal: 0 }]
+    : [{ id: "initial", role: "user", text: "Original task" }]);
+  const [events, setEvents] = useState<Snapshot["events"]>(presettled
+    ? [{ type: "steered", sequence: 1, timestamp: 1, node: "task", execution_id: "exec", instruction: "CONSUMED STEER" }]
+    : []);
+  const [running, setRunning] = useState(!presettled);
   const audit = ((window as any).steerAudit = {});
   audit.consume = (text: string) => setOutput(previous => previous + line({ type: "message_start", message: { role: "user", content: [{ type: "text", text }] } }) + assistant("OUTPUT AFTER STEER"));
   audit.settle = () => setRunning(false);

@@ -68,11 +68,9 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
         if (!copyBtn.isConnected) return;
         clearTimeout(copyTimers.current.get(copyBtn));
         copyBtn.classList.add("copied");
-        copyBtn.title = t("已复制");
         copyBtn.setAttribute("aria-label", t("已复制"));
         copyTimers.current.set(copyBtn, setTimeout(() => {
           copyBtn.classList.remove("copied");
-          copyBtn.title = copyLabel;
           copyBtn.setAttribute("aria-label", copyLabel);
           copyTimers.current.delete(copyBtn);
         }, 1800));
@@ -97,7 +95,7 @@ function addCodeCopyButtons(html: string, label: string): string {
   const escapedLabel = escapeHtml(label);
   // Decorate parsed block code only; leave inline code and cached Markdown HTML unchanged.
   return html.replace(/<pre\b[^>]*>\s*<code\b[^>]*>[\s\S]*?<\/code>\s*<\/pre>/gi, block =>
-    `<div class="code-block-wrapper">${block}<button type="button" class="code-copy-btn" title="${escapedLabel}" aria-label="${escapedLabel}">` +
+    `<div class="code-block-wrapper">${block}<button type="button" class="code-copy-btn" aria-label="${escapedLabel}">` +
     '<svg class="code-copy-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>' +
     '<svg class="code-copy-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m5 12 4 4L19 6"/></svg></button></div>');
 }

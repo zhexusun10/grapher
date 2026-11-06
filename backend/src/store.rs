@@ -35,6 +35,8 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::PlannerReviewProgress { .. } => "planner_review_progress",
         EventKind::PlannerPreviewProgress { .. } => "planner_preview_progress",
         EventKind::PlannerTurnProgress { .. } => "planner_turn_progress",
+        EventKind::PlannerSteerSubmitted { .. } => "planner_steer_submitted",
+        EventKind::PlannerSteerStatus { .. } => "planner_steer_status",
         EventKind::PlannerReviewFinished { .. } => "planner_review_finished",
         EventKind::PlannerTurnAborted { .. } => "planner_turn_aborted",
         EventKind::PlannerWorkspaceSelected { .. } => "planner_workspace_selected",
@@ -629,6 +631,55 @@ impl Store {
             }
         }
         Ok(false)
+    }
+
+    /// Terminal heads that a durable `PublicationCompleted` delivered, derived
+    /// from the event log rather than a checkpoint. A checkpoint written before
+    /// delivered heads were accumulated would otherwise let a later publication
+    /// retry a result whose internal Git objects are already reclaimed.
+    pub fn delivered_heads(&self, run_id: &str) -> Result<Vec<String>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT payload FROM events
+                 WHERE run_id=?1 AND kind IN ('publication_started','publication_completed')
+                 ORDER BY sequence",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([run_id], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        let mut pending: Vec<String> = Vec::new();
+        let mut delivered: Vec<String> = Vec::new();
+        for payload in rows {
+            let Ok(value) =
+                serde_json::from_str::<serde_json::Value>(&payload.map_err(|e| e.to_string())?)
+            else {
+                continue;
+            };
+            match value["type"].as_str() {
+                Some("publication_started") => {
+                    pending = value["heads"]
+                        .as_array()
+                        .map(|heads| {
+                            heads
+                                .iter()
+                                .filter_map(|head| head.as_str().map(str::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                }
+                Some("publication_completed") => {
+                    for head in pending.drain(..) {
+                        if !delivered.contains(&head) {
+                            delivered.push(head);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(delivered)
     }
 
     pub fn load(&self, run_id: &str) -> Result<Snapshot, String> {

@@ -90,12 +90,13 @@ test("Markdown cannot execute HTML handlers or reach local APIs in live or repla
           `<svg onload="${handler}"></svg><a href="&#x6a;avascript:window.audit.xss++">unsafe link</a>` +
           '<iframe srcdoc="<script>parent.audit.xss++</script>"></iframe>', streaming);
       }, streaming);
-      await page.locator(".markdown-content a").waitFor();
-      await page.locator(".markdown-content a").click();
+      // A non-web href is reduced to its text, so nothing here is navigable.
+      await page.getByText("unsafe link", { exact: true }).waitFor();
+      await page.getByText("unsafe link", { exact: true }).click();
       await page.waitForTimeout(100);
       assert.equal(await page.evaluate(() => window.audit.xss), 0);
       assert.equal(await page.locator(".markdown-content [onerror], .markdown-content [onload], .markdown-content iframe, .markdown-content svg").count(), 0);
-      assert.equal(await page.locator(".markdown-content a").getAttribute("href"), null);
+      assert.equal(await page.locator(".markdown-content a").count(), 0);
     }
     assert.deepEqual(apiCalls, []);
     assert.deepEqual(errors, []);
@@ -258,6 +259,15 @@ test("polling graph metadata cannot overwrite an open editor draft", { timeout: 
     await page.evaluate(() => window.audit.open());
     await page.waitForFunction(() => document.querySelector(".json-editor")?.value.includes("Polled graph"));
     assert.ok((await editor.inputValue()).includes("Polled graph"), "reopening starts a new draft session");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a click outside the Graph IR editor still reaches the backdrop and closes it", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("editor");
+  try {
+    await page.mouse.click(5, 5);
+    await page.locator(".modal").waitFor({ state: "detached" });
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -442,11 +452,16 @@ for (const type of ["thinking", "tool"]) {
           // Reload to reset presentation history before the first live presentation.
           await page.reload({ waitUntil: "domcontentloaded" });
           await page.waitForFunction(() => !!window.audit?.showCards);
-          await page.addStyleTag({ content: ".appear-active { animation-duration: 10s !important; }" });
+          await page.addStyleTag({ content: ".appear-active, .card-reveal.entering { animation-duration: 10s !important; }" });
           await page.evaluate(() => window.audit.showCards());
           await card.waitFor({ state: "attached" });
           assert.equal(await pauseCardEntrance(card), reducedMotion === "no-preference",
             "StrictMode must not consume presentation before commit; reduced motion disables entrance");
+          // The card takes its height over the entrance so the rows above are
+          // pushed up instead of jumping; reduced motion reserves it at once.
+          assert.equal(await page.locator(".card-reveal").last().evaluate(reveal => reveal.getAnimations()
+            .some(animation => animation.animationName === "transcript-card-reveal")), reducedMotion === "no-preference",
+          "a presented card grows into its height unless motion is reduced");
           assert.deepEqual(errors, []);
         } finally { await context.close(); }
       }
@@ -456,7 +471,7 @@ for (const type of ["thinking", "tool"]) {
 
 for (const view of ["serial", "node"]) {
   for (const completion of ["during", "after"]) {
-    test(`${view} tool card stays steady while its entrance plays naturally and completes ${completion} entrance`, { timeout: 30_000 }, async () => {
+    test(`${view} tool card entrance pushes the older rows up while it completes ${completion} entrance`, { timeout: 30_000 }, async () => {
       const { context, page, errors } = await fixture(`latestScroll&layout=live-tool&view=${view}`, undefined, "no-preference");
       try {
         const scroller = page.locator(".initial-query-scroll");
@@ -481,8 +496,11 @@ for (const view of ["serial", "node"]) {
                 const rect = card.getBoundingClientRect();
                 const style = getComputedStyle(card);
                 const dy = style.transform === "none" ? 0 : new DOMMatrix(style.transform).m42;
+                const row = card.closest("[data-transcript-id]");
+                // The row above the new card: its glide upward is the entrance.
+                const priorTop = row?.previousElementSibling?.getBoundingClientRect().top ?? null;
                 samples.push({ top: rect.top, layoutTop: rect.top - dy, height: card.offsetHeight,
-                  scrollTop: scroll.scrollTop, rowHeight: card.closest("[data-transcript-id]").offsetHeight });
+                  scrollTop: scroll.scrollTop, rowHeight: row.offsetHeight, priorTop });
                 const progress = entrance?.effect.getComputedTiming().progress;
                 if (!executionStarted && (progress >= 0.2 || entrance?.playState === "finished")) {
                   executionStarted = true;
@@ -505,12 +523,24 @@ for (const view of ["serial", "node"]) {
         }, completion);
         assert.ok(samples.sawEntrance && samples.settled, "exercise a real, unpaused entrance and tool completion");
         const frames = samples.samples;
-        assert.ok(Math.max(...frames.map(frame => frame.layoutTop)) - Math.min(...frames.map(frame => frame.layoutTop)) <= 1,
-          `appearance/activity must not move the card's layout anchor: ${JSON.stringify(frames)}`);
-        assert.ok(frames.every((frame, index) => index === 0 || frame.top <= frames[index - 1].top + 1),
+        const steps = (values, compare) => values.every((value, index) => index === 0 || compare(value, values[index - 1]));
+        const rises = (value, previous) => value <= previous + 1;
+        const grows = (value, previous) => value >= previous - 1;
+        // The card is presented with its own height instead of reserving all of
+        // it in one frame, so the rows above glide up with it and the measured
+        // row follows that growth. Neither may overshoot and snap back, and a
+        // later status/content update must not reverse the motion.
+        assert.ok(steps(frames.map(frame => frame.top), rises) && steps(frames.map(frame => frame.layoutTop), rises),
           `the natural entrance must not bounce back down: ${JSON.stringify(frames)}`);
-        assert.ok(frames.every(frame => frame.height === frames[0].height && frame.rowHeight === frames[0].rowHeight),
-          "tool completion cannot disturb measured row height");
+        assert.ok(steps(frames.map(frame => frame.height), grows) && steps(frames.map(frame => frame.rowHeight), grows),
+          `the entrance must only add card height: ${JSON.stringify(frames)}`);
+        const priorTops = frames.map(frame => frame.priorTop).filter(top => top !== null);
+        assert.ok(priorTops.length > 2 && priorTops.every((top, index) => index === 0 || top <= priorTops[index - 1] + 1),
+          `the rows above a presented card must only move up: ${JSON.stringify(frames)}`);
+        const pushedUp = priorTops[0] - priorTops.at(-1);
+        const biggestStep = Math.max(...priorTops.slice(1).map((top, index) => priorTops[index] - top));
+        assert.ok(pushedUp > 1 && biggestStep < pushedUp,
+          `a presented card must push the older rows up over its entrance, not in one frame: ${JSON.stringify(frames)}`);
         assert.deepEqual(errors, []);
       } finally { await context.close(); }
     });
@@ -654,6 +684,200 @@ for (const type of ["tool", "thinking"]) {
   });
 }
 
+test("clicking a reasoning card leaves keyboard focus in the composer", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=thinking-card");
+  try {
+    const card = page.locator(".thinking-card");
+    const header = card.locator(".thinking-card-header");
+    const input = page.locator(".pane-bottom-chat textarea");
+    await card.waitFor();
+    await input.fill("Unsaved draft");
+    const before = await header.getAttribute("aria-expanded");
+    await header.click();
+    await page.waitForTimeout(300);
+    assert.notEqual(await header.getAttribute("aria-expanded"), before, "the click still toggles the card");
+    assert.equal(await input.evaluate(element => document.activeElement === element), true,
+      "a disclosure click must not move Enter/Space handling away from the composer");
+    assert.equal(await input.inputValue(), "Unsaved draft");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a pointer send does not flash the Stop control under the cursor", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=live-tool");
+  try {
+    const input = page.locator(".pane-bottom-chat textarea");
+    const send = page.locator(".pane-bottom-chat .prompt-box-send-btn");
+    await input.fill("STEER AFTER POINTER SEND");
+    await send.click();
+    assert.equal(await send.evaluate(element => element.classList.contains("working")), false,
+      "the click keeps the send affordance briefly instead of repainting the same spot red");
+    await page.waitForTimeout(700);
+    assert.equal(await send.evaluate(element => element.classList.contains("working")), true,
+      "the live Stop control appears after the pointer grace period");
+    await input.fill("STEER AGAIN");
+    await send.click();
+    assert.equal(await send.evaluate(element => element.classList.contains("working")), false);
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(100);
+    assert.equal(await send.evaluate(element => element.classList.contains("working")), true,
+      "moving the pointer away releases the grace early");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const name of ["prompt", "compactPrompt", "interruptPrompt"]) {
+  test(`${name}: a new draft can be sent immediately during pointer grace`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(name);
+    try {
+      await page.clock.install();
+      await page.clock.pauseAt(await page.evaluate(() => Date.now() + 10_000));
+      const input = page.locator("textarea");
+      const send = page.locator(".prompt-box-send-btn");
+      await input.fill("First message");
+      await send.click();
+      await page.clock.runFor(30);
+      assert.equal(await page.evaluate(() => window.audit.submissions), 1);
+      await input.fill("Immediate next message");
+      assert.equal(await send.isDisabled(), false);
+      await send.click();
+      await page.clock.runFor(30);
+      assert.equal(await page.evaluate(() => window.audit.submissions), 2,
+        "a visible enabled send control must not swallow a new message");
+      if (name === "interruptPrompt") assert.equal(await page.evaluate(() => window.audit.interrupts), 0,
+        "sending a new steer must not interrupt the execution");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("a keyboard send exposes Stop as soon as its submission settles", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("interruptPrompt");
+  try {
+    await page.clock.install();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 10_000));
+    const input = page.locator("textarea");
+    await input.fill("Keyboard steer");
+    await input.press("Enter");
+    await page.clock.runFor(50);
+    assert.equal(await page.evaluate(() => window.audit.submissions), 1);
+    const stop = page.getByRole("button", { name: "Click to interrupt execution", exact: true });
+    assert.equal(await stop.count(), 1, "pointer-only grace must not hide Stop after a keyboard submission");
+    assert.equal(await stop.isDisabled(), false);
+    await stop.click();
+    assert.equal(await page.evaluate(() => window.audit.interrupts), 1);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("leaving the send button during a pending request releases pointer grace", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("interruptPrompt");
+  try {
+    await page.clock.install();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 10_000));
+    await page.evaluate(() => { window.audit.deferSubmit = true; });
+    await page.locator("textarea").fill("Pending pointer steer");
+    await page.locator(".prompt-box-send-btn").click();
+    const sending = page.getByRole("button", { name: "Sending…", exact: true });
+    assert.equal(await sending.isDisabled(), true);
+    await page.mouse.move(0, 0);
+    await page.evaluate(() => window.audit.resolve(true));
+    await page.clock.runFor(50);
+    const stop = page.getByRole("button", { name: "Click to interrupt execution", exact: true });
+    assert.equal(await stop.count(), 1, "do not restart pointer grace after the pointer has left");
+    assert.equal(await stop.isDisabled(), false);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("an attachment-only draft can be sent immediately during pointer grace", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("prompt");
+  try {
+    await page.clock.install();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 10_000));
+    const input = page.locator("textarea"), send = page.locator(".prompt-box-send-btn");
+    await input.fill("First message");
+    await send.click();
+    await page.clock.runFor(30);
+    await page.locator('input[type="file"]').setInputFiles({ name: "evidence.txt", mimeType: "text/plain", buffer: Buffer.from("evidence") });
+    await page.locator(".prompt-box-file-badge").waitFor();
+    assert.equal(await input.inputValue(), "");
+    assert.equal(await send.isDisabled(), false);
+    await send.click();
+    for (let i = 0; i < 20 && await page.evaluate(() => window.audit.submissions) < 2; i++) {
+      await page.clock.runFor(10);
+      // The mocked upload runs on the Node side, whose wall clock is not frozen.
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
+    assert.equal(await page.evaluate(() => window.audit.submissions), 2);
+    assert.match(await page.evaluate(() => window.audit.lastMessage), /^@grapher-attachments\//);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a rejected send can be retried immediately during pointer grace", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("prompt");
+  try {
+    await page.clock.install();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 10_000));
+    await page.evaluate(() => { window.audit.deferSubmit = true; });
+    const input = page.locator("textarea"), send = page.locator(".prompt-box-send-btn");
+    await input.fill("Retry this draft");
+    await send.click();
+    await page.evaluate(() => window.audit.resolve(false));
+    for (let i = 0; i < 10 && await input.isDisabled(); i++) await page.clock.runFor(20);
+    assert.equal(await input.inputValue(), "Retry this draft");
+    assert.equal(await send.isDisabled(), false);
+    await send.click();
+    await page.clock.runFor(30);
+    assert.equal(await page.evaluate(() => window.audit.submissions), 2,
+      "an enabled retry must not be blocked by the earlier pointer grace");
+    await page.evaluate(() => window.audit.resolve(true));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("pending sends expose a localized busy label", { timeout: 30_000 }, async () => {
+  for (const [language, label] of [["en", "Sending…"], ["zh-CN", "正在发送…"]]) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+    await context.addInitScript(value => localStorage.setItem("grapher_language_v1", value), language);
+    const page = await context.newPage(), errors = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    try {
+      await page.goto(`${origin}/__audit?case=prompt`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.setValue);
+      await page.evaluate(() => { window.audit.deferSubmit = true; });
+      const input = page.locator("textarea");
+      await input.fill("Pending"); await input.press("Enter");
+      const sending = page.getByRole("button", { name: label, exact: true });
+      await sending.waitFor();
+      assert.equal(await sending.isDisabled(), true);
+      assert.equal(await sending.getAttribute("aria-busy"), "true");
+      await page.evaluate(() => window.audit.resolve(false));
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  }
+});
+
+test("clicking a tool card leaves keyboard focus in the composer", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=tool-card");
+  try {
+    const card = page.locator(".tool-call-card");
+    const header = card.locator(".tool-call-header");
+    const input = page.locator(".pane-bottom-chat textarea");
+    await card.waitFor();
+    await input.fill("Unsaved draft");
+    const before = await header.getAttribute("aria-expanded");
+    await header.click();
+    await page.waitForTimeout(300);
+    assert.notEqual(await header.getAttribute("aria-expanded"), before, "the click still toggles the card");
+    assert.equal(await input.evaluate(element => document.activeElement === element), true,
+      "a tool disclosure click must not move Enter/Space handling away from the composer");
+    assert.equal(await input.inputValue(), "Unsaved draft");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("a tall thinking card expands without pulling its visible header on a short pane", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("latestScroll&layout=thinking-card", undefined, "no-preference");
   try {
@@ -750,6 +974,175 @@ test("expanding a thinking card while following keeps the conversation at the bo
     await page.getByText("FOLLOW_AFTER_COT", { exact: true }).waitFor();
     await page.waitForTimeout(300);
     assert.ok(await bottomGap() <= 2, "new output still follows after the expansion");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const view of ["serial", "node", "planner"]) {
+  for (const motion of ["reduce", "no-preference"]) {
+    test(`${view} completed reasoning opens at its newest line while following (${motion})`, { timeout: 30_000 }, async () => {
+      const name = view === "planner" ? "plannerRoute&longThinking=1" : `latestScroll&layout=thinking-card&view=${view}`;
+      const { context, page, errors } = await fixture(name, undefined, motion, view === "planner" ? false : undefined);
+      try {
+        const card = page.locator(".thinking-card");
+        const header = card.locator(".thinking-card-header");
+        const body = card.locator(".thinking-card-body");
+        const scroller = page.locator(".initial-query-scroll");
+        const input = page.locator(".pane-bottom-chat textarea");
+        await card.waitFor();
+        await input.fill("Unsent draft");
+        await page.waitForTimeout(400);
+        assert.equal(await header.getAttribute("aria-expanded"), "false");
+        assert.ok(await scroller.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight) <= 2);
+        await header.click();
+        await body.waitFor();
+        await page.waitForTimeout(450);
+        const state = await body.evaluate(el => {
+          const scroll = el.closest(".initial-query-scroll"), view = scroll.getBoundingClientRect();
+          const composer = el.closest(".initial-query-view").querySelector(".pane-bottom-chat").getBoundingClientRect();
+          const line = [...el.querySelectorAll("p")].find(p => p.textContent === "Card output line 29")?.getBoundingClientRect();
+          return { innerGap: el.scrollHeight - el.scrollTop - el.clientHeight,
+            outerGap: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+            lineVisible: !!line && line.top >= Math.max(view.top, el.getBoundingClientRect().top) &&
+              line.bottom <= Math.min(view.bottom, composer.top, el.getBoundingClientRect().bottom) + 1 };
+        });
+        assert.ok(state.outerGap <= 2 && state.innerGap <= 2 && state.lineVisible,
+          `opening must show the last reasoning line and keep the conversation at its bottom: ${JSON.stringify(state)}`);
+        assert.equal(await input.evaluate(el => document.activeElement === el), true,
+          "opening a card must not move keyboard focus out of the composer");
+        assert.deepEqual(errors, []);
+      } finally { await context.close(); }
+    });
+  }
+}
+
+for (const motion of ["reduce", "no-preference"]) {
+  test(`an initially expanded Planner reasoning card opens on its newest line (${motion})`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture("plannerRoute&longThinking=1", undefined, motion, true);
+    try {
+      const body = page.locator(".thinking-card-body");
+      await body.waitFor();
+      await page.waitForTimeout(450);
+      const state = await body.evaluate(el => {
+        const scroll = el.closest(".initial-query-scroll");
+        const line = [...el.querySelectorAll("p")].find(p => p.textContent === "Card output line 29")?.getBoundingClientRect();
+        const view = scroll.getBoundingClientRect(), body = el.getBoundingClientRect();
+        const composer = el.closest(".initial-query-view").querySelector(".pane-bottom-chat").getBoundingClientRect();
+        return { innerGap: el.scrollHeight - el.scrollTop - el.clientHeight,
+          outerGap: scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+          lineVisible: !!line && line.top >= Math.max(view.top, body.top) &&
+            line.bottom <= Math.min(view.bottom, composer.top, body.bottom) + 1 };
+      });
+      assert.ok(state.innerGap <= 2 && state.outerGap <= 2 && state.lineVisible,
+        `an initially expanded card must show its last line: ${JSON.stringify(state)}`);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("reopening completed reasoning resets to the newest line without overriding an inner reader", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=thinking-card&view=node", undefined, "no-preference");
+  try {
+    const card = page.locator(".thinking-card");
+    const header = card.locator(".thinking-card-header");
+    const body = card.locator(".thinking-card-body");
+    const scroller = page.locator(".initial-query-scroll");
+    await card.waitFor();
+    await page.waitForTimeout(400);
+    await header.click();
+    await body.waitFor();
+    await page.waitForTimeout(450);
+    await body.hover();
+    await page.mouse.wheel(0, -200);
+    await page.waitForTimeout(200);
+    const reading = await body.evaluate(el => ({ top: el.scrollTop, gap: el.scrollHeight - el.scrollTop - el.clientHeight }));
+    assert.ok(reading.gap > 100, `the reader moved to an earlier line: ${JSON.stringify(reading)}`);
+    await page.evaluate(() => window.audit.appendToolEvents([{
+      type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "OUTPUT_AFTER_READING_COT" }] },
+    }]));
+    await page.getByText("OUTPUT_AFTER_READING_COT", { exact: true }).waitFor();
+    await page.waitForTimeout(250);
+    assert.ok(Math.abs(await body.evaluate(el => el.scrollTop) - reading.top) <= 2,
+      "new conversation output must not pull an inner reader back to the latest line");
+    assert.ok(await scroller.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight) <= 2,
+      "an inner reader does not stop the conversation following its own output");
+    await header.click();
+    await body.waitFor({ state: "detached" });
+    await header.click();
+    await body.waitFor();
+    await page.waitForTimeout(350);
+    assert.ok(await body.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight) <= 2,
+      "explicitly reopening the card starts at its newest line again");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("backfilled reasoning in an already open card shows its newest line", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("thinking", undefined, "reduce", true);
+  try {
+    const views = [page.locator('[data-thinking-view="live"]'), page.locator('[data-thinking-view="history"]')];
+    await page.evaluate(() => {
+      window.audit.append({ type: "message_start", message: { role: "assistant", content: [] } });
+      window.audit.append({ type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } });
+    });
+    for (const view of views) await view.locator(".thinking-shimmer").waitFor();
+    await page.evaluate(() => window.audit.append({ type: "message_update", assistantMessageEvent: {
+      type: "thinking_end", contentIndex: 0, content: "",
+    } }));
+    for (const view of views) await view.locator(".thinking-no-output").waitFor();
+    const reasoning = Array.from({ length: 40 }, (_, index) => `BACKFILLED_REASON_${index}`).join("\n\n");
+    await page.evaluate(reasoning => window.audit.append({ type: "message_end", message: {
+      role: "assistant", content: [{ type: "thinking", thinking: reasoning }],
+    } }), reasoning);
+    for (const view of views) {
+      const body = view.locator(".thinking-card-body");
+      await body.getByText("BACKFILLED_REASON_39", { exact: true }).waitFor({ state: "attached" });
+      await page.waitForTimeout(100);
+      const gap = await body.evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight);
+      assert.ok(gap <= 2, `a completed backfill should show its latest line: ${gap}`);
+    }
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a reasoning body observed after its empty placeholder follows late layout growth", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("latestScroll&layout=live-empty&view=node");
+  try {
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_start", message: { role: "assistant", content: [] } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+    ]));
+    await page.locator(".thinking-shimmer").waitFor();
+    await page.evaluate(() => window.audit.appendToolEvents([{
+      type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Layout seed" },
+    }]));
+    const body = page.locator(".thinking-card-body");
+    await body.getByText("Layout seed").waitFor();
+    // Model an image or other asynchronously sized Markdown content, without
+    // appending another text delta that would independently pin the body.
+    await body.evaluate(el => {
+      const block = document.createElement("div");
+      block.style.height = "1000px";
+      el.querySelector(".thinking-content-container").append(block);
+    });
+    await page.waitForTimeout(200);
+    const afterGrowth = await body.evaluate(el => ({ top: el.scrollTop, gap: el.scrollHeight - el.scrollTop - el.clientHeight }));
+    assert.ok(afterGrowth.top > 100 && afterGrowth.gap <= 2,
+      `late layout growth must show the newest line: ${JSON.stringify(afterGrowth)}`);
+    await body.evaluate(el => {
+      el.dispatchEvent(new WheelEvent("wheel", { deltaY: -160, bubbles: true }));
+      el.scrollTop -= 160;
+    });
+    const readingTop = await body.evaluate(el => el.scrollTop);
+    await body.evaluate(el => {
+      const block = document.createElement("div");
+      block.style.height = "200px";
+      el.querySelector(".thinking-content-container").append(block);
+    });
+    await page.waitForTimeout(200);
+    assert.ok(Math.abs(await body.evaluate(el => el.scrollTop) - readingTop) <= 2,
+      "late layout growth must not override an inner reading gesture");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -2500,7 +2893,9 @@ for (const approved of [false, true]) {
       const checkPlanning = async () => {
         assert.equal(await bottom.getByRole("button", { name: "Approve", exact: true }).count(), 0);
         assert.equal(await bottom.getByRole("button", { name: "Reject", exact: true }).count(), 0);
-        assert.equal(await bottom.locator(".progress-label > span").last().innerText(), approved ? "Paused" : "Planning");
+        assert.equal(await bottom.locator(".progress-label > span").count(), 1,
+          "the progress row carries the node count only; the phase belongs to the footer status");
+        assert.match(await bottom.locator(".progress-label > span").innerText(), /^\d+ \/ \d+ nodes completed$/);
         assert.ok(!(await bottom.innerText()).includes("Running"));
         assert.ok(!(await bottom.innerText()).includes("Deterministic runtime"));
       };
@@ -2561,11 +2956,12 @@ for (const wireStatus of ["completed", "done"]) {
       await card.waitFor();
       const label = card.locator(".node-footer .status");
       assert.equal(await label.innerText(), "Completed", "backend completion must render a capitalized card label");
-      // The graph entrance can still be fading the new node when the label
-      // first exists; checkVisibility below deliberately includes opacity.
+      // The label can exist before React Flow has measured and revealed its
+      // canvas. Wait for the whole ancestor chain, not just the label's own
+      // opacity (which is already 1 while the canvas is still hidden).
       await page.waitForFunction(() => {
         const status = document.querySelector('.graph-canvas .task-node[data-node-name="task"] .node-footer .status');
-        return status && Number(getComputedStyle(status).opacity) === 1;
+        return status?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
       });
       assert.equal(await label.evaluate(element => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })), true);
       const bounds = await label.boundingBox(), cardBounds = await card.boundingBox();
@@ -3339,12 +3735,19 @@ test("pausing a node returns an unread steer to the composer and removes its car
     await page.locator('.chat-message-row.user', { hasText: "Unread steer instruction" }).waitFor();
     await waitFor(() => steerReceived);
     assert.deepEqual(actions, [], "the optimistic card is visible before acknowledgement");
-    const interrupt = page.getByRole("button", { name: "Click to interrupt execution" });
-    assert.equal(await interrupt.isDisabled(), true, "the send must settle before interruption");
+    // The pending send now uses a disabled progress affordance, rather than
+    // repainting the same button as Stop before the request settles. It still
+    // must not allow an interrupt to race the unacknowledged Steer.
+    const sending = page.getByRole("button", { name: "Sending…", exact: true });
+    assert.equal(await sending.isDisabled(), true, "the send must settle before interruption");
+    assert.equal(await sending.getAttribute("aria-busy"), "true");
+    assert.equal(await page.getByRole("button", { name: "Click to interrupt execution" }).count(), 0);
+    await sending.evaluate(element => element.click());
+    assert.deepEqual(actions, []);
     gate.resolve();
     await waitFor(() => actions.length === 1);
     assert.deepEqual(actions, [{ action: "steer", node: "task" }]);
-    await interrupt.click();
+    await page.getByRole("button", { name: "Click to interrupt execution", exact: true }).click();
     await page.waitForFunction(() => document.querySelector(".pane-bottom-chat textarea")?.value === "Unread steer instruction");
     assert.equal(await page.locator('.chat-message-row.user', { hasText: "Unread steer instruction" }).count(), 0,
       "the unread steer card is removed");

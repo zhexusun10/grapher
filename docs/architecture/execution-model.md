@@ -90,7 +90,9 @@ The review uses the normal Planner tool policy and may inspect, verify, revise t
 
 Its output streams through durable planning logs and SSE wake-ups. Successful
 node/edge edits immediately project a live candidate graph without dispatching
-work before the turn finishes.
+work before the turn finishes. The saved conversation replays review output as
+its own section, separated from the planned turns by a divider, so the review
+reply does not read as part of the turn that produced the published graph.
 
 A completed turn validates and commits its graph and snapshots any Planner source
 writes. Existing unaffected results stay completed. If more work is needed, Auto
@@ -149,7 +151,7 @@ running -> publishing -> completed
                '--> publication_failed
 ```
 
-`PublicationStarted` is durable before final source changes. Publication selects valid terminal heads; already-integrated commits are skipped. Failed or invalidated attempts are not delivered as current results. The publication merge algorithm belongs to [Git publication](workspace-snapshots-and-feedback.md#publication).
+`PublicationStarted` is durable before final source changes. Publication selects valid terminal heads; already-integrated commits are skipped, and so are heads a completed publication already delivered — their files are part of the source snapshot while their internal objects may already be reclaimed (a plain folder drops its snapshot database at completion). Delivered heads are durable: they are projected into checkpoints and re-derived from the event log when a checkpoint predates them. A composition can merge trees in the host-only Git database and record the composed project view without materializing a private checkout; unsupported or unverifiable project metadata falls back to a materialized workspace, and only a real Git conflict invokes the Merger. Failed or invalidated attempts are not delivered as current results. The publication merge algorithm belongs to [Git publication](workspace-snapshots-and-feedback.md#publication).
 
 Only a real Git conflict invokes a dedicated Merger in the private publication workspace. A missing/inaccessible repository or permission error is a publication failure, not a request for the model to improvise a workaround. Node preparation never inspects the live source working tree; source changes are incorporated at publication.
 

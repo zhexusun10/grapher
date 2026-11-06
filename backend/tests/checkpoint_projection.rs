@@ -173,3 +173,72 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
         0
     );
 }
+
+#[test]
+fn a_legacy_checkpoint_without_delivered_heads_is_repaired_from_the_event_log() {
+    let temp = TempDir::new().unwrap();
+    let mut runtime = grapher::runtime::Runtime::open(temp.path()).unwrap();
+    runtime.state.run_id = "run".into();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                nodes: vec![Node {
+                    name: "task".into(),
+                    task: "test".into(),
+                }],
+                ..Default::default()
+            },
+            config: serde_json::from_value(serde_json::json!({
+                "repository": "/repo", "model": "test", "maxParallel": 1
+            }))
+            .unwrap(),
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    let delivered = "a".repeat(40);
+    runtime
+        .emit(EventKind::PublicationStarted {
+            repository: "/repo".into(),
+            heads: vec![delivered.clone()],
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted {
+            head: "b".repeat(40),
+        })
+        .unwrap();
+    // Force a checkpoint (projection-independent events only) and then strip the
+    // field the way a checkpoint written before delivered heads were projected
+    // did, so a restart would otherwise forget what was already published.
+    runtime
+        .emit(EventKind::Failed {
+            node: "task".into(),
+            execution_id: None,
+            error: "checkpoint".into(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
+    drop(runtime);
+    let connection = Connection::open(temp.path().join("events.sqlite")).unwrap();
+    let payload: String = connection
+        .query_row(
+            "SELECT payload FROM checkpoints WHERE run_id='run'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    value.as_object_mut().unwrap().remove("publishedHeads");
+    connection
+        .execute(
+            "UPDATE checkpoints SET payload=?1 WHERE run_id='run'",
+            [value.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let replayed = grapher::runtime::Runtime::open(temp.path()).unwrap();
+    assert_eq!(replayed.state.published_heads, vec![delivered]);
+}

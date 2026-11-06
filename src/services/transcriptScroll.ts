@@ -35,6 +35,19 @@ export function markTranscriptPrependIfReading(element: HTMLElement | null): voi
   markTranscriptPrepend(element);
 }
 
+/** `overscroll-behavior: contain` also applies to a scroll container that has
+ * nothing to scroll. Such a box is a dead zone: the browser neither scrolls it
+ * nor chains the wheel to the conversation. Keep containment only for the axes
+ * that can actually move, so a short reasoning card or tool output still
+ * forwards the gesture to the conversation scroller. */
+export function syncOverscrollContainment(element: HTMLElement | null): void {
+  if (!element) return;
+  const vertical = element.scrollHeight > element.clientHeight + 1;
+  const horizontal = element.scrollWidth > element.clientWidth + 1;
+  element.style.overscrollBehaviorY = vertical ? "contain" : "auto";
+  element.style.overscrollBehaviorX = horizontal ? "contain" : "auto";
+}
+
 /** True when a wheel, touch or key gesture belongs to a nested scroll area
  * inside the conversation scroller. Scrolling a thinking card or tool output
  * must move only that inner viewport; it is not a conversation scroll-up and
@@ -56,6 +69,48 @@ export function isNestedScrollGesture(event: Event, scroller: HTMLElement | null
  * its generic resize path (for example while a thinking body scrolls inside a
  * fixed-height card). */
 export const TRANSCRIPT_CONTENT_GROWTH_EVENT = "grapher:transcript-content-growth";
+
+/** The actual insertion point, including revisions with no mounted rows. Tool
+ * and user row IDs do not necessarily contain the revision ID, and virtualized
+ * rows can be unmounted, so neither is a reliable boundary. */
+function olderInsertionTop(element: HTMLElement | null, source?: string): number | null {
+  if (!element) return null;
+  if (source) {
+    for (const boundary of element.querySelectorAll<HTMLElement>("[data-transcript-source-start]")) {
+      if (boundary.dataset.transcriptSourceStart === source) return boundary.getBoundingClientRect().top;
+    }
+  }
+  const list = element.querySelector<HTMLElement>(".virtualized-transcript-container") ?? element;
+  return list.getBoundingClientRect().top;
+}
+
+/** Older bytes are inserted above the rows their revision already has, so the
+ * layout grows above the viewport and the virtualizer compensates the scroll
+ * position to keep the reader's rows in place. Committing that while the reader
+ * is still inside the loaded history moves the scroll position under their
+ * gesture, which reads as being pulled back. A fetched page therefore becomes
+ * part of the layout only once the reader has scrolled to its insertion point -
+ * the history is extended where they stopped, never somewhere above them. A view
+ * that is following the newest output is at that end already. */
+export function olderPageFits(element: HTMLElement | null, source?: string): boolean {
+  const scroller = transcriptScrollParent(element);
+  if (!scroller) return true;
+  // A view that follows the newest output is anchored at its end, so the page
+  // lands there without a gesture to fight.
+  if (scroller.dataset.transcriptFollowing === "true" || scroller.dataset.transcriptPreparing === "true") return true;
+  const top = olderInsertionTop(element, source);
+  if (top === null) return true;
+  return top >= scroller.getBoundingClientRect().top + scroller.clientTop - 1;
+}
+
+/** Calls `run` whenever the shared scroller moves, so a held page can land as
+ * soon as the reader reaches its insertion point. */
+export function onTranscriptScroll(element: HTMLElement | null, run: () => void): () => void {
+  const scroller = transcriptScrollParent(element);
+  if (!scroller) return () => {};
+  scroller.addEventListener("scroll", run, { passive: true });
+  return () => scroller.removeEventListener("scroll", run);
+}
 
 export function notifyTranscriptContentGrowth(element: HTMLElement | null): void {
   transcriptScrollParent(element)?.dispatchEvent(new Event(TRANSCRIPT_CONTENT_GROWTH_EVENT));

@@ -16,6 +16,11 @@ pub(crate) struct Topology {
 }
 
 impl Topology {
+    /// A nonempty topology needs physical reconstruction and verification.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.aliases.is_empty() && self.outside.is_empty()
+    }
+
     /// Drop aliases/outside records whose path fails `keep`. Used when a
     /// comparison ignores generated artifacts a recorded view may still carry.
     pub(crate) fn retain(&mut self, keep: impl Fn(&str) -> bool) {

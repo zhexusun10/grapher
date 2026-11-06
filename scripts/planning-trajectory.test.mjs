@@ -8,6 +8,8 @@ import { execFileSync } from 'node:child_process';
 for (const appliedField of ['applied', 'mutationApplied']) for (const [format, topology] of [
   ['legacy', { nodes: ['build'], edges: [] }],
   ['direct dependencies', { directDependencies: { build: [] }, feedbackTo: {} }],
+  ['historical roots', { roots: ['build'], directDependencies: { build: [] }, feedbackTo: {} }],
+  ['root nodes', { rootNodes: ['build'], directDependencies: { build: [] }, feedbackTo: {} }],
 ]) test(`separates graph attempts and process outcome (${appliedField}, ${format})`, () => {
   const dir = mkdtempSync(join(tmpdir(), 'grapher-trajectory-'));
   try {

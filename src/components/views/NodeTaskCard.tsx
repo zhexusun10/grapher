@@ -119,7 +119,6 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
                 type="button"
                 className="node-task-tool-btn cancel"
                 onClick={onCancel}
-                title={t("取消修改 (Esc)")}
                 aria-label={t("取消修改")}
               >
                 <X size={13} />
@@ -130,7 +129,6 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
                 className="node-task-tool-btn save"
                 onClick={handleSave}
                 disabled={disabled || !isChanged || !draft.trim()}
-                title={t("保存修改 (Ctrl + Enter)")}
                 aria-label={t("保存修改")}
               >
                 <Check size={13} />
@@ -143,7 +141,6 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
                 type="button"
                 className={`node-task-tool-btn copy${copied ? " copied" : ""}`}
                 onClick={handleCopy}
-                title={copied ? t("已复制") : t("复制任务指令")}
                 aria-label={copied ? t("已复制") : t("复制任务指令")}
               >
                 {copied ? <Check size={13} /> : <Copy size={13} />}
@@ -155,7 +152,6 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
                   className="node-task-tool-btn edit"
                   onClick={onEdit}
                   disabled={disabled}
-                  title={t("编辑任务指令")}
                   aria-label={t("编辑任务指令")}
                 >
                   <Pencil size={13} />

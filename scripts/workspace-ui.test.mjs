@@ -134,17 +134,35 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
       await page.locator(".landing-screen").waitFor();
       const metrics = await page.evaluate(() => {
         const home = document.querySelector(".landing-screen");
+        const shell = document.querySelector(".app-shell");
         const prompt = home.querySelector(".prompt-box-container").getBoundingClientRect();
-        return { overflow: getComputedStyle(home).overflowY, homeHeight: home.clientHeight, homeScrollHeight: home.scrollHeight,
+        return { shellOverflow: getComputedStyle(shell).overflowY,
           documentHeight: document.documentElement.scrollHeight, viewport: innerHeight, promptTop: prompt.top, promptBottom: prompt.bottom };
       });
-      assert.equal(metrics.overflow, "hidden");
-      assert.equal(metrics.homeHeight, metrics.homeScrollHeight);
+      // The dot background deliberately paints outside the landing screen (under
+      // the sidebar), so the landing box itself is no longer the clipping
+      // boundary. The app shell stays the viewport bound and must not move.
+      assert.equal(metrics.shellOverflow, "hidden");
       assert.equal(metrics.documentHeight, metrics.viewport);
       assert.ok(metrics.promptTop >= 0 && metrics.promptBottom <= height, "composer remains visible");
+      // The dot layer is the only element allowed to paint outside the landing
+      // box. With that decoration removed, the home layout itself must still be
+      // exactly viewport-bound on short screens.
+      const layout = await page.evaluate(() => {
+        const dots = document.querySelector(".landing-title-dot-pattern");
+        const home = document.querySelector(".landing-screen");
+        const previous = dots ? dots.style.display : "";
+        if (dots) dots.style.display = "none";
+        const result = { client: home.clientHeight, scroll: home.scrollHeight };
+        if (dots) dots.style.display = previous;
+        return result;
+      });
+      assert.equal(layout.client, layout.scroll, "non-decorative home content stays viewport-bound");
       await page.mouse.move(1200, 100);
       await page.mouse.wheel(0, 600);
       assert.equal(await page.evaluate(() => document.querySelector(".landing-screen").scrollTop), 0);
+      assert.equal(await page.evaluate(() => document.querySelector(".app-shell").scrollTop), 0);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollTop), 0);
     }
     await page.setViewportSize({ width: 1280, height: 768 });
 

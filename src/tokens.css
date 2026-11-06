@@ -55,6 +55,10 @@
 
   /* 遮罩与画布专用令牌 */
   --bg-overlay: rgba(15, 23, 42, 0.45);
+  /* 大型弹窗（Settings / Graph IR 编辑）的轻型遮罩 */
+  --bg-scrim: rgba(15, 23, 42, 0.12);
+  /* 弹窗表面阴影：所有对话框共用同一层投影 */
+  --shadow-modal: 0 16px 36px -4px rgba(15, 23, 42, 0.16), 0 4px 12px -2px rgba(15, 23, 42, 0.06);
   --graph-edge-default: #94A3B8;
   --graph-edge-feedback: #8B5CF6;
   --graph-edge-feedback-bg: #F5F3FF;

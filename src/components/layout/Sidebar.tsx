@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2 } from "lucide-react";
 import { ProjectItem } from "../../types";
+import type { RunIndicator } from "../../hooks/useRunIndicators";
 import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
 import { workspacePathDisplay } from "./workspacePathDisplay";
 
@@ -12,6 +13,50 @@ export { normalizeWorkspacePath } from "../../services/workspaceConversations";
 // Match the previous CSS entrance while giving cards a real exit, so removing a
 // workspace or conversation fades out before the list closes the gap.
 const CARD_EASE: [number, number, number, number] = [0.16, 1, 0.3, 1];
+// The entrance can snap into place; the removal cannot. The collapse moves the
+// cards below, so it uses a gentler curve that spreads the same distance over
+// more frames instead of clearing most of it in the first few.
+const CARD_COLLAPSE_EASE: [number, number, number, number] = [0.25, 0.46, 0.45, 0.94];
+
+// `.projects-list` separates its cards with a flex `gap`; `.runs-list` spaces
+// them with a card margin instead.
+const PROJECT_LIST_GAP = 4;
+
+// AnimatePresence keeps an exiting card in the flow until its exit finishes, so
+// the exit also closes the card's own box: height, padding, border and spacing
+// shrink. Without that, the cards below hold their place for the whole exit and
+// then snap upward the moment the card is removed, which reads as a jerk instead
+// of a removal.
+function cardExit(listGap: number) {
+  return {
+    opacity: 0,
+    height: 0,
+    minHeight: 0,
+    paddingTop: 0,
+    paddingBottom: 0,
+    // Only the vertical box closes; the horizontal borders stay so the card's
+    // content does not reflow sideways while it fades.
+    borderTopWidth: 0,
+    borderBottomWidth: 0,
+    // A `gap` list keeps the space on both sides while the exiting card is still
+    // mounted, so pull the trailing gap back out with a negative margin.
+    marginBottom: listGap > 0 ? -listGap : 0,
+    overflow: "hidden",
+    // The card fades in place first and only then gives its space back. The
+    // fading card is a clipping box: collapsing it while its label still has
+    // visible alpha leaves the middle of the glyphs behind as a smudge inside a
+    // card that already reads as gone, which looks like the text outliving the
+    // card. No `y`/`scale` here either, so the removal is one motion (the space
+    // closing) instead of the content drifting away from its own box.
+    transition: {
+      opacity: { duration: 0.13, ease: CARD_COLLAPSE_EASE },
+      default: { duration: 0.18, ease: CARD_COLLAPSE_EASE, delay: 0.08 },
+    },
+  };
+}
+
+const PROJECT_CARD_EXIT = cardExit(PROJECT_LIST_GAP);
+const RUN_CARD_EXIT = cardExit(0);
 
 // Matches the CSS overlay breakpoint below which the sidebar would otherwise
 // take a large share of the width from the single-pane workbench.
@@ -21,7 +66,7 @@ function startsCollapsed(): boolean {
   return typeof window !== "undefined" && window.matchMedia(NARROW_SIDEBAR_QUERY).matches;
 }
 
-function cardMotion(reduceMotion: boolean, index: number, skipEntrance = false) {
+function cardMotion(reduceMotion: boolean, index: number, skipEntrance = false, listGap = 0) {
   if (reduceMotion) {
     return {
       initial: false,
@@ -34,7 +79,7 @@ function cardMotion(reduceMotion: boolean, index: number, skipEntrance = false) 
     // entrance; replaying a per-card fade makes them blink on every reload.
     initial: skipEntrance ? false : { opacity: 0, y: 6 },
     animate: { opacity: 1, y: 0, transition: { duration: 0.24, ease: CARD_EASE, delay: Math.min(index, 12) * 0.028 } },
-    exit: { opacity: 0, y: -4, scale: 0.98, transition: { duration: 0.18, ease: CARD_EASE } },
+    exit: listGap > 0 ? PROJECT_CARD_EXIT : RUN_CARD_EXIT,
   };
 }
 
@@ -74,9 +119,7 @@ interface SidebarProps {
   onRemoveProject: (project: ProjectItem) => void;
   runs: string[];
   currentRunId: string;
-  activeBackendRunId?: string | null;
-  activeBackendPhase?: string | null;
-  runIndicators: Record<string, { unread: boolean; phase: string }>;
+  runIndicators: Record<string, RunIndicator>;
   onLoadRun: (runId: string) => void;
   onCopyRunPrompt: (runId: string, provisionalPrompt?: string) => void;
   onCancelPendingPromptCopy: () => void;
@@ -100,8 +143,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   onRemoveProject,
   runs,
   currentRunId,
-  activeBackendRunId,
-  activeBackendPhase,
   runIndicators,
   onLoadRun,
   onCopyRunPrompt,
@@ -194,7 +235,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           setRunContextMenu(null);
           setProjectContextMenu({ x: e.clientX, y: e.clientY, project: proj });
         }}
-        {...cardMotion(reduceMotion, index, restoredProjectKeys.has(workspaceKey(proj.path)))}
+        {...cardMotion(reduceMotion, index, restoredProjectKeys.has(workspaceKey(proj.path)), PROJECT_LIST_GAP)}
       >
         <div className="proj-details">
           <div className="proj-name-row">
@@ -208,7 +249,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
 
   const runCards = runs.map((id, index) => {
     const indicator = runIndicators[id];
-    const isThisRunActive = ["running", "awaiting_approval", "publishing", "merging"].includes(indicator?.phase ?? (activeBackendRunId === id ? activeBackendPhase ?? "" : ""));
+    const isThisRunActive = Boolean(indicator?.working);
     const isUnread = Boolean(indicator?.unread && currentRunId !== id);
     const needsUnreadApproval = isUnread && indicator.phase === "awaiting_approval";
     const isChosen = (loadingRunId ?? currentRunId) === id;

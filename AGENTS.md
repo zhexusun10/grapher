@@ -1,2 +1,1 @@
 Use [docs/index.md](docs/index.md) as the documentation index and navigation entry point; keep task maps there and put background and procedures in the relevant linked documents. Do not bulk-scan `docs/`; read only documentation relevant to the current task.
-Review your work for potential regressions and unintended side effects once complete.

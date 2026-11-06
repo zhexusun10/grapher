@@ -53,3 +53,19 @@ test("prepend anchors use retained row identity and ignore simultaneous live gro
   assert.deepEqual(retainedRowAnchor(before, withoutSplitRow, rowOffsets(before, heights), rowOffsets(withoutSplitRow, heights), 0),
     { id: "b", delta: 72 - 100 });
 });
+
+test("an inserted page anchors the first visible row it moved, not an unchanged row above it", () => {
+  // A composed Planner conversation inserts a loaded page of the later revision
+  // below the turn that precedes it. The preceding turn's rows keep their
+  // offset, so anchoring them would leave the rows the reader is actually
+  // looking at to be dragged down by the inserted block.
+  const before = ["previous", "review-1", "review-2", "review-3"];
+  const after = ["previous", "older-1", "older-2", "review-1", "review-2", "review-3"];
+  const heights = new Map(before.map(id => [id, 100]));
+  const beforeOffsets = rowOffsets(before, heights), afterOffsets = rowOffsets(after, heights);
+  assert.deepEqual(retainedRowAnchor(before, after, beforeOffsets, afterOffsets, 0, 400),
+    { id: "review-1", delta: 144 });
+  // A change entirely below the viewport did not move anything the reader can
+  // see, so it must not scroll them at all.
+  assert.equal(retainedRowAnchor(before, after, beforeOffsets, afterOffsets, 0, 100), null);
+});

@@ -29,15 +29,19 @@ export function ExtensionItem({ extension, disabled, onToggle }: {
 }
 
 export function ExtensionSettings({ disabled = false }: { disabled?: boolean }) {
-  const [catalog, setCatalog] = useState<ExtensionCatalog>();
-  const [busy, setBusy] = useState(true);
+  const [catalog, setCatalog] = useState<ExtensionCatalog | undefined>(() => piExtensions.getCachedCatalog() ?? undefined);
+  // A cached catalog already painted the real rows, so the card must not switch
+  // back to a placeholder that is shorter than the content it replaces.
+  const [busy, setBusy] = useState(() => !piExtensions.getCachedCatalog());
   const [error, setError] = useState('');
   const inFlight = useRef(false);
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
     let cancelled = false;
-    piExtensions.catalog().then(value => { if (!cancelled) setCatalog(value); })
+    // Refresh behind a cached catalog: an unchanged response re-renders the same
+    // rows, so the Settings pane keeps the height its reader already scrolled.
+    piExtensions.catalog(true).then(value => { if (!cancelled) setCatalog(value); })
       .catch(error => { if (!cancelled) setError(String(error)); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; mounted.current = false; };
@@ -48,7 +52,7 @@ export function ExtensionSettings({ disabled = false }: { disabled?: boolean }) 
     setBusy(true);
     setError('');
     try {
-      const value = extension ? await piExtensions.setEnabled(extension.id, !extension.enabled) : await piExtensions.catalog();
+      const value = extension ? await piExtensions.setEnabled(extension.id, !extension.enabled) : await piExtensions.catalog(true);
       if (mounted.current) setCatalog(value);
     } catch (error) {
       if (mounted.current) setError(String(error));

@@ -6,6 +6,7 @@ import { ThinkingCard } from "../src/components/ThinkingCard.tsx";
 import { ToolCallCard } from "../src/components/ToolCallCard.tsx";
 import { parseTranscriptChunkLines } from "../src/services/transcriptParser.ts";
 import { TOOL_OUTPUT_PREVIEW_BYTES } from "../src/services/toolOutput.ts";
+import { upsertToolCall } from "../src/services/toolCallUpdates.ts";
 import { injectStreamingCursor } from "../src/components/MarkdownRenderer.tsx";
 import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
 import { PlannerTranscript } from "../src/components/PlannerTranscript.tsx";
@@ -35,6 +36,18 @@ const withFoldedCot = <T,>(run: () => T): T => {
   try { return run(); } finally { setAutoExpandCot(true); }
 };
 
+test("tool and reasoning cards never render native browser hover tooltips", () => {
+  const tool = renderToStaticMarkup(createElement(ToolCallCard, { item: {
+    id: "tool", type: "tool_call", toolName: "bash", status: "success",
+    args: { command: "echo hello" }, result: "hello\n", exitCode: 0,
+  } }));
+  assert.doesNotMatch(tool, /\stitle=/, "a tool card must not show browser title tooltips");
+  const reasoning = renderToStaticMarkup(createElement(ThinkingCard, {
+    content: "Inspect the command:\n\n```sh\necho hello\n```", isStreaming: false,
+  }));
+  assert.doesNotMatch(reasoning, /\stitle=/, "a reasoning card must not show browser title tooltips");
+});
+
 test("background Planner replies stay separate across turns with no visible user bubble", () => {
   const events = [
     { type: "grapher_planning_source", planningId: "first" }, start(),
@@ -46,6 +59,50 @@ test("background Planner replies stay separate across turns with no visible user
   assert.equal((html.match(/PHASE_TWO_PLANNED/g) || []).length, 1);
   assert.equal((html.match(/REVIEW_COMPLETE/g) || []).length, 1);
   assert.doesNotMatch(html, /PHASE_TWO_PLANNEDREVIEW_COMPLETE/);
+});
+
+test("a streamed Planner tool card starts during generation and retains identity through execution", () => {
+  let items: TranscriptItem[] = [];
+  items = upsertToolCall(items, { contentIndex: 1, toolName: "bash", phase: "generating" });
+  const stableId = items[0].id;
+  assert.equal(items[0].toolPhase, "generating");
+  assert.match(renderToStaticMarkup(createElement(ToolCallCard, { item: items[0] })), /Preparing call/);
+  items = upsertToolCall(items, { contentIndex: 1, toolCallId: "call-1", toolName: "bash", args: { command: "npm test" }, phase: "pending" });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, stableId);
+  assert.equal(items[0].toolPhase, "pending");
+  items = upsertToolCall(items, { toolCallId: "call-1", toolName: "bash", phase: "executing" }, items.length);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].toolPhase, "executing");
+  assert.deepEqual(items[0].args, { command: "npm test" });
+  items = upsertToolCall(items, { contentIndex: 1, toolCallId: "call-2", phase: "generating" }, items.length);
+  assert.equal(items.length, 2, "a later assistant turn may reuse a content index");
+  // A provider that identifies the call only at its end must adopt the
+  // id-less generating row, not draw a second card for the same block.
+  let unnamed: TranscriptItem[] = [];
+  unnamed = upsertToolCall(unnamed, { contentIndex: 2, toolName: "read", phase: "generating" });
+  unnamed = upsertToolCall(unnamed, { contentIndex: 2, toolCallId: "late-id", toolName: "read", phase: "pending" });
+  assert.equal(unnamed.length, 1);
+  assert.equal(unnamed[0].toolCallId, "late-id");
+  assert.equal(unnamed[0].toolPhase, "pending");
+  // A finalized row with a different identity is never overwritten by index.
+  unnamed = upsertToolCall(unnamed, { contentIndex: 2, toolCallId: "other-id", phase: "pending" }, 0);
+  assert.equal(unnamed.length, 2);
+});
+
+test("replay renders a tool's generation and execution phases as one card", () => {
+  const state = { source: "planner", byteOffset: 0, leadingFragment: false, inTagThinking: false,
+    inFinalResponse: false, finalResponseSuppressed: false, seenFirstUser: false, pendingUserStart: false,
+    assistantStartIndex: 0, userMessageStarts: new Set<string>(), compacting: false };
+  const options = { showUserTurns: true, skipFirstUser: false };
+  const pending = new Map<string, TranscriptItem>();
+  let items = parseTranscriptChunkLines([JSON.stringify(start()), JSON.stringify(update("toolcall_start", 0, { toolName: "bash" }))], [], pending, state, options).currentItems;
+  assert.equal(items[0].toolPhase, "generating");
+  items = parseTranscriptChunkLines([JSON.stringify(update("toolcall_end", 0, { toolCall: { id: "one", name: "bash", arguments: { command: "long" } } })),
+    JSON.stringify({ type: "tool_execution_start", toolCallId: "one", toolName: "bash", args: { command: "long" } })], items, pending, state, options).currentItems;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].toolPhase, "executing");
+  assert.equal(items[0].args?.command, "long");
 });
 
 test("RPC and message_end tool-call records render one completed tool card", () => {

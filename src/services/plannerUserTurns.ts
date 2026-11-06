@@ -1,4 +1,4 @@
-import { stripPlannerContext } from "./plannerText";
+import { plannerContentSteerId, plannerContentText, stripPlannerContext } from "./plannerText";
 
 /** A live continuation seeds the stream with the message being edited. The
  * first turn is already rendered as the conversation header, so drop that
@@ -23,7 +23,7 @@ export function plannerUserTurns(output: string): string[] {
       const event = JSON.parse(line);
       if ((event.type !== "message_start" && event.type !== "message_end") || event.message?.role !== "user") continue;
       const content = event.message.content;
-      if (!Array.isArray(content)) continue;
+      if (!Array.isArray(content) && typeof content !== "string") continue;
       const messageId = event.message.id;
       if (event.type === "message_end") {
         // A start already rendered this turn; the end only confirms it.
@@ -35,14 +35,27 @@ export function plannerUserTurns(output: string): string[] {
         pendingStart = true;
         if (messageId) started.add(messageId);
       }
-      const text = stripPlannerContext(content.filter((part: { type: string }) => part.type === "text")
-        .map((part: { text?: string }) => part.text || "").join("\n")).trim();
+      const text = stripPlannerContext(plannerContentText(content)).trim();
       if (text) turns.push(text);
     } catch {
       // Incomplete JSONL lines are still being written by the Planner.
     }
   }
   return turns;
+}
+
+/** A paged window can start at a steer identical to the original goal. Its
+ * transport identity proves it is not the header even when the text matches. */
+export function firstPlannerUserIsSteer(output: string): boolean {
+  for (const line of output.split("\n")) {
+    if (!line.includes('"message_start"') && !line.includes('"message_end"')) continue;
+    try {
+      const event = JSON.parse(line);
+      if ((event.type !== "message_start" && event.type !== "message_end") || event.message?.role !== "user") continue;
+      return !!plannerContentSteerId(event.message.content);
+    } catch { /* An incomplete live JSONL line cannot establish identity. */ }
+  }
+  return false;
 }
 
 /** Prompt attachments travel as XML ahead of the user's text; editing a saved

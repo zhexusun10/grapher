@@ -183,7 +183,7 @@ See [Contributing](CONTRIBUTING.md) and the [testing guide](docs/development/tes
 
 **Using Grapher:** [User guide](docs/user-guide.md) · [Security policy](SECURITY.md).
 
-**Developing Grapher:** [Architecture contracts](docs/architecture/overview.md) · [Development guide](docs/development/contributing.md) · [Benchmarks](docs/benchmarks/harbor.md).
+**Developing Grapher:** [Architecture contracts](docs/architecture/overview.md) · [Contributing guide](CONTRIBUTING.md) · [Benchmarks](docs/benchmarks/harbor.md).
 
 The [documentation index](docs/index.md) separates user guidance from developer task routes. Coding agents should use [AGENTS.md](AGENTS.md) for repository constraints.
 

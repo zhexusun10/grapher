@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { activePlannerOutput, plannerConversationEdits, plannerHistoryIds, plannerTurnIds } from '../src/lib/plannerOutput.ts';
+import { activePlannerOutput, plannerConversationEdits, plannerHistoryIds, plannerTurnIds, reviewPlanningIds } from '../src/lib/plannerOutput.ts';
 import { recoveredPlanningForDisplay } from '../src/services/planningRecovery.ts';
 
 const source = (id: string) => JSON.stringify({ type: 'grapher_planning_source', planningId: id });
@@ -56,6 +56,21 @@ test('an edit keeps the failed replacement turn it started', () => {
   assert.match(visible, /initial reply/);
   assert.match(visible, /failed reply/);
   assert.doesNotMatch(visible, /followup reply/);
+});
+
+test('only post-task review turns start a new transcript section', () => {
+  const events = [
+    { type: 'created', planning_id: 'initial', planning: { planningId: 'initial', createdAt: 100 } },
+    { type: 'graph_revised', planning_id: 'revision', planning: { planningId: 'revision', createdAt: 200 } },
+    { type: 'planner_review_started', planning_id: 'review-a', planning: { planningId: 'review-a', createdAt: 300 } },
+    { type: 'planner_review_finished', planning: { planningId: 'review-a', status: 'failed' } },
+    { type: 'planner_turn_aborted', planning: { planningId: 'aborted', createdAt: 350 } },
+    { type: 'planner_review_started', planning: { planningId: 'review-b', createdAt: 400 } },
+  ];
+  assert.deepEqual([...reviewPlanningIds(events)], ['review-a', 'review-b']);
+  // Ordinary revisions and aborted attempts continue the conversation.
+  assert.deepEqual([...reviewPlanningIds(events.slice(0, 2))], []);
+  assert.equal(reviewPlanningIds([]).size, 0);
 });
 
 test('a live review keeps the earlier Planner conversation before recovery markers settle', () => {

@@ -45,6 +45,14 @@ the output is taken to the failure notice rather than the top of the shortened
 conversation. A deliberate scroll-up is preserved. Focused evidence:
 [edited follow-up failure regression](../../scripts/conversation-history-ui.test.mjs).
 
+Planner lifecycle updates for a running turn never own the viewed
+conversation. Starting, settling, recovering or polling a running Planner turn
+in the current Run updates the transcript, graph and status in place without
+clearing the node conversation the reader opened; only an actual Run switch, a
+failed attempt's outcome, or the reader returning to the Planner resets that
+selection. Focused evidence:
+[live node conversation regression](../../scripts/conversation-history-ui.test.mjs).
+
 ## Manual graph nodes
 
 Right-clicking the topology background adds one node to the current Graph Run, without a Planner turn. The optional `from` is an ordinary dependency into the new node; optional `to` is an outgoing dependency, or a feedback edge when `feedback` is true. If an ordinary insertion splits an existing direct `from` → `to` edge, that edge is replaced. Compiler validation remains authoritative, including the feedback-ancestor and DAG rules.
@@ -202,11 +210,41 @@ records delivery once the live RPC input accepts the command and does not block
 the HTTP request on a long tool turn's acknowledgement; a closed RPC input still
 surfaces as a failure, not false success or an automatic resend.
 
+Planner Steers use an append-only submission/status record keyed by a client
+request ID. The HTTP response means Grapher recorded the submission, not that Pi
+or the model read it; the asynchronous Pi RPC disposition separately records
+queued, accepted, handled or failed. Repeated requests with the same ID are
+idempotent. An unconfirmed RPC times out to unknown and a later response can
+resolve it; a stopped, ended or recovered turn with an unconsumed submission is
+also shown as unknown rather than silently resent. A private UUID suffix binds
+Pi's user-turn event to its submission without matching text or repeated
+instructions. It remains in Pi's session/log for recovery and history edits,
+but the mandatory Planner context projection removes it before model calls. If
+an extension handles or rewrites the input without the marker, Grapher does not
+claim that it was consumed. Slash commands retain their original parsing.
+
+The browser presents unconsumed Planner Steers separately from the ordered
+transcript; only Pi's matching user turn enters that transcript. Exactly one
+surface owns an unhanded instruction: a submission that the response or the
+durable log proves was not accepted leaves the pending area and its text returns
+to the composer, while a submission the log records keeps its card and clears
+the composer. The same instruction is therefore never both a card and an
+editable draft, and an uncertain turn is still never resent by itself.
+
+A tool card first represents call generation, then a generated call awaiting
+execution, then actual execution and a result. The live stream and replay reconcile these
+records by call ID (or a content index scoped to one assistant message); a
+clean process exit cannot manufacture a missing tool result. A successful
+Planner log append wakes subscribed readers through coalesced SSE, with polling
+as the fallback for missed events or disconnected clients.
+
 Focused evidence: [queue/replay regressions](../../backend/src/node_message_queue_tests.rs),
 [live delivery regressions](../../backend/src/node_message_delivery_tests.rs) and
 [Graph/Serial browser interactions](../../scripts/frontend-audit.test.mjs).
 
 ## Event and output storage
+
+### Log production and context
 
 Business events include graph creation/revision, approval, execution transitions,
 feedback, human intervention, pause, and publication. Execution output is stored
@@ -248,6 +286,8 @@ the latter only. Pi's own session, model context and actual tool result are
 untouched; `full=true` exports the retained display log and does not bypass
 producer-side truncation.
 
+### Summaries and file changes
+
 The sidebar uses backend-owned conversation summaries, prewarmed without
 transcripts or runtime locks. Settled cards do not require snapshots; live work
 remains watched. Browser caches are rendering hints, and failed reads must not
@@ -275,13 +315,19 @@ changes with bounded, non-overlapping reads; scope changes cancel old readers an
 failed reads retain the last display projection rather than implying no changes.
 The main view follows actual running executions/Mergers even when the Run phase
 stays `completed` for a standalone Merger or is `followup` for source-direct work;
-it suspends timer reads once those writers settle.
+it suspends timer reads once those writers settle. The sidebar card uses the same
+rule ([runPhase.ts](../../src/lib/runPhase.ts)): it shows the live dot for a
+Planner turn, execution, the approval gate, publication and the native launch
+step, plus any Run whose executions, Mergers or nodes are still writing, so a
+settled phase cannot hide work in flight and a settled `followup` cannot fake it.
 
 Clicking a row calls `open_workspace_file`, which resolves the path in the owning
 execution's worktree (newest attempt first), a Planner-only workspace, then the
 Run repository. Resolution uses the same real-child safety boundary, so
 traversal, absolute paths and symlinked descendants are rejected; deleted rows
 are not actionable.
+
+### Paging and request coordination
 
 Snapshot/history/list requests are metadata-oriented. Node logs load on demand by
 `(runId, executionId, byteOffset)`; planning revisions have their own cursor.
@@ -305,6 +351,8 @@ settings, and provider-catalog waits have a 15-second browser deadline; planning
 streams, approvals and native result execution do not. A settings timeout asks the
 user to refresh and verify; it never rolls back or automatically retries a save.
 See [request deadlines](../../src/services/requestTimeout.ts).
+
+### Live updates
 
 `/api/events` SSE notifications (`snapshot_changed`, `output_available`,
 `planning_output_available`) are a latency accelerator, never the authority. The

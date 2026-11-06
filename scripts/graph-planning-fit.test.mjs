@@ -68,9 +68,9 @@ test("actual App: node results render before Planner completion; edges rearrange
   const planner = event => send("planner", { event, raw: JSON.stringify(event) + "\n" });
   const startTool = (id, toolName, args) => planner({ type: "tool_execution_start", toolCallId: id, toolName, args });
   // Pi's end event intentionally has no args. The pairing must survive text updates and polls.
-  const endTool = (id, toolName, topology, isError = false, legacy = false) => {
+  const endTool = (id, toolName, topology, isError = false, legacy = false, rootField = "rootNodes") => {
     const projection = legacy ? topology : {
-      roots: topology.nodes.filter(name => !topology.edges.some(edge => !edge.feedback && edge.to === name)),
+      ...(rootField ? { [rootField]: topology.nodes.filter(name => !topology.edges.some(edge => !edge.feedback && edge.to === name)) } : {}),
       directDependencies: Object.fromEntries(topology.nodes.map(name => [name,
         topology.edges.filter(edge => !edge.feedback && edge.to === name).map(edge => edge.from)])),
       feedbackTo: Object.fromEntries(topology.edges.filter(edge => edge.feedback).map(edge => [edge.from, edge.to])),
@@ -78,9 +78,9 @@ test("actual App: node results render before Planner completion; edges rearrange
     planner({ type: "tool_execution_end", toolCallId: id, toolName, isError,
       result: { content: [{ type: "text", text: JSON.stringify({ applied: !isError, topology: projection }) }] } });
   };
-  const tool = (id, toolName, args, topology, isError = false, legacy = false) => {
+  const tool = (id, toolName, args, topology, isError = false, legacy = false, rootField = "rootNodes") => {
     startTool(id, toolName, args);
-    endTool(id, toolName, topology, isError, legacy);
+    endTool(id, toolName, topology, isError, legacy, rootField);
   };
   const nodes = ["a", "b", "c"].map(name => ({ name, task: `Task ${name}` }));
   const edges = [{ from: "a", to: "b", feedback: false }, { from: "b", to: "c", feedback: false }];
@@ -108,13 +108,15 @@ test("actual App: node results render before Planner completion; edges rearrange
     // otherwise show an empty topology that may still fail validation.
     await page.waitForTimeout(150);
     assert.equal(await page.locator(".graph-pane").count(), 0, "a pending node call does not open the pane");
-    endTool("node-a", "node", { nodes: ["a"], edges: [] });
+    // The initial node batch omits rootNodes; its accepted edit still opens the preview.
+    endTool("node-a", "node", { nodes: ["a"], edges: [] }, false, false, null);
     await page.waitForFunction(() => {
       const pane = document.querySelector(".graph-pane");
       return pane && +getComputedStyle(pane).opacity > 0.99;
     });
     await assertFitted(page, [["a"]]);
-    tool("node-bc", "node", { nodes: nodes.slice(1) }, { nodes: ["a", "b", "c"], edges: [] });
+    // Historical direct-dependency results used `roots` rather than `rootNodes`.
+    tool("node-bc", "node", { nodes: nodes.slice(1) }, { nodes: ["a", "b", "c"], edges: [] }, false, false, "roots");
     await assertFitted(page, [["a", "b", "c"]]);
     assert.equal(planningResponse.writableEnded, false, "cards appear while the response is still open");
     assert.equal(await page.getByRole("button", { name: "Approve", exact: true }).count(), 0, "preview is not approval");
@@ -157,7 +159,7 @@ test("actual App: node results render before Planner completion; edges rearrange
     clearInterval(textTimer);
     snapshot = { ...snapshot, phase: "awaiting_approval", graph: { originalGoal: goal, nodes, edges },
       nodes: Object.fromEntries(nodes.map(node => [node.name, { status: "waiting" }])),
-      plan: { executionBatches: [["a"], ["b"], ["c"]], roots: ["a"], terminals: ["c"], warnings: [] } };
+      plan: { executionBatches: [["a"], ["b"], ["c"]], rootNodes: ["a"], terminals: ["c"], warnings: [] } };
     planningResponse.end(`event: complete\ndata: ${JSON.stringify({ snapshot })}\n\n`);
     await page.getByRole("button", { name: "Approve", exact: true }).waitFor();
     await assertFitted(page, [["a"], ["b"], ["c"]]);
@@ -176,7 +178,7 @@ test("actual App: node results render before Planner completion; edges rearrange
     await assertFitted(page, [["a", "b", "c"]]);
     assert.equal(await page.locator(".react-flow__edge-path").count(), 0);
     snapshot = { ...snapshot, graph: { ...snapshot.graph, edges: [] },
-      plan: { executionBatches: [["a", "b", "c"]], roots: ["a", "b", "c"], terminals: ["a", "b", "c"], warnings: [] } };
+      plan: { executionBatches: [["a", "b", "c"]], rootNodes: ["a", "b", "c"], terminals: ["a", "b", "c"], warnings: [] } };
     planningResponse.end(`event: complete\ndata: ${JSON.stringify({ snapshot })}\n\n`);
     await assertFitted(page, [["a", "b", "c"]]);
 

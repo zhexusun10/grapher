@@ -1,6 +1,6 @@
 # Grapher's Pi adapter
 
-Scope: Grapher-side integration, not an upstream Pi implementation guide. [Development](contributing.md) covers checkout setup; [Testing](testing.md) covers check selection and prerequisites.
+Scope: Grapher-side integration, not an upstream Pi implementation guide. [CONTRIBUTING.md](../../CONTRIBUTING.md) covers checkout setup; [Testing](testing.md) covers check selection and prerequisites.
 
 [pi-compat.ts](../../engine/pi-compat.ts) contains Grapher's SDK/CLI binding. Pi owns model/auth behavior; Grapher owns role loading, workspace policy, process lifecycle, and persistence. Role model resolution lives in `PiModelConfig` in [engine.rs](../../backend/src/engine.rs); the recorded baseline lives in [pi-lock.json](../../engine/pi-lock.json).
 
@@ -17,11 +17,11 @@ Working directories, source-write effects, and platform permissions belong to [E
 
 ## Global extension settings
 
-Settings Add/Remove changes Grapher's selection, not installed global files. Changes apply to new processes and invalidate affected idle prewarmed processes, not running turns. Discovery does not execute extension factories or install missing packages.
+Settings Add/Remove changes Grapher's selection, not installed global files. Changes apply to new processes and invalidate affected idle prewarmed processes, not running turns. Discovery does not execute extension factories or install missing packages. The Settings card reads a page-session catalog ([piExtensions.ts](../../src/services/piExtensions.ts)) so a reopen paints the rows it last read and refreshes behind them; the card must not fall back to a shorter loading placeholder, because a late height change moves the Settings pane under a reader who already scrolled it. Only the refresh control and a successful Add/Remove bypass that snapshot.
 
 External resources default to `~/.pi/agent` (`GRAPHER_GLOBAL_PI_AGENT_DIR` overrides it). Grapher credentials and selection overrides use `PI_CODING_AGENT_DIR`, normally `~/.grapher/pi-agent`. Dedicated resources shadow external copies; bundled copies are deduplicated against both. [global-extensions.ts](../../engine/global-extensions.ts) owns discovery, identity, and precedence.
 
-`pi-trim` is mandatory for every role and recognizes both the Pi 1.4 and Pi 1.5 default identities. `pi-continuity` is enabled by default for Planner/Node/Merger and can be disabled. `pi-better-web-search` is off by default for Planner/Node and must be enabled in Settings; before enabling, confirm at least one configured provider supports the `web_search` API. It registers search only for supported available providers. Exact releases and integrity belong in `package.json` and `package-lock.json`, not a second version list here.
+`pi-trim` is mandatory for every role and recognizes both the Pi 1.4 and Pi 1.5 default identities. `pi-continuity` is enabled by default for Planner/Node/Merger and can be disabled. `pi-better-web-search` is off by default for Planner/Node and must be enabled in Settings; before enabling, confirm at least one configured provider supports the `web_search` API. It registers search only for supported available providers. Exact releases and integrity belong in `package.json` and `package-lock.json`, not a second version list here. The root `pi-ai` and `pi-coding-agent` packages provide extension peers and are pinned to the version recorded in `pi-lock.json`; review them alongside any source baseline upgrade.
 
 ### MCP project overrides
 

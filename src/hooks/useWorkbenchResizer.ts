@@ -67,7 +67,7 @@ export function shouldCollapseGraphPane(pointerX: number, containerWidth: number
 }
 
 /** Resize via CSS variable percentage so dragging does not trigger React re-renders, while maintaining split ratio across container resizing. */
-export function useWorkbenchResizer({ onCollapse }: { onCollapse?: () => void } = {}) {
+export function useWorkbenchResizer({ onCollapse, collapsed = false }: { onCollapse?: () => void; collapsed?: boolean } = {}) {
   const collapse = useStableCallback(() => onCollapse?.());
   const workbenchRef = useRef<HTMLDivElement>(null);
   const [splitRatio, setSplitRatio] = useState<number>(getStoredRatio);
@@ -89,6 +89,13 @@ export function useWorkbenchResizer({ onCollapse }: { onCollapse?: () => void } 
     workbenchRef.current?.style.setProperty("--workbench-left-width", `${ratio * 100}%`);
   }, []);
 
+  // Restore the pre-drag split only after the full-width class has committed.
+  // Restoring it while the drag is still visible makes the divider jump back
+  // before starting its collapse animation.
+  useLayoutEffect(() => {
+    if (collapsed) applyRatio(currentRatioRef.current);
+  }, [collapsed, applyRatio]);
+
   const handleStartResize = useCallback((e: ReactPointerEvent) => {
     if (e.button !== 0 || !e.isPrimary) return;
     e.preventDefault();
@@ -97,12 +104,15 @@ export function useWorkbenchResizer({ onCollapse }: { onCollapse?: () => void } 
     const pointerId = e.pointerId;
     setIsResizing(true);
 
-    const finish = (restore: boolean) => {
+    const finish = (restore: boolean, collapsing = false) => {
       removeListeners();
       setIsResizing(false);
       // Collapsing is not a saved resize: reopening restores the useful width
       // from before this gesture rather than leaving the graph at its minimum.
-      if (restore) applyRatio(startRatio);
+      if (restore) {
+        if (collapsing) currentRatioRef.current = startRatio;
+        else applyRatio(startRatio);
+      }
       const finalRatio = currentRatioRef.current;
       setSplitRatio(finalRatio);
       if (!restore) persistRatio(finalRatio);
@@ -113,8 +123,8 @@ export function useWorkbenchResizer({ onCollapse }: { onCollapse?: () => void } 
       if (rect.width <= 0) return;
       const pointerX = moveEvent.clientX - rect.left;
       if (onCollapse && shouldCollapseGraphPane(pointerX, rect.width)) {
-        finish(true);
         collapse();
+        finish(true, true);
         return;
       }
       applyRatio(clampSplitRatio(pointerX / rect.width, rect.width));
