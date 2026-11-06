@@ -207,6 +207,9 @@ function ExecutionRecordHeader({ execution, expanded, onToggle, placeholder = fa
 }
 
 interface WorkspaceDetailsPanelProps {
+  /** Controlled by the workbench so at most one footer disclosure is expanded. */
+  open: boolean;
+  onToggle: () => void;
   showWorking?: boolean;
   compacting?: boolean;
   /** Overrides the generic Working label for a known lifecycle phase. */
@@ -222,6 +225,8 @@ interface WorkspaceDetailsPanelProps {
 }
 
 const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
+  open,
+  onToggle,
   showWorking,
   compacting,
   workingLabel,
@@ -233,11 +238,10 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
   onBeforeToggle,
   onAfterToggle,
 }) => {
-  const [isOpen, setIsOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
 
   return (
-    <div ref={panelRef} className={`workspace-details ${isOpen ? "open" : ""}`}>
+    <div ref={panelRef} className={`workspace-details ${open ? "open" : ""}`}>
       {showWorking && (
         <div className="working-indicator" role="status" aria-live="polite">
           <span className="working-indicator-dot" />
@@ -248,11 +252,11 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
         <button
           type="button"
           className="workspace-details-trigger"
-          onClick={() => setIsOpen(open => !open)}
-          aria-expanded={isOpen}
+          onClick={onToggle}
+          aria-expanded={open}
         >
           <span>{label ?? t("工作区与会话信息")}</span>
-          <ChevronRight size={12} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} />
+          <ChevronRight size={12} className={`workspace-details-chevron ${open ? "open" : ""}`} />
         </button>
         {summaryAction}
       </div>
@@ -260,7 +264,7 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
       {additionalDetails}
 
       <AnimatedDisclosure
-        open={isOpen}
+        open={open}
         panelRef={panelRef}
         scrollContainerRef={scrollContainerRef}
         onBeforeToggle={onBeforeToggle}
@@ -2288,10 +2292,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   });
 
   const changesPanelId = React.useId();
-  const [changesOpenForView, setChangesOpenForView] = useState<string | null>(null);
-  const changesPanelOpen = changesOpenForView === conversationViewKey;
+  // Session details and file changes sit beside each other in the same footer
+  // row, so only one of them is expanded per conversation view; opening either
+  // collapses the other instead of stacking two disclosures.
+  const [openFooterPanel, setOpenFooterPanel] = useState<{ view: string; panel: "details" | "changes" } | null>(null);
+  const footerPanel = openFooterPanel?.view === conversationViewKey ? openFooterPanel.panel : null;
+  const changesPanelOpen = footerPanel === "changes";
+  const detailsPanelOpen = footerPanel === "details";
+  const toggleFooterPanel = useCallback((panel: "details" | "changes") => {
+    setOpenFooterPanel(current => current?.view === conversationViewKey && current.panel === panel
+      ? null
+      : { view: conversationViewKey, panel });
+  }, [conversationViewKey]);
   useEffect(() => {
-    setChangesOpenForView(null);
+    setOpenFooterPanel(null);
   }, [conversationViewKey]);
 
   const inNodeScope = !!selectedNode && routeType === "graph";
@@ -2324,7 +2338,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     summary={workspaceChangesSummary}
     panelId={changesPanelId}
     isOpen={changesPanelOpen}
-    onToggle={() => setChangesOpenForView(changesPanelOpen ? null : conversationViewKey)}
+    onToggle={() => toggleFooterPanel("changes")}
   />;
   const changesPanel = <WorkspaceChangesPanel
     key={conversationViewKey}
@@ -2638,6 +2652,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                 <WorkspaceDetailsPanel
                   key={`${state.runId}:${selectedNode.name}`}
+                  open={detailsPanelOpen}
+                  onToggle={() => toggleFooterPanel("details")}
                   showWorking={isSelectedNodeWorking}
                   compacting={isSelectedNodeCompacting}
                   workingLabel={publicationWorkingLabel}
@@ -2844,6 +2860,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
                     <WorkspaceDetailsPanel
                       key={`${state.runId}:serial`}
+                      open={detailsPanelOpen}
+                      onToggle={() => toggleFooterPanel("details")}
                       showWorking={isMainViewWorking}
                       compacting={isMainViewWorking && !!serialExecution?.id && !!compactingAttempts[serialExecution.id]}
                       workingLabel={publicationWorkingLabel}
@@ -3040,6 +3058,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 {showPlannerDetails && (
                   <WorkspaceDetailsPanel
                     key={`${state.runId}:planner`}
+                    open={detailsPanelOpen}
+                    onToggle={() => toggleFooterPanel("details")}
                     label={t("规划会话信息")}
                     showWorking={isMainViewWorking}
                     compacting={isMainViewCompacting}

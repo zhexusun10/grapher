@@ -257,9 +257,7 @@ for (const mode of ["serial", "planner", "node", "merger"]) {
       await expect(panel.getByTestId("changed-file-item")).toHaveCount(6);
       assert.deepEqual(await composer.boundingBox(), before, "the review panel must not resize or move the input");
 
-      // The body uses the session-details expansion slot and width.
-      await session.click();
-      await expect(session).toHaveAttribute("aria-expanded", "true");
+      // The list uses the session-details expansion slot and width.
       const slots = await page.evaluate(() => {
         const panel = document.querySelector(".workspace-changes-panel").getBoundingClientRect();
         const body = document.querySelector(".workspace-details-body").getBoundingClientRect();
@@ -268,11 +266,17 @@ for (const mode of ["serial", "planner", "node", "merger"]) {
       assert.ok(slots.left <= 1, JSON.stringify(slots));
       assert.ok(slots.width <= 1, JSON.stringify(slots));
       assert.equal(slots.panelBelowSummary, true);
-      await expect(panel).toBeVisible();
+      // The two disclosures are mutually exclusive: opening either one
+      // collapses the other instead of stacking two open bodies.
+      await session.click();
+      await expect(session).toHaveAttribute("aria-expanded", "true");
+      await expectCollapsed(page, trigger);
+      await expect(page.locator(".workspace-details-body")).toBeVisible();
       await page.evaluate(() => window.changesAudit.empty());
       await expect(panel.getByTestId("changed-file-item")).toHaveCount(0);
       await expect(trigger).toHaveText(/No file changes/);
-      await session.click();
+      await trigger.click();
+      await expect(panel).toBeVisible();
       await expect(session).toHaveAttribute("aria-expanded", "false");
       await trigger.click();
       await expectCollapsed(page, trigger);
