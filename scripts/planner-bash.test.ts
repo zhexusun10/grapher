@@ -156,7 +156,15 @@ test('Planner keeps one visible path namespace across source, different worktree
       assert.ok(!buildSystemPrompt(options).includes(boundCwd), 'system prompt must not reveal the changing physical cwd');
       const user = { role: 'user', content: 'Continue the plan.' };
       const history = { role: 'toolResult', toolCallId: 'read-1', content: [{ type: 'text', text: join(boundCwd, 'value.txt') }] };
-      const normalized = await hooks.get('context')![0]({ messages: [user, history] });
+      // Pi runs every `context` handler in registration order, and a Planner
+      // request carries both the steer projection and the workspace-path
+      // projection. Replay the chain instead of assuming the first handler
+      // owns the whole transform.
+      let normalized = { messages: [user, history] };
+      for (const handler of hooks.get('context') ?? []) {
+        const result = await handler({ messages: normalized.messages });
+        if (result?.messages) normalized = result;
+      }
       assert.deepEqual(normalized.messages[0], user, 'no extra user instructions');
       assert.equal(normalized.messages[1].content[0].text.replaceAll('\\', '/'), './value.txt');
       await assert.rejects(() => read.execute('missing', { path: 'missing.txt' }, undefined, undefined, context),
