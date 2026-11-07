@@ -3,7 +3,8 @@ import test from "node:test";
 import { plannerContentSteerId, plannerContentText, plannerSteerId, stripPlannerContext } from "../src/services/plannerText.ts";
 import { plannerSteerOwner, plannerSteerRows, planningOutputSteerIds, withoutPlannerSteerIdentity } from "../src/services/plannerSteers.ts";
 import { plannerSteerContext } from "../engine/planner-steer.ts";
-import { firstPlannerUserIsSteer, plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../src/services/plannerUserTurns.ts";
+import { firstPlannerUserIsSteer, plannerHistoryMessageSources, plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../src/services/plannerUserTurns.ts";
+import type { ChatMessage, PlanningSummary } from "../src/types.ts";
 
 test("Planner status context is not shown as conversation text", () => {
   assert.equal(stripPlannerContext("Current graph node status:\n- worker: completed\n继续优化"), "继续优化");
@@ -46,6 +47,35 @@ test("Planner user turns follow the transcript parser's start/end rules", () => 
     line("message_start", "stopped steer", "m5"),
     "{incomplete",
   ].join("\n")), ["Original", "stopped steer"]);
+});
+
+test("Planner user start/end matching resets at each revision boundary", () => {
+  const marker = (id: string) => JSON.stringify({ type: "grapher_planning_source", planningId: id, startOffset: 0 });
+  const user = (type: string, text: string) => JSON.stringify({ type, message: { id: "reused", role: "user", content: [{ type: "text", text }] } });
+  assert.deepEqual(plannerUserTurns([marker("first"), user("message_start", "interrupted"),
+    marker("second"), user("message_end", "next")].join("\n")), ["interrupted", "next"]);
+});
+
+test("cached follow-ups are matched only to their own unambiguous saved turn", () => {
+  const messages: ChatMessage[] = [
+    { id: "goal", role: "user", text: "Goal", timestamp: 100 },
+    { id: "one", role: "user", text: "same", timestamp: 200 },
+    { id: "two", role: "user", text: "same", timestamp: 400 },
+    { id: "pending", role: "user", text: "same", timestamp: 600 },
+    { id: "unknown-time", role: "user", text: "unknown" },
+  ];
+  const turn = (planningId: string, goal: string, createdAt: number): PlanningSummary => ({
+    planningId, goal, createdAt, roles: {}, totalPlanningDuration: 0, modelDuration: 0,
+  });
+  const turns = [turn("first", "Goal", 110), turn("one", "same", 210), turn("review", "same", 250),
+    turn("two", "<file name=\"a\">body</file>same", 410)];
+  assert.deepEqual([...plannerHistoryMessageSources(messages, turns, turns.map(item => item.planningId), new Set(["review"]))],
+    [["one", "one"], ["two", "two"]]);
+  assert.deepEqual([...plannerHistoryMessageSources(messages, [...turns, turn("ambiguous", "same", 220)],
+    [...turns.map(item => item.planningId), "ambiguous"], new Set(["review"]))], [["two", "two"]],
+    "ambiguous timestamps must not claim an optimistic message");
+  assert.deepEqual([...plannerHistoryMessageSources(messages, turns, ["first", "review"], new Set(["review"]))], [],
+    "a matching review cannot be mistaken for an ordinary turn");
 });
 
 test("live continuation does not repeat the already rendered first turn", () => {

@@ -28,7 +28,7 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
     <span className={`system-pill${item.isError && item.role === "assistant" ? " conversation-error-message" : ""}`}>{item.content}</span>
   </div>;
   if (item.role === "user") return <AnimatedUserTurn id={item.id} animateAppear={item.animateAppear}
-    className="chat-message-row user planner-user-turn"><EditableUserBubble text={item.content || ""} images={item.images?.length ? item.images : steerAttachments?.images} files={steerAttachments?.files}
+    className="chat-message-row user planner-user-turn"><EditableUserBubble text={item.content || ""} images={item.images?.length ? item.images : steerAttachments?.images} files={item.files ?? steerAttachments?.files}
     editing={editing} draft={draft} onDraftChange={onDraftChange}
     onEdit={onEditUser ? () => onStartEdit(item.id, item.content || "") : undefined}
     onCancel={onCancelEdit} onSend={onEditUser ? text => {

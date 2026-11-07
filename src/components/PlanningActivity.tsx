@@ -1,7 +1,9 @@
 import { t, localizeError } from "../i18n";
+import type { ChatMessage } from "../types";
+import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
 import { runtimeService } from "../services/runtime";
-import { subscribePlanningOutput } from "../services/runtimeEvents";
+import { isRuntimeEventsConnected, RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS, subscribePlanningOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { useTranscriptReader } from "../hooks/useTranscriptReader";
@@ -32,6 +34,11 @@ type Props = {
   livePlanningId?: string;
   /** Revisions whose output starts a new conversation section (post-task review). */
   dividerSources?: ReadonlySet<string>;
+  /** Local prompts belonging to saved revisions, used only if their log omits the user row. */
+  sourceUserFallbacks?: ReadonlyMap<string, readonly ChatMessage[]>;
+  rowHeights?: Map<string, number>;
+  restoreAnchor?: TranscriptRestoreAnchor;
+  onRestoreScroll?: (scrollTop: number | null) => void;
   onCompactingChange?: (compacting: boolean) => void;
 };
 
@@ -55,7 +62,8 @@ export const PlanningActivity = memo(function PlanningActivity(props: Props) {
 });
 
 function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onLoadingChange, showUserTurns = false,
-  skipFirstUser = false, onUserResize, onEditUser, edits = [], running = false, livePlanningId, dividerSources, onCompactingChange }: Props) {
+  skipFirstUser = false, onUserResize, onEditUser, edits = [], running = false, livePlanningId, dividerSources,
+  sourceUserFallbacks, rowHeights, restoreAnchor, onRestoreScroll, onCompactingChange }: Props) {
   const key = planningIds.join(":");
   const [initialSegments] = useState(() => {
     const loaded = new Map<string, TranscriptWindow>();
@@ -215,6 +223,10 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     // first (or last) bytes yet. Retry such a revision a bounded number of
     // times instead of caching an empty window forever.
     const emptyRetries = new Map<string, number>();
+    // A terminal summary and file EOF can race the writer's final flush even
+    // when the first page already contained some output. Recheck the newest
+    // freshly-read terminal window twice, then suspend again once it is stable.
+    const terminalChecks = new Map<string, number>();
     const staleEmpty = (id: string) => {
       const window = segments.current.get(id);
       return !!window && window.settled && window.end === window.total && !window.text &&
@@ -225,12 +237,18 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     const stop = startVisibilityPolling(async () => {
       try {
         const latestId = planningIds.at(-1)!;
+        // A summary can be read while it is being replaced, briefly making a
+        // live log look terminal. The displayed live revision stays eligible
+        // for forward reads until its owning snapshot also settles.
+        const liveId = running && livePlanningId && planningIds.includes(livePlanningId)
+          ? livePlanningId : running ? latestId : undefined;
         // Start at the newest revision. Revalidate any cached live revisions,
         // but never download missing older revisions just to open a conversation.
         const toRead = [latestId, ...planningIds.filter(id => id !== latestId && segments.current.has(id))];
         for (const planningId of toRead) {
           const current = segments.current.get(planningId);
-          if (!staleEmpty(planningId) && current?.settled && current.end === current.total) continue;
+          if (planningId !== liveId && !staleEmpty(planningId) && !(terminalChecks.get(planningId) ?? 0) &&
+              current?.settled && current.end === current.total) continue;
           const offset = current?.end ?? 0;
           const page = await runtimeService.getPlanningOutput(planningId, "planner", offset, signal, !current, undefined,
             !current ? INITIAL_TRANSCRIPT_BYTES : undefined);
@@ -239,19 +257,30 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
               (!page.complete && page.nextOffset === offset)) throw new Error(t("执行记录与请求不匹配"));
           // Older reads may have prepended to this revision while we awaited.
           const latest = segments.current.get(planningId);
+          const settled = !page.running && planningId !== liveId;
           const next = latest
-            ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, !page.running)
-            : windowFromPage(page, !page.running);
+            ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, settled)
+            : windowFromPage(page, settled);
           publish(planningId, next); // Also publish empty terminal pages.
           emptyPages = page.content ? 0 : emptyPages + 1;
-          if (planningId === latestId) setReady(true);
+          if (planningId === latestId) {
+            setReady(true);
+            if (settled) {
+              const remaining = terminalChecks.get(planningId);
+              terminalChecks.set(planningId, remaining === undefined || page.content ? 2 : Math.max(0, remaining - 1));
+            }
+          }
         }
         setReady(true);
         const loaded = [...segments.current.values()];
         if (loaded.some(window => window.end < window.total)) return 0;
-        if (loaded.some(window => !window.settled)) return liveOutputDelay(emptyPages);
+        if (loaded.some(window => !window.settled)) {
+          // Pushes reduce latency, but a missed frame or half-open connection
+          // must not leave a visible Planner frozen until it is reopened.
+          return isRuntimeEventsConnected() ? RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS : liveOutputDelay(emptyPages);
+        }
         const retry = planningIds.filter(staleEmpty);
-        if (retry.length) {
+        if (retry.length || (terminalChecks.get(latestId) ?? 0) > 0) {
           for (const id of retry) emptyRetries.set(id, (emptyRetries.get(id) ?? 0) + 1);
           return liveOutputDelay(emptyPages);
         }
@@ -280,13 +309,15 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         stop.wake();
       }, wait);
     });
+    const unsubscribeStatus = subscribeRuntimeEventsStatus(() => stop.wake());
     return () => {
       unsubscribe();
+      unsubscribeStatus();
       if (wakeTimer !== undefined) clearTimeout(wakeTimer);
       abort.abort();
       stop();
     };
-  }, [key, retry, running, publish, lifetime]);
+  }, [key, retry, running, livePlanningId, publish, lifetime]);
 
   return <section ref={sectionRef} className="planning-activity" aria-label={t("规划活动记录")} aria-busy={!initialReady}>
     {error && <p role="alert">{localizeError(error)} <button type="button" onClick={() => {
@@ -305,6 +336,10 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         settled={!running}
         liveSource={running ? livePlanningId : undefined}
         dividerSources={dividerSources}
+        sourceUserFallbacks={showUserTurns ? sourceUserFallbacks : undefined}
+        rowHeights={rowHeights}
+        restoreAnchor={restoreAnchor}
+        onRestoreScroll={onRestoreScroll}
         onCompactingChange={onCompactingChange}
         onEditUser={onEditUser ? editUser : undefined} />
     </div>}

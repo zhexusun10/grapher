@@ -41,7 +41,7 @@ import { plannerConversationEdits, plannerHistoryIds, reviewPlanningIds } from "
 import { cachedPlanningOutput } from "../../services/transcriptCache";
 import { HISTORY_PREPEND_EVENT, TRANSCRIPT_CONTENT_GROWTH_EVENT, TRANSCRIPT_FINAL_OUTPUT_EVENT, TRANSCRIPT_SCROLL_ADJUSTED_EVENT, isNestedScrollGesture, notifyTranscriptContentGrowth } from "../../services/transcriptScroll";
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
-import { firstPlannerUserIsSteer, plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
+import { firstPlannerUserIsSteer, plannerHistoryMessageSources, plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
 import { plannerSteerRows, planningOutputSteerIds, type PlannerSteerRow } from "../../services/plannerSteers";
 import { executionSessionTiming, executionSessionUsageThrough, mergePlannerTurns, plannerLegacyUsage, plannerSessionTiming, plannerSessionUsageThrough, plannerTurnSummaries, addTokenUsage } from "../../services/sessionMetrics";
 import { PlanningActivity } from "../PlanningActivity";
@@ -1013,6 +1013,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const savedPlannerOutput = savedPlannerRecord.key === savedPlannerKey ? savedPlannerRecord.text
     : cachedPlanningOutput(transcriptRunId, savedPlannerIds);
   const plannerMessages = useMemo(() => effectiveMessages.filter((msg) => !msg.node || msg.node === "planner"), [effectiveMessages]);
+  // Local messages can outlive this mount, while history initially loads only
+  // the newest pages. Keep a known follow-up with its own revision rather than
+  // appending it after newer replies until the older page is fetched.
+  const plannerMessageSources = useMemo(() => plannerHistoryMessageSources(
+    plannerMessages, plannerTurnHistory, savedPlannerIds, reviewPlannerIds,
+  ), [plannerMessages, plannerTurnHistory, savedPlannerIds, reviewPlannerIds]);
+  const plannerSourceFallbacks = useMemo(() => {
+    const sources = new Map<string, ChatMessage[]>();
+    for (const message of plannerMessages) {
+      const source = plannerMessageSources.get(message.id);
+      if (source) sources.set(source, [...(sources.get(source) ?? []), message]);
+    }
+    return sources;
+  }, [plannerMessages, plannerMessageSources]);
   const livePlannerItems = useMemo(() => {
     const items = (plannerStream.items ?? []) as TranscriptItem[];
     // The first turn is always rendered above the transcript. A continuation
@@ -1046,7 +1060,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // A partial window that starts at a steer keeps the header out of history, so
   // skipping its first row would drop the user's message instead of a duplicate.
   const firstPersistedUserIsSteer = useMemo(() => firstPlannerUserIsSteer(activeSavedPlannerOutput), [activeSavedPlannerOutput]);
-  const skipFirstPersistedTurn = !firstPersistedUserIsSteer && skipsFirstPersistedTurn(persistedTurnHistory, plannerMessages[0]?.text);
+  const historyStartsAtBeginning = useMemo(() => {
+    try {
+      const marker = JSON.parse(activeSavedPlannerOutput.split("\n", 1)[0]);
+      return marker.type === "grapher_planning_source" && marker.planningId === savedPlannerIds[0] && marker.startOffset === 0;
+    } catch { return false; }
+  }, [activeSavedPlannerOutput, savedPlannerIds]);
+  const skipFirstPersistedTurn = historyStartsAtBeginning && !firstPersistedUserIsSteer &&
+    skipsFirstPersistedTurn(persistedTurnHistory, plannerMessages[0]?.text);
   const persistedUserTurns = useMemo(() => skipFirstPersistedTurn
     ? persistedTurnHistory.slice(1) : persistedTurnHistory,
     [persistedTurnHistory, skipFirstPersistedTurn]);
@@ -1275,6 +1296,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, []);
   const conversationScrollStateRef = useRef<Map<string, ViewScrollState>>(new Map());
+  // Planner byte windows and scroll positions survive Node navigation. Keep
+  // their row measurements too, or a restored pixel offset points at different
+  // rows when the virtualizer replaces estimates on remount.
+  const plannerRowHeightsRef = useRef(new Map<string, number>());
   const previousNodeViewRef = useRef(Boolean(selected));
 
   if (activeConversationViewRef.current !== conversationViewKey) {
@@ -1283,8 +1308,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       // describes the reopened Node's fresh tail. Only Planner positions persist.
       conversationScrollStateRef.current.delete(activeConversationViewRef.current);
     } else if (chatScrollRef.current && activeConversationViewRef.current) {
-      conversationScrollStateRef.current.set(activeConversationViewRef.current,
-        captureViewScrollState(chatScrollRef.current, isUserScrolledUpRef.current));
+      const scroll = chatScrollRef.current;
+      const saved = captureViewScrollState(scroll, isUserScrolledUpRef.current);
+      if (saved.isUserScrolledUp) {
+        const viewport = scroll.getBoundingClientRect();
+        const row = [...scroll.querySelectorAll<HTMLElement>(".planning-activity [data-transcript-id]")].find(item => {
+          const bounds = item.getBoundingClientRect();
+          return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+        });
+        if (row?.dataset.transcriptId) saved.anchor = { id: row.dataset.transcriptId, top: row.getBoundingClientRect().top - viewport.top };
+      }
+      conversationScrollStateRef.current.set(activeConversationViewRef.current, saved);
     }
     previousNodeViewRef.current = Boolean(selected);
     activeConversationViewRef.current = conversationViewKey;
@@ -2370,6 +2404,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, [effectiveMessages.length, shouldFollowOutput]);
 
+  const updatePlannerRestoredScroll = useStableCallback((scrollTop: number | null) => {
+    const saved = conversationScrollStateRef.current.get(conversationViewKey);
+    if (!saved?.isUserScrolledUp) return;
+    if (scrollTop !== null) saved.scrollTop = scrollTop;
+    // This anchor belongs only to the current remount. A later revision must
+    // not restore the old position after the reader has moved elsewhere.
+    delete saved.anchor;
+  });
+
   const syncViewScroll = useCallback((key: string) => {
     const el = chatScrollRef.current;
     if (!el) return;
@@ -3188,6 +3231,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           running={plannerActivityRunning}
                           livePlanningId={livePlanningId}
                           dividerSources={reviewPlannerIds}
+                          sourceUserFallbacks={plannerSourceFallbacks}
+                          rowHeights={plannerRowHeightsRef.current}
+                          restoreAnchor={conversationScrollStateRef.current.get(conversationViewKey)?.anchor}
+                          onRestoreScroll={updatePlannerRestoredScroll}
                           onCompactingChange={setPlannerHistoryCompacting}
                           onLoadingChange={setPlannerHistoryLoading}
                           onReady={() => {
@@ -3210,6 +3257,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     {/* 保留当前对话中的跟进消息；实时流已有同一消息时不重复渲染。 */}
                     {plannerMessages.slice(1).filter((msg) => {
                       if (msg.plannerSteerId) return false; // Rendered in the pending area or its exact Pi turn.
+                      if (useSavedPlanner && savedPlannerShowsUserTurns && plannerMessageSources.has(msg.id)) return false;
                       if (msg.node && msg.node !== "planner") return false;
                       if (renderLivePlanner && plannerStream.items?.some((item: TranscriptItem) =>
                         item.role === "user" && item.id === msg.id)) return false;

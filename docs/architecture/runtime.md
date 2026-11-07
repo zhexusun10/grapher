@@ -374,7 +374,10 @@ Planning attempts retain requests, graph candidates, summaries, and Pi JSONL
 streams. The planning SSE `complete` event is terminal even if the HTTP transport
 remains open: the client releases the reader and supersedes in-flight draft polls
 with the committed snapshot. This applies to appended Planner revisions as well
-as first plans. Tests and legacy-log migration are described in
+as first plans. A displayed live Planner remains eligible for watchdog reads even
+if a transient summary read reports a terminal log. A newly read terminal tail
+also gets a bounded recheck for a final writer flush; stable cached history does
+not poll indefinitely. Tests and legacy-log migration are described in
 [Conversation logs](../development/conversation-logs.md).
 
 ## Recovery and ownership

@@ -1,7 +1,9 @@
 import { t } from "../i18n";
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
-import { type ImageAttachment, TranscriptItem } from "../types";
+import { type ChatMessage, type ImageAttachment, TranscriptItem } from "../types";
+import { plannerUserTurnKey } from "../services/plannerUserTurns";
+import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
 import { closeThinkingItems } from "../services/thinkingTranscript";
 import { isNestedScrollGesture, notifyTranscriptFinalOutput } from "../services/transcriptScroll";
 import { parseTranscriptChunkLines, type ParseTranscriptChunkState, type TranscriptParseOptions } from "../services/transcriptParser";
@@ -40,6 +42,12 @@ interface VirtualizedTranscriptProps {
   /** Composed sources that start a new section, such as a post-task Planner
    * review. A divider row precedes such a source once it has earlier content. */
   dividerSources?: ReadonlySet<string>;
+  /** Cached prompts assigned to their durable planning revision. */
+  sourceUserFallbacks?: ReadonlyMap<string, readonly ChatMessage[]>;
+  /** Measurements retained while the Planner view is temporarily unmounted. */
+  rowHeights?: Map<string, number>;
+  restoreAnchor?: TranscriptRestoreAnchor;
+  onRestoreScroll?: (scrollTop: number | null) => void;
   onEditUser?: (text: string, replacement: string, userTurnOffset?: number, images?: ImageAttachment[]) => boolean | void | Promise<unknown>;
   /** Called when the user reaches the top of a shared history scroller. */
   onReachTop?: () => void;
@@ -216,6 +224,10 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   liveSource,
   sourceOrder,
   dividerSources,
+  sourceUserFallbacks,
+  rowHeights,
+  restoreAnchor,
+  onRestoreScroll,
   onEditUser,
   onReachTop,
   onCompactingChange,
@@ -732,18 +744,48 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   }, [liveTextVersion]);
 
   const parsedItems = itemsRef.current;
-  // Empty thinking blocks keep their card so a settled COT without visible
-  // text explains itself instead of disappearing from the transcript.
-  const items = useMemo(() => (settled ? settleInterruptedItems(parsedItems) : parsedItems),
-    [parsedItems, settled]);
-  // Missing revisions will be inserted immediately before the next loaded
-  // revision, or at the end if none follows. Keep those boundaries even when
-  // every row of a revision has been virtualized out of the DOM.
+  // A local prompt whose durable revision has not loaded must not appear at
+  // the end of the conversation. If that revision starts at byte zero but its
+  // log omitted the user row, insert the fallback at the revision boundary,
+  // without changing the byte offsets or the parser's cached items.
+  const projected = useMemo(() => {
+    let rows = settled ? settleInterruptedItems(parsedItems) : parsedItems;
+    const starts = new Map(segmentStartsRef.current);
+    const insertions: Array<{ index: number; rows: TranscriptItem[] }> = [];
+    let added = 0;
+    if (segmentedRef.current && sourceUserFallbacks?.size) {
+      for (const [source, index] of segmentStartsRef.current) {
+        const segment = segmentStatesRef.current.get(source);
+        const fallbacks = sourceUserFallbacks.get(source);
+        starts.set(source, index + added);
+        if (!segment || segment.startOffset !== 0 || !fallbacks?.length) continue;
+        const recorded = segment.items.filter(item => item.role === "user" && !/^msg-[0-9a-f-]{36}$/i.test(item.id));
+        const missing = fallbacks.filter(message => {
+          const match = recorded.findIndex(item => plannerUserTurnKey(item.content || "") === plannerUserTurnKey(message.text));
+          if (match < 0) return true;
+          recorded.splice(match, 1);
+          return false;
+        }).map((message): TranscriptItem => ({
+          id: `planner-local-${message.id}`, type: "text", role: "user", content: message.text,
+          images: message.images, files: message.files, timestamp: message.timestamp ?? 0, animateAppear: false,
+        }));
+        if (missing.length) { insertions.push({ index, rows: missing }); added += missing.length; }
+      }
+    }
+    if (insertions.length) {
+      rows = [...rows];
+      for (const insertion of insertions.reverse()) rows.splice(insertion.index, 0, ...insertion.rows);
+    }
+    return { rows, starts };
+  }, [parsedItems, settled, sourceUserFallbacks, output]);
+  const items = projected.rows;
+  // Missing revisions keep a boundary before the next loaded revision, even
+  // when their rows have not loaded or have been virtualized out of the DOM.
   const sourceStarts: Array<{ source: string; index: number }> = [];
   if (segmentedRef.current) {
     let next = items.length;
-    for (const source of [...(sourceOrder ?? segmentStartsRef.current.keys())].reverse()) {
-      next = segmentStartsRef.current.get(source) ?? next;
+    for (const source of [...(sourceOrder ?? projected.starts.keys())].reverse()) {
+      next = projected.starts.get(source) ?? next;
       sourceStarts.push({ source, index: next });
     }
     sourceStarts.reverse();
@@ -1007,7 +1049,8 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         style={{ overflowAnchor: "none", minHeight: inline || compact ? 0 : 200 }}
       >
         {!output && items.length === 0 && emptyText && <div className="transcript-empty-state"><Terminal size={22} /><p>{emptyText}</p></div>}
-        {sharedViewport ? <VirtualizedList items={items} renderRow={renderRow} gap={10} sourceStarts={sourceStarts} /> :
+        {sharedViewport ? <VirtualizedList items={items} renderRow={renderRow} gap={10} sourceStarts={sourceStarts} rowHeights={rowHeights}
+          restoreAnchor={restoreAnchor} onRestoreScroll={onRestoreScroll} /> :
           <div style={{ flexShrink: 0, paddingTop: `${paddingTop}px`, paddingBottom: `${paddingBottom}px` }}>
             {visibleItems.map(item => <MeasuredRow key={item.id} id={item.id} measure={measure}>{renderRow(item)}</MeasuredRow>)}
           </div>}

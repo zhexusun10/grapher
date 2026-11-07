@@ -1115,6 +1115,86 @@ test("a live Planner turn keeps the node conversation the reader opened", { time
   }
 });
 
+test("actual App reopening Planner history does not move cached follow-ups past newer replies", { timeout: 45_000 }, async () => {
+  const config = { repository: "/mock/planner-order", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
+    plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
+  const summary = (id, goal, createdAt) => ({ planningId: id, goal, createdAt, status: "success", roles: {},
+    totalPlanningDuration: 0, modelDuration: 0, runId: "order-app", repository: config.repository });
+  const first = summary("app-goal", "APP_ORDER_GOAL", Date.now() - 1000);
+  let current = { ...empty, runId: "order-app", config, planType: "graph", phase: "awaiting_approval", planningId: first.planningId,
+    planning: first, graph: { originalGoal: first.goal, nodes: [], edges: [] },
+    events: [{ type: "created", sequence: 1, timestamp: first.createdAt, planning_id: first.planningId, planning: first }] };
+  const other = { ...empty, runId: "other-order-app", config, planType: "graph", phase: "completed",
+    graph: { originalGoal: "OTHER_ORDER_GOAL", nodes: [], edges: [] } };
+  const user = text => line({ type: "message_end", message: { role: "user", content: [{ type: "text", text }] } });
+  const outputs = { "app-goal": user(first.goal) + assistant("APP_GOAL_REPLY") };
+  let turn = 0, holdPrevious = false, releasePrevious;
+  onPlanStream = (body, res) => {
+    const id = `app-turn-${++turn}`;
+    const planning = summary(id, body.goal, Date.now());
+    outputs[id] = user(body.goal) + (turn === 3
+      ? Array.from({ length: 80 }, (_, i) => assistant(`APP_LAST_REPLY_${i}`)).join("") : assistant(`APP_REPLY_${turn}`));
+    current = { ...current, planningId: id, planning,
+      events: [...current.events, { type: "graph_revised", sequence: turn + 1, timestamp: planning.createdAt, planning_id: id, planning }] };
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+    res.end(`event: run_started\ndata: ${JSON.stringify({ runId: current.runId })}\n\nevent: complete\ndata: ${JSON.stringify({ snapshot: current })}\n\n`);
+  };
+  const { context, page, errors } = await newPage(async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    if (command === "plan_goal_stream") return route.continue();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId, other.runId],
+        repositoryInfo: { path: config.repository, name: "Planner order", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = body.runId === other.runId ? other : current; break;
+      case "snapshot_if_changed": result = { version: String(turn), snapshot: null }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_planning_output": {
+        if (holdPrevious && body.planningId === "app-turn-2") await new Promise(resolve => { releasePrevious = resolve; });
+        const bytes = Buffer.from(outputs[body.planningId] || ""), start = body.offset ?? 0;
+        result = { planningId: body.planningId, role: "planner", content: bytes.subarray(start).toString(),
+          startOffset: start, nextOffset: bytes.length, totalBytes: bytes.length, complete: true, running: false }; break;
+      }
+      default: result = {};
+    }
+    try { await route.fulfill({ json: { result } }); } catch {}
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="order-app"]').click();
+    await page.getByText("APP_GOAL_REPLY", { exact: true }).waitFor();
+    const composer = page.locator(".pane-bottom-chat textarea");
+    for (const [index, text] of ["APP_FOLLOW_1", "APP_FOLLOW_2", "APP_FOLLOW_3"].entries()) {
+      await composer.fill(text); await composer.press("Enter");
+      await page.waitForFunction(expected => document.querySelector(".pane-bottom-chat textarea")?.value === "", undefined);
+      await page.getByText(index === 2 ? "APP_LAST_REPLY_79" : `APP_REPLY_${index + 1}`, { exact: true }).waitFor();
+      await page.waitForTimeout(150);
+    }
+    holdPrevious = true;
+    await page.locator('[data-run-id="other-order-app"]').click();
+    await page.getByText("OTHER_ORDER_GOAL", { exact: true }).first().waitFor();
+    await page.locator('[data-run-id="order-app"]').click();
+    await page.getByText("APP_LAST_REPLY_79", { exact: true }).waitFor();
+    for (let i = 0; i < 100 && !releasePrevious; i++) await page.waitForTimeout(20);
+    assert.ok(releasePrevious, "the older revision is still in flight after reopening");
+    assert.equal(await page.getByText("APP_FOLLOW_1", { exact: true }).count(), 0);
+    assert.equal(await page.getByText("APP_FOLLOW_2", { exact: true }).count(), 0,
+      "an older cached prompt cannot appear after the latest Planner reply");
+    releasePrevious(); releasePrevious = undefined;
+    const scroll = page.locator(".initial-query-scroll");
+    await scroll.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })); });
+    await page.getByText("APP_FOLLOW_2", { exact: true }).waitFor();
+    const text = await page.locator(".planning-activity-output").innerText();
+    assert.ok(text.indexOf("APP_FOLLOW_2") < text.indexOf("APP_REPLY_2"));
+    assert.deepEqual(errors, []);
+  } finally { onPlanStream = undefined; releasePrevious?.(); await context.close(); }
+});
+
 test("actual App renders a Planner goal once even when the saved replay contains it", { timeout: 45_000 }, async () => {
   // A conversation stopped before any follow-up still has its goal in the
   // durable planner.jsonl. The saved replay must skip that turn (it is already
@@ -1394,6 +1474,44 @@ for (const role of ["node", "planner"]) {
           assert.ok(requests.length > count, "leaving a Node view releases its cache; reopening reads a tail again");
           assert.ok(requests.slice(count).filter(item => item.command === "get_execution_output").every(item => !item.full));
         }
+      }
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+for (const running of [true, false]) {
+  test(`Planner ${running ? "live" : "settling"} history recovers tools and thinking after a terminal read without a push`, { timeout: 20_000 }, async () => {
+    let data = assistant("POLL_INITIAL");
+    const reads = [];
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      const command = new URL(route.request().url()).pathname.slice(5);
+      if (command !== "get_planning_output") return route.fulfill({ json: { result: {} } });
+      reads.push(body.offset);
+      const bytes = Buffer.from(data), start = body.offset ?? 0;
+      // A concurrently replaced summary can briefly be unreadable, so the page
+      // reports terminal even though the displayed Planner is still running.
+      return route.fulfill({ json: { result: { planningId: body.planningId, role: "planner",
+        content: bytes.subarray(start).toString(), startOffset: start, nextOffset: bytes.length,
+        totalBytes: bytes.length, complete: true, running: false } } });
+    });
+    try {
+      await page.goto(`${origin}/__history?case=historyRegression`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.selectHistory);
+      await page.evaluate(running => { window.audit.setRunning(running); window.audit.setPlanningIds(["planner-latest"]); window.audit.selectHistory("planner"); }, running);
+      await page.getByText("POLL_INITIAL", { exact: true }).waitFor();
+      data += line({ type: "message_start", message: { role: "assistant", content: [] } }) +
+        line({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "LATE_PLANNER_THINKING" } }) +
+        startTool("late-planner-tool", "echo LATE_PLANNER_TOOL");
+      await page.locator('[data-transcript-id="late-planner-tool"]').waitFor({ timeout: 4000 });
+      await page.locator(".thinking-card").waitFor({ timeout: 4000 });
+      assert.ok(reads.some(offset => offset === Buffer.byteLength(assistant("POLL_INITIAL"))), "resume at the retained cursor without re-entering");
+      if (!running) {
+        await page.waitForTimeout(1600);
+        const count = reads.length;
+        await page.waitForTimeout(1500);
+        assert.equal(reads.length, count, "a stable terminal transcript must stop timer polling");
       }
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
@@ -1903,7 +2021,9 @@ for (const role of ["node", "planner"]) {
       assert.equal(await page.locator(".thinking-card.collapsed").count(), 2);
       assert.equal(await page.locator(".thinking-card-body, .tool-call-body").count(), 0, "folded cards must not mount their large bodies");
       assert.equal(await page.getByText("PENDING_HISTORY_REASONING", { exact: true }).count(), 0);
-      await page.waitForTimeout(100);
+      // Planner terminal EOF is briefly revalidated for a racing final flush;
+      // distinguish those background cursor checks from a card-triggered read.
+      await page.waitForTimeout(role === "planner" ? 1200 : 100);
       const count = requests.length;
       await page.locator(".thinking-card").first().locator(".thinking-card-header").click();
       await page.locator(".thinking-card-body", { hasText: "HISTORICAL_REASONING" }).waitFor();
@@ -2017,6 +2137,123 @@ test("planner: opening a reviewed run preloads the preceding planning turn", { t
       "opening the reviewed conversation seeds the preceding revision");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
+});
+
+test("Planner restores the visible row after visiting a node in a virtualized history", { timeout: 30_000 }, async () => {
+  const output = Array.from({ length: 140 }, (_, index) => assistant(`SCROLL_ROW_${index} ` +
+    (index % 2 ? "A long wrapped paragraph with 中文 content. ".repeat(25) : "short"))).join("");
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    const bytes = Buffer.from(output), start = body.offset ?? 0;
+    if (new URL(route.request().url()).pathname !== "/api/get_planning_output") return route.fulfill({ json: { result: {} } });
+    return route.fulfill({ json: { result: { planningId: body.planningId, role: "planner", content: bytes.subarray(start).toString(),
+      startOffset: start, nextOffset: bytes.length, totalBytes: bytes.length, complete: true, running: false } } });
+  });
+  try {
+    await page.goto(`${origin}/__history?case=plannerScrollRestore`, { waitUntil: "domcontentloaded" });
+    await page.getByText(/SCROLL_ROW_139/).waitFor();
+    const scroll = page.locator(".initial-query-scroll");
+    await scroll.hover();
+    // Measure many variable-height rows above the eventual reading position.
+    // On remount their initial estimates differ from those measurements.
+    await scroll.evaluate(element => {
+      element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+      element.scrollTop = 0;
+    });
+    await page.waitForTimeout(200);
+    for (let i = 0; i < 30; i++) { await page.mouse.wheel(0, 400); await page.waitForTimeout(40); }
+    await page.waitForTimeout(200);
+    const anchor = await scroll.evaluate(element => {
+      const top = element.getBoundingClientRect().top;
+      const row = [...element.querySelectorAll(".planning-activity [data-transcript-id]")].find(item => {
+        const bounds = item.getBoundingClientRect();
+        return bounds.bottom > top + 20 && bounds.top < top + element.clientHeight - 20;
+      });
+      return row && { id: row.dataset.transcriptId, top: row.getBoundingClientRect().top - top };
+    });
+    assert.ok(anchor, "a measured Planner row is visible before leaving");
+    await page.evaluate(() => window.audit.selectPlannerScrollView("worker"));
+    await page.locator(".back-to-query-btn").waitFor();
+    await page.evaluate(() => window.audit.selectPlannerScrollView(""));
+    await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".chat-messages-stream")).opacity) > 0.99);
+    await page.waitForTimeout(250);
+    const restored = await scroll.evaluate((element, id) => {
+      const row = [...element.querySelectorAll(".planning-activity [data-transcript-id]")].find(item => item.dataset.transcriptId === id);
+      return row ? row.getBoundingClientRect().top - element.getBoundingClientRect().top : null;
+    }, anchor.id);
+    assert.ok(restored !== null && Math.abs(restored - anchor.top) <= 4,
+      `returning should preserve the same visible row, not only its stale pixel offset: ${JSON.stringify({ anchor, restored })}`);
+    await page.evaluate(() => { window.audit.selectPlannerScrollView("worker"); window.audit.setPlannerScrollWidth("600px"); });
+    await page.locator(".back-to-query-btn").waitFor();
+    await page.evaluate(() => window.audit.selectPlannerScrollView(""));
+    await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".chat-messages-stream")).opacity) > 0.99);
+    await page.waitForTimeout(300);
+    const resized = await scroll.evaluate((element, id) => {
+      const row = [...element.querySelectorAll(".planning-activity [data-transcript-id]")].find(item => item.dataset.transcriptId === id);
+      return row ? row.getBoundingClientRect().top - element.getBoundingClientRect().top : null;
+    }, anchor.id);
+    assert.ok(resized !== null && Math.abs(resized - anchor.top) <= 8,
+      `resizing while away should retain the same reading anchor: ${JSON.stringify({ anchor, resized })}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("planner: cached follow-ups stay with their revisions while history pages load", { timeout: 30_000 }, async () => {
+  const user = text => line({ type: "message_end", message: { role: "user", content: [{ type: "text", text }] } });
+  const outputs = {
+    "order-goal": user("ORDER_GOAL") + assistant("GOAL_REPLY"),
+    "order-one": user("FOLLOW_1") + assistant("REPLY_1"),
+    // An empty/missing user event still needs its local prompt before this reply.
+    "order-two": assistant("REPLY_2"),
+    "order-three": user("FOLLOW_3") + Array.from({ length: 80 }, (_, i) => assistant(`REPLY_3_${i}`)).join(""),
+  };
+  const requests = [];
+  let releaseTwo, releaseOne;
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    if (new URL(route.request().url()).pathname !== "/api/get_planning_output") return route.fulfill({ json: { result: {} } });
+    requests.push(body.planningId);
+    if (body.planningId === "order-two") await new Promise(resolve => { releaseTwo = resolve; });
+    if (body.planningId === "order-one") await new Promise(resolve => { releaseOne = resolve; });
+    const bytes = Buffer.from(outputs[body.planningId]), start = body.offset ?? 0;
+    try { await route.fulfill({ json: { result: { planningId: body.planningId, role: "planner",
+      content: bytes.subarray(start).toString(), startOffset: start, nextOffset: bytes.length,
+      totalBytes: bytes.length, complete: true, running: false } } }); } catch {}
+  });
+  try {
+    await page.goto(`${origin}/__history?case=plannerHistoryOrder`, { waitUntil: "domcontentloaded" });
+    await page.getByText("REPLY_3_79", { exact: true }).waitFor();
+    for (let i = 0; i < 100 && !releaseTwo; i++) await page.waitForTimeout(20);
+    assert.ok(releaseTwo, "the preceding revision is still loading");
+    assert.equal(await page.getByText("FOLLOW_1", { exact: true }).count(), 0);
+    assert.equal(await page.getByText("FOLLOW_2", { exact: true }).count(), 0,
+      "cached older prompts must not be appended after the newest reply");
+    await page.getByText("UNSAVED_FOLLOW_UP", { exact: true }).waitFor();
+    releaseTwo(); releaseTwo = undefined;
+    const scroll = page.locator(".initial-query-scroll");
+    await scroll.evaluate(element => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+    });
+    await page.getByText("REPLY_2", { exact: true }).waitFor();
+    await page.getByText("FOLLOW_2", { exact: true }).waitFor();
+    const order = await page.locator(".planning-activity-output").innerText();
+    assert.ok(order.indexOf("FOLLOW_2") < order.indexOf("REPLY_2"), "a missing user event is restored at its own revision");
+    assert.equal(await page.getByText("FOLLOW_2", { exact: true }).count(), 1);
+    for (let i = 0; i < 100 && !releaseOne; i++) {
+      await scroll.evaluate(element => element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })));
+      await page.waitForTimeout(20);
+    }
+    assert.ok(releaseOne, "older revision is requested on scrollback");
+    releaseOne(); releaseOne = undefined;
+    await scroll.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
+    await page.getByText("FOLLOW_1", { exact: true }).waitFor();
+    const loaded = await page.locator(".planning-activity-output").innerText();
+    assert.ok(loaded.indexOf("FOLLOW_1") < loaded.indexOf("REPLY_1"));
+    assert.equal(await page.getByText("FOLLOW_1", { exact: true }).count(), 1);
+    assert.ok(requests.includes("order-one"));
+    assert.deepEqual(errors, []);
+  } finally { releaseTwo?.(); releaseOne?.(); await context.close(); }
 });
 
 test("planner: starting and finishing a review keeps the earlier planning conversation", { timeout: 30_000 }, async () => {

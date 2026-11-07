@@ -13,10 +13,17 @@
  * hard zero check would misread the bottom as a deliberate scroll-up. */
 export const CONVERSATION_BOTTOM_THRESHOLD = 35;
 
+export interface TranscriptRestoreAnchor {
+  id: string;
+  /** Row top relative to the shared conversation viewport. */
+  top: number;
+}
+
 export interface ViewScrollState {
   scrollTop: number;
   isAtBottom: boolean;
   isUserScrolledUp: boolean;
+  anchor?: TranscriptRestoreAnchor;
 }
 
 export interface ScrollMetrics {

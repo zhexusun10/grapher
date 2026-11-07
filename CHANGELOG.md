@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Reopening Planner history keeps cached follow-ups with their own revisions and restores the visible row after visiting a node, even when the pane width changes. Live and recently settled Planner logs also recheck missed output so thinking and tool cards do not remain hidden until the view is reopened.
+
 ## [1.5.0] - 2026-11-07
 
 This release is a refinement pass over the workbench rather than a new surface: the interface was tightened end to end, the product's visual identity moved onto the home dot pattern, and large Graph runs now load, publish and open much faster.

@@ -297,6 +297,48 @@ function PlannerReviewFixture() {
   </div>;
 }
 
+function PlannerHistoryOrderFixture() {
+  const turns = ["goal", "one", "two", "three"].map((name, index) => ({
+    planningId: `order-${name}`, status: "success", createdAt: (index + 1) * 100 + 10,
+    goal: index ? `FOLLOW_${index}` : "ORDER_GOAL", roles: {}, totalPlanningDuration: 0, modelDuration: 0,
+  }));
+  const state = { ...emptySnapshot, runId: "order-run", config, planType: "graph", phase: "completed", approved: true,
+    planningId: turns.at(-1)!.planningId, planning: turns.at(-1),
+    graph: { originalGoal: "ORDER_GOAL", nodes: [], edges: [] },
+    events: turns.map((planning, index) => ({ type: index ? "graph_revised" : "created",
+      sequence: index + 1, timestamp: planning.createdAt, planning_id: planning.planningId, planning })) } as Snapshot;
+  const messages = ["ORDER_GOAL", "FOLLOW_1", "FOLLOW_2", "FOLLOW_3", "UNSAVED_FOLLOW_UP"].map((text, index) => ({
+    id: `order-message-${index}`, role: "user" as const, text, timestamp: (index + 1) * 100, runId: state.runId,
+  }));
+  const noop = () => {};
+  return <div style={{ height: "calc(100vh - 64px)", display: "flex" }}>
+    <GraphWorkbench state={state} routeType="graph" selected="" setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
+      effectiveMessages={messages} isPlanning={false} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
+      onControl={noop} onSave={noop} onAddManualNode={async () => true} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop}
+      repoInfo={null} config={config} active={false} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
+      nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
+  </div>;
+}
+
+function PlannerScrollRestoreFixture() {
+  const [selected, setSelected] = useState("");
+  const [width, setWidth] = useState("100%");
+  audit.selectPlannerScrollView = setSelected;
+  audit.setPlannerScrollWidth = setWidth;
+  const state = { ...emptySnapshot, runId: "scroll-run", config, planType: "graph", phase: "completed", approved: true,
+    planningId: "scroll-plan", graph: { originalGoal: "Planner scroll goal", nodes: [{ name: "worker", task: "Worker" }], edges: [] },
+    nodes: { worker: { status: "completed", revision: 0, instruction: "", error: null } },
+    events: [{ type: "created", sequence: 1, timestamp: 1, planning_id: "scroll-plan" }] } as Snapshot;
+  const noop = () => {};
+  return <div style={{ height: "calc(100vh - 64px)", width, display: "flex" }}>
+    <GraphWorkbench state={state} routeType="graph" selected={selected} setSelected={setSelected} selectedMergerId="" setSelectedMergerId={noop}
+      effectiveMessages={[]} isPlanning={false} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
+      onControl={noop} onSave={noop} onAddManualNode={async () => true} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop}
+      repoInfo={null} config={config} active={false} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
+      nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
+  </div>;
+}
+
 function UnrunNodeFixture() {
   const [selected, setSelected] = useState("worker");
   const [started, setStarted] = useState(false);
@@ -442,7 +484,7 @@ const cases: Record<string, React.ComponentType> = {
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
-  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, heldHistory: HeldHistoryFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture,
+  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, heldHistory: HeldHistoryFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture, plannerHistoryOrder: PlannerHistoryOrderFixture, plannerScrollRestore: PlannerScrollRestoreFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
   timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture,
 };

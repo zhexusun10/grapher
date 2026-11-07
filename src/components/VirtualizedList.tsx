@@ -2,6 +2,7 @@ import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, 
 import { estimateTranscriptRowHeight, retainedRowAnchor, rowAt, rowOffsets, visibleRows } from "../services/transcriptLayout";
 import { shareJson } from "../services/structuralSharing";
 import { FOLLOW_LATEST_EVENT, TRANSCRIPT_SCROLL_ADJUSTED_EVENT, isNestedScrollGesture } from "../services/transcriptScroll";
+import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
 
 export function scrollParent(element: HTMLElement | null): HTMLElement | null {
   for (let parent = element?.parentElement; parent; parent = parent.parentElement) {
@@ -28,13 +29,22 @@ const MeasuredListRow = memo(function MeasuredListRow({ id, measure, children }:
 /** Window document-flow rows using the *shared parent's* viewport, not a private scroll area.
  * The conversation remains responsible for following output and revealing expanded cards.
  */
-export function VirtualizedList<T extends { id: string }>({ items, renderRow, gap = 0, sourceStarts = [] }: {
+export function VirtualizedList<T extends { id: string }>({ items, renderRow, gap = 0, sourceStarts = [], rowHeights, restoreAnchor, onRestoreScroll }: {
   items: T[]; renderRow: (item: T, index: number) => React.ReactNode; gap?: number;
   sourceStarts?: Array<{ source: string; index: number }>;
+  /** View-owned measurements survive a temporary unmount of this list. */
+  rowHeights?: Map<string, number>;
+  restoreAnchor?: TranscriptRestoreAnchor;
+  onRestoreScroll?: (scrollTop: number | null) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const parentRef = useRef<HTMLElement | null>(null);
-  const heights = useRef(new Map<string, number>());
+  const heights = useRef(rowHeights ?? new Map<string, number>());
+  // A saved pixel position is only an estimate after a resize or remount. Keep
+  // the actual row mounted and align it as its neighbours are remeasured.
+  const restoreRef = useRef(restoreAnchor ?? null);
+  const onRestoreScrollRef = useRef(onRestoreScroll);
+  onRestoreScrollRef.current = onRestoreScroll;
   const resizedMeasuredRowsRef = useRef(false);
   const [heightVersion, setHeightVersion] = useState(0);
   const flushScheduled = useRef(false);
@@ -142,6 +152,11 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     parentRef.current = scrollParent(ref.current);
     const parent = parentRef.current;
     updateViewport();
+    const cancelRestore = () => {
+      if (!restoreRef.current) return;
+      restoreRef.current = null;
+      onRestoreScrollRef.current?.(null);
+    };
     const releaseAnchor = () => {
       if (stabilizingAnchorRef.current) return;
       readingAnchor.current = null;
@@ -191,6 +206,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     };
     const onUserScrollGesture = (e: Event) => {
       if (parent && isNestedScrollGesture(e, parent)) return;
+      cancelRestore();
       const target = e.target instanceof Element ? e.target : null;
       let row = target?.closest<HTMLElement>("[data-transcript-id]");
       if (!row) {
@@ -217,6 +233,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     let scrollbarPointer: number | null = null;
     const onPointerDown = (event: PointerEvent) => {
       if (!parent || isNestedScrollGesture(event, parent)) return;
+      cancelRestore();
       releaseAnchor();
       const width = parent.offsetWidth - parent.clientWidth;
       const bounds = parent.getBoundingClientRect();
@@ -243,6 +260,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         clearGestureAnchor();
         return;
       }
+      cancelRestore();
       captureGestureAnchor(target?.closest<HTMLElement>("[data-transcript-id]") ?? visibleRowsInConversation().at(-1), true);
       releaseAnchor();
     };
@@ -289,6 +307,9 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       }
     };
     const observer = new ResizeObserver(updateViewport);
+    // Measurements and the workbench's initial scroll settle over multiple
+    // frames. Never keep ownership after the user starts interacting.
+    const restoreTimer = restoreRef.current ? setTimeout(cancelRestore, 300) : null;
     if (parent) {
       parent.addEventListener(FOLLOW_LATEST_EVENT, clearGestureAnchor);
       parent.addEventListener("scroll", schedule, { passive: true });
@@ -311,6 +332,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
       cancelGestureTimer();
+      if (restoreTimer !== null) clearTimeout(restoreTimer);
       observer.disconnect();
       if (frame.current !== null) cancelAnimationFrame(frame.current);
       frame.current = null;
@@ -332,6 +354,26 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     const readingHistoryNow = !followingLatestNow && parent?.dataset.transcriptHistoryReading === "true";
     const bottomPinnedNow = !followingLatestNow && !readingHistoryNow &&
       (parent?.dataset.transcriptPreparing === "true" || parent?.dataset.transcriptFollowing === "true");
+
+    const restore = restoreRef.current;
+    if (restore && parent && ref.current) {
+      const row = [...ref.current.querySelectorAll<HTMLElement>("[data-transcript-id]")]
+        .find(item => item.dataset.transcriptId === restore.id);
+      if (row) {
+        const delta = row.getBoundingClientRect().top - parent.getBoundingClientRect().top - restore.top;
+        if (Math.abs(delta) > 0.5) parent.scrollTop += delta;
+        onRestoreScrollRef.current?.(parent.scrollTop);
+        parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
+        previousOffsets.current = offsets;
+        previousOffsetIds.current = ids;
+        updateViewport();
+        return;
+      }
+      if (!ids.includes(restore.id)) {
+        restoreRef.current = null;
+        onRestoreScrollRef.current?.(null);
+      }
+    }
 
     readingAnchor.current = anchor;
     if (anchor && parent) {
@@ -410,7 +452,9 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const virtual = typeof window !== "undefined" && viewport.hasScroller && items.length > 35;
   const height = parent?.clientHeight || viewport.height;
   const totalHeight = offsets.at(-1) ?? 0;
-  const top = anchorTop ?? (pinnedToBottom ? Math.max(viewport.top, totalHeight - height) : viewport.top);
+  const restoreIndex = restoreRef.current ? ids.indexOf(restoreRef.current.id) : -1;
+  const restoreTop = restoreIndex >= 0 ? offsets[restoreIndex] - restoreRef.current!.top : null;
+  const top = restoreTop ?? anchorTop ?? (pinnedToBottom ? Math.max(viewport.top, totalHeight - height) : viewport.top);
   const range = virtual ? visibleRows(offsets, top, height, 16)
     : { start: 0, end: items.length, paddingTop: 0, paddingBottom: 0 };
   return <div ref={ref} style={{ display: "flex", flexDirection: "column", gap, position: "relative",
