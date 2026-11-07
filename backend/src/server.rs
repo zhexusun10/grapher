@@ -6966,6 +6966,70 @@ impl std::io::Read for SseStreamReceiver {
     }
 }
 
+/// tiny_http's `respond` copies an unknown-length body through an 8 KiB
+/// chunk encoder and only flushes the socket after EOF. SSE may remain open
+/// indefinitely, so write each HTTP chunk and flush it as soon as it arrives.
+/// The caller has already validated the request Host and Origin.
+fn respond_sse(
+    request: tiny_http::Request,
+    mut stream: SseStreamReceiver,
+    origin: Option<&str>,
+    advertise_events: bool,
+) -> std::io::Result<()> {
+    let chunked = *request.http_version() >= tiny_http::HTTPVersion(1, 1);
+    let close = !chunked
+        || request.headers().iter().any(|header| {
+            header.field.equiv("Connection")
+                && header
+                    .value
+                    .as_str()
+                    .split(',')
+                    .any(|value| value.trim().eq_ignore_ascii_case("close"))
+        });
+    let mut writer = request.into_writer();
+    let version = if chunked { "HTTP/1.1" } else { "HTTP/1.0" };
+    let connection = if close { "close" } else { "keep-alive" };
+    write!(
+        writer,
+        "{version} 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: {connection}\r\nX-Accel-Buffering: no\r\n"
+    )?;
+    if chunked {
+        writer.write_all(b"Transfer-Encoding: chunked\r\n")?;
+    }
+    if advertise_events {
+        writer.write_all(b"X-Grapher-Events: 1\r\n")?;
+    }
+    if let Some(origin) = origin {
+        write!(writer, "Access-Control-Allow-Origin: {origin}\r\n")?;
+        if advertise_events {
+            writer.write_all(b"Access-Control-Expose-Headers: X-Grapher-Events\r\n")?;
+        }
+    }
+    writer.write_all(b"\r\n")?;
+    // A new planning request can take time before producing its first event;
+    // expose its headers without waiting for any model output.
+    writer.flush()?;
+
+    let mut buffer = [0; 8192];
+    loop {
+        let n = stream.read(&mut buffer)?;
+        if n == 0 {
+            if chunked {
+                writer.write_all(b"0\r\n\r\n")?;
+            }
+            return writer.flush();
+        }
+        if chunked {
+            write!(writer, "{n:x}\r\n")?;
+        }
+        writer.write_all(&buffer[..n])?;
+        if chunked {
+            writer.write_all(b"\r\n")?;
+        }
+        writer.flush()?;
+    }
+}
+
 fn active_planning_service(primary: &Arc<Service>) -> Result<Arc<Service>, String> {
     let root = primary
         .runtime
@@ -7366,6 +7430,9 @@ fn static_asset_path(web_root: &std::path::Path, url: &str) -> Option<PathBuf> {
 #[cfg(test)]
 #[path = "http_file_tests.rs"]
 mod http_file_tests;
+#[cfg(test)]
+#[path = "sse_http_tests.rs"]
+mod sse_http_tests;
 
 fn handle_http_request(
     mut request: tiny_http::Request,
@@ -7441,20 +7508,7 @@ fn handle_http_request(
                 return;
             }
             let stream = subscribe_runtime_events();
-            let mut response = Response::empty(200)
-                .with_data(stream, None)
-                .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
-                .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
-                .with_header(Header::from_bytes("Connection", "keep-alive").unwrap())
-                .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap());
-            if let Some(ref origin) = req_origin {
-                if let Ok(hdr) =
-                    Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes())
-                {
-                    response = response.with_header(hdr);
-                }
-            }
-            let _ = request.respond(response);
+            let _ = respond_sse(request, stream, req_origin.as_deref(), false);
             return;
         }
         // JSON-only POST + exact Host/Origin checks limit browser access.
@@ -7629,26 +7683,7 @@ fn handle_http_request(
                 pos: 0,
                 subscriber_id: None,
             };
-            let mut response = Response::empty(200)
-                .with_data(stream, None)
-                .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap())
-                .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
-                .with_header(Header::from_bytes("Connection", "keep-alive").unwrap())
-                .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap())
-                .with_header(Header::from_bytes("X-Grapher-Events", "1").unwrap());
-            if let Some(ref origin) = req_origin {
-                if let Ok(hdr) =
-                    Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes())
-                {
-                    response = response.with_header(hdr);
-                }
-                if let Ok(hdr) =
-                    Header::from_bytes("Access-Control-Expose-Headers", "X-Grapher-Events")
-                {
-                    response = response.with_header(hdr);
-                }
-            }
-            let _ = request.respond(response);
+            let _ = respond_sse(request, stream, req_origin.as_deref(), true);
             return;
         }
 

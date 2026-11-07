@@ -360,6 +360,12 @@ See [request deadlines](../../src/services/requestTimeout.ts).
 
 ### Live updates
 
+Both `/api/events` and `/api/plan_goal_stream` flush HTTP headers immediately and
+flush each SSE payload without waiting for the stream to finish or an HTTP chunk
+buffer to fill. This preserves live Planner deltas as well as runtime wakeups;
+[real-socket tests](../../backend/src/sse_http_tests.rs) cover small frames,
+large payloads, disconnects, and HTTP/1.0/1.1 framing.
+
 `/api/events` SSE notifications (`snapshot_changed`, `output_available`,
 `planning_output_available`) are a latency accelerator, never the authority. The
 browser keeps a bounded re-check of durable state while the stream is connected,
