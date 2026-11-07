@@ -835,6 +835,14 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
 
   const requestOlderNearTop = useCallback((scrollParent: HTMLElement, nextScrollTop = scrollParent.scrollTop) => {
     if (!onReachTop || scrollParent.dataset.transcriptScrollMode === "latest") return;
+    // Replacing estimated row heights with measured ones clamps scrollTop
+    // upwards during the initial fill. That is layout motion, not the reader
+    // asking for earlier bytes: reading history while the view still follows
+    // the newest output would lock the conversation out of following a
+    // streaming turn. A reader's own wheel/touch/key gesture clears these
+    // before the resulting scroll event reaches this listener.
+    if (scrollParent.dataset.transcriptFollowing === "true" ||
+        scrollParent.dataset.transcriptPreparing === "true") return;
     const relativeTop = getTranscriptRelativeScroll() + nextScrollTop - scrollParent.scrollTop;
     const threshold = Math.max(480, scrollParent.clientHeight * TRANSCRIPT_VIEWPORT_BUFFER);
     const nearTranscriptTop = relativeTop >= -threshold && relativeTop <= threshold;

@@ -320,6 +320,32 @@ function PlannerHistoryOrderFixture() {
   </div>;
 }
 
+function NodeEntryFixture() {
+  const serial = new URLSearchParams(location.search).get("mode") === "serial";
+  const [selected, setSelected] = useState("");
+  const [bytes, setBytes] = useState(0);
+  audit.enterNode = () => setSelected("worker");
+  audit.setOutputBytes = (value: number) => setBytes(value);
+  audit.cachedNodeEntry = () => executionTranscriptCache.get("node-entry:worker-exec");
+  const execution: Execution = { id: "worker-exec", node: "worker", status: "running",
+    output: "", outputBytes: bytes, revision: 0, attempt: 1, startedAt: 1, completedAt: null,
+    sessionId: "worker-session", worktree: "/mock", before: "", after: null };
+  const state = { ...emptySnapshot, runId: "node-entry", config, planType: serial ? "serial" : "graph", phase: "running",
+    approved: true, paused: false, planningId: "node-entry-plan",
+    graph: { originalGoal: "Node entry goal", nodes: [{ name: "worker", task: "Worker task" }], edges: [] },
+    nodes: { worker: { status: "running", revision: 0, instruction: "", error: null } },
+    executions: [execution],
+    events: [{ type: "created", sequence: 1, timestamp: 1, planning_id: "node-entry-plan" }] } as Snapshot;
+  const noop = () => {};
+  return <div style={{ height: "calc(100vh - 64px)", display: "flex" }}>
+    {(!serial || selected) && <GraphWorkbench state={state} routeType={serial ? "serial" : "graph"} selected={serial ? "" : selected} setSelected={setSelected} selectedMergerId="" setSelectedMergerId={noop}
+      effectiveMessages={[]} isPlanning={false} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
+      onControl={noop} onSave={noop} onAddManualNode={async () => true} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop}
+      repoInfo={null} config={config} active locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
+      nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />}
+  </div>;
+}
+
 function PlannerScrollRestoreFixture() {
   const [selected, setSelected] = useState("");
   const [width, setWidth] = useState("100%");
@@ -484,7 +510,7 @@ const cases: Record<string, React.ComponentType> = {
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
-  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, heldHistory: HeldHistoryFixture, historyRegression: HistoryRegressionFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture, plannerHistoryOrder: PlannerHistoryOrderFixture, plannerScrollRestore: PlannerScrollRestoreFixture,
+  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, heldHistory: HeldHistoryFixture, historyRegression: HistoryRegressionFixture, nodeEntry: NodeEntryFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture, plannerHistoryOrder: PlannerHistoryOrderFixture, plannerScrollRestore: PlannerScrollRestoreFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
   timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture,
 };

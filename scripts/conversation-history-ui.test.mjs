@@ -2103,6 +2103,172 @@ for (const role of ["node", "planner"]) {
   });
 }
 
+for (const mode of ["node", "serial"]) {
+  test(`${mode}: entering a running conversation keeps following its live reasoning`, { timeout: 40_000 }, async () => {
+  // The tail window starts inside a long log, so earlier bytes exist and the
+  // transcript offers a scroll-triggered older read. Only a handful of rows
+  // render, so a pane resize clamps the scroller upwards while the view is
+  // still pinned to the newest output. That clamp is layout motion, not the
+  // reader asking for earlier history.
+  const padding = count => Array.from({ length: count }, (_, index) =>
+    line({ type: "grapher_context_usage", tokens: index, pad: "x".repeat(900) })).join("");
+  let data = padding(1200) +
+    Array.from({ length: 24 }, (_, index) => assistant(`VISIBLE_NODE_ROW_${index} ` + "word ".repeat(30))).join("") +
+    padding(380) + assistant("LAST_NODE_ANSWER");
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    const command = new URL(route.request().url()).pathname.slice(5);
+    if (command !== "get_execution_output") return route.fulfill({ json: { result: {} } });
+    const bytes = Buffer.from(data), total = bytes.length;
+    let start, end;
+    if (body.before !== undefined) {
+      end = body.before;
+      start = Math.max(0, end - 512 * 1024);
+      const newline = bytes.subarray(0, start).lastIndexOf(0x0a);
+      if (newline >= 0) start = newline + 1;
+    } else if (body.tail) {
+      end = total;
+      start = Math.max(0, total - 512 * 1024);
+      const newline = bytes.subarray(0, start).lastIndexOf(0x0a);
+      if (newline >= 0) start = newline + 1;
+    } else {
+      start = body.offset ?? 0;
+      end = Math.min(total, start + 512 * 1024);
+    }
+    try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+      content: bytes.subarray(start, end).toString(), startOffset: start, nextOffset: end,
+      totalBytes: total, complete: end === total, status: "running" } } }); } catch {}
+  });
+  try {
+    await page.goto(`${origin}/__history?case=nodeEntry&mode=${mode}`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.enterNode);
+    await page.evaluate(bytes => window.audit.setOutputBytes(bytes), Buffer.byteLength(data));
+    await page.evaluate(() => {
+      window.entryFrames = [];
+      window.sampleEntry = true;
+      const sample = () => {
+        const scroll = document.querySelector(".initial-query-scroll");
+        if (scroll) window.entryFrames.push({
+          bottom: Math.round(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight),
+          follow: scroll.dataset.transcriptFollowing === "true",
+          reading: scroll.dataset.transcriptHistoryReading === "true",
+        });
+        if (window.sampleEntry) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    await page.evaluate(() => window.audit.enterNode());
+    await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".chat-messages-stream")).opacity) > 0.99, null, { timeout: 8000 });
+    // Growing the pane lowers the maximum scrollTop, so the browser clamps it
+    // upwards without any reader gesture.
+    await page.setViewportSize({ width: 1280, height: 920 });
+    await page.waitForTimeout(250);
+    // A live Pi turn keeps streaming while the reader watches; its reasoning
+    // card must grow at the bottom, not behind the viewport.
+    data += line({ type: "message_start", message: { role: "assistant", content: [] } });
+    data += line({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+      delta: "reasoning step 0 " } });
+    // Streaming deltas need not update the metadata snapshot. The mounted
+    // reader must fetch and render them without a parent re-render or a visit
+    // to another conversation.
+    const card = page.locator(".thinking-card.streaming");
+    await card.locator(".thinking-card-body", { hasText: "reasoning step 0" }).waitFor({ timeout: 5000 });
+    for (let index = 1; index < 20; index++) {
+      data += line({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: `reasoning step ${index} `.repeat(12) } });
+      await page.waitForTimeout(50);
+    }
+    await card.locator(".thinking-card-body", { hasText: "reasoning step 19" }).waitFor({ timeout: 5000 });
+    await page.waitForTimeout(400);
+    const visibility = await card.evaluate(element => {
+      const scroller = element.closest(".initial-query-scroll");
+      const composer = scroller.closest(".initial-query-view").querySelector(".pane-bottom-chat");
+      const body = element.querySelector(".thinking-card-body");
+      const view = scroller.getBoundingClientRect(), bounds = body.getBoundingClientRect();
+      return { top: bounds.top, bottom: bounds.bottom, visibleTop: view.top,
+        visibleBottom: Math.min(view.bottom, composer.getBoundingClientRect().top),
+        innerGap: body.scrollHeight - body.scrollTop - body.clientHeight };
+    });
+    assert.ok(visibility.bottom > visibility.visibleTop && visibility.top < visibility.visibleBottom,
+      `the live reasoning card must actually be in view: ${JSON.stringify(visibility)}`);
+    assert.ok(visibility.innerGap <= 2, `the card follows its latest reasoning: ${JSON.stringify(visibility)}`);
+    const frames = await page.evaluate(() => { window.sampleEntry = false; return window.entryFrames; });
+    assert.ok(frames.length > 10);
+    assert.equal(frames.some(frame => frame.reading), false,
+      `a layout clamp must not start reading history: ${JSON.stringify(frames.find(frame => frame.reading))}`);
+    assert.ok(frames.slice(-5).every(frame => frame.follow), "the conversation keeps following the live turn");
+    assert.ok(frames.slice(-5).every(frame => frame.bottom <= 2),
+      `the live reasoning stays at the bottom: ${JSON.stringify(frames.at(-1))}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+  });
+}
+
+for (const [mode, gesture] of ["node", "serial"].flatMap(mode =>
+  ["wheel", "keyboard", "touch"].map(gesture => [mode, gesture]))) {
+  test(`${mode}: ${gesture} scrollback still loads older history while output streams`, { timeout: 30_000 }, async () => {
+    const prefix = line({ type: "opaque", pad: "x".repeat(600_000) }) + assistant("OLDER_NODE_ENTRY");
+    const tail = Array.from({ length: 80 }, (_, index) => assistant(`NODE_HISTORY_${index} ` + "detail ".repeat(20))).join("");
+    let data = prefix + tail, releaseOlder, olderReads = 0, sawLiveOutput = false;
+    const split = Buffer.byteLength(prefix);
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
+      if (body.before !== undefined) {
+        olderReads++;
+        await new Promise(resolve => { releaseOlder = resolve; });
+      }
+      const bytes = Buffer.from(data), end = body.before ?? bytes.length;
+      const start = body.before !== undefined ? 0 : body.tail ? split : body.offset;
+      const content = bytes.subarray(start, end).toString();
+      if (content.includes("LIVE_WHILE_READING")) sawLiveOutput = true;
+      try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        content, startOffset: start, nextOffset: end, totalBytes: bytes.length,
+        complete: end === bytes.length, status: "running" } } }); } catch {}
+    });
+    try {
+      await page.goto(`${origin}/__history?case=nodeEntry&mode=${mode}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.enterNode);
+      await page.evaluate(bytes => { window.audit.setOutputBytes(bytes); window.audit.enterNode(); }, Buffer.byteLength(data));
+      const scroller = page.locator(".initial-query-scroll.conversation-ready");
+      await scroller.waitFor();
+      await page.waitForFunction(() => document.querySelector('[data-execution-id="worker-exec"]')?.getAttribute("aria-busy") === "false");
+      assert.equal(olderReads, 0, "the initial tail already fills the viewport");
+      assert.ok((await page.evaluate(() => window.audit.cachedNodeEntry())).startOffset > 0);
+      if (gesture === "wheel") {
+        await scroller.hover({ position: { x: 10, y: 10 } });
+        await page.mouse.wheel(0, -100_000);
+      } else if (gesture === "keyboard") {
+        await scroller.evaluate(element => { element.tabIndex = 0; element.focus({ preventScroll: true }); });
+        await page.keyboard.press("Home");
+      } else {
+        // Chromium's synthetic touch events do not perform the default scroll.
+        await scroller.evaluate(element => {
+          const touch = clientY => new Touch({ identifier: 9, target: element, clientY });
+          element.dispatchEvent(new TouchEvent("touchstart", { bubbles: true, touches: [touch(100)] }));
+          element.dispatchEvent(new TouchEvent("touchmove", { bubbles: true, touches: [touch(150)] }));
+          element.scrollTop = 0;
+          element.dispatchEvent(new Event("scroll"));
+        });
+      }
+      for (let index = 0; index < 100 && !releaseOlder; index++) await page.waitForTimeout(20);
+      assert.ok(releaseOlder, "a genuine upward gesture must request older bytes");
+      assert.equal(await scroller.getAttribute("data-transcript-history-reading"), "true");
+      data += assistant("LIVE_WHILE_READING");
+      for (let index = 0; index < 150 && !sawLiveOutput; index++) await page.waitForTimeout(20);
+      assert.ok(sawLiveOutput, "the live reader continues fetching while history is open");
+      assert.equal(await scroller.getAttribute("data-transcript-following"), null,
+        "new output must not pull a reader back to the bottom");
+      releaseOlder(); releaseOlder = undefined;
+      await page.waitForFunction(() => window.audit.cachedNodeEntry()?.startOffset === 0 &&
+        window.audit.cachedNodeEntry().text.includes("LIVE_WHILE_READING"));
+      assert.ok((await page.evaluate(() => window.audit.cachedNodeEntry().text)).includes("LIVE_WHILE_READING"),
+        "prepending older bytes must not discard the concurrent live output");
+      assert.deepEqual(errors, []);
+    } finally { releaseOlder?.(); await context.close(); }
+  });
+}
+
 test("planner: opening a reviewed run preloads the preceding planning turn", { timeout: 30_000 }, async () => {
   const earlier = Array.from({ length: 5 }, (_, i) => assistant(`EARLIER_PLAN_${i}`)).join("");
   const review = Array.from({ length: 100 }, (_, i) => assistant(`LATEST_REVIEW_${i} 中文🚀`)).join("");

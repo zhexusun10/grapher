@@ -340,6 +340,12 @@ pages are capped at 256 KiB, and planning tails accept a `limit` capped at 1 MiB
 and [byte-window tests](../../scripts/transcript-window.test.ts); those UI budgets
 are not a storage cap.
 
+Scroll-triggered older reads require reader intent. Replacing estimated row
+heights with measured ones, or shrinking the pane, clamps `scrollTop` upwards
+without a gesture; such a view keeps following the newest output instead of
+locking into history reading (which would leave a streaming turn below the
+viewport until the conversation is reopened).
+
 Approval and Planner revisions collect their source Git snapshot under the Run
 mutex. First-node source materialization uses the per-repository source lock and
 only short Run-mutex reads; node workspace preparation/copy and final publication
