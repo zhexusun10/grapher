@@ -886,7 +886,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // follow state, so a Planner conversation reading its history snapped back to
   // the newest row as soon as the Partitioner answered.
   const conversationPaneKey = routeType === "serial" ? "main" : routeType === "graph" && selected ? selected : "planner";
-  const conversationViewKey = `${currentRunKey}:${conversationPaneKey}`;
+  // The creation form replaces the scroller even when Planner remains selected.
+  // Give that absence its own view so returning captures/restores the Planner
+  // position and reattaches all listeners and observers to the new scroller.
+  const conversationViewKey = creatingNode && routeType === "graph"
+    ? JSON.stringify([currentRunKey, "create-node"])
+    : JSON.stringify([currentRunKey, "conversation", conversationPaneKey]);
   const composerDraftKey = JSON.stringify([selected, selectedMerger?.id ?? ""]);
   // Remounting on epoch bumps is the only way to push restored text into the
   // uncontrolled composer without making every keystroke controlled.
@@ -1296,8 +1301,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }
   }, []);
   const conversationScrollStateRef = useRef<Map<string, ViewScrollState>>(new Map());
-  // Planner byte windows and scroll positions survive Node navigation. Keep
-  // their row measurements too, or a restored pixel offset points at different
+  // Planner byte windows and scroll positions survive Node and form navigation.
+  // Keep their row measurements too, or a restored pixel offset points at different
   // rows when the virtualizer replaces estimates on remount.
   const plannerRowHeightsRef = useRef(new Map<string, number>());
   const previousNodeViewRef = useRef(Boolean(selected));
@@ -2466,7 +2471,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
-    if (!el) return;
+    if (!el) {
+      // The create-node form has no conversation element. Mark the old one as
+      // unmounted so a return to the same Planner still prepares a fresh view.
+      prevViewKeyRef.current = conversationViewKey;
+      setReadyConversationKey("");
+      return;
+    }
 
     const isNewView = prevViewKeyRef.current !== conversationViewKey;
     prevViewKeyRef.current = conversationViewKey;

@@ -14,7 +14,7 @@ Tailwind v4 uses `@tailwindcss/vite` and `src/tailwind.css`, imported by `src/ma
 
 A reasoning card opens at its newest line. Inner scrolling preserves the reader's position without disabling outer bottom-following; reopening resets to the newest line. Expansion keeps composer focus and does not move a reader who has scrolled away.
 
-Planner revisions page independently. Cached local follow-ups with an unambiguous revision stay at that revision's boundary, not after newer replies; unmatched optimistic messages remain visible. Returning from a Node to a scrolled-up Planner retains measured row heights and restores the visible row, including after a pane resize. A new Conversation still opens at its newest output. See [conversation history browser tests](../../scripts/conversation-history-ui.test.mjs).
+Planner revisions page independently. Cached local follow-ups with an unambiguous revision stay at that revision's boundary, not after newer replies; unmatched optimistic messages remain visible. Returning from a Node or the create-node form to a scrolled-up Planner retains measured row heights and restores the visible row, including after a pane resize. A new Conversation still opens at its newest output. See [conversation history](../../scripts/conversation-history-ui.test.mjs) and [manual node](../../scripts/manual-node-ui.test.mjs) browser tests.
 
 During submission, the composer shows a disabled, accessible sending indicator and delays Stop until the send settles. A brief pointer-send grace prevents accidental Stop without blocking a new or restored draft.
 
