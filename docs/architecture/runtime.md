@@ -137,18 +137,19 @@ internal scheduling-only pause does not retry failures. Automatically unpausing 
 a node message resumes interrupted work but never retries unrelated failures;
 those remain available for a later explicit Continue.
 
-Saving changed Node Agent model/thinking settings from a conversation records
-per-node overrides for every node that has never had an execution, including
-unapproved drafts, nodes waiting for dependencies or blocked before their first
-attempt, and nodes the Planner adds later. Their first dispatch uses those
-settings. Saving does not dispatch work, approve a draft, unpause a Run, or
-rewrite its original configuration. A running attempt keeps its original
-settings; if it subsequently fails or is interrupted, its next attempt uses the
-conversation's latest Node Agent selection, even when the save happened before
-the failure. A successful node retains its settings; a waiting/dirty status alone
-does not make an executed node never-started. Overrides survive replay and
-repeated saves update the previous override.
-Failure recovery remains available regardless of whether settings were changed.
+Saving changed Node Agent model/thinking settings records the conversation's
+selection and synchronizes per-node overrides for unstarted and failed nodes.
+Every subsequent dispatch uses the latest conversation selection, including
+feedback targets, invalidated descendants, retries, history edits and follow-ups
+of completed nodes; stale overrides from earlier saves cannot override it. A
+running attempt keeps its original settings, even if the save precedes its
+success or failure, and recorded attempt metrics are not rewritten. Saving does
+not dispatch work, approve a draft, unpause a Run, or rewrite its original
+configuration. The selection survives replay, including for feedback queued
+before a restart. Opening a Run also reconciles failed-node retry selections
+that were not synchronized before a crash, without automatically starting work.
+Failure recovery remains available regardless of whether settings were changed;
+environment overrides still take precedence.
 Model selections are conversation-scoped: a save made inside a Run records
 that conversation's override, including nodes the Planner adds later. Other
 conversations keep their own creation or saved selection, so their running and

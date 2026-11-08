@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Changing a conversation's Node Agent model or reasoning level now applies to every later attempt, including feedback repairs, invalidated descendants, history edits and follow-ups of completed nodes. Previously, an older per-node selection could revive the old model. Running attempts and historical model records remain unchanged, and environment overrides still take precedence (`backend/src/runtime.rs`, `backend/src/feedback_workspace_tests.rs`).
+
 - Live Planner responses and runtime notifications now flush each SSE frame immediately instead of waiting for the HTTP server's 8 KiB buffer to fill. A conversation can show reasoning and status updates as they arrive without leaving and reopening it (`backend/src/server.rs`, `backend/src/sse_http_tests.rs`).
 - Reopening Planner history keeps cached follow-ups with their own revisions and restores the visible row after visiting a node, even when the pane width changes. Live and recently settled Planner logs also recheck missed output so thinking and tool cards do not remain hidden until the view is reopened.
 - Entering a running node or Serial conversation no longer parks the pane above its newest reasoning. Row estimates being replaced by measurements, or a pane resize, clamps `scrollTop` upwards without a gesture; the transcript treated that as the reader reaching the top of history and locked the conversation out of following, so the streaming Chain-of-Thought card stayed at the bottom while later output accumulated below the viewport until the conversation was reopened (`src/components/VirtualizedTranscript.tsx`, `scripts/conversation-history-ui.test.mjs`).

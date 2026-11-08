@@ -226,6 +226,9 @@ impl Runtime {
         for execution in interrupted {
             runtime.emit(EventKind::Failed { node: execution.node, execution_id: Some(execution.id), output_bytes: 0, metrics: None, error: "Application stopped during this execution. Its result is not trusted; inspect and rerun with a fresh Execution Instance.".into() })?;
         }
+        // A crash can record a failure before the normal finish path has
+        // synchronized its retry selection. Repair that projection on open.
+        runtime.sync_failed_node_models(None)?;
         runtime.recover_publication()?;
         if runtime.state.approved
             && !matches!(
@@ -296,6 +299,7 @@ impl Runtime {
                 metrics: None,
             })?;
         }
+        runtime.sync_failed_node_models(None)?;
         runtime.recover_publication()?;
         if runtime.state.approved
             && !matches!(
@@ -3859,22 +3863,18 @@ impl Runtime {
             // Record the selected Node Agent model before launch so session
             // details can show what this attempt will actually use. Completion
             // replaces this placeholder with parsed live metrics.
-            let node_settings = self.state.nodes[&node.name]
+            // The conversation selection governs every new attempt, including
+            // feedback repairs and previously completed or invalidated nodes.
+            // Node overrides may predate a later save, so only use them for
+            // legacy snapshots without a conversation-wide selection. A job
+            // already dispatched keeps its own immutable config and metrics.
+            let node_settings = self
+                .state
                 .model_config
-                .clone()
-                .or_else(|| {
-                    if execution.attempt == 1 {
-                        self.state
-                            .model_config
-                            .as_ref()
-                            .map(RunModelConfig::node_agent_settings)
-                    } else {
-                        // An already-started node without an override retains the
-                        // Run's original settings, even if the conversation changed
-                        // models while this attempt was still running.
-                        self.state.config.as_ref().map(Config::node_agent_settings)
-                    }
-                });
+                .as_ref()
+                .map(RunModelConfig::node_agent_settings)
+                .or_else(|| self.state.nodes[&node.name].model_config.clone())
+                .or_else(|| self.state.config.as_ref().map(Config::node_agent_settings));
             if let Some(settings) = &node_settings {
                 execution.metrics = Some(ExecutionMetrics {
                     model: Some(settings.model.clone()),

@@ -98,6 +98,108 @@ test("transcript and parser hot updates preserve the mounted conversation", { ti
   } finally { await context.close(); await hmrServer.close(); }
 });
 
+test("failed node attempts keep their execution record spacing even", { timeout: 30_000 }, async () => {
+  const tool = id => startTool(id, `echo ${id}`) + endTool(id, "done");
+  const thinking = line({ type: "message_start", message: { role: "assistant", content: [] } }) +
+    line({ type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } }) +
+    line({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Reasoning" } }) +
+    line({ type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } });
+  const failedOutput = thinking + tool("failed-one") + tool("failed-two") + line({ type: "message_end",
+    message: { role: "assistant", stopReason: "error", errorMessage: "Connection failed", content: [] } });
+  // Resumed sessions can emit whitespace-only text deltas between tool calls.
+  const blankDelta = line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "\n\n" } });
+  const retryOutput = tool("retry-one") + blankDelta + tool("retry-two");
+  const execution = (id, attempt, status, output) => ({ id, node: "task", attempt, revision: attempt, status, output,
+    startedAt: attempt * 1000, completedAt: attempt * 1000 + 1, sessionId: "session", worktree: "/mock", before: "", after: "" });
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=graph&turn=follow-up`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.setExecutions);
+    await page.evaluate(executions => window.audit.setExecutions(executions), [
+      execution("failed", 1, "failed", failedOutput), execution("retry", 2, "completed", retryOutput),
+    ]);
+    await page.locator('[data-execution-id="failed"] .conversation-error-message').waitFor();
+    await page.locator('[data-execution-id="retry"] .tool-call-card').last().waitFor();
+
+    for (const width of [1280, 700]) {
+      await page.setViewportSize({ width, height: 900 });
+      const metrics = await page.evaluate(() => {
+        const panels = [...document.querySelectorAll(".serial-execution-panel")];
+        const bounds = element => element.getBoundingClientRect();
+        const parts = panels.map(panel => {
+          const header = panel.querySelector(".session-label-toggle");
+          const rows = [...panel.querySelectorAll("[data-transcript-id]")].map(row =>
+            row.querySelector(".tool-call-card, .thinking-card, .system-pill")).filter(Boolean);
+          const boxes = [header, ...rows].map(bounds);
+          const panelBox = bounds(panel);
+          return { gaps: boxes.slice(1).map((box, i) => box.top - boxes[i].bottom),
+            insets: rows.filter(row => row.matches(".tool-call-card, .thinking-card")).map(row => {
+              const box = bounds(row);
+              return [box.left - panelBox.left, panelBox.right - box.right];
+            }), first: boxes[0].top, last: boxes.at(-1).bottom };
+        });
+        return { parts, between: parts[1].first - parts[0].last };
+      });
+      assert.deepEqual(metrics.parts.map(part => part.gaps.length), [4, 2]);
+      for (const gap of [...metrics.parts.flatMap(part => part.gaps), metrics.between]) {
+        assert.ok(Math.abs(gap - 10) < 0.6, `record and card gaps must be 10px at ${width}px: ${JSON.stringify(metrics)}`);
+      }
+      for (const [left, right] of metrics.parts.flatMap(part => part.insets)) {
+        assert.ok(Math.abs(left - right) < 0.6, `card insets must be symmetric at ${width}px: ${left}, ${right}`);
+      }
+    }
+    const firstTool = page.locator('[data-execution-id="failed"] .tool-call-card').first();
+    await firstTool.locator(".tool-call-header").click();
+    await firstTool.locator(".tool-call-body").waitFor();
+    const expandedGaps = await firstTool.evaluate(card => {
+      const row = card.closest("[data-transcript-id]");
+      const previous = row.previousElementSibling.querySelector(".thinking-card").getBoundingClientRect();
+      const current = card.getBoundingClientRect();
+      const next = row.nextElementSibling.querySelector(".tool-call-card").getBoundingClientRect();
+      return [current.top - previous.bottom, next.top - current.bottom];
+    });
+    assert.ok(expandedGaps.every(gap => Math.abs(gap - 10) < 0.6),
+      `expanded cards keep the same spacing: ${expandedGaps}`);
+    const headers = page.locator(".session-label-toggle");
+    await headers.first().click();
+    assert.equal(await headers.first().getAttribute("aria-expanded"), "false");
+    const collapsedGap = await page.evaluate(() => {
+      const headers = [...document.querySelectorAll(".session-label-toggle")].map(element => element.getBoundingClientRect());
+      return headers[1].top - headers[0].bottom;
+    });
+    assert.ok(Math.abs(collapsedGap - 10) < 0.6, `collapsed records keep the same gap: ${collapsedGap}`);
+    await headers.first().click();
+    await page.locator('[data-execution-id="failed"] .conversation-error-message').waitFor();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a retry's blank streamed text stays out of layout until it has visible content", { timeout: 30_000 }, async () => {
+  const tool = id => startTool(id, `echo ${id}`) + endTool(id, "done");
+  const delta = text => line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
+  const execution = (id, attempt, status, output) => ({ id, node: "task", attempt, revision: attempt, status, output,
+    startedAt: attempt * 1000, completedAt: status === "running" ? null : attempt * 1000 + 1,
+    sessionId: "session", worktree: "/mock", before: "", after: "" });
+  const failed = execution("failed", 1, "failed", tool("old-tool"));
+  const retryOutput = tool("live-tool") + delta("\n\n");
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=graph&turn=follow-up`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.setExecutions);
+    await page.evaluate(executions => window.audit.setExecutions(executions),
+      [failed, execution("retry", 2, "running", retryOutput)]);
+    const retry = page.locator('[data-execution-id="retry"]');
+    await retry.locator(".tool-call-card").waitFor();
+    assert.equal(await retry.locator("[data-transcript-id]").count(), 1, "blank live text must not reserve a row");
+    await page.evaluate(executions => window.audit.setExecutions(executions), [failed,
+      execution("retry", 2, "running", retryOutput + delta("Visible after whitespace") + tool("next-tool"))]);
+    await retry.getByText("Visible after whitespace", { exact: true }).waitFor();
+    await retry.locator(".tool-call-card").last().waitFor();
+    assert.equal(await retry.locator("[data-transcript-id]").count(), 3, "the continued text appears once in its original place");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("history status bridges page gaps without flashing for fast reads or moving history", { timeout: 20_000 }, async () => {
   const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
   try {

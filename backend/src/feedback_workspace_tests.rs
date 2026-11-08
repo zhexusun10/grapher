@@ -207,6 +207,197 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
     assert_eq!(runtime.state.feedback_counts["review->owner"], 1);
 }
 
+#[test]
+fn feedback_redispatch_uses_the_latest_conversation_model() {
+    for save_before_feedback in [false, true] {
+        for restart in [false, true] {
+            let (_temp, _source, mut runtime) = configured(&["owner", "review"], 1);
+            let script = PathBuf::from(&runtime.state.config.as_ref().unwrap().pi_args[0]);
+            let original_script = fs::read_to_string(&script).unwrap();
+            fs::write(
+                &script,
+                format!(
+                    "printf '%s\\n' \"$@\" > \"$GRAPHER_ENVIRONMENT_DATA/launch-$GRAPHER_NODE_EXECUTION_ID\"\n{original_script}"
+                ),
+            )
+            .unwrap();
+            let mut previous = runtime.state.config.clone().unwrap();
+            previous.role_models.insert(
+                "nodeAgent".into(),
+                crate::model::RoleModelConfig {
+                    model: "old/coder".into(),
+                    thinking_level: Some("low".into()),
+                },
+            );
+            runtime.update_node_models(&previous).unwrap();
+            let owner = runtime.jobs().unwrap().remove(0);
+            execute(&mut runtime, &owner);
+            history(&runtime, &owner, "OWNER PRIVATE HISTORY");
+            let review = runtime.jobs().unwrap().remove(0);
+            assert_eq!(
+                review.config.node_agent_settings(),
+                previous.node_agent_settings()
+            );
+
+            let mut latest = previous.clone();
+            let node = latest.role_models.get_mut("nodeAgent").unwrap();
+            node.model = "new/coder".into();
+            node.thinking_level = Some("high".into());
+            if save_before_feedback {
+                runtime.update_node_models(&latest).unwrap();
+                assert_eq!(
+                    review.config.node_agent_settings(),
+                    previous.node_agent_settings(),
+                    "a running attempt is not retargeted"
+                );
+            }
+            execute(&mut runtime, &review);
+            assert_eq!(runtime.state.pending_feedback.len(), 1);
+            if !save_before_feedback {
+                runtime.drain_feedback().unwrap();
+                assert_eq!(runtime.state.nodes["owner"].status, "dirty");
+                assert_eq!(runtime.state.nodes["review"].status, "dirty");
+                runtime.update_node_models(&latest).unwrap();
+            }
+            let original_metrics = runtime.state.executions[0].metrics.clone();
+            if restart {
+                let root = runtime.root.clone();
+                drop(runtime);
+                runtime = Runtime::open(&root).unwrap();
+                runtime.pause(false).unwrap();
+            }
+
+            let repair = runtime.jobs().unwrap().remove(0);
+            assert_eq!(repair.execution.node, "owner");
+            assert_eq!(repair.session_fork.as_ref().unwrap().id, owner.execution.id);
+            assert_eq!(
+                repair.config.node_agent_settings(),
+                latest.node_agent_settings(),
+                "feedback target: saved before verdict={save_before_feedback}, restart={restart}"
+            );
+            assert_eq!(
+                repair.execution.metrics.as_ref().unwrap().model.as_deref(),
+                Some("new/coder")
+            );
+            assert_eq!(
+                repair
+                    .execution
+                    .metrics
+                    .as_ref()
+                    .unwrap()
+                    .thinking_level
+                    .as_deref(),
+                Some("high")
+            );
+            execute(&mut runtime, &repair);
+            let args =
+                fs::read_to_string(runtime.root.join(format!("launch-{}", repair.execution.id)))
+                    .unwrap();
+            let args: Vec<_> = args.lines().collect();
+            let model = std::env::var("NODE_AGENT_MODEL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "new/coder".into());
+            let thinking = std::env::var("NODE_AGENT_THINKING")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "high".into());
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--model", model.trim()]));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--thinking", thinking.as_str()]));
+            let history = fs::read_to_string(
+                runtime
+                    .root
+                    .join("sessions")
+                    .join(&repair.execution.id)
+                    .join(format!("grapher_{}.jsonl", repair.execution.session_id)),
+            )
+            .unwrap();
+            assert!(history.contains("OWNER PRIVATE HISTORY"));
+            assert_eq!(
+                runtime.state.executions[0].metrics, original_metrics,
+                "the earlier attempt retains its recorded model"
+            );
+
+            let rerun = runtime.jobs().unwrap().remove(0);
+            assert_eq!(rerun.execution.node, "review");
+            assert!(
+                rerun.session_fork.is_none(),
+                "invalidated descendants restart from zero"
+            );
+            assert_eq!(
+                rerun.config.node_agent_settings(),
+                latest.node_agent_settings(),
+                "feedback descendants also use the new selection"
+            );
+            execute(&mut runtime, &rerun);
+        }
+    }
+}
+
+#[test]
+fn feedback_after_another_node_fails_uses_the_model_saved_for_recovery() {
+    let (_temp, _source, mut runtime) = configured(&["owner", "review", "fault"], 1);
+    let owner = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &owner);
+    history(&runtime, &owner, "OWNER HISTORY");
+    let jobs = runtime.jobs().unwrap();
+    let review = jobs
+        .iter()
+        .find(|job| job.execution.node == "review")
+        .unwrap();
+    let failed = jobs
+        .iter()
+        .find(|job| job.execution.node == "fault")
+        .unwrap();
+    runtime
+        .finish(&failed.execution, Err("Provider failed".into()))
+        .unwrap();
+    let mut latest = runtime.state.config.clone().unwrap();
+    latest.role_models.insert(
+        "nodeAgent".into(),
+        crate::model::RoleModelConfig {
+            model: "new/coder".into(),
+            thinking_level: Some("high".into()),
+        },
+    );
+    runtime.update_node_models(&latest).unwrap();
+    assert_eq!(
+        runtime.state.nodes["fault"].model_config,
+        Some(latest.node_agent_settings())
+    );
+    assert_ne!(
+        review.config.node_agent_settings(),
+        latest.node_agent_settings(),
+        "the in-flight review is not retargeted"
+    );
+    execute(&mut runtime, review);
+
+    let repair = runtime.jobs().unwrap().remove(0);
+    assert_eq!(repair.execution.node, "owner");
+    assert_eq!(
+        repair.config.node_agent_settings(),
+        latest.node_agent_settings()
+    );
+    assert_eq!(repair.session_fork.as_ref().unwrap().id, owner.execution.id);
+    execute(&mut runtime, &repair);
+    let reruns = runtime.jobs().unwrap();
+    for name in ["review", "fault"] {
+        let rerun = reruns
+            .iter()
+            .find(|job| job.execution.node == name)
+            .unwrap();
+        assert_eq!(
+            rerun.config.node_agent_settings(),
+            latest.node_agent_settings(),
+            "{name}"
+        );
+    }
+}
+
 #[cfg(feature = "fixture")]
 #[test]
 fn pending_feedback_survives_restart_and_replays_its_exact_output_range() {
@@ -394,6 +585,43 @@ fn shared_terminal_workspace_project_file_followup_keeps_descendants_completed()
             .trim(),
         "cache-only-change"
     );
+}
+
+#[test]
+fn editing_a_completed_nodes_history_uses_the_latest_model() {
+    let (_temp, _source, mut runtime) = configured(&["owner"], 0);
+    let mut previous = runtime.state.config.clone().unwrap();
+    previous.role_models.insert(
+        "nodeAgent".into(),
+        crate::model::RoleModelConfig {
+            model: "old/coder".into(),
+            thinking_level: Some("low".into()),
+        },
+    );
+    runtime.update_node_models(&previous).unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &first);
+    history(&runtime, &first, &first.task);
+    let original_metrics = runtime.state.executions[0].metrics.clone();
+    let mut latest = previous.clone();
+    let node = latest.role_models.get_mut("nodeAgent").unwrap();
+    node.model = "new/coder".into();
+    node.thinking_level = Some("high".into());
+    runtime.update_node_models(&latest).unwrap();
+    runtime
+        .edit_node_message("owner", &first.execution.id, &first.task, "rewrite", None)
+        .unwrap();
+    let edit = runtime.jobs().unwrap().remove(0);
+    assert_eq!(
+        edit.config.node_agent_settings(),
+        latest.node_agent_settings()
+    );
+    assert_eq!(
+        edit.execution.metrics.as_ref().unwrap().model.as_deref(),
+        Some("new/coder")
+    );
+    assert_eq!(runtime.state.executions[0].metrics, original_metrics);
+    execute(&mut runtime, &edit);
 }
 
 #[test]

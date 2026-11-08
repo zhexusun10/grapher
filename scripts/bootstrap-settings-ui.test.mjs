@@ -581,6 +581,66 @@ for (const planType of ["graph", "serial"]) {
  });
 }
 
+test("a resumed failed node keeps virtualized tool cards evenly spaced", { timeout: 45_000 }, async () => {
+  const line = event => JSON.stringify(event) + "\n";
+  const output = Array.from({ length: 80 }, (_, index) => {
+    const id = `retry-tool-${index}`;
+    return line({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: { command: `echo ${index}` } }) +
+      line({ type: "tool_execution_end", toolCallId: id, toolName: "bash", result: { content: [{ type: "text", text: "done" }] } }) +
+      line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "\n\n" } });
+  }).join("");
+  const bytes = Buffer.from(output);
+  const failed = { id: "failed-attempt", node: "task", revision: 1, attempt: 1, sessionId: "session",
+    worktree: "/workspace", before: "base", after: null, status: "failed", output: "", outputBytes: 0,
+    startedAt: 1, completedAt: 2 };
+  let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, phase: "needs_attention", canResume: true,
+    graph: { originalGoal: "Recover", nodes: [{ name: "task", task: "Finish the task" }], edges: [] },
+    plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
+    nodes: { task: { status: "failed", revision: 1, head: null, instruction: "", error: "Provider failed" } }, executions: [failed] };
+  const { context, page, errors } = await app(async (route, command, body) => {
+    let result;
+    if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
+    else if (command === "history" || command === "snapshot" || command === "load_run") result = current;
+    else if (command === "control") {
+      assert.equal(body.action, "resume");
+      current = { ...current, canResume: false, phase: "running", nodes: { task: { ...current.nodes.task, status: "running", error: null } },
+        executions: [failed, { ...failed, id: "retry", attempt: 2, status: "running", outputBytes: bytes.length, startedAt: 3, completedAt: null }] };
+      result = current;
+    } else if (command === "get_execution_output") {
+      const content = body.executionId === "retry" ? bytes : Buffer.alloc(0);
+      const start = body.tail ? 0 : Math.min(body.offset ?? 0, content.length);
+      result = { runId: "fast", executionId: body.executionId, content: content.subarray(start).toString(),
+        startOffset: start, nextOffset: content.length, totalBytes: content.length, complete: true,
+        status: body.executionId === "retry" ? "running" : "failed" };
+    } else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').click();
+    await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Failed" }).waitFor();
+    await page.getByRole("button", { name: "Resume", exact: true }).click();
+    await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Running" }).waitFor();
+    await page.locator('.task-node[data-node-name="task"]').click();
+    const retry = page.locator('[data-execution-id="retry"]');
+    await retry.locator(".tool-call-card").first().waitFor();
+    const scroll = page.locator(".initial-query-scroll");
+    for (const fraction of [0, 0.5, 1]) {
+      await scroll.evaluate((element, value) => { element.scrollTop = (element.scrollHeight - element.clientHeight) * value; }, fraction);
+      await page.waitForTimeout(200);
+      const metrics = await retry.evaluate(element => {
+        const cards = [...element.querySelectorAll(".tool-call-card")].map(card => card.getBoundingClientRect());
+        return { count: cards.length, gaps: cards.slice(1).map((card, index) => card.top - cards[index].bottom),
+          blankRows: [...element.querySelectorAll("[data-transcript-id]")]
+            .filter(row => row.querySelector(".chat-message-assistant") && !row.textContent.trim()).length };
+      });
+      assert.ok(metrics.count >= 3 && metrics.count < 80, `retry history must be virtualized: ${JSON.stringify(metrics)}`);
+      assert.equal(metrics.blankRows, 0);
+      assert.ok(metrics.gaps.every(gap => Math.abs(gap - 10) < 0.6), `unexpected gaps after retry: ${JSON.stringify(metrics)}`);
+    }
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("serial paused execution does not display a Continue button", { timeout: 30_000 }, async () => {
   const execution = { id: "worker", node: "task", revision: 1, attempt: 1, sessionId: "session", worktree: "/workspace",
     before: "", after: null, status: "running", output: "", outputBytes: 0, startedAt: 1, completedAt: null };

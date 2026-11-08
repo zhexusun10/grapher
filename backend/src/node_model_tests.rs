@@ -219,7 +219,7 @@ fn model_saved_during_a_composition_failure_is_applied_after_the_block() {
 }
 
 #[test]
-fn model_saved_during_a_successful_attempt_does_not_retarget_that_node() {
+fn model_saved_during_a_successful_attempt_does_not_retarget_that_attempt() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
@@ -237,6 +237,93 @@ fn model_saved_during_a_successful_attempt_does_not_retarget_that_node() {
         job.config.node_agent_settings(),
         settings.node_agent_settings()
     );
+}
+
+#[test]
+fn successful_node_followups_use_the_latest_selection_without_rewriting_history() {
+    for route in ["graph", "serial"] {
+        for (prior_override, save_while_running, restart) in [
+            (false, false, false),
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let (_temp, _source, mut runtime) = setup(true, single());
+            runtime.set_route(route).unwrap();
+            let previous = if prior_override {
+                let config = replacement(runtime.state.config.as_ref().unwrap());
+                runtime.update_node_models(&config).unwrap();
+                config
+            } else {
+                runtime.state.config.clone().unwrap()
+            };
+            runtime.approve().unwrap();
+            let first = runtime.jobs().unwrap().remove(0);
+            record_session(&runtime, &first.execution);
+            let mut latest = replacement(&previous);
+            let node = latest.role_models.get_mut("nodeAgent").unwrap();
+            node.model = "new/coder".into();
+            node.thinking_level = Some("low".into());
+            if save_while_running {
+                runtime.update_node_models(&latest).unwrap();
+            }
+            runtime
+                .finish(
+                    &first.execution,
+                    Ok((runtime.state.base.clone(), "done".into())),
+                )
+                .unwrap();
+            if !save_while_running {
+                runtime.update_node_models(&latest).unwrap();
+            }
+            let original_metrics = runtime.state.executions[0].metrics.clone();
+            assert_eq!(
+                original_metrics.as_ref().unwrap().model.as_deref(),
+                Some(previous.node_agent_settings().model.as_str())
+            );
+            assert_eq!(
+                first.config.node_agent_settings(),
+                previous.node_agent_settings()
+            );
+            if restart {
+                let root = runtime.root.clone();
+                drop(runtime);
+                runtime = Runtime::open(&root).unwrap();
+                runtime.pause(false).unwrap();
+            }
+            runtime
+                .intervene("task", "continue the completed task")
+                .unwrap();
+            let followup = runtime.jobs().unwrap().remove(0);
+            assert_eq!(
+                    followup.config.node_agent_settings(),
+                    latest.node_agent_settings(),
+                    "{route}, prior override={prior_override}, save while running={save_while_running}, restart={restart}"
+                );
+            assert_eq!(
+                followup
+                    .execution
+                    .metrics
+                    .as_ref()
+                    .unwrap()
+                    .model
+                    .as_deref(),
+                Some("new/coder")
+            );
+            assert_eq!(
+                followup
+                    .execution
+                    .metrics
+                    .as_ref()
+                    .unwrap()
+                    .thinking_level
+                    .as_deref(),
+                Some("low")
+            );
+            assert_eq!(followup.execution.session_id, first.execution.session_id);
+            assert_eq!(runtime.state.executions[0].metrics, original_metrics);
+        }
+    }
 }
 
 #[test]
@@ -288,6 +375,71 @@ fn legacy_failed_attempts_reconcile_a_model_saved_while_running() {
             "{recovery}"
         );
         assert_eq!(next.execution.session_id, job.execution.session_id);
+    }
+}
+
+#[test]
+fn restart_reconciles_stale_retry_selection_without_rewriting_attempts() {
+    for open_run in [false, true] {
+        let (_temp, _source, mut runtime) = setup(true, single());
+        runtime.set_route("serial").unwrap();
+        runtime.approve().unwrap();
+        let first = runtime.jobs().unwrap().remove(0);
+        record_session(&runtime, &first.execution);
+        let previous = replacement(runtime.state.config.as_ref().unwrap());
+        runtime.update_node_models(&previous).unwrap();
+        runtime
+            .finish(&first.execution, Err("Provider failed".into()))
+            .unwrap();
+        runtime.pause(false).unwrap();
+        let interrupted = runtime.jobs().unwrap().remove(0);
+        assert_eq!(
+            interrupted.config.node_agent_settings(),
+            previous.node_agent_settings()
+        );
+        let mut latest = previous.clone();
+        latest.role_models.get_mut("nodeAgent").unwrap().model = "new/coder".into();
+        runtime.update_node_models(&latest).unwrap();
+        assert_eq!(
+            runtime.state.nodes["task"].model_config,
+            Some(previous.node_agent_settings())
+        );
+        assert_eq!(runtime.state.nodes["task"].model_retry, Some(true));
+        let root = runtime.root.clone();
+        let run_id = runtime.state.run_id.clone();
+        let mut recovered = if open_run {
+            runtime.open_run(&run_id).unwrap()
+        } else {
+            drop(runtime);
+            Runtime::open(&root).unwrap()
+        };
+        assert_eq!(recovered.state.nodes["task"].status, "failed");
+        assert!(
+            recovered.state.paused,
+            "restart must not start a retry automatically"
+        );
+        assert_eq!(recovered.state.executions.len(), 2);
+        assert_eq!(
+            recovered.state.nodes["task"].model_config,
+            Some(latest.node_agent_settings())
+        );
+        assert_eq!(recovered.state.nodes["task"].model_retry, Some(true));
+        assert_eq!(
+            recovered.state.executions[1]
+                .metrics
+                .as_ref()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("replacement/coder")
+        );
+        recovered.pause(false).unwrap();
+        let retry = recovered.jobs().unwrap().remove(0);
+        assert_eq!(
+            retry.config.node_agent_settings(),
+            latest.node_agent_settings()
+        );
+        assert_eq!(retry.execution.session_id, first.execution.session_id);
     }
 }
 
@@ -396,7 +548,7 @@ fn blocked_composition_failure_uses_the_new_model_after_restart() {
 }
 
 #[test]
-fn an_upstream_block_does_not_retarget_an_old_failed_descendant() {
+fn an_upstream_block_does_not_rewrite_a_descendants_historical_override() {
     let graph = Graph {
         nodes: ["first", "after"]
             .into_iter()
@@ -438,7 +590,7 @@ fn an_upstream_block_does_not_retarget_an_old_failed_descendant() {
         .unwrap();
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.nodes["after"].status, "blocked");
-    // An old preparation-only descendant failure must not be retargeted when
+    // Saving must not rewrite the override for an old descendant failure when
     // the current block was caused by its upstream branch, even when managed.
     runtime.state.config.as_mut().unwrap().environment = Some(serde_json::from_value(serde_json::json!({
         "mode": "native-workspace", "platform": "test", "arch": "test", "scopes": [".agent-home"],
@@ -790,7 +942,7 @@ fn prestart_model_settings_are_retained_when_a_later_failure_is_retried() {
 }
 
 #[test]
-fn previously_started_waiting_blocked_and_dirty_nodes_keep_their_models() {
+fn previously_started_waiting_blocked_and_dirty_nodes_keep_historical_overrides() {
     for status in ["waiting", "blocked", "dirty"] {
         let (_temp, _source, mut runtime) = setup(true, single());
         runtime.approve().unwrap();
@@ -812,7 +964,7 @@ fn previously_started_waiting_blocked_and_dirty_nodes_keep_their_models() {
             .unwrap();
         assert!(
             runtime.state.nodes["task"].model_config.is_none(),
-            "an already-started node keeps its own model"
+            "saving does not rewrite an already-started node's historical override"
         );
         assert_eq!(
             runtime
@@ -993,7 +1145,7 @@ fn a_finished_conversation_records_models_for_future_followups() {
     assert_eq!(
         serde_json::to_value(&runtime.state.nodes["task"]).unwrap(),
         node_before,
-        "an executed node keeps its recorded model"
+        "saving does not rewrite the executed node's historical override"
     );
     assert_eq!(
         runtime

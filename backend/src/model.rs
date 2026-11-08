@@ -680,7 +680,8 @@ pub struct NodeState {
     #[serde(default)]
     pub human_instruction: bool,
     /// Model settings synchronized before first dispatch or while failed.
-    /// Running/completed nodes and the Run's original config stay unchanged.
+    /// Running/completed nodes and the Run's original config stay unchanged;
+    /// a later dispatch uses the conversation selection before this override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_config: Option<RoleModelConfig>,
     /// Legacy record of model changes saved while failed. Explicit Continue
