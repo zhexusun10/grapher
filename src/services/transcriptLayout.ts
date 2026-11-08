@@ -1,3 +1,23 @@
+import type { TranscriptItem } from "../types";
+
+/** Whitespace-only assistant text has no visible Markdown, but still takes a
+ * row and two list gaps. Keep it in the parser so later deltas can extend it;
+ * omit it only from the rendered projection and remap revision boundaries. */
+export function visibleTranscriptRows(rows: TranscriptItem[], starts = new Map<string, number>()) {
+  const blank = (item: TranscriptItem) => item.type === "text" && item.role === "assistant" &&
+    !item.content?.trim() && !item.images?.length && !item.files?.length;
+  const first = rows.findIndex(blank);
+  if (first < 0) return { rows, starts };
+
+  const visible = rows.slice(0, first);
+  const indices = Array.from({ length: first + 1 }, (_, index) => index);
+  for (let index = first; index < rows.length; index++) {
+    if (!blank(rows[index])) visible.push(rows[index]);
+    indices.push(visible.length);
+  }
+  return { rows: visible, starts: new Map([...starts].map(([source, index]) => [source, indices[index]])) };
+}
+
 export function estimateTranscriptRowHeight(id: string): number {
   if (id.startsWith("think_")) return 44;
   if (id.startsWith("divider_")) return 25;

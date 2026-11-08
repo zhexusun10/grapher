@@ -35,31 +35,39 @@ export function markTranscriptPrependIfReading(element: HTMLElement | null): voi
   markTranscriptPrepend(element);
 }
 
-/** `overscroll-behavior: contain` also applies to a scroll container that has
- * nothing to scroll. Such a box is a dead zone: the browser neither scrolls it
- * nor chains the wheel to the conversation. Keep containment only for the axes
- * that can actually move, so a short reasoning card or tool output still
- * forwards the gesture to the conversation scroller. */
+/** Vertical scrolling chains to the conversation at a card's edge. Contain
+ * horizontal scrolling only when the card actually overflows horizontally:
+ * containment on an axis with no scroll range would swallow that gesture. */
 export function syncOverscrollContainment(element: HTMLElement | null): void {
   if (!element) return;
-  const vertical = element.scrollHeight > element.clientHeight + 1;
   const horizontal = element.scrollWidth > element.clientWidth + 1;
-  element.style.overscrollBehaviorY = vertical ? "contain" : "auto";
+  element.style.overscrollBehaviorY = "auto";
   element.style.overscrollBehaviorX = horizontal ? "contain" : "auto";
 }
 
-/** True when a wheel, touch or key gesture belongs to a nested scroll area
- * inside the conversation scroller. Scrolling a thinking card or tool output
- * must move only that inner viewport; it is not a conversation scroll-up and
- * must not turn off the conversation's bottom follow state. */
-export function isNestedScrollGesture(event: Event, scroller: HTMLElement | null): boolean {
+/** True when a nested scroll area can consume this gesture, or explicitly
+ * contains it at its boundary. A chained gesture belongs to the conversation,
+ * which must stop following before the browser applies the outer scroll.
+ * Touch callers supply the change in scroll direction from consecutive events. */
+export function isNestedScrollGesture(event: Event, scroller: HTMLElement | null, touchDeltaY?: number): boolean {
   if (!scroller || typeof getComputedStyle !== "function") return false;
+  let direction = touchDeltaY ?? 0;
+  if (event.type === "wheel") direction = (event as WheelEvent).deltaY;
+  else if (event.type === "keydown") {
+    const key = (event as KeyboardEvent).key;
+    direction = ["ArrowUp", "PageUp", "Home"].includes(key) || (key === " " && (event as KeyboardEvent).shiftKey) ? -1
+      : ["ArrowDown", "PageDown", "End", " "].includes(key) ? 1 : 0;
+  }
   let node = event.target as HTMLElement | null;
   if (!node || typeof node.closest !== "function") return false;
   for (; node && node !== scroller; node = node.parentElement) {
-    const overflowY = getComputedStyle(node).overflowY;
-    if ((overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
-        node.scrollHeight > node.clientHeight + 1) return true;
+    const style = getComputedStyle(node);
+    if (!/^(auto|scroll|overlay)$/.test(style.overflowY) || node.scrollHeight <= node.clientHeight + 1) continue;
+    // scrollHeight/clientHeight are rounded integers even when the browser's
+    // actual scroll range is fractional, so allow a 1px boundary tolerance.
+    const canScroll = direction < 0 ? node.scrollTop > 1
+      : direction > 0 ? node.scrollTop < node.scrollHeight - node.clientHeight - 1 : true;
+    if (canScroll || style.overscrollBehaviorY === "contain" || style.overscrollBehaviorY === "none") return true;
   }
   return false;
 }

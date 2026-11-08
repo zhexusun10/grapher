@@ -1,8 +1,9 @@
-import React, { memo, useCallback, useRef, useState } from "react";
+import React, { memo, useCallback, useMemo, useRef, useState } from "react";
 import { stripPlannerContext } from "../services/plannerText";
 import { motion } from "motion/react";
 import type { ChatMessage, TranscriptItem } from "../types";
 import { VirtualizedList } from "./VirtualizedList";
+import { visibleTranscriptRows } from "../services/transcriptLayout";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
@@ -57,6 +58,7 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
 
 const noop = () => {};
 export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
+  const items = useMemo(() => visibleTranscriptRows(props.items).rows, [props.items]);
   const expanded = useRef(new Map<string, boolean>());
   const [, bump] = useState(0);
   const expand = useCallback((id: string, value: boolean, card?: HTMLElement) => {
@@ -65,11 +67,11 @@ export const PlannerTranscript = memo(function PlannerTranscript(props: Props) {
     props.onUserResize(value, card);
   }, [props.onUserResize]);
   const renderRow = (item: TranscriptItem, index: number) => <PlannerRow item={item}
-    streaming={props.isPlanning && item.status === "running" && (item.type === "thinking" || index === props.items.length - 1)}
+    streaming={props.isPlanning && item.status === "running" && (item.type === "thinking" || index === items.length - 1)}
     locked={props.locked && !props.isPlanning} editing={props.editingMessage?.id === item.id}
     draft={props.editingMessage?.id === item.id ? props.draft : ""}
     expanded={expanded.current.get(item.id)} onExpandedChange={expand}
     onDraftChange={props.onDraftChange || noop} onEditMessage={props.onEditMessage} onCancelEdit={props.onCancelEdit}
     onEditSubmit={props.onEditSubmit} onSendMessage={props.onSendMessage} />;
-  return <div className="planner-transcript"><VirtualizedList items={props.items} renderRow={renderRow} gap={10} /></div>;
+  return <div className="planner-transcript"><VirtualizedList items={items} renderRow={renderRow} gap={10} /></div>;
 });

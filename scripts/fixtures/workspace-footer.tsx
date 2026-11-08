@@ -129,6 +129,7 @@ function WorkspaceFooterFixture() {
     setExecutions(previous => previous.map(item => ({ ...item, status: "completed", completedAt: 2 })));
     setStatus("completed");
   };
+  audit.setExecutions = (next: Execution[]) => setExecutions(next);
   audit.setExecutionMetrics = (metrics: Execution["metrics"], id = "current") => setExecutions(previous =>
     previous.map(item => item.id === id ? { ...item, metrics } : item));
   audit.setExecutionTiming = (id: string, startedAt: number, completedAt: number | null) => setExecutions(previous =>

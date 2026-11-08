@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { FOLLOW_LATEST_EVENT, transcriptScrollParent } from "../services/transcriptScroll";
+import { FOLLOW_LATEST_EVENT, isNestedScrollGesture, transcriptScrollParent } from "../services/transcriptScroll";
 import { MAX_AUTO_TRANSCRIPT_BYTES, TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
 import { useStableCallback } from "./useStableCallback";
 
@@ -88,16 +88,30 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
         }
       });
     };
+    let lastTouchY = 0;
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches[0]) lastTouchY = event.touches[0].clientY;
+    };
     const resumeFill = (event: Event) => {
+      let touchDeltaY: number | undefined;
+      if (event.type === "touchmove") {
+        const touch = (event as TouchEvent).touches[0];
+        if (!touch) return;
+        touchDeltaY = lastTouchY - touch.clientY;
+        lastTouchY = touch.clientY;
+        if (touchDeltaY >= -1) return;
+      }
       if ((event.target as HTMLElement).closest?.("input, textarea, [contenteditable=true]")) return;
       if (event instanceof WheelEvent && event.deltaY >= -0.5) return;
       if (event instanceof KeyboardEvent && !["ArrowUp", "PageUp", "Home"].includes(event.key) && !(event.key === " " && event.shiftKey)) return;
+      if (isNestedScrollGesture(event, parent, touchDeltaY)) return;
       autoFillStartRef.current = loadedBytes;
       check();
     };
     const observer = new ResizeObserver(check);
     observer.observe(element); observer.observe(parent);
     parent.addEventListener("wheel", resumeFill, { passive: true });
+    parent.addEventListener("touchstart", onTouchStart, { passive: true });
     parent.addEventListener("touchmove", resumeFill, { passive: true });
     parent.addEventListener("keydown", resumeFill);
     parent.addEventListener(FOLLOW_LATEST_EVENT, check);
@@ -106,6 +120,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
     return () => {
       observer.disconnect(); parent.removeEventListener(FOLLOW_LATEST_EVENT, check);
       parent.removeEventListener("wheel", resumeFill);
+      parent.removeEventListener("touchstart", onTouchStart);
       parent.removeEventListener("touchmove", resumeFill);
       parent.removeEventListener("keydown", resumeFill);
       document.removeEventListener("visibilitychange", check);

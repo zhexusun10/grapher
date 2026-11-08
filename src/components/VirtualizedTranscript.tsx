@@ -1,6 +1,6 @@
 import { t } from "../i18n";
 import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
-import { rowOffsets, rowAt, visibleRows } from "../services/transcriptLayout";
+import { rowOffsets, rowAt, visibleRows, visibleTranscriptRows } from "../services/transcriptLayout";
 import { type ChatMessage, type ImageAttachment, TranscriptItem } from "../types";
 import { plannerUserTurnKey } from "../services/plannerUserTurns";
 import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
@@ -776,7 +776,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       rows = [...rows];
       for (const insertion of insertions.reverse()) rows.splice(insertion.index, 0, ...insertion.rows);
     }
-    return { rows, starts };
+    return visibleTranscriptRows(rows, starts);
   }, [parsedItems, settled, sourceUserFallbacks, output]);
   const items = projected.rows;
   // Missing revisions keep a boundary before the next loaded revision, even
@@ -960,15 +960,14 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     };
     let lastTouchY = 0;
     const onTouchStart = (e: TouchEvent) => {
-      if (isNestedScrollGesture(e, scrollParent)) return;
       if (e.touches[0]) lastTouchY = e.touches[0].clientY;
     };
     const onTouchMove = (e: TouchEvent) => {
-      if (isNestedScrollGesture(e, scrollParent)) return;
       if (e.touches[0]) {
         const curY = e.touches[0].clientY;
         const delta = curY - lastTouchY;
         lastTouchY = curY;
+        if (isNestedScrollGesture(e, scrollParent, -delta)) return;
         const distanceFromBottom = scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight;
         if (delta > 1 && distanceFromBottom > 20) {
           isUserScrolledUpRef.current = true;

@@ -14,6 +14,7 @@ import { MarkdownRenderer } from "../../src/components/MarkdownRenderer";
 import { ExecutionTimeTookText, PlannerTimeTookText } from "../../src/components/ExecutionTimeTook";
 import { ToolCallCard } from "../../src/components/ToolCallCard";
 import { VirtualizedTranscript } from "../../src/components/VirtualizedTranscript";
+import { VirtualizedList } from "../../src/components/VirtualizedList";
 import { TranscriptHistoryStatus } from "../../src/components/TranscriptHistoryStatus";
 import { ExecutionTranscript, executionTranscriptCache } from "../../src/components/ExecutionTranscript";
 import { PlanningActivity, planningTranscriptCache } from "../../src/components/PlanningActivity";
@@ -121,6 +122,16 @@ function TranscriptFixture() {
 function PlannerTranscriptFixture() {
   return <div className="initial-query-scroll" data-transcript-scroll style={{ height: 300, overflowY: "auto" }}>
     <PlanningActivity planningIds={["planner-tool-plan"]} showUserTurns running />
+  </div>;
+}
+
+function VirtualScrollFixture() {
+  const params = new URLSearchParams(location.search);
+  const count = Number(params.get("count") ?? 240);
+  const height = Number(params.get("height") ?? 24);
+  const items = React.useMemo(() => Array.from({ length: count }, (_, index) => ({ id: `row-${index}` })), [count]);
+  return <div data-virtual-scroll style={{ height: 300, width: 400, overflowY: "auto" }}>
+    <VirtualizedList items={items} renderRow={item => <div style={{ height }}>{item.id}</div>} />
   </div>;
 }
 
@@ -510,7 +521,7 @@ const cases: Record<string, React.ComponentType> = {
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
-  transcriptOutput: TranscriptOutputFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, heldHistory: HeldHistoryFixture, historyRegression: HistoryRegressionFixture, nodeEntry: NodeEntryFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture, plannerHistoryOrder: PlannerHistoryOrderFixture, plannerScrollRestore: PlannerScrollRestoreFixture,
+  transcriptOutput: TranscriptOutputFixture, virtualScroll: VirtualScrollFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, heldHistory: HeldHistoryFixture, historyRegression: HistoryRegressionFixture, nodeEntry: NodeEntryFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture, plannerHistoryOrder: PlannerHistoryOrderFixture, plannerScrollRestore: PlannerScrollRestoreFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
   timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture,
 };

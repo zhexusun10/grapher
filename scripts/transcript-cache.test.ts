@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { runtimeService } from "../src/services/runtime.ts";
 import { ExecutionTranscript, executionTranscriptCache } from "../src/components/ExecutionTranscript.tsx";
 import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
+import { PlannerTranscript } from "../src/components/PlannerTranscript.tsx";
 import { parseTranscriptChunkLines, type ParseTranscriptChunkState } from "../src/services/transcriptParser.ts";
 import { planningTranscriptCache } from "../src/components/PlanningActivity.tsx";
 import { BoundedLruCache, utf8Bytes } from "../src/lib/BoundedLruCache.ts";
@@ -36,6 +37,31 @@ test("uncached settled nodes render a loading spinner on the first frame", () =>
   const cached = renderToStaticMarkup(createElement(ExecutionTranscript, { runId: "run", execution }));
   assert.doesNotMatch(cached, /transcript-loading\"/);
   executionTranscriptCache.clear();
+});
+
+test("blank assistant text does not create live Planner rows", () => {
+  const items: TranscriptItem[] = [
+    { id: "first-tool", type: "tool_call", toolName: "bash", status: "success" },
+    { id: "blank", type: "text", role: "assistant", content: "\n  " },
+    { id: "second-tool", type: "tool_call", toolName: "read", status: "success" },
+    { id: "private-thinking", type: "thinking", role: "assistant", content: "" },
+  ];
+  const html = renderToStaticMarkup(createElement(PlannerTranscript, { items, isPlanning: true, locked: false,
+    draft: "", onDraftChange: () => {}, onSendMessage: () => {}, onUserResize: () => {} }));
+  assert.doesNotMatch(html, /data-transcript-id="blank"/);
+  for (const id of ["first-tool", "second-tool", "private-thinking"]) assert.match(html, new RegExp(`data-transcript-id="${id}"`));
+});
+
+test("Planner revision boundaries use visible row indices after blank text is removed", () => {
+  const line = (event: unknown) => JSON.stringify(event) + "\n";
+  const marker = (planningId: string) => line({ type: "grapher_planning_source", planningId, startOffset: 0 });
+  const tool = (id: string) => line({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: {} });
+  const blank = line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "\n" } });
+  const output = marker("first") + blank + tool("tool-first") + marker("second") + tool("tool-second");
+  const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output, inline: true, settled: true,
+    sourceOrder: ["first", "second"] }));
+  assert.match(html, /data-transcript-source-start="second" style="position:absolute;top:58px/);
+  assert.doesNotMatch(html, /data-transcript-id="text_first_/);
 });
 
 test("successful delete and clear invalidate transcript caches", async () => {

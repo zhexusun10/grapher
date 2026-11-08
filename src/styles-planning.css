@@ -387,12 +387,10 @@
      10px scrollbars, letting it appear only when the body overflows would
      narrow the Markdown and rewrap every line mid-stream. */
   scrollbar-gutter: stable;
-  /* Keep wheel/touch scrolling inside the reasoning viewport. Chaining it to
-     the conversation would turn an inner read into an outer scroll-up. This is
-     the default only: ThinkingCard disables containment per axis while the
-     body has nothing to scroll, otherwise Chromium would swallow the wheel
-     instead of forwarding it to the conversation. */
-  overscroll-behavior: contain;
+  /* Read inside the card first, then continue through the conversation at its
+     vertical edges. Horizontal overflow remains contained when present. */
+  overscroll-behavior-y: auto;
+  overscroll-behavior-x: contain;
   border-top: 1px solid rgba(139, 92, 246, 0.09);
   background: #fdfdfe;
 }
@@ -867,9 +865,10 @@
   border-radius: 8px;
   overflow-x: auto;
   max-height: 220px;
-  /* ToolCallCard aligns containment with measured overflow; a short block must
-     not swallow the conversation wheel gesture. */
-  overscroll-behavior: contain;
+  /* At a vertical edge, continue scrolling the surrounding conversation.
+     ToolCallCard contains horizontal overflow only when it actually exists. */
+  overscroll-behavior-y: auto;
+  overscroll-behavior-x: contain;
   border: 1px solid rgba(255, 255, 255, 0.05);
   margin: 0;
   white-space: pre-wrap;
@@ -1134,7 +1133,8 @@
 .transcript-row.system-row {
   display: flex;
   justify-content: flex-start;
-  margin: 4px 0;
+  /* The shared transcript list already spaces every row, including errors. */
+  margin: 0;
 }
 
 /* A post-task Planner review continues the same conversation but starts a new

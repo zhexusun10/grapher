@@ -1195,6 +1195,162 @@ test("a tall live thinking card stays at the newest reasoning when the conversat
   } finally { await context.close(); }
 });
 
+for (const height of [24, 130]) {
+  test(`measuring ${height}px older virtualized rows does not resist an upward wheel gesture`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(`virtualScroll&height=${height}`);
+    try {
+      const scroller = page.locator("[data-virtual-scroll]");
+      await scroller.evaluate(element => { element.scrollTop = element.scrollHeight; });
+      await page.waitForTimeout(300);
+      // Leave room below the reader so replacing estimates cannot clamp the
+      // scroller at its maximum independently of the wheel gesture.
+      await scroller.evaluate(element => { element.scrollTop -= 1000; });
+      await page.waitForTimeout(300);
+      await scroller.hover({ position: { x: 5, y: 150 } });
+      for (let i = 0; i < 12; i++) {
+        const before = await scroller.evaluate(element => {
+          const bounds = element.getBoundingClientRect();
+          const row = [...element.querySelectorAll("[data-transcript-id]")].find(row => row.getBoundingClientRect().top >= bounds.top);
+          return { id: row.dataset.transcriptId, top: row.getBoundingClientRect().top, scroll: element.scrollTop };
+        });
+        await page.mouse.wheel(0, -80);
+        await page.waitForTimeout(220);
+        const after = await scroller.locator(`[data-transcript-id="${before.id}"]`).evaluate(row => ({
+          top: row.getBoundingClientRect().top, scroll: row.closest("[data-virtual-scroll]").scrollTop }));
+        assert.ok(Math.abs(after.top - before.top - 80) <= 3,
+          `new row measurements resisted wheel ${i}: ${JSON.stringify({ before, after })}`);
+      }
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("a row measured before a pending wheel scroll is corrected when the gesture lands", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("virtualScroll&count=25");
+  try {
+    const scroller = page.locator("[data-virtual-scroll]");
+    await scroller.evaluate(element => { element.scrollTop = 200; });
+    await page.waitForTimeout(250);
+    const result = await scroller.evaluate(async element => {
+      const top = element.getBoundingClientRect().top;
+      const row = [...element.querySelectorAll("[data-transcript-id]")].find(row => row.getBoundingClientRect().top > top + 140);
+      const previous = row.previousElementSibling;
+      const start = row.getBoundingClientRect().top;
+      row.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -50 }));
+      previous.firstElementChild.style.height = "124px";
+      // Let ResizeObserver and the measurement commit run while Chromium's
+      // synthetic wheel is still waiting for its default scroll.
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const beforeScroll = row.getBoundingClientRect().top;
+      element.scrollTop -= 50;
+      element.dispatchEvent(new Event("scroll"));
+      await new Promise(resolve => setTimeout(resolve, 100));
+      return { start, beforeScroll, end: row.getBoundingClientRect().top };
+    });
+    assert.ok(result.beforeScroll - result.start > 90, `the resize must actually precede the scroll: ${JSON.stringify(result)}`);
+    assert.ok(Math.abs(result.end - result.start - 50) <= 3,
+      `the resize must not steal or add to the pending wheel motion: ${JSON.stringify(result)}`);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const type of ["thinking", "tool"]) {
+  test(`${type} card hands vertical scrolling back to the conversation at its edges`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(`latestScroll&layout=${type}-card`, undefined, "reduce");
+    try {
+      const card = page.locator(type === "thinking" ? ".thinking-card" : ".tool-call-card").last();
+      await card.locator(type === "thinking" ? ".thinking-card-header" : ".tool-call-header").click();
+      const body = card.locator(type === "thinking" ? ".thinking-card-body" : ".tool-result-code");
+      await body.waitFor();
+      await page.waitForTimeout(350);
+      const scroller = page.locator(".initial-query-scroll");
+      const metrics = () => body.evaluate(element => {
+        const scroll = element.closest(".initial-query-scroll");
+        return { inner: element.scrollTop, max: element.scrollHeight - element.clientHeight,
+          outer: scroll.scrollTop, following: scroll.dataset.transcriptFollowing ?? null };
+      });
+      const initial = await metrics();
+      assert.ok(initial.max > 200 && initial.outer > 200, `both viewports must be scrollable: ${JSON.stringify(initial)}`);
+      await body.evaluate(element => { element.scrollTop = (element.scrollHeight - element.clientHeight) / 2; });
+      await body.hover();
+      const before = await metrics();
+      await page.mouse.wheel(0, -80);
+      await page.waitForTimeout(120);
+      const inside = await metrics();
+      assert.ok(inside.inner < before.inner - 40 && Math.abs(inside.outer - before.outer) <= 2,
+        `the card consumes scrolling while it has room: ${JSON.stringify({ before, inside })}`);
+
+      await body.evaluate(element => { element.scrollTop = 0; });
+      await page.waitForTimeout(80);
+      const atTop = await metrics();
+      await page.mouse.wheel(0, -100);
+      await page.waitForTimeout(150);
+      const pastTop = await metrics();
+      assert.ok(pastTop.outer < atTop.outer - 40 && pastTop.following === null,
+        `upward scrolling at the card's top must continue through history: ${JSON.stringify({ atTop, pastTop })}`);
+
+      // Reach the actual compositor boundary with a wheel rather than an
+      // assigned rounded scrollHeight (the real range can be fractional).
+      await body.evaluate(element => { element.scrollTop = element.scrollHeight - element.clientHeight - 5; });
+      await body.hover();
+      await page.mouse.wheel(0, 30);
+      await page.waitForTimeout(150);
+      const atBottom = await metrics();
+      await page.mouse.wheel(0, 100);
+      await page.waitForTimeout(150);
+      const pastBottom = await metrics();
+      assert.ok(pastBottom.outer > atBottom.outer + 40,
+        `downward scrolling at the card's bottom must return to the conversation: ${JSON.stringify({ atBottom, pastBottom })}`);
+      assert.equal(pastBottom.following, "true", "returning to the latest output resumes following");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+for (const gesture of ["touch", "keyboard"]) {
+  test(`${gesture} scroll at a reasoning boundary transfers control to the conversation`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node", undefined, "reduce");
+    try {
+      await page.getByText("Virtualized message 79", { exact: true }).waitFor();
+      await page.evaluate(() => window.audit.appendToolEvents([
+        { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } },
+        { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+          delta: Array.from({ length: 60 }, (_, index) => `EDGE_REASONING_${index}\n\n`).join("") } },
+      ]));
+      const body = page.locator(".thinking-card-body"), scroller = page.locator(".initial-query-scroll");
+      await body.waitFor();
+      await page.waitForTimeout(350);
+      assert.ok(await body.evaluate(element => element.scrollHeight - element.clientHeight > 200));
+      const send = edge => body.evaluate((element, { gesture, edge }) => {
+        element.scrollTop = edge ? 0 : (element.scrollHeight - element.clientHeight) / 2;
+        if (gesture === "touch") {
+          const touch = clientY => new Touch({ identifier: 7, target: element, clientY });
+          element.dispatchEvent(new TouchEvent("touchstart", { bubbles: true, touches: [touch(100)] }));
+          element.dispatchEvent(new TouchEvent("touchmove", { bubbles: true, touches: [touch(150)] }));
+        } else {
+          element.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowUp" }));
+        }
+      }, { gesture, edge });
+      await send(false);
+      assert.equal(await scroller.getAttribute("data-transcript-following"), "true",
+        "a gesture the card can consume must leave the outer view following");
+      await send(true);
+      assert.equal(await scroller.getAttribute("data-transcript-following"), null,
+        "a gesture chained past the card must release outer following before it scrolls");
+      // Synthetic touch and key events do not run Chromium's default scroll.
+      await scroller.evaluate(element => { element.scrollTop -= 80; element.dispatchEvent(new Event("scroll")); });
+      const before = await scroller.evaluate(element => element.scrollTop);
+      await page.evaluate(() => window.audit.appendToolEvents([{
+        type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: " MORE_STREAMING" },
+      }]));
+      await page.waitForTimeout(250);
+      const after = await scroller.evaluate(element => element.scrollTop);
+      assert.ok(Math.abs(after - before) <= 3, `live output must not pull the history reader back: ${JSON.stringify({ before, after })}`);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
 test("scrolling inside a live thinking card leaves the conversation following its own bottom", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("latestScroll&layout=live-tool", undefined, "reduce");
   try {

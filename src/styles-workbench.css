@@ -988,6 +988,22 @@
   justify-content: flex-start;
 }
 
+/* The transcript list owns a 10px row gap. Keep record headers on that same
+   rhythm, including collapsed and provisional records. The outer conversation
+   uses 12px, so adjacent records compensate for those extra 2px. */
+.chat-messages-stream > .execution-record-panel + .execution-record-panel {
+  margin-top: -2px;
+}
+
+.execution-record-panel .session-label {
+  margin: 0;
+}
+
+.execution-record-panel .session-label[aria-expanded="true"],
+.execution-record-panel .session-label[aria-hidden="true"] {
+  margin-bottom: 10px;
+}
+
 button.session-label-toggle {
   background: transparent;
   border: none;

@@ -45,8 +45,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const restoreRef = useRef(restoreAnchor ?? null);
   const onRestoreScrollRef = useRef(onRestoreScroll);
   onRestoreScrollRef.current = onRestoreScroll;
-  const resizedMeasuredRowsRef = useRef(false);
   const [heightVersion, setHeightVersion] = useState(0);
+  const committedHeightVersionRef = useRef(heightVersion);
   const flushScheduled = useRef(false);
   const mounted = useRef(false);
   const frame = useRef<number | null>(null);
@@ -57,10 +57,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   const measure = useCallback((id: string, height: number) => {
     if (height <= 0) return;
     const existing = heights.current.get(id);
-    if (existing !== undefined) {
-      if (Math.abs(existing - height) < 1) return;
-      resizedMeasuredRowsRef.current = true;
-    }
+    if (existing !== undefined && Math.abs(existing - height) < 1) return;
     heights.current.set(id, height);
     if (flushScheduled.current) return;
     flushScheduled.current = true;
@@ -85,6 +82,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   // row at the viewport's top. A still-draining CoT above the answer can grow
   // while both are visible and otherwise push the answer out of the pane.
   const gestureRowAnchor = useRef<{ id: string; visualTop: number; scrollTop: number; awaitingScroll: boolean } | null>(null);
+  const pendingGestureMeasurementRef = useRef(false);
   const restoredScrollTop = useRef<number | null>(null);
   const stabilizingAnchorRef = useRef(false);
   const beforeIds = previousOffsetIds.current;
@@ -170,10 +168,12 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     const clearGestureAnchor = () => {
       cancelGestureTimer();
       gestureRowAnchor.current = null;
+      pendingGestureMeasurementRef.current = false;
       releaseAnchor();
     };
     const captureGestureAnchor = (row: HTMLElement | null | undefined, awaitingScroll = false) => {
       cancelGestureTimer();
+      pendingGestureMeasurementRef.current = false;
       const id = row?.dataset.transcriptId;
       const anchor = parent && id && ref.current?.contains(row)
         ? { id, visualTop: row.getBoundingClientRect().top, scrollTop: parent.scrollTop, awaitingScroll } : null;
@@ -204,8 +204,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         return rect.bottom > bounds.top && rect.top < bounds.bottom;
       });
     };
-    const onUserScrollGesture = (e: Event) => {
-      if (parent && isNestedScrollGesture(e, parent)) return;
+    const onUserScrollGesture = (e: Event, touchDeltaY?: number) => {
+      if (parent && isNestedScrollGesture(e, parent, touchDeltaY)) return;
       cancelRestore();
       const target = e.target instanceof Element ? e.target : null;
       let row = target?.closest<HTMLElement>("[data-transcript-id]");
@@ -216,7 +216,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
           return y !== undefined && y >= bounds.top && y <= bounds.bottom;
         });
       }
-      const mayScroll = e.type === "touchstart" || Math.abs((e as WheelEvent).deltaY) > 0.5;
+      const mayScroll = e.type.startsWith("touch") || Math.abs((e as WheelEvent).deltaY) > 0.5;
       captureGestureAnchor(row, mayScroll);
       if (stabilizingAnchorRef.current && parent && restoredScrollTop.current !== null) {
         // If the user scrolled during stabilization, adjust the anchor's expected visualTop
@@ -229,6 +229,22 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         return;
       }
       releaseAnchor();
+    };
+    let lastTouchY = 0, touchOwnsOuter = false;
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches[0]) lastTouchY = event.touches[0].clientY;
+      touchOwnsOuter = !!parent && !isNestedScrollGesture(event, parent);
+      onUserScrollGesture(event);
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      if (!event.touches[0] || !parent) return;
+      const delta = lastTouchY - event.touches[0].clientY;
+      lastTouchY = event.touches[0].clientY;
+      if (isNestedScrollGesture(event, parent, delta)) { touchOwnsOuter = false; return; }
+      // A gesture that began in a card can reach the conversation later. Take
+      // its anchor at that transition, not on every frame of a touch drag.
+      if (!touchOwnsOuter || !gestureRowAnchor.current) onUserScrollGesture(event, delta);
+      touchOwnsOuter = true;
     };
     let scrollbarPointer: number | null = null;
     const onPointerDown = (event: PointerEvent) => {
@@ -271,11 +287,15 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
         if (gesture.awaitingScroll && Math.abs(parent.scrollTop - gesture.scrollTop) > 0.5) {
           gesture.awaitingScroll = false;
           cancelGestureTimer();
+          // A row may have resized before the browser applied this gesture.
+          // Reconcile it now even if no further measurements arrive.
+          if (pendingGestureMeasurementRef.current && mounted.current) setHeightVersion(value => value + 1);
         }
         const row = ref.current?.querySelector<HTMLElement>(`[data-transcript-id="${gesture.id.replace(/["\\]/g, "\\$&")}"]`);
         if (!row) {
           cancelGestureTimer();
           gestureRowAnchor.current = null;
+          pendingGestureMeasurementRef.current = false;
         } else {
           const expectedTop = gesture.visualTop - (parent.scrollTop - gesture.scrollTop);
           const actualTop = row.getBoundingClientRect().top;
@@ -295,6 +315,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
           if (expectedTop >= bounds.bottom || expectedTop + row.getBoundingClientRect().height <= bounds.top) {
             cancelGestureTimer();
             gestureRowAnchor.current = null;
+            pendingGestureMeasurementRef.current = false;
           }
         }
       }
@@ -314,7 +335,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       parent.addEventListener(FOLLOW_LATEST_EVENT, clearGestureAnchor);
       parent.addEventListener("scroll", schedule, { passive: true });
       parent.addEventListener("wheel", onUserScrollGesture, { passive: true });
-      parent.addEventListener("touchstart", onUserScrollGesture, { passive: true });
+      parent.addEventListener("touchstart", onTouchStart, { passive: true });
+      parent.addEventListener("touchmove", onTouchMove, { passive: true });
       parent.addEventListener("pointerdown", onPointerDown, { passive: true });
       parent.addEventListener("keydown", onKeyDown);
       window.addEventListener("pointerup", onPointerUp);
@@ -326,7 +348,8 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       parent?.removeEventListener(FOLLOW_LATEST_EVENT, clearGestureAnchor);
       parent?.removeEventListener("scroll", schedule);
       parent?.removeEventListener("wheel", onUserScrollGesture);
-      parent?.removeEventListener("touchstart", onUserScrollGesture);
+      parent?.removeEventListener("touchstart", onTouchStart);
+      parent?.removeEventListener("touchmove", onTouchMove);
       parent?.removeEventListener("pointerdown", onPointerDown);
       parent?.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("pointerup", onPointerUp);
@@ -345,8 +368,12 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
   useLayoutEffect(() => {
     const before = previousOffsets.current;
     const parent = parentRef.current;
-    const hasResize = resizedMeasuredRowsRef.current;
-    resizedMeasuredRowsRef.current = false;
+    // Child layout effects can measure newly mounted overscan rows before this
+    // commit, while `offsets` still contains their estimates. Associate those
+    // measurements with the next height-version render rather than consuming a
+    // flag here, or the correction is lost and upward scrolling feels resisted.
+    const hasMeasurementChange = heightVersion !== committedHeightVersionRef.current;
+    committedHeightVersionRef.current = heightVersion;
     // Follow state is also updated imperatively from scroll handlers without a
     // React render. Re-read it at commit time so a reader who just scrolled up
     // is never pulled back by this frame's row measurement.
@@ -418,7 +445,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
           // pane or animation re-render can momentarily report different
           // geometry while the commit settles; compensating that transient
           // would move a reader whose conversation did not actually change.
-          if (hasResize) {
+          if (hasMeasurementChange || pendingGestureMeasurementRef.current) {
             // The snapshot is taken before the gesture moves scrollTop. Compare
             // actual geometry rather than cached heights so a measurement already
             // pending at that moment is not compensated twice.
@@ -429,12 +456,15 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
               parent.dispatchEvent(new Event(TRANSCRIPT_SCROLL_ADJUSTED_EVENT));
             }
           }
+          pendingGestureMeasurementRef.current = false;
           // Rebase either way, so a later unrelated commit cannot apply this
           // gesture's stale measurement to a settled viewport.
           gesture.visualTop = row.getBoundingClientRect().top;
           gesture.scrollTop = parent.scrollTop;
+        } else if (hasMeasurementChange) {
+          pendingGestureMeasurementRef.current = true;
         }
-      } else if (hasResize && viewport.top > 0) {
+      } else if (hasMeasurementChange && viewport.top > 0) {
         const index = viewport.top >= before.at(-1)! ? before.length - 1 : rowAt(before, viewport.top);
         if (index < offsets.length) {
           const delta = offsets[index] - before[index];
@@ -448,7 +478,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
     }
     previousOffsets.current = offsets;
     previousOffsetIds.current = ids;
-  }, [offsets, ids, viewport.top, anchor, followingLatest, updateViewport]);
+  }, [offsets, ids, viewport.top, anchor, followingLatest, heightVersion, updateViewport]);
   const virtual = typeof window !== "undefined" && viewport.hasScroller && items.length > 35;
   const height = parent?.clientHeight || viewport.height;
   const totalHeight = offsets.at(-1) ?? 0;

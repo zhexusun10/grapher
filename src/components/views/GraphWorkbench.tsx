@@ -1562,16 +1562,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
     let lastTouchY = 0;
     const onTouchStart = (e: TouchEvent) => {
+      if (e.touches[0]) lastTouchY = e.touches[0].clientY;
       if (isNestedScrollGesture(e, el)) return;
       stopLatestForReader();
-      if (e.touches[0]) lastTouchY = e.touches[0].clientY;
     };
     const onTouchMove = (e: TouchEvent) => {
-      if (isNestedScrollGesture(e, el)) return;
       if (e.touches[0]) {
         const curY = e.touches[0].clientY;
         const delta = curY - lastTouchY;
         lastTouchY = curY;
+        if (isNestedScrollGesture(e, el, -delta)) return;
+        stopLatestForReader();
         if (delta < -1) {
           historyReadingRef.current = false;
           delete el.dataset.transcriptHistoryReading;
@@ -2871,7 +2872,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         return (
                           <React.Fragment key={exec.id}>
                             <motion.div
-                              className="serial-execution-panel"
+                              className={`serial-execution-panel${showExecutionRecords ? " execution-record-panel" : ""}`}
                               initial={false}
                               animate={{ opacity: 1, y: 0 }}
                               transition={{ duration: 0.3 }}
@@ -2887,7 +2888,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                   conversation column so their turn rhythm matches the rest. */}
                               {fallbackSteers.filter(item => item.position === "before").map(item => renderSteerBubble(item.steer))}
                               {isExpanded && (
-                                <div style={{ display: "flex", flexDirection: "column", marginTop: showExecutionRecords ? 4 : 0 }}>
+                                <div style={{ display: "flex", flexDirection: "column" }}>
                                   <ExecutionTranscript
                                     runId={state.runId}
                                     execution={exec}
@@ -2912,11 +2913,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         ?.filter(steer => !turn.executions.some(exec => exec.id === steer.executionId))
                         .map(renderSteerBubble)}
                       {isWaitingExecution && (
-                        <div className="serial-execution-panel" aria-hidden="true">
+                        <div className={`serial-execution-panel${showExecutionRecords ? " execution-record-panel" : ""}`} aria-hidden="true">
                           {showExecutionRecords && attempts.at(-1) && (
                             <ExecutionRecordHeader execution={attempts.at(-1)!} expanded placeholder />
                           )}
-                          <div style={{ display: "flex", flexDirection: "column", marginTop: showExecutionRecords ? 4 : 0 }}>
+                          <div style={{ display: "flex", flexDirection: "column" }}>
                             <ExecutionTranscriptPlaceholder />
                           </div>
                         </div>

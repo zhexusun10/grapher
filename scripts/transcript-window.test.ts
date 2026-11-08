@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { appendTranscriptPage, prependTranscriptPage, renderTranscriptWindow, windowFromPage } from "../src/services/transcriptWindow.ts";
 import { executionTranscriptCache } from "../src/services/transcriptCache.ts";
-import { retainedRowAnchor, rowOffsets } from "../src/services/transcriptLayout.ts";
+import { retainedRowAnchor, rowOffsets, visibleTranscriptRows } from "../src/services/transcriptLayout.ts";
+import type { TranscriptItem } from "../src/types.ts";
 
 const page = (content: string, start: number, total: number) => ({ content, startOffset: start,
   nextOffset: start + Buffer.byteLength(content), totalBytes: total });
@@ -41,6 +42,29 @@ test("a small tail of a huge log is cached by retained bytes, not its absolute c
   assert.equal(executionTranscriptCache.has("huge:tail"), true);
   assert.equal(executionTranscriptCache.byteSize, 10);
   executionTranscriptCache.clear();
+});
+
+test("blank assistant rows do not consume layout or move revision boundaries", () => {
+  const rows: TranscriptItem[] = [
+    { id: "blank-start", type: "text", role: "assistant", content: "\n" },
+    { id: "private-thinking", type: "thinking", role: "assistant", content: "" },
+    { id: "blank-middle", type: "text", role: "assistant", content: "  \t" },
+    { id: "answer", type: "text", role: "assistant", content: "  answer" },
+    { id: "user", type: "text", role: "user", content: "" },
+    { id: "error", type: "system", role: "assistant", isError: true, content: "" },
+    { id: "blank-end", type: "text", role: "assistant", content: "" },
+  ];
+  const starts = new Map([["first", 0], ["second", 2], ["third", 5], ["empty", 7]]);
+  const projected = visibleTranscriptRows(rows, starts);
+  assert.deepEqual(projected.rows.map(row => row.id), ["private-thinking", "answer", "user", "error"]);
+  assert.deepEqual([...projected.starts], [["first", 0], ["second", 1], ["third", 3], ["empty", 4]]);
+  assert.equal(rows.length, 7, "the parser's rows must not be mutated");
+  assert.equal(rows[2].content, "  \t");
+  const completed = rows.map(row => row.id === "blank-middle" ? { ...row, content: `${row.content}continued` } : row);
+  assert.deepEqual(visibleTranscriptRows(completed, starts).rows.map(row => row.id),
+    ["private-thinking", "blank-middle", "answer", "user", "error"], "a later delta reveals the same row");
+  const alreadyVisible = projected.rows;
+  assert.equal(visibleTranscriptRows(alreadyVisible).rows, alreadyVisible, "unchanged rows retain their identity");
 });
 
 test("prepend anchors use retained row identity and ignore simultaneous live growth", () => {

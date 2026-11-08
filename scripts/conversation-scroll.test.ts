@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { smoothScrollToLatest } from "../src/services/smoothConversationScroll.ts";
-import { syncOverscrollContainment } from "../src/services/transcriptScroll.ts";
+import { isNestedScrollGesture, syncOverscrollContainment } from "../src/services/transcriptScroll.ts";
 import {
   CONVERSATION_BOTTOM_THRESHOLD,
   calculateExpandedCardScrollDelta,
@@ -15,7 +15,7 @@ import {
 const metrics = (scrollTop: number, scrollHeight: number, clientHeight: number): ScrollMetrics =>
   ({ scrollTop, scrollHeight, clientHeight });
 
-test("a nested scroll box only contains the axes that can actually move", () => {
+test("nested cards chain vertically and only contain real horizontal overflow", () => {
   // `overscroll-behavior: contain` on a box with no scroll range makes Chromium
   // swallow the wheel instead of chaining it to the conversation.
   const box = (height: number, width: number) => ({
@@ -28,13 +28,45 @@ test("a nested scroll box only contains the axes that can actually move", () => 
   assert.equal(short.style.overscrollBehaviorX, "auto");
   const tall = box(80, 100);
   syncOverscrollContainment(tall);
-  assert.equal(tall.style.overscrollBehaviorY, "contain");
+  assert.equal(tall.style.overscrollBehaviorY, "auto");
   assert.equal(tall.style.overscrollBehaviorX, "auto");
   const wide = box(50, 160);
   syncOverscrollContainment(wide);
   assert.equal(wide.style.overscrollBehaviorY, "auto");
   assert.equal(wide.style.overscrollBehaviorX, "contain");
   syncOverscrollContainment(null);
+});
+
+test("nested gestures chain only at the boundary in their scroll direction", () => {
+  const original = globalThis.getComputedStyle;
+  const outer = { closest() {}, parentElement: null };
+  const middle = { closest() {}, parentElement: outer, scrollTop: 0, scrollHeight: 200, clientHeight: 100,
+    overflowY: "auto", overscrollBehaviorY: "auto" };
+  const inner = { closest() {}, parentElement: middle, scrollTop: 50, scrollHeight: 200, clientHeight: 100,
+    overflowY: "auto", overscrollBehaviorY: "auto" };
+  globalThis.getComputedStyle = ((node: typeof inner) => node) as unknown as typeof getComputedStyle;
+  const scroller = outer as unknown as HTMLElement;
+  const gesture = (type: string, details: object = {}) => ({ type, target: inner, ...details }) as unknown as Event;
+  try {
+    assert.equal(isNestedScrollGesture(gesture("wheel", { deltaY: -20 }), scroller), true);
+    inner.scrollTop = 0;
+    assert.equal(isNestedScrollGesture(gesture("wheel", { deltaY: -20 }), scroller), false);
+    assert.equal(isNestedScrollGesture(gesture("wheel", { deltaY: 20 }), scroller), true);
+    middle.scrollTop = 40;
+    assert.equal(isNestedScrollGesture(gesture("wheel", { deltaY: -20 }), scroller), true, "another nested scroller can consume it");
+    middle.scrollTop = 0;
+    assert.equal(isNestedScrollGesture(gesture("keydown", { key: "Home" }), scroller), false);
+    assert.equal(isNestedScrollGesture(gesture("touchmove"), scroller, -10), false);
+    assert.equal(isNestedScrollGesture(gesture("touchmove"), scroller, 10), true);
+    assert.equal(isNestedScrollGesture(gesture("touchstart"), scroller), true, "direction is not known on touchstart");
+    inner.scrollTop = 99;
+    middle.scrollTop = 100;
+    assert.equal(isNestedScrollGesture(gesture("wheel", { deltaY: 20 }), scroller), false, "rounded dimensions tolerate a 1px discrepancy");
+    assert.equal(isNestedScrollGesture(gesture("keydown", { key: "ArrowUp" }), scroller), true);
+    inner.scrollTop = 0;
+    inner.overscrollBehaviorY = "contain";
+    assert.equal(isNestedScrollGesture(gesture("wheel", { deltaY: -20 }), scroller), true, "other contained scrollers still own their edges");
+  } finally { globalThis.getComputedStyle = original; }
 });
 
 test("distanceFromBottom measures the remaining scroll range", () => {
