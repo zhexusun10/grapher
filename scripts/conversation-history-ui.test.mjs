@@ -1902,6 +1902,56 @@ for (const role of ["node", "planner"]) {
 }
 
 for (const role of ["node", "planner"]) {
+  test(`${role}: a fast fling cannot expose content before an unloaded page`, { timeout: 30_000 }, async () => {
+    const prefix = Array.from({ length: 40 }, (_, i) => assistant(`FLING_OLDER_${i}`)).join("");
+    const tail = Array.from({ length: 60 }, (_, i) => assistant(`FLING_TAIL_${i}`)).join("");
+    const data = Buffer.from(prefix + tail), split = Buffer.byteLength(prefix);
+    let releaseOlder;
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      if (body.before !== undefined) await new Promise(resolve => { releaseOlder = resolve; });
+      const start = body.before !== undefined ? 0 : body.tail ? split : body.offset ?? 0;
+      const end = body.before ?? data.length;
+      try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        planningId: body.planningId, role: "planner", content: data.subarray(start, end).toString(),
+        startOffset: start, nextOffset: end, totalBytes: data.length, complete: end === data.length,
+        status: "running", running: true } } }); } catch {}
+    });
+    try {
+      await page.goto(`${origin}/__history?case=historyRegression&heading=1200`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.selectHistory);
+      await page.evaluate(role => {
+        if (role === "planner") window.audit.setPlanningIds(["planner-latest"]);
+        window.audit.selectHistory(role);
+      }, role);
+      await page.waitForFunction(role => !!(role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning()), role);
+      await page.waitForFunction(() => document.querySelector('[data-shared-scroll]')?.scrollHeight > 2000);
+      await page.waitForFunction(role => document.querySelector(role === "node" ? "[data-execution-id]" : ".planning-activity")?.getAttribute("aria-busy") === "false", role);
+      const scroller = page.locator("[data-shared-scroll]");
+      await scroller.evaluate(element => { element.scrollTop = element.scrollHeight; });
+      await page.waitForTimeout(100);
+      await scroller.hover();
+      await page.mouse.wheel(0, -100000);
+      for (let i = 0; i < 100 && !releaseOlder; i++) await page.waitForTimeout(10);
+      assert.ok(releaseOlder, "the fling requests the missing page");
+      await page.waitForTimeout(100);
+      const boundary = await scroller.evaluate((element, role) => {
+        const start = role === "planner" ? element.querySelector('[data-transcript-source-start="planner-latest"]')
+          : element.querySelector('.virtualized-transcript-container');
+        return start.getBoundingClientRect().top - element.getBoundingClientRect().top - element.clientTop;
+      }, role);
+      assert.ok(boundary <= 2, `unloaded history exposed ${boundary}px of earlier content`);
+      releaseOlder(); releaseOlder = undefined;
+      await page.waitForFunction(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.startOffset === 0, role);
+      await scroller.evaluate(element => { element.scrollTop = 0; });
+      await page.waitForTimeout(100);
+      assert.equal(await scroller.evaluate(element => element.scrollTop), 0, "the real beginning remains reachable after loading");
+      assert.deepEqual(errors, []);
+    } finally { releaseOlder?.(); await context.close(); }
+  });
+}
+
+for (const role of ["node", "planner"]) {
   test(`${role}: an older page lands at the beginning of the loaded history`, { timeout: 30_000 }, async () => {
     // Older bytes are inserted above the reader, so the virtualizer has to
     // compensate the scroll position. That compensation belongs at the point the

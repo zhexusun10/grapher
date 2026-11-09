@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { FOLLOW_LATEST_EVENT, isNestedScrollGesture, transcriptScrollParent } from "../services/transcriptScroll";
+import { FOLLOW_LATEST_EVENT, isNestedScrollGesture, olderInsertionTop, transcriptScrollParent } from "../services/transcriptScroll";
 import { MAX_AUTO_TRANSCRIPT_BYTES, TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
 import { useStableCallback } from "./useStableCallback";
 
@@ -17,13 +17,64 @@ function needsInitialTranscriptFill(element: HTMLElement | null, hasOlder: boole
  * burst by bytes, then reveal measured rows and wait for another upward gesture. */
 export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, hasOlder: boolean,
   busy: boolean, error: string, progress: unknown, loadOlder: (preserveReading: boolean) => void,
-  ready: boolean, loadedBytes: number, holdingOlder = false): boolean {
+  ready: boolean, loadedBytes: number, holdingOlder = false, olderSource?: string): boolean {
   const load = useStableCallback(loadOlder);
   const [initialReady, setInitialReady] = useState(false);
   const initialReadyRef = useRef(false);
   const measuredViewportRef = useRef("");
   const busyRetryRef = useRef<number | null>(null);
   const autoFillStartRef = useRef(0);
+  // The prompt or an earlier turn is already in the DOM above a partially
+  // loaded transcript. A fast fling can cross that gap before the page arrives,
+  // briefly exposing content that is not actually adjacent to the loaded rows.
+  // Treat the missing page as a temporary scroll boundary, not as empty history.
+  useLayoutEffect(() => {
+    const element = ref.current;
+    const parent = transcriptScrollParent(element);
+    if (!ready || !hasOlder || error || !element || !parent) return;
+    let lastGesture = -Infinity;
+    const noteGesture = (event: Event) => {
+      if (event.type === "wheel" && (event as WheelEvent).deltaY >= 0) return;
+      if (event.type === "keydown") {
+        const key = event as KeyboardEvent;
+        if (!["ArrowUp", "PageUp", "Home"].includes(key.key) && !(key.key === " " && key.shiftKey)) return;
+        if ((key.target as HTMLElement | null)?.closest?.("input, textarea, [contenteditable=true]")) return;
+      }
+      if (event.type === "pointerdown") {
+        const pointer = event as PointerEvent, bounds = parent.getBoundingClientRect();
+        const width = parent.offsetWidth - parent.clientWidth;
+        if (pointer.clientX < bounds.right - (width || 14)) return;
+      }
+      if (isNestedScrollGesture(event, parent)) return;
+      lastGesture = performance.now();
+    };
+    const containMissingHistory = () => {
+      if (parent.dataset.transcriptScrollMode === "latest" ||
+          (parent.dataset.transcriptHistoryReading !== "true" && performance.now() - lastGesture > 1000)) return;
+      const top = olderInsertionTop(element, olderSource);
+      if (top === null) return;
+      const overshoot = top - parent.getBoundingClientRect().top - parent.clientTop;
+      if (overshoot <= 1) return;
+      // A short initial tail cannot fill the viewport even at the bottom. Do
+      // not push the reader there: it would turn an in-flight background fill
+      // back into bottom-following and lose their visible-row anchor.
+      if (parent.scrollTop + overshoot > parent.scrollHeight - parent.clientHeight + 1) return;
+      parent.scrollTop += overshoot;
+      if (!busy && !holdingOlder) load(true);
+    };
+    parent.addEventListener("scroll", containMissingHistory, { passive: true });
+    parent.addEventListener("wheel", noteGesture, { passive: true });
+    parent.addEventListener("touchmove", noteGesture, { passive: true });
+    parent.addEventListener("pointerdown", noteGesture, { passive: true });
+    parent.addEventListener("keydown", noteGesture);
+    return () => {
+      parent.removeEventListener("scroll", containMissingHistory);
+      parent.removeEventListener("wheel", noteGesture);
+      parent.removeEventListener("touchmove", noteGesture);
+      parent.removeEventListener("pointerdown", noteGesture);
+      parent.removeEventListener("keydown", noteGesture);
+    };
+  }, [ref, ready, hasOlder, error, busy, holdingOlder, olderSource, load]);
   useLayoutEffect(() => {
     if (!ready) { measuredViewportRef.current = ""; return; }
     const element = ref.current;

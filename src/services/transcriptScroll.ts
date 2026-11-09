@@ -81,7 +81,7 @@ export const TRANSCRIPT_CONTENT_GROWTH_EVENT = "grapher:transcript-content-growt
 /** The actual insertion point, including revisions with no mounted rows. Tool
  * and user row IDs do not necessarily contain the revision ID, and virtualized
  * rows can be unmounted, so neither is a reliable boundary. */
-function olderInsertionTop(element: HTMLElement | null, source?: string): number | null {
+export function olderInsertionTop(element: HTMLElement | null, source?: string): number | null {
   if (!element) return null;
   if (source) {
     for (const boundary of element.querySelectorAll<HTMLElement>("[data-transcript-source-start]")) {

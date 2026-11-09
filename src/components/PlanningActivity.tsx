@@ -199,7 +199,8 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
 
   const loadedBytes = [...segments.current.values()].reduce((sum, window) => sum + window.end - window.start, 0);
   const initialReady = useAutoTranscriptHistory(sectionRef, hasOlder, loadingOlder, error, activeOutput,
-    preserveReading => { void loadOlder(preserveReading); }, ready, loadedBytes, holdingOlder);
+    preserveReading => { void loadOlder(preserveReading); }, ready, loadedBytes, holdingOlder,
+    olderTarget(planningIds, segments.current) ?? undefined);
 
   useLayoutEffect(() => { notifyOutput(output); }, [output, notifyOutput]);
   useLayoutEffect(() => {
