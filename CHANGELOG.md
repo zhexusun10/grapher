@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-11-10
+
+### Fixed
+
+- The packaged Pi contract suite has a longer overall smoke-test deadline for slower macOS Intel runners; individual test deadlines and assertions remain in place (`scripts/smoke-release.mjs`).
+
 ## [1.6.1] - 2026-11-10
 
 ### Fixed
@@ -494,7 +500,8 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
-[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.6.2...HEAD
+[1.6.2]: https://github.com/zhexusun10/grapher/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/zhexusun10/grapher/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/zhexusun10/grapher/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/zhexusun10/grapher/compare/v1.4.2...v1.5.0

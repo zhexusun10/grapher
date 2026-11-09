@@ -73,7 +73,9 @@ try {
   // Real CLI/IPC and bounded local-provider tests, not just a --version check.
   cpSync(join(root, 'scripts/pi-process-contract.test.mjs'), join(installation, 'scripts/pi-process-contract.test.mjs'));
   const contracts = execFileSync(process.execPath, ['--test', join(installation, 'scripts/pi-process-contract.test.mjs')], {
-    cwd: directory, env, encoding: 'utf8', timeout: 180000, maxBuffer: 8 * 1024 * 1024,
+    // The individual contracts retain their own timeouts. On the slower Intel
+    // macOS runner the full, sequential suite can exceed three minutes.
+    cwd: directory, env, encoding: 'utf8', timeout: 420000, maxBuffer: 8 * 1024 * 1024,
   });
   process.stdout.write(contracts);
   rmSync(join(installation, 'scripts/pi-process-contract.test.mjs'));
