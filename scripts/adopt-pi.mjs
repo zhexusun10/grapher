@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { root, source } from './pi-baseline.mjs';
+import { root, source, verifyBaseline } from './pi-baseline.mjs';
 
 const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 const git = (...args) => execFileSync('git', ['-C', source, ...args], {
@@ -57,8 +57,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       copyFileSync(join(source, 'packages/ai/src/providers/data', name), join(target, name));
     }
     writeFileSync(join(root, 'engine/pi-lock.json'), `${JSON.stringify(lock, null, 2)}\n`);
-    execFileSync(process.execPath, [join(root, 'scripts/pi-baseline.mjs'), 'verify'], { stdio: 'inherit' });
-    console.log('Baseline staged. Review the Pi diff, run compatibility tests, then git add pi engine/pi-lock.json engine/model-data.');
+    // The root extension peers may still target the previous release until the
+    // rest of the upgrade is staged; verify the newly written source lock here.
+    verifyBaseline({ baseline: lock });
+    console.log('Baseline staged. Update the root Pi package pins, run npm run pi:verify and compatibility tests, then review and stage the changes.');
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

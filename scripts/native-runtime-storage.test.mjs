@@ -25,6 +25,7 @@ export function verifyBaseline() {}
   writeFileSync(join(scripts, 'cargo.mjs'), '');
   writeFileSync(join(scripts, 'model-data-manifest.mjs'), 'export function regenerateModelDataManifest() {}');
   writeFileSync(join(root, 'package.json'), '{"name":"grapher","type":"module"}');
+  writeFileSync(join(root, 'package-lock.json'), '{}');
   const run = (destination, runtimeParent = parent) => spawnSync(process.execPath, [join(scripts, 'prepare-native-runtime.mjs')], {
     cwd: root, encoding: 'utf8', timeout: 10000,
     env: { ...process.env, GRAPHER_NATIVE_RUNTIME_PARENT: runtimeParent, GRAPHER_NATIVE_RUNTIME_DIR: destination },
@@ -90,7 +91,7 @@ test('cache identity follows engine inputs, not workspace, cache parent or insta
   writeFileSync(join(relocated, 'engine/entrypoint.mjs'), 'modified cached adapter');
   assert.notEqual(f.key(f.root, f.parent, relocated), initial, 'a changed cached engine must not be reused');
   let previous = initial;
-  for (const path of ['engine/entrypoint.mjs', 'pi/packages/core/dist/index.js', 'pi/package-lock.json', 'node_modules/pi-trim/index.js', 'scripts/prepare-native-runtime.mjs']) {
+  for (const path of ['engine/entrypoint.mjs', 'pi/packages/core/dist/index.js', 'pi/package-lock.json', 'package-lock.json', 'node_modules/pi-trim/index.js', 'scripts/prepare-native-runtime.mjs']) {
     writeFileSync(join(f.root, path), readFileSync(join(f.root, path), 'utf8') + '\n// changed runtime input');
     const changed = f.key();
     assert.notEqual(changed, previous, `${path} invalidates the engine cache`);

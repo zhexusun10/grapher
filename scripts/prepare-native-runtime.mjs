@@ -35,7 +35,7 @@ if (process.argv[2] === '--cache-key') {
       hash.update(String(stat.size)).update('\0').update(readFileSync(path));
     }
   };
-  for (const name of ['engine', 'package.json', 'pi/package.json', 'pi/package-lock.json', 'pi/packages']) add(join(input, name), name);
+  for (const name of ['engine', 'package.json', 'package-lock.json', 'pi/package.json', 'pi/package-lock.json', 'pi/packages']) add(join(input, name), name);
   for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'model-data-manifest.mjs', 'prepare-native-runtime.mjs']) add(join(input, 'scripts', script), `scripts/${script}`);
   for (const name of bundledExtensionNames) add(join(input, 'node_modules', name), `node_modules/${name}`);
   process.stdout.write(hash.digest('hex'));
@@ -93,8 +93,8 @@ try {
   for (const name of bundledExtensionNames) {
     cpSync(join(root, 'node_modules', name), join(destination, 'node_modules', name), options);
   }
-  // Preserve the installation's ESM boundary in the copy.
-  cpSync(join(root, 'package.json'), join(destination, 'package.json'));
+  // Preserve the ESM boundary and root Pi peer pins for runtime verification.
+  for (const name of ['package.json', 'package-lock.json']) cpSync(join(root, name), join(destination, name));
   mkdirSync(join(destination, 'scripts'));
   for (const script of ['pi-baseline.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs', 'cargo.mjs', 'model-data-manifest.mjs', 'prepare-native-runtime.mjs']) {
     cpSync(join(root, 'scripts', script), join(destination, 'scripts', script));
