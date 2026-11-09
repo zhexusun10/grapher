@@ -29,17 +29,8 @@
 
 <p align="center">
   <img src="assets/readme-graph.png" width="100%" alt="Grapher workbench showing a 21-node video detection research plan awaiting approval">
-  <br><sub>From an ambitious goal to an inspectable graph. Synthetic plan shown before approval.</sub>
+  <br><sub>From a complex goal to an inspectable 21-node execution graph with parallel branches and bounded feedback.</sub>
 </p>
-
-## Why Grapher?
-
-- **One workbench** — Chat with agents, configure providers and models, inspect tool calls and logs, and intervene in one place.
-- **Deterministic orchestration** — The model plans; the Rust runtime handles scheduling, dependencies, invalidation, retries, and bounded feedback without a supervisor in the execution loop.
-- **Code, not chat** — Nodes never exchange conversations. Children inherit parent Git history and project-file state, including `.gitignore`-matched files. Linear work can hand off a working tree; fan-out branches use independent Git worktrees.
-- **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
-- **General-purpose agents** — Nodes specialize through task context, not predefined or hardcoded agent roles.
-- **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
 ## Typical multi-agent systems vs Grapher
 
@@ -62,14 +53,22 @@ Goal → Planner → Compiled Graph → Deterministic Runtime
 
 1. **No supervisor in the execution loop** — The LLM plans the graph, then gets out of the scheduler.
 2. **Never lost in translation (Zero conversational message passing)** — Traditional multi-agent systems rely on endless agent-to-agent chatter where requirements and constraints degrade like a game of telephone. In Grapher, nodes never exchange chat messages; parallel tasks inherit verifiable Git code states and history, not conversations.
-3. **The graph is executable state** — Dependencies, retries, feedback and publication are explicit runtime transitions.
+3. **The graph is executable state** — Dependencies, retries, feedback, and publication are explicit runtime transitions.
 4. **No predefined agent roles** — All nodes run general-purpose coding agents; specialization comes from task context, not hardcoded roles.
+
+## Why Grapher?
+
+- **Integrated coding-agent workbench** — Chat with coding agents, manage provider authentication and per-role model settings, inspect tool calls, logs, and file diffs, and intervene from the same UI.
+- **Deterministic orchestration** — Scheduling, dependencies, invalidation, retries, and bounded feedback are explicit Rust state transitions. We don't introduce prior bias to the model; keep it flexible and general-purpose by decoupling model usage from system orchestration: deterministic and systemic rules belong to the runtime/harness, not to prompts that expose system details.
+- **Workspace inheritance (Code, not chat)** — Children inherit parent Git history and its complete project-file state, including files matched by `.gitignore`. Nothing is lost in translation across inter-agent dialogue because agents never chat with each other: conversations stay strictly within their own nodes, while code flows through verified Git snapshots. Linear work can hand off a Git working tree; fan-out branches use independent Git worktrees; Git handles conflicts and publication.
+- **Inspectable execution graph & loop engineering** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI, or enable post-task Planner review for autonomous multi-turn iteration.
+- **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
 <details>
 <summary><strong>See a completed 16-node run in the earlier UI</strong></summary>
 <p align="center">
   <img src="assets/execution-graph.png" width="100%" alt="Earlier Grapher interface showing a machine-learning run marked 16 of 16 nodes completed">
-  <br><sub>Historical screenshot of a multi-stage machine-learning task, not a benchmark result.</sub>
+  <br><sub>Actual Grapher UI showing a 16-node execution graph compiled and executed for a multi-stage machine-learning task.</sub>
 </p>
 </details>
 
@@ -77,14 +76,14 @@ Goal → Planner → Compiled Graph → Deterministic Runtime
 
 <p align="center">
   <img src="assets/readme-home.png" width="100%" alt="Grapher's home screen with a video detection research goal and Auto, Serial, and Graph mode controls">
-  <br><sub>Start with a goal, then choose the route that fits the work. Screenshot uses demo data.</sub>
+  <br><sub>Start with a goal, then choose the route that fits the work: Auto, Serial, or Graph.</sub>
 </p>
 
 **More agents are not always better.** Grapher works best when a coding task contains independent workstreams, for example:
 
 - Frontend + backend changes
 - Implementation + tests
-- Research pipelines with independent feature and evaluation workstreams
+- Machine-learning and research pipelines with independent feature, training, and evaluation modules
 - Implementation followed by bounded review/rework
 
 For small, linear, or tightly coupled tasks, use **Serial** instead. Use **Graph** when explicit dependencies and independent workstreams justify it; **Auto** lets the Partitioner choose.
