@@ -2167,9 +2167,11 @@ export default function App() {
   const continuePlanner = () => {
     const previous = failedPlanning ?? state.planning;
     if (!previous || previous.status !== "failed" || previous.planType !== "graph" ||
-        !state.runId || previous.runId !== state.runId || !previous.planningId) return;
-    startPlanGoal(previous.goal || state.graph.originalGoal || goal, undefined, "graph", state.runId,
-      false, undefined, false, previous.planningId);
+        !state.runId || previous.runId !== state.runId || !previous.planningId) return false;
+    // Acceptance is synchronous; the completion promise owns the Planner
+    // stream. The composer must expose Stop once that stream starts.
+    return startPlanGoal(previous.goal || state.graph.originalGoal || goal, undefined, "graph", state.runId,
+      false, undefined, false, previous.planningId).accepted;
   };
 
   const handlePlanGoal = (...args: Parameters<typeof startPlanGoal>): Promise<boolean> => {

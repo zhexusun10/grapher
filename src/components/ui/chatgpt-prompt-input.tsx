@@ -51,7 +51,7 @@ interface PromptBoxProps
   isExecuting?: boolean;
   isWorking?: boolean;
   onInterrupt?: () => void;
-  onContinue?: () => void;
+  onContinue?: () => boolean | void | Promise<boolean | void>;
   planMode?: "auto" | "serial" | "graph";
   onPlanModeChange?: (mode: "auto" | "serial" | "graph") => void;
   onCancel?: () => void;
@@ -144,6 +144,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const attachmentGenerationRef = useRef(0);
     const [isPreparing, setIsPreparing] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isContinuing, setIsContinuing] = useState(false);
     const [isAwaitingAcceptance, setIsAwaitingAcceptance] = useState(false);
     const [sendGrace, setSendGrace] = useState(false);
     const sendGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -184,6 +185,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       setAttachmentError("");
       setIsPreparing(false);
       setIsSubmitting(false);
+      setIsContinuing(false);
       setIsAwaitingAcceptance(false);
       endSendGrace();
       return () => {
@@ -703,7 +705,32 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       const trimmed = currentText.trim();
       if (disabled || isBusy || isPreparing || submittingRef.current) return;
       if (!trimmed && !selectedFile) {
-        if (!isWorking) onContinue?.();
+        if (isWorking || !onContinue) return;
+        // Hold the same synchronous lock as a send: repeated Enter/clicks
+        // must not queue a second continuation while acceptance is pending.
+        const generation = attachmentGenerationRef.current;
+        const isCurrent = () => mountedRef.current && generation === attachmentGenerationRef.current;
+        submittingRef.current = true;
+        setIsSubmitting(true);
+        setIsContinuing(true);
+        if (fromPointer) scheduleSendGrace(SEND_GRACE_FALLBACK_MS);
+        else endSendGrace();
+        let accepted = false;
+        try {
+          accepted = (await onContinue()) !== false;
+        } catch (error) {
+          console.error("Failed to continue agent:", error);
+        } finally {
+          if (isCurrent()) {
+            submittingRef.current = false;
+            setIsSubmitting(false);
+            setIsContinuing(false);
+            // A resumed process may make this same button Stop. Protect it
+            // under the pointer exactly as for a normal pointer send.
+            if (accepted && fromPointer && sendPointerInsideRef.current) scheduleSendGrace();
+            else endSendGrace();
+          }
+        }
         return;
       }
       submittingRef.current = true;
@@ -1265,8 +1292,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               aria-busy={isSubmitting || isPreparing || undefined}
               title={showContinue ? t("继续当前 Agent（不会追加消息）") : undefined}
               aria-label={
-                isSubmitting || isPreparing
-                  ? t("正在发送…")
+                isContinuing
+                  ? t("正在继续")
+                  : isSubmitting || isPreparing
+                    ? t("正在发送…")
                   : showWorkingStop
                     ? t("点击打断执行")
                     : showContinue

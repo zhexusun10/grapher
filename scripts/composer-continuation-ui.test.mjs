@@ -18,6 +18,7 @@ test("empty composer continues without submitting a message; drafts and stop ret
     await server.listen();
     browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
     const page = await browser.newPage();
+    await page.route("**/api/*", route => route.fulfill({ json: { result: {} } }));
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__composer-continuation`);
     const input = page.locator("textarea");
     const output = page.locator("output");
@@ -39,9 +40,30 @@ test("empty composer continues without submitting a message; drafts and stop ret
     assert.equal(await page.getByRole("button", { name: "继续当前 Agent（不会追加消息）" }).isDisabled(), true);
     for (const mode of ["graph", "serial", "planner"]) {
       await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__node-continuation?mode=${mode}`);
-      await page.getByRole("button", { name: "继续当前 Agent（不会追加消息）" }).click();
-      assert.equal(await page.getByTestId("calls").textContent(), mode === "planner" ? "resume_planner" : "resume_node:task", `${mode} must address its own agent`);
+      await page.locator(".pane-bottom-chat textarea").evaluate(input => {
+        for (let i = 0; i < 2; i++) input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      });
+      assert.equal(await page.getByTestId("calls").textContent(), mode === "planner" ? "resume_planner" : "resume_node:task", `${mode} must address its own agent only once`);
     }
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__composer-continuation?pending=1`);
+    await page.locator("textarea").evaluate(input => {
+      for (let i = 0; i < 2; i++) input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    assert.equal(await page.locator("output").textContent(), "continue", "repeated Enter cannot submit a pending continuation twice");
+    assert.equal(await page.getByRole("button", { name: "正在继续" }).isDisabled(), true);
+    await page.evaluate(() => window.continuationFixture.reject(new Error("rejected")));
+    await page.getByRole("button", { name: "继续当前 Agent（不会追加消息）" }).waitFor();
+    const play = page.getByRole("button", { name: "继续当前 Agent（不会追加消息）" });
+    const box = await play.boundingBox();
+    assert.ok(box);
+    await play.click();
+    await page.evaluate(() => { window.continuationFixture.setWorking(true); window.continuationFixture.resolve(true); });
+    await page.waitForTimeout(100);
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    assert.equal(await page.locator("output").textContent(), "continue|continue", "a second click must not stop the just-resumed agent");
+    await page.mouse.move(0, 0);
+    await page.getByRole("button", { name: "点击打断执行" }).click();
+    assert.equal(await page.locator("output").textContent(), "continue|continue|interrupt");
   } finally {
     await browser?.close();
     await server.close();

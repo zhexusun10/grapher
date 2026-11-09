@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-10
+
 ### Changed
 
 - Editing a never-started graph node now updates its task in the same Run instead of creating a new conversation and approval graph. Existing work and scheduling state are retained; a stale edit or a race with dispatch is rejected without discarding the draft (`src/components/views/GraphWorkbench.tsx`, `backend/src/runtime.rs`, `backend/src/model.rs`).
@@ -16,12 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Empty Node Agent, Serial Agent, and Graph Planner composers now offer Continue after a recoverable interruption or failure. Node continuation targets the selected agent, preserves its session and workspace, and does not add a user prompt; Planner continuation also retains its uncommitted graph draft. Missing tool results follow Pi's native normalization, while previously recorded tool results remain in the conversation (`src/components/ui/chatgpt-prompt-input.tsx`, `src/components/views/GraphWorkbench.tsx`, `backend/src/runtime.rs`, `backend/src/server.rs`, `engine/prompt-extension.ts`).
 - Planner graph edits on an approved Run now say which completed nodes the whole candidate graph would invalidate, e.g. `Current changes will invalidate and rerun 56 completed nodes: …`. The list comes from the Runtime calculation used at commit, so a review or follow-up can see that removing feedback routes or retasking a node reruns existing work before it commits the revision. It is an advisory warning, not a rejection or an approval; commit re-evaluates live state, unapproved drafts report nothing, and a missing snapshot or older compiler returns no warning rather than a guess (`backend/resources/planner.ts`, `backend/src/runtime.rs`, `backend/src/server.rs`, `backend/src/main.rs`).
 - Feedback-routing warnings are shorter: they now say the affected nodes will rerun and that the target resumes its own session, instead of describing invalidation scope in three sentences (`backend/src/compiler.rs`).
 - Compiler diagnostics and the Planner prompt now say a dependency carries upstream *workspace results*, not "project-file results", and the Planner rule states that a node's first execution starts from the recorded snapshot plus its completed dependencies' workspace results, so files written in the source project before the snapshot are shared inputs. The redundant-dependency warning is asserted across the compiler test so the wording cannot silently drift back (`backend/resources/prompts/planner.md`, `backend/src/compiler.rs`, `backend/tests/core.rs`).
 
 ### Fixed
 
+- Repeated Enter or rapid clicks while a Continue request is being accepted no longer submit duplicate recovery commands. A pointer-triggered continuation also keeps the send-to-Stop grace period, so a second click cannot immediately interrupt the resumed agent (`src/components/ui/chatgpt-prompt-input.tsx`, `src/components/views/GraphWorkbench.tsx`, `scripts/composer-continuation-ui.test.mjs`).
+- The scrollback regression for a growing reasoning card now starts the growth after the reader has scrolled; it no longer fails when a fast browser reaches the card-height cap before the first measurement (`scripts/frontend-audit.test.mjs`).
 - Continuing a Graph after the backend exits during workspace handoff now recovers interrupted preparation instead of treating the incomplete project view as a completed result. Recovery also recognizes interrupted node-composition Mergers, restores managed-environment inputs when preparation had not finished, and falls back to the completed node session when a follow-up was interrupted before its session fork. Prepared executions still retain their partial workspace and fail closed when their recovery evidence is missing or inputs changed (`backend/src/runtime.rs`, `backend/src/model.rs`, `backend/src/workspace.rs`, `backend/src/workspace_view.rs`, `backend/src/recovery_workspace_tests.rs`, `backend/src/environment_tests.rs`).
 - The English UI showed `正在继续` while a paused Graph was resuming (`Resuming`), and five backend Git/snapshot diagnostics (missing or reclaimed temporary Git snapshots, unborn repository `HEAD`, and unresolvable snapshot `HEAD`) had no English entries and fell back to Chinese; all now localize to English (`src/i18n/en.ts`, `scripts/frontend-i18n.test.ts`).
 - Frontend and backend tests no longer depend on the host: the streamed tool-card assertion follows the active locale instead of expecting English on a Chinese system, and the Planner steer test runs `python` on Windows, where `python3` is usually only the Microsoft Store stub (`scripts/thinking-transcript.test.ts`, `backend/src/planner_steer_tests.rs`).
@@ -482,7 +487,8 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
-[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/zhexusun10/grapher/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/zhexusun10/grapher/compare/v1.4.2...v1.5.0
 [1.3.1]: https://github.com/zhexusun10/grapher/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/zhexusun10/grapher/compare/v1.2.6...v1.3.0

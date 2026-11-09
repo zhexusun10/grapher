@@ -1890,11 +1890,6 @@ test("a reader who scrolls past the answer is not anchored back to it while CoT 
     ]));
     await page.locator(".thinking-card-body").waitFor();
     await page.waitForTimeout(80);
-    await page.evaluate(() => window.audit.appendToolEvents([{
-      type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
-        delta: Array.from({ length: 500 }, (_, index) => `PAST_REASON_${index} ${"detail ".repeat(5)}\n\n`).join("") },
-    }]));
-    await page.waitForTimeout(60);
     await page.evaluate(() => window.audit.appendToolEvents([
       { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } },
       { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "ANSWER_SCROLL_PAST" } },
@@ -1918,6 +1913,14 @@ test("a reader who scrolls past the answer is not anchored back to it while CoT 
     });
     const before = await snapshot();
     assert.ok(before.answerTop > before.visibleBottom, `the reader intentionally moved past the answer: ${JSON.stringify(before)}`);
+    // Deliver the remaining reasoning only after the scroll. This still checks
+    // post-stream drainage, but cannot race a fast browser reaching the card's
+    // height cap before the initial measurement.
+    await page.evaluate(() => window.audit.appendToolEvents([
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0,
+        delta: Array.from({ length: 500 }, (_, index) => `PAST_REASON_${index} ${"detail ".repeat(5)}\n\n`).join("") } },
+      { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0 } },
+    ]));
     await page.waitForTimeout(700);
     const after = await snapshot();
     assert.ok(after.cardHeight > before.cardHeight + 100, `the CoT must still be draining: ${JSON.stringify({ before, after })}`);

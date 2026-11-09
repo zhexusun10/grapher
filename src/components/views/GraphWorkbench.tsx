@@ -132,7 +132,7 @@ interface GraphWorkbenchProps {
   plannerStream: any;
   recoveredPlanningId?: string;
   onSendMessage: (val: string, options?: PromptBoxSubmitOptions) => boolean | void | Promise<boolean>;
-  onContinuePlanner?: () => void;
+  onContinuePlanner?: () => boolean | void | Promise<boolean | void>;
   onEditMessageSubmit?: (msg: ChatMessage, newText: string, selectedVersion?: number) => boolean | void | Promise<boolean | void>;
   onSwitchMessageVersion?: (msg: ChatMessage, targetIndex: number) => void;
   /** Steer cards rolled back after a pause; their text returns to the composer. */
@@ -144,7 +144,7 @@ interface GraphWorkbenchProps {
   onRequestConfirmation: (config: ConfirmModalState) => void;
   followUpQueue?: Array<{ id: string; text: string; node?: string; timestamp: number }>;
   onCancelFollowUp?: (id: string) => void;
-  onControl: (action: string, extra?: Record<string, unknown>) => void;
+  onControl: (action: string, extra?: Record<string, unknown>) => boolean | void | Promise<boolean | void>;
   onSave: (graph: Graph) => void;
   onAddManualNode: (runId: string, request: ManualNodeRequest) => Promise<boolean>;
   onUpdateUnstartedNodeTask: (runId: string, node: string, oldTask: string, task: string) => Promise<boolean>;
@@ -2351,7 +2351,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     node?.canResume === true && !isPlanning && !publishing && !publicationFailed && controlPending === null;
   const continueNode = (node: string) => {
     setControlPending("resume");
-    onControl("resume_node", { node });
+    return onControl("resume_node", { node });
   };
   const graphPhase = resolveGraphPhase({
     isPlanning,
