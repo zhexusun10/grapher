@@ -71,6 +71,12 @@ jobs:
       - name: Install Grapher and pinned Pi
         run: npm ci --ignore-scripts
       - run: npm run pi:setup
+      # Frontend tests run through tsx, which strips types without checking
+      # them; type errors would otherwise surface only in the release build.
+      # The check is host-neutral, so Linux covers it.
+      - name: Type-check the frontend
+        if: runner.os == 'Linux'
+        run: npm run check
       - name: Verify frontend state, i18n and transcript contracts
         run: npm run test:frontend
       - name: Verify snapshot inheritance, failed revisions and event replay

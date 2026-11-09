@@ -314,11 +314,14 @@ fn create_prefixes(
 ) -> Result<Vec<PathBuf>, String> {
     let roots = roots(workspace, state);
     let conda_root = state.unwrap_or(workspace);
-    let module = args.windows(2).position(|pair| pair == ["-m", "venv"]);
-    if matches!(tool, "python" | "python3") && module.is_some() {
+    let module = args
+        .windows(2)
+        .position(|pair| pair == ["-m", "venv"])
+        .filter(|_| matches!(tool, "python" | "python3"));
+    if let Some(module) = module {
         let mut prefixes = Vec::new();
         let mut skip = false;
-        for arg in &args[module.unwrap() + 2..] {
+        for arg in &args[module + 2..] {
             if skip {
                 skip = false;
                 continue;
@@ -1353,6 +1356,16 @@ pub(crate) fn resolve_for_policy_with_state(
     next.validate()?;
     Ok(next)
 }
+
+fn find_conda(paths: &[String]) -> Result<String, String> {
+    for directory in paths {
+        let path = Path::new(directory).join(if cfg!(windows) { "conda.exe" } else { "conda" });
+        if path.is_file() {
+            return Ok(text(&canonical(&path)?));
+        }
+    }
+    Err("Native Conda activation tool is unavailable; no interpreter fallback".into())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1680,14 +1693,4 @@ mod tests {
         .unwrap_err()
         .contains("host interpreter"));
     }
-}
-
-fn find_conda(paths: &[String]) -> Result<String, String> {
-    for directory in paths {
-        let path = Path::new(directory).join(if cfg!(windows) { "conda.exe" } else { "conda" });
-        if path.is_file() {
-            return Ok(text(&canonical(&path)?));
-        }
-    }
-    Err("Native Conda activation tool is unavailable; no interpreter fallback".into())
 }

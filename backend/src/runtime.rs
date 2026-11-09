@@ -1940,6 +1940,41 @@ impl Runtime {
         })
     }
 
+    /// Replace only an unstarted node's task, without resetting the Run or its state.
+    pub fn update_unstarted_node_task(
+        &mut self,
+        node: &str,
+        old_task: &str,
+        task: &str,
+    ) -> Result<(), String> {
+        self.require_current_file_contract()?;
+        if self.state.run_id.is_empty() || self.is_serial() {
+            return Err("Node task edits require an existing Graph run".into());
+        }
+        let current = self.state.graph.nodes.iter().find(|item| item.name == node)
+            .ok_or("Node no longer exists")?;
+        if current.task != old_task {
+            return Err("Node task changed; reload and try again".into());
+        }
+        if self.state.executions.iter().any(|execution| execution.node == node) {
+            return Err("Node has already started; reload before editing its task".into());
+        }
+        let task = task.trim();
+        if task.is_empty() {
+            return Err("Enter a node task".into());
+        }
+        if current.task == task {
+            return Ok(());
+        }
+        let mut graph = self.state.graph.clone();
+        graph.nodes.iter_mut().find(|item| item.name == node).unwrap().task = task.into();
+        compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+        self.emit(EventKind::NodeTaskUpdated {
+            node: node.into(),
+            task: task.into(),
+        })
+    }
+
     /// Add exactly one node to the current graph, preserving Planner history.
     /// The caller holds the Run mutex and excludes concurrent Planner turns.
     pub fn add_manual_node(&mut self, mut request: ManualNodeRequest) -> Result<(), String> {
@@ -2405,6 +2440,15 @@ impl Runtime {
         if scope == RecoveryScope::AllFailed {
             roots.extend(self.state.preparation_failed_nodes());
         }
+        self.queue_recovery_roots(roots, scope == RecoveryScope::AllFailed, false)
+    }
+
+    fn queue_recovery_roots(
+        &mut self,
+        mut roots: Vec<String>,
+        resume_failed: bool,
+        targeted: bool,
+    ) -> Result<(), String> {
         roots.sort();
         roots.dedup();
         if roots.is_empty() {
@@ -2458,10 +2502,13 @@ impl Runtime {
         // Do not disturb a completed branch. Retry the selected failed attempts
         // and unblock the failed/blocked work that depends on them.
         recovery.retain(|name| {
-            self.state
-                .nodes
-                .get(name)
-                .is_some_and(|node| matches!(node.status.as_str(), "failed" | "blocked"))
+            self.state.nodes.get(name).is_some_and(|node| {
+                matches!(node.status.as_str(), "failed" | "blocked")
+                    && (!targeted
+                        || continuation_nodes.contains(name)
+                        || (node.status == "blocked"
+                            && !self.state.node_has_own_blocked_failure(name)))
+            })
         });
         if recovery.is_empty() {
             return Ok(());
@@ -2469,9 +2516,27 @@ impl Runtime {
         self.emit(EventKind::RecoveryQueued {
             nodes: recovery.into_iter().collect(),
             continuation_nodes,
-            resume_failed: scope == RecoveryScope::AllFailed,
+            resume_failed,
             source_direct_nodes,
         })
+    }
+
+    /// Continue one failed node without retrying other failed branches or
+    /// creating a user message. Global pause remains a run-wide barrier; only
+    /// a single-node Run can be unpaused without scheduling unrelated work.
+    pub fn resume_node(&mut self, node: &str) -> Result<(), String> {
+        if !self.state.can_resume_node(node) {
+            return Err("This node cannot be continued while it is running, blocked by another node, or the Run is paused".into());
+        }
+        resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
+        self.queue_recovery_roots(vec![node.to_string()], true, true)?;
+        if self.state.paused {
+            self.emit(EventKind::Paused { paused: false })?;
+        }
+        Ok(())
     }
 
     /// Record intent before terminating processes, including workers not yet spawned.
@@ -3559,7 +3624,7 @@ impl Runtime {
                         .executions
                         .iter()
                         .find(|execution| execution.id == input.target_execution_id)
-                } else if source_direct_run {
+                } else if source_direct_run || node_state.human_instruction {
                     self.state.executions.iter().rev().find(|execution| {
                         execution.node == node.name
                             && execution.status == "completed"
@@ -3598,12 +3663,26 @@ impl Runtime {
                         && no_session_activity(previous)
                         && !has_completed_history(previous)
                 });
-            let preparation_recovery = self
+            let stopped_during_preparation = resume.is_some_and(|previous| {
+                self.state.events.iter().any(|event| {
+                    matches!(
+                        &event.kind,
+                        EventKind::Failed {
+                            execution_id: Some(id),
+                            error,
+                            ..
+                        } if id == &previous.id
+                            && error.starts_with("Application stopped during this execution")
+                    )
+                })
+            });
+            let preparation_recovery = (self
                 .state
                 .config
                 .as_ref()
                 .and_then(|config| config.environment.as_ref())
                 .is_some()
+                || stopped_during_preparation)
                 && resume.is_some_and(|previous| {
                     self.state.execution_is_preparation_only(previous)
                         && session_missing(previous)
@@ -3733,6 +3812,14 @@ impl Runtime {
                 if !busy(path) {
                     if path.is_dir() {
                         inherit_workspace = self.workspace_has_head(path, &before);
+                        previous.worktree.clone()
+                    } else if self
+                        .state
+                        .config
+                        .as_ref()
+                        .and_then(|config| config.environment.as_ref())
+                        .is_some()
+                    {
                         previous.worktree.clone()
                     } else if let Some(idle) = self.idle_workspace_path() {
                         idle.to_string_lossy().into()
@@ -4076,11 +4163,17 @@ impl Runtime {
                     if !history_edit
                         && feedback_workspace.is_none()
                         && resume.is_some_and(|previous| {
+                            let path = Path::new(&previous.worktree);
+                            let unstarted_slot = self.state.execution_is_preparation_only(previous)
+                                && !path.is_dir()
+                                && crate::workspace_state::root(path)
+                                    .is_ok_and(|state| !state.exists())
+                                && crate::workspace::private_git_dir(path).is_none();
                             previous.status == "failed"
                                 && (!Self::same_workspace_path(
-                                    Path::new(&previous.worktree),
+                                    path,
                                     Path::new(&execution.worktree),
-                                ) || !Path::new(&previous.worktree).is_dir())
+                                ) || (!path.is_dir() && !unstarted_slot))
                         })
                     {
                         return Err("Failed partial environment view is missing or cannot be reused; refusing to silently restore old input".into());
@@ -4107,7 +4200,10 @@ impl Runtime {
                                 .clone()
                                 .or_else(|| previous.result.clone())
                                 .or_else(|| previous.input.clone())
-                                .ok_or("Continuation environment input is missing")?
+                                .map(Ok)
+                                .unwrap_or_else(|| {
+                                    store.load_record_metadata(&previous.id, "selected")
+                                })?
                         }
                     } else if !parent_names.is_empty() {
                         let inputs = parent_names
@@ -4836,7 +4932,7 @@ impl Runtime {
                             output_bytes: 0,
                             metrics: None,
                         })?;
-                        self.sync_failed_node_models(Some(&[execution.node.clone()]))?;
+                        self.sync_failed_node_models(Some(std::slice::from_ref(&execution.node)))?;
                         return Ok(None);
                     }
                 }
@@ -4979,7 +5075,7 @@ impl Runtime {
                         error,
                     })?;
                 }
-                self.sync_failed_node_models(Some(&[execution.node.clone()]))?;
+                self.sync_failed_node_models(Some(std::slice::from_ref(&execution.node)))?;
                 Ok(None)
             }
         }
@@ -5217,8 +5313,9 @@ impl Runtime {
                 });
                 if !member.accepted {
                     let stored;
-                    let text = if member.execution_id == pending.execution_id && output.is_some() {
-                        output.unwrap()
+                    let current = output.filter(|_| member.execution_id == pending.execution_id);
+                    let text = if let Some(current) = current {
+                        current
                     } else {
                         stored = self
                             .store
@@ -6022,8 +6119,20 @@ fn perform_with_merger_inner(
     } else {
         None
     };
+    let pending_merge = !source_tree
+        && reused
+        && workspace::git(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
+    let incomplete_preparation = !source_tree
+        && reused
+        && preserved_head.is_none()
+        && !job.history_edit
+        && !job.feedback_repair_retry
+        && crate::workspace_view::is_bound(path)
+        && (pending_merge || crate::workspace_view::validate_ready(path, &repository).is_err());
+    let preserve_failed_environment = job.preserve_failed_environment && !incomplete_preparation;
     if reused
         && preserved_head.is_none()
+        && !incomplete_preparation
         && !job.history_edit
         && !job.feedback_repair_retry
         && crate::workspace_view::is_bound(path)
@@ -6064,7 +6173,7 @@ fn perform_with_merger_inner(
             store.validate_history_scopes(&input.launch_ref, previous)?;
         }
     }
-    if job.preserve_failed_environment {
+    if preserve_failed_environment {
         if let (Some(policy), Some(input), Some(previous)) = (
             &job.config.environment,
             &selected_environment,
@@ -6111,7 +6220,8 @@ fn perform_with_merger_inner(
                 .as_ref()
                 .is_some_and(|selected| selected.layout.is_none())
             && reused
-            && !job.preserve_failed_environment
+            && !incomplete_preparation
+            && !preserve_failed_environment
         {
             if let Some(previous) = &job.environment_previous {
                 store.verify_view(path, &previous.launch_ref, &previous.environment_ref)?;
@@ -6298,6 +6408,7 @@ fn perform_with_merger_inner(
     };
     let can_inherit = !job.source_direct
         && !source_tree
+        && !incomplete_preparation
         && job.inherit_workspace
         && !job.history_edit
         && !expected_source_head.is_empty()
@@ -6374,8 +6485,8 @@ fn perform_with_merger_inner(
                 &job.execution.id,
                 &before,
                 vec![],
-                job.preserve_failed_environment,
-                job.history_edit || !reused,
+                preserve_failed_environment,
+                job.history_edit || !reused || incomplete_preparation,
             )?,
         )
     } else {

@@ -57,7 +57,15 @@ test('Auto refills during routing and older completions cannot revert a newly co
     const modelPort = modelServer.address().port;
     const model = id => ({ id, reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+    // Exercise the real backend's host-home binding as well as prewarming:
+    // HOME is replaced inside a task, so only the bound upstream path can load
+    // the newer model definitions after process preparation.
+    await mkdir(join(directory, '.pi', 'agent'), { recursive: true });
     await writeFile(join(agent, 'models.json'), JSON.stringify({ providers: { 'prewarm-test': {
+      baseUrl: 'http://127.0.0.1:1/v1', api: 'openai-completions', apiKey: 'loopback-only',
+      models: [model('old')],
+    } } }));
+    await writeFile(join(directory, '.pi', 'agent', 'models.json'), JSON.stringify({ providers: { 'prewarm-test': {
       baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: 'openai-completions', apiKey: 'loopback-only',
       models: [model('router'), model('router-next'), model('node'), model('planner')],
     } } }));
@@ -66,8 +74,9 @@ test('Auto refills during routing and older completions cannot revert a newly co
     const port = listener.address().port;
     await new Promise(completed => listener.close(completed));
     const target = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(root, 'backend/target');
-    const env = { ...process.env, GRAPHER_DATA_DIR: data, GRAPHER_PORT: String(port), PI_CODING_AGENT_DIR: agent,
-      GRAPHER_GLOBAL_PI_AGENT_DIR: join(directory, 'global-agent'), GRAPHER_ISOLATED_PI_MODELS: '1',
+    const env = { ...process.env, HOME: directory, USERPROFILE: directory,
+      GRAPHER_DATA_DIR: data, GRAPHER_PORT: String(port), PI_CODING_AGENT_DIR: agent,
+      GRAPHER_GLOBAL_PI_AGENT_DIR: join(directory, 'global-agent'), GRAPHER_ISOLATED_PI_MODELS: '0',
       GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'runtime'), GRAPHER_WORKSPACE_PARENT: join(directory, 'workspaces'), PARTITIONER_MODEL: undefined,
       NODE_AGENT_MODEL: 'prewarm-test/node', PLANNER_MODEL: 'prewarm-test/planner', MERGER_MODEL: 'prewarm-test/node',
       PARTITIONER_THINKING: 'off', NODE_AGENT_THINKING: 'off', PLANNER_THINKING: 'off', MERGER_THINKING: 'off' };

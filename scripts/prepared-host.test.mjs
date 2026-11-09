@@ -54,6 +54,43 @@ function host(role, cwd, env) {
   return { child, events, request, wait, stop, get diagnostics() { return diagnostics; } };
 }
 
+test('prepared host loads the latest Pi overlay from the task binding', { timeout: 45000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'grapher-prepared-overlay-'));
+  const source = join(directory, 'source');
+  const agent = join(directory, 'agent');
+  const upstream = join(directory, 'upstream-models.json');
+  const sessions = join(directory, 'sessions');
+  for (const path of [source, agent, sessions]) await mkdir(path);
+  await writeFile(join(agent, 'models.json'), JSON.stringify({ providers: {} }));
+  const env = { ...process.env, HOME: directory, USERPROFILE: directory, PI_CODING_AGENT_DIR: agent,
+    GRAPHER_ISOLATED_PI_MODELS: '0', PI_OFFLINE: '1' };
+  delete env.GRAPHER_UPSTREAM_PI_MODELS;
+  const value = host('partition', source, env);
+  try {
+    assert.equal((await value.request({ type: 'grapher_prepare', role: 'partition' })).success, true);
+    // This file and its binding only appear after the process is prepared.
+    await writeFile(upstream, JSON.stringify({ providers: { 'prepared-overlay': {
+      baseUrl: 'http://127.0.0.1:1/v1', api: 'openai-completions', apiKey: 'fixture', models: [{ id: 'latest' }],
+    } } }));
+    const reply = await value.request({ type: 'grapher_bind', role: 'partition', cwd: source,
+      args: ['--mode', 'rpc', '--no-tools', '--no-extensions', '--no-skills', '--no-approve',
+        '--model', 'prepared-overlay/latest', '--session-dir', sessions],
+      environment: { GRAPHER_MODE: 'partition', GRAPHER_EXECUTION_KIND: 'source', GRAPHER_SOURCE_ALIAS: source,
+        GRAPHER_WORKSPACE_ROOT: source, GRAPHER_ORIGINAL_ROOT: source, PI_CODING_AGENT_DIR: agent,
+        GRAPHER_UPSTREAM_PI_MODELS: upstream } });
+    assert.equal(reply.success, true, reply.error);
+    const state = await value.request({ type: 'get_state' });
+    assert.equal(state.success, true, value.diagnostics);
+    assert.equal(state.data.model.id, 'latest');
+    const closed = once(value.child, 'close');
+    value.child.stdin.end();
+    assert.equal((await closed)[0], 0, value.diagnostics);
+  } finally {
+    await value.stop();
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
+  }
+});
+
 test('three prepared roles bind real isolated sessions; Planner paths, extensions, tools and RPC bytes are task-scoped', { timeout: 180000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'grapher-prepared-host-'));
   const children = [];

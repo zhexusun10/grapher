@@ -317,10 +317,9 @@ impl ReadyProcess {
         let started = Instant::now();
         process_control::configure_command(command);
         let mut child = command.spawn().map_err(|error| error.to_string())?;
-        let tree = process_control::track(&child).map_err(|error| {
+        let tree = process_control::track(&child).inspect_err(|_| {
             let _ = child.kill();
             let _ = child.wait();
-            error
         })?;
         let mut process = Self {
             child: Some(child),

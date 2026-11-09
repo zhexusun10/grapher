@@ -592,6 +592,40 @@ pub struct Execution {
     pub metrics: Option<ExecutionMetrics>,
 }
 
+impl Execution {
+    fn settle_terminal(
+        &mut self,
+        status: &str,
+        head: Option<String>,
+        completed_at: u64,
+        fallback_output: Option<&str>,
+        output_bytes: usize,
+        metrics: Option<ExecutionMetrics>,
+    ) {
+        self.status = status.into();
+        if let Some(head) = head {
+            self.after = Some(head);
+        }
+        self.completed_at = Some(completed_at);
+        self.output_bytes = match fallback_output {
+            Some(output) => output_bytes.max(output.len()),
+            None => output_bytes.max(self.output_bytes).max(self.output.len()),
+        };
+        let recorded = self.metrics.take();
+        let fallback = fallback_output.unwrap_or(&self.output);
+        self.metrics = metrics
+            .or_else(|| {
+                (!fallback.is_empty())
+                    .then(|| parse_execution_metrics(fallback, self.started_at, completed_at))
+            })
+            .or_else(|| recorded.clone());
+        if let Some(current) = self.metrics.as_mut() {
+            merge_recorded_model(current, recorded.as_ref());
+        }
+        self.output = String::new();
+    }
+}
+
 /// A feedback input is pinned to an execution, never to a movable node ref.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -796,6 +830,13 @@ impl NodeState {
     pub fn is_real_failure(&self) -> bool {
         self.status == "failed" && !self.error.as_deref().is_some_and(is_interrupted_error)
     }
+
+    fn clear_turn_directive(&mut self) {
+        self.instruction.clear();
+        self.instruction_images = None;
+        self.edit_execution_id = None;
+        self.human_instruction = false;
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -969,6 +1010,11 @@ pub enum EventKind {
         invalidated: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_head: Option<String>,
+    },
+    /// Replace an unstarted node's task without changing execution state.
+    NodeTaskUpdated {
+        node: String,
+        task: String,
     },
     /// A manual edit of an unapproved draft. Keep its Run and Planner history.
     DraftEdited {
@@ -1314,148 +1360,148 @@ pub struct Snapshot {
     pub run_metrics: Option<RunMetrics>,
 }
 
+fn fold_execution_metric_event(
+    metrics: &mut ExecutionMetrics,
+    observed_thinking: Option<&mut Option<String>>,
+    value: &serde_json::Value,
+) {
+    match value
+        .get("type")
+        .and_then(|kind| kind.as_str())
+        .unwrap_or_default()
+    {
+        "grapher_process_exited" => {
+            if let Some(elapsed) = value.get("elapsedMs").and_then(|v| v.as_f64()) {
+                metrics.duration_seconds += elapsed / 1000.0;
+            }
+        }
+        "message_start" | "message_end" => {
+            let Some(message) = value.get("message") else {
+                return;
+            };
+            if message.get("role").and_then(|role| role.as_str()) != Some("assistant") {
+                return;
+            }
+            if let Some(model) = message
+                .get("model")
+                .and_then(|model| model.as_str())
+                .filter(|model| !model.is_empty())
+            {
+                let next = message
+                    .get("provider")
+                    .and_then(|provider| provider.as_str())
+                    .filter(|provider| !provider.is_empty())
+                    .map_or_else(
+                        || model.to_string(),
+                        |provider| format!("{provider}/{model}"),
+                    );
+                record_context_model(&mut metrics.model, &mut metrics.context_usage, next);
+            }
+            if let Some(level) = message
+                .get("thinkingLevel")
+                .and_then(|level| level.as_str())
+                .filter(|level| !level.is_empty())
+            {
+                if let Some(observed) = observed_thinking {
+                    *observed = Some(level.to_string());
+                } else {
+                    metrics.thinking_level = Some(level.to_string());
+                }
+            }
+            if value.get("type").and_then(|kind| kind.as_str()) == Some("message_end") {
+                metrics.assistant_messages += 1;
+                if let Some(usage) = message.get("usage") {
+                    let turn = TokenUsage::from_message_usage(usage);
+                    record_assistant_context(
+                        message,
+                        &turn,
+                        &mut metrics.context_tokens,
+                        &mut metrics.context_peak,
+                        &mut metrics.context_usage,
+                    );
+                    metrics.usage.accumulate(&turn);
+                }
+            }
+        }
+        "grapher_context_usage" => {
+            record_context_usage(
+                value,
+                &mut metrics.context_tokens,
+                &mut metrics.context_peak,
+                &mut metrics.context_usage,
+            );
+        }
+        "model_change" => {
+            if let Some(model) = value
+                .get("modelId")
+                .and_then(|model| model.as_str())
+                .filter(|model| !model.is_empty())
+            {
+                let next = value
+                    .get("provider")
+                    .and_then(|provider| provider.as_str())
+                    .filter(|provider| !provider.is_empty())
+                    .map_or_else(
+                        || model.to_string(),
+                        |provider| format!("{provider}/{model}"),
+                    );
+                record_context_model(&mut metrics.model, &mut metrics.context_usage, next);
+            }
+        }
+        "thinking_level_change" => {
+            if let Some(level) = value
+                .get("thinkingLevel")
+                .and_then(|level| level.as_str())
+                .filter(|level| !level.is_empty())
+            {
+                metrics.thinking_level = Some(level.to_string());
+            }
+        }
+        "tool_execution_start" => metrics.tools += 1,
+        "tool_execution_end"
+            if (value
+                .get("isError")
+                .and_then(|flag| flag.as_bool())
+                .unwrap_or(false)
+                || value
+                    .get("result")
+                    .and_then(|result| result.get("isError"))
+                    .and_then(|flag| flag.as_bool())
+                    .unwrap_or(false)) =>
+        {
+            metrics.tool_errors += 1;
+        }
+        _ => {}
+    }
+}
+
 pub fn parse_execution_metrics(
     output: &str,
     started_at: u64,
     completed_at: u64,
 ) -> ExecutionMetrics {
-    let mut duration_seconds = 0.0;
-    let mut assistant_messages = 0;
-    let mut tools = 0;
-    let mut tool_errors = 0;
-    let mut usage = TokenUsage::default();
-    let mut context_tokens = 0;
-    let mut context_peak = 0;
-    let mut context_usage = None;
-    let mut model = None;
-    let mut thinking_level = None;
+    let mut metrics = ExecutionMetrics::default();
     // Pi may omit the initial model/thinking change. Assistant messages carry
     // the selected model, and later observations must win in stream order.
     let mut observed_thinking = None;
 
     for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("[stderr]") {
+        if !line_advances_live_metrics(line) && !line.contains("\"grapher_process_exited\"") {
             continue;
         }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            match value
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-            {
-                "grapher_process_exited" => {
-                    if let Some(elapsed) = value.get("elapsedMs").and_then(|v| v.as_f64()) {
-                        duration_seconds += elapsed / 1000.0;
-                    }
-                }
-                "message_start" | "message_end" => {
-                    if let Some(msg) = value.get("message") {
-                        if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
-                            if let Some(model_id) = msg
-                                .get("model")
-                                .and_then(|v| v.as_str())
-                                .filter(|model_id| !model_id.is_empty())
-                            {
-                                let next = msg
-                                    .get("provider")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|provider| !provider.is_empty())
-                                    .map_or_else(
-                                        || model_id.to_string(),
-                                        |provider| format!("{provider}/{model_id}"),
-                                    );
-                                record_context_model(&mut model, &mut context_usage, next);
-                            }
-                            if let Some(level) = msg
-                                .get("thinkingLevel")
-                                .and_then(|v| v.as_str())
-                                .filter(|level| !level.is_empty())
-                            {
-                                observed_thinking = Some(level.to_string());
-                            }
-                            if value.get("type").and_then(|v| v.as_str()) == Some("message_end") {
-                                assistant_messages += 1;
-                                if let Some(u) = msg.get("usage") {
-                                    let message = TokenUsage::from_message_usage(u);
-                                    record_assistant_context(
-                                        msg,
-                                        &message,
-                                        &mut context_tokens,
-                                        &mut context_peak,
-                                        &mut context_usage,
-                                    );
-                                    usage.accumulate(&message);
-                                }
-                            }
-                        }
-                    }
-                }
-                "grapher_context_usage" => {
-                    record_context_usage(
-                        &value,
-                        &mut context_tokens,
-                        &mut context_peak,
-                        &mut context_usage,
-                    );
-                }
-                "model_change" => {
-                    let model_id = value.get("modelId").and_then(|v| v.as_str());
-                    if let Some(model_id) = model_id {
-                        let next = value
-                            .get("provider")
-                            .and_then(|v| v.as_str())
-                            .filter(|provider| !provider.is_empty())
-                            .map_or_else(
-                                || model_id.to_string(),
-                                |provider| format!("{provider}/{model_id}"),
-                            );
-                        record_context_model(&mut model, &mut context_usage, next);
-                    }
-                }
-                "thinking_level_change" => {
-                    if let Some(level) = value.get("thinkingLevel").and_then(|v| v.as_str()) {
-                        thinking_level = Some(level.to_string());
-                    }
-                }
-                "tool_execution_start" => {
-                    tools += 1;
-                }
-                "tool_execution_end" => {
-                    if value
-                        .get("isError")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                        || value
-                            .get("result")
-                            .and_then(|r| r.get("isError"))
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                    {
-                        tool_errors += 1;
-                    }
-                }
-                _ => {}
-            }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+            fold_execution_metric_event(&mut metrics, Some(&mut observed_thinking), &value);
         }
     }
 
-    if duration_seconds == 0.0 && completed_at >= started_at && started_at > 0 {
-        duration_seconds = (completed_at - started_at) as f64 / 1000.0;
+    if metrics.thinking_level.is_none() {
+        metrics.thinking_level = observed_thinking;
+    }
+    if metrics.duration_seconds == 0.0 && completed_at >= started_at && started_at > 0 {
+        metrics.duration_seconds = (completed_at - started_at) as f64 / 1000.0;
     }
 
-    ExecutionMetrics {
-        duration_seconds,
-        assistant_messages,
-        tools,
-        tool_errors,
-        usage,
-        context_tokens,
-        context_peak,
-        context_usage,
-        model,
-        thinking_level: thinking_level.or(observed_thinking),
-    }
+    metrics
 }
 
 /// Recover a legacy checkpoint from a bounded log tail. Prefer Pi's projection;
@@ -1608,16 +1654,34 @@ impl Snapshot {
         self.nodes
             .iter()
             .filter_map(|(name, node)| {
-                if node.status != "failed"
-                    || !node.error.as_deref().is_some_and(is_interrupted_error)
-                {
-                    return None;
-                }
                 let latest = self.executions.iter().rev().find(|execution| {
                     execution.node == *name
                         && !self.superseded_execution_ids.contains(&execution.id)
                 })?;
-                (latest.status == "failed").then(|| name.clone())
+                if latest.status != "failed" {
+                    return None;
+                }
+                if node.status == "failed"
+                    && node.error.as_deref().is_some_and(is_interrupted_error)
+                {
+                    return Some(name.clone());
+                }
+                if node.status == "blocked"
+                    && self.node_has_own_blocked_failure(name)
+                    && self.events.iter().rev().any(|event| {
+                        matches!(
+                            &event.kind,
+                            EventKind::Failed {
+                                execution_id: Some(id),
+                                error,
+                                ..
+                            } if id == &latest.id && is_interrupted_error(error)
+                        )
+                    })
+                {
+                    return Some(name.clone());
+                }
+                None
             })
             .collect()
     }
@@ -1723,14 +1787,35 @@ impl Snapshot {
             .and_then(|config| config.environment.as_ref())
             .is_some()
             && self.execution_is_preparation_only(latest);
-        self.events.windows(2).any(|pair| matches!(
-            (&pair[0].kind, &pair[1].kind),
-            (EventKind::Failed { node: failed_node, execution_id: Some(id), error: failed_error, .. },
-             EventKind::Blocked { node: blocked_node, error: blocked_error })
-                if failed_node == name && blocked_node == name && id == &latest.id
-                    && node.error.as_ref() == Some(blocked_error)
-                    && (failed_error == blocked_error || managed_preparation)
-        ))
+        let merger_node = format!("merge:{name}");
+        let merger_blocked = self.execution_is_preparation_only(latest)
+            && node.error.as_deref().is_some_and(|error| {
+                error.starts_with("Workspace composition blocked: Merger failed:")
+            })
+            && self
+                .mergers
+                .iter()
+                .rev()
+                .find(|merger| merger.node == merger_node)
+                .is_some_and(|merger| merger.status == "failed")
+            && !self.graph.edges.iter().any(|edge| {
+                !edge.feedback
+                    && edge.to == name
+                    && self.nodes.get(&edge.from).is_some_and(|upstream| {
+                        matches!(upstream.status.as_str(), "failed" | "blocked")
+                    })
+            });
+        merger_blocked
+            || self.events.windows(2).any(|pair| {
+                matches!(
+                    (&pair[0].kind, &pair[1].kind),
+                    (EventKind::Failed { node: failed_node, execution_id: Some(id), error: failed_error, .. },
+                     EventKind::Blocked { node: blocked_node, error: blocked_error })
+                        if failed_node == name && blocked_node == name && id == &latest.id
+                            && node.error.as_ref() == Some(blocked_error)
+                            && (failed_error == blocked_error || managed_preparation)
+                )
+            })
     }
 
     /// A node's own composition failure is projected as blocked, even without
@@ -1757,6 +1842,20 @@ impl Snapshot {
                     .then(|| name.clone())
             })
             .collect()
+    }
+
+    /// A node-specific retry may run alongside independent writers, but must
+    /// never bypass a global pause and accidentally dispatch other nodes.
+    pub fn can_resume_node(&self, name: &str) -> bool {
+        self.approved
+            && !matches!(self.phase.as_str(), "completed" | "publishing" | "merging" | "publication_failed")
+            && (!self.paused || self.graph.nodes.len() == 1)
+            && !self.executions.iter().any(|execution| execution.node == name && execution.status == "running")
+            && !self.mergers.iter().any(|merger| merger.status == "running")
+            && self.graph.edges.iter().filter(|edge| !edge.feedback && edge.to == name)
+                .all(|edge| self.nodes.get(&edge.from).is_some_and(|parent| parent.status == "completed"))
+            && (self.failed_retry_nodes().iter().any(|node| node == name)
+                || self.preparation_failed_nodes().iter().any(|node| node == name))
     }
 
     /// Backend-owned recovery hint; neither a retry nor a completion claim.
@@ -1827,11 +1926,12 @@ impl Snapshot {
         if let Some(planning) = &self.planning {
             // Fall back to the displayed summary for snapshots that predate the
             // per-turn map. Once the map is populated it is authoritative.
-            if !planning.planning_id.is_empty()
-                && !self.planning_turns.contains_key(&planning.planning_id)
-            {
-                planning_turns.push(planning);
-            } else if planning.planning_id.is_empty() && planning_turns.is_empty() {
+            let missing_turn = if planning.planning_id.is_empty() {
+                planning_turns.is_empty()
+            } else {
+                !self.planning_turns.contains_key(&planning.planning_id)
+            };
+            if missing_turn {
                 planning_turns.push(planning);
             }
         }
@@ -1932,6 +2032,7 @@ pub fn is_interrupted_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("application stopped during this execution")
         || lower.contains("execution was interrupted")
+        || lower.contains("merger interrupted")
         || lower.contains("0xc000013a")
         || lower.contains("exit code: 130")
         || lower.contains("exit code: 143")
@@ -2072,111 +2173,10 @@ fn accumulate_live_metrics(execution: &mut Execution, text: &str) {
         if !line_advances_live_metrics(line) {
             continue;
         }
-        let trimmed = line.trim();
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
-        match value
-            .get("type")
-            .and_then(|kind| kind.as_str())
-            .unwrap_or_default()
-        {
-            "message_start" | "message_end" => {
-                let Some(message) = value.get("message") else {
-                    continue;
-                };
-                if message.get("role").and_then(|role| role.as_str()) != Some("assistant") {
-                    continue;
-                }
-                if let Some(model) = message
-                    .get("model")
-                    .and_then(|model| model.as_str())
-                    .filter(|model| !model.is_empty())
-                {
-                    let next = message
-                        .get("provider")
-                        .and_then(|provider| provider.as_str())
-                        .filter(|provider| !provider.is_empty())
-                        .map_or_else(
-                            || model.to_string(),
-                            |provider| format!("{provider}/{model}"),
-                        );
-                    record_context_model(&mut metrics.model, &mut metrics.context_usage, next);
-                }
-                if let Some(level) = message
-                    .get("thinkingLevel")
-                    .and_then(|level| level.as_str())
-                    .filter(|level| !level.is_empty())
-                {
-                    metrics.thinking_level = Some(level.to_string());
-                }
-                if value.get("type").and_then(|kind| kind.as_str()) != Some("message_end") {
-                    continue;
-                }
-                metrics.assistant_messages += 1;
-                if let Some(usage) = message.get("usage") {
-                    let turn = TokenUsage::from_message_usage(usage);
-                    record_assistant_context(
-                        message,
-                        &turn,
-                        &mut metrics.context_tokens,
-                        &mut metrics.context_peak,
-                        &mut metrics.context_usage,
-                    );
-                    metrics.usage.accumulate(&turn);
-                }
-            }
-            "grapher_context_usage" => {
-                record_context_usage(
-                    &value,
-                    &mut metrics.context_tokens,
-                    &mut metrics.context_peak,
-                    &mut metrics.context_usage,
-                );
-            }
-            "model_change" => {
-                if let Some(model) = value
-                    .get("modelId")
-                    .and_then(|model| model.as_str())
-                    .filter(|model| !model.is_empty())
-                {
-                    let next = value
-                        .get("provider")
-                        .and_then(|provider| provider.as_str())
-                        .filter(|provider| !provider.is_empty())
-                        .map_or_else(
-                            || model.to_string(),
-                            |provider| format!("{provider}/{model}"),
-                        );
-                    record_context_model(&mut metrics.model, &mut metrics.context_usage, next);
-                }
-            }
-            "thinking_level_change" => {
-                if let Some(level) = value
-                    .get("thinkingLevel")
-                    .and_then(|level| level.as_str())
-                    .filter(|level| !level.is_empty())
-                {
-                    metrics.thinking_level = Some(level.to_string());
-                }
-            }
-            "tool_execution_start" => metrics.tools += 1,
-            "tool_execution_end" => {
-                if value
-                    .get("isError")
-                    .and_then(|flag| flag.as_bool())
-                    .unwrap_or(false)
-                    || value
-                        .get("result")
-                        .and_then(|result| result.get("isError"))
-                        .and_then(|flag| flag.as_bool())
-                        .unwrap_or(false)
-                {
-                    metrics.tool_errors += 1;
-                }
-            }
-            _ => {}
-        }
+        fold_execution_metric_event(metrics, None, &value);
     }
 }
 
@@ -2276,10 +2276,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         node.error = None;
                         node.baseline_head = None;
                         node.feedback_workspace = None;
-                        node.instruction.clear();
-                        node.instruction_images = None;
-                        node.edit_execution_id = None;
-                        node.human_instruction = false;
+                        node.clear_turn_directive();
                         node.continuation = false;
                         node.shared_workspace = false;
                     }
@@ -2411,10 +2408,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 .into();
                 node.head = None;
                 node.error = None;
-                node.instruction.clear();
-                node.instruction_images = None;
-                node.edit_execution_id = None;
-                node.human_instruction = false;
+                node.clear_turn_directive();
                 node.feedback_workspace = None;
                 node.baseline_head = None;
                 // A changed task must not resurrect the discarded session through
@@ -2439,6 +2433,12 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 state.publication = None;
                 state.phase = if state.paused { "paused" } else { "running" }.into();
             }
+        }
+        EventKind::NodeTaskUpdated { node, task } => {
+            if let Some(target) = state.graph.nodes.iter_mut().find(|item| item.name == *node) {
+                target.task = task.clone();
+            }
+            state.plan = crate::compiler::compile_legacy(&state.graph, true).ok();
         }
         EventKind::DraftEdited { graph, config } => {
             state.graph = graph.clone();
@@ -2829,27 +2829,14 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 .map(|execution| {
                     let node_name = execution.node.clone();
                     let lineage = execution.workspace_lineage.clone();
-                    execution.status = "completed".into();
-                    execution.after = Some(head.clone());
-                    execution.completed_at = Some(event.timestamp);
-                    execution.output_bytes = (*output_bytes).max(output.len());
-                    let recorded = execution.metrics.take();
-                    execution.metrics = metrics
-                        .clone()
-                        .or_else(|| {
-                            (!output.is_empty()).then(|| {
-                                parse_execution_metrics(
-                                    output,
-                                    execution.started_at,
-                                    event.timestamp,
-                                )
-                            })
-                        })
-                        .or_else(|| recorded.clone());
-                    if let Some(current) = execution.metrics.as_mut() {
-                        merge_recorded_model(current, recorded.as_ref());
-                    }
-                    execution.output = String::new();
+                    execution.settle_terminal(
+                        "completed",
+                        Some(head.clone()),
+                        event.timestamp,
+                        Some(output),
+                        *output_bytes,
+                        metrics.clone(),
+                    );
                     (node_name, lineage, execution.result.clone())
                 });
             if let Some((node_name, lineage, result)) = completed {
@@ -2903,10 +2890,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                             node.error = None;
                             node.head = None;
                             node.baseline_head = None;
-                            node.instruction.clear();
-                            node.instruction_images = None;
-                            node.edit_execution_id = None;
-                            node.human_instruction = false;
+                            node.clear_turn_directive();
                             node.feedback_workspace = None;
                             if !unstarted {
                                 node.revision += 1;
@@ -2955,28 +2939,14 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 .chain(state.mergers.iter_mut())
                 .find(|item| Some(&item.id) == execution_id.as_ref())
             {
-                execution.status = "failed".into();
-                execution.completed_at = Some(event.timestamp);
-                execution.output_bytes = (*output_bytes)
-                    .max(execution.output_bytes)
-                    .max(execution.output.len());
-                let recorded = execution.metrics.take();
-                execution.metrics = metrics
-                    .clone()
-                    .or_else(|| {
-                        (!execution.output.is_empty()).then(|| {
-                            parse_execution_metrics(
-                                &execution.output,
-                                execution.started_at,
-                                event.timestamp,
-                            )
-                        })
-                    })
-                    .or_else(|| recorded.clone());
-                if let Some(current) = execution.metrics.as_mut() {
-                    merge_recorded_model(current, recorded.as_ref());
-                }
-                execution.output = String::new();
+                execution.settle_terminal(
+                    "failed",
+                    None,
+                    event.timestamp,
+                    None,
+                    *output_bytes,
+                    metrics.clone(),
+                );
             }
         }
         EventKind::Blocked { node, error } => {
@@ -3108,10 +3078,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if name != target {
                     node.head = None;
                     node.baseline_head = None;
-                    node.instruction.clear();
-                    node.instruction_images = None;
-                    node.edit_execution_id = None;
-                    node.human_instruction = false;
+                    node.clear_turn_directive();
                     node.feedback_workspace = None;
                 }
                 if *human && !unstarted {
@@ -3204,10 +3171,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 } else {
                     node.head = None;
                     node.baseline_head = None;
-                    node.instruction.clear();
-                    node.instruction_images = None;
-                    node.edit_execution_id = None;
-                    node.human_instruction = false;
+                    node.clear_turn_directive();
                 }
             }
             state.phase = if state.paused { "paused" } else { "running" }.into();
@@ -3326,29 +3290,14 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         .map(|name| (name.to_string(), execution.revision))
                 });
             if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
-                execution.status = "completed".into();
-                execution.after = Some(head.clone());
-                execution.completed_at = Some(event.timestamp);
-                execution.output_bytes = (*output_bytes)
-                    .max(execution.output_bytes)
-                    .max(execution.output.len());
-                let recorded = execution.metrics.take();
-                execution.metrics = metrics
-                    .clone()
-                    .or_else(|| {
-                        (!execution.output.is_empty()).then(|| {
-                            parse_execution_metrics(
-                                &execution.output,
-                                execution.started_at,
-                                event.timestamp,
-                            )
-                        })
-                    })
-                    .or_else(|| recorded.clone());
-                if let Some(current) = execution.metrics.as_mut() {
-                    merge_recorded_model(current, recorded.as_ref());
-                }
-                execution.output = String::new();
+                execution.settle_terminal(
+                    "completed",
+                    Some(head.clone()),
+                    event.timestamp,
+                    None,
+                    *output_bytes,
+                    metrics.clone(),
+                );
             }
             let publication_attempt = state
                 .mergers
@@ -3391,31 +3340,17 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         } => {
             let target_node_name =
                 if let Some(execution) = state.mergers.iter_mut().find(|e| e.id == *execution_id) {
-                    execution.status = "failed".into();
                     // Runtime persists the annotation before this terminal event.
                     // Replay restores byte counts from the log table, not text.
                     let _ = error;
-                    execution.completed_at = Some(event.timestamp);
-                    execution.output_bytes = (*output_bytes)
-                        .max(execution.output_bytes)
-                        .max(execution.output.len());
-                    let recorded = execution.metrics.take();
-                    execution.metrics = metrics
-                        .clone()
-                        .or_else(|| {
-                            (!execution.output.is_empty()).then(|| {
-                                parse_execution_metrics(
-                                    &execution.output,
-                                    execution.started_at,
-                                    event.timestamp,
-                                )
-                            })
-                        })
-                        .or_else(|| recorded.clone());
-                    if let Some(current) = execution.metrics.as_mut() {
-                        merge_recorded_model(current, recorded.as_ref());
-                    }
-                    execution.output = String::new();
+                    execution.settle_terminal(
+                        "failed",
+                        None,
+                        event.timestamp,
+                        None,
+                        *output_bytes,
+                        metrics.clone(),
+                    );
                     execution.node.strip_prefix("merge:").map(|s| s.to_string())
                 } else {
                     None
@@ -3573,6 +3508,21 @@ mod metrics_tests {
         }))
         .unwrap();
         assert!(enabled.planner_write_tools);
+    }
+
+    #[test]
+    fn legacy_configs_enable_post_task_review_by_default() {
+        let legacy: Config = serde_json::from_value(serde_json::json!({
+            "repository": "repo", "model": "provider/model", "maxParallel": 1
+        }))
+        .unwrap();
+        assert!(legacy.post_task_review);
+        let disabled: Config = serde_json::from_value(serde_json::json!({
+            "repository": "repo", "model": "provider/model", "maxParallel": 1,
+            "postTaskReview": false
+        }))
+        .unwrap();
+        assert!(!disabled.post_task_review);
     }
 
     #[test]

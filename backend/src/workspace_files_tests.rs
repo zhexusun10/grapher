@@ -21,7 +21,7 @@ fn managed_environment_scopes_remain_versioned_and_independent_of_gitignore() {
     files.capture(&workspace, &version, "", &[]).unwrap();
     fs::write(workspace.join(".venv/bin/python"), "mutated environment").unwrap();
     files
-        .materialize(&workspace, &[version.clone()], None, false)
+        .materialize(&workspace, std::slice::from_ref(&version), None, false)
         .unwrap();
 
     assert_eq!(
@@ -52,7 +52,7 @@ fn managed_environment_scope_conflicts_and_missing_versions_fail_closed() {
     fs::write(workspace.join(".venv/package"), "changed").unwrap();
     let branch = Uuid::new_v4().to_string();
     files
-        .capture(&workspace, &branch, "", &[base.clone()])
+        .capture(&workspace, &branch, "", std::slice::from_ref(&base))
         .unwrap();
     assert!(files.exists(&branch));
     fs::remove_file(workspace.join(".venv/package")).unwrap();

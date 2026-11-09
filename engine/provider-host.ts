@@ -1,6 +1,6 @@
 // The only production Provider/Auth binding to Pi: its public SDK export.
 import { createInterface } from "node:readline";
-import { ModelRuntime, SettingsManager, getModelThinkingCapabilities } from "./pi-compat.ts";
+import { ModelRuntime, SettingsManager, getModelThinkingCapabilities, modelRuntimeOptions } from "./pi-compat.ts";
 import { ProviderAuthAdapter } from "./provider-auth-adapter.mjs";
 import { root, verifyBaseline } from "../scripts/pi-baseline.mjs";
 import { verifyPiDependencies } from "../scripts/pi-dependencies.mjs";
@@ -10,7 +10,7 @@ configureAgentDir();
 verifyBaseline();
 verifyPiDependencies(root);
 const adapter = new ProviderAuthAdapter(
-  (options: Parameters<typeof ModelRuntime.create>[0]) => ModelRuntime.create(options),
+  async (options: Parameters<typeof ModelRuntime.create>[0]) => ModelRuntime.create(await modelRuntimeOptions(options)),
   {
     getThinkingCapabilities: getModelThinkingCapabilities,
     getDeviceId: () => {

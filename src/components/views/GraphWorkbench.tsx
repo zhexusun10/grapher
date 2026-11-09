@@ -132,6 +132,7 @@ interface GraphWorkbenchProps {
   plannerStream: any;
   recoveredPlanningId?: string;
   onSendMessage: (val: string, options?: PromptBoxSubmitOptions) => boolean | void | Promise<boolean>;
+  onContinuePlanner?: () => void;
   onEditMessageSubmit?: (msg: ChatMessage, newText: string, selectedVersion?: number) => boolean | void | Promise<boolean | void>;
   onSwitchMessageVersion?: (msg: ChatMessage, targetIndex: number) => void;
   /** Steer cards rolled back after a pause; their text returns to the composer. */
@@ -146,6 +147,7 @@ interface GraphWorkbenchProps {
   onControl: (action: string, extra?: Record<string, unknown>) => void;
   onSave: (graph: Graph) => void;
   onAddManualNode: (runId: string, request: ManualNodeRequest) => Promise<boolean>;
+  onUpdateUnstartedNodeTask: (runId: string, node: string, oldTask: string, task: string) => Promise<boolean>;
   onOpenEditor: () => void;
   onOpenApproval: () => void;
   onOpenFile: (request: OpenWorkspaceFileRequest) => void;
@@ -269,6 +271,17 @@ function NodeErrorPanel({ error, paused }: { error: string; paused?: boolean }) 
       <pre className="node-error-detail">{detail}</pre>
     </div>
   );
+}
+
+/** Snapshot commits shown inline in the details panel.
+ *
+ * Only a short prefix is displayed so the before/after pair stays on one line,
+ * and the panel stays tooltip-free; an empty value is a state, not a missing
+ * commit, so it keeps the caller's wording instead of a hash.
+ */
+function shortCommit(hash: string | null | undefined, empty: string): string {
+  if (!hash) return empty;
+  return hash.length > 8 ? hash.slice(0, 8) : hash;
 }
 
 function ExecutionRecordHeader({ execution, expanded, onToggle, placeholder = false }: {
@@ -426,6 +439,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   isPlanning,
   plannerStream,
   onSendMessage,
+  onContinuePlanner,
   onEditMessageSubmit,
   onSwitchMessageVersion,
   rolledBackSteerKeys = EMPTY_ID_SET,
@@ -437,6 +451,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   onControl,
   onSave,
   onAddManualNode,
+  onUpdateUnstartedNodeTask,
   onOpenEditor,
   onOpenApproval,
   onOpenFile,
@@ -2330,6 +2345,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // backend also exposes when failed nodes can be explicitly continued.
   const canContinue = !publishing && !publicationFailed &&
     (state.paused || state.canResume === true);
+  // The backend determines whether this specific node can be retried safely,
+  // independently of the run-wide footer's recovery ordering.
+  const canContinueNode = (node?: { canResume?: boolean }) =>
+    node?.canResume === true && !isPlanning && !publishing && !publicationFailed && controlPending === null;
+  const continueNode = (node: string) => {
+    setControlPending("resume");
+    onControl("resume_node", { node });
+  };
   const graphPhase = resolveGraphPhase({
     isPlanning,
     approved: state.approved,
@@ -2439,6 +2462,27 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     prevScrollHeightRef.current = el.scrollHeight;
   }, [isUnrunNode, shouldFollowOutput]);
 
+  const inNodeScope = !!selectedNode && routeType === "graph";
+  const isCurrentViewWorking =
+    selectedNode && routeType === "graph"
+      ? isSelectedNodeWorking
+      : isMainViewWorking ||
+      graphPhase === "running" ||
+      graphPhase === "publishing" ||
+      graphPhase === "merging" ||
+      // Standalone publication-Merger turns keep the Run completed; source
+      // follow-ups can likewise run outside the ordinary running phase.
+      state.executions.some(execution => execution.status === "running") ||
+      (state.mergers ?? []).some(execution => execution.status === "running");
+
+  const { summary: workspaceChangesSummary, isLoaded: workspaceChangesLoaded } = useWorkspaceChanges({
+    state,
+    // Scope by snapshot attempts rather than incrementally loaded transcript turns.
+    scopedExecutions: inNodeScope ? attempts : null,
+    isWorking: isCurrentViewWorking,
+  });
+
+  // File-change reads run independently and must not hold up the transcript.
   const revealConversation = useCallback(() => {
     const key = conversationViewKey;
     const generation = conversationGenerationRef.current;
@@ -2585,43 +2629,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     setOpenFooterPanel(null);
   }, [conversationViewKey]);
 
-  const inNodeScope = !!selectedNode && routeType === "graph";
-
-  const isCurrentViewWorking =
-    selectedNode && routeType === "graph"
-      ? isSelectedNodeWorking
-      : isMainViewWorking ||
-      graphPhase === "running" ||
-      graphPhase === "publishing" ||
-      graphPhase === "merging" ||
-      // Standalone publication-Merger turns keep the Run completed; source
-      // follow-ups can likewise run outside the ordinary running phase.
-      state.executions.some(execution => execution.status === "running") ||
-      (state.mergers ?? []).some(execution => execution.status === "running");
-
-  const { summary: workspaceChangesSummary } = useWorkspaceChanges({
-    state,
-    // Node/Merger conversations show only their own executions; the main view
-    // uses the run-level projection, which also covers Planner and publication.
-    // A waiting node scopes to an empty execution list, which must not fall back
-    // to that run aggregate. `attempts` is stable from the snapshot, whereas
-    // `nodeTurns` grows while transcript history loads and would re-scope the
-    // panel several times (empty -> first attempt -> all attempts).
-    scopedExecutions: inNodeScope ? attempts : null,
-    isWorking: isCurrentViewWorking,
-  });
-
   const changesTrigger = <WorkspaceChangesTrigger
     summary={workspaceChangesSummary}
+    isLoaded={workspaceChangesLoaded}
     panelId={changesPanelId}
-    isOpen={changesPanelOpen}
+    isOpen={workspaceChangesLoaded && changesPanelOpen}
     onToggle={() => toggleFooterPanel("changes")}
   />;
   const changesPanel = <WorkspaceChangesPanel
     key={conversationViewKey}
     id={changesPanelId}
     summary={workspaceChangesSummary}
-    open={changesPanelOpen}
+    open={workspaceChangesLoaded && changesPanelOpen}
     scrollContainerRef={chatScrollRef}
     onBeforeToggle={handleWorkspaceDetailsBeforeToggle}
     onAfterToggle={handleWorkspaceDetailsAfterToggle}
@@ -2784,17 +2803,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   onCancel={() => setEditingTaskNode("")}
                   disabled={locked}
                   onSave={(value) => {
-                    const saveTask = () => {
-                      onSave({
-                        ...state.graph,
-                        nodes: state.graph.nodes.map((node) =>
-                          node.name === selectedNode.name ? { ...node, task: value } : node
-                        ),
-                      });
-                      setEditingTaskNode("");
-                    };
+                    const first = attempts[0];
+                    if (!first) {
+                      void onUpdateUnstartedNodeTask(state.runId, selectedNode.name, selectedNode.task, value)
+                        .then(accepted => { if (accepted) setEditingTaskNode(""); });
+                      return;
+                    }
                     if (state.approved) {
-                      const first = attempts[0];
                       if (first && onEditMessageSubmit) {
                         const submitEdit = () => {
                           void Promise.resolve(onEditMessageSubmit({
@@ -2820,18 +2835,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         }
                         submitEdit();
                         return;
-                      } else {
-                        onRequestConfirmation({
-                          title: t("修改未执行的 Task？"),
-                          message: t("此节点尚无 Pi 对话可分支，将创建新的待审批运行。"),
-                          confirmText: t("确认修改"),
-                          danger: true,
-                          onConfirm: saveTask,
-                        });
                       }
                       return;
                     }
-                    saveTask();
+                    // An unapproved graph with prior executions must not reset their history.
+                    if (onEditMessageSubmit) {
+                      void Promise.resolve(onEditMessageSubmit({
+                        id: `task-${selectedNode.name}`, role: "user", text: selectedNode.task,
+                        node: selectedNode.name, executionId: first.id, runId: state.runId,
+                      }, value)).then(accepted => { if (accepted !== false) setEditingTaskNode(""); });
+                    }
                   }}
                 />
 
@@ -2946,12 +2959,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 >
                   <p>Workspace: {execution?.worktree || config.repository || "preparing workspace…"}</p>
                   <p>Session id: {execution?.sessionId || "waiting for initialization…"}</p>
-                  <p>Commit before: {execution?.before || "not snapshotted"}</p>
-                  <p>Commit after: {execution ? (execution.after === "" ? "direct modification (no snapshot)" : execution.after ?? "pending") : "pending"}</p>
+                  <p>
+                    Commit:{" "}
+                    {execution
+                      ? `${shortCommit(execution.before, "not snapshotted")} → ${shortCommit(execution.after, execution.after === "" ? "direct modification (no snapshot)" : "pending")}`
+                      : "pending"}
+                  </p>
                   <div className="session-details-row">
                     <p>Start time: {formatSessionStartTime(executionSession.startedAt ?? execution?.startedAt)}</p>
                     <p>Time took: <ExecutionTimeTookText execution={execution} priorDurationSeconds={executionSession.priorDurationSeconds} /></p>
                   </div>
+                  {(showExecutionTokenUsage || executionContext) && (
+                    <SessionTokenUsage usage={executionUsage} context={executionContext}
+                      showTokens={showExecutionTokenUsage} />
+                  )}
                   {snapshotModelInfo && (
                     <div className="session-details-row">
                       <p>Model: {snapshotModelInfo.model}</p>
@@ -2963,10 +2984,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <p>{t("重试时使用的模型：{0}", retryModelInfo.model)}</p>
                       <p>{t("重试时使用的思维等级：{0}", retryModelInfo.thinkingLevel)}</p>
                     </div>
-                  )}
-                  {(showExecutionTokenUsage || executionContext) && (
-                    <SessionTokenUsage usage={executionUsage} context={executionContext}
-                      showTokens={showExecutionTokenUsage} />
                   )}
                 </WorkspaceDetailsPanel>
 
@@ -3019,6 +3036,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(selectedNode?.name); onInterrupt(selectedNode?.name); } : undefined}
+                onContinue={!selectedMerger && selectedNode && canContinueNode(selectedState) ? () => continueNode(selectedNode.name) : undefined}
                 disabled={nodeComposerDisabled}
               />
             </motion.div>
@@ -3162,6 +3180,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         <p>Start time: {formatSessionStartTime(serialSession.startedAt ?? serialExecution?.startedAt)}</p>
                         <p>Time took: <ExecutionTimeTookText execution={serialExecution} priorDurationSeconds={serialSession.priorDurationSeconds} /></p>
                       </div>
+                      {(showSerialTokenUsage || serialContext) && (
+                        <SessionTokenUsage usage={serialUsage} context={serialContext}
+                          showTokens={showSerialTokenUsage} />
+                      )}
                       {serialModelInfo && (
                         <div className="session-details-row">
                           <p>Model: {serialModelInfo.model}</p>
@@ -3173,10 +3195,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           <p>{t("重试时使用的模型：{0}", serialRetryModelInfo.model)}</p>
                           <p>{t("重试时使用的思维等级：{0}", serialRetryModelInfo.thinkingLevel)}</p>
                         </div>
-                      )}
-                      {(showSerialTokenUsage || serialContext) && (
-                        <SessionTokenUsage usage={serialUsage} context={serialContext}
-                          showTokens={showSerialTokenUsage} />
                       )}
                     </WorkspaceDetailsPanel>
                   </div>
@@ -3386,14 +3404,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       <p>Start time: {formatSessionStartTime(plannerStartTime)}</p>
                       <p>Time took: <PlannerTimeTookText isPlanning={isPlanning} startedAt={plannerLiveTurnStart} durationSeconds={plannerRole?.durationSeconds} priorDurationSeconds={plannerSession.priorDurationSeconds} /></p>
                     </div>
-                    <div className="session-details-row">
-                      <p>Model: {plannerModelInfo.model}</p>
-                      <p>Thinking level: {plannerModelInfo.thinkingLevel}</p>
-                    </div>
                     {(showPlannerTokenUsage || displayedPlannerContext) && (
                       <SessionTokenUsage usage={plannerUsage} context={displayedPlannerContext}
                         showTokens={showPlannerTokenUsage} />
                     )}
+                    <div className="session-details-row">
+                      <p>Model: {plannerModelInfo.model}</p>
+                      <p>Thinking level: {plannerModelInfo.thinkingLevel}</p>
+                    </div>
                   </WorkspaceDetailsPanel>
                 )}
               </div>
@@ -3477,6 +3495,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 isExecuting={isMainViewWorking}
                 isWorking={isMainViewWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(); onInterrupt(); } : undefined}
+                onContinue={isSerialExecution && serialNode && canContinueNode(serialNodeState) ? () => continueNode(serialNode.name)
+                  : routeType === "graph" && !isMainViewWorking && (failedPlanning ?? state.planning)?.status === "failed" &&
+                    (failedPlanning ?? state.planning)?.planType === "graph" && (failedPlanning ?? state.planning)?.runId === state.runId
+                    ? onContinuePlanner : undefined}
                 disabled={mainComposerDisabled}
               />
             </motion.div>

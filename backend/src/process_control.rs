@@ -505,15 +505,13 @@ impl Drop for ProcessTreeInner {
         let _ = terminate_inner(self); // Drop cannot propagate errors.
         #[cfg(windows)]
         unsafe {
-            if self.job != 0 {
-                if CloseHandle(self.job as RawHandle) == 0 {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "Closing process job failed: {}",
-                        std::io::Error::last_os_error()
-                    );
-                }
+            if self.job != 0 && CloseHandle(self.job as RawHandle) == 0 {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Closing process job failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
         }
     }

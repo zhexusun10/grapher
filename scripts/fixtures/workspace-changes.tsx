@@ -57,7 +57,7 @@ function Fixture() {
   const metadata = params.get("metadata") === "1";
   const repeatedAttempts = params.get("attempts") === "2";
   const livePhase = params.get("phase") || "running";
-  const [running, setRunning] = useState(true);
+  const [running, setRunning] = useState(params.get("settled") !== "1");
   const [empty, setEmpty] = useState(false);
   const [revision, setRevision] = useState(0);
   const [selected, setSelected] = useState(mode === "node" || mode === "waiting" ? "worker" : mode === "merger" ? publicationMergerCardId : "");

@@ -122,6 +122,60 @@ async function openFollowUp({ repository, firstRead = "ready" }) {
   return { page, errors, close, transcriptReads: () => newPlanReads, isClosed: () => closed };
 }
 
+test("empty failed Planner composer resumes its own turn without adding a user message", { timeout: 45_000 }, async () => {
+  const config = { repository: "/mock/planner-resume", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const summary = { planningId: "failed-plan", runId: "planner-resume-run", planType: "graph", status: "failed",
+    goal: "Original goal", error: "interrupted", repository: config.repository, roles: { planner: {} }, createdAt: 1 };
+  const failed = { runId: summary.runId, config, planType: "graph", phase: "planning_failed", approved: false, paused: false,
+    planningId: summary.planningId, planning: summary, graph: { originalGoal: "Original goal", nodes: [], edges: [] },
+    nodes: {}, plan: null, executions: [], events: [{ type: "planning_failed", sequence: 1, timestamp: 1, planning: summary }], base: "", feedbackCounts: {} };
+  const complete = { ...failed, phase: "awaiting_approval", planningId: "continued-plan", planning: { ...summary, planningId: "continued-plan", status: "success", error: null },
+    graph: { originalGoal: "Original goal", nodes: [{ name: "restored", task: "task" }], edges: [] },
+    nodes: { restored: { status: "waiting", revision: 0, instruction: "", error: null } } };
+  let body;
+  onPlanStream = (request, res) => {
+    body = request;
+    res.writeHead(200, { "Content-Type": "text/event-stream", Connection: "keep-alive" });
+    res.write(`event: run_started\ndata: ${JSON.stringify({ runId: failed.runId })}\n\n`);
+    res.write(`event: complete\ndata: ${JSON.stringify({ snapshot: complete })}\n\n`);
+    res.end();
+  };
+  const { context, page, errors } = await newPage(route => {
+    const command = new URL(route.request().url()).pathname.slice(5), request = route.request().postDataJSON();
+    if (command === "plan_goal_stream") return route.continue();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: failed, runs: [failed.runId], repositoryInfo: { path: config.repository, name: "Resume", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": case "load_run": result = failed; break;
+      case "snapshot_if_changed": result = { version: "failed", snapshot: failed }; break;
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = [summary]; break;
+      case "get_planning": result = summary; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_planning_output": result = { planningId: request.planningId, role: "planner", content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, running: false }; break;
+      default: result = {};
+    }
+    return route.fulfill({ json: { result } });
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator(`[data-run-id="${failed.runId}"]`).click();
+    const input = page.locator(".pane-bottom-chat textarea");
+    await input.waitFor();
+    const before = await page.locator(".chat-bubble-user").count();
+    await page.getByRole("button", { name: "Continue this agent (without adding a message)" }).click();
+    await page.waitForFunction(() => document.querySelector(".pane-bottom-chat"));
+    await page.waitForTimeout(300);
+    assert.equal(body?.revisionRunId, failed.runId);
+    assert.equal(body?.continuePlanningId, summary.planningId);
+    assert.equal(body?.mode, "graph");
+    assert.equal(await page.locator(".chat-bubble-user").count(), before, "continuation must not create an optimistic user bubble");
+    assert.deepEqual(errors, []);
+  } finally { onPlanStream = undefined; await context.close(); }
+});
+
 test("post-task review output starts after a divider instead of continuing the planned turn", { timeout: 45_000 }, async () => {
   const config = { repository: "/mock/review-divider", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3,
     autoApprove: false, postTaskReview: true };

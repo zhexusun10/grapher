@@ -431,6 +431,43 @@ fn publication_merger_continuation_control_validates_phase_and_workspace() {
 
 #[cfg(feature = "fixture")]
 #[test]
+fn control_resume_node_targets_the_requested_run_and_node() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = crate::fixture::repository(temp.path()).unwrap();
+    let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+    runtime.create(Graph {
+        original_goal: "two branches".into(),
+        nodes: ["left", "right"].into_iter().map(|name| Node {
+            name: name.into(), task: name.into(),
+        }).collect(),
+        edges: vec![],
+    }, serde_json::from_value(serde_json::json!({
+        "repository": repository, "model": "mock/model", "maxParallel": 2,
+    })).unwrap()).unwrap();
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    let left = jobs.iter().find(|job| job.execution.node == "left").unwrap();
+    runtime.finish(&left.execution, Err("provider failure".into())).unwrap();
+    let run_id = runtime.state.run_id.clone();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime), driving: AtomicBool::new(true),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+    });
+    let invoke = |node: Option<&str>, run: &str| control("resume_node".into(),
+        node.map(str::to_owned), None, Some(run.into()), None, None, &service);
+    assert!(invoke(None, &run_id).is_err());
+    assert!(invoke(Some("right"), &run_id).is_err());
+    assert!(invoke(Some("left"), "different-run").is_err());
+    let snapshot = invoke(Some("left"), &run_id).unwrap();
+    assert_eq!(snapshot.nodes["left"].status, "waiting");
+    assert_eq!(snapshot.nodes["right"].status, "running");
+    assert_eq!(*service.drive_signal.0.lock().unwrap(), 1);
+    assert!(invoke(Some("left"), &run_id).is_err(), "duplicate requests cannot queue another attempt");
+}
+
+#[cfg(feature = "fixture")]
+#[test]
 fn topology_pause_and_node_stop_recover_unlaunched_workers_without_a_phantom_session() {
     for global in [false, true] {
         let temp = tempfile::tempdir().unwrap();
@@ -1565,7 +1602,7 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
     );
     assert_eq!(
         planner_node_status(&runtime.state),
-        format!("Current graph node status:\n- first: waiting\n")
+        "Current graph node status:\n- first: waiting\n".to_string()
     );
 }
 
@@ -5220,7 +5257,7 @@ fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
         calls.set(calls.get() + 1);
         Some(serde_json::json!({ "result": { "providers": [] } }))
     };
-    validate_planning_models_preflight(&config, None, &fetch).unwrap();
+    validate_planning_models_preflight(&config, None, fetch).unwrap();
     assert_eq!(calls.get(), 1);
 
     calls.set(0);
@@ -5228,7 +5265,7 @@ fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
         calls.set(calls.get() + 1);
         None
     };
-    validate_planning_models_preflight(&config, None, &unavailable).unwrap();
+    validate_planning_models_preflight(&config, None, unavailable).unwrap();
     assert_eq!(calls.get(), 1); // A failed lookup is also reused.
 
     calls.set(0);
@@ -5240,7 +5277,7 @@ fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
             serde_json::json!({ "result": { "providers": [{ "id": provider, "configured": false }] } }),
         )
     };
-    let error = validate_planning_models_preflight(&config, None, &unauthenticated).unwrap_err();
+    let error = validate_planning_models_preflight(&config, None, unauthenticated).unwrap_err();
     assert!(error.contains("not authenticated"));
     assert!(error.contains(&partitioner_model));
     assert_eq!(calls.get(), 1);

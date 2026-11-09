@@ -1,5 +1,6 @@
 // Keys retain the existing Chinese UI copy so the Chinese version stays unchanged.
 export const en: Record<string, string> = {
+  "继续当前 Agent（不会追加消息）": "Continue this agent (without adding a message)",
   "Planner 待处理消息": "Pending Planner messages",
   "正在提交消息…": "Submitting message…",
   "已提交，等待 Planner 确认…": "Submitted; waiting for Planner confirmation…",
@@ -519,6 +520,7 @@ export const en: Record<string, string> = {
   "执行已停止；请在失败节点的对话中发送介入指令以继续": "Execution has stopped; send an intervention message in the failed node's conversation to continue",
   "已暂停后续派发": "Further dispatch paused",
   "正在暂停": "Pausing",
+  "正在继续": "Resuming",
   "正在停止运行中的节点…": "Stopping running nodes…",
   "执行已暂停，点击继续可恢复": "Execution paused. Continue to resume.",
   "继续将先恢复暂停的任务；其他失败节点可稍后重试。": "Continue first resumes paused tasks; retry other failed nodes afterward.",
@@ -567,6 +569,11 @@ export const en: Record<string, string> = {
   "不能选择系统桌面作为项目工作区：Grapher 会强制把工作区内所有文件收录进 Git 快照（无视 .gitignore），而桌面通常包含大量无关个人数据，会让运行长时间卡住。请选择具体的项目或代码仓库目录。": "The system desktop cannot be selected as a project workspace. Grapher force-collects all workspace files into Git snapshots (ignoring .gitignore), and desktop folders typically contain personal data that causes runs to stall. Select a specific project or code repository directory instead.",
   "项目绑定已失效：{0}。原目录不存在、不可访问或不是绝对目录；请重新选择目录建立新绑定。": "The project binding is invalid: {0}. The original directory is missing, inaccessible, or not an absolute path. Select a directory again to create a new binding.",
   "项目绑定不可访问：{0}：{1}。请重新选择目录建立新绑定。": "The project binding is inaccessible: {0}: {1}. Select a directory again to create a new binding.",
+  "临时 Git 快照不存在或已回收；请重新派发节点或开启新对话。": "The temporary Git snapshot is missing or has been reclaimed. Redispatch the node or start a new conversation.",
+  "临时 Git 快照不存在或已回收：快照在首次派发节点时建立，发布成功后删除。请开启新对话后重试。": "The temporary Git snapshot is missing or has been reclaimed. Snapshots are created when nodes are first dispatched and removed after publication. Start a new conversation and try again.",
+  "临时 Git 快照不存在：图运行的快照在首次派发节点时建立，并在发布成功后回收。请开启新对话后重试。（工作区：{0}）": "The temporary Git snapshot is missing. Graph run snapshots are created when nodes are first dispatched and reclaimed after publication. Start a new conversation and try again. (Workspace: {0})",
+  "绑定的 Git 仓库还没有任何提交（HEAD 不存在）；请先完成一次提交再运行。": "The bound Git repository has no commits yet (HEAD does not exist). Create an initial commit before running.",
+  "工作区快照缺少可解析的 HEAD：{0}": "The workspace snapshot has no resolvable HEAD: {0}",
   "发现旧执行器的未清理 lease：{0}。请先使用旧版本停止对应执行并确认没有后台写入；新原生后端不会删除记录或接管旧执行。": "An uncleared legacy executor lease was found: {0}. Use the old version to stop the execution and ensure no background writes remain. The native backend will not delete records or take over legacy executions.",
   "节点执行期间在隔离工作区内修改文件；整图完成后会将结果写回 {0}。": "Nodes modify files in isolated workspaces. Once the graph completes, results will be written back to {0}.",
   "界面语言": "Interface language",

@@ -130,24 +130,22 @@ fn workspace_plan(root: &Path, store: &Store, parent: &Path) -> Result<Workspace
     // Apply the source-database lifetime contract, including completed Git
     // Graphs whose private ancestry is still conversation-owned. Skip entries
     // that fail shadow name validation or are symlinks.
-    if let Ok(shadow_root) = real_child_path(root, &root.join("shadow_repos"), false) {
-        if let Some(shadow_root) = shadow_root {
-            for entry in fs::read_dir(&shadow_root).map_err(|error| error.to_string())? {
-                let entry = entry.map_err(|error| error.to_string())?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let target = crate::cleanup::Target::Shadow {
-                    root: root.to_path_buf(),
-                    name,
-                    source: None,
-                };
-                let Ok(Some(path)) = target.resolve(root, "offline-gc") else {
-                    continue;
-                };
-                if store.shadow_repo_in_use(&path)? {
-                    plan.shadow_retained += 1;
-                } else {
-                    plan.shadow_paths.insert(path);
-                }
+    if let Ok(Some(shadow_root)) = real_child_path(root, &root.join("shadow_repos"), false) {
+        for entry in fs::read_dir(&shadow_root).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let target = crate::cleanup::Target::Shadow {
+                root: root.to_path_buf(),
+                name,
+                source: None,
+            };
+            let Ok(Some(path)) = target.resolve(root, "offline-gc") else {
+                continue;
+            };
+            if store.shadow_repo_in_use(&path)? {
+                plan.shadow_retained += 1;
+            } else {
+                plan.shadow_paths.insert(path);
             }
         }
     }

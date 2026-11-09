@@ -21,6 +21,8 @@ export interface UseWorkspaceChangesOptions {
 
 export interface WorkspaceChangesViewModel {
   summary: FileChangeSummary;
+  /** False until this scope has an authoritative summary. */
+  isLoaded: boolean;
   availableNodes: string[];
   activeExecutionId?: string;
 }
@@ -55,12 +57,15 @@ export function useWorkspaceChanges({
   const scopedIds = scoped ? scopedExecutions.map((execution) => execution.id) : null;
   const scopeKey = JSON.stringify([runId, scopedIds]);
   const inline = !state.fileChangesOmitted;
+  // No executions means there cannot be any execution-scoped changes.
+  const emptyScope = scopedIds !== null && scopedIds.length === 0;
   const [fetched, setFetched] = useState<{ key: string; summary: FileChangeSummary } | null>(null);
   const poller = useRef<PollingController | null>(null);
   const snapshotSequence = state.events.at(-1)?.sequence ?? 0;
 
   useEffect(() => {
     if (inline || !runId) { setFetched(null); return; }
+    if (emptyScope) return;
     const abort = new AbortController();
     let nextReadAt = 0;
     const load = async (): Promise<number | null> => {
@@ -93,7 +98,7 @@ export function useWorkspaceChanges({
       if (poller.current === polling) poller.current = null;
     };
     // scopeKey contains the immutable execution-id list, not its array identity.
-  }, [inline, runId, scopeKey, isWorking]);
+  }, [inline, runId, scopeKey, emptyScope, isWorking]);
 
   useEffect(() => { poller.current?.wake(); }, [snapshotSequence]);
 
@@ -108,7 +113,7 @@ export function useWorkspaceChanges({
 
     let summary: FileChangeSummary;
     if (!inline) {
-      summary = fetched && fetched.key === scopeKey ? fetched.summary : emptyFileChangeSummary;
+      summary = !emptyScope && fetched && fetched.key === scopeKey ? fetched.summary : emptyFileChangeSummary;
     } else {
       const parts: FileChangeSummary[] = [];
       for (const execution of executions) {
@@ -138,12 +143,15 @@ export function useWorkspaceChanges({
 
     return {
       summary,
+      isLoaded: inline || !runId || emptyScope || fetched?.key === scopeKey,
       availableNodes: nodes.size > 0 ? Array.from(nodes) : EMPTY_NODES,
       activeExecutionId,
     };
   }, [
     inline,
+    emptyScope,
     fetched,
+    runId,
     scopeKey,
     state.fileChanges,
     state.executions,

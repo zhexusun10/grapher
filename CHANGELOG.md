@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Editing a never-started graph node now updates its task in the same Run instead of creating a new conversation and approval graph. Existing work and scheduling state are retained; a stale edit or a race with dispatch is rejected without discarding the draft (`src/components/views/GraphWorkbench.tsx`, `backend/src/runtime.rs`, `backend/src/model.rs`).
+- CI now type-checks the frontend (`npm run check`) on Linux. The frontend suites run through `tsx`, which strips types without checking them, so a type error previously surfaced only in the release build (`.github/workflows/planner-source.yml`).
+- Extracted Planner stream state reduction, inline `<think>`/`<thought>` tag splitting, and message-version branching out of `src/App.tsx`, split `backend/src/server.rs` into focused `server/{activity,open_file,project_discovery,sse}.rs` submodules, consolidated repository path-binding checks into `backend/src/path_identity.rs`, and unified live and terminal execution metric folding in `backend/src/model.rs` so terminal completion skips parsing non-metric delta lines (`src/App.tsx`, `src/services/plannerStream.ts`, `src/services/thinkingTranscript.ts`, `src/services/conversationBranch.ts`, `backend/src/model.rs`, `backend/src/path_identity.rs`, `backend/src/server.rs`, `backend/src/server/`).
+- Applied host-neutral Clippy suggestions across the backend (slice borrowing, `inspect_err`, collapsed conditions, redundant `Option` unwraps). Platform-gated `return` statements are left in place on purpose, because which branch is "last" depends on the compile target (`backend/src`, `backend/tests`).
+
 ### Added
 
 - Planner graph edits on an approved Run now say which completed nodes the whole candidate graph would invalidate, e.g. `Current changes will invalidate and rerun 56 completed nodes: …`. The list comes from the Runtime calculation used at commit, so a review or follow-up can see that removing feedback routes or retasking a node reruns existing work before it commits the revision. It is an advisory warning, not a rejection or an approval; commit re-evaluates live state, unapproved drafts report nothing, and a missing snapshot or older compiler returns no warning rather than a guess (`backend/resources/planner.ts`, `backend/src/runtime.rs`, `backend/src/server.rs`, `backend/src/main.rs`).
@@ -15,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Continuing a Graph after the backend exits during workspace handoff now recovers interrupted preparation instead of treating the incomplete project view as a completed result. Recovery also recognizes interrupted node-composition Mergers, restores managed-environment inputs when preparation had not finished, and falls back to the completed node session when a follow-up was interrupted before its session fork. Prepared executions still retain their partial workspace and fail closed when their recovery evidence is missing or inputs changed (`backend/src/runtime.rs`, `backend/src/model.rs`, `backend/src/workspace.rs`, `backend/src/workspace_view.rs`, `backend/src/recovery_workspace_tests.rs`, `backend/src/environment_tests.rs`).
+- The English UI showed `正在继续` while a paused Graph was resuming (`Resuming`), and five backend Git/snapshot diagnostics (missing or reclaimed temporary Git snapshots, unborn repository `HEAD`, and unresolvable snapshot `HEAD`) had no English entries and fell back to Chinese; all now localize to English (`src/i18n/en.ts`, `scripts/frontend-i18n.test.ts`).
+- Frontend and backend tests no longer depend on the host: the streamed tool-card assertion follows the active locale instead of expecting English on a Chinese system, and the Planner steer test runs `python` on Windows, where `python3` is usually only the Microsoft Store stub (`scripts/thinking-transcript.test.ts`, `backend/src/planner_steer_tests.rs`).
 - Changing a conversation's Node Agent model or reasoning level now applies to every later attempt, including feedback repairs, invalidated descendants, history edits and follow-ups of completed nodes. Previously, an older per-node selection could revive the old model. Running attempts and historical model records remain unchanged, and environment overrides still take precedence (`backend/src/runtime.rs`, `backend/src/feedback_workspace_tests.rs`).
 
 - Live Planner responses and runtime notifications now flush each SSE frame immediately instead of waiting for the HTTP server's 8 KiB buffer to fill. A conversation can show reasoning and status updates as they arrive without leaving and reopening it (`backend/src/server.rs`, `backend/src/sse_http_tests.rs`).

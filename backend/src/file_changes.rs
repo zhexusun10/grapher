@@ -557,7 +557,7 @@ fn parse_bash_command_changes(
     // example `cd /tmp && rm -rf build`) moves every following relative target
     // outside it. Commands without a resolved directory cannot be attributed.
     let mut cwd = root;
-    for segment in command.split(|c| c == ';' || c == '\n') {
+    for segment in command.split([';', '\n']) {
         for sub in segment.split("&&") {
             let trimmed = sub.trim();
             if trimmed.is_empty() {
@@ -2171,7 +2171,7 @@ mod tests {
         let running = parse_jsonl_file_changes(jsonl, "task", "exec-1", "/repo", "/repo", true);
         assert!(running.is_running);
         assert_eq!(running.active_file_path.as_deref(), Some("src/live.ts"));
-        assert_eq!(running.files[0].is_running, true);
+        assert!(running.files[0].is_running);
 
         let settled = parse_jsonl_file_changes(jsonl, "task", "exec-1", "/repo", "/repo", false);
         assert!(!settled.is_running);
@@ -2210,7 +2210,7 @@ mod tests {
             ..Default::default()
         };
         apply_jsonl(&mut acc, start, "worker", "exec-1", "/repo", "/repo", true);
-        assert_eq!(accumulator_summary(&acc).files[0].is_running, true);
+        assert!(accumulator_summary(&acc).files[0].is_running);
         acc.settled();
         let done = accumulator_summary(&acc);
         assert!(!done.is_running);

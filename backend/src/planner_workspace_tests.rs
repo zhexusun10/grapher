@@ -1733,7 +1733,7 @@ console.log(JSON.stringify({ type: 'message_end', message: {
         .unwrap()
         .finish(&running.execution, Err("node interrupted by test".into()))
         .unwrap();
-    let _ = planner.join().unwrap();
+    planner.join().unwrap();
     assert!(
         result_rx.recv().unwrap().is_some(),
         "Stop must abort the revision before it commits"

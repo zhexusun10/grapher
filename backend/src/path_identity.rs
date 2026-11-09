@@ -191,6 +191,55 @@ pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     path_key(left) == path_key(right)
 }
 
+/// Match a persisted repository binding to a requested repository path.
+/// Prefer canonical identity when available; on Windows also recognize lexical
+/// aliases for archived/deleted paths. Never treat two failed canonicalizations
+/// (or an unattributed record) as equal.
+pub(crate) fn same_repository_binding(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.trim().is_empty() {
+        return false;
+    }
+    if left == right {
+        return true;
+    }
+    let left = Path::new(left);
+    let right = Path::new(right);
+    if !left.is_absolute() || !right.is_absolute() {
+        return false;
+    }
+    if let (Ok(left), Ok(right)) = (left.canonicalize(), right.canonicalize()) {
+        return left == right;
+    }
+    #[cfg(windows)]
+    if let (Some(left), Some(right)) = (windows_repository_key(left), windows_repository_key(right))
+    {
+        return left == right;
+    }
+    false
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_repository_key(path: &Path) -> Option<String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    // Archived bindings may point at a deleted final directory. Canonicalize
+    // the longest existing ancestor first so 8.3 aliases such as RUNNER~1
+    // still match the saved long path without guessing a missing component.
+    let probe = actual_path(path).unwrap_or_else(|_| path.to_path_buf());
+    let value = probe.to_str()?.replace('/', "\\").to_lowercase();
+    let value = if let Some(unc) = value.strip_prefix(r"\\?\unc\") {
+        format!(r"\\{unc}")
+    } else {
+        value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
+    };
+    Some(value.trim_end_matches('\\').to_owned())
+}
+
 /// Encode an absolute, NUL-terminated path for raw Win32 filesystem calls.
 /// Unlike canonicalize, this does not follow the final symlink/junction (which
 /// may be dangling). Keep this native boundary separate from Node/Git paths.
@@ -252,7 +301,7 @@ mod tests {
         ] {
             assert!(is_runtime_metadata_name(OsStr::new(name)));
             #[cfg(any(windows, target_os = "macos"))]
-            assert!(is_runtime_metadata_name(&OsStr::new(
+            assert!(is_runtime_metadata_name(OsStr::new(
                 &name.to_ascii_uppercase()
             )));
         }

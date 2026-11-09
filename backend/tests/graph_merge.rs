@@ -532,7 +532,7 @@ fn failed_resolver_preserves_conflict_and_user_edits_publish_before_merge() {
     fs::write(source.join("local"), "user changes").unwrap();
     // Pending user work is captured privately and remains uncommitted. It is not a merge
     // conflict, so publication succeeds without launching the Merger.
-    merge_graph(&source, &[a.clone()], || {
+    merge_graph(&source, std::slice::from_ref(&a), || {
         panic!("User edits are not a merge conflict")
     })
     .unwrap();
@@ -566,7 +566,7 @@ fn redundant_ancestors_do_not_create_extra_merges_in_either_order() {
         let base = snapshot_repository(&source).unwrap();
         let a = branch(&source, &base, &temp.path().join("a"), "a.txt", "a");
         let b_path = temp.path().join("b");
-        prepare(&source, &b_path, &base, &[a.clone()]).unwrap();
+        prepare(&source, &b_path, &base, std::slice::from_ref(&a)).unwrap();
         fs::write(b_path.join("b.txt"), "b").unwrap();
         let b = snapshot_node(&b_path, &source, "b").unwrap();
         let mut heads = vec![a.clone(), b.clone(), b.clone()];
@@ -672,7 +672,7 @@ fn retry_finishes_pending_merge_before_pruning_redundant_incoming() {
     let a = branch(&source, &base, &temp.path().join("a"), "shared", "first\n");
     let b = branch(&source, &base, &temp.path().join("b"), "shared", "second\n");
     let c_path = temp.path().join("c");
-    prepare(&source, &c_path, &base, &[b.clone()]).unwrap();
+    prepare(&source, &c_path, &base, std::slice::from_ref(&b)).unwrap();
     fs::write(c_path.join("c.txt"), "c").unwrap();
     let c = snapshot_node(&c_path, &source, "c").unwrap();
     assert!(merge_graph(&source, &[a.clone(), b.clone()], || Err(

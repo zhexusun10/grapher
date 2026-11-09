@@ -425,7 +425,12 @@ fn opaque_versions_are_immutable_and_corruption_fails_before_materialization() {
     workspace::git(&sibling, &["init", "-q"]).unwrap();
     store
         .files
-        .materialize(&sibling, &[base.environment_ref.clone()], None, false)
+        .materialize(
+            &sibling,
+            std::slice::from_ref(&base.environment_ref),
+            None,
+            false,
+        )
         .unwrap();
     assert_eq!(
         fs::read_to_string(sibling.join(".env/package")).unwrap(),
@@ -1022,4 +1027,63 @@ fn snapshot_then_transaction_failure_never_commits_half_a_composite_result() {
     assert_eq!(recovered.state.run_id, run);
     assert_eq!(recovered.state.nodes["A"].status, "failed");
     assert!(recovered.state.executions[0].result.is_none());
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn managed_environment_handoff_recovers_after_crash_before_directory_or_environment_prepare() {
+    let mut policy = state_policy();
+    policy.layout = "relocatable".into();
+    let (_temp, source, mut runtime) = setup(
+        graph(&["A", "B", "C"], &[("A", "B", false), ("A", "C", false)]),
+        policy,
+        r#"
+if (name === 'A') {
+  fs.mkdirSync(process.env.GTEST_STATE + '/.env', { recursive: true });
+  fs.writeFileSync(process.env.GTEST_STATE + '/.env/pkg', 'from-A');
+} else {
+  if (fs.readFileSync(process.env.GTEST_STATE + '/.env/pkg', 'utf8') !== 'from-A') {
+    throw Error('managed environment was not materialized for ' + name);
+  }
+}
+"#,
+    );
+    // 1. Crash right after `Started(A)` before `A.worktree` is created on disk.
+    let a_uncreated = runtime.jobs().unwrap().remove(0);
+    assert!(!Path::new(&a_uncreated.execution.worktree).exists());
+    let root = runtime.root.clone();
+    drop(runtime);
+    let mut runtime = Runtime::open(&root).unwrap();
+    assert!(runtime.state.can_resume_interrupted());
+    runtime.pause(false).unwrap();
+    let a_retry = runtime.jobs().unwrap().remove(0);
+    assert_eq!(a_retry.execution.worktree, a_uncreated.execution.worktree);
+    run(&mut runtime, &a_retry);
+
+    // 2. Fan-out `B` and `C` allocate fresh slots. Simulate a crash during `B`'s
+    // Git/view handoff after `B.worktree` is created on disk (with `project-ready`
+    // cleared), before `store.prepare` materialized `.env/pkg`.
+    let mut children = runtime.jobs().unwrap();
+    let c_job = children.pop().unwrap();
+    let b_job = children.pop().unwrap();
+    run(&mut runtime, &c_job);
+    let b_path = PathBuf::from(&b_job.execution.worktree);
+    workspace::prepare(
+        &source,
+        &b_path,
+        &b_job.execution.before,
+        &b_job.parent_heads,
+    )
+    .unwrap();
+    crate::workspace_view::clear_ready(&b_path).unwrap();
+    let root = runtime.root.clone();
+    drop(runtime);
+    let mut runtime = Runtime::open(&root).unwrap();
+    assert!(runtime.state.can_resume_interrupted());
+    runtime.pause(false).unwrap();
+    let b_retry = runtime.jobs().unwrap().remove(0);
+    assert_eq!(b_retry.execution.node, "B");
+    assert_eq!(b_retry.execution.worktree, b_job.execution.worktree);
+    run(&mut runtime, &b_retry);
+    assert_eq!(runtime.state.nodes["B"].status, "completed");
 }

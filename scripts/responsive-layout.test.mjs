@@ -97,6 +97,44 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
       }
     }
     await page.setViewportSize({ width: 1280, height: 800 });
+    await page.waitForTimeout(400);
+    // Compare the actual card with a non-clipping reference at the same pixel
+    // position. Descenders must survive the overflow needed for ellipsis.
+    const card = page.locator(".project-workspace-item").first();
+    const title = card.locator(".proj-name-row strong");
+    await title.evaluate(element => {
+      element.textContent = "RSI-Agent";
+      // Exercise a taller font as well as the platform's default font metrics.
+      element.style.fontSize = "16px";
+    });
+    const glyphClip = await title.evaluate(element => {
+      const range = document.createRange();
+      range.setStart(element.firstChild, 5);
+      range.setEnd(element.firstChild, 6);
+      const glyph = range.getBoundingClientRect();
+      const box = element.getBoundingClientRect();
+      const x = Math.floor(glyph.left), y = Math.floor(box.top) - 2;
+      return { x, y, width: Math.ceil(glyph.right) - x, height: Math.ceil(box.bottom) - y + 2 };
+    });
+    const clipped = await page.screenshot({ clip: glyphClip, animations: "disabled" });
+    await title.evaluate(element => { element.style.overflow = "visible"; });
+    const unclipped = await page.screenshot({ clip: glyphClip, animations: "disabled" });
+    assert.ok(clipped.equals(unclipped), "workspace title descenders are not clipped by the ellipsis box");
+    await title.evaluate(element => {
+      element.style.removeProperty("overflow");
+      element.style.removeProperty("font-size");
+      element.textContent = "A very long workspace title with descenders gyp ".repeat(3);
+    });
+    const titleLayout = await card.evaluate(element => {
+      const title = element.querySelector(".proj-name-row strong");
+      const path = element.querySelector(".proj-path-text");
+      return { truncated: title.scrollWidth > title.clientWidth && getComputedStyle(title).textOverflow === "ellipsis",
+        separated: title.getBoundingClientRect().bottom <= path.getBoundingClientRect().top,
+        withinCard: path.getBoundingClientRect().bottom <= element.getBoundingClientRect().bottom };
+    });
+    assert.deepEqual(titleLayout, { truncated: true, separated: true, withinCard: true },
+      "long titles still truncate without overlapping the path or card edge");
+    await title.evaluate(element => { element.textContent = "Project"; });
     assert.equal(await switcher.isVisible(), false, "wide workspaces keep the split view");
     assert.ok((await page.locator(".conversation-pane").boundingBox()).width >= 279, "a stored small split does not crush the conversation");
     assert.ok((await page.locator(".graph-pane").boundingBox()).width >= 319, "the graph retains its minimum width");

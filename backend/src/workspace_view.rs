@@ -1529,9 +1529,6 @@ pub(crate) fn validate_bound(path: &Path, source: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-fn install_git(path: &Path, record: &Path, view: &View) -> Result<(), String> {
-    install_git_scoped(path, path, record, view)
-}
 /// The private copy of the project Git for `path`. Nested repositories and
 /// gitfile/link layouts keep it beside the slot's external state instead of in
 /// the worktree.
@@ -1562,7 +1559,18 @@ fn private_project_git(owner: &Path, path: &Path, view: &View) -> Result<Option<
 /// its native history, while graph `checkout -f` already moved the working
 /// files to this one; preparation is deterministic, so the native repository
 /// must follow the record exactly as a fresh slot would.
-fn project_git_follows_record(path: &Path, record: &Path) -> Result<bool, String> {
+fn project_git_follows_record(owner: &Path, path: &Path, record: &Path) -> Result<bool, String> {
+    if !crate::workspace_state::process_root(owner)?
+        .join(".git-config/global")
+        .is_file()
+    {
+        return Ok(false);
+    }
+    if !workspace::project_git(path, &["rev-parse", "--show-toplevel"])
+        .is_ok_and(|top| crate::path_identity::same_path(Path::new(&top), path))
+    {
+        return Ok(false);
+    }
     let git = record.join("git");
     let dir = git.to_str().ok_or("Invalid recorded project Git path")?;
     let Ok(recorded) = workspace::project_git(
@@ -1588,13 +1596,14 @@ fn rebind_git_scoped(owner: &Path, path: &Path, record: &Path, view: &View) -> R
     let git_dir =
         private_project_git(owner, path, view)?.ok_or("Missing recorded project Git view")?;
     let binding = path.join(".git");
-    let existing = fs::symlink_metadata(&binding).map_err(|e| e.to_string())?;
-    if existing.is_dir() && !crate::workspace_symlinks::is_link(&existing) {
-        crate::path_safety::real_child_path(path, &binding, false)?
-            .ok_or("Project Git binding disappeared during preparation")?;
-        fs::remove_dir_all(&binding).map_err(|e| e.to_string())?;
-    } else {
-        fs::remove_file(&binding).map_err(|e| e.to_string())?;
+    if let Ok(existing) = fs::symlink_metadata(&binding) {
+        if existing.is_dir() && !crate::workspace_symlinks::is_link(&existing) {
+            crate::path_safety::real_child_path(path, &binding, false)?
+                .ok_or("Project Git binding disappeared during preparation")?;
+            fs::remove_dir_all(&binding).map_err(|e| e.to_string())?;
+        } else {
+            fs::remove_file(&binding).map_err(|e| e.to_string())?;
+        }
     }
     if git_dir != binding {
         let state = crate::workspace_state::process_root(owner)?;
@@ -1611,10 +1620,10 @@ fn rebind_git_scoped(owner: &Path, path: &Path, record: &Path, view: &View) -> R
 /// native history keeps the previous occupant's base, and staging composition
 /// cannot even read the new reference.
 fn ensure_project_git(owner: &Path, path: &Path, record: &Path, view: &View) -> Result<(), String> {
-    if !path.join(".git").exists() {
-        return install_git_scoped(owner, path, record, view);
+    if view.git_entries.is_none() {
+        return Ok(());
     }
-    if view.git_entries.is_none() || project_git_follows_record(path, record)? {
+    if path.join(".git").exists() && project_git_follows_record(owner, path, record)? {
         return Ok(());
     }
     rebind_git_scoped(owner, path, record, view)
@@ -1875,6 +1884,13 @@ fn restore_entry(path: &Path, entry: &Entry) -> Result<(), String> {
 fn ready(path: &Path) -> Result<PathBuf, String> {
     Ok(crate::workspace_state::root(path)?.join("project-ready"))
 }
+pub(crate) fn clear_ready(path: &Path) -> Result<(), String> {
+    let file = ready(path)?;
+    if file.exists() {
+        fs::remove_file(&file).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 fn mark_ready(path: &Path) -> Result<(), String> {
     let file = ready(path)?;
     let root = crate::workspace_state::root(path)?;
@@ -2043,18 +2059,17 @@ pub(crate) fn prepare(
     {
         return Err("Conflicting inherited Git creation/deletion; refusing to silently choose a project view".into());
     }
-    if is_bound(path) {
-        validate_bound(path, source)?;
-        ensure_project_git(path, path, &record, &view)?;
-    } else {
-        install_git(path, &record, &view)?;
+    if !is_bound(path) {
+        if path.join(".git").exists() {
+            return Err("Refusing to replace an existing project Git view".into());
+        }
         crate::workspace_state::prepare(path)?;
         fs::write(binding(path)?, &view.source).map_err(|e| e.to_string())?;
+    } else {
+        validate_bound(path, source)?;
     }
-    let ready = ready(path)?;
-    if ready.exists() {
-        fs::remove_file(&ready).map_err(|e| e.to_string())?;
-    }
+    clear_ready(path)?;
+    ensure_project_git(path, path, &record, &view)?;
     compose_project_history(path, &inputs)?;
     if view.git_entries.is_some() && base_view.git_entries.is_some() {
         let indices: Vec<_> = inputs
@@ -2880,18 +2895,17 @@ pub(crate) fn seal_composed_view(
     {
         return Err("Conflicting inherited Git creation/deletion; refusing to silently choose a project view".into());
     }
-    if is_bound(path) {
-        validate_bound(path, source)?;
-        ensure_project_git(path, path, &record, &view)?;
-    } else {
-        install_git(path, &record, &view)?;
+    if !is_bound(path) {
+        if path.join(".git").exists() {
+            return Err("Refusing to replace an existing project Git view".into());
+        }
         crate::workspace_state::prepare(path)?;
         fs::write(binding(path)?, &view.source).map_err(|e| e.to_string())?;
+    } else {
+        validate_bound(path, source)?;
     }
-    let ready = ready(path)?;
-    if ready.exists() {
-        fs::remove_file(&ready).map_err(|e| e.to_string())?;
-    }
+    clear_ready(path)?;
+    ensure_project_git(path, path, &record, &view)?;
     compose_project_history(path, &inputs)?;
     if view.git_entries.is_some() && base_view.git_entries.is_some() {
         let indices: Vec<_> = inputs

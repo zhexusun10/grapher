@@ -694,6 +694,8 @@ a,
 }
 
 .proj-name-row strong {
+  /* Ellipsis clips vertically too; allow room for descenders in fallback fonts. */
+  padding-block: 2px;
   font-size: 13px;
   line-height: 18px;
   font-weight: 500;

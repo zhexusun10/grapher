@@ -8,6 +8,7 @@ import "./WorkspaceChanges.css";
 
 interface WorkspaceChangesTriggerProps {
   summary: FileChangeSummary;
+  isLoaded: boolean;
   panelId: string;
   isOpen: boolean;
   onToggle: React.MouseEventHandler<HTMLButtonElement>;
@@ -16,11 +17,13 @@ interface WorkspaceChangesTriggerProps {
 /** Same trigger treatment as "Workspace and session details"; no leading icon,
  * no totals, and the same chevron that rotates in place. */
 export const WorkspaceChangesTrigger = React.memo(function WorkspaceChangesTrigger({
-  summary, panelId, isOpen, onToggle,
+  summary, isLoaded, panelId, isOpen, onToggle,
 }: WorkspaceChangesTriggerProps) {
+  const label = summary.totalFiles > 0 ? t("{0} 个文件变更", summary.totalFiles) : t("暂无文件变更");
   return <button type="button" className="workspace-details-trigger workspace-changes-trigger" data-testid="workspace-changes-trigger"
-    onClick={onToggle} aria-expanded={isOpen} aria-controls={isOpen ? panelId : undefined}>
-    <span>{summary.totalFiles > 0 ? t("{0} 个文件变更", summary.totalFiles) : t("暂无文件变更")}</span>
+    onClick={onToggle} disabled={!isLoaded} aria-busy={!isLoaded}
+    aria-expanded={isOpen} aria-controls={isOpen ? panelId : undefined}>
+    <span>{label}</span>
     <ChevronRight size={12} className={`workspace-details-chevron ${isOpen ? "open" : ""}`} aria-hidden="true" />
   </button>;
 });

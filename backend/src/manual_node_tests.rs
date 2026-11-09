@@ -87,6 +87,46 @@ fn completed_chain() -> (tempfile::TempDir, PathBuf, Runtime) {
 }
 
 #[test]
+fn unstarted_task_edit_preserves_run_and_replays_without_resetting_work() {
+    let (_temp, _source, mut runtime) = setup(true, chain());
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    assert!(jobs.iter().any(|job| job.execution.node == "up"));
+    assert!(!jobs.iter().any(|job| job.execution.node == "child"));
+    let run_id = runtime.state.run_id.clone();
+    let executions = runtime.state.executions.len();
+    let phase = runtime.state.phase.clone();
+    let up_status = runtime.state.nodes["up"].status.clone();
+    runtime.update_unstarted_node_task("child", "task child", "new child task").unwrap();
+    assert_eq!(runtime.state.run_id, run_id);
+    assert_eq!(runtime.state.graph.nodes.iter().find(|n| n.name == "child").unwrap().task, "new child task");
+    assert_eq!(runtime.state.executions.len(), executions);
+    assert_eq!(runtime.state.nodes["up"].status, up_status);
+    assert_eq!(runtime.state.phase, phase);
+    assert!(runtime.update_unstarted_node_task("child", "task child", "stale").is_err());
+    assert!(runtime.update_unstarted_node_task("up", "task up", "too late").is_err());
+    assert!(runtime.update_unstarted_node_task("child", "new child task", "  ").is_err());
+    let replay = runtime.store.load(&run_id).unwrap();
+    assert_eq!(replay.graph, runtime.state.graph);
+    assert_eq!(replay.phase, phase);
+    assert_eq!(replay.executions.len(), executions);
+}
+
+#[test]
+fn unstarted_task_edit_is_used_by_the_first_execution() {
+    let (_temp, _source, mut runtime) = setup(true, chain());
+    let run_id = runtime.state.run_id.clone();
+    runtime.update_unstarted_node_task("up", "task up", "updated upstream task").unwrap();
+    assert_eq!(runtime.state.phase, "awaiting_approval");
+    assert_eq!(runtime.store.load(&run_id).unwrap().graph, runtime.state.graph);
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    let up = jobs.iter().find(|job| job.execution.node == "up").unwrap();
+    assert_eq!(up.task, "updated upstream task");
+    assert!(runtime.update_unstarted_node_task("up", "updated upstream task", "racing edit").is_err());
+}
+
+#[test]
 fn manual_node_draft_validates_atomically_and_replays() {
     let (_temp, _source, mut runtime) = setup(true, chain());
     let run_id = runtime.state.run_id.clone();

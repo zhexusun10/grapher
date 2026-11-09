@@ -311,6 +311,88 @@ test('bundled continuity recovers capped provider turns only while selected for 
   }
 });
 
+test('manual continuation preserves tool history and uses Pi native missing-result normalization', { timeout: 90000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-continuation-context-'));
+  const agent = join(directory, 'agent'), global = join(directory, 'global');
+  for (const path of [agent, global]) mkdirSync(path);
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    const chunks = []; for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+    const chunk = (delta, finish_reason) => ({ id: 'context-audit', object: 'chat.completion.chunk', created: 1, model: 'local',
+      choices: [{ index: 0, delta, finish_reason }] });
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify(chunk({ role: 'assistant', content: 'done' }, null))}\n\ndata: ${JSON.stringify(chunk({}, 'stop'))}\n\ndata: [DONE]\n\n`);
+  });
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: { 'context-audit': {
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'local-audit-only',
+      models: [{ id: 'local', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    } } }));
+    for (const [index, role, complete, continuity, stopReason = 'toolUse'] of [[1, 'node', false, true], [2, 'node', true, true],
+      [3, 'planner', false, true], [4, 'planner', true, true], [5, 'node', false, false], [6, 'planner', false, false],
+      [7, 'node', false, false, 'error'], [8, 'planner', false, false, 'length']]) {
+      writeFileSync(join(agent, 'extensions.json'), JSON.stringify({ overrides: { 'npm:pi-continuity': continuity } }));
+      const sessions = join(directory, `sessions-${index}`); mkdirSync(sessions);
+      const id = `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+      const now = new Date().toISOString();
+      const entry = (id, parentId, message) => ({ type: 'message', id, parentId, timestamp: now, message });
+      const call = (id, name) => ({ type: 'toolCall', id, name, arguments: { command: 'echo test' } });
+      const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+      const entries = [
+        { type: 'session', version: 3, id, timestamp: now, cwd: directory },
+        entry('user', null, { role: 'user', content: [{ type: 'text', text: 'ORIGINAL_TASK_ONLY' }], timestamp: 1 }),
+        entry('assistant', 'user', { role: 'assistant', content: [call('call_alpha', 'bash'), call('call_beta', 'bash')],
+          api: 'openai-completions', provider: 'context-audit', model: 'local', usage, stopReason, timestamp: 2 }),
+        entry('result-a', 'assistant', { role: 'toolResult', toolCallId: 'call_alpha', toolName: 'bash',
+          content: [{ type: 'text', text: 'SAVED_RESULT_ALPHA' }], isError: false, timestamp: 3 }),
+      ];
+      if (complete) entries.push(entry('result-b', 'result-a', { role: 'toolResult', toolCallId: 'call_beta', toolName: 'bash',
+        content: [{ type: 'text', text: 'SAVED_RESULT_BETA' }], isError: false, timestamp: 4 }));
+      const sessionFile = join(sessions, `audit_${id}.jsonl`);
+      writeFileSync(sessionFile, entries.map(item => JSON.stringify(item)).join('\n') + '\n');
+      const events = await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--mode', 'rpc', '--no-context-files',
+          '--no-skills', '--no-tools', '--model', 'context-audit/local', '--thinking', 'off', '--session-id', id, '--session-dir', sessions], {
+          cwd: directory, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PI_CODING_AGENT_DIR: agent,
+            GRAPHER_GLOBAL_PI_AGENT_DIR: global, GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_MODE: role,
+            GRAPHER_EXECUTION_KIND: 'source', GRAPHER_CONTINUE_INTERRUPTED: 'true', PI_OFFLINE: '1' },
+        });
+        let stderr = ''; const seen = [];
+        child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+        child.stdin.on('error', () => {});
+        const lines = createInterface({ input: child.stdout });
+        lines.on('line', line => { try { const event = JSON.parse(line); seen.push(event); if (event.type === 'agent_settled') settleRpc(child, role); } catch {} });
+        const timer = setTimeout(() => { child.kill(); reject(new Error(`${role} continuation timed out: ${stderr}`)); }, 20000);
+        child.once('error', error => { clearTimeout(timer); lines.close(); reject(error); });
+        child.once('close', code => { clearTimeout(timer); lines.close(); code === 0 ? resolve(seen) : reject(new Error(`${role} exited ${code}: ${stderr}`)); });
+        child.stdin.write(`${JSON.stringify({ id: 'continue', type: 'prompt', message: '__grapher_continue_interrupted__' })}\n`);
+      });
+      assert.ok(events.some(event => event.type === 'message_end' && event.message?.role === 'assistant' && event.message.stopReason === 'stop'));
+      assert.equal(requests.length, index);
+      const messages = requests.at(-1).messages;
+      const serialized = JSON.stringify(messages);
+      assert.equal(messages.filter(message => message.role === 'user').length, 1);
+      assert.ok(serialized.includes('ORIGINAL_TASK_ONLY'));
+      assert.ok(!serialized.includes('__grapher_continue_interrupted__'));
+      const retainedBatch = stopReason === 'toolUse';
+      assert.equal(serialized.includes('No result provided'), retainedBatch && !complete,
+        'only Pi supplies its native missing-result text');
+      assert.ok(!serialized.includes('side effects are unknown'), 'Grapher adds no custom warning');
+      assert.equal(serialized.includes('SAVED_RESULT_ALPHA'), retainedBatch, 'saved sibling results are retained');
+      assert.equal(serialized.includes('SAVED_RESULT_BETA'), complete);
+      assert.ok(readFileSync(sessionFile, 'utf8').includes('SAVED_RESULT_ALPHA'), 'raw session history stays intact');
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('a resumed Pi session honors a replacement model while retaining its conversation', { timeout: 60000 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'grapher-model-retry-'));
   const agent = join(directory, 'agent');
@@ -372,6 +454,118 @@ test('a resumed Pi session honors a replacement model while retaining its conver
     assert.equal(requests[1].model, 'new');
     assert.ok(JSON.stringify(requests[1].messages).includes('Original task'), 'the resumed session keeps its history');
     assert.ok(JSON.stringify(requests[1].messages).includes('Continue task'));
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('Provider refresh and Pi CLI use the same refreshed local model overlay', { timeout: 90000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-overlay-contract-'));
+  const agent = join(directory, 'agent');
+  const source = join(directory, 'upstream-models.json');
+  mkdirSync(agent);
+  const model = id => ({ id, contextWindow: 32000, maxTokens: 4096 });
+  const provider = models => ({ baseUrl: 'http://127.0.0.1:1/v1', api: 'openai-completions', apiKey: 'fixture-key', models });
+  writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: { 'overlay-audit': provider([model('dedicated')]) } }));
+  const writeSource = id => writeFileSync(source, `// Pi supports JSONC\n${JSON.stringify({ providers: { 'overlay-audit': provider([model(id)]) } })}`);
+  writeSource('first');
+  // Managed execution replaces HOME; the explicit host path must still win.
+  const env = { ...process.env, HOME: directory, USERPROFILE: directory, PI_CODING_AGENT_DIR: agent, GRAPHER_UPSTREAM_PI_MODELS: source,
+    GRAPHER_ISOLATED_PI_MODELS: '0', PI_OFFLINE: '1' };
+  const child = spawn(process.execPath, ['--import', resolverUrl, join(root, 'engine/provider-host.ts')], {
+    cwd: root, env, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const exit = new Promise(resolve => child.once('close', resolve));
+  const lines = createInterface({ input: child.stdout });
+  const iterator = lines[Symbol.asyncIterator]();
+  let diagnostics = '';
+  child.stderr.on('data', bytes => { diagnostics += bytes; });
+  async function catalog() {
+    child.stdin.write(`${JSON.stringify({ version: 1, operation: 'catalog', refresh: true })}\n`);
+    const next = await iterator.next();
+    assert.equal(next.done, false, diagnostics);
+    const reply = JSON.parse(next.value);
+    assert.ok(reply.result, JSON.stringify(reply));
+    return reply.result;
+  }
+  const ids = catalog => catalog.models.filter(m => m.provider === 'overlay-audit').map(m => m.id).sort();
+  try {
+    assert.deepEqual(ids(await catalog()), ['dedicated', 'first']);
+    writeSource('second');
+    assert.deepEqual(ids(await catalog()), ['dedicated', 'second']);
+    const cli = execFileSync(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--list-models', 'overlay-audit'], {
+      cwd: root, env, encoding: 'utf8', timeout: 45000,
+    });
+    assert.match(cli, /second/);
+    assert.match(cli, /dedicated/);
+    assert.doesNotMatch(cli, /first/);
+    // The preferred layer must not mask an invalid dedicated layer. Pi should
+    // report the configuration error while retaining its built-in catalog.
+    writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: { 'overlay-audit': { models: 'invalid' } } }));
+    const invalid = await catalog();
+    assert.ok(invalid.warning, 'invalid schema should produce the normal Pi warning');
+    assert.ok(invalid.providers.length > 0, 'built-in providers remain available');
+    writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: {} }));
+    writeFileSync(source, JSON.stringify({ providers: { 'overlay-audit': { models: 'invalid' } } }));
+    const invalidUpstream = await catalog();
+    assert.ok(invalidUpstream.warning, 'an invalid Pi schema must not be masked by dedicated settings');
+    assert.ok(invalidUpstream.providers.length > 0, 'built-in providers remain available');
+    writeFileSync(source, '{ invalid');
+    const malformed = await catalog();
+    assert.ok(malformed.warning, 'invalid JSON should produce the normal Pi warning');
+    assert.ok(malformed.providers.length > 0, 'built-in providers remain available');
+  } finally {
+    child.stdin.end();
+    await exit;
+    lines.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('execution sends requests to a model loaded from the Pi overlay', { timeout: 45000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-overlay-execution-'));
+  const agent = join(directory, 'agent');
+  const source = join(directory, 'upstream.json');
+  mkdirSync(agent);
+  writeFileSync(join(agent, 'models.json'), JSON.stringify({ providers: {} }));
+  let requestModel;
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requestModel = JSON.parse(Buffer.concat(chunks).toString()).model;
+    const chunk = (delta, finish_reason) => ({ id: 'overlay', object: 'chat.completion.chunk', created: 1, model: 'fresh',
+      choices: [{ index: 0, delta, finish_reason }] });
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify(chunk({ role: 'assistant', content: 'ok' }, null))}\n\ndata: ${JSON.stringify(chunk({}, 'stop'))}\n\ndata: [DONE]\n\n`);
+  });
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    writeFileSync(source, JSON.stringify({ providers: { 'overlay-execution': {
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'fixture-key',
+      models: [{ id: 'fresh', contextWindow: 32000, maxTokens: 4096 }],
+    } } }));
+    const child = spawn(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--mode', 'rpc', '--no-session',
+      '--no-context-files', '--no-extensions', '--no-skills', '--model', 'overlay-execution/fresh'], {
+      cwd: directory, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, HOME: directory, USERPROFILE: directory,
+        PI_CODING_AGENT_DIR: agent, GRAPHER_UPSTREAM_PI_MODELS: source, GRAPHER_ISOLATED_PI_MODELS: '0', PI_OFFLINE: '1' },
+    });
+    let stderr = '';
+    child.stderr.on('data', value => { stderr += value; });
+    child.stdin.on('error', () => {});
+    const lines = createInterface({ input: child.stdout });
+    lines.on('line', line => {
+      try { if (JSON.parse(line).type === 'agent_settled') settleRpc(child, 'node'); } catch {}
+    });
+    const exit = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', code => code === 0 ? resolve() : reject(new Error(`Pi exited ${code}: ${stderr}`)));
+    });
+    child.stdin.write(`${JSON.stringify({ type: 'prompt', message: 'test overlay' })}\n`);
+    await exit;
+    lines.close();
+    assert.equal(requestModel, 'fresh');
   } finally {
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));

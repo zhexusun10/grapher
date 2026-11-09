@@ -6,6 +6,16 @@
   row-gap: 0;
 }
 
+/* A pending summary keeps the same appearance as the ready trigger; only its
+   interaction is disabled until the backend supplies an authoritative list. */
+.workspace-details .workspace-changes-trigger:disabled {
+  opacity: 1;
+  cursor: default;
+}
+.workspace-details .workspace-changes-trigger:disabled:hover {
+  color: var(--text-secondary);
+}
+
 .workspace-changes-panel {
   padding-top: 6px;
   font-family: inherit;

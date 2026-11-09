@@ -6,7 +6,7 @@ import { motion, AnimatePresence, LayoutGroup } from "motion/react";
 import {
   defaultConfig, emptyGraph, emptySnapshot, publicationMergerCardId,
   type Config, type Graph, type ManualNodeRequest, type ProjectItem, type RepositoryInfo,
-  type Snapshot, type PlanRouteType, type TranscriptItem,
+  type Snapshot, type PlanRouteType,
   type RuntimeActivity,
   type PlanningSummary, type PlanMode, type ChatMessage,
   type ImageAttachment, type FileAttachment, type ChatMessageVersion,
@@ -20,12 +20,20 @@ import { applyModelConfig, modelRoles, planningModelRoles, providerIdForModel, r
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay, recoveredPlanningForDisplay } from "./services/planningRecovery";
-import { executionIdForMessage, executionIdForVersion, nodeConversationExecutions } from "./services/conversationBranch";
-import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./services/thinkingTranscript";
-import { appendItemDelta } from "./services/transcriptUpdates";
-import { plannerContentSteerId, plannerContentText, stripPlannerContext } from "./services/plannerText";
+import {
+  applySelectedVersionToEntries, branchEditedMessageEntries, executionIdForMessage,
+  executionIdForVersion, findBranchTargetIndex, nodeConversationExecutions, stripNodePrefix,
+} from "./services/conversationBranch";
+import { closeThinkingItems, splitThinkingTagDelta } from "./services/thinkingTranscript";
+import { plannerContentSteerId } from "./services/plannerText";
 import { plannerSteerOwner, withoutPlannerSteerIdentity } from "./services/plannerSteers";
-import { upsertToolCall } from "./services/toolCallUpdates";
+import {
+  appendPlannerError, applyPartitionerDelta, applyPartitionerMessageEnd,
+  applyPlannerAssistantMessageEnd, applyPlannerEdgeEditsToState, applyPlannerNodeEditsToState,
+  applyPlannerTextDelta, applyPlannerThinkingUpdate, applyPlannerToolCallUpdate,
+  applyPlannerToolExecutionEnd, applyPlannerToolExecutionStart, applyPlannerUserMessageStart,
+  initialPlannerStream,
+} from "./services/plannerStream";
 import { mapWithConcurrency } from "./services/boundedRequests";
 import { useSnapshotState } from "./hooks/useSnapshotState";
 import { useConversationTranscriptCache } from "./hooks/useConversationTranscriptCache";
@@ -52,6 +60,46 @@ import { EditorModal } from "./components/modals/EditorModal";
 
 type WorkbenchComponent = typeof import("./components/views/AppGraphWorkbench").AppGraphWorkbench;
 
+const STORAGE_KEYS = {
+  projects: "grapher_projects",
+  workspaceRuns: "grapher_workspace_runs",
+  runLabels: "grapher_run_labels",
+  runModes: "grapher_run_modes",
+  config: "grapher_config",
+  dataPath: "grapher_data_path",
+  planMode: "grapher_plan_mode",
+} as const;
+
+function readStorageString(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function readStorageJson<T>(key: string): T | null {
+  const raw = readStorageString(key);
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function writeStorageString(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+}
+
+function writeStorageJson(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+}
+
 // A conversation without an explicit override keeps the model composition it
 // was created with. Snapshots always describe their own Run, never whichever
 // conversation happened to save settings last.
@@ -76,42 +124,29 @@ export default function App() {
   const landingBackground = useLandingBackground();
   const [state, setState] = useSnapshotState(emptySnapshot);
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
-    try {
-      const saved = localStorage.getItem("grapher_projects");
-      if (!saved) return [];
-      const items: ProjectItem[] = JSON.parse(saved);
-      // Match the order bootstrap derives from `lastOpened`; otherwise the
-      // first authoritative sort visibly rearranges the restored cards.
-      return items.map((p) => ({
-        ...p,
-        path: normalizeWorkspacePath(p.path),
-        id: normalizeWorkspacePath(p.id || p.path),
-      })).sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-    } catch {
-      return [];
-    }
+    const items = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
+    if (!Array.isArray(items)) return [];
+    // Match the order bootstrap derives from `lastOpened`; otherwise the
+    // first authoritative sort visibly rearranges the restored cards.
+    return items.map((p) => ({
+      ...p,
+      path: normalizeWorkspacePath(p.path),
+      id: normalizeWorkspacePath(p.id || p.path),
+    })).sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
   });
   const [config, setConfig] = useState<Config>(() => {
     let initialConfig: Config = { ...defaultConfig, maxFeedback: 5 };
-    try {
-      const savedConfig = localStorage.getItem("grapher_config");
-      if (savedConfig) {
-        const parsed = JSON.parse(savedConfig);
-        initialConfig = { ...initialConfig, ...parsed, model: "", maxFeedback: 5 };
+    const parsed = readStorageJson<Partial<Config>>(STORAGE_KEYS.config);
+    if (parsed) {
+      initialConfig = { ...initialConfig, ...parsed, model: "", maxFeedback: 5 };
+    }
+    const list = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
+    if (Array.isArray(list) && list.length > 0) {
+      const sorted = [...list].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
+      if (sorted[0]?.path) {
+        initialConfig.repository = normalizeWorkspacePath(sorted[0].path);
       }
-    } catch { }
-    try {
-      const saved = localStorage.getItem("grapher_projects");
-      if (saved) {
-        const list: ProjectItem[] = JSON.parse(saved);
-        if (list.length > 0) {
-          const sorted = [...list].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-          if (sorted[0]?.path) {
-            initialConfig.repository = normalizeWorkspacePath(sorted[0].path);
-          }
-        }
-      }
-    } catch { }
+    }
     return { ...initialConfig, repository: normalizeWorkspacePath(initialConfig.repository), maxFeedback: 5 };
   });
   // Model defaults for new conversations. A settings save inside a conversation
@@ -164,53 +199,32 @@ export default function App() {
   // Warm initial cache with stored workspace runs to prevent initial skeleton flash.
   // Bootstrap subsequently repairs ownership and updates persisted lists.
   const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>(() => {
-    try {
-      const saved = localStorage.getItem("grapher_workspace_runs");
-      if (!saved) return {};
-      return normalizeWorkspaceRuns(JSON.parse(saved));
-    } catch {
-      return {};
-    }
+    const saved = readStorageJson<Record<string, string[]>>(STORAGE_KEYS.workspaceRuns);
+    return saved ? normalizeWorkspaceRuns(saved) : {};
   });
   const [isSidebarReady, setIsSidebarReady] = useState(() => {
-    try {
-      const savedProjects = localStorage.getItem("grapher_projects");
-      if (!savedProjects) return false;
-      const parsedProjects = JSON.parse(savedProjects);
-      if (!Array.isArray(parsedProjects) || parsedProjects.length === 0) return true;
-      const savedRuns = localStorage.getItem("grapher_workspace_runs");
-      if (savedRuns) {
-        const parsedRuns = JSON.parse(savedRuns);
-        const sorted = [...parsedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-        const active = sorted[0];
-        if (active && parsedRuns[workspaceKey(active.path)] !== undefined) return true;
-      }
-      return false;
-    } catch {
-      return false;
+    const parsedProjects = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
+    if (!parsedProjects) return false;
+    if (!Array.isArray(parsedProjects) || parsedProjects.length === 0) return true;
+    const parsedRuns = readStorageJson<Record<string, string[]>>(STORAGE_KEYS.workspaceRuns);
+    if (parsedRuns) {
+      const sorted = [...parsedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
+      const active = sorted[0];
+      if (active && parsedRuns[workspaceKey(active.path)] !== undefined) return true;
     }
+    return false;
   });
   const [isBootstrapReady, setIsBootstrapReady] = useState(false);
   // Session-only mapping from a durable Run ID to the provisional card key it
   // replaced. Persisting it is pointless: pending cards do not survive reload.
   const [runCardKeys, setRunCardKeys] = useState<Record<string, string>>({});
   const acceptedSettingsRef = useRef<Config | null>(null);
-  const [runLabels, setRunLabels] = useState<Record<string, string>>(() => {
-    try {
-      const saved = localStorage.getItem("grapher_run_labels");
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
-  const [runModes, setRunModes] = useState<Record<string, PlanMode>>(() => {
-    try {
-      const saved = localStorage.getItem("grapher_run_modes");
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
-  });
+  const [runLabels, setRunLabels] = useState<Record<string, string>>(
+    () => readStorageJson<Record<string, string>>(STORAGE_KEYS.runLabels) ?? {}
+  );
+  const [runModes, setRunModes] = useState<Record<string, PlanMode>>(
+    () => readStorageJson<Record<string, PlanMode>>(STORAGE_KEYS.runModes) ?? {}
+  );
   const hasConversationSummariesRef = useRef(false);
   const pendingRunLabelIdsRef = useRef(new Set<string>());
   const deletedRunIdsRef = useRef(new Set<string>());
@@ -241,7 +255,7 @@ export default function App() {
               updated[id] = goal;
             }
           }
-          try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch { }
+          writeStorageJson(STORAGE_KEYS.runLabels, updated);
           return updated;
         });
       }).finally(() => {
@@ -267,13 +281,7 @@ export default function App() {
     (state.mergers ?? []).some(item => item.status === "running") ||
     Object.values(state.nodes).some(item => item.status === "running" || item.status === "dirty");
 
-  const [dataPath, setDataPath] = useState(() => {
-    try {
-      return normalizeWorkspacePath(localStorage.getItem("grapher_data_path") || "");
-    } catch {
-      return "";
-    }
-  });
+  const [dataPath, setDataPath] = useState(() => normalizeWorkspacePath(readStorageString(STORAGE_KEYS.dataPath) || ""));
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);
 
   const [isPlanning, setIsPlanning] = useState(false);
@@ -294,9 +302,7 @@ export default function App() {
     setWorkspaceRuns((prev) => {
       const updated = bindRunToWorkspace(prev, runId, repo);
       if (updated === prev) return prev;
-      try {
-        localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.workspaceRuns, updated);
       return updated;
     });
   };
@@ -307,9 +313,7 @@ export default function App() {
     setRunCardKeys((prev) => (prev[newId] === oldId ? prev : { ...prev, [newId]: oldId }));
     setWorkspaceRuns((prev) => {
       const updated = bindRunToWorkspace(prev, newId, repository, oldId);
-      try {
-        localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.workspaceRuns, updated);
       return updated;
     });
 
@@ -317,9 +321,7 @@ export default function App() {
       const copy = { ...prev };
       delete copy[oldId];
       copy[newId] = label;
-      try {
-        localStorage.setItem("grapher_run_labels", JSON.stringify(copy));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.runLabels, copy);
       return copy;
     });
 
@@ -329,9 +331,7 @@ export default function App() {
       const copy = { ...prev };
       delete copy[oldId];
       copy[newId] = mode;
-      try {
-        localStorage.setItem("grapher_run_modes", JSON.stringify(copy));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.runModes, copy);
       return copy;
     });
 
@@ -366,18 +366,14 @@ export default function App() {
       for (const [repo, list] of Object.entries(prev)) {
         updated[repo] = list.filter((id) => id !== provisionalId);
       }
-      try {
-        localStorage.setItem("grapher_workspace_runs", JSON.stringify(updated));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.workspaceRuns, updated);
       return updated;
     });
 
     setRunLabels((prev) => {
       const copy = { ...prev };
       delete copy[provisionalId];
-      try {
-        localStorage.setItem("grapher_run_labels", JSON.stringify(copy));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.runLabels, copy);
       return copy;
     });
 
@@ -385,9 +381,7 @@ export default function App() {
       if (!prev[provisionalId]) return prev;
       const copy = { ...prev };
       delete copy[provisionalId];
-      try {
-        localStorage.setItem("grapher_run_modes", JSON.stringify(copy));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.runModes, copy);
       return copy;
     });
 
@@ -455,18 +449,13 @@ export default function App() {
 
   // 规划路由模式选择：graph (默认，Planner跳过Partitioner) / serial (单Agent跳过Partitioner) / auto (Partitioner评估)
   const [planMode, setPlanMode] = useState<PlanMode>(() => {
-    try {
-      const saved = localStorage.getItem("grapher_plan_mode");
-      if (saved === "serial" || saved === "graph" || saved === "auto") return saved;
-    } catch { }
-    return "graph";
+    const saved = readStorageString(STORAGE_KEYS.planMode);
+    return saved === "serial" || saved === "graph" || saved === "auto" ? saved : "graph";
   });
 
   const handlePlanModeChange = useCallback((mode: PlanMode) => {
     setPlanMode(mode);
-    try {
-      localStorage.setItem("grapher_plan_mode", mode);
-    } catch { }
+    writeStorageString(STORAGE_KEYS.planMode, mode);
   }, []);
 
   const resetSessionMessages = useCallback(() => {
@@ -525,26 +514,6 @@ export default function App() {
     setEditPrefillText("");
   }, []);
 
-  const initialPlannerStream = {
-    runId: "",
-    initialPlanMode: undefined as PlanMode | undefined,
-    stage: "idle" as "idle" | "partitioning" | "planning" | "completed" | "error",
-    items: [] as TranscriptItem[],
-    plannerMessageStart: 0,
-    representedPlanningIds: [] as string[],
-    isContinuation: false,
-    startedAt: undefined as number | undefined,
-    partitionerThinking: "",
-    partitionerThinkingActive: false,
-    partitionerText: "",
-    plannerThinking: "",
-    plannerThinkingActive: false,
-    plannerText: "",
-    tools: [] as TranscriptItem[],
-    // Live Planner auto-compaction: no transcript rows, only the working label.
-    compacting: false,
-  };
-
   const [plannerStream, setPlannerStream, queuePlannerStream] = useFrameBatchedState(initialPlannerStream);
   // Legacy/orphaned Planner histories may be visible before a Run is recovered.
   // They still need an owner so leaving the Conversation releases their RAM.
@@ -592,7 +561,7 @@ export default function App() {
 
   const control = (action: string, extra: Record<string, unknown> = {}) => run(async () => {
     const generation = foregroundGeneration.current;
-    if (["approve", "resume", "intervene", "resolve", "retry_publication"].includes(action)) {
+    if (["approve", "resume", "resume_node", "intervene", "resolve", "retry_publication"].includes(action)) {
       await requireRepository(state.config?.repository || config.repository);
     }
     if (generation !== foregroundGeneration.current) return;
@@ -849,30 +818,19 @@ export default function App() {
     if (data.dataPath) {
       const cleanDataPath = normalizeWorkspacePath(data.dataPath);
       setDataPath(cleanDataPath);
-      try {
-        localStorage.setItem("grapher_data_path", cleanDataPath);
-      } catch { }
+      writeStorageString(STORAGE_KEYS.dataPath, cleanDataPath);
     }
     if (!planningRecovery.current(scope)) return;
     if (data.envOverrides) setEnvOverrides(data.envOverrides);
 
-    let storedProjects: ProjectItem[] | null = null;
-    try {
-      const saved = localStorage.getItem("grapher_projects");
-      if (saved !== null) {
-        storedProjects = (JSON.parse(saved) as ProjectItem[]).map(project => ({
+    const rawProjects = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
+    const storedProjects = Array.isArray(rawProjects)
+      ? rawProjects.map(project => ({
           ...project, path: normalizeWorkspacePath(project.path), id: normalizeWorkspacePath(project.id || project.path),
-        }));
-      }
-    } catch { }
+        }))
+      : null;
 
-    let storedWorkspaceRuns: Record<string, string[]> | null = null;
-    try {
-      const saved = localStorage.getItem("grapher_workspace_runs");
-      if (saved !== null) {
-        storedWorkspaceRuns = JSON.parse(saved);
-      }
-    } catch { }
+    const storedWorkspaceRuns = readStorageJson<Record<string, string[]>>(STORAGE_KEYS.workspaceRuns);
 
     let activeRepo = "";
     let activeInfo: RepositoryInfo | null = null;
@@ -890,9 +848,7 @@ export default function App() {
             : p
         );
         setProjects(updatedProjects);
-        try {
-          localStorage.setItem("grapher_projects", JSON.stringify(updatedProjects));
-        } catch { }
+        writeStorageJson(STORAGE_KEYS.projects, updatedProjects);
       } else {
         activeInfo = {
           name: latestProj.name,
@@ -916,9 +872,7 @@ export default function App() {
         lastOpened: Date.now(),
       };
       setProjects([item]);
-      try {
-        localStorage.setItem("grapher_projects", JSON.stringify([item]));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.projects, [item]);
       activeRepo = info.path;
       activeInfo = info;
     } else if (storedProjects === null && data.config.repository) {
@@ -931,7 +885,7 @@ export default function App() {
         branch: "", clean: false, lastOpened: Date.now(),
       };
       setProjects([item]);
-      try { localStorage.setItem("grapher_projects", JSON.stringify([item])); } catch { }
+      writeStorageJson(STORAGE_KEYS.projects, [item]);
     } else {
       setProjects([]);
       activeRepo = "";
@@ -948,7 +902,7 @@ export default function App() {
           const next = previous.map(project => workspaceKey(project.path) === workspaceKey(repository)
             ? { ...project, name: detected.name, branch: detected.branch, clean: detected.clean, isShadow: detected.isShadow }
             : project);
-          try { localStorage.setItem("grapher_projects", JSON.stringify(next)); } catch { }
+          writeStorageJson(STORAGE_KEYS.projects, next);
           return next;
         });
       }).catch(() => { });
@@ -978,13 +932,9 @@ export default function App() {
     if (data.dataPath) {
       const cleanDataPath = normalizeWorkspacePath(data.dataPath);
       setDataPath(cleanDataPath);
-      try {
-        localStorage.setItem("grapher_data_path", cleanDataPath);
-      } catch { }
+      writeStorageString(STORAGE_KEYS.dataPath, cleanDataPath);
     }
-    try {
-      localStorage.setItem("grapher_config", JSON.stringify(nextConfigObj));
-    } catch { }
+    writeStorageJson(STORAGE_KEYS.config, nextConfigObj);
     if (nextConfigObj.repository && workspaceKey(nextConfigObj.repository) !== workspaceKey(data.config.repository)) {
       void runtimeService.saveConfig(nextConfigObj).catch(() => { });
     }
@@ -1006,10 +956,8 @@ export default function App() {
         setRepoInfo(info);
         setConfig(discoveredConfig);
         setDefaultSettings(previous => ({ ...previous, repository: info.path }));
-        try {
-          localStorage.setItem("grapher_projects", JSON.stringify([item]));
-          localStorage.setItem("grapher_config", JSON.stringify(discoveredConfig));
-        } catch { }
+        writeStorageJson(STORAGE_KEYS.projects, [item]);
+        writeStorageJson(STORAGE_KEYS.config, discoveredConfig);
         // Like opening a project, discovery selects a view; it must not race
         // an explicit settings save by rewriting backend defaults itself.
       }).catch(() => { });
@@ -1032,7 +980,7 @@ export default function App() {
       setRunLabels(previous => {
         const next = { ...previous };
         for (const item of summaries) next[item.runId] = item.title;
-        try { localStorage.setItem("grapher_run_labels", JSON.stringify(next)); } catch { }
+        writeStorageJson(STORAGE_KEYS.runLabels, next);
         return next;
       });
       setRunModes(previous => {
@@ -1040,10 +988,10 @@ export default function App() {
         for (const item of summaries) {
           if (item.planType === "serial" || item.planType === "graph") next[item.runId] = item.planType;
         }
-        try { localStorage.setItem("grapher_run_modes", JSON.stringify(next)); } catch { }
+        writeStorageJson(STORAGE_KEYS.runModes, next);
         return next;
       });
-      try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(indexedRuns)); } catch { }
+      writeStorageJson(STORAGE_KEYS.workspaceRuns, indexedRuns);
       setIsSidebarReady(true);
       if (data.snapshot.runId) setBackendStatus(data.snapshot);
     } else {
@@ -1113,7 +1061,7 @@ export default function App() {
         setRunLabels(prev => {
           const label = snapshot.graph.originalGoal || "";
           const next = label || prev[id] === undefined ? { ...prev, [id]: label } : prev;
-          try { localStorage.setItem("grapher_run_labels", JSON.stringify(next)); } catch { }
+          writeStorageJson(STORAGE_KEYS.runLabels, next);
           return next;
         });
         if (snapshot.config?.repository) {
@@ -1125,7 +1073,7 @@ export default function App() {
       if (!planningRecovery.current(scope)) return;
       indexedRuns = reconcileWorkspaceRuns(storedWorkspaceRuns || {}, snapshots);
       setWorkspaceRuns(indexedRuns);
-      try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(indexedRuns)); } catch { }
+      writeStorageJson(STORAGE_KEYS.workspaceRuns, indexedRuns);
       setIsSidebarReady(true);
     }
 
@@ -1216,9 +1164,7 @@ export default function App() {
           };
           setProjects((prev) => {
             const next = [item, ...prev.filter((p) => workspaceKey(p.path) !== workspaceKey(normalizedPath))];
-            try {
-              localStorage.setItem("grapher_projects", JSON.stringify(next));
-            } catch { }
+            writeStorageJson(STORAGE_KEYS.projects, next);
             return next;
           });
           const nextSnapshot = emptySnapshot;
@@ -1270,9 +1216,7 @@ export default function App() {
                 ? { ...p, branch: info.branch, clean: info.clean, isShadow: info.isShadow, lastOpened: Date.now() }
                 : p
             );
-            try {
-              localStorage.setItem("grapher_projects", JSON.stringify(next));
-            } catch { }
+            writeStorageJson(STORAGE_KEYS.projects, next);
             return next;
           });
         } else {
@@ -1298,9 +1242,7 @@ export default function App() {
     const remaining = projects.filter(project => workspaceKey(project.path) !== key);
     if (remaining.length !== projects.length) {
       setProjects(remaining);
-      try {
-        localStorage.setItem("grapher_projects", JSON.stringify(remaining));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.projects, remaining);
     }
     // An open folder picker owns the next workspace selection, and bootstrap
     // still owns the initial foreground state. Detaching now would invalidate
@@ -1312,9 +1254,7 @@ export default function App() {
     detachForeground("");
     setConfig(prev => {
       const next = applyModelConfig({ ...prev, repository: nextRepository }, defaultSettings);
-      try {
-        localStorage.setItem("grapher_config", JSON.stringify(next));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.config, next);
       return next;
     });
     setRepoInfo(null);
@@ -1359,10 +1299,9 @@ export default function App() {
         });
         clearLandingDraft(pathToRemove);
         setRunCardKeys((prev) => Object.fromEntries(Object.entries(prev).filter(([id]) => !deletedIds.has(id))));
-        const remainingProjects = projects.filter((p) => workspaceKey(p.path) !== key);
         setProjects(prev => {
           const remaining = prev.filter(p => workspaceKey(p.path) !== key);
-          try { localStorage.setItem("grapher_projects", JSON.stringify(remaining)); } catch { }
+          writeStorageJson(STORAGE_KEYS.projects, remaining);
           return remaining;
         });
         setWorkspaceRuns((prev) => {
@@ -1370,18 +1309,18 @@ export default function App() {
           for (const [repo, ids] of Object.entries(prev)) {
             if (repo !== key) copy[repo] = ids.filter(id => !deletedIds.has(id));
           }
-          try { localStorage.setItem("grapher_workspace_runs", JSON.stringify(copy)); } catch { }
+          writeStorageJson(STORAGE_KEYS.workspaceRuns, copy);
           return copy;
         });
         const forgetLabels = (prev: Record<string, string>) => Object.fromEntries(Object.entries(prev).filter(([id]) => !deletedIds.has(id)));
         setRunLabels(prev => {
           const next = forgetLabels(prev);
-          try { localStorage.setItem("grapher_run_labels", JSON.stringify(next)); } catch { }
+          writeStorageJson(STORAGE_KEYS.runLabels, next);
           return next;
         });
         setRunModes(prev => {
           const next = Object.fromEntries(Object.entries(prev).filter(([id]) => !deletedIds.has(id)));
-          try { localStorage.setItem("grapher_run_modes", JSON.stringify(next)); } catch { }
+          writeStorageJson(STORAGE_KEYS.runModes, next);
           return next;
         });
 
@@ -1390,7 +1329,7 @@ export default function App() {
           setPlannerStream(initialPlannerStream);
           setConfig((prev) => {
             const next = applyModelConfig({ ...prev, repository: "" }, defaultSettings);
-            try { localStorage.setItem("grapher_config", JSON.stringify(next)); } catch { }
+            writeStorageJson(STORAGE_KEYS.config, next);
             return next;
           });
           setRepoInfo(null);
@@ -1423,26 +1362,20 @@ export default function App() {
       for (const [repo, idList] of Object.entries(prev)) {
         copy[repo] = idList.filter((id) => id !== runIdToDelete);
       }
-      try {
-        localStorage.setItem("grapher_workspace_runs", JSON.stringify(copy));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.workspaceRuns, copy);
       return copy;
     });
     setRunLabels((prev) => {
       const copy = { ...prev };
       delete copy[runIdToDelete];
-      try {
-        localStorage.setItem("grapher_run_labels", JSON.stringify(copy));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.runLabels, copy);
       return copy;
     });
     setRunModes((prev) => {
       if (!prev[runIdToDelete]) return prev;
       const copy = { ...prev };
       delete copy[runIdToDelete];
-      try {
-        localStorage.setItem("grapher_run_modes", JSON.stringify(copy));
-      } catch { }
+      writeStorageJson(STORAGE_KEYS.runModes, copy);
       return copy;
     });
     messagesByRunRef.current.delete(runIdToDelete);
@@ -1570,9 +1503,7 @@ export default function App() {
       if (boot.dataPath) {
         const cleanDataPath = normalizeWorkspacePath(boot.dataPath);
         setDataPath(cleanDataPath);
-        try {
-          localStorage.setItem("grapher_data_path", cleanDataPath);
-        } catch { }
+        writeStorageString(STORAGE_KEYS.dataPath, cleanDataPath);
       }
       if (boot.envOverrides) setEnvOverrides(boot.envOverrides);
       setDefaultSettings({ ...boot.config, maxFeedback: 5 });
@@ -1585,14 +1516,12 @@ export default function App() {
     setConfig(nextConfig);
     setIsBootstrapReady(true);
     if (info) setRepoInfo({ ...info, path: repoPath });
-    try {
-      localStorage.setItem("grapher_config", JSON.stringify(nextConfig));
-    } catch { }
+    writeStorageJson(STORAGE_KEYS.config, nextConfig);
     if (info) {
       setProjects((prev) => {
         const item: ProjectItem = { ...info, id: info.path, lastOpened: Date.now() };
         const next = [item, ...prev.filter((project) => workspaceKey(project.path) !== workspaceKey(info.path))];
-        try { localStorage.setItem("grapher_projects", JSON.stringify(next)); } catch { }
+        writeStorageJson(STORAGE_KEYS.projects, next);
         return next;
       });
     }
@@ -1617,11 +1546,18 @@ export default function App() {
     if (draftRunId && snapshot.runId === draftRunId) {
       setRunLabels((prev) => {
         const updated = { ...prev, [draftRunId]: graph.originalGoal || "" };
-        try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch { }
+        writeStorageJson(STORAGE_KEYS.runLabels, updated);
         return updated;
       });
     }
     setSelected("");
+  });
+
+  const updateUnstartedNodeTask = (runId: string, node: string, oldTask: string, task: string) => run(async () => {
+    if (!runId || state.runId !== runId) return false;
+    const generation = foregroundGeneration.current;
+    const snapshot = await runtimeService.updateUnstartedNodeTask(runId, node, oldTask, task);
+    return applyForegroundSnapshot(snapshot, generation);
   });
 
   const addManualNode = (runId: string, request: ManualNodeRequest) => run(async () => {
@@ -1646,7 +1582,8 @@ export default function App() {
     // A Planner turn can settle between a send and its steer request. The
     // caller already verified that turn is over, so continue instead of
     // rejecting the message as a second concurrent conversation.
-    allowWhilePlanning?: boolean
+    allowWhilePlanning?: boolean,
+    continuePlanningId?: string
   ): { accepted: boolean; completion: Promise<boolean> } => {
     const targetGoal = (inputGoal !== undefined ? inputGoal : (landingGoal || goal)).trim();
     if (!targetGoal) return { accepted: false, completion: Promise.resolve(false) };
@@ -1699,9 +1636,7 @@ export default function App() {
       setRunLabels((prev) => ({ ...prev, [provisionalRunId!]: targetGoal }));
       setRunModes((prev) => {
         const next = { ...prev, [provisionalRunId!]: effectiveMode };
-        try {
-          localStorage.setItem("grapher_run_modes", JSON.stringify(next));
-        } catch { }
+        writeStorageJson(STORAGE_KEYS.runModes, next);
         return next;
       });
 
@@ -1789,18 +1724,16 @@ export default function App() {
         runId: effectiveRevisionRunId,
         animateAppear: !editedMessage,
       };
-      if (editedMessage) {
-        // The replacement is already in the truncated local branch.
-      } else {
+      if (!editedMessage && !continuePlanningId) {
         setSessionEntries((prev) => [...(prev.length ? prev : effectiveMessages), newMsg]);
       }
       setPlannerStream((prev) => ({
         ...prev,
         stage: "planning",
         isContinuation: true,
-        plannerMessageStart: 1,
+        plannerMessageStart: continuePlanningId ? 0 : 1,
         startedAt: Date.now(),
-        items: [
+        items: continuePlanningId ? [] : [
           {
             id: newMsg.id,
             type: "text",
@@ -1891,13 +1824,13 @@ export default function App() {
                   setRunLabels((prev) => {
                     if (prev[event.runId!]) return prev;
                     const updated = { ...prev, [event.runId!]: targetGoal };
-                    try { localStorage.setItem("grapher_run_labels", JSON.stringify(updated)); } catch {}
+                    writeStorageJson(STORAGE_KEYS.runLabels, updated);
                     return updated;
                   });
                   setRunModes((prev) => {
                     if (prev[event.runId!]) return prev;
                     const updated = { ...prev, [event.runId!]: effectiveMode };
-                    try { localStorage.setItem("grapher_run_modes", JSON.stringify(updated)); } catch {}
+                    writeStorageJson(STORAGE_KEYS.runModes, updated);
                     return updated;
                   });
                 }
@@ -1910,7 +1843,7 @@ export default function App() {
                   setRunModes((prev) => {
                     if (prev[event.snapshot!.runId]) return prev;
                     const updated = { ...prev, [event.snapshot!.runId]: effectiveMode };
-                    try { localStorage.setItem("grapher_run_modes", JSON.stringify(updated)); } catch {}
+                    writeStorageJson(STORAGE_KEYS.runModes, updated);
                     return updated;
                   });
                 }
@@ -1934,582 +1867,289 @@ export default function App() {
                   setRunLabels((prev) => {
                     if (prev[runId]) return prev;
                     const updated = { ...prev, [runId]: targetGoal };
-                    try {
-                      localStorage.setItem("grapher_run_labels", JSON.stringify(updated));
-                    } catch {}
+                    writeStorageJson(STORAGE_KEYS.runLabels, updated);
                     return updated;
                   });
                   setRunModes((prev) => {
                     if (prev[runId]) return prev;
                     const updated = { ...prev, [runId]: effectiveMode };
-                    try {
-                      localStorage.setItem("grapher_run_modes", JSON.stringify(updated));
-                    } catch {}
+                    writeStorageJson(STORAGE_KEYS.runModes, updated);
                     return updated;
                   });
                 }
               }
             } else if (event.type === "partitioner") {
-            const pEvent = event.event;
-            if (pEvent?.type === "message_update") {
-              const aEvent = pEvent.assistantMessageEvent;
-              if (aEvent?.type === "thinking_start") {
-                queuePlannerStream((prev) => ({ ...prev, partitionerThinkingActive: true }));
-              } else if (aEvent?.type === "thinking_delta") {
-                const delta = aEvent.delta || "";
-                queuePlannerStream((prev) => ({
-                  ...prev,
-                  partitionerThinking: prev.partitionerThinking + delta,
-                  partitionerThinkingActive: true,
+              const pEvent = event.event;
+              if (pEvent?.type === "message_update") {
+                const aEvent = pEvent.assistantMessageEvent;
+                if (aEvent?.type === "thinking_start") {
+                  queuePlannerStream((prev) => ({ ...prev, partitionerThinkingActive: true }));
+                } else if (aEvent?.type === "thinking_delta") {
+                  const delta = aEvent.delta || "";
+                  queuePlannerStream((prev) => ({
+                    ...prev,
+                    partitionerThinking: prev.partitionerThinking + delta,
+                    partitionerThinkingActive: true,
+                  }));
+                } else if (aEvent?.type === "thinking_end") {
+                  queuePlannerStream((prev) => ({ ...prev, partitionerThinkingActive: false }));
+                } else if (aEvent?.type === "text_delta") {
+                  const split = splitThinkingTagDelta(aEvent.delta || "", partInTag);
+                  partInTag = split.inTag;
+                  queuePlannerStream((prev) => applyPartitionerDelta(prev, split.thinkChunk, split.textChunk, split.inTag));
+                }
+              } else if (pEvent?.type === "message_end") {
+                // Show the complete route as soon as Pi finishes the turn, without
+                // waiting for its CLI to exit. Only route_decision confirms it;
+                // errors before confirmation revert this preview.
+                if (effectiveMode === "auto" && pEvent.message?.role === "assistant" && pEvent.message?.stopReason === "stop") {
+                  const text = (pEvent.message.content ?? [])
+                    .filter((item: any) => item.type === "text")
+                    .map((item: any) => item.text)
+                    .join("\n").trim().toLowerCase();
+                  if (text === "graph" || text === "serial") setRouteType(text);
+                }
+                setPlannerStream((prev) => applyPartitionerMessageEnd(prev, pEvent.message?.content));
+              }
+            } else if (event.type === "route_decision") {
+              if (event.planType) {
+                routeConfirmed = true;
+                setRouteType(event.planType);
+                setPlannerStream((prev) => ({ ...prev, stage: "planning" }));
+              }
+            } else if (event.type === "planner") {
+              queuePlannerStream((prev) => (prev.stage !== "planning" ? { ...prev, stage: "planning" } : prev));
+              const pEvent = event.event;
+              if (pEvent?.type === "message_start" && pEvent.message?.role === "user") {
+                const content = pEvent.message.content;
+                const id = plannerContentSteerId(content);
+                if (id) setPlannerStream((prev) => applyPlannerUserMessageStart(prev, content, id));
+              } else if (pEvent?.type === "message_start" && pEvent.message?.role === "assistant") {
+                setPlannerStream(prev => ({
+                  ...prev, items: closeThinkingItems(prev.items), plannerMessageStart: prev.items.length,
                 }));
-              } else if (aEvent?.type === "thinking_end") {
-                queuePlannerStream((prev) => ({ ...prev, partitionerThinkingActive: false }));
-              } else if (aEvent?.type === "text_delta") {
-                const delta = aEvent.delta || "";
-                if (partInTag || delta.includes("<think>") || delta.includes("<thought>")) {
-                  let remaining = delta;
-                  let thinkChunk = "";
-                  let textChunk = "";
-                  while (remaining.length > 0) {
-                    if (!partInTag) {
-                      const idx1 = remaining.indexOf("<think>");
-                      const idx2 = remaining.indexOf("<thought>");
-                      const idx = idx1 !== -1 && idx2 !== -1 ? Math.min(idx1, idx2) : idx1 !== -1 ? idx1 : idx2;
-                      if (idx !== -1) {
-                        textChunk += remaining.slice(0, idx);
-                        const tagLen = remaining.slice(idx).startsWith("<thought>") ? 9 : 7;
-                        remaining = remaining.slice(idx + tagLen);
-                        partInTag = true;
-                      } else {
-                        textChunk += remaining;
-                        remaining = "";
-                      }
-                    } else {
-                      const idx1 = remaining.indexOf("</think>");
-                      const idx2 = remaining.indexOf("</thought>");
-                      const idx = idx1 !== -1 && idx2 !== -1 ? Math.min(idx1, idx2) : idx1 !== -1 ? idx1 : idx2;
-                      if (idx !== -1) {
-                        thinkChunk += remaining.slice(0, idx);
-                        const tagLen = remaining.slice(idx).startsWith("</thought>") ? 10 : 8;
-                        remaining = remaining.slice(idx + tagLen);
-                        partInTag = false;
-                      } else {
-                        thinkChunk += remaining;
-                        remaining = "";
-                      }
-                    }
+              } else if (pEvent?.type === "message_update") {
+                const aEvent = pEvent.assistantMessageEvent;
+                if (aEvent?.type === "toolcall_start" || aEvent?.type === "toolcall_end") {
+                  const part = aEvent.type === "toolcall_end" ? aEvent.toolCall : aEvent.partial?.content?.[aEvent.contentIndex];
+                  const toolCallId = aEvent.id || part?.id;
+                  const toolName = aEvent.toolName || part?.name;
+                  const args = aEvent.arguments || part?.arguments;
+                  if (aEvent.type === "toolcall_end" && (toolCallId || toolName)) {
+                    pendingToolArgsRef.current.set(toolCallId || toolName, args || {});
                   }
-                  const thinkingActive = partInTag;
-                  queuePlannerStream((prev) => ({
-                    ...prev,
-                    partitionerThinking: prev.partitionerThinking + thinkChunk,
-                    partitionerThinkingActive: thinkingActive,
-                    partitionerText: prev.partitionerText + textChunk,
-                  }));
-                } else {
-                  queuePlannerStream((prev) => ({
-                    ...prev,
-                    partitionerThinkingActive: false,
-                    partitionerText: prev.partitionerText + delta,
-                  }));
+                  setPlannerStream((prev) => applyPlannerToolCallUpdate(prev, aEvent));
+                } else if (["thinking_start", "thinking_delta", "thinking_end"].includes(aEvent?.type)) {
+                  queuePlannerStream((prev) => applyPlannerThinkingUpdate(prev, aEvent));
+                } else if (aEvent?.type === "text_delta") {
+                  const split = splitThinkingTagDelta(aEvent.delta || "", planInTag);
+                  planInTag = split.inTag;
+                  queuePlannerStream((prev) => applyPlannerTextDelta(prev, split.thinkChunk, split.textChunk, split.inTag));
                 }
-              }
-            } else if (pEvent?.type === "message_end") {
-              // Show the complete route as soon as Pi finishes the turn, without
-              // waiting for its CLI to exit. Only route_decision confirms it;
-              // errors before confirmation revert this preview.
-              if (effectiveMode === "auto" && pEvent.message?.role === "assistant" && pEvent.message?.stopReason === "stop") {
-                const text = (pEvent.message.content ?? [])
-                  .filter((item: any) => item.type === "text")
-                  .map((item: any) => item.text)
-                  .join("\n").trim().toLowerCase();
-                if (text === "graph" || text === "serial") setRouteType(text);
-              }
-              setPlannerStream((prev) => {
-                let thinking = prev.partitionerThinking;
-                if (!thinking && Array.isArray(pEvent.message?.content)) {
-                  for (const c of pEvent.message.content) {
-                    if (c.type === "thinking" && c.thinking) {
-                      thinking = c.thinking;
-                    }
-                  }
+              } else if (pEvent?.type === "message_end" && pEvent.message?.role === "assistant") {
+                // A failed model call is the only visible explanation for a stopped
+                // Planner turn; terminal SSE errors may never arrive (detached view).
+                setPlannerStream((prev) => applyPlannerAssistantMessageEnd(prev, pEvent.message));
+              } else if (pEvent?.type === "tool_execution_start") {
+                if (pEvent.toolCallId || pEvent.toolName) {
+                  pendingToolArgsRef.current.set(pEvent.toolCallId || pEvent.toolName, pEvent.args || {});
                 }
-                return {
-                  ...prev,
-                  partitionerThinking: thinking,
-                  partitionerThinkingActive: false,
-                };
-              });
-            }
-          } else if (event.type === "route_decision") {
-            if (event.planType) {
-              routeConfirmed = true;
-              setRouteType(event.planType);
-              setPlannerStream((prev) => ({ ...prev, stage: "planning" }));
-            }
-          } else if (event.type === "planner") {
-            queuePlannerStream((prev) => (prev.stage !== "planning" ? { ...prev, stage: "planning" } : prev));
-            const pEvent = event.event;
-            if (pEvent?.type === "message_start" && pEvent.message?.role === "user") {
-              const content = pEvent.message.content;
-              const id = plannerContentSteerId(content);
-              if (id) setPlannerStream(prev => {
-                if (prev.items.some(item => item.id === `msg-${id}`)) return prev;
-                const images = Array.isArray(content) ? content.filter((part: any) => part?.type === "image") : [];
-                return { ...prev, items: [...closeRunningThinkingItem(prev.items), {
-                  id: `msg-${id}`, type: "text", role: "user", content: stripPlannerContext(plannerContentText(content)).trim(),
-                  images: images.length ? images : undefined, timestamp: Date.now(), animateAppear: true,
-                }] };
-              });
-            } else if (pEvent?.type === "message_start" && pEvent.message?.role === "assistant") {
-              setPlannerStream(prev => ({
-                ...prev, items: closeThinkingItems(prev.items), plannerMessageStart: prev.items.length,
-              }));
-            } else if (pEvent?.type === "message_update") {
-              const aEvent = pEvent.assistantMessageEvent;
-              if (aEvent?.type === "toolcall_start" || aEvent?.type === "toolcall_end") {
-                const part = aEvent.type === "toolcall_end" ? aEvent.toolCall : aEvent.partial?.content?.[aEvent.contentIndex];
-                const toolCallId = aEvent.id || part?.id;
-                const toolName = aEvent.toolName || part?.name;
-                const args = aEvent.arguments || part?.arguments;
-                if (aEvent.type === "toolcall_end" && (toolCallId || toolName)) {
-                  pendingToolArgsRef.current.set(toolCallId || toolName, args || {});
-                }
-                setPlannerStream(prev => {
-                  const items = upsertToolCall(prev.items, { toolCallId, toolName, args,
-                    argsTruncated: !!(aEvent.argsTruncated || part?.argsTruncated), contentIndex: aEvent.contentIndex,
-                    phase: aEvent.type === "toolcall_start" ? "generating" : "pending" }, prev.plannerMessageStart);
-                  return { ...prev, items, tools: items.filter(item => item.type === "tool_call") };
-                });
-              } else if (["thinking_start", "thinking_delta", "thinking_end"].includes(aEvent?.type)) {
-                queuePlannerStream(prev => {
-                  const items = updateThinkingItems(prev.items, aEvent, prev.plannerMessageStart);
-                  return {
-                    ...prev, items,
-                    plannerThinking: items.filter(item => item.type === "thinking" && item.content).map(item => item.content).join("\n\n"),
-                    plannerThinkingActive: items.some(item => item.type === "thinking" && item.status === "running"),
-                  };
-                });
-              } else if (aEvent?.type === "text_delta") {
-                const delta = aEvent.delta || "";
-                if (planInTag || delta.includes("<think>") || delta.includes("<thought>")) {
-                  let remaining = delta;
-                  let thinkChunk = "";
-                  let textChunk = "";
-                  while (remaining.length > 0) {
-                    if (!planInTag) {
-                      const idx1 = remaining.indexOf("<think>");
-                      const idx2 = remaining.indexOf("<thought>");
-                      const idx = idx1 !== -1 && idx2 !== -1 ? Math.min(idx1, idx2) : idx1 !== -1 ? idx1 : idx2;
-                      if (idx !== -1) {
-                        textChunk += remaining.slice(0, idx);
-                        const tagLen = remaining.slice(idx).startsWith("<thought>") ? 9 : 7;
-                        remaining = remaining.slice(idx + tagLen);
-                        planInTag = true;
-                      } else {
-                        textChunk += remaining;
-                        remaining = "";
-                      }
-                    } else {
-                      const idx1 = remaining.indexOf("</think>");
-                      const idx2 = remaining.indexOf("</thought>");
-                      const idx = idx1 !== -1 && idx2 !== -1 ? Math.min(idx1, idx2) : idx1 !== -1 ? idx1 : idx2;
-                      if (idx !== -1) {
-                        thinkChunk += remaining.slice(0, idx);
-                        const tagLen = remaining.slice(idx).startsWith("</thought>") ? 10 : 8;
-                        remaining = remaining.slice(idx + tagLen);
-                        planInTag = false;
-                      } else {
-                        thinkChunk += remaining;
-                        remaining = "";
-                      }
-                    }
-                  }
-                  const thinkingActive = planInTag;
-                  queuePlannerStream((prev) => {
-                    let items = prev.items;
-                    if (thinkChunk) {
-                      items = appendItemDelta(items, "thinking", thinkChunk, thinkingActive);
-                    }
-                    if (!thinkingActive && items.some((i) => i.type === "thinking" && i.status === "running")) {
-                      items = closeRunningThinkingItem(items);
-                    }
-                    if (textChunk) {
-                      items = appendItemDelta(items, "text", textChunk, true);
-                    }
-                    return {
-                      ...prev,
-                      items,
-                      plannerThinking: prev.plannerThinking + thinkChunk,
-                      plannerThinkingActive: thinkingActive,
-                      plannerText: prev.plannerText + textChunk,
-                    };
-                  });
-                } else {
-                  queuePlannerStream((prev) => ({
-                    ...prev,
-                    items: appendItemDelta(closeRunningThinkingItem(prev.items), "text", delta, true),
-                    plannerThinkingActive: false,
-                    plannerText: prev.plannerText + delta,
-                  }));
-                }
-              }
-            } else if (pEvent?.type === "message_end" && pEvent.message?.role === "assistant") {
-              // A failed model call is the only visible explanation for a stopped
-              // Planner turn; terminal SSE errors may never arrive (detached view).
-              const failureStopReason = pEvent.message?.stopReason;
-              const failureMessage = pEvent.message?.errorMessage;
-              setPlannerStream(prev => {
-                const content = Array.isArray(pEvent.message.content) ? pEvent.message.content : [];
-                let items = finalizeThinkingItems(prev.items, content, prev.plannerMessageStart);
-                content.forEach((part: any, contentIndex: number) => {
-                  if (part?.type === "toolCall") items = upsertToolCall(items, {
-                    toolCallId: part.id, toolName: part.name, args: part.arguments,
-                    argsTruncated: !!part.argsTruncated, contentIndex, phase: "pending",
-                  }, prev.plannerMessageStart);
-                });
-                if ((failureStopReason === "error" || failureStopReason === "aborted") && failureMessage) {
-                  const alreadyHas = items.some(i => (i.isError || i.status === "error") && i.content === failureMessage);
-                  if (!alreadyHas) {
-                    items = [
-                      ...closeRunningThinkingItem(items),
-                      {
-                        id: `planner_error_${Date.now()}`,
-                        type: "text",
-                        role: "assistant",
-                        content: failureMessage,
-                        isError: true,
-                        status: "error",
-                        timestamp: Date.now(),
-                      },
-                    ];
-                  }
-                }
-                return {
-                  ...prev, items, tools: items.filter(item => item.type === "tool_call"), plannerMessageStart: items.length,
-                  plannerThinking: items.filter(item => item.type === "thinking" && item.content).map(item => item.content).join("\n\n"),
-                  plannerThinkingActive: false,
-                };
-              });
-            } else if (pEvent?.type === "tool_execution_start") {
-              if (pEvent.toolCallId || pEvent.toolName) {
-                pendingToolArgsRef.current.set(pEvent.toolCallId || pEvent.toolName, pEvent.args || {});
-              }
-              setPlannerStream(prev => {
-                const items = upsertToolCall(closeRunningThinkingItem(prev.items), {
-                  toolCallId: pEvent.toolCallId, toolName: pEvent.toolName, args: pEvent.args,
-                  argsTruncated: !!pEvent.argsTruncated, phase: "executing",
-                }, prev.plannerMessageStart);
-                return { ...prev, items, plannerThinkingActive: false, tools: items.filter(item => item.type === "tool_call") };
-              });
-            } else if (pEvent?.type === "tool_execution_end") {
-              const resText = (pEvent.result?.content ?? [])
-                .filter((i: any) => i.type === "text")
-                .map((i: any) => i.text)
-                .join("\n");
-              const rawExitCode = pEvent.result?.details?.exitCode;
-              const exitCode = typeof rawExitCode === "number" ? rawExitCode : null;
-              const isErr = !!(pEvent.isError || pEvent.result?.isError || (exitCode !== null && exitCode !== 0));
-              const truncated = !!(
-                pEvent.result?.details?.truncation?.truncated ||
-                resText.includes("[Showing lines") ||
-                resText.includes("Full output:")
-              );
-
-              const savedArgs = pendingToolArgsRef.current.get(pEvent.toolCallId) ||
-                pendingToolArgsRef.current.get(pEvent.toolName) ||
-                {};
-              if (pEvent.toolCallId) pendingToolArgsRef.current.delete(pEvent.toolCallId);
-              const args = pEvent.args || savedArgs;
-
-              // A resume can start work after this turn began; the live ref
-              // keeps running revision topology authoritative even then. A new
-              // plan has no committed revision to protect.
-              const revisionBecameActive = isContinuing && state.approved && liveWorkRef.current;
-              if (!isErr && !liveRevision && !revisionBecameActive) {
-                // 工具调用通过（执行成功）：增量将节点与连线同步至 graph，触发卡片入场动效与边连线动效
-                if (pEvent.toolName === "node") {
-                  const edits = plannerNodeEdits(args);
-                  if (edits.length > 0) {
-                    previewApplied = true;
-                    // 新建（非替换、非删除）的节点标记一个短入场动画窗口。
-                    const existing = new Set(state.graph.nodes.map((item) => item.name));
-                    const addedNodeNames = edits
-                      .filter((edit) => !edit.delete && !existing.has(edit.name))
-                      .map((edit) => edit.name);
-                    setState((prev) => {
-                      let nextNodes = [...prev.graph.nodes];
-                      let nextEdges = [...prev.graph.edges];
-                      for (const edit of edits) {
-                        nextNodes = nextNodes.filter((item) => item.name !== edit.name);
-                        if (edit.delete) {
-                          nextEdges = nextEdges.filter((e) => e.from !== edit.name && e.to !== edit.name);
-                        } else {
-                          nextNodes.push({ name: edit.name, task: edit.task });
-                        }
-                      }
-                      return {
-                        ...prev,
-                        graph: {
-                          ...prev.graph,
-                          nodes: nextNodes,
-                          edges: nextEdges,
-                        },
-                        // The committed plan predates this draft. Lay out the
-                        // preview from its current edges until Rust commits it.
-                        plan: null,
-                      };
-                    });
-                    if (addedNodeNames.length > 0) {
-                      setRecentlyAddedNodeNames((prev) => new Set([...prev, ...addedNodeNames]));
-                      setTimeout(() => {
-                        setRecentlyAddedNodeNames((prev) => {
-                          const next = new Set(prev);
-                          for (const name of addedNodeNames) next.delete(name);
-                          return next;
-                        });
-                      }, 1200);
-                    }
-                  }
-                } else if (pEvent.toolName === "edge") {
-                  const edits = plannerEdgeEdits(args);
-                  if (edits.length > 0) {
-                    previewApplied = true;
-                    const addedIds = edits.filter((edit) => !edit.delete).map((edit) => graphEdgeId(edit));
-                    setState((prev) => {
-                      let nextEdges = [...prev.graph.edges];
-                      for (const edit of edits) {
-                        nextEdges = nextEdges.filter((item) => item.from !== edit.from || item.to !== edit.to);
-                        if (!edit.delete) {
-                          nextEdges.push({
-                            from: edit.from,
-                            to: edit.to,
-                            feedback: edit.feedback,
-                          });
-                        }
-                      }
-                      return {
-                        ...prev,
-                        graph: {
-                          ...prev.graph,
-                          edges: nextEdges,
-                        },
-                        plan: null,
-                      };
-                    });
-                    if (addedIds.length > 0) {
-                      setRecentlyAddedEdgeIds((prev) => new Set([...prev, ...addedIds]));
-                      setTimeout(() => {
-                        setRecentlyAddedEdgeIds((prev) => {
-                          const next = new Set(prev);
-                          for (const id of addedIds) next.delete(id);
-                          return next;
-                        });
-                      }, 1200);
-                    }
-                  }
-                }
-
-                // 尝试解析并同步编译计划（executionBatches），用于实时驱动拓扑卡片摆位
-                try {
-                  if (resText) {
-                    const parsed = JSON.parse(resText);
-                    if (parsed?.plan?.executionBatches) {
-                      previewApplied = true;
-                      setState((prev) => ({
-                        ...prev,
-                        plan: parsed.plan,
-                      }));
-                    }
-                  }
-                } catch {
-                  // 非 JSON 输出则忽略
-                }
-              }
-
-              setPlannerStream((prev) => {
-                const updateTool = (t: TranscriptItem) => ({
-                  ...t,
-                  result: resText,
-                  exitCode,
-                  truncated,
-                  durationMs: typeof pEvent.durationMs === "number" ? pEvent.durationMs : t.durationMs,
-                  isError: isErr,
-                  status: isErr ? ("error" as const) : ("success" as const),
-                });
-
-                let nextItems = prev.items.slice();
-                let index = pEvent.toolCallId
-                  ? nextItems.findIndex(item => item.type === "tool_call" && item.toolCallId === pEvent.toolCallId)
-                  : -1;
-                if (!pEvent.toolCallId) {
-                  for (let i = nextItems.length - 1; i >= 0; i--) {
-                    if (nextItems[i].type === "tool_call" && nextItems[i].toolName === pEvent.toolName && nextItems[i].status === "running") { index = i; break; }
-                  }
-                }
-                if (index < 0) {
-                  nextItems = upsertToolCall(nextItems, { toolCallId: pEvent.toolCallId, toolName: pEvent.toolName,
-                    args, phase: "executing" }, prev.plannerMessageStart);
-                  index = nextItems.length - 1;
-                }
-                nextItems[index] = updateTool(nextItems[index]);
-                return { ...prev, items: nextItems, tools: nextItems.filter(item => item.type === "tool_call") };
-              });
-            } else if (pEvent?.type === "compaction_start" || pEvent?.type === "compaction_end") {
-              const compacting = pEvent.type === "compaction_start";
-              queuePlannerStream((prev) => (!!prev.compacting === compacting ? prev : { ...prev, compacting }));
-            }
-          } else if (event.type === "error") {
-            const errorMsg = event.error;
-            if (errorMsg) {
-              setPlannerStream((prev) => {
-                const closed = closeRunningThinkingItem(prev.items);
-                const alreadyHas = closed.some(
-                  (i) => (i.isError || i.status === "error") && i.content === errorMsg
+                setPlannerStream((prev) => applyPlannerToolExecutionStart(prev, pEvent));
+              } else if (pEvent?.type === "tool_execution_end") {
+                const resText = (pEvent.result?.content ?? [])
+                  .filter((i: any) => i.type === "text")
+                  .map((i: any) => i.text)
+                  .join("\n");
+                const rawExitCode = pEvent.result?.details?.exitCode;
+                const exitCode = typeof rawExitCode === "number" ? rawExitCode : null;
+                const isErr = !!(pEvent.isError || pEvent.result?.isError || (exitCode !== null && exitCode !== 0));
+                const truncated = !!(
+                  pEvent.result?.details?.truncation?.truncated ||
+                  resText.includes("[Showing lines") ||
+                  resText.includes("Full output:")
                 );
-                if (alreadyHas) return prev;
-                return {
+
+                const savedArgs = pendingToolArgsRef.current.get(pEvent.toolCallId) ||
+                  pendingToolArgsRef.current.get(pEvent.toolName) ||
+                  {};
+                if (pEvent.toolCallId) pendingToolArgsRef.current.delete(pEvent.toolCallId);
+                const args = pEvent.args || savedArgs;
+
+                // A resume can start work after this turn began; the live ref
+                // keeps running revision topology authoritative even then. A new
+                // plan has no committed revision to protect.
+                const revisionBecameActive = isContinuing && state.approved && liveWorkRef.current;
+                if (!isErr && !liveRevision && !revisionBecameActive) {
+                  // 工具调用通过（执行成功）：增量将节点与连线同步至 graph，触发卡片入场动效与边连线动效
+                  if (pEvent.toolName === "node") {
+                    const edits = plannerNodeEdits(args);
+                    if (edits.length > 0) {
+                      previewApplied = true;
+                      // 新建（非替换、非删除）的节点标记一个短入场动画窗口。
+                      const existing = new Set(state.graph.nodes.map((item) => item.name));
+                      const addedNodeNames = edits
+                        .filter((edit) => !edit.delete && !existing.has(edit.name))
+                        .map((edit) => edit.name);
+                      setState((prev) => applyPlannerNodeEditsToState(prev, edits));
+                      if (addedNodeNames.length > 0) {
+                        setRecentlyAddedNodeNames((prev) => new Set([...prev, ...addedNodeNames]));
+                        setTimeout(() => {
+                          setRecentlyAddedNodeNames((prev) => {
+                            const next = new Set(prev);
+                            for (const name of addedNodeNames) next.delete(name);
+                            return next;
+                          });
+                        }, 1200);
+                      }
+                    }
+                  } else if (pEvent.toolName === "edge") {
+                    const edits = plannerEdgeEdits(args);
+                    if (edits.length > 0) {
+                      previewApplied = true;
+                      const addedIds = edits.filter((edit) => !edit.delete).map((edit) => graphEdgeId(edit));
+                      setState((prev) => applyPlannerEdgeEditsToState(prev, edits));
+                      if (addedIds.length > 0) {
+                        setRecentlyAddedEdgeIds((prev) => new Set([...prev, ...addedIds]));
+                        setTimeout(() => {
+                          setRecentlyAddedEdgeIds((prev) => {
+                            const next = new Set(prev);
+                            for (const id of addedIds) next.delete(id);
+                            return next;
+                          });
+                        }, 1200);
+                      }
+                    }
+                  }
+
+                  // 尝试解析并同步编译计划（executionBatches），用于实时驱动拓扑卡片摆位
+                  try {
+                    if (resText) {
+                      const parsed = JSON.parse(resText);
+                      if (parsed?.plan?.executionBatches) {
+                        previewApplied = true;
+                        setState((prev) => ({
+                          ...prev,
+                          plan: parsed.plan,
+                        }));
+                      }
+                    }
+                  } catch {
+                    // 非 JSON 输出则忽略
+                  }
+                }
+
+                setPlannerStream((prev) => applyPlannerToolExecutionEnd(prev, pEvent, resText, exitCode, isErr, truncated, args));
+              } else if (pEvent?.type === "compaction_start" || pEvent?.type === "compaction_end") {
+                const compacting = pEvent.type === "compaction_start";
+                queuePlannerStream((prev) => (!!prev.compacting === compacting ? prev : { ...prev, compacting }));
+              }
+            } else if (event.type === "error") {
+              const errorMsg = event.error;
+              if (errorMsg) {
+                setPlannerStream((prev) => appendPlannerError(prev, errorMsg));
+              }
+              void planningRecovery.finish(scope, event.summary, event.planningId);
+            } else if (event.type === "complete") {
+              if (event.snapshot) {
+                // Terminal events supersede in-flight draft polls immediately;
+                // planning must not wait for the SSE transport to close.
+                applyForegroundSnapshot(event.snapshot, foregroundGeneration.current);
+                setIsPlanning(false);
+                setRouteType(deduceRouteType(event.snapshot));
+                recordRunToWorkspace(event.snapshot.runId, event.snapshot.config?.repository || targetRepo);
+                const id = event.snapshot.planningId;
+                if (id) setPlannerStream((prev) => ({
                   ...prev,
-                  items: [
-                    ...closed,
-                    {
-                      id: `planner_error_${Date.now()}`,
-                      type: "text",
-                      role: "assistant",
-                      content: errorMsg,
-                      isError: true,
-                      status: "error",
-                      timestamp: Date.now(),
-                    },
-                  ],
-                };
-              });
+                  representedPlanningIds: prev.representedPlanningIds.includes(id)
+                    ? prev.representedPlanningIds : [...prev.representedPlanningIds, id],
+                }));
+                void planningRecovery.finish(scope);
+              }
             }
-            void planningRecovery.finish(scope, event.summary, event.planningId);
-          } else if (event.type === "complete") {
-            if (event.snapshot) {
-              // Terminal events supersede in-flight draft polls immediately;
-              // planning must not wait for the SSE transport to close.
-              applyForegroundSnapshot(event.snapshot, foregroundGeneration.current);
-              setIsPlanning(false);
-              setRouteType(deduceRouteType(event.snapshot));
-              recordRunToWorkspace(event.snapshot.runId, event.snapshot.config?.repository || targetRepo);
-              const id = event.snapshot.planningId;
-              if (id) setPlannerStream((prev) => ({
-                ...prev,
-                representedPlanningIds: prev.representedPlanningIds.includes(id)
-                  ? prev.representedPlanningIds : [...prev.representedPlanningIds, id],
-              }));
-              void planningRecovery.finish(scope);
-            }
+          },
+          effectiveMode,
+          abortController.signal,
+          options?.images,
+          effectiveRevisionRunId,
+          continuePlanningId
+        );
+        if (!planningRecovery.current(scope)) return;
+        applyForegroundSnapshot(snapshot, foregroundGeneration.current);
+        setRouteType(deduceRouteType(snapshot));
+        recordRunToWorkspace(snapshot.runId, snapshot.config?.repository || targetRepo);
+        setRunModes((prev) => {
+          if (prev[snapshot.runId]) return prev;
+          const updated = { ...prev, [snapshot.runId]: effectiveMode };
+          writeStorageJson(STORAGE_KEYS.runModes, updated);
+          return updated;
+        });
+        void planningRecovery.finish(scope);
+        // Settling a Planner turn is not a view change. The reader may have opened
+        // a node conversation while the Planner was still working, and clearing
+        // the selection here would force them back to the Planner.
+        setPlannerStream((prev) => ({
+          ...prev,
+          runId: snapshot.runId,
+          items: closeRunningThinkingItem(prev.items),
+          representedPlanningIds: snapshot.planningId && !prev.representedPlanningIds.includes(snapshot.planningId)
+            ? [...prev.representedPlanningIds, snapshot.planningId] : prev.representedPlanningIds,
+          stage: "completed",
+          startedAt: undefined,
+        }));
+      } catch (err: any) {
+        if (!planningRecovery.current(scope)) return;
+        // A failed or aborted approved revision never commits. Drop the local
+        // draft preview immediately instead of leaving it until a later snapshot
+        // happens to change versions.
+        const restoreCommittedGraph = async () => {
+          if (!previewApplied || !isContinuing || !state.approved) return;
+          const runId = effectiveRevisionRunId || state.runId;
+          if (!runId || runId.startsWith("pending-")) return;
+          try {
+            const durable = await runtimeService.snapshotForRun(runId);
+            if (planningRecovery.current(scope)) applyForegroundSnapshot(durable, planningGeneration);
+          } catch {
+            // The durable snapshot poll remains the fallback.
           }
-        },
-        effectiveMode,
-        abortController.signal,
-        options?.images,
-        effectiveRevisionRunId
-      );
-      if (!planningRecovery.current(scope)) return;
-      applyForegroundSnapshot(snapshot, foregroundGeneration.current);
-      setRouteType(deduceRouteType(snapshot));
-      recordRunToWorkspace(snapshot.runId, snapshot.config?.repository || targetRepo);
-      setRunModes((prev) => {
-        if (prev[snapshot.runId]) return prev;
-        const updated = { ...prev, [snapshot.runId]: effectiveMode };
-        try { localStorage.setItem("grapher_run_modes", JSON.stringify(updated)); } catch {}
-        return updated;
-      });
-      void planningRecovery.finish(scope);
-      // Settling a Planner turn is not a view change. The reader may have opened
-      // a node conversation while the Planner was still working, and clearing
-      // the selection here would force them back to the Planner.
-      setPlannerStream((prev) => ({
-        ...prev,
-        runId: snapshot.runId,
-        items: closeRunningThinkingItem(prev.items),
-        representedPlanningIds: snapshot.planningId && !prev.representedPlanningIds.includes(snapshot.planningId)
-          ? [...prev.representedPlanningIds, snapshot.planningId] : prev.representedPlanningIds,
-        stage: "completed",
-        startedAt: undefined,
-      }));
-    } catch (err: any) {
-      if (!planningRecovery.current(scope)) return;
-      // A failed or aborted approved revision never commits. Drop the local
-      // draft preview immediately instead of leaving it until a later snapshot
-      // happens to change versions.
-      const restoreCommittedGraph = async () => {
-        if (!previewApplied || !isContinuing || !state.approved) return;
-        const runId = effectiveRevisionRunId || state.runId;
-        if (!runId || runId.startsWith("pending-")) return;
-        try {
-          const durable = await runtimeService.snapshotForRun(runId);
-          if (planningRecovery.current(scope)) applyForegroundSnapshot(durable, planningGeneration);
-        } catch {
-          // The durable snapshot poll remains the fallback.
+        };
+        if (provisionalRunId && !startedRunId) {
+          setGoal(targetGoal);
+          setLandingGoal(targetGoal);
+          saveLandingDraft(targetRepo, targetGoal);
         }
-      };
-      if (provisionalRunId && !startedRunId) {
-        setGoal(targetGoal);
-        setLandingGoal(targetGoal);
-        saveLandingDraft(targetRepo, targetGoal);
-      }
-      const isAbort =
-        err?.name === "AbortError" ||
-        String(err?.message || err).includes("AbortError") ||
-        String(err?.message || err).includes("The user aborted a request");
-      if (isAbort) {
+        const isAbort =
+          err?.name === "AbortError" ||
+          String(err?.message || err).includes("AbortError") ||
+          String(err?.message || err).includes("The user aborted a request");
+        if (isAbort) {
+          void restoreCommittedGraph();
+          if (!routeConfirmed && effectiveMode === "auto") setRouteType(deduceRouteType(state));
+          return;
+        }
+        const errorMsg = String(err?.message || err);
+        setError(errorMsg);
         void restoreCommittedGraph();
         if (!routeConfirmed && effectiveMode === "auto") setRouteType(deduceRouteType(state));
-        return;
-      }
-      const errorMsg = String(err?.message || err);
-      setError(errorMsg);
-      void restoreCommittedGraph();
-      if (!routeConfirmed && effectiveMode === "auto") setRouteType(deduceRouteType(state));
-      // Keep the failed first-message conversation mounted: wiping the whole
-      // snapshot here remounts the landing view over the workspace (page flash)
-      // and hides the failure the user is looking at.
-      if (provisionalRunId && !startedRunId) {
-        failureSummary = err?.summary ?? {
-          planningId: "",
-          roles: {},
-          totalPlanningDuration: 0,
-          modelDuration: 0,
-          status: "failed",
-          error: errorMsg,
-          createdAt: Date.now(),
-          repository: targetRepo,
-          planType: effectiveMode === "graph" ? "graph" : undefined,
-          goal: targetGoal,
-          runId: "",
-        };
-      }
-      void planningRecovery.finish(scope, err?.summary, err?.planningId);
-      setPlannerStream((prev) => {
-        const closed = closeRunningThinkingItem(prev.items);
-        const alreadyHas = closed.some(
-          (i) => (i.isError || i.status === "error") && i.content === errorMsg
-        );
-        return {
-          ...prev,
-          startedAt: undefined,
-          items: alreadyHas
-            ? closed
-            : [
-                ...closed,
-                {
-                  id: `planner_error_${Date.now()}`,
-                  type: "text",
-                  role: "assistant",
-                  content: errorMsg,
-                  isError: true,
-                  status: "error",
-                  timestamp: Date.now(),
-                },
-              ],
-          stage: "error",
-        };
-      });
+        // Keep the failed first-message conversation mounted: wiping the whole
+        // snapshot here remounts the landing view over the workspace (page flash)
+        // and hides the failure the user is looking at.
+        if (provisionalRunId && !startedRunId) {
+          failureSummary = err?.summary ?? {
+            planningId: "",
+            roles: {},
+            totalPlanningDuration: 0,
+            modelDuration: 0,
+            status: "failed",
+            error: errorMsg,
+            createdAt: Date.now(),
+            repository: targetRepo,
+            planType: effectiveMode === "graph" ? "graph" : undefined,
+            goal: targetGoal,
+            runId: "",
+          };
+        }
+        void planningRecovery.finish(scope, err?.summary, err?.planningId);
+        setPlannerStream((prev) => appendPlannerError(prev, errorMsg, true));
     } finally {
       if (abortController && planningAbortControllerRef.current === abortController) {
         planningAbortControllerRef.current = null;
@@ -2523,6 +2163,14 @@ export default function App() {
   });
   return { accepted: true, completion };
 };
+
+  const continuePlanner = () => {
+    const previous = failedPlanning ?? state.planning;
+    if (!previous || previous.status !== "failed" || previous.planType !== "graph" ||
+        !state.runId || previous.runId !== state.runId || !previous.planningId) return;
+    startPlanGoal(previous.goal || state.graph.originalGoal || goal, undefined, "graph", state.runId,
+      false, undefined, false, previous.planningId);
+  };
 
   const handlePlanGoal = (...args: Parameters<typeof startPlanGoal>): Promise<boolean> => {
     const { accepted, completion } = startPlanGoal(...args);
@@ -2576,7 +2224,7 @@ export default function App() {
     }
 
     const parsedExisting = parseMessageAttachmentsAndText(targetMsg.text, targetMsg.files, targetMsg.images);
-    const cleanExisting = parsedExisting.cleanText.replace(/^\[@[^\]]+\]\s*/, "").trim();
+    const cleanExisting = stripNodePrefix(parsedExisting.cleanText);
     if (selectedVersion === undefined && cleanText === cleanExisting) {
       setEditingMessage(null);
       setEditPrefillText("");
@@ -2589,7 +2237,7 @@ export default function App() {
 
     const isPlannerHistoryInitial = routeType === "graph" && !targetMsg.node &&
       targetMsg.id.startsWith("planner-history-") &&
-      targetMsg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === state.graph.originalGoal.trim();
+      stripNodePrefix(targetMsg.text) === state.graph.originalGoal.trim();
     const isInitialGoal = targetMsg.id === "msg-initial-goal" || isPlannerHistoryInitial || (!targetMsg.node && (
       (sessionEntries.length > 0 && sessionEntries[0].id === targetMsg.id) ||
       effectiveMessages[0]?.id === targetMsg.id
@@ -2607,7 +2255,7 @@ export default function App() {
         setError(t("无法定位要切换的对话版本，请重新加载对话后重试。"));
         return false;
       }
-      const selectedText = selectedVersionData.text.replace(/^\[@[^\]]+\]\s*/, "").trim();
+      const selectedText = stripNodePrefix(selectedVersionData.text);
       if (!selectedText) return false;
 
       if (isMergerMessage) {
@@ -2645,17 +2293,9 @@ export default function App() {
           if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
           if (!applyForegroundSnapshot(snapshot, generation)) return false;
           const base = sessionEntries.length > 0 ? sessionEntries : effectiveMessages;
-          const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, "").trim();
-          const cleanTarget = stripPrefix(cleanExisting || targetMsg.text);
-          const index = base.findIndex(entry =>
-            (targetMsg.id && entry.id === targetMsg.id) ||
-            stripPrefix(entry.text) === cleanTarget ||
-            stripPrefix(entry.text) === stripPrefix(targetMsg.text)
-          );
-          const next = index >= 0 ? [...base] : [...base, selectedMessage];
-          if (index >= 0) next[index] = selectedMessage;
-          const subsequent = (selectedVersionData.subsequentEntries ?? []).map(withoutPlannerSteerIdentity);
-          setSessionEntries(index >= 0 ? [...next.slice(0, index + 1), ...subsequent] : next);
+          setSessionEntries(applySelectedVersionToEntries(
+            base, targetMsg, cleanExisting, selectedMessage, selectedVersionData.subsequentEntries, true
+          ));
           const nextMerger = (snapshot.mergers ?? []).filter(item => item.node === targetMerger.node).at(-1);
           if (nextMerger && nextMerger.id !== targetMerger.id) setSelectedMergerId(nextMerger.id);
           setEditingMessage(null);
@@ -2711,20 +2351,9 @@ export default function App() {
         });
         if (!await acceptNodeEdit(snap)) return false;
         if (isInitialGoal) setGoal(selectedText);
-        setSessionEntries(prev => {
-          const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, "").trim();
-          const cleanTarget = stripPrefix(cleanExisting || targetMsg.text);
-          const index = prev.findIndex(entry =>
-            (targetMsg.id && entry.id === targetMsg.id) ||
-            stripPrefix(entry.text) === cleanTarget ||
-            stripPrefix(entry.text) === stripPrefix(targetMsg.text)
-          );
-          if (index < 0) return [selectedMessage];
-          const next = [...prev];
-          next[index] = selectedMessage;
-          const subsequent = (selectedVersionData.subsequentEntries ?? []).map(withoutPlannerSteerIdentity);
-          return [...next.slice(0, index + 1), ...subsequent];
-        });
+        setSessionEntries(prev => applySelectedVersionToEntries(
+          prev, targetMsg, cleanExisting, selectedMessage, selectedVersionData.subsequentEntries, false
+        ));
         setEditingMessage(null);
         setEditPrefillText("");
         return true;
@@ -2752,9 +2381,7 @@ export default function App() {
       } catch (error) { return reportEditError(error); }
     }
     if (!isInitialGoal && routeType === "graph" && state.runId && state.planningId && !targetMsg.node) {
-      const msgIdx = sessionEntries.findIndex((entry) => entry.id === targetMsg.id);
-      const textIdx = msgIdx >= 0 ? msgIdx : sessionEntries.findIndex((entry) =>
-        entry.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === cleanExisting);
+      const textIdx = findBranchTargetIndex(sessionEntries, targetMsg, cleanExisting);
       const current = textIdx >= 0 ? sessionEntries[textIdx] : targetMsg;
       const previous = textIdx >= 0
         ? sessionEntries.slice(0, textIdx)
@@ -2887,65 +2514,9 @@ export default function App() {
       }
 
       const baseEntries = sessionEntries.length > 0 ? sessionEntries : effectiveMessages;
-      const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, "").trim();
-      const cleanTarget = stripPrefix(cleanExisting || targetMsg.text);
-      const targetIndex = baseEntries.findIndex((e) =>
-        (targetMsg.id && e.id === targetMsg.id) ||
-        stripPrefix(e.text) === cleanTarget ||
-        stripPrefix(e.text) === stripPrefix(targetMsg.text)
+      const { rolledBackEntries } = branchEditedMessageEntries(
+        baseEntries, targetMsg, cleanExisting, cleanText, parsedExisting.attachments
       );
-
-      let rolledBackEntries: ChatMessage[];
-      let updatedMsg: ChatMessage;
-
-      if (targetIndex !== -1) {
-        const current = baseEntries[targetIndex];
-        const prevEntries = baseEntries.slice(0, targetIndex);
-        const parentId = prevEntries.length > 0 ? prevEntries[prevEntries.length - 1].id : null;
-
-        const initialVersion: ChatMessageVersion = {
-          id: "v1",
-          text: current.text,
-          files: current.files,
-          images: current.images,
-          timestamp: current.timestamp || Date.now(),
-          subsequentEntries: baseEntries.slice(targetIndex + 1),
-        };
-        const newVersion: ChatMessageVersion = {
-          id: `v${Date.now()}`,
-          text: cleanText,
-          files: parsedExisting.attachments,
-          images: targetMsg.images,
-          timestamp: Date.now(),
-          subsequentEntries: [],
-        };
-        const versions = [...(current.versions || [initialVersion]), newVersion];
-
-        updatedMsg = {
-          ...current,
-          text: cleanText,
-          files: parsedExisting.attachments,
-          timestamp: Date.now(),
-          parentId,
-          versions,
-          currentVersionIndex: versions.length - 1,
-        };
-        rolledBackEntries = [...prevEntries, updatedMsg];
-      } else {
-        const versions = [
-          ...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, files: targetMsg.files, images: targetMsg.images, timestamp: targetMsg.timestamp || Date.now() }]),
-          { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
-        ];
-        updatedMsg = {
-          ...targetMsg,
-          text: cleanText,
-          files: parsedExisting.attachments,
-          timestamp: Date.now(),
-          versions,
-          currentVersionIndex: versions.length - 1,
-        };
-        rolledBackEntries = [...baseEntries, updatedMsg];
-      }
 
       return run(async () => {
         try {
@@ -2971,67 +2542,17 @@ export default function App() {
       });
     }
 
-    const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, "").trim();
-    const cleanTarget = stripPrefix(cleanExisting || targetMsg.text);
-    const targetIndex = sessionEntries.findIndex((e) =>
-      (targetMsg.id && e.id === targetMsg.id) ||
-      stripPrefix(e.text) === cleanTarget ||
-      stripPrefix(e.text) === stripPrefix(targetMsg.text)
+    const { updatedMsg, rolledBackEntries } = branchEditedMessageEntries(
+      sessionEntries,
+      targetMsg,
+      cleanExisting,
+      cleanText,
+      parsedExisting.attachments,
+      msg => withoutPlannerSteerIdentity({
+        ...msg,
+        delivery: state.nodes[targetMsg.node || selected]?.status === "completed" ? undefined : msg.delivery,
+      })
     );
-
-    let rolledBackEntries: ChatMessage[];
-    let updatedMsg: ChatMessage;
-
-    if (targetIndex !== -1) {
-      const current = sessionEntries[targetIndex];
-      const prevEntries = sessionEntries.slice(0, targetIndex);
-      const parentId = prevEntries.length > 0 ? prevEntries[prevEntries.length - 1].id : null;
-
-      const initialVersion: ChatMessageVersion = {
-        id: "v1",
-        text: current.text,
-        files: current.files,
-        images: current.images,
-        timestamp: current.timestamp || Date.now(),
-        subsequentEntries: sessionEntries.slice(targetIndex + 1),
-      };
-      const newVersion: ChatMessageVersion = {
-        id: `v${Date.now()}`,
-        text: cleanText,
-        files: parsedExisting.attachments,
-        images: targetMsg.images,
-        timestamp: Date.now(),
-        subsequentEntries: [],
-      };
-      const versions = [...(current.versions || [initialVersion]), newVersion];
-
-      updatedMsg = withoutPlannerSteerIdentity({
-        ...current,
-        delivery: state.nodes[targetMsg.node || selected]?.status === "completed" ? undefined : current.delivery,
-        text: cleanText,
-        files: parsedExisting.attachments,
-        timestamp: Date.now(),
-        parentId,
-        versions,
-        currentVersionIndex: versions.length - 1,
-      });
-      rolledBackEntries = [...prevEntries, updatedMsg];
-    } else {
-      const versions = [
-        ...(targetMsg.versions ?? [{ id: "v1", text: targetMsg.text, files: targetMsg.files, images: targetMsg.images, timestamp: targetMsg.timestamp || Date.now() }]),
-        { id: `v${Date.now()}`, text: cleanText, files: parsedExisting.attachments, images: targetMsg.images, timestamp: Date.now(), subsequentEntries: [] },
-      ];
-      updatedMsg = withoutPlannerSteerIdentity({
-        ...targetMsg,
-        delivery: state.nodes[targetMsg.node || selected]?.status === "completed" ? undefined : targetMsg.delivery,
-        text: cleanText,
-        files: parsedExisting.attachments,
-        timestamp: Date.now(),
-        versions,
-        currentVersionIndex: versions.length - 1,
-      });
-      rolledBackEntries = [...sessionEntries, updatedMsg];
-    }
 
     const selectedNode = state.graph.nodes.find((item) => item.name === selected);
     const targetNodeName = targetMsg.node || (selectedNode ? selectedNode.name : (
@@ -3421,6 +2942,7 @@ export default function App() {
     newConversation: useStableCallback(handleNewConversation), send: useStableCallback(handleSendMessage),
     edit: useStableCallback(handleEditMessageSubmit), switchVersion: useStableCallback(handleSwitchMessageVersion),
     control: useStableCallback(control), save: useStableCallback(save), addManualNode: useStableCallback(addManualNode),
+    updateUnstartedNodeTask: useStableCallback(updateUnstartedNodeTask),
     openSettings: useStableCallback(handleOpenSettings), openEditor: useStableCallback(() => setModal("editor")),
     openApproval: useStableCallback(() => setModal("approval")),
     openFile: handleOpenFile,
@@ -3641,9 +3163,11 @@ export default function App() {
                     plannerStream={plannerStream}
                     recoveredPlanningId={recoveredPlanning?.planningId || (!isPlanning && backendPlanning ? (state.planningId || state.planning?.planningId) : undefined)}
                     onSendMessage={actions.send}
+                    onContinuePlanner={continuePlanner}
                     onRequestConfirmation={setConfirmModal}
                     onControl={actions.control}
                     onSave={actions.save}
+                    onUpdateUnstartedNodeTask={actions.updateUnstartedNodeTask}
                     onAddManualNode={actions.addManualNode}
                     onOpenEditor={actions.openEditor}
                     onOpenApproval={actions.openApproval}

@@ -1,4 +1,115 @@
-import type { ChatMessageVersion, Execution, GraphEvent, Snapshot } from "../types";
+import type { ChatMessage, ChatMessageVersion, Execution, FileAttachment, GraphEvent, Snapshot } from "../types";
+import { withoutPlannerSteerIdentity } from "./plannerSteers";
+
+export function stripNodePrefix(text: string): string {
+  return text.replace(/^\[@[^\]]+\]\s*/, "").trim();
+}
+
+export function findBranchTargetIndex(
+  entries: readonly ChatMessage[],
+  targetMsg: Pick<ChatMessage, "id" | "text">,
+  cleanExisting?: string,
+): number {
+  const cleanTarget = stripNodePrefix(cleanExisting || targetMsg.text);
+  const strippedRaw = stripNodePrefix(targetMsg.text);
+  return entries.findIndex(entry =>
+    (targetMsg.id && entry.id === targetMsg.id) ||
+    stripNodePrefix(entry.text) === cleanTarget ||
+    stripNodePrefix(entry.text) === strippedRaw
+  );
+}
+
+export function applySelectedVersionToEntries(
+  entries: readonly ChatMessage[],
+  targetMsg: Pick<ChatMessage, "id" | "text">,
+  cleanExisting: string | undefined,
+  selectedMessage: ChatMessage,
+  subsequentEntries: readonly ChatMessage[] | undefined,
+  appendWhenMissing = false,
+): ChatMessage[] {
+  const index = findBranchTargetIndex(entries, targetMsg, cleanExisting);
+  if (index < 0) return appendWhenMissing ? [...entries, selectedMessage] : [selectedMessage];
+  const subsequent = (subsequentEntries ?? []).map(withoutPlannerSteerIdentity);
+  return [...entries.slice(0, index), selectedMessage, ...subsequent];
+}
+
+export function branchEditedMessageEntries(
+  entries: readonly ChatMessage[],
+  targetMsg: ChatMessage,
+  cleanExisting: string,
+  cleanText: string,
+  attachments: FileAttachment[] | undefined,
+  transform: (msg: ChatMessage) => ChatMessage = msg => msg,
+): { updatedMsg: ChatMessage; rolledBackEntries: ChatMessage[]; previousEntries: ChatMessage[] } {
+  const now = Date.now();
+  const targetIndex = findBranchTargetIndex(entries, targetMsg, cleanExisting);
+  if (targetIndex !== -1) {
+    const current = entries[targetIndex];
+    const previousEntries = entries.slice(0, targetIndex);
+    const parentId = previousEntries.length > 0 ? previousEntries[previousEntries.length - 1].id : null;
+    const initialVersion: ChatMessageVersion = {
+      id: "v1",
+      text: current.text,
+      files: current.files,
+      images: current.images,
+      timestamp: current.timestamp || now,
+      subsequentEntries: entries.slice(targetIndex + 1),
+    };
+    const newVersion: ChatMessageVersion = {
+      id: `v${now}`,
+      text: cleanText,
+      files: attachments,
+      images: targetMsg.images,
+      timestamp: now,
+      subsequentEntries: [],
+    };
+    const versions = [...(current.versions || [initialVersion]), newVersion];
+    const updatedMsg = transform({
+      ...current,
+      text: cleanText,
+      files: attachments,
+      timestamp: now,
+      parentId,
+      versions,
+      currentVersionIndex: versions.length - 1,
+    });
+    return {
+      updatedMsg,
+      rolledBackEntries: [...previousEntries, updatedMsg],
+      previousEntries,
+    };
+  }
+  const versions: ChatMessageVersion[] = [
+    ...(targetMsg.versions ?? [{
+      id: "v1",
+      text: targetMsg.text,
+      files: targetMsg.files,
+      images: targetMsg.images,
+      timestamp: targetMsg.timestamp || now,
+    }]),
+    {
+      id: `v${now}`,
+      text: cleanText,
+      files: attachments,
+      images: targetMsg.images,
+      timestamp: now,
+      subsequentEntries: [],
+    },
+  ];
+  const updatedMsg = transform({
+    ...targetMsg,
+    text: cleanText,
+    files: attachments,
+    timestamp: now,
+    versions,
+    currentVersionIndex: versions.length - 1,
+  });
+  return {
+    updatedMsg,
+    rolledBackEntries: [...entries, updatedMsg],
+    previousEntries: entries[0] ? [entries[0]] : [],
+  };
+}
 
 /** Only the chosen branch contributes turns to the active conversation. The
  * original durable events and executions remain available for history. */
@@ -46,7 +157,7 @@ export function executionIdForMessage(state: Snapshot, event: GraphEvent): strin
 }
 
 export function executionIdForVersion(state: Snapshot, node: string, text: string): string | undefined {
-  const clean = text.replace(/^\[@[^\]]+\]\s*/, "").trim();
+  const clean = stripNodePrefix(text);
   const edited = state.events.slice().reverse().find(event =>
     event.type === "conversation_edited" && event.target === node &&
     event.instruction?.trim() === clean);

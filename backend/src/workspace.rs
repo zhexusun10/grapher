@@ -1245,7 +1245,7 @@ pub fn remove_shadow_repo(target: &Path) -> Result<(), String> {
     if !checked_shadow_directory(&shadow)? {
         return Ok(());
     }
-    if let Some(metadata) = fs::symlink_metadata(&shadow).ok() {
+    if let Ok(metadata) = fs::symlink_metadata(&shadow) {
         if metadata.file_type().is_symlink() {
             return Err(format!(
                 "Refusing to remove shadow repository symlink {}",
@@ -1511,7 +1511,7 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
     ) && !repo
         .workdir()
         .and_then(|dir| dir.canonicalize().ok())
-        .is_some_and(|workdir| crate::path_identity::same_path(&workdir, &cwd))
+        .is_some_and(|workdir| crate::path_identity::same_path(&workdir, cwd))
     {
         return None;
     }
@@ -2406,11 +2406,17 @@ pub fn publish_planner_with_merger(
         return Ok(());
     }
     let mut resolved_preview = false;
-    prepare_with_merger(repository, preview, &source_head, &[head.clone()], || {
-        resolve(preview)?;
-        resolved_preview = true;
-        Ok(())
-    })
+    prepare_with_merger(
+        repository,
+        preview,
+        &source_head,
+        std::slice::from_ref(&head),
+        || {
+            resolve(preview)?;
+            resolved_preview = true;
+            Ok(())
+        },
+    )
     .map_err(|error| {
         format!(
             "Planner changes conflict with the source; the private workspace is retained: {error}"
@@ -2669,6 +2675,20 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
     };
     // Graph metadata is never an agent .git, including during composition.
     allocate_private_git(path)?;
+    if private_slot_layout(path) {
+        if prepare_view {
+            crate::workspace_view::clear_ready(path)?;
+        }
+        if let Some(metadata) = private_git_dir(path) {
+            let _lease = SlotGitGuard::acquire(path)?;
+            for lock_name in ["index.lock", "HEAD.lock", "config.lock"] {
+                let lock_file = metadata.join(lock_name);
+                if lock_file.exists() {
+                    let _ = fs::remove_file(lock_file);
+                }
+            }
+        }
+    }
     let source_git = |args: &[&str]| -> Result<String, String> {
         let mut command = source_args.clone();
         command.extend_from_slice(args);

@@ -158,6 +158,7 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
     // Keep legacy persisted failure events/checkpoints compatible while exposing
     // interruption as a distinct UI state. Ordinary provider errors stay failed.
     for (name, node) in &state.nodes {
+        metadata["nodes"][name]["canResume"] = json!(state.can_resume_node(name));
         if node.is_user_paused() {
             metadata["nodes"][name]["status"] = json!("paused");
         }

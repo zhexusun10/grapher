@@ -194,10 +194,9 @@ fn run_runtime_preparation(
         let mut child = command.spawn().map_err(|error| {
             format!("Cannot start native runtime preparation with Node: {error}")
         })?;
-        let tree = crate::process_control::track(&child).map_err(|error| {
+        let tree = crate::process_control::track(&child).inspect_err(|_error| {
             let _ = child.kill();
             let _ = child.wait();
-            error
         })?;
         if RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst) {
             tree.terminate();
@@ -365,6 +364,12 @@ pub(crate) fn clear_git_environment(command: &mut Command) {
 pub(crate) fn bind_workspace_state(command: &mut Command, workspace: &Path) -> Result<(), String> {
     let state = crate::workspace_state::prepare(workspace)?;
     let home = state.join(".agent-home");
+    if let Some(user_home) = home_dir() {
+        command.env(
+            "GRAPHER_UPSTREAM_PI_MODELS",
+            host_path(&user_home.join(".pi/agent/models.json")),
+        );
+    }
     crate::path_safety::real_child_path(&state, &home, false)?;
     fs::create_dir_all(&home).map_err(|e| e.to_string())?;
     if let Some(directory) = environment_path("GRAPHER_GLOBAL_PI_AGENT_DIR")
@@ -798,24 +803,6 @@ pub fn agent_dir() -> Result<PathBuf, String> {
         home.join(".grapher/pi-agent")
     };
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
-    let target_models = path.join("models.json");
-    let isolated_models = std::env::var_os("GRAPHER_ISOLATED_PI_MODELS").as_deref()
-        == Some(std::ffi::OsStr::new("1"));
-    if !target_models.exists() && !isolated_models {
-        let source_models = home.join(".pi/agent/models.json");
-        if source_models.exists() {
-            #[cfg(unix)]
-            {
-                let _ = std::os::unix::fs::symlink(&source_models, &target_models);
-            }
-            #[cfg(windows)]
-            {
-                // Windows symlink creation commonly requires a developer mode
-                // or elevated privilege; a private copy preserves startup.
-                let _ = fs::copy(&source_models, &target_models);
-            }
-        }
-    }
     path.canonicalize().map_err(|e| e.to_string())
 }
 

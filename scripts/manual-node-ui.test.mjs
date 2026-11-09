@@ -187,6 +187,7 @@ test("graph background menu creates nodes with explicit completed-result confirm
     nodes: { up: nodeState(), target: nodeState(), child: nodeState() } };
   const repositoryInfo = { path: repository, name: "Project", branch: "main", head: "", clean: true };
   const requests = [];
+  const taskEdits = [];
   const errors = [];
   let reject = true;
   const server = await createServer({ cacheDir: "node_modules/.vite-manual-node", server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false } });
@@ -214,6 +215,17 @@ test("graph background menu creates nodes with explicit completed-result confirm
         case "list_files": result = { files: [] }; break;
         case "list_skills": result = { skills: [] }; break;
         case "provider_auth": result = { providers: [], models: [], warning: null }; break;
+        case "update_unstarted_node_task": {
+          taskEdits.push(body);
+          if (taskEdits.length === 2) {
+            await route.fulfill({ status: 409, json: { error: "Node has already started; reload before editing its task" } });
+            return;
+          }
+          snapshot = { ...snapshot, graph: { ...snapshot.graph, nodes: snapshot.graph.nodes.map(node =>
+            node.name === body.node ? { ...node, task: body.task } : node) } };
+          result = snapshot;
+          break;
+        }
         case "add_manual_node": {
           requests.push(body);
           if (reject) {
@@ -318,6 +330,23 @@ test("graph background menu creates nodes with explicit completed-result confirm
     assert.equal(await dialog.count(), 0, "an independent node does not require confirmation");
     assert.equal(requests[3].request.to, null);
     assert.deepEqual(requests[3].request.confirmedCompleted, []);
+
+    await page.getByRole("heading", { name: "independent" }).waitFor();
+    await page.getByRole("button", { name: "Edit task directive" }).click();
+    await page.locator(".node-task-card textarea").fill("Updated independent work");
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await page.locator(".node-task-card").getByText("Updated independent work", { exact: true }).waitFor();
+    assert.deepEqual(taskEdits.map(({ runId, node, oldTask, task }) => ({ runId, node, oldTask, task })),
+      [{ runId: "graph-a", node: "independent", oldTask: "Independent work", task: "Updated independent work" }]);
+    assert.equal(await page.locator('[data-run-id="graph-a"]').count(), 1);
+    assert.equal(await page.locator('[data-run-id]').count(), 1, "editing a waiting node does not create a conversation");
+    await page.getByRole("button", { name: "Edit task directive" }).click();
+    await page.locator(".node-task-card textarea").fill("Race draft");
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await page.getByRole("alert").filter({ hasText: "Node has already started" }).waitFor();
+    assert.equal(await page.locator(".node-task-card textarea").inputValue(), "Race draft", "rejected edits retain their draft");
+    await page.getByRole("button", { name: "Cancel edit" }).click();
+    await page.locator(".floating-error-close").click();
 
     snapshot = { ...snapshot, phase: "launching_result" };
     await page.waitForFunction(() => document.querySelector(".approval-row")?.textContent?.includes("launching_result"));

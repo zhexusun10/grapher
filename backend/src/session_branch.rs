@@ -52,7 +52,7 @@ fn session_file(
     let mut last = [0];
     file.read_exact(&mut last)
         .map_err(|error| error.to_string())?;
-    if last != [b'\n'] {
+    if last != *b"\n" {
         return Err("Node session has an incomplete last entry".into());
     }
     file.seek(std::io::SeekFrom::Start(0))

@@ -14,6 +14,7 @@ import {
   ChevronUp,
   ChevronDown,
   CornerDownLeft,
+  Play,
 } from "lucide-react";
 import { runtimeService } from "../../services/runtime";
 import { formatFileSize, getFileIcon } from "../../utils/attachmentUtils";
@@ -50,6 +51,7 @@ interface PromptBoxProps
   isExecuting?: boolean;
   isWorking?: boolean;
   onInterrupt?: () => void;
+  onContinue?: () => void;
   planMode?: "auto" | "serial" | "graph";
   onPlanModeChange?: (mode: "auto" | "serial" | "graph") => void;
   onCancel?: () => void;
@@ -89,6 +91,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       isExecuting = false,
       isWorking = false,
       onInterrupt,
+      onContinue,
       planMode,
       onPlanModeChange,
       onCancel,
@@ -698,7 +701,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     const handleSubmitAction = async (fromPointer = false) => {
       const trimmed = currentText.trim();
-      if ((!trimmed && !selectedFile) || disabled || isBusy || isPreparing || submittingRef.current) return;
+      if (disabled || isBusy || isPreparing || submittingRef.current) return;
+      if (!trimmed && !selectedFile) {
+        if (!isWorking) onContinue?.();
+        return;
+      }
       submittingRef.current = true;
       setIsSubmitting(true);
       // Only pointer sends can leave a click over the future Stop control.
@@ -877,7 +884,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
     };
 
-    const canSubmit = (hasText || !!selectedFile) && !disabled && !isBusy && !isPreparing && !isSubmitting;
+    const showContinue = !hasText && !selectedFile && !isWorking && !!onContinue;
+    const canSubmit = (hasText || !!selectedFile || showContinue) && !disabled && !isBusy && !isPreparing && !isSubmitting;
     const showWorkingStop = isWorking && !hasText && !selectedFile && !sendGrace && !isSubmitting && !isPreparing;
 
     const prompt = (
@@ -1255,20 +1263,25 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                   : ""
               }`}
               aria-busy={isSubmitting || isPreparing || undefined}
+              title={showContinue ? t("继续当前 Agent（不会追加消息）") : undefined}
               aria-label={
                 isSubmitting || isPreparing
                   ? t("正在发送…")
                   : showWorkingStop
                     ? t("点击打断执行")
-                    : isWorking && (hasText || selectedFile)
-                      ? t("发送以实时调整方向 (Steer)")
-                      : t("发送消息")
+                    : showContinue
+                      ? t("继续当前 Agent（不会追加消息）")
+                      : isWorking && (hasText || selectedFile)
+                        ? t("发送以实时调整方向 (Steer)")
+                        : t("发送消息")
               }
             >
               {showWorkingStop ? (
                 <Square size={compact ? 8 : 10} className="prompt-box-stop-icon" />
               ) : isPreparing || isSubmitting ? (
                 <LoaderCircle size={compact ? 14 : 16} className="prompt-box-spin" />
+              ) : showContinue ? (
+                <Play size={compact ? 14 : 16} fill="currentColor" />
               ) : (
                 <span
                   style={{

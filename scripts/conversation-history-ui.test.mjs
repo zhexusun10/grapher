@@ -499,17 +499,18 @@ for (const mode of ["graph", "serial", "planner"]) {
         for (const label of labels) assert.match(label, /^[A-Z]/, `${mode}: ${label}`);
         for (const label of [
           "Workspace", ...(mode === "planner" ? [] : ["Session id"]),
-          ...(mode === "graph" ? ["Commit before", "Commit after"] : []),
-          "Start time", "Time took", "Model", "Thinking level",
+          ...(mode === "graph" ? ["Commit"] : []),
+          "Start time", "Time took",
           "Cumulative tokens", "Input", "Output", "Cache read", "Cache write", "Reasoning", "Context window", "Current context",
+          // Model settings sit on the last row, after token usage.
+          "Model", "Thinking level",
         ]) assert.ok(labels.includes(label), `${mode}: missing ${label}`);
         await details.getByText("Workspace: /mock", { exact: true }).waitFor();
         await details.getByText("Model: test/model", { exact: true }).waitFor();
         await details.getByText(`Thinking level: ${mode === "planner" ? "high" : "low"}`, { exact: true }).waitFor();
         if (mode !== "planner") await details.getByText("Session id: session", { exact: true }).waitFor();
         if (mode === "graph") {
-          await details.getByText("Commit before: not snapshotted", { exact: true }).waitFor();
-          await details.getByText("Commit after: direct modification (no snapshot)", { exact: true }).waitFor();
+          await details.getByText("Commit: not snapshotted → direct modification (no snapshot)", { exact: true }).waitFor();
         }
         assert.deepEqual(errors, []);
       } finally { await context.close(); }

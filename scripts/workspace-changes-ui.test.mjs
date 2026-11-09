@@ -31,7 +31,7 @@ async function expectCollapsed(page, trigger) {
   })).toBe(0);
 }
 
-async function fixture(mode, viewport = { width: 1280, height: 850 }, getFileChanges, getExecutionOutput) {
+async function fixture(mode, viewport = { width: 1280, height: 850 }, getFileChanges, getExecutionOutput, waitUntil = getExecutionOutput ? "domcontentloaded" : "networkidle") {
   const context = await browser.newContext({ viewport, locale: "en-US", reducedMotion: "reduce" });
   await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
   const errors = [];
@@ -60,7 +60,7 @@ async function fixture(mode, viewport = { width: 1280, height: 850 }, getFileCha
   const page = await context.newPage();
   page.on("pageerror", error => errors.push(String(error)));
   page.setDefaultTimeout(10_000);
-  await page.goto(`${origin}/__changes?mode=${mode}`, { waitUntil: getExecutionOutput ? "domcontentloaded" : "networkidle" });
+  await page.goto(`${origin}/__changes?mode=${mode}`, { waitUntil });
   await page.locator(".initial-query-scroll.conversation-ready").waitFor();
   return { page, context, errors };
 }
@@ -72,6 +72,71 @@ function changesResult(paths, totalFiles = paths.length) {
     totalAdditions: totalFiles, totalDeletions: 0, isRunning: false,
   } };
 }
+
+test("conversation defaults to no changes and updates when the first read finds files", { timeout: 30_000 }, async () => {
+  let release;
+  const response = new Promise(resolve => { release = resolve; });
+  const { page, context, errors } = await fixture("node&metadata=1&settled=1", undefined, async () => {
+    await response;
+    return changesResult(["src/node.ts"]);
+  }, undefined, "domcontentloaded");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await expect(trigger).toHaveText("No file changes");
+    await expect(trigger).toBeDisabled();
+    release();
+    await expect(trigger).toContainText("1 files changed");
+    await expect(trigger).toBeEnabled();
+    assert.deepEqual(errors, []);
+  } finally { release(); await context.close(); }
+});
+
+test("running empty node reveals immediately and shows the result after a slow read", { timeout: 30_000 }, async () => {
+  let release;
+  const response = new Promise(resolve => { release = resolve; });
+  const { page, context, errors } = await fixture("node&metadata=1", undefined, async () => {
+    await response;
+    return changesResult([]);
+  }, undefined, "domcontentloaded");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await expect(page.locator(".initial-query-scroll")).toHaveClass(/conversation-ready/);
+    await expect(trigger).toHaveText("No file changes");
+    await expect(trigger).toBeDisabled();
+    const pendingStyle = await trigger.evaluate(element => {
+      const style = getComputedStyle(element);
+      return { opacity: style.opacity, color: style.color };
+    });
+    assert.equal(pendingStyle.opacity, "1");
+    release();
+    await expect(trigger).toBeEnabled();
+    await expect(trigger).toHaveText("No file changes");
+    assert.deepEqual(await trigger.evaluate(element => {
+      const style = getComputedStyle(element);
+      return { opacity: style.opacity, color: style.color };
+    }), pendingStyle);
+    await trigger.click();
+    await expect(page.getByTestId("workspace-changes-panel")).toContainText("No files added, modified, or deleted in this session yet");
+    assert.deepEqual(errors, []);
+  } finally { release(); await context.close(); }
+});
+
+test("failed initial metadata read releases the conversation and retries", { timeout: 30_000 }, async () => {
+  let calls = 0;
+  const { page, context, errors } = await fixture("node&metadata=1", undefined, () => {
+    if (++calls === 1) throw Error("unavailable");
+    return changesResult([]);
+  }, undefined, "domcontentloaded");
+  try {
+    const trigger = page.getByTestId("workspace-changes-trigger");
+    await expect(trigger).toHaveText("No file changes");
+    await expect(trigger).toBeDisabled();
+    await expect(trigger).toBeEnabled();
+    await expect(trigger).toHaveText("No file changes");
+    assert.ok(calls >= 2);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 test("metadata changes refresh during a running execution and after a settled snapshot", { timeout: 30_000 }, async () => {
   let current = changesResult(["src/first.ts"]);
@@ -204,6 +269,7 @@ test("metadata waiting scope stays empty and failed reads retain the last projec
   try {
     const trigger = page.getByTestId("workspace-changes-trigger");
     await expect(trigger).toContainText("No file changes");
+    assert.equal(attempts, 0, "an empty execution scope must not need a backend read");
     await page.evaluate(() => window.changesAudit.select(""));
     await expect(trigger).toContainText("1 files changed");
     failing = true;
@@ -274,7 +340,7 @@ for (const mode of ["serial", "planner", "node", "merger"]) {
       await expect(page.locator(".workspace-details-body")).toBeVisible();
       await page.evaluate(() => window.changesAudit.empty());
       await expect(panel.getByTestId("changed-file-item")).toHaveCount(0);
-      await expect(trigger).toHaveText(/No file changes/);
+      await expect(trigger).toHaveText("No file changes");
       await trigger.click();
       await expect(panel).toBeVisible();
       await expect(session).toHaveAttribute("aria-expanded", "false");
@@ -648,7 +714,7 @@ test("narrow conversation: review stays within the page and the entry remains re
     await trigger.click();
     await expectCollapsed(page, trigger);
     await page.evaluate(() => window.changesAudit.empty());
-    await expect(trigger).toHaveText(/No file changes/);
+    await expect(trigger).toHaveText("No file changes");
     await trigger.click();
     await expect(panel).toContainText("No files added, modified, or deleted in this session yet");
     await trigger.click();

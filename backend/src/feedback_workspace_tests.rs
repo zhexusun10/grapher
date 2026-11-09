@@ -1406,7 +1406,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         .find(|job| job.execution.node == "related")
         .unwrap()
         .clone();
-    assert!(related.feedback_source == false);
+    assert!(!related.feedback_source);
     execute(&mut runtime, &review);
     assert_eq!(runtime.state.pending_feedback.len(), 1);
     let root_dir = runtime.root.clone();

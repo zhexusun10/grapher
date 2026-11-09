@@ -13,6 +13,12 @@
 
 More agents help only when work can progress independently. Repeatedly splitting edits to the same files can add conflicts instead of useful parallelism.
 
+## Refresh local Pi models
+
+After editing `~/.pi/agent/models.json`, open **Settings → Model & Provider** and click **Refresh**. Grapher reads the latest local definitions for the catalog and for new execution runtimes. A model appears in role selectors only when its Provider is available; authenticate it in Settings if needed. Running sessions retain their current runtime.
+
+If Grapher also has its own `models.json`, local Pi definitions win on conflicts and Grapher-only models remain. The original Grapher file is retained and backed up as `models.json.grapher-backup`. To remove an old model that only exists in that file, remove it there as well. These files may contain credentials; keep them private. Merged snapshots are normally removed on exit, but a forced termination or crash may leave a `grapher-models-*` directory in the system temporary directory; check it before sharing or cleaning temporary files.
+
 ## Customize the home screen
 
 At the bottom of **Settings**, choose the static **Dot pattern** (the default) or **Animated paths**, then save. The choice affects the home screen and is stored in the current browser; it does not change a conversation or backend settings.
@@ -65,7 +71,7 @@ Review nodes can send bounded feedback to their graph-defined target. The target
 
 ## Recover without starting over
 
-The **Continue** control below is available in Graph. In Serial, after fixing the cause, send a follow-up in the conversation to retry the task.
+After fixing the cause, use the play button in an empty Node, Serial Agent or Planner composer when available to continue that agent without adding a message. Graph also has a run-wide **Continue** in the topology. If a multi-node Graph is globally paused, use the run-wide control; individual node continuation does not bypass that pause. Planner continuation requires its saved session and draft; if either is unavailable or the graph has since changed, Grapher reports the problem instead of silently starting over.
 
 | Situation | What to do |
 | --- | --- |

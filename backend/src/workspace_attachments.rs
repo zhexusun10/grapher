@@ -181,15 +181,14 @@ fn direct_write(
 ) -> Result<(), String> {
     {
         let directory = workspace.join(ATTACHMENTS);
-        if real_child_path(&workspace, &directory, false)?.is_none() {
+        if real_child_path(workspace, &directory, false)?.is_none() {
             match fs::create_dir(&directory) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(format!("Cannot create attachment directory: {error}")),
             }
         }
-        real_child_path(&workspace, &directory, false)?
-            .ok_or("Attachment directory disappeared")?;
+        real_child_path(workspace, &directory, false)?.ok_or("Attachment directory disappeared")?;
         let owned = directory.join(id);
         if real_child_path(workspace, &owned, false)?.is_none() {
             fs::create_dir(&owned)

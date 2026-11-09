@@ -171,7 +171,7 @@ fn node_key(
     }
     let repo = crate::path_identity::actual_path(Path::new(&config.repository))
         .map_err(|e| e.to_string())?;
-    let cwd = crate::path_identity::actual_path(&cwd).map_err(|e| e.to_string())?;
+    let cwd = crate::path_identity::actual_path(cwd).map_err(|e| e.to_string())?;
     if !crate::path_identity::same_path(&cwd, &repo) {
         return Err("Only source-checkout nodes can be prewarmed".into());
     }
@@ -720,8 +720,8 @@ pub fn parse_route_decision(text: &str) -> Route {
             .filter_map(|(idx, _)| {
                 let before = lower[..idx].chars().next_back();
                 let after = lower[idx + "parallel".len()..].chars().next();
-                let before_ok = before.map_or(true, |c| !c.is_alphanumeric());
-                let after_ok = after.map_or(true, |c| !c.is_alphanumeric());
+                let before_ok = before.is_none_or(|c| !c.is_alphanumeric());
+                let after_ok = after.is_none_or(|c| !c.is_alphanumeric());
                 if before_ok && after_ok {
                     Some(idx)
                 } else {
@@ -735,8 +735,8 @@ pub fn parse_route_decision(text: &str) -> Route {
             .filter_map(|(idx, _)| {
                 let before = lower[..idx].chars().next_back();
                 let after = lower[idx + 6..].chars().next();
-                let before_ok = before.map_or(true, |c| !c.is_alphanumeric());
-                let after_ok = after.map_or(true, |c| !c.is_alphanumeric());
+                let before_ok = before.is_none_or(|c| !c.is_alphanumeric());
+                let after_ok = after.is_none_or(|c| !c.is_alphanumeric());
                 if before_ok && after_ok {
                     Some(idx)
                 } else {
@@ -1010,9 +1010,7 @@ fn run_pi_with_timeout(
     if !request.extra_args.is_empty() {
         command.args(&request.extra_args);
     }
-    if request.role == PiRole::Partitioner
-        && !request.extra_args.iter().any(|arg| *arg == "--thinking")
-    {
+    if request.role == PiRole::Partitioner && !request.extra_args.contains(&"--thinking") {
         command.args(["--thinking", "low"]);
     }
     if let Some(system_prompt) = request.system_prompt {
@@ -1262,10 +1260,9 @@ fn run_pi_with_timeout(
         let mut child = command
             .spawn()
             .map_err(|error| format!("Cannot start Execution Instance Engine: {error}"))?;
-        let tree = process_control::track(&child).map_err(|error| {
+        let tree = process_control::track(&child).inspect_err(|_| {
             let _ = child.kill();
             let _ = child.wait();
-            error
         })?;
         (child, tree)
     };
@@ -1274,10 +1271,9 @@ fn run_pi_with_timeout(
         let mut child = command
             .spawn()
             .map_err(|error| format!("Cannot start Execution Instance Engine: {error}"))?;
-        let tree = process_control::track(&child).map_err(|error| {
+        let tree = process_control::track(&child).inspect_err(|_error| {
             let _ = child.kill();
             let _ = child.wait();
-            error
         })?;
         (child, tree)
     };

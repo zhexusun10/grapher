@@ -211,13 +211,16 @@ fn linear_and_parallel_results_deliver_files_without_any_source_commit_objects()
         "c",
     );
     let d = node(&source, &temp.path().join("d"), &c, &[], "d.txt", "d");
-    let published = publish(&source, &[d.clone()], |_| panic!("unexpected conflict")).unwrap();
+    let published = publish(&source, std::slice::from_ref(&d), |_| {
+        panic!("unexpected conflict")
+    })
+    .unwrap();
     assert_delivery(&source, &original, &published, &[base, a, b, c, d.clone()]);
     for name in ["planner", "a", "b", "c", "d"] {
         assert!(source.join(format!("{name}.txt")).is_file());
     }
     assert_eq!(
-        publish(&source, &[d.clone()], |_| panic!()).unwrap(),
+        publish(&source, std::slice::from_ref(&d), |_| panic!()).unwrap(),
         published
     );
     fs::write(source.join("later-user.txt"), "not part of publication").unwrap();
@@ -248,7 +251,7 @@ fn delivery_preserves_user_index_and_leaves_staged_unstaged_ignored_changes_unco
         &["rev-parse", "--path-format=absolute", "--git-path", "index"],
     ));
     let before = fs::read(&index).unwrap();
-    let head = publish(&source, &[a.clone()], |_| panic!()).unwrap();
+    let head = publish(&source, std::slice::from_ref(&a), |_| panic!()).unwrap();
     assert_delivery(&source, &original, &head, &[base, a]);
     assert_eq!(fs::read(index).unwrap(), before);
     assert_eq!(git(&source, &["show", ":user.txt"]), "staged");
@@ -282,7 +285,7 @@ fn conflict_failure_and_restart_retry_never_partially_publish_or_touch_user_inde
         &["rev-parse", "--path-format=absolute", "--git-path", "index"],
     ));
     let before_index = fs::read(&index_path).unwrap();
-    assert!(publish(&source, &[a.clone()], |private| {
+    assert!(publish(&source, std::slice::from_ref(&a), |private| {
         assert_ne!(
             private.canonicalize().unwrap(),
             source.canonicalize().unwrap()
@@ -298,7 +301,7 @@ fn conflict_failure_and_restart_retry_never_partially_publish_or_touch_user_inde
     assert_eq!(fs::read(&index_path).unwrap(), before_index);
     assert_eq!(git(&source, &["rev-parse", "HEAD"]), original);
     assert!(workspace::git(&source, &["rev-parse", "--verify", "MERGE_HEAD"]).is_err());
-    let head = publish(&source, &[a.clone()], |private| {
+    let head = publish(&source, std::slice::from_ref(&a), |private| {
         fs::write(private.join("shared.txt"), "user\nnode\n").map_err(|e| e.to_string())?;
         workspace::git(private, &["add", "shared.txt"])?;
         Ok(())
@@ -374,17 +377,17 @@ fn subsequent_publication_retains_internal_ancestry_without_reapplying_delivered
         "shared.txt",
         "first\n",
     );
-    let first = publish(&source, &[a.clone()], |_| panic!()).unwrap();
+    let first = publish(&source, std::slice::from_ref(&a), |_| panic!()).unwrap();
     let revised_base = workspace::snapshot_repository(&source).unwrap();
     let b = node(
         &source,
         &temp.path().join("b"),
         &revised_base,
-        &[a.clone()],
+        std::slice::from_ref(&a),
         "shared.txt",
         "second\n",
     );
-    let second = publish(&source, &[b.clone()], |_| {
+    let second = publish(&source, std::slice::from_ref(&b), |_| {
         panic!("delivered ancestors must not conflict again")
     })
     .unwrap();

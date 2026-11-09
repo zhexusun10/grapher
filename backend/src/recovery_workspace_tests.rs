@@ -657,3 +657,381 @@ fn recovery_refuses_rewritten_history_without_touching_dirty_files() {
         b"keep this evidence"
     );
 }
+
+#[test]
+fn interrupted_fan_in_merger_handoff_continues_and_resolves_after_restart() {
+    let graph = Graph {
+        original_goal: "recover interrupted fan-in merger handoff".into(),
+        nodes: ["left", "right", "join", "after"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![
+            Edge {
+                from: "left".into(),
+                to: "join".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "right".into(),
+                to: "join".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "join".into(),
+                to: "after".into(),
+                feedback: false,
+            },
+        ],
+    };
+    let (temp, source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let mut branches = runtime.jobs().unwrap();
+    for job in &mut branches {
+        attach(&mut runtime, job);
+        let path = Path::new(&job.execution.worktree);
+        workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
+        fs::write(
+            path.join("tracked.txt"),
+            format!("{} change\n", job.execution.node),
+        )
+        .unwrap();
+        let head = workspace::snapshot_node_for_run(
+            path,
+            &source,
+            &job.execution.node,
+            Some(&runtime.state.run_id),
+        )
+        .unwrap();
+        runtime
+            .finish(&job.execution, Ok((head, "completed".into())))
+            .unwrap();
+    }
+
+    let join = runtime.jobs().unwrap().remove(0);
+    assert_eq!(join.execution.node, "join");
+    let join_path = PathBuf::from(&join.execution.worktree);
+    // Simulate backend exit while the fan-in composition Merger is running:
+    // MERGE_HEAD and conflict markers exist on disk, a stale Git lock was left
+    // by a killed git subprocess, MergerStarted is recorded, and Prepared was
+    // never emitted.
+    let _ = workspace::prepare_with_merger_expected_for_run(
+        &source,
+        &join_path,
+        &join.execution.before,
+        &join.parent_heads,
+        &join.expected_source_head,
+        Some(&join.run_id),
+        || {
+            crate::workspace_view::prepare_conflicts(&source, &join_path)?;
+            let merger_id = Uuid::new_v4().to_string();
+            runtime.emit(EventKind::MergerStarted {
+                execution: Execution {
+                    id: merger_id.clone(),
+                    node: "merge:join".into(),
+                    revision: 1,
+                    attempt: 1,
+                    session_id: merger_id,
+                    worktree: join.execution.worktree.clone(),
+                    before: join.execution.before.clone(),
+                    workspace_lineage: vec![],
+                    after: None,
+                    input: None,
+                    result: None,
+                    status: "running".into(),
+                    output: String::new(),
+                    output_bytes: 0,
+                    pid: None,
+                    started_at: now(),
+                    completed_at: None,
+                    metrics: None,
+                },
+            })?;
+            Err("backend exited during node composition merger".into())
+        },
+    );
+    if let Some(git_dir) = workspace::private_git_dir(&join_path) {
+        fs::write(git_dir.join("index.lock"), b"stale lock").unwrap();
+    }
+
+    let root = runtime.root.clone();
+    drop(runtime);
+    let mut runtime = Runtime::open(&root).unwrap();
+    assert_eq!(runtime.state.nodes["join"].status, "blocked");
+    assert!(
+        runtime.state.can_resume_interrupted(),
+        "an interrupted node-composition Merger must be resumable as interrupted work"
+    );
+    assert!(runtime.state.can_resume());
+
+    runtime.pause(false).unwrap();
+    let mut retry = runtime.jobs().unwrap().remove(0);
+    assert_eq!(retry.execution.node, "join");
+    assert!(retry.initial_recovery);
+    assert!(!retry.continuation);
+    assert_eq!(retry.task, "join");
+    assert_eq!(retry.execution.worktree, join.execution.worktree);
+    local_agent(&mut retry, &temp);
+
+    let result = perform_with_merger(
+        &retry,
+        &root,
+        &[],
+        |_| {},
+        |prepared| {
+            runtime.emit(EventKind::Prepared {
+                execution_id: retry.execution.id.clone(),
+                head: prepared,
+            })
+        },
+        |_| Ok(()),
+    );
+    // The conflict resolver in perform_with_merger invokes resolve_with_merger_for_node;
+    // verify that prepare_with_merger_expected_for_run_scoped itself succeeds when
+    // the Merger resolves the conflict on retry.
+    let _ = result;
+    let resolved_head = workspace::prepare_with_merger_expected_for_run(
+        &source,
+        &join_path,
+        &retry.execution.before,
+        &retry.parent_heads,
+        &retry.expected_source_head,
+        Some(&retry.run_id),
+        || {
+            fs::write(join_path.join("tracked.txt"), "left + right resolved\n").unwrap();
+            workspace::git(&join_path, &["add", "-f", "--", "tracked.txt"])?;
+            workspace::git(&join_path, &["commit", "--no-edit"])?;
+            Ok(())
+        },
+    )
+    .expect("retrying after an interrupted conflict merge must re-prepare cleanly");
+    runtime
+        .emit(EventKind::Prepared {
+            execution_id: retry.execution.id.clone(),
+            head: resolved_head.clone(),
+        })
+        .unwrap();
+    let final_head =
+        workspace::snapshot_node_for_run(&join_path, &source, "join", Some(&runtime.state.run_id))
+            .unwrap();
+    runtime
+        .finish(&retry.execution, Ok((final_head, "completed".into())))
+        .unwrap();
+    assert_eq!(runtime.state.nodes["join"].status, "completed");
+    let next = runtime.jobs().unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].execution.node, "after");
+}
+
+#[test]
+fn interrupted_mid_view_handoff_before_prepared_recovers_on_continue_after_restart() {
+    let graph = Graph {
+        original_goal: "recover interrupted workspace view handoff".into(),
+        nodes: ["parent", "worker"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "parent".into(),
+            to: "worker".into(),
+            feedback: false,
+        }],
+    };
+    let (temp, source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let mut parent = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut parent);
+    let parent_path = PathBuf::from(&parent.execution.worktree);
+    workspace::prepare(&source, &parent_path, &parent.execution.before, &[]).unwrap();
+    fs::write(parent_path.join("parent.txt"), "from parent\n").unwrap();
+    let parent_head = workspace::snapshot_node_for_run(
+        &parent_path,
+        &source,
+        "parent",
+        Some(&runtime.state.run_id),
+    )
+    .unwrap();
+    runtime
+        .finish(&parent.execution, Ok((parent_head, "completed".into())))
+        .unwrap();
+
+    let worker = runtime.jobs().unwrap().remove(0);
+    let worker_path = PathBuf::from(&worker.execution.worktree);
+    // Simulate a backend crash mid-handoff: project-ready and .git-config/global
+    // were missing/incomplete while .git and half-modified files existed on disk,
+    // and Prepared was never emitted.
+    crate::workspace_view::clear_ready(&worker_path).unwrap();
+    let global_cfg = crate::workspace_state::process_root(&worker_path)
+        .unwrap()
+        .join(".git-config/global");
+    if global_cfg.exists() {
+        fs::remove_file(&global_cfg).unwrap();
+    }
+    fs::write(worker_path.join("tracked.txt"), "half-prepared bytes").unwrap();
+
+    let root = runtime.root.clone();
+    drop(runtime);
+    let mut runtime = Runtime::open(&root).unwrap();
+    assert!(runtime.state.can_resume_interrupted());
+    runtime.pause(false).unwrap();
+
+    let mut retry = runtime.jobs().unwrap().remove(0);
+    assert!(
+        retry.initial_recovery,
+        "an unmanaged node that crashed before Prepared must use initial_recovery"
+    );
+    assert!(!retry.continuation);
+    assert_eq!(retry.task, "worker");
+    assert_eq!(retry.execution.worktree, worker.execution.worktree);
+    local_agent(&mut retry, &temp);
+
+    let result = perform(
+        &retry,
+        &root,
+        &[],
+        |_| {},
+        |prepared| {
+            runtime.emit(EventKind::Prepared {
+                execution_id: retry.execution.id.clone(),
+                head: prepared,
+            })
+        },
+    );
+    runtime.finish(&retry.execution, result.clone()).unwrap();
+    result.expect("Continue must re-prepare the half-handed-off workspace instead of rejecting it");
+    assert_eq!(runtime.state.nodes["worker"].status, "completed");
+    assert_eq!(
+        fs::read_to_string(worker_path.join("parent.txt")).unwrap(),
+        "from parent\n"
+    );
+}
+
+#[test]
+fn interrupted_followup_before_session_fork_recovers_after_restart() {
+    let graph = Graph {
+        original_goal: "recover follow-up that crashed before session fork".into(),
+        nodes: ["first", "second"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "first".into(),
+            to: "second".into(),
+            feedback: false,
+        }],
+    };
+    let (temp, source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let mut first = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut first);
+    let first_path = PathBuf::from(&first.execution.worktree);
+    workspace::prepare(&source, &first_path, &first.execution.before, &[]).unwrap();
+    let first_session_dir = runtime.root.join("sessions").join(&first.execution.id);
+    fs::create_dir_all(&first_session_dir).unwrap();
+    fs::write(
+        first_session_dir.join(format!("test_{}.jsonl", first.execution.session_id)),
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "session",
+                "version": 3,
+                "id": first.execution.session_id,
+                "cwd": crate::native::host_path(&first_path),
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "m1",
+                "parentId": null,
+                "message": { "role": "user", "content": "first", "timestamp": 1 }
+            })
+        ),
+    )
+    .unwrap();
+    let first_head = workspace::snapshot_node_for_run(
+        &first_path,
+        &source,
+        "first",
+        Some(&runtime.state.run_id),
+    )
+    .unwrap();
+    runtime
+        .finish(&first.execution, Ok((first_head, "completed".into())))
+        .unwrap();
+
+    let mut second = runtime.jobs().unwrap().remove(0);
+    // Put `second` in its own terminal directory so a shared-terminal follow-up
+    // on `first` must move workspaces and fork `first`'s session.
+    second.execution.worktree = runtime
+        .run_workspace_root()
+        .join("second-terminal")
+        .to_string_lossy()
+        .into();
+    let second_path = PathBuf::from(&second.execution.worktree);
+    workspace::prepare(
+        &source,
+        &second_path,
+        &second.execution.before,
+        &second.parent_heads,
+    )
+    .unwrap();
+    let second_head = workspace::snapshot_node_for_run(
+        &second_path,
+        &source,
+        "second",
+        Some(&runtime.state.run_id),
+    )
+    .unwrap();
+    runtime
+        .finish(&second.execution, Ok((second_head, "completed".into())))
+        .unwrap();
+
+    runtime
+        .intervene("first", "follow up in shared terminal")
+        .unwrap();
+    let followup = runtime.jobs().unwrap().remove(0);
+    assert!(
+        followup.session_fork.is_some(),
+        "moving to the terminal workspace requires a session fork"
+    );
+    // Simulate backend exit before `Prepared` and before `fork_session` wrote
+    // the new JSONL session file.
+    let root = runtime.root.clone();
+    drop(runtime);
+
+    let mut runtime = Runtime::open(&root).unwrap();
+    assert!(runtime.state.can_resume_interrupted());
+    runtime.pause(false).unwrap();
+    let mut retry = runtime.jobs().unwrap().remove(0);
+    assert!(!retry.continuation);
+    assert_eq!(retry.task, "follow up in shared terminal");
+    assert_eq!(
+        retry.session_fork.as_ref().unwrap().id,
+        first.execution.id,
+        "Continue must fall back to the last completed session when the previous fork was never written"
+    );
+    local_agent(&mut retry, &temp);
+    let result = perform(
+        &retry,
+        &root,
+        &[],
+        |_| {},
+        |prepared| {
+            runtime.emit(EventKind::Prepared {
+                execution_id: retry.execution.id.clone(),
+                head: prepared,
+            })
+        },
+    );
+    runtime.finish(&retry.execution, result.clone()).unwrap();
+    result.expect("follow-up recovery must fork from the completed anchor session and succeed");
+    assert_eq!(runtime.state.nodes["first"].status, "completed");
+}

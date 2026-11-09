@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { toHostInput } from './path-identity.mjs';
-import { mkdirSync, existsSync, symlinkSync, copyFileSync, accessSync, statSync, constants } from 'node:fs';
+import { mkdirSync, symlinkSync, copyFileSync, accessSync, statSync, constants } from 'node:fs';
 
 // Reuse only Pi's known managed executables, not its configuration or plugins.
 // No downloads on the planning critical path and no replacement of local tools.
@@ -34,16 +34,6 @@ export function configureAgentDir() {
   directory = resolve(directory);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   process.env.PI_CODING_AGENT_DIR = directory;
-
-  const targetModels = join(directory, 'models.json');
-  const sourceModels = join(homedir(), '.pi', 'agent', 'models.json');
-  if (process.env.GRAPHER_ISOLATED_PI_MODELS !== '1' && !existsSync(targetModels) && existsSync(sourceModels)) {
-    if (process.platform === 'win32') {
-      try { copyFileSync(sourceModels, targetModels); } catch {}
-    } else {
-      try { symlinkSync(sourceModels, targetModels); } catch {}
-    }
-  }
 
   reuseManagedTools(directory, join(homedir(), '.pi', 'agent'));
   return directory;

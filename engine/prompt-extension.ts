@@ -34,59 +34,39 @@ export default function (pi: ExtensionAPI) {
         customType: 'grapher-interrupted-continuation',
         content: [],
         display: false,
-        details: { reason: 'grapher-interrupted-node' },
+        details: { reason: process.env.GRAPHER_MODE === 'planner' ? 'grapher-interrupted-planner' : 'grapher-interrupted-node' },
       }, { triggerTurn: true });
       return { action: 'handled' };
     });
   }
-  if (continuation || process.env.GRAPHER_MODE === 'node') {
+  if (continuation || process.env.GRAPHER_MODE === 'node' || process.env.GRAPHER_MODE === 'planner') {
     pi.on('context', event => {
-      // Repairs are a context projection, not edits to Pi's stored history.
-      // Reapply them on later node turns too: an interrupted tool result may
-      // still be absent after a successful continuation and a later reload.
+      // Match Pi's interrupted-response retry: omit a failed assistant and
+      // its associated tool results from this request, not from saved history.
+      // Leave ordinary tool-use turns, including missing results, untouched so
+      // Pi's provider adapter performs its own native normalization.
       const messages = event.messages.filter(message =>
         !(message.role === 'custom' && message.customType === 'grapher-interrupted-continuation'));
       const lastAssistant = messages.findLastIndex(message => message.role === 'assistant');
       const lastUser = messages.findLastIndex(message => message.role === 'user');
       const projected: typeof messages = [];
+      let omittedCalls = new Set<string>();
       for (let index = 0; index < messages.length; index++) {
         const message = messages[index];
-        if (message.role !== 'assistant') { projected.push(message); continue; }
-        if (continuation && index === lastAssistant && index > lastUser &&
-          ['error', 'aborted', 'length'].includes(message.stopReason)) continue;
-        if (message.stopReason !== 'toolUse') { projected.push(message); continue; }
-        let end = index + 1;
-        while (end < messages.length && messages[end].role !== 'assistant' && messages[end].role !== 'user') end++;
-        const tail = messages.slice(index + 1, end);
-        const calls = Array.isArray(message.content) ? message.content.filter(block => block.type === 'toolCall') : [];
-        const validCalls = calls.length > 0 && calls.every(call =>
-          typeof call.id === 'string' && call.id.length > 0 && typeof call.name === 'string' && call.name.length > 0) &&
-          new Set(calls.map(call => call.id)).size === calls.length;
-        if (!validCalls) {
-          // Do not invent an identity for a malformed current call or leave
-          // its tool results orphaned. Historical malformed data stays intact.
-          if (continuation && index === lastAssistant && index > lastUser) {
-            projected.push(...tail.filter(item => item.role !== 'toolResult'));
-          } else { projected.push(message, ...tail); }
-          index = end - 1;
-          continue;
+        if (message.role === 'assistant') {
+          omittedCalls = new Set();
+          const interrupted = ['error', 'aborted'].includes(message.stopReason) ||
+            (continuation && message.stopReason === 'length' && index === lastAssistant && index > lastUser);
+          if (interrupted) {
+            if (Array.isArray(message.content)) {
+              for (const block of message.content) {
+                if (block.type === 'toolCall' && typeof block.id === 'string') omittedCalls.add(block.id);
+              }
+            }
+            continue;
+          }
         }
-        const results = tail.filter(item => item.role === 'toolResult');
-        const resultIds = new Set(results.map(item => item.toolCallId));
-        const missing = calls.filter(call => !resultIds.has(call.id)).map(call => ({
-          role: 'toolResult' as const, toolCallId: call.id, toolName: call.name,
-          content: [{ type: 'text' as const, text: 'The tool result is not available in the current context; its side effects are unknown. Inspect the workspace and external state before retrying.' }],
-          isError: true, timestamp: typeof message.timestamp === 'number' ? message.timestamp : Date.now(),
-        }));
-        if (missing.length === 0) {
-          // A completed answer or settled tool tail retains its exact history.
-          projected.push(message, ...tail);
-        } else {
-          const validIds = new Set(calls.map(call => call.id));
-          projected.push(message, ...results.filter(item => validIds.has(item.toolCallId)), ...missing,
-            ...tail.filter(item => item.role !== 'toolResult'));
-        }
-        index = end - 1;
+        if (message.role !== 'toolResult' || !omittedCalls.has(message.toolCallId)) projected.push(message);
       }
       return { messages: projected };
     });

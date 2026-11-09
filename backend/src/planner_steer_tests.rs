@@ -1,6 +1,15 @@
 use super::*;
 use std::time::{Duration, Instant};
 
+/// Windows installs Python as `python`; `python3` is usually the Store stub.
+fn python_command() -> &'static str {
+    if cfg!(windows) {
+        "python"
+    } else {
+        "python3"
+    }
+}
+
 fn setup() -> (tempfile::TempDir, Arc<Service>, Config, String, String) {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("repo");
@@ -12,7 +21,7 @@ fn setup() -> (tempfile::TempDir, Arc<Service>, Config, String, String) {
     runtime.state.run_id = run_id.clone();
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": repo, "model": "mock/model", "maxParallel": 1,
-        "engine": "pi", "piCommand": "python3"
+        "engine": "pi", "piCommand": python_command()
     }))
     .unwrap();
     let summary = PlanningSummary {
@@ -135,7 +144,7 @@ print(json.dumps({{'type':'message_end','message':{{'role':'assistant','content'
 print(json.dumps({{'type':'agent_settled'}}), flush=True)
 sys.stdin.read()
 "#, received=received.to_string_lossy(), release=release.to_string_lossy())).unwrap();
-    config.pi_command = "python3".into();
+    config.pi_command = python_command().into();
     config.pi_args = vec!["-u".into(), script.to_string_lossy().into()];
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let worker = {
@@ -189,8 +198,8 @@ sys.stdin.read()
     };
     let start = Instant::now();
     thread::scope(|scope| {
-        let first = scope.spawn(&submit);
-        let second = scope.spawn(&submit);
+        let first = scope.spawn(submit);
+        let second = scope.spawn(submit);
         first.join().unwrap();
         second.join().unwrap();
     });

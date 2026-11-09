@@ -111,3 +111,48 @@ export function finalizeThinkingItems(items: TranscriptItem[], content: MessageC
   });
   return next;
 }
+
+/** Split inline `<think>` / `<thought>` tags out of a streamed text delta. */
+export function splitThinkingTagDelta(delta: string, inTag: boolean): {
+  thinkChunk: string;
+  textChunk: string;
+  inTag: boolean;
+} {
+  if (!inTag && !delta.includes("<think>") && !delta.includes("<thought>")) {
+    return { thinkChunk: "", textChunk: delta, inTag: false };
+  }
+  let remaining = delta;
+  let thinkChunk = "";
+  let textChunk = "";
+  let currentInTag = inTag;
+  while (remaining.length > 0) {
+    if (!currentInTag) {
+      const idx1 = remaining.indexOf("<think>");
+      const idx2 = remaining.indexOf("<thought>");
+      const idx = idx1 !== -1 && idx2 !== -1 ? Math.min(idx1, idx2) : idx1 !== -1 ? idx1 : idx2;
+      if (idx !== -1) {
+        textChunk += remaining.slice(0, idx);
+        const tagLen = remaining.slice(idx).startsWith("<thought>") ? 9 : 7;
+        remaining = remaining.slice(idx + tagLen);
+        currentInTag = true;
+      } else {
+        textChunk += remaining;
+        remaining = "";
+      }
+    } else {
+      const idx1 = remaining.indexOf("</think>");
+      const idx2 = remaining.indexOf("</thought>");
+      const idx = idx1 !== -1 && idx2 !== -1 ? Math.min(idx1, idx2) : idx1 !== -1 ? idx1 : idx2;
+      if (idx !== -1) {
+        thinkChunk += remaining.slice(0, idx);
+        const tagLen = remaining.slice(idx).startsWith("</thought>") ? 10 : 8;
+        remaining = remaining.slice(idx + tagLen);
+        currentInTag = false;
+      } else {
+        thinkChunk += remaining;
+        remaining = "";
+      }
+    }
+  }
+  return { thinkChunk, textChunk, inTag: currentInTag };
+}

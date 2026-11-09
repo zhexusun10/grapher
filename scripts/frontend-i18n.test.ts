@@ -78,6 +78,28 @@ test("all English translations contain no Chinese and preserve placeholders", ()
   }
 });
 
+test("Chinese backend diagnostics localize to English without untranslated warnings", () => {
+  const backendDiagnostics = [
+    "发现旧执行器的未清理 lease：/tmp/lease。请先使用旧版本停止对应执行并确认没有后台写入；新原生后端不会删除记录或接管旧执行。",
+    "临时 Git 快照不存在或已回收；请重新派发节点或开启新对话。",
+    "临时 Git 快照不存在或已回收：快照在首次派发节点时建立，发布成功后删除。请开启新对话后重试。",
+    "临时 Git 快照不存在：图运行的快照在首次派发节点时建立，并在发布成功后回收。请开启新对话后重试。（工作区：/tmp/ws）",
+    "所选目录「/tmp/ws」无法初始化为有效工作区。",
+    "项目绑定已失效：/tmp/ws。原目录不存在、不可访问或不是绝对目录；请重新选择目录建立新绑定。",
+    "项目绑定不可访问：/tmp/ws：permission denied。请重新选择目录建立新绑定。",
+    "绑定的 Git 仓库还没有任何提交（HEAD 不存在）；请先完成一次提交再运行。",
+    "工作区快照缺少可解析的 HEAD：missing ref",
+    "当前 Run 中找不到所选执行。",
+    "必须提供文件路径。",
+    "文件已不在当前 Run 的工作区或仓库中。",
+    "无法启动系统文件打开器：spawn error",
+  ];
+  for (const diagnostic of backendDiagnostics) {
+    const localized = localizeError(diagnostic, "en");
+    assert.doesNotMatch(localized, han, diagnostic);
+  }
+});
+
 test("application errors are localized without changing the Chinese version", () => {
   const message = "用户已停止本次执行；可以修改消息或重新运行。";
   assert.equal(localizeError(message, "zh-CN"), message);

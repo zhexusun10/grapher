@@ -253,7 +253,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let a = format!("GPU-{}", uuid::Uuid::new_v4());
         let b = format!("GPU-{}", uuid::Uuid::new_v4());
-        let held = acquire_ids(root.path(), &[b.clone()]).unwrap();
+        let held = acquire_ids(root.path(), std::slice::from_ref(&b)).unwrap();
         let conflict = acquire_ids(root.path(), &[a.clone(), b.clone()]).unwrap_err();
         assert!(
             conflict.contains("busy"),
@@ -261,7 +261,7 @@ mod tests {
         );
         // The rejected multi-device attempt must release the device it already
         // took, so a single-device acquisition of it succeeds again.
-        let a_lease = acquire_released(root.path(), &[a.clone()]);
+        let a_lease = acquire_released(root.path(), std::slice::from_ref(&a));
         let path = root.path().to_path_buf();
         let other = b.clone();
         assert!(
@@ -312,7 +312,7 @@ mod tests {
         }
         let acquired = root.path().join("ready").exists();
         let busy = acquired
-            && matches!(acquire_ids(root.path(), &[id.clone()]), Err(error) if error.contains("busy"));
+            && matches!(acquire_ids(root.path(), std::slice::from_ref(&id)), Err(error) if error.contains("busy"));
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(

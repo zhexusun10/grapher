@@ -10,6 +10,88 @@ fn record_session(runtime: &Runtime, execution: &Execution) {
 }
 
 #[test]
+fn targeted_continue_retries_only_the_selected_failure_even_with_another_writer() {
+    let graph = Graph {
+        original_goal: "independent failures".into(),
+        nodes: ["first", "other", "live", "child"]
+            .into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
+        edges: vec![Edge { from: "first".into(), to: "child".into(), feedback: false }],
+    };
+    let (_temp, source, mut runtime) = setup(true, graph);
+    runtime.state.config.as_mut().unwrap().max_parallel = 3;
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    assert_eq!(jobs.len(), 3);
+    let first = &jobs.iter().find(|job| job.execution.node == "first").unwrap().execution;
+    let other = &jobs.iter().find(|job| job.execution.node == "other").unwrap().execution;
+    for execution in [first, other] {
+        workspace::prepare(&source, Path::new(&execution.worktree), &execution.before, &[]).unwrap();
+        runtime.emit(EventKind::Prepared { execution_id: execution.id.clone(), head: execution.before.clone() }).unwrap();
+        record_session(&runtime, execution);
+        runtime.finish(execution, Err("provider failure".into())).unwrap();
+    }
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.nodes["child"].status, "blocked");
+    assert!(!runtime.state.can_resume_node("child"), "an upstream dependency block is not its own failure");
+    assert!(!runtime.state.can_resume(), "run-wide retry waits for the live writer");
+    assert!(runtime.state.can_resume_node("first"));
+    let metadata = crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap();
+    assert_eq!(metadata["nodes"]["first"]["canResume"], true);
+    assert_eq!(metadata["nodes"]["live"]["canResume"], false);
+    runtime.resume_node("first").unwrap();
+    assert_eq!(runtime.state.nodes["other"].status, "failed");
+    assert_eq!(runtime.state.nodes["child"].status, "waiting");
+    assert_eq!(runtime.state.nodes["live"].status, "running");
+    let replay = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert!(replay.nodes["first"].continuation);
+    assert_eq!(replay.nodes["other"].status, "failed");
+    let retry = runtime.jobs().unwrap();
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].execution.node, "first");
+    assert!(retry[0].continuation);
+    assert!(retry[0].task.is_empty(), "retry must not add a user prompt");
+    assert_eq!(retry[0].execution.session_id, first.session_id);
+    assert_eq!(retry[0].execution.worktree, first.worktree);
+    assert!(runtime.resume_node("first").is_err(), "an active retry cannot be started twice");
+}
+
+#[test]
+fn targeted_continue_can_unpause_a_single_serial_node_without_adding_a_message() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.set_route("serial").unwrap();
+    runtime.approve().unwrap();
+    let failed = runtime.jobs().unwrap().remove(0);
+    record_session(&runtime, &failed.execution);
+    runtime.finish(&failed.execution, Err("provider failure".into())).unwrap();
+    runtime.pause(true).unwrap();
+    assert!(runtime.state.can_resume_node("task"));
+    runtime.resume_node("task").unwrap();
+    assert!(!runtime.state.paused);
+    let retry = runtime.jobs().unwrap().remove(0);
+    assert!(retry.continuation);
+    assert!(retry.task.is_empty());
+    assert_eq!(retry.execution.session_id, failed.execution.session_id);
+}
+
+#[test]
+fn targeted_continue_does_not_bypass_a_global_graph_pause() {
+    let graph = Graph { original_goal: "paused".into(), nodes: ["first", "other"].into_iter()
+        .map(|name| Node { name: name.into(), task: name.into() }).collect(), edges: vec![] };
+    let (_temp, _source, mut runtime) = setup(true, graph);
+    runtime.approve().unwrap();
+    let jobs = runtime.jobs().unwrap();
+    let first = &jobs.iter().find(|job| job.execution.node == "first").unwrap().execution;
+    runtime.finish(first, Err("failure".into())).unwrap();
+    runtime.pause(true).unwrap();
+    let count = runtime.state.events.len();
+    assert!(!runtime.state.can_resume_node("first"));
+    assert!(runtime.resume_node("first").is_err());
+    assert_eq!(runtime.state.events.len(), count);
+    assert!(runtime.state.paused);
+    assert_eq!(runtime.state.nodes["first"].status, "failed");
+}
+
+#[test]
 fn unknown_failure_continue_replays_and_retains_session_and_partial_work() {
     for route in ["graph", "serial"] {
         let (_temp, source, mut runtime) = setup(true, single());

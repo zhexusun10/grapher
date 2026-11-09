@@ -10,7 +10,8 @@ import { upsertToolCall } from "../src/services/toolCallUpdates.ts";
 import { injectStreamingCursor } from "../src/components/MarkdownRenderer.tsx";
 import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
 import { PlannerTranscript } from "../src/components/PlannerTranscript.tsx";
-import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../src/services/thinkingTranscript.ts";
+import { closeThinkingItems, finalizeThinkingItems, splitThinkingTagDelta, updateThinkingItems } from "../src/services/thinkingTranscript.ts";
+import { appendPlannerError, applyPartitionerDelta, applyPlannerTextDelta, initialPlannerStream } from "../src/services/plannerStream.ts";
 import { setAutoExpandCot, readAutoExpandCot, autoExpandCotEnabled, AUTO_EXPAND_COT_KEY } from "../src/services/displayPreferences.ts";
 import type { TranscriptItem } from "../src/types.ts";
 import { t } from "../src/i18n/index.ts";
@@ -66,7 +67,8 @@ test("a streamed Planner tool card starts during generation and retains identity
   items = upsertToolCall(items, { contentIndex: 1, toolName: "bash", phase: "generating" });
   const stableId = items[0].id;
   assert.equal(items[0].toolPhase, "generating");
-  assert.match(renderToStaticMarkup(createElement(ToolCallCard, { item: items[0] })), /Preparing call/);
+  assert.ok(renderToStaticMarkup(createElement(ToolCallCard, { item: items[0] })).includes(t("正在生成调用…")),
+    "a generating call shows its preparing label in the active locale");
   items = upsertToolCall(items, { contentIndex: 1, toolCallId: "call-1", toolName: "bash", args: { command: "npm test" }, phase: "pending" });
   assert.equal(items.length, 1);
   assert.equal(items[0].id, stableId);
@@ -689,6 +691,29 @@ test("streaming cursor is injected inline on the latest line and not pushed to a
   // Cursor should be inline within the latest paragraph, not following after </p> or outside the markdown div
   assert.match(renderedCard, /latest action line<span class="thinking-streaming-cursor"><\/span><\/p>/);
   assert.doesNotMatch(renderedCard, /<\/div><span class="thinking-streaming-cursor">/);
+});
+
+test("splitThinkingTagDelta and plannerStream reducers handle interleaved <think>/<thought> tags and deduplicated errors", () => {
+  const first = splitThinkingTagDelta("Before <think>inside ", false);
+  assert.deepEqual(first, { textChunk: "Before ", thinkChunk: "inside ", inTag: true });
+  const second = splitThinkingTagDelta("more</think> after <thought>second</thought>!", first.inTag);
+  assert.deepEqual(second, { textChunk: " after !", thinkChunk: "moresecond", inTag: false });
+
+  let state = applyPartitionerDelta(initialPlannerStream, first.thinkChunk, first.textChunk, first.inTag);
+  state = applyPartitionerDelta(state, second.thinkChunk, second.textChunk, second.inTag);
+  assert.equal(state.partitionerThinking, "inside moresecond");
+  assert.equal(state.partitionerText, "Before  after !");
+  assert.equal(state.partitionerThinkingActive, false);
+
+  let plannerState = applyPlannerTextDelta(initialPlannerStream, "step 1", "", true);
+  assert.equal(plannerState.plannerThinkingActive, true);
+  plannerState = applyPlannerTextDelta(plannerState, "", "final answer", false);
+  assert.equal(plannerState.plannerThinkingActive, false);
+  assert.equal(plannerState.items.find(i => i.type === "thinking")?.status, "success");
+
+  const withErr = appendPlannerError(plannerState, "provider timeout", true);
+  assert.equal(withErr.stage, "error");
+  assert.equal(appendPlannerError(withErr, "provider timeout").items.length, withErr.items.length);
 });
 
 

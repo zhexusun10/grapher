@@ -417,18 +417,29 @@ After interruption:
   recoverable rather than claiming completion.
 - The saved projection exposes `canResume` for idle failed node attempts regardless
   of whether their errors are recognized, including credential, transport, quota,
-  protocol and unknown failures. Graph surfaces Continue in its topology; Serial
-  uses a conversation follow-up instead. After paused or queued work drains and
-  the cause is addressed, an explicit Continue queues eligible failed nodes and
+  protocol and unknown failures. Graph surfaces run-wide Continue in its topology.
+  The Node and Serial composers also expose the backend's per-node `canResume`
+  hint and issue `resume_node` without creating a user message. A targeted retry
+  can run alongside independent workers, queues only the selected failed root
+  and its dependency-blocked descendants, and leaves other failures untouched.
+  Its dependencies must be complete. A globally paused multi-node Graph remains
+  paused: its nodes cannot be resumed individually without also scheduling other
+  queued work; use the run-wide Continue. A paused single-node Run can safely be
+  unpaused for its targeted retry. After paused or queued work drains and
+  the cause is addressed, a run-wide Continue queues eligible failed nodes and
   their failed/blocked dependency descendants, then starts new Execution Instances;
   it never claims that the original failure succeeded. Each root keeps its own
   Pi session and workspace and uses the bundled `pi-continuity` boundary to
   continue the unfinished turn without a synthetic user message. Completed
   assistant turns and settled tool tails retain their tool-call/result pairs.
-  Missing results in an interrupted tool batch become explicit context-only
-  errors stating that side effects are unknown. Those warnings are reconstructed
-  on later node turns and reload without changing stored sessions; malformed
-  current tool-call identities and their orphan results are omitted
+  As in Pi's interrupted-response retry, the request-time projection omits a
+  failed or aborted assistant turn and its associated tool results, and omits
+  the unfinished truncated turn when explicitly continuing it. Ordinary tool
+  calls and saved results, including partially answered batches, remain intact.
+  Pi's provider adapter supplies its native `No result provided` tool result
+  for a missing result; Grapher adds no separate warning or user instruction.
+  Raw session history is unchanged. Missing results can represent operations
+  with unknown side effects; exactly-once execution is not claimed
   ([context regressions](../../scripts/continuation-context.test.ts)).
   A first attempt is restarted without a session only when no launch, output or
   completed-history evidence exists;
@@ -468,7 +479,17 @@ After interruption:
   post-publication rebaseline—is not a change: composition already ignores it
   because the prepared snapshot carries its delivered content, and recovery
   would otherwise block the preserved work forever.
-- Interrupted planning becomes failed, preserving available output.
+- Interrupted planning becomes failed, preserving available output. A Graph Planner
+  continuation identifies the latest failed turn and resumes its original Pi
+  session and retained draft graph through the same private, non-user continuation
+  marker as node recovery. It keeps the Run identity and streams a new attempt;
+  no synthetic user turn is recorded. Missing or invalid session/draft evidence,
+  an in-use workspace, or a graph edit after the failure rejects the request
+  without replacing the failed turn. A resumed initial plan still commits as the
+  original Run; a resumed revision commits through normal graph-revision checks.
+  Failed retries retain their own draft for another explicit continuation. See
+  [Planner continuation](../../backend/src/planner_continuation_tests.rs) and
+  [context projection](../../scripts/continuation-context.test.ts).
 - Interrupted publication or its Merger becomes `publication_failed` for explicit retry.
 - An interrupted node-composition Merger is recorded as failed without entering the publication phase; inspect the node workspace and rerun or resolve it.
 - Committed pending feedback remains queued. Resume drains and validates it before related dispatch; an uncommitted finish cannot leave a half-persisted handoff.

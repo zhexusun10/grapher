@@ -829,12 +829,14 @@ mod tests {
         }
         let lock_file = source_index(&source).unwrap().with_extension("lock");
         fs::write(&lock_file, "foreign lease").unwrap();
-        assert!(
-            publish(&source, &[head.clone()], &[], Some(&path), |_| panic!(
-                "no conflict"
-            ))
-            .is_err()
-        );
+        assert!(publish(
+            &source,
+            std::slice::from_ref(&head),
+            &[],
+            Some(&path),
+            |_| panic!("no conflict")
+        )
+        .is_err());
         let journal = path.with_extension("publication").join("00000000");
         let prepared: Prepared =
             serde_json::from_slice(&fs::read(journal.join("prepared.json")).unwrap()).unwrap();

@@ -61,10 +61,9 @@ impl Bridge {
         // miss initiated inside a Run. Cancelling that Run must not kill it.
         let process_tree =
             crate::process_control::with_owner("", || crate::process_control::track(&child))
-                .map_err(|error| {
+                .inspect_err(|_error| {
                     let _ = child.kill();
                     let _ = child.wait();
-                    error
                 })?;
         let input = child.stdin.take().ok_or("Adapter input unavailable")?;
         let stdout = child.stdout.take().ok_or("Adapter output unavailable")?;

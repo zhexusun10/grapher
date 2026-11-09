@@ -747,7 +747,7 @@ impl Environments {
             return Err("Native baseline/domain changed; explicit rebuild required".into());
         }
         self.scoped_files(&result.launch_ref)?
-            .validate(&[result.environment_ref.clone()])?;
+            .validate(std::slice::from_ref(&result.environment_ref))?;
         self.load_launch(&result.launch_ref)?;
         Ok(())
     }
@@ -838,11 +838,7 @@ impl Environments {
         };
         let mut selected = reusable.unwrap_or_else(|| baseline.clone());
         let mut hints = Vec::new();
-        for input in inputs
-            .iter()
-            .map(|(_, input)| input)
-            .chain(current.into_iter())
-        {
+        for input in inputs.iter().map(|(_, input)| input).chain(current) {
             hints.extend(self.load_launch(&input.launch_ref)?.ambient_hints);
         }
         hints.sort_by(|a, b| {
@@ -926,9 +922,14 @@ impl Environments {
         } else if !preserve_failed && !unbound_best_effort {
             // Materialization itself validates every stored byte before touching
             // the view; do not repeat the same multi-GiB scan beforehand.
-            scoped.materialize(&state, &[selected.environment_ref.clone()], None, false)?;
+            scoped.materialize(
+                &state,
+                std::slice::from_ref(&selected.environment_ref),
+                None,
+                false,
+            )?;
         } else {
-            scoped.validate(&[selected.environment_ref.clone()])?;
+            scoped.validate(std::slice::from_ref(&selected.environment_ref))?;
         }
         if selected.layout.is_none()
             && !self.config.import_source
@@ -1443,10 +1444,9 @@ pub(crate) fn controlled_output_with_limits(
     let mut child = command
         .spawn()
         .map_err(|e| format!("Native environment process could not start: {e}"))?;
-    let tree = crate::process_control::track(&child).map_err(|error| {
+    let tree = crate::process_control::track(&child).inspect_err(|_error| {
         let _ = child.kill();
         let _ = child.wait();
-        error
     })?;
     let collect = |mut pipe: Box<dyn std::io::Read + Send>| {
         let (sender, receiver) = std::sync::mpsc::channel();

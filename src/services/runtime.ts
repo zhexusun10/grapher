@@ -11,7 +11,7 @@ const skillsRequests = new Map<string, number>();
 // Share only requests in flight; settled history is never cached as authoritative state.
 const historyRequests = new Map<string, Promise<Snapshot>>();
 const snapshotMutations = new Set([
-  "save_graph", "add_manual_node", "save_config", "plan_goal", "control", "edit_planner", "edit_node",
+  "save_graph", "add_manual_node", "update_unstarted_node_task", "save_config", "plan_goal", "control", "edit_planner", "edit_node",
   "load_run", "reset_workspace", "clear_history", "delete_run", "delete_workspace",
 ]);
 
@@ -150,6 +150,8 @@ export const runtimeService = {
   },
   compileGraph: async (graph: Graph) => normalizePlan(await request<Plan>("compile_graph", { graph })),
   saveGraph: (graph: Graph, config: Config, runId?: string) => request<Snapshot>("save_graph", { graph, config, runId }),
+  updateUnstartedNodeTask: (runId: string, node: string, oldTask: string, task: string) =>
+    request<Snapshot>("update_unstarted_node_task", { runId, node, oldTask, task }),
   addManualNode: (runId: string, node: ManualNodeRequest) => request<Snapshot>("add_manual_node", { runId, request: node }),
   saveConfig: (config: Config, runId?: string) => request<Bootstrap>("save_config", { config, ...(runId ? { runId } : {}) }),
   planGoal: (goal: string, config: Config, mode?: string) => request<Snapshot>("plan_goal", { goal, config, mode }),
@@ -160,13 +162,14 @@ export const runtimeService = {
     mode?: import("../types").PlanMode,
     signal?: AbortSignal,
     images?: import("../types").ImageAttachment[],
-    revisionRunId?: string
+    revisionRunId?: string,
+    continuePlanningId?: string
   ): Promise<Snapshot> {
     historyRequests.clear();
     const response = await fetch("/api/plan_goal_stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ goal, config, mode, images, revisionRunId }),
+      body: JSON.stringify({ goal, config, mode, images, revisionRunId, continuePlanningId }),
       signal,
     });
 

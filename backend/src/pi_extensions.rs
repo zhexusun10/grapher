@@ -49,10 +49,9 @@ pub fn request(body: Value) -> Result<Value, String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("Cannot start Pi extension discovery: {error}"))?;
-    let tree = crate::process_control::track(&child).map_err(|error| {
+    let tree = crate::process_control::track(&child).inspect_err(|_error| {
         let _ = child.kill();
         let _ = child.wait();
-        error
     })?;
     if let Err(error) = child
         .stdin

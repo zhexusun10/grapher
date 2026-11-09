@@ -312,17 +312,17 @@ fn unused_locked(
     keep_key: Option<&str>,
 ) -> Result<Vec<NativeRuntime>, String> {
     let mut unused = Vec::new();
-    for entry in fs::read_dir(&parent).map_err(|error| error.to_string())? {
+    for entry in fs::read_dir(parent).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if !runtime_name(&name) {
             continue;
         }
         let path = parent.join(&name);
-        let Some(directory) = real_child_path(&parent, &path, false)? else {
+        let Some(directory) = real_child_path(parent, &path, false)? else {
             continue;
         };
-        let marker = real_child_path(&parent, &path.join(MARKER), true)?;
+        let marker = real_child_path(parent, &path.join(MARKER), true)?;
         if let Some(marker) = marker {
             let value = fs::read(marker)
                 .ok()
@@ -353,14 +353,14 @@ fn unused_locked(
                 ("package.json", true),
                 ("pi/.git", false),
             ] {
-                complete &= real_child_path(&parent, &path.join(child), file)?.is_some();
+                complete &= real_child_path(parent, &path.join(child), file)?.is_some();
             }
             if !complete {
                 continue;
             }
         }
         // Validate an existing lock file before acquire() opens it.
-        real_child_path(&parent, &path.join("runtime.lock"), true)?;
+        real_child_path(parent, &path.join("runtime.lock"), true)?;
         if let Ok(lease) = acquire_settled(&directory) {
             unused.push(NativeRuntime {
                 directory,

@@ -620,14 +620,8 @@ fn invalid_replacement_leaves_current_graph_unchanged() {
 
 #[test]
 fn feedback_has_exact_final_line_protocol() {
-    assert_eq!(
-        feedback("Additional instruction\n<FEEDBACK>\n").unwrap(),
-        true
-    );
-    assert_eq!(
-        feedback("Earlier text mentions <FEEDBACK>\n<ACCEPT>").unwrap(),
-        false
-    );
+    assert!(feedback("Additional instruction\n<FEEDBACK>\n").unwrap());
+    assert!(!feedback("Earlier text mentions <FEEDBACK>\n<ACCEPT>").unwrap());
     assert!(feedback("<ACCEPT> trailing text").is_err());
     assert!(feedback("<FEEDBACK> trailing text").is_err());
     assert!(feedback("```\n<ACCEPT>\n```").is_err());

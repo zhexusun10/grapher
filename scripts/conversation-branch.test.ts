@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activeNodeConversationEvents, activeNodeExecutions, nodeConversationExecutions, nodeConversationLineage, executionIdForMessage, executionIdForVersion, executionIdForEdit, versionsForEdit } from '../src/services/conversationBranch.ts';
-import { emptySnapshot, type GraphEvent, type Snapshot } from '../src/types.ts';
+import { activeNodeConversationEvents, activeNodeExecutions, applySelectedVersionToEntries, branchEditedMessageEntries, findBranchTargetIndex, nodeConversationExecutions, nodeConversationLineage, executionIdForMessage, executionIdForVersion, executionIdForEdit, versionsForEdit } from '../src/services/conversationBranch.ts';
+import { emptySnapshot, type ChatMessage, type GraphEvent, type Snapshot } from '../src/types.ts';
 
 test('editing a completed turn hides the abandoned node branch but preserves earlier turns', () => {
   const state: Snapshot = {
@@ -181,22 +181,33 @@ test('message versions survive reload and nested edits', () => {
 });
 
 test('message rollback matches stripped node prefixes and rolls back subsequent turns', () => {
-  const stripPrefix = (s: string) => s.replace(/^\[@[^\]]+\]\s*/, '').trim();
-  const baseEntries = [
-    { id: 'msg-1', text: '[@merge:06_feature_qa] continue solve the conflict' },
-    { id: 'msg-2', text: '[@merge:06_feature_qa] second follow-up turn' },
+  const baseEntries: ChatMessage[] = [
+    { id: 'msg-1', role: 'user', text: '[@merge:06_feature_qa] continue solve the conflict', timestamp: 10 },
+    { id: 'msg-2', role: 'user', text: '[@merge:06_feature_qa] second follow-up turn', timestamp: 20, plannerSteerId: 'steer-1', plannerSteerStatus: 'queued' },
   ];
   const targetClean = 'continue solve the conflict';
-  const targetIndex = baseEntries.findIndex((e) =>
-    e.id === 'event-5' ||
-    stripPrefix(e.text) === targetClean
-  );
+  const targetMsg: ChatMessage = { id: 'event-5', role: 'user', text: targetClean, timestamp: 10 };
+  const targetIndex = findBranchTargetIndex(baseEntries, targetMsg, targetClean);
   assert.equal(targetIndex, 0, 'matches turn 0 despite different ID and [@node] prefix');
-  const prevEntries = baseEntries.slice(0, targetIndex);
-  const subsequentEntries = baseEntries.slice(targetIndex + 1);
-  assert.equal(prevEntries.length, 0);
-  assert.equal(subsequentEntries.length, 1);
-  assert.equal(subsequentEntries[0].id, 'msg-2');
+
+  const branched = branchEditedMessageEntries(baseEntries, targetMsg, targetClean, 'revised resolution', undefined);
+  assert.equal(branched.previousEntries.length, 0);
+  assert.equal(branched.rolledBackEntries.length, 1);
+  assert.equal(branched.updatedMsg.text, 'revised resolution');
+  assert.equal(branched.updatedMsg.versions?.length, 2);
+  assert.equal(branched.updatedMsg.versions?.[0].subsequentEntries?.length, 1);
+  assert.equal(branched.updatedMsg.versions?.[0].subsequentEntries?.[0].id, 'msg-2');
+
+  const restored = applySelectedVersionToEntries(
+    branched.rolledBackEntries,
+    branched.updatedMsg,
+    'revised resolution',
+    { ...branched.updatedMsg, text: targetClean, currentVersionIndex: 0 },
+    branched.updatedMsg.versions?.[0].subsequentEntries,
+  );
+  assert.equal(restored.length, 2);
+  assert.equal(restored[1].id, 'msg-2');
+  assert.equal(restored[1].plannerSteerId, undefined, 'restored subsequent entries strip stale steer identity');
 });
 
 
