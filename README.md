@@ -41,14 +41,29 @@
 - **General-purpose agents** — Nodes specialize through task context, not predefined or hardcoded agent roles.
 - **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
-## One goal, many workstreams
+## Typical multi-agent systems vs Grapher
 
-This video-forensics example brings together data auditing, parallel visual/frequency/temporal models, leakage checks, robustness testing, a single holdout evaluation, and reproducible delivery. The plan has **21 nodes across 6 execution batches**; a feedback edge routes robustness findings back to the frequency-model branch.
+```text
+Typical multi-agent systems
 
-<p align="center">
-  <img src="assets/readme-graph-detail.png" width="720" alt="Detailed 21-node execution graph for a video detection research pipeline, including parallel branches and a feedback edge">
-  <br><sub>A synthetic approval-stage plan, not a completed run, benchmark, or maximum graph size.</sub>
-</p>
+Goal → Supervisor LLM → Agent → Supervisor LLM → Agent → ...
+             ↑ scheduling lives inside the conversation loop
+
+
+Grapher
+
+Goal → Planner → Compiled Graph → Deterministic Runtime
+                                      ├── Agent A ──┐
+                                      ├── Agent B ──┼──→ Agent D
+                                      └── Agent C ──┘
+```
+
+**Core differences:**
+
+1. **No supervisor in the execution loop** — The LLM plans the graph, then gets out of the scheduler.
+2. **Never lost in translation (Zero conversational message passing)** — Traditional multi-agent systems rely on endless agent-to-agent chatter where requirements and constraints degrade like a game of telephone. In Grapher, nodes never exchange chat messages; parallel tasks inherit verifiable Git code states and history, not conversations.
+3. **The graph is executable state** — Dependencies, retries, feedback and publication are explicit runtime transitions.
+4. **No predefined agent roles** — All nodes run general-purpose coding agents; specialization comes from task context, not hardcoded roles.
 
 <details>
 <summary><strong>See a completed 16-node run in the earlier UI</strong></summary>

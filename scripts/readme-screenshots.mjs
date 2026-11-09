@@ -166,8 +166,7 @@ try {
     assert.equal(await page.getByText('Non-contiguous transcript append').count(), 0);
     assert.deepEqual(errors, []);
     await page.screenshot({ path: `assets/readme-graph${zh ? '-zh' : ''}.png` });
-    await page.locator('.graph-pane').screenshot({ path: `assets/readme-graph-detail${zh ? '-zh' : ''}.png` });
-    console.log(`Captured ${lang} home, workbench and 21-node graph detail`);
+    console.log(`Captured ${lang} home and workbench`);
     await context.close();
   }
 } finally { await browser.close(); await server.close(); }
