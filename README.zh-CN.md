@@ -11,7 +11,7 @@
 
 <p align="center">
   将复杂工作编译为可检查执行图的本地 Coding Agent 工作台。<br>
-  基于 <a href="https://github.com/earendil-works/pi">Pi</a> 构建 · 目前处于 alpha 阶段
+  基于 <a href="https://github.com/earendil-works/pi">Pi</a> 构建
 </p>
 
 <p align="center">
@@ -134,8 +134,6 @@ npm start
 打开 <http://127.0.0.1:1421>。
 
 ## 项目状态
-
-**Grapher 目前是 alpha 阶段软件。**
 
 **已实现功能：**
 - Serial 单 Agent 编程工作流

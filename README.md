@@ -11,7 +11,7 @@
 
 <p align="center">
   A local coding-agent workbench that turns complex work into inspectable execution graphs.<br>
-  Built on <a href="https://github.com/earendil-works/pi">Pi</a> · Currently in alpha
+  Built on <a href="https://github.com/earendil-works/pi">Pi</a>
 </p>
 
 <p align="center">
@@ -134,8 +134,6 @@ npm start
 Open <http://127.0.0.1:1421>.
 
 ## Project status
-
-**Grapher is currently alpha software.**
 
 **Working:**
 - Serial coding-agent workflow
