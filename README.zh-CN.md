@@ -133,25 +133,6 @@ npm start
 
 打开 <http://127.0.0.1:1421>。
 
-## 项目状态
-
-**已实现功能：**
-- Serial 单 Agent 编程工作流
-- Graph 任务图规划与审批
-- 依赖感知的执行调度
-- 工作区状态继承
-- 有界反馈边
-- 结果发布机制
-- 任务后 Planner 复盘与闭环自主迭代（Loop Engineering）
-- Linux 沙箱（bubblewrap）
-- Windows/macOS/Linux 发布包与一键开发启动
-
-**仍在完善：**
-- 跨平台隔离（Windows 沙箱）
-- 路由质量与图编译启发式
-- 服务商兼容性覆盖
-- 性能优化
-
 ## 工作方式
 
 ```text

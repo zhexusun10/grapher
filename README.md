@@ -133,25 +133,6 @@ npm start
 
 Open <http://127.0.0.1:1421>.
 
-## Project status
-
-**Working:**
-- Serial coding-agent workflow
-- Graph planning and approval
-- Dependency-aware execution
-- Workspace inheritance
-- Bounded feedback edges
-- Result publication
-- Post-task Planner review and autonomous loop engineering
-- Linux sandbox (bubblewrap)
-- Release archives (Windows/macOS/Linux) and one-command dev setup
-
-**Still evolving:**
-- Cross-platform isolation (Windows sandboxing)
-- Routing quality and graph compilation heuristics
-- Provider compatibility coverage
-- Performance optimization
-
 ## How it works
 
 ```text
