@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Planner graph edits on an approved Run now say which completed nodes the whole candidate graph would invalidate, e.g. `Current changes will invalidate and rerun 56 completed nodes: …`. The list comes from the Runtime calculation used at commit, so a review or follow-up can see that removing feedback routes or retasking a node reruns existing work before it commits the revision. It is an advisory warning, not a rejection or an approval; commit re-evaluates live state, unapproved drafts report nothing, and a missing snapshot or older compiler returns no warning rather than a guess (`backend/resources/planner.ts`, `backend/src/runtime.rs`, `backend/src/server.rs`, `backend/src/main.rs`).
 - Feedback-routing warnings are shorter: they now say the affected nodes will rerun and that the target resumes its own session, instead of describing invalidation scope in three sentences (`backend/src/compiler.rs`).
+- Compiler diagnostics and the Planner prompt now say a dependency carries upstream *workspace results*, not "project-file results", and the Planner rule states that a node's first execution starts from the recorded snapshot plus its completed dependencies' workspace results, so files written in the source project before the snapshot are shared inputs. The redundant-dependency warning is asserted across the compiler test so the wording cannot silently drift back (`backend/resources/prompts/planner.md`, `backend/src/compiler.rs`, `backend/tests/core.rs`).
 
 ### Fixed
 

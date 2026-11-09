@@ -306,7 +306,7 @@ fn compile_with_policy(
                 errors.push(Diagnostic {
                     code: "E209".into(),
                     message: format!(
-                        "Redundant dependency {} → {}. Remove this direct edge: {} already provides execution ordering and carries upstream project-file results to {}.",
+                        "Redundant dependency {} → {}. Remove this direct edge: {} already provides execution ordering and carries upstream workspace results to {}.",
                         edge.from, edge.to, path.join(" → "), edge.to
                     ),
                 });

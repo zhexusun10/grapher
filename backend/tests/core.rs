@@ -264,6 +264,9 @@ fn compiler_reports_each_transitive_dependency_and_preserves_legacy_replay() {
     assert!(diagnostics
         .iter()
         .any(|item| item.message.contains("server → server_tests → acceptance")));
+    assert!(diagnostics.iter().all(|item| item
+        .message
+        .contains("carries upstream workspace results to")));
     assert!(diagnostics
         .iter()
         .any(|item| item.message.contains("web → web_tests → acceptance")));
