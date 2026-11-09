@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createInterface } from 'node:readline';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -314,7 +314,12 @@ test('bundled continuity recovers capped provider turns only while selected for 
 test('manual continuation preserves tool history and uses Pi native missing-result normalization', { timeout: 90000 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'grapher-continuation-context-'));
   const agent = join(directory, 'agent'), global = join(directory, 'global');
-  for (const path of [agent, global]) mkdirSync(path);
+  const workspace = join(directory, 'workspace'), alias = join(directory, 'workspace-alias');
+  for (const path of [agent, global, workspace]) mkdirSync(path);
+  symlinkSync(workspace, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  // Pi records the child's cwd, which resolves symlinked paths on Unix (e.g.
+  // macOS /var -> /private/var) but can retain the launched spelling on Windows.
+  const savedCwd = execFileSync(process.execPath, ['-p', 'process.cwd()'], { cwd: alias, encoding: 'utf8' }).trimEnd();
   const requests = [];
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
@@ -343,7 +348,7 @@ test('manual continuation preserves tool history and uses Pi native missing-resu
       const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
       const entries = [
-        { type: 'session', version: 3, id, timestamp: now, cwd: directory },
+        { type: 'session', version: 3, id, timestamp: now, cwd: savedCwd },
         entry('user', null, { role: 'user', content: [{ type: 'text', text: 'ORIGINAL_TASK_ONLY' }], timestamp: 1 }),
         entry('assistant', 'user', { role: 'assistant', content: [call('call_alpha', 'bash'), call('call_beta', 'bash')],
           api: 'openai-completions', provider: 'context-audit', model: 'local', usage, stopReason, timestamp: 2 }),
@@ -357,7 +362,7 @@ test('manual continuation preserves tool history and uses Pi native missing-resu
       const events = await new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--mode', 'rpc', '--no-context-files',
           '--no-skills', '--no-tools', '--model', 'context-audit/local', '--thinking', 'off', '--session-id', id, '--session-dir', sessions], {
-          cwd: directory, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PI_CODING_AGENT_DIR: agent,
+          cwd: alias, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PI_CODING_AGENT_DIR: agent,
             GRAPHER_GLOBAL_PI_AGENT_DIR: global, GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_MODE: role,
             GRAPHER_EXECUTION_KIND: 'source', GRAPHER_CONTINUE_INTERRUPTED: 'true', PI_OFFLINE: '1' },
         });
@@ -375,7 +380,8 @@ test('manual continuation preserves tool history and uses Pi native missing-resu
       assert.equal(requests.length, index);
       const messages = requests.at(-1).messages;
       const serialized = JSON.stringify(messages);
-      assert.equal(messages.filter(message => message.role === 'user').length, 1);
+      assert.equal(messages.filter(message => message.role === 'user').length, 1,
+        `${role} case ${index}: the original session must be loaded from the workspace alias`);
       assert.ok(serialized.includes('ORIGINAL_TASK_ONLY'));
       assert.ok(!serialized.includes('__grapher_continue_interrupted__'));
       const retainedBatch = stopReason === 'toolUse';

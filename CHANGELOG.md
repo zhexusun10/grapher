@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-11-10
+
+### Fixed
+
+- The packaged Pi continuation contract now records the working-directory spelling seen by the spawned process, including symlink aliases such as macOS `/var` → `/private/var`. This fixes the macOS release smoke test without weakening its checks on retained history and Pi's missing-result behavior (`scripts/pi-process-contract.test.mjs`).
+
 ## [1.6.0] - 2026-11-10
 
 ### Changed
@@ -488,7 +494,8 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
 
-[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/zhexusun10/grapher/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/zhexusun10/grapher/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/zhexusun10/grapher/compare/v1.4.2...v1.5.0
 [1.3.1]: https://github.com/zhexusun10/grapher/compare/v1.3.0...v1.3.1
