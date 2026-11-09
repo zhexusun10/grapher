@@ -30,6 +30,11 @@ fn main() {
             .expect("Cannot read graph");
         let result = serde_json::from_str::<serde_json::Value>(&input).and_then(|value| {
             let graph = serde_json::from_value(value["graph"].clone())?;
+            let revision: Option<grapher::runtime::PlannerRevisionContext> = value
+                .get("revisionContext")
+                .filter(|context| !context.is_null())
+                .map(|context| serde_json::from_value(context.clone()))
+                .transpose()?;
             // Runtime-state constraint passed by the Planner tool boundary:
             // nodes whose results this run already published cannot be removed.
             let unremovable: Vec<String> = value["unremovableNodes"]
@@ -46,10 +51,20 @@ fn main() {
                     &graph,
                     value["finalCheck"].as_bool().unwrap_or(true),
                 ) {
-                    Ok(plan) => {
+                    Ok(mut plan) => {
                         let diagnostics =
                             grapher::compiler::unremovable_node_diagnostics(&graph, &unremovable);
                         if diagnostics.is_empty() {
+                            if let Some(revision) = revision {
+                                let affected = revision.invalidated_completed(&graph);
+                                if !affected.is_empty() {
+                                    let noun = if affected.len() == 1 { "node" } else { "nodes" };
+                                    plan.warnings.push(format!(
+                                        "W304: Current changes will invalidate and rerun {} completed {noun}: {}.",
+                                        affected.len(), affected.join(", ")
+                                    ));
+                                }
+                            }
                             serde_json::json!({ "plan": plan, "diagnostics": [] })
                         } else {
                             serde_json::json!({ "diagnostics": diagnostics })

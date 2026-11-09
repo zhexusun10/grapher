@@ -1,62 +1,75 @@
-# Grapher
+<p align="center">
+  <img src="assets/icon-dots.svg" width="80" height="80" alt="Grapher logo">
+</p>
 
-> **Don't orchestrate agents. Compile work.**  
-> **No more "lost in translation".**
+<h1 align="center">Grapher</h1>
 
+<p align="center">
+  <strong>Don't orchestrate agents. Compile work.</strong><br>
+  No more “lost in translation”.
+</p>
 
-[![CI](https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml)
-[![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
+<p align="center">
+  A local coding-agent workbench that turns complex work into inspectable execution graphs.<br>
+  Built on <a href="https://github.com/earendil-works/pi">Pi</a> · Currently in alpha
+</p>
 
-**Local coding-agent architecture that compiles complex work into inspectable execution graphs.**
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="docs/user-guide.md">User guide</a> ·
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-### Typical multi-agent systems vs Grapher
+<p align="center">
+  <a href="https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml"><img src="https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-stable-orange.svg" alt="Rust stable"></a>
+</p>
 
-```text
-Typical multi-agent systems
-
-Goal → Supervisor LLM → Agent → Supervisor LLM → Agent → ...
-             ↑ scheduling lives inside the conversation loop
-
-
-Grapher
-
-Goal → Planner → Compiled Graph → Deterministic Runtime
-                                      ├── Agent A ──┐
-                                      ├── Agent B ──┼──→ Agent D
-                                      └── Agent C ──┘
-```
-
-**Core differences:**
-
-1. **No supervisor in the execution loop** — The LLM plans the graph, then gets out of the scheduler.
-2. **Never lost in translation (Zero conversational message passing)** — Traditional multi-agent systems rely on endless agent-to-agent chatter where requirements and constraints degrade like a game of telephone. In Grapher, nodes never exchange chat messages; parallel tasks inherit verifiable Git code states and history, not conversations.
-3. **The graph is executable state** — Dependencies, retries, feedback and publication are explicit runtime transitions.
-4. **No predefined agent roles** — All nodes run general-purpose coding agents; specialization comes from task context, not hardcoded roles.
-
-**Not all work needs multiple agents.** Grapher uses intent-based routing in **Auto** mode or lets you choose manually: **Serial** for linear tasks, **Graph** when parallelism helps.
-
-Built on [Pi](https://github.com/earendil-works/pi). [Quick start](#quick-start) · [How it works](#how-it-works) · [User guide](docs/user-guide.md) · [简体中文](README.zh-CN.md)
-
-![Grapher UI showing compiled execution graph with user prompt, planning tool calls, and 16-node dependency topology](assets/execution-graph.png)
-
-*Actual Grapher UI showing a 16-node execution graph compiled and executed for a multi-stage machine learning task.*
+<p align="center">
+  <img src="assets/readme-graph.png" width="100%" alt="Grapher workbench showing a 21-node video detection research plan awaiting approval">
+  <br><sub>From an ambitious goal to an inspectable graph. Synthetic plan shown before approval.</sub>
+</p>
 
 ## Why Grapher?
 
-- **Integrated coding-agent environment** — Chat with coding agents, manage provider authentication and model settings, inspect tool calls and logs, and intervene from the same UI.
-- **Deterministic orchestration** — Scheduling, dependencies, invalidation, and bounded feedback are explicit Rust state transitions. We don't introduce prior bias to the model; keep it flexible and general-purpose by decoupling model usage from system orchestration: deterministic and systemic rules belong to the runtime/harness, not to prompts that expose system details.
-- **Workspace inheritance (Code, not chat)** — Children inherit parent Git history and its complete project-file state, including files matched by `.gitignore`. Nothing is lost in translation across inter-agent dialogue because agents never chat with each other: conversations stay strictly within their own nodes, while code flows through verified Git snapshots. Linear work can hand off a Git working tree; fan-out branches use independent Git worktrees; Git handles conflicts and publication.
+- **One workbench** — Chat with agents, configure providers and models, inspect tool calls and logs, and intervene in one place.
+- **Deterministic orchestration** — The model plans; the Rust runtime handles scheduling, dependencies, invalidation, retries, and bounded feedback without a supervisor in the execution loop.
+- **Code, not chat** — Nodes never exchange conversations. Children inherit parent Git history and project-file state, including `.gitignore`-matched files. Linear work can hand off a working tree; fan-out branches use independent Git worktrees.
 - **Inspectable execution graph** — Review and approve the graph before execution; see dependencies, parallel branches, and bounded rework in the UI.
+- **General-purpose agents** — Nodes specialize through task context, not predefined or hardcoded agent roles.
 - **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
+## One goal, many workstreams
+
+This video-forensics example brings together data auditing, parallel visual/frequency/temporal models, leakage checks, robustness testing, a single holdout evaluation, and reproducible delivery. The plan has **21 nodes across 6 execution batches**; a feedback edge routes robustness findings back to the frequency-model branch.
+
+<p align="center">
+  <img src="assets/readme-graph-detail.png" width="720" alt="Detailed 21-node execution graph for a video detection research pipeline, including parallel branches and a feedback edge">
+  <br><sub>A synthetic approval-stage plan, not a completed run, benchmark, or maximum graph size.</sub>
+</p>
+
+<details>
+<summary><strong>See a completed 16-node run in the earlier UI</strong></summary>
+<p align="center">
+  <img src="assets/execution-graph.png" width="100%" alt="Earlier Grapher interface showing a machine-learning run marked 16 of 16 nodes completed">
+  <br><sub>Historical screenshot of a multi-stage machine-learning task, not a benchmark result.</sub>
+</p>
+</details>
+
 ## When should I use Grapher?
+
+<p align="center">
+  <img src="assets/readme-home.png" width="100%" alt="Grapher's home screen with a video detection research goal and Auto, Serial, and Graph mode controls">
+  <br><sub>Start with a goal, then choose the route that fits the work. Screenshot uses demo data.</sub>
+</p>
 
 **More agents are not always better.** Grapher works best when a coding task contains independent workstreams, for example:
 
 - Frontend + backend changes
 - Implementation + tests
-- Machine Learning Task naturally contains multiple independent modules
+- Research pipelines with independent feature and evaluation workstreams
 - Implementation followed by bounded review/rework
 
 For small, linear, or tightly coupled tasks, use **Serial** instead. Use **Graph** when explicit dependencies and independent workstreams justify it; **Auto** lets the Partitioner choose.
@@ -76,7 +89,7 @@ See the [user guide](docs/user-guide.md) for planning side effects, controls and
 
 **Requirements:** Node.js 22.19+, stable Rust, Git, npm, network access, and provider authentication. Windows needs Git for Windows Bash; macOS needs Xcode Command Line Tools for the Rust linker and uses the built-in Seatbelt sandbox for Graph; Linux Graph needs bubblewrap and permitted unprivileged user/mount/PID namespaces.
 
-**No build tools?** Download a ready-to-run release archive instead: verify its `.sha256` checksum, extract it, and run `start.bat` (Windows) or `./start.sh` (macOS/Linux). Archives still require Node.js 22.19+ and Git at runtime; Rust and npm are not needed.
+**No build tools?** Download a ready-to-run [release archive](https://github.com/zhexusun10/grapher/releases/latest) instead: verify its `.sha256` checksum, extract it, and run `start.bat` (Windows) or `./start.sh` (macOS/Linux). Archives still require Node.js 22.19+ and Git at runtime; Rust and npm are not needed.
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git

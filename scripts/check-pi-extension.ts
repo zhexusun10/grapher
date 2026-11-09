@@ -83,7 +83,7 @@ try {
   const node = (edit: Record<string, unknown>) => call("node", { nodes: [edit] });
   const edge = (edit: Record<string, unknown>) => call("edge", { edges: [edit] });
   const feedbackWarning = (from: string, to: string, nodes: string[]) =>
-    `If <FEEDBACK> from ${from} to ${to} is applied, the target and dependency descendants will be invalidated: ${nodes.join(", ")}. Completed results must be recomputed; ${to} continues from its own conversation history. Nodes outside this set are unaffected.`;
+    `If <FEEDBACK> is sent from ${from} to ${to}, these nodes will rerun: ${nodes.join(", ")}. ${to} resumes its own session on rework.`;
   // Verify the actual provider schema, then exercise nullable wire arguments
   // through Pi's validator and the real compiler (not direct execute alone).
   for (const name of ["node", "edge"]) {
@@ -602,6 +602,74 @@ fn main() {
   });
   process.env.GRAPHER_COMPILER_PATH = compilerPath;
   writeFileSync(process.env.GRAPHER_GRAPH_PATH, beforeLegacyCompiler);
+
+  // The Runtime supplies committed state for each revision tool call. Warnings
+  // use the same invalidation calculation as commit and retain the tool schema.
+  const beforeRevision = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
+  const revisionRun = process.env.GRAPHER_PLANNER_RUN_ID;
+  process.env.GRAPHER_PLANNER_RUN_ID = "revision-run";
+  const committed = {
+    originalGoal: "Revision fixture",
+    nodes: ["build", "review", "consumer", "unrelated"].map(name => ({ name, task: name })),
+    edges: [
+      { from: "build", to: "review", feedback: false },
+      { from: "review", to: "consumer", feedback: false },
+      { from: "review", to: "build", feedback: true },
+    ],
+  };
+  const contextPath = `${process.env.GRAPHER_GRAPH_PATH}.impact-f9e6e6ef197c2b25.json`; // tool ID "test"
+  function revisionContext(completedNodes = ["build", "review", "consumer", "unrelated"], approved = true) {
+    writeFileSync(contextPath, JSON.stringify({
+      toolCallId: "test", revisionContext: { graph: committed, completedNodes, approved },
+    }));
+  }
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(committed));
+  revisionContext();
+  const removeFeedback = JSON.parse((await edge({ from: "review", to: "build", feedback: true, delete: true })).content[0].text);
+  const rerunWarning = "Current changes will invalidate and rerun 2 completed nodes: consumer, review.";
+  assert.deepEqual(removeFeedback.warnings, [rerunWarning]);
+  assert.equal(removeFeedback.applied, true);
+  assert.equal(await toolResultHook({ toolName: "edge", isError: false }), undefined, "Impact is a warning, not a rejected edit");
+
+  revisionContext();
+  const unchangedNode = JSON.parse((await node({ name: "unrelated", task: "unrelated" })).content[0].text);
+  assert.deepEqual(unchangedNode.warnings, [rerunWarning], "Impact compares the whole candidate with the committed graph");
+  revisionContext();
+  const restoreFeedback = JSON.parse((await edge({ from: "review", to: "build", feedback: true })).content[0].text);
+  assert.deepEqual(restoreFeedback.warnings, [feedbackWarning("review", "build", ["build", "consumer", "review"])], "Reverting the edit removes the rerun warning");
+  revisionContext();
+  const changeTask = JSON.parse((await node({ name: "build", task: "Changed build" })).content[0].text);
+  assert.ok(changeTask.warnings.includes("Current changes will invalidate and rerun 3 completed nodes: build, consumer, review."), "Node task changes use the same cumulative impact");
+  revisionContext();
+  const restoreTask = JSON.parse((await node({ name: "build", task: "build" })).content[0].text);
+  assert.deepEqual(restoreTask.warnings, [feedbackWarning("review", "build", ["build", "consumer", "review"])]);
+
+  revisionContext(["build", "review", "unrelated"]);
+  const changedState = JSON.parse((await edge({ from: "review", to: "build", feedback: true, delete: true })).content[0].text);
+  assert.deepEqual(changedState.warnings, ["Current changes will invalidate and rerun 1 completed node: review."]);
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(committed));
+  revisionContext(undefined, false);
+  const draftEdit = JSON.parse((await edge({ from: "review", to: "build", feedback: true, delete: true })).content[0].text);
+  assert.equal(draftEdit.warnings, undefined, "Unapproved drafts do not invalidate completed nodes");
+
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({
+    originalGoal: "Legacy compiler", nodes: [{ name: "legacy", task: "Original" }], edges: [],
+  }));
+  revisionContext();
+  process.env.GRAPHER_COMPILER_PATH = legacyCompiler;
+  const unknownImpact = JSON.parse((await node({ name: "legacy", task: "Updated" })).content[0].text);
+  assert.equal(unknownImpact.warnings, undefined, "Older compilers do not produce a fallback warning");
+  process.env.GRAPHER_COMPILER_PATH = compilerPath;
+  writeFileSync(contextPath, JSON.stringify({ toolCallId: "other", revisionContext: {
+    graph: { originalGoal: "Legacy compiler", nodes: [{ name: "legacy", task: "Original" }], edges: [] },
+    completedNodes: ["legacy"], approved: true,
+  } }));
+  const missingContext = JSON.parse((await node({ name: "legacy", task: "Updated" })).content[0].text);
+  assert.equal(missingContext.warnings, undefined, "Mismatched context is ignored without a fallback warning");
+  rmSync(contextPath, { force: true });
+  if (revisionRun === undefined) delete process.env.GRAPHER_PLANNER_RUN_ID;
+  else process.env.GRAPHER_PLANNER_RUN_ID = revisionRun;
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, beforeRevision);
 
   // Graph mutations remain self-contained; the shared adapter owns read/bash/write/edit.
   process.env.GRAPHER_MODE = "planner";

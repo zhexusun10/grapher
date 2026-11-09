@@ -116,6 +116,16 @@ test("provider errors include actionable hints and role localization", () => {
 });
 
 test("execution graph plan warnings are localized without diagnostic code prefixes", () => {
+  const currentW303 = "W303: If <FEEDBACK> is sent from verify_final_branch_b to integrate_branch_b, these nodes will rerun: integrate_branch_b, verify_final_branch_b. integrate_branch_b resumes its own session on rework.";
+  const currentZh = "若 verify_final_branch_b 向 integrate_branch_b 发送 <FEEDBACK>，这些节点将重跑：integrate_branch_b, verify_final_branch_b。integrate_branch_b 返工时延续自己的会话。";
+  const currentEn = currentW303.replace(/^W303:\s*/, "");
+  for (const warning of [currentW303, currentEn]) {
+    assert.equal(localizePlanWarning(warning, "zh-CN"), currentZh);
+    assert.equal(localizePlanWarning(warning, "en"), currentEn);
+    assert.equal(localizeError(warning, "zh-CN"), currentZh);
+    assert.equal(localizeError(warning, "en"), currentEn);
+  }
+
   const w303Raw =
     "W303: If <FEEDBACK> from verify_final_branch_b to integrate_branch_b is applied, the target and dependency descendants will be invalidated: integrate_branch_b, verify_final_branch_b. Completed results must be recomputed; integrate_branch_b continues from its own conversation history. Nodes outside this set are unaffected.";
   const w303Zh = localizePlanWarning(w303Raw, "zh-CN");

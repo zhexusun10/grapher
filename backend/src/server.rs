@@ -1951,6 +1951,50 @@ fn planner_session_directory_for_workspace(
     Ok((session, snapshot.run_id.clone()))
 }
 
+/// Give each tool call a bounded, portable filename without trusting its ID as
+/// a path. The Planner verifies the full ID in the response before using it.
+fn planner_revision_context_path(graph_path: &std::path::Path, tool_call_id: &str) -> PathBuf {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in tool_call_id.as_bytes() {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+    }
+    let mut path = graph_path.as_os_str().to_os_string();
+    path.push(format!(".impact-{hash:016x}.json"));
+    PathBuf::from(path)
+}
+
+/// A Planner tool cannot read the Run database from its sandbox. Capture the
+/// current Runtime state at tool start, in that attempt's own session directory.
+fn write_planner_revision_context(
+    service: &Arc<Service>,
+    owner: &str,
+    graph_path: &std::path::Path,
+    tool_call_id: &str,
+) -> Result<PathBuf, String> {
+    let context = {
+        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+        if runtime.state.run_id != owner {
+            return Err("Run changed during Planner edit".into());
+        }
+        runtime.planner_revision_context()
+    };
+    let path = planner_revision_context_path(graph_path, tool_call_id);
+    let mut temporary = path.as_os_str().to_os_string();
+    temporary.push(format!(".{}.tmp", Uuid::new_v4()));
+    let temporary = PathBuf::from(temporary);
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "toolCallId": tool_call_id,
+        "revisionContext": context,
+    }))
+    .map_err(|error| error.to_string())?;
+    fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    Ok(path)
+}
+
 /// Project the Planner's current graph file as a display-only candidate. The
 /// extension writes that file only after an edit validated, so an accepted
 /// tool end publishes the whole draft topology; storing it durably lets a
@@ -2566,6 +2610,7 @@ fn plan_goal_internal_with_started(
                             let planning_worktree =
                                 planner_workspace.to_string_lossy().into_owned();
                             let mut log_error = None;
+                            let mut revision_context_files = Vec::new();
                             check_planning_cancelled(&owner)?;
                             // Planner uploads are staged like node inputs; deliver the
                             // accepted references now that this turn owns the workspace.
@@ -2672,6 +2717,22 @@ fn plan_goal_internal_with_started(
                                     if let Some(event) =
                                         serde_json::from_str::<serde_json::Value>(&text).ok()
                                     {
+                                        if revision_run_id.is_some()
+                                            && event["type"] == "tool_execution_start"
+                                            && event["toolName"]
+                                                .as_str()
+                                                .is_some_and(|name| matches!(name, "node" | "edge"))
+                                        {
+                                            if let Some(tool_call_id) = event["toolCallId"].as_str()
+                                            {
+                                                match write_planner_revision_context(
+                                                    &service, &owner, &graph_path, tool_call_id,
+                                                ) {
+                                                    Ok(path) => revision_context_files.push(path),
+                                                    Err(error) => eprintln!("[Grapher] [Planner] Cannot inspect revision impact: {error}"),
+                                                }
+                                            }
+                                        }
                                         if event["type"] == "tool_execution_end"
                                             && event["toolName"] == "switch_workspace"
                                             && event["isError"] != true
@@ -2760,6 +2821,9 @@ fn plan_goal_internal_with_started(
                                     }
                                 },
                             );
+                            for path in revision_context_files {
+                                let _ = fs::remove_file(path);
+                            }
                             crate::file_changes::settle_planning(&owner, &planning_id);
                             if let Ok(runtime) = service.runtime.lock() {
                                 let _ = crate::file_changes::persist_run(&runtime.root, &owner);

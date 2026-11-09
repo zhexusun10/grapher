@@ -886,12 +886,17 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // follow state, so a Planner conversation reading its history snapped back to
   // the newest row as soon as the Partitioner answered.
   const conversationPaneKey = routeType === "serial" ? "main" : routeType === "graph" && selected ? selected : "planner";
+  // A selected publication Merger can precede its first execution. When that
+  // execution arrives, the Planner branch is replaced by a Node scroller even
+  // though `selected` is unchanged. Give the two actual scrollers distinct
+  // identities so their listeners, observers and initial scroll are rebound.
+  const conversationScrollerKind = routeType === "graph" && selectedNode ? "node" : "main";
   // The creation form replaces the scroller even when Planner remains selected.
   // Give that absence its own view so returning captures/restores the Planner
   // position and reattaches all listeners and observers to the new scroller.
   const conversationViewKey = creatingNode && routeType === "graph"
     ? JSON.stringify([currentRunKey, "create-node"])
-    : JSON.stringify([currentRunKey, "conversation", conversationPaneKey]);
+    : JSON.stringify([currentRunKey, "conversation", conversationPaneKey, conversationScrollerKind]);
   const composerDraftKey = JSON.stringify([selected, selectedMerger?.id ?? ""]);
   // Remounting on epoch bumps is the only way to push restored text into the
   // uncontrolled composer without making every keystroke controlled.

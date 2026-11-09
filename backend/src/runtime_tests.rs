@@ -3507,6 +3507,97 @@ fn live_revision_keeps_unaffected_running_and_resets_only_changed_failed_or_wait
 }
 
 #[test]
+fn planner_revision_warning_matches_runtime_invalidation() {
+    let graph = Graph {
+        original_goal: "test".into(),
+        nodes: ["build", "review", "consumer", "unrelated"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![
+            Edge {
+                from: "build".into(),
+                to: "review".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "review".into(),
+                to: "consumer".into(),
+                feedback: false,
+            },
+            Edge {
+                from: "review".into(),
+                to: "build".into(),
+                feedback: true,
+            },
+        ],
+    };
+    let (_temp, _source, mut runtime) = setup(true, graph.clone());
+    runtime.approve().unwrap();
+    while runtime
+        .state
+        .nodes
+        .values()
+        .any(|node| node.status != "completed")
+    {
+        let jobs = runtime.jobs().unwrap();
+        assert!(!jobs.is_empty());
+        for job in jobs {
+            runtime
+                .emit(EventKind::Finished {
+                    execution_id: job.execution.id,
+                    head: runtime.state.base.clone(),
+                    output: "completed".into(),
+                    output_bytes: 0,
+                    metrics: None,
+                })
+                .unwrap();
+        }
+    }
+    let context = runtime.planner_revision_context();
+    let mut candidate = graph.clone();
+    candidate.edges.retain(|edge| !edge.feedback);
+    assert_eq!(
+        context.invalidated_completed(&candidate),
+        vec!["consumer", "review"]
+    );
+    assert!(context.invalidated_completed(&graph).is_empty());
+
+    // A fresh Runtime snapshot reflects a node that finished after planning
+    // began; unapproved draft edits do not run revision invalidation.
+    let mut earlier = context.clone();
+    earlier.completed_nodes.remove("consumer");
+    assert_eq!(earlier.invalidated_completed(&candidate), vec!["review"]);
+    earlier.approved = false;
+    assert!(earlier.invalidated_completed(&candidate).is_empty());
+
+    runtime
+        .revise_graph(candidate, PlanningSummary::default())
+        .unwrap();
+    let invalidated = runtime
+        .state
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::GraphRevised { invalidated, .. } => Some(invalidated),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        *invalidated,
+        context.invalidated_completed(&runtime.state.graph)
+    );
+    assert_eq!(runtime.state.nodes["review"].status, "dirty");
+    assert_eq!(runtime.state.nodes["consumer"].status, "dirty");
+    assert_eq!(runtime.state.nodes["build"].status, "completed");
+    assert_eq!(runtime.state.nodes["unrelated"].status, "completed");
+}
+
+#[test]
 fn graph_revision_invalidates_only_nodes_with_new_inputs() {
     let graph = Graph {
         original_goal: "test".into(),

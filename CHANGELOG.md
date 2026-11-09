@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Planner graph edits on an approved Run now say which completed nodes the whole candidate graph would invalidate, e.g. `Current changes will invalidate and rerun 56 completed nodes: …`. The list comes from the Runtime calculation used at commit, so a review or follow-up can see that removing feedback routes or retasking a node reruns existing work before it commits the revision. It is an advisory warning, not a rejection or an approval; commit re-evaluates live state, unapproved drafts report nothing, and a missing snapshot or older compiler returns no warning rather than a guess (`backend/resources/planner.ts`, `backend/src/runtime.rs`, `backend/src/server.rs`, `backend/src/main.rs`).
+- Feedback-routing warnings are shorter: they now say the affected nodes will rerun and that the target resumes its own session, instead of describing invalidation scope in three sentences (`backend/src/compiler.rs`).
+
 ### Fixed
 
 - Changing a conversation's Node Agent model or reasoning level now applies to every later attempt, including feedback repairs, invalidated descendants, history edits and follow-ups of completed nodes. Previously, an older per-node selection could revive the old model. Running attempts and historical model records remain unchanged, and environment overrides still take precedence (`backend/src/runtime.rs`, `backend/src/feedback_workspace_tests.rs`).
@@ -14,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live Planner responses and runtime notifications now flush each SSE frame immediately instead of waiting for the HTTP server's 8 KiB buffer to fill. A conversation can show reasoning and status updates as they arrive without leaving and reopening it (`backend/src/server.rs`, `backend/src/sse_http_tests.rs`).
 - Reopening Planner history keeps cached follow-ups with their own revisions and restores the visible row after visiting a node, even when the pane width changes. Live and recently settled Planner logs also recheck missed output so thinking and tool cards do not remain hidden until the view is reopened.
 - Entering a running node or Serial conversation no longer parks the pane above its newest reasoning. Row estimates being replaced by measurements, or a pane resize, clamps `scrollTop` upwards without a gesture; the transcript treated that as the reader reaching the top of history and locked the conversation out of following, so the streaming Chain-of-Thought card stayed at the bottom while later output accumulated below the viewport until the conversation was reopened (`src/components/VirtualizedTranscript.tsx`, `scripts/conversation-history-ui.test.mjs`).
+- A selected publication Merger that gains its first execution now hands the conversation pane to that execution's scroller instead of keeping the Planner branch's listeners, observers and initial position. Upward wheel scrolling in node, Serial, Planner and publication-Merger history keeps its measured rows in place (`src/components/views/GraphWorkbench.tsx`, `scripts/conversation-history-ui.test.mjs`).
 
 ## [1.5.0] - 2026-11-07
 

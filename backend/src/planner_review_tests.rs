@@ -378,6 +378,82 @@ fn post_task_review_omits_rework_note_after_followup_and_reload() {
 }
 
 #[test]
+fn planner_revision_tool_start_receives_live_runtime_context() {
+    for background in [false, true] {
+        let (temp, _repo, service) = setup(background, false);
+        let script = temp.path().join("agent.mjs");
+        fs::write(&script, r#"
+import fs from 'node:fs';
+let task = ''; for await (const chunk of process.stdin) task += chunk;
+if (process.env.GRAPHER_MODE !== 'planner') {
+  fs.writeFileSync('first.txt', 'published');
+  console.log(JSON.stringify({type:'message_end', message:{role:'assistant',content:[{type:'text',text:'Completed'}]}}));
+  process.exit(0);
+}
+const id = 'call/一';
+console.log(JSON.stringify({type:'tool_execution_start', toolName:'edge', toolCallId:id, args:{edges:[]}}));
+const path = `${process.env.GRAPHER_GRAPH_PATH}.impact-3fb43c6ba852b42a.json`;
+const until = Date.now() + 3000;
+while (!fs.existsSync(path) && Date.now() < until) await new Promise(done => setTimeout(done, 10));
+const context = JSON.parse(fs.readFileSync(path, 'utf8'));
+fs.writeFileSync(new URL('./impact-observed.json', import.meta.url), JSON.stringify({path, context}));
+console.log(JSON.stringify({type:'tool_execution_end', toolName:'edge', toolCallId:id, isError:false}));
+console.log(JSON.stringify({type:'message_end', message:{role:'assistant',content:[{type:'text',text:'Done'}]}}));
+"#).unwrap();
+        drive(service.clone());
+        let completed = wait(&service, |state| {
+            state.phase == "completed"
+                && (!background
+                    || state
+                        .events
+                        .iter()
+                        .any(|event| matches!(event.kind, EventKind::PlannerReviewFinished { .. })))
+        });
+        wait_for_driver_exit(&service);
+        if !background {
+            let config = service
+                .runtime
+                .lock()
+                .unwrap()
+                .state
+                .config
+                .clone()
+                .unwrap();
+            let revised = plan_goal_internal(
+                "Check".into(),
+                config,
+                Some("graph"),
+                None,
+                Some(completed.run_id.clone()),
+                &service,
+                |_| {},
+                |_| {},
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(revised.nodes["first"].status, "completed");
+        }
+        let observed: serde_json::Value =
+            serde_json::from_slice(&fs::read(temp.path().join("impact-observed.json")).unwrap())
+                .unwrap();
+        assert_eq!(observed["context"]["toolCallId"], "call/一");
+        assert_eq!(observed["context"]["revisionContext"]["approved"], true);
+        assert_eq!(
+            observed["context"]["revisionContext"]["completedNodes"],
+            serde_json::json!(["first"])
+        );
+        assert_eq!(
+            observed["context"]["revisionContext"]["graph"]["nodes"][0]["name"],
+            "first"
+        );
+        assert!(
+            !Path::new(observed["path"].as_str().unwrap()).exists(),
+            "per-call context must be cleaned up"
+        );
+    }
+}
+
+#[test]
 fn post_task_review_disabled_does_not_call_planner() {
     let (_temp, _repo, service) = setup(false, false);
     drive(service.clone());

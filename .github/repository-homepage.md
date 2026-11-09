@@ -54,4 +54,6 @@ gh repo view zhexusun10/grapher --json description,homepageUrl,repositoryTopics
 - [Chinese product homepage](../README.zh-CN.md)
 - [Canonical documentation index](../docs/index.md)
 
-The screenshot shows an approval-stage demo graph, not execution success or benchmark performance. Maintainer checks belong in development documentation or issue tracking, not the product README.
+The primary README screenshots show the current frontend with a hand-authored 21-node research-plan fixture. The graph is awaiting approval; it does not demonstrate execution success, benchmark performance or a graph-size limit. The optional historical screenshot shows an earlier UI with a 16-node run marked complete. To refresh the screenshots, install the project dependencies and Playwright Chromium (`npx playwright install chromium`), then run `node scripts/readme-screenshots.mjs` from the repository root. The capture mocks the API and does not require a backend, a real project or provider credentials.
+
+Maintainer checks belong in development documentation or issue tracking, not the product README.

@@ -159,6 +159,28 @@ fn repair_delivered_heads(store: &Store, state: &mut Snapshot) -> Result<(), Str
     Ok(())
 }
 
+/// Runtime-owned graph and completed results captured for one Planner edit.
+/// The edit remains provisional, so the runtime re-evaluates it at commit.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannerRevisionContext {
+    pub graph: Graph,
+    pub completed_nodes: BTreeSet<String>,
+    pub approved: bool,
+}
+
+impl PlannerRevisionContext {
+    pub fn invalidated_completed(&self, graph: &Graph) -> Vec<String> {
+        if !self.approved {
+            return Vec::new();
+        }
+        Runtime::revision_invalidated_between(&self.graph, graph)
+            .intersection(&self.completed_nodes)
+            .cloned()
+            .collect()
+    }
+}
+
 pub struct Runtime {
     pub store: Store,
     pub state: Snapshot,
@@ -2067,10 +2089,29 @@ impl Runtime {
         })
     }
 
+    /// Snapshot the authoritative committed graph and completed nodes when a
+    /// Planner tool starts. Never expose another Run's state to the Planner.
+    pub fn planner_revision_context(&self) -> PlannerRevisionContext {
+        PlannerRevisionContext {
+            graph: self.state.graph.clone(),
+            completed_nodes: self
+                .state
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.status == "completed")
+                .map(|(name, _)| name.clone())
+                .collect(),
+            approved: self.state.approved,
+        }
+    }
+
     /// Nodes whose work or dependencies change, plus consumers of those nodes.
     /// Removed nodes must also finish before their execution state is discarded.
     pub fn revision_affected(&self, graph: &Graph) -> BTreeSet<String> {
-        let previous = &self.state.graph;
+        Self::revision_affected_between(&self.state.graph, graph)
+    }
+
+    fn revision_affected_between(previous: &Graph, graph: &Graph) -> BTreeSet<String> {
         let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
         let mut affected: BTreeSet<String> = previous
             .nodes
@@ -2104,6 +2145,18 @@ impl Runtime {
             }
         }
         affected
+    }
+
+    fn retained_revision_affected(graph: &Graph, affected: BTreeSet<String>) -> BTreeSet<String> {
+        let names: BTreeSet<_> = graph.nodes.iter().map(|node| node.name.as_str()).collect();
+        affected
+            .into_iter()
+            .filter(|name| names.contains(name.as_str()))
+            .collect()
+    }
+
+    fn revision_invalidated_between(previous: &Graph, graph: &Graph) -> BTreeSet<String> {
+        Self::retained_revision_affected(graph, Self::revision_affected_between(previous, graph))
     }
 
     /// Apply a planner revision without discarding unrelated work. The caller
@@ -2148,9 +2201,8 @@ impl Runtime {
         }
         // New consumers of changed nodes must also be invalidated; all others
         // retain their heads, revisions, execution history and worktrees.
-        let invalidated: Vec<_> = affected
+        let invalidated: Vec<_> = Self::retained_revision_affected(&graph, affected)
             .into_iter()
-            .filter(|name| names.contains(name.as_str()))
             .collect();
         // Capture the real source after Planner's native writes. Persist the
         // input head with the revision so reloads cannot fall back to old files.

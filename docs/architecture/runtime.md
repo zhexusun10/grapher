@@ -32,6 +32,18 @@ approved revisions still commit atomically in Rust. Backend evidence:
 browser regressions:
 [Planner streaming and auto-fit](../../scripts/graph-planning-fit.test.mjs).
 
+For an approved graph revision, each `node`/`edge` tool call receives a
+Run-owned snapshot of the committed graph and completed nodes at tool start.
+The existing tool `warnings` report completed nodes that the entire candidate
+would invalidate, using the same Runtime calculation as commit. This is an
+advisory preview, not approval or a scheduling guarantee: active nodes can
+finish later, and commit re-evaluates the current state. If the snapshot or
+compiler support is unavailable, no impact warning is returned; absence of a
+warning does not prove there is no impact. Unapproved drafts do not run revision
+invalidation. Focused evidence:
+[Runtime revision](../../backend/src/runtime_tests.rs) and
+[Planner extension](../../scripts/check-pi-extension.ts).
+
 The Planner conversation itself is projected the same way: the newest turn's
 live rows own the transcript while it streams, and a turn that ends without
 committing (failed, stopped or rejected by a provider) keeps those live rows —

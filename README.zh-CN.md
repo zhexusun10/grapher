@@ -1,63 +1,75 @@
-# Grapher
+<p align="center">
+  <img src="assets/icon-dots.svg" width="80" height="80" alt="Grapher 标志">
+</p>
 
-> **不编排智能体，编译工作。彻底告别“转述失真”。**
->
-> **Don't orchestrate agents. Compile work.**  
-> **No more "lost in translation".**
+<h1 align="center">Grapher</h1>
 
-[![CI](https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml/badge.svg)](https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml)
-[![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
+<p align="center">
+  <strong>不编排智能体，编译工作。</strong><br>
+  告别“转述失真”。
+</p>
 
-**将复杂工作编译为可检查执行图的本地 Coding Agent 架构。**
+<p align="center">
+  将复杂工作编译为可检查执行图的本地 Coding Agent 工作台。<br>
+  基于 <a href="https://github.com/earendil-works/pi">Pi</a> 构建 · 目前处于 alpha 阶段
+</p>
 
-### 典型多智能体系统 vs Grapher
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#工作方式">工作方式</a> ·
+  <a href="docs/user-guide.md">使用指南</a> ·
+  <a href="README.md">English</a>
+</p>
 
-```text
-典型多智能体系统
+<p align="center">
+  <a href="https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml"><img src="https://github.com/zhexusun10/grapher/actions/workflows/planner-source.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT 许可证"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-stable-orange.svg" alt="Rust stable"></a>
+</p>
 
-目标 → 主管 LLM → Agent → 主管 LLM → Agent → ...
-          ↑ 调度存在于对话循环内部
-
-
-Grapher
-
-目标 → Planner → 编译后的执行图 → 确定性 Runtime
-                                      ├── Agent A ──┐
-                                      ├── Agent B ──┼──→ Agent D
-                                      └── Agent C ──┘
-```
-
-**核心区别：**
-
-1. **执行循环中没有主管** — LLM 规划执行图后退出调度器。
-2. **彻底告别转述失真（Zero Conversational Message Passing，绝无 Lost in Translation）** — 传统多 Agent 系统依赖密集的 Agent 间对话，技术约束与设计细节在层层“传话筒”汇报中极易衰减和失真。Grapher 在节点间完全杜绝对话消息传递，任务间继承的是确定性的 Git 代码状态与文件历史，而不是容易产生幻觉的聊天记录。
-3. **执行图就是可执行状态** — 依赖、重试、反馈和发布都是明确的运行时状态转换。
-4. **没有预定义 Agent 角色** — 所有节点运行通用 Coding Agent；专业化来自任务上下文，而不是硬编码角色。
-
-**并非所有工作都需要多个 Agent。** Grapher 在 **Auto** 模式下按意图路由，也允许手动选择：线性任务使用 **Serial**，并行有价值时使用 **Graph**。
-
-基于 [Pi](https://github.com/earendil-works/pi) 构建。 [快速开始](#快速开始) · [工作方式](#工作方式) · [使用指南](docs/user-guide.md) · [English](README.md)
-
-![Grapher 真实界面：完成多节点复杂依赖拓扑图编译与执行，包含需求提示词、规划过程工具调用与执行拓扑图](assets/execution-graph-zh.png)
-
-*真实 Grapher 界面，展示复杂任务编译生成的 16 节点执行拓扑图与规划全流程记录。*
+<p align="center">
+  <img src="assets/readme-graph-zh.png" width="100%" alt="Grapher 工作台：视频检测研究任务被规划为等待批准的 21 节点执行图">
+  <br><sub>从复杂目标到可检查的执行图。画面为审批前的合成演示计划。</sub>
+</p>
 
 ## 为什么选择 Grapher？
 
-- **集成式 Coding Agent 环境** — 在同一个界面中与 Coding Agent 对话、管理服务商认证与模型设置、查看工具调用和日志，并进行干预。
-- **确定性编排** — 调度、依赖、结果失效和有界反馈是明确的 Rust 状态转换。我们不向模型注入 prior bias；模型使用层与系统编排层解耦，让模型保持灵活通用：确定性、系统性规则由 runtime/harness 负责，而不是靠 prompt 向模型暴露系统细节。
-- **工作区继承（传递代码，而非闲聊）** — 子节点直接继承父节点的 Git 提交历史以及包含 `.gitignore` 在内的完整项目文件状态。节点之间绝不互相“对齐聊天”，彻底避免技术细节在多轮转述中失真（Lost in translation）；每个 Agent 的上下文保持干净专注，代码的交接与冲突由 Git 机制精确处理。线性任务可以交接 Git 工作区；fan-out 分支使用独立 Git worktree；Git 负责冲突和发布。
+- **一个工作台** — 在同一界面与 Agent 对话、配置服务商和模型、查看工具调用与日志，并随时干预。
+- **确定性编排** — 模型负责规划；Rust Runtime 负责调度、依赖、结果失效、重试和有界反馈，执行循环中无需主管 Agent。
+- **传递代码，而非闲聊** — 节点之间不交换对话；子节点继承父节点的 Git 历史与项目文件状态，包括匹配 `.gitignore` 的文件。线性任务可以交接工作区，fan-out 分支则使用独立 Git worktree。
 - **可检查的执行图** — 执行前查看并批准任务图；执行中可以看到依赖、并行分支和有界返工。
+- **通用 Agent** — 节点通过任务上下文获得专业化，而非依赖预定义或硬编码角色。
 - **本地优先** — 在你的机器上运行，并在宣告完成前把有效的 Graph 结果发布回代码库。模型请求仍会发送给你配置的服务商。
 
+## 一个目标，多条工作流
+
+这个视频取证示例涵盖数据审计、视觉／频域／时序模型并行研究、数据泄漏检查、鲁棒性测试、一次留出集评估和可复现交付。计划包含 **21 个节点、6 个执行批次**；反馈边将鲁棒性测试结果送回频域模型分支。
+
+<p align="center">
+  <img src="assets/readme-graph-detail-zh.png" width="720" alt="视频检测研究流水线的 21 节点执行图细节，展示并行分支、依赖和反馈边">
+  <br><sub>这是审批前的合成演示计划，不代表已完成的运行、基准成绩或图规模上限。</sub>
+</p>
+
+<details>
+<summary><strong>查看旧版界面中的 16 节点实际完成记录</strong></summary>
+<p align="center">
+  <img src="assets/execution-graph-zh.png" width="100%" alt="旧版 Grapher 界面：机器学习任务的 16 个节点均显示已完成">
+  <br><sub>多阶段机器学习任务的历史截图，不代表基准测试成绩。</sub>
+</p>
+</details>
+
 ## 什么时候应该使用 Grapher？
+
+<p align="center">
+  <img src="assets/readme-home-zh.png" width="100%" alt="Grapher 首页：输入视频检测研究目标，并可选择 Auto、Serial 或 Graph 模式">
+  <br><sub>从一个目标出发，选择适合当前任务的执行路线。截图使用演示数据。</sub>
+</p>
 
 **Agent 并不是越多越好。** Grapher 最适合包含独立工作流的编程任务，例如：
 
 - 前端 + 后端修改
 - 实现 + 测试
-- 机器学习任务天然具有多个独立模块
+- 包含独立特征工程和评估工作流的研究任务
 - 实现后进行有界审查 / 返工
 
 小型、线性或高度耦合的任务应使用 **Serial**。只有当显式依赖和独立工作流值得拆图时才使用 **Graph**；**Auto** 让 Partitioner 选择路线。
@@ -77,7 +89,7 @@ Grapher
 
 **依赖：** Node.js 22.19+、稳定版 Rust、Git、npm、网络和服务商认证。Windows 需要 Git for Windows Bash；macOS 需要 Xcode Command Line Tools（用于 Rust 链接），Graph 使用系统内置 Seatbelt 沙箱；Linux Graph 需要 bubblewrap，并允许非特权 user/mount/PID namespace。
 
-**不想安装编译工具？** 直接下载可运行的发布包：校验 `.sha256` 后解压，运行 `start.bat`（Windows）或 `./start.sh`（macOS/Linux）。发布包在运行时仍需要 Node.js 22.19+ 与 Git；无需 Rust 和 npm。
+**不想安装编译工具？** 直接下载可运行的[发布包](https://github.com/zhexusun10/grapher/releases/latest)：校验 `.sha256` 后解压，运行 `start.bat`（Windows）或 `./start.sh`（macOS/Linux）。发布包在运行时仍需要 Node.js 22.19+ 与 Git；无需 Rust 和 npm。
 
 ```sh
 git clone --recurse-submodules https://github.com/zhexusun10/grapher.git

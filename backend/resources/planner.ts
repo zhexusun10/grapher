@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 type Graph = { originalGoal: string; nodes: { name: string; task: string }[]; edges: { from: string; to: string; feedback: boolean }[] };
@@ -216,9 +216,36 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       return { isError: true };
     }
   });
+  // Runtime publishes one live committed-graph snapshot per tool start. The
+  // filename is bounded even for provider IDs containing separators or very
+  // long strings; the response also carries the full ID to detect collisions.
+  function revisionContextPath(id: string): string {
+    let hash = 0xcbf29ce484222325n;
+    for (const byte of Buffer.from(id, "utf8")) {
+      hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
+    }
+    return `${graphPath}.impact-${hash.toString(16).padStart(16, "0")}.json`;
+  }
+  async function revisionContext(id: string, signal?: AbortSignal): Promise<unknown | undefined> {
+    if (!process.env.GRAPHER_PLANNER_RUN_ID) return;
+    const path = revisionContextPath(id);
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new Error("Operation aborted");
+      try {
+        const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+        if (isRecord(value) && value.toolCallId === id && isRecord(value.revisionContext)) {
+          try { unlinkSync(path); } catch { }
+          return value.revisionContext;
+        }
+      } catch { }
+      await new Promise(resolve => setTimeout(resolve, 15));
+    }
+  }
   // The shared engine policy owns read/bash and their stable path view.
   // Keep this extension limited to graph mutations, regardless of cwd.
-  function mutate(kind: "node" | "edge", change: (graph: Graph) => Diagnostic[] | void) {
+  async function mutate(id: string, signal: AbortSignal | undefined, kind: "node" | "edge", change: (graph: Graph) => Diagnostic[] | void) {
+    const revision = await revisionContext(id, signal);
     const saved: Graph = JSON.parse(readFileSync(graphPath, "utf8"));
     const graph: Graph = structuredClone(saved);
     const rejected = (diagnostics: Diagnostic[]) => result(JSON.stringify({
@@ -228,7 +255,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     }), diagnostics.map(diagnostic => diagnostic.code));
     const inputErrors = change(graph);
     if (inputErrors?.length) return rejected(inputErrors);
-    const checked = spawnSync(process.env.GRAPHER_COMPILER_PATH!, ["--compile"], { input: JSON.stringify({ graph, finalCheck: false, unremovableNodes }), encoding: "utf8", timeout: 10000 });
+    const checked = spawnSync(process.env.GRAPHER_COMPILER_PATH!, ["--compile"], { input: JSON.stringify({ graph, finalCheck: false, unremovableNodes, ...(revision ? { revisionContext: revision } : {}) }), encoding: "utf8", timeout: 10000 });
     if (checked.error || checked.status !== 0) return rejected([{ code: "compiler-unavailable", message: checked.error?.message || checked.stderr || `Compiler exited with status ${checked.status}` }]);
     let output;
     try { output = JSON.parse(checked.stdout); }
@@ -271,8 +298,8 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       }, { additionalProperties: false }), { minItems: 1, description: "One or more node edits, applied in order" }),
     }, { additionalProperties: false }),
     prepareArguments: raw => prepareWithContext(() => editArguments(raw, "nodes", ["name"], ["name", "task", "delete"], '{"nodes":[{"name":"...","task":"..."}]}')),
-    async execute(_id, parameters) {
-      return mutate("node", graph => {
+    async execute(id, parameters, signal) {
+      return mutate(id, signal, "node", graph => {
         const duplicates = duplicateTargets("nodes", parameters.nodes.map(edit => edit.name));
         if (duplicates.length) return duplicates;
         for (const edit of parameters.nodes) applyNode(graph, edit);
@@ -293,8 +320,8 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       }, { additionalProperties: false }), { minItems: 1, description: "One or more edge edits, applied in order" }),
     }, { additionalProperties: false }),
     prepareArguments: raw => prepareWithContext(() => editArguments(raw, "edges", ["from", "to"], ["from", "to", "feedback", "delete"], '{"edges":[{"from":"...","to":"..."}]}')),
-    async execute(_id, parameters) {
-      return mutate("edge", graph => {
+    async execute(id, parameters, signal) {
+      return mutate(id, signal, "edge", graph => {
         const duplicates = duplicateTargets("edges", parameters.edges.map(edit => JSON.stringify([edit.from, edit.to])));
         if (duplicates.length) return duplicates;
         for (const edit of parameters.edges) applyEdge(graph, edit);

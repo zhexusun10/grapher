@@ -616,6 +616,100 @@ test("completed write-back details live inside the topology overview with copy a
   } finally { await context.close(); }
 });
 
+async function assertHistoryWheelProgress(page, scroller) {
+  await scroller.waitFor();
+  await page.waitForFunction(element => element.scrollHeight - element.clientHeight > 1800, await scroller.elementHandle());
+  await scroller.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await page.waitForTimeout(200);
+  await scroller.hover({ position: { x: 10, y: 80 } });
+  await page.mouse.wheel(0, -800);
+  await page.waitForTimeout(300);
+  for (let index = 0; index < 6; index++) {
+    const before = await scroller.evaluate(element => {
+      const view = element.getBoundingClientRect();
+      const row = [...element.querySelectorAll("[data-transcript-id]")].find(item => {
+        const rect = item.getBoundingClientRect();
+        return rect.bottom > view.top + 1 && rect.top < view.bottom - 1;
+      });
+      return row && { id: row.dataset.transcriptId, top: row.getBoundingClientRect().top, scroll: element.scrollTop };
+    });
+    assert.ok(before, "a retained transcript row must be visible");
+    await page.mouse.wheel(0, -80);
+    await page.waitForTimeout(300);
+    const after = await scroller.locator(`[data-transcript-id="${before.id}"]`).evaluate(row => ({
+      top: row.getBoundingClientRect().top, scroll: row.closest(".pub-card-merger-transcript, .initial-query-scroll").scrollTop }));
+    assert.ok(Math.abs(after.top - before.top - 80) <= 4,
+      `scrollback must preserve the wheel motion: ${JSON.stringify({ index, before, after })}`);
+  }
+}
+
+for (const mode of ["serial", "graph", "merger", "node-merger"]) {
+  test(`${mode}: execution history preserves upward wheel progress`, { timeout: 60_000 }, async () => {
+    const output = Array.from({ length: 100 }, (_, index) =>
+      assistant(`MODE_HISTORY_${index} ` + (index % 2 ? "wrapped content ".repeat(40) : "short"))).join("");
+    const { context, page, errors } = await newPage(route => route.fulfill({ json: {
+      result: route.request().url().endsWith("/get_merger_prompt") ? { prompt: "Merge the completed work." } : {},
+    } }));
+    try {
+      page.setDefaultTimeout(30_000);
+      await page.goto(`${origin}/__workspace-footer?mode=${mode}`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.setExecutions);
+      await page.evaluate(output => {
+        window.audit.startExecution();
+        window.audit.setExecutions([{ id: "current", node: "task", status: "completed", output,
+          revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "s", worktree: "/mock", before: "", after: "" }]);
+        window.audit.finish();
+      }, output);
+      await page.locator('[data-execution-id="current"] [data-transcript-id]').first().waitFor({ state: "attached" });
+      await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+      await assertHistoryWheelProgress(page, page.locator(".initial-query-scroll"));
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("live Planner history preserves upward wheel progress", { timeout: 60_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  try {
+    page.setDefaultTimeout(30_000);
+    await page.goto(`${origin}/__history?case=plannerRoute&longThinking=1`, { waitUntil: "domcontentloaded" });
+    await page.locator(".planner-transcript [data-transcript-id]").first().waitFor({ state: "attached" });
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+    await assertHistoryWheelProgress(page, page.locator(".initial-query-scroll"));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("write-back merger history preserves wheel progress in its nested viewport", { timeout: 60_000 }, async () => {
+  const content = Array.from({ length: 100 }, (_, index) =>
+    assistant(`PUBLICATION_HISTORY_${index} ` + (index % 2 ? "wrapped content ".repeat(40) : "short"))).join("");
+  const { context, page, errors } = await newPage(route => {
+    if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
+    const body = route.request().postDataJSON(), bytes = Buffer.from(content);
+    const start = body.offset ?? 0, end = bytes.length;
+    return route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+      content: bytes.subarray(start).toString(), startOffset: start, nextOffset: end, totalBytes: end,
+      complete: true, status: "completed" } } });
+  });
+  try {
+    page.setDefaultTimeout(30_000);
+    await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.setPublicationResult);
+    await page.evaluate(bytes => {
+      window.audit.startExecution(); window.audit.finish(); window.audit.setRunSummary("completed", null);
+      window.audit.setPublicationResult({ status: "completed", repository: "/mock", completedAt: 2 }, [{
+        id: "publication-scroll", node: "merger", status: "completed", output: "", outputBytes: bytes,
+        revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "s", worktree: "/mock", before: "", after: "",
+      }]);
+    }, Buffer.byteLength(content));
+    await page.locator(".pub-card-mergers-summary").click();
+    const scroller = page.locator(".pub-card-merger-transcript");
+    await scroller.locator("[data-transcript-id]").first().waitFor({ state: "attached" });
+    await assertHistoryWheelProgress(page, scroller);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("completed topology reports task token totals and cache percentage only after completion", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
   const emptyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0, consumedTokens: 0 };

@@ -11,6 +11,61 @@ fn service(root: &std::path::Path) -> Arc<Service> {
 }
 
 #[test]
+fn planner_revision_context_uses_current_run_state_at_each_tool_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = service(temp.path());
+    let graph_path = temp.path().join("graph.json");
+    let owner = "run";
+    {
+        let mut runtime = primary.runtime.lock().unwrap();
+        runtime.state.run_id = owner.into();
+        runtime.state.approved = true;
+        runtime.state.graph.nodes = ["completed", "running"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect();
+        for node in &runtime.state.graph.nodes.clone() {
+            runtime
+                .state
+                .nodes
+                .insert(node.name.clone(), Default::default());
+        }
+        runtime.state.nodes.get_mut("completed").unwrap().status = "completed".into();
+        runtime.state.nodes.get_mut("running").unwrap().status = "running".into();
+    }
+    let first = write_planner_revision_context(&primary, owner, &graph_path, "call/一").unwrap();
+    assert_eq!(first, planner_revision_context_path(&graph_path, "call/一"));
+    assert!(first.ends_with("graph.json.impact-3fb43c6ba852b42a.json"));
+    let data: serde_json::Value = serde_json::from_slice(&fs::read(&first).unwrap()).unwrap();
+    assert_eq!(data["toolCallId"], "call/一");
+    assert_eq!(
+        data["revisionContext"]["completedNodes"],
+        serde_json::json!(["completed"])
+    );
+    assert_eq!(data["revisionContext"]["approved"], true);
+    primary
+        .runtime
+        .lock()
+        .unwrap()
+        .state
+        .nodes
+        .get_mut("running")
+        .unwrap()
+        .status = "completed".into();
+    let second = write_planner_revision_context(&primary, owner, &graph_path, "another").unwrap();
+    assert_ne!(first, second);
+    let data: serde_json::Value = serde_json::from_slice(&fs::read(second).unwrap()).unwrap();
+    assert_eq!(
+        data["revisionContext"]["completedNodes"],
+        serde_json::json!(["completed", "running"])
+    );
+    assert!(write_planner_revision_context(&primary, "other-run", &graph_path, "third").is_err());
+}
+
+#[test]
 fn startup_cleanup_recovers_unqueued_completed_workspaces_and_provisional_attempts() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("data");

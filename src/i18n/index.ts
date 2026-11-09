@@ -114,6 +114,10 @@ function annotateProviderError(message: string, language: Locale): string {
   return text;
 }
 
+const W303_SENT_REGEX =
+  /^(?:W303:\s*)?If\s+<FEEDBACK>\s+is\s+sent\s+from\s+(.+?)\s+to\s+(.+?),\s+these\s+nodes\s+will\s+rerun:\s*(.+?)\.\s*(.+?)\s+resumes\s+its\s+own\s+session\s+on\s+rework\.?$/i;
+
+// Older saved plans retain the original longer warning.
 const W303_REGEX =
   /^(?:W303:\s*)?If\s+<FEEDBACK>\s+from\s+(.+?)\s+to\s+(.+?)\s+is\s+applied,\s+the\s+target\s+and\s+dependency\s+descendants\s+will\s+be\s+invalidated:\s*(.+?)\.\s*Completed\s+results\s+must\s+be\s+recomputed;\s*(.+?)\s+continues\s+(?:from\s+its\s+own\s+conversation\s+history|its\s+conversation)\.\s*Nodes\s+outside\s+this\s+set\s+are\s+unaffected\.?$/i;
 
@@ -128,6 +132,16 @@ const GENERIC_WARNING_CODE_REGEX = /^W\d+:\s*(.*)$/;
 /** Localize execution graph plan warnings and strip machine diagnostic codes (e.g. W303). */
 export function localizePlanWarning(warning: string, language: Locale = locale): string {
   const message = (warning ?? "").trim();
+  const sent303 = message.match(W303_SENT_REGEX);
+  if (sent303) {
+    return translate(
+      language,
+      "若 {0} 向 {1} 发送 <FEEDBACK>，这些节点将重跑：{2}。{1} 返工时延续自己的会话。",
+      sent303[1],
+      sent303[2],
+      sent303[3]
+    );
+  }
   const m303 = message.match(W303_REGEX);
   if (m303) {
     return translate(
@@ -165,6 +179,7 @@ export function localizePlanWarning(warning: string, language: Locale = locale):
 export function localizeError(error: unknown, language: Locale = locale): string {
   const message = error instanceof Error ? error.message : String(error ?? "");
   if (
+    W303_SENT_REGEX.test(message) ||
     W303_REGEX.test(message) ||
     W301_REGEX.test(message) ||
     W302_REGEX.test(message) ||
