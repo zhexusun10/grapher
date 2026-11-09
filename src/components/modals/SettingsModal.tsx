@@ -297,6 +297,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <p className="section-desc">{t("选择首页背景，保存后在此浏览器中生效。")}</p>
               <fieldset className="settings-background-options" disabled={saving}>
                 <legend className="sr-only">{t("首页背景")}</legend>
+                <label className={`settings-background-option ${landingBackground === "dots" ? "is-selected" : ""}`}>
+                  <span className="settings-background-preview" aria-hidden="true">
+                    <DotPattern width={18} height={18} cr={1} className="[mask-image:radial-gradient(130px_circle_at_center,white,transparent)]" />
+                  </span>
+                  <span className="settings-background-option-label">
+                    <input type="radio" name="landing-background" value="dots" checked={landingBackground === "dots"}
+                      onChange={() => setLandingBackgroundDraft("dots")} />
+                    <span><strong>{t("点阵")}</strong><small>{t("默认的静态渐隐点阵")}</small></span>
+                  </span>
+                </label>
                 <label className={`settings-background-option ${landingBackground === "paths" ? "is-selected" : ""}`}>
                   <span className="settings-background-preview settings-background-preview-paths" aria-hidden="true">
                     <svg viewBox="0 0 240 80" preserveAspectRatio="xMidYMid slice" fill="none">
@@ -310,16 +320,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                     <input type="radio" name="landing-background" value="paths" checked={landingBackground === "paths"}
                       onChange={() => setLandingBackgroundDraft("paths")} />
                     <span><strong>{t("动态线条")}</strong><small>{t("流动的动态线条")}</small></span>
-                  </span>
-                </label>
-                <label className={`settings-background-option ${landingBackground === "dots" ? "is-selected" : ""}`}>
-                  <span className="settings-background-preview" aria-hidden="true">
-                    <DotPattern width={18} height={18} cr={1} className="[mask-image:radial-gradient(130px_circle_at_center,white,transparent)]" />
-                  </span>
-                  <span className="settings-background-option-label">
-                    <input type="radio" name="landing-background" value="dots" checked={landingBackground === "dots"}
-                      onChange={() => setLandingBackgroundDraft("dots")} />
-                    <span><strong>{t("点阵")}</strong><small>{t("默认的静态渐隐点阵")}</small></span>
                   </span>
                 </label>
               </fieldset>

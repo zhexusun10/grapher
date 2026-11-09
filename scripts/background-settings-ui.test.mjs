@@ -69,7 +69,20 @@ test("home background saves only after acceptance, persists, and preserves the a
     const animated = page.getByRole("radio", { name: /Animated paths/ });
     const pattern = page.getByRole("radio", { name: /Dot pattern/ });
     assert.equal(await pattern.isChecked(), true);
+    assert.deepEqual(await page.locator('input[name="landing-background"]').evaluateAll(inputs => inputs.map(input => input.value)), ["dots", "paths"], "the default option appears first");
+    const radioBorder = radio => radio.evaluate(input => getComputedStyle(input).borderColor);
+    const originalBorder = await radioBorder(pattern);
+    assert.equal(originalBorder, await radioBorder(animated), "selected and unselected radio outlines match");
+    assert.equal(await pattern.evaluate(input => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--brand-default)";
+      input.parentElement.append(probe);
+      const hasBlueDot = getComputedStyle(input).backgroundImage.includes(getComputedStyle(probe).color);
+      probe.remove();
+      return hasBlueDot;
+    }), true, "the selected radio keeps its blue dot");
     await animated.check();
+    assert.equal(await radioBorder(animated), originalBorder, "the outline stays unchanged after selection");
     assert.equal(await dots(page).count(), 1, "a draft does not change the live background");
     assert.equal(await paths(page).count(), 0);
     assert.equal(await page.evaluate(() => localStorage.getItem("grapher_landing_background_v1")), null);
@@ -113,7 +126,7 @@ test("home background saves only after acceptance, persists, and preserves the a
     const radioBox = await pattern.boundingBox();
     assert.ok(radioBox && radioBox.x >= 0 && radioBox.x + radioBox.width <= 390, "options remain reachable on narrow screens");
     await pattern.focus();
-    await page.keyboard.press("ArrowLeft");
+    await page.keyboard.press("ArrowRight");
     assert.equal(await animated.isChecked(), true, "native radio options support keyboard navigation");
     await page.locator(".save-config-btn").click();
     await page.locator(".settings-modal").waitFor({ state: "detached" });

@@ -2735,9 +2735,18 @@ button.session-label-toggle:focus-visible {
 }
 
 .settings-background-option-label input {
+  appearance: none;
   flex: none;
+  width: 13px;
+  height: 13px;
   margin: 2px 0 0;
-  accent-color: var(--brand-default);
+  border: 1px solid var(--text-secondary);
+  border-radius: 50%;
+  background: var(--bg-canvas);
+}
+
+.settings-background-option-label input:checked {
+  background: radial-gradient(circle, var(--brand-default) 0 3px, transparent 3.5px), var(--bg-canvas);
 }
 
 .settings-background-option-label strong,
