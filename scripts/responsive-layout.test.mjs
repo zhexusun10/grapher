@@ -68,6 +68,35 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     const composer = page.locator(".conversation-pane .pane-bottom-chat textarea");
     await composer.fill("Draft survives resizing");
 
+    // The workspace viewport ends at a card boundary at different heights;
+    // overflowing cards remain scrollable without showing a clipped card.
+    for (const height of [800, 700, 600, 500, 420]) {
+      await page.setViewportSize({ width: 1280, height });
+      await page.waitForTimeout(400);
+      const workspace = await page.locator(".projects-list").evaluate(list => {
+        const cards = [...list.querySelectorAll(".project-workspace-item")];
+        const bounds = list.getBoundingClientRect();
+        const visible = cards.filter(card => card.getBoundingClientRect().bottom <= bounds.bottom + 0.5);
+        const last = visible.at(-1)?.getBoundingClientRect();
+        return { height: bounds.height, visible: visible.length, bottomGap: last ? bounds.bottom - last.bottom : null,
+          scrollable: list.scrollHeight > list.clientHeight };
+      });
+      assert.ok(workspace.visible >= 1 && Math.abs(workspace.bottomGap) < 1,
+        `workspace ends after a whole card at height ${height}: ${JSON.stringify(workspace)}`);
+      assert.equal(workspace.scrollable, true, "additional workspaces remain scrollable");
+      if (height === 800) {
+        assert.equal(workspace.visible, 4, "four workspaces fit at desktop height");
+        const exactFit = await page.locator(".projects-list").evaluate(list => {
+          const extra = [...list.querySelectorAll(".project-workspace-item")].slice(4);
+          extra.forEach(card => { card.style.display = "none"; });
+          const fits = list.scrollHeight <= list.clientHeight;
+          extra.forEach(card => { card.style.removeProperty("display"); });
+          return fits;
+        });
+        assert.equal(exactFit, true, "four cards do not trigger workspace scrolling");
+      }
+    }
+    await page.setViewportSize({ width: 1280, height: 800 });
     assert.equal(await switcher.isVisible(), false, "wide workspaces keep the split view");
     assert.ok((await page.locator(".conversation-pane").boundingBox()).width >= 279, "a stored small split does not crush the conversation");
     assert.ok((await page.locator(".graph-pane").boundingBox()).width >= 319, "the graph retains its minimum width");

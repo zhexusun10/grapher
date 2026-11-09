@@ -609,12 +609,16 @@ a,
 }
 
 .projects-list {
+  /* Keep the viewport aligned to whole cards, including the gaps between them.
+     Reserve room for the conversation and pinned footer in short windows. */
+  --workspace-card-height: 54px;
+  --workspace-card-gap: 4px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--workspace-card-gap);
   overflow-y: auto;
   overflow-x: hidden;
-  max-height: min(240px, 30vh);
+  max-height: max(0px, calc(round(down, calc(min(228px, 30dvh, max(54px, 100dvh - 310px)) + var(--workspace-card-gap)), calc(var(--workspace-card-height) + var(--workspace-card-gap))) - var(--workspace-card-gap)));
   flex-shrink: 1;
   min-height: 0;
   margin-bottom: 12px;
@@ -636,6 +640,7 @@ a,
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
   position: relative;
+  height: var(--workspace-card-height);
   width: var(--sidebar-content-width, 230px);
   min-width: var(--sidebar-content-width, 230px);
   flex-shrink: 0;
@@ -690,6 +695,7 @@ a,
 
 .proj-name-row strong {
   font-size: 13px;
+  line-height: 18px;
   font-weight: 500;
   color: var(--text-primary);
   white-space: nowrap;
@@ -700,6 +706,7 @@ a,
 .proj-path-text {
   display: block;
   font-size: 12px;
+  line-height: 16px;
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
