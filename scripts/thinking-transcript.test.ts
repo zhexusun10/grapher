@@ -388,14 +388,14 @@ test("consecutive transcript errors render as a compact counted card with full e
     onDraftChange: () => {}, onSendMessage: () => false, onUserResize: () => {},
   }));
   assert.match(planner, /data-testid="transcript-error-card"/);
-  assert.match(planner, /aria-label="复制错误"/);
+  assert.ok(planner.includes(`aria-label="${t("复制错误")}"`));
   assert.match(planner, /LATEST_ERROR_PREVIEW/);
   assert.doesNotMatch(planner, /FIRST_FULL_ERROR_DETAIL/, "collapsed card keeps full details out of the transcript");
   assert.ok(planner.includes(t(" - {0}", 2)));
 
   const single = renderToStaticMarkup(createElement(TranscriptErrorCard, { item: items[0] }));
   assert.match(single, /FIRST_FULL_ERROR_DETAIL/);
-  assert.match(single, /aria-label="复制错误"/);
+  assert.ok(single.includes(`aria-label="${t("复制错误")}"`));
   assert.doesNotMatch(single, /transcript-error-count/, "a single error has no count label");
   assert.doesNotMatch(single, /aria-expanded|transcript-error-details|tool-expand-chevron/, "a single error is not expandable");
 
