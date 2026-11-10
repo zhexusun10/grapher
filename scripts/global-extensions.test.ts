@@ -131,7 +131,7 @@ test('mandatory workspace policy reuses native ESM code but binds fresh tools an
 });
 
 test('execution path guidance directly follows existing prompts without a blank line', async () => {
-  const keys = ['GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS'];
+  const keys = ['GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS', 'GRAPHER_FEEDBACK_SOURCE'];
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   const guideline = 'Use project-root-relative paths in Bash commands and project files.';
   try {
@@ -155,21 +155,30 @@ test('execution path guidance directly follows existing prompts without a blank 
           assert.equal(options.forceSystemPrompt, 'Existing override.');
           continue;
         }
-        assert.ok(hook, `${role}/${kind}: path addendum registered`);
+        assert.ok(hook, `${role}/${kind}: prompt hook registered`);
+        // Serial is a normal Pi source session, not a mapped execution.
+        const serial = role === 'node' && kind === 'source';
+        process.env.GRAPHER_FEEDBACK_SOURCE = serial ? 'true' : 'false';
         for (const preceding of ['', 'Task instructions.', 'Task instructions.\n\n']) {
           const expected = preceding.trimEnd() ? `${preceding.trimEnd()}\n${guideline}` : guideline;
           const options = { appendSystemPrompt: preceding, forceSystemPrompt: undefined };
           assert.equal(await hook({ systemPromptOptions: options }), undefined);
-          assert.equal(options.appendSystemPrompt, role === 'node' && kind === 'graph' ? preceding : expected, `${role}/${kind}: append prompt spacing`);
+          assert.equal(options.appendSystemPrompt, role === 'node' ? preceding : expected,
+            `${role}/${kind}: append prompt`);
           assert.equal(options.forceSystemPrompt, undefined, 'preserve structured prompts for pi-trim');
           const forced = { appendSystemPrompt: 'Unchanged addendum.', forceSystemPrompt: preceding };
           assert.equal(await hook({ systemPromptOptions: forced }), undefined);
-          assert.equal(forced.forceSystemPrompt, expected, `${role}/${kind}: forced prompt spacing`);
+          assert.equal(forced.forceSystemPrompt, serial ? preceding : expected, `${role}/${kind}: forced prompt`);
           assert.equal(forced.appendSystemPrompt, 'Unchanged addendum.');
         }
         const custom = { customPrompt: 'Custom system prompt.', appendSystemPrompt: 'Base.', forceSystemPrompt: undefined };
         assert.equal(await hook({ messageType: 'custom', message: { role: 'custom' }, systemPromptOptions: custom }), undefined);
-        assert.equal(custom.appendSystemPrompt, `Base.\n${guideline}`, `${role}/${kind}: custom system prompt retains guidance`);
+        assert.equal(custom.appendSystemPrompt, serial ? 'Base.' : `Base.\n${guideline}`,
+          `${role}/${kind}: custom system prompt`);
+        assert.equal(custom.appendSystemPrompt.includes(guideline), !serial,
+          `${role}/${kind}: only mapped roles receive path guidance`);
+        assert.equal(custom.appendSystemPrompt.includes('End your response with exactly one standalone final line'), false,
+          `${role}/${kind}: feedback instructions are limited to Graph nodes`);
       }
     }
   } finally {
@@ -312,11 +321,14 @@ test('extension-supplied rules retain graph path guidance and the feedback proto
 
 test('previous agent environment hints are appended to system prompt guidance when present', async () => {
   const previousMode = process.env.GRAPHER_MODE;
+  const previousKind = process.env.GRAPHER_EXECUTION_KIND;
+  const previousRoot = process.env.GRAPHER_ORIGINAL_ROOT;
+  const previousAlias = process.env.GRAPHER_SOURCE_ALIAS;
   const previousHints = process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS;
-  const guideline = 'Use project-root-relative paths in Bash commands and project files.';
   const hint = 'previous agent used: conda name:ml (conda)';
   try {
-    process.env.GRAPHER_MODE = 'node';
+    Object.assign(process.env, { GRAPHER_MODE: 'node', GRAPHER_EXECUTION_KIND: 'graph',
+      GRAPHER_ORIGINAL_ROOT: process.cwd(), GRAPHER_SOURCE_ALIAS: process.cwd() });
     process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS = hint;
     const hooks = new Map<string, any>();
     workspacePolicy({ registerTool() {}, on(name: string, handler: any) { hooks.set(name, handler); } } as any);
@@ -324,12 +336,15 @@ test('previous agent environment hints are appended to system prompt guidance wh
     assert.ok(hook);
     const options = { appendSystemPrompt: 'Base instructions.', forceSystemPrompt: undefined };
     await hook({ systemPromptOptions: options });
-    assert.equal(options.appendSystemPrompt, `Base instructions.\n${guideline}\n${hint}`);
+    assert.equal(options.appendSystemPrompt, `Base instructions.\n${hint}`,
+      'default graph rules already carry the path convention; only hints are appended');
   } finally {
-    if (previousMode === undefined) delete process.env.GRAPHER_MODE;
-    else process.env.GRAPHER_MODE = previousMode;
-    if (previousHints === undefined) delete process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS;
-    else process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS = previousHints;
+    for (const [key, value] of [['GRAPHER_MODE', previousMode], ['GRAPHER_EXECUTION_KIND', previousKind],
+      ['GRAPHER_ORIGINAL_ROOT', previousRoot], ['GRAPHER_SOURCE_ALIAS', previousAlias],
+      ['GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS', previousHints]] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 

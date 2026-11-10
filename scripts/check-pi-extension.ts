@@ -749,11 +749,13 @@ fn main() {
   const workerExtension = worker.extensions[0];
   assert.deepEqual([...workerExtension.tools.keys()].sort(), ["bash"], "Without a graph binding the node adapter registers only Bash; ls/find/grep are gone and file tools bind via GRAPHER_ORIGINAL_ROOT");
   const workerOptions = normalizeBuildSystemPromptOptions({ customPrompt: "base", cwd: repository });
+  const workerAddendum = workerOptions.appendSystemPrompt;
   assert.equal(await workerExtension.handlers.get("before_agent_start")![0]({ systemPromptOptions: workerOptions }), undefined);
   assert.equal(workerOptions.forceSystemPrompt, undefined, "Path guidance must not bypass request-time prompt trimming");
+  assert.equal(workerOptions.appendSystemPrompt, workerAddendum, "Serial prompts receive no Grapher addendum");
   const workerPrompt = buildSystemPrompt(workerOptions);
-  assert.match(workerPrompt, /Use project-root-relative paths in Bash commands and project files/);
-  assert.doesNotMatch(workerPrompt, /node task handoffs|generated configuration/);
+  assert.doesNotMatch(workerPrompt, /Use project-root-relative paths|node task handoffs|generated configuration/,
+    "Serial is the ordinary source-project Pi prompt, not a mapped execution");
   const { createReadToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/read.ts");
   const { createWriteToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/write.ts");
   const { createEditToolDefinition } = await import("../pi/packages/coding-agent/src/core/tools/edit.ts");

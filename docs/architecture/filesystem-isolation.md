@@ -72,6 +72,8 @@ output. The precise project/Git contract and capability gaps belong to
 
 ## Path convention
 
+Private Graph nodes and Mergers receive this path convention in their prompt; Serial uses the ordinary source-project Pi prompt without a Grapher addendum.
+
 Use project-root-relative paths for tasks, handoffs, and generated configuration:
 
 ```text

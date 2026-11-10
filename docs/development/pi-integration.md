@@ -10,7 +10,7 @@ Scope: Grapher-side integration, not an upstream Pi implementation guide. [CONTR
 | --- | --- |
 | Partitioner | No tools, context files, user extensions, MCP, or skills; bundled `pi-trim` only. |
 | Planner | `node`, `edge`, `read`, `bash`, selected extensions/MCP/skills; `write`/`edit` only when `plannerWriteTools` is enabled (default false). Eligible [follow-ups](../architecture/execution-model.md#planner-follow-up-workspaces) expose `switch_workspace`. No automatic project context files. |
-| Node Agent / Serial | Native file/shell tools, selected extensions/MCP/skills, and trusted workspace resources. |
+| Node Agent / Serial | Native file/shell tools, selected extensions/MCP/skills, and trusted workspace resources. Serial keeps the ordinary source-project prompt without a Grapher path addendum; private Graph nodes receive the relative-path convention. |
 | Merger | Native file/shell tools, bundled `pi-trim` and selected `pi-continuity`; no user extensions, MCP, skills, or automatic context files. Git repair appends the repair addendum; follow-ups retain the user's instruction. |
 
 Working directories, source-write effects, and platform permissions belong to [Execution model](../architecture/execution-model.md) and [Filesystem isolation](../architecture/filesystem-isolation.md), not this loading table.

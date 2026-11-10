@@ -87,7 +87,7 @@ export default function (pi: ExtensionAPI) {
     ? createWorkspacePaths(cwd, project, process.env.GRAPHER_SOURCE_ALIAS || project) : undefined;
   const paths = activePaths;
   const view = (value: any): any => activePaths ? activePaths.view(value) : value;
-  // Execution roles receive path guidance directly; Planner need not repeat it in handoffs.
+  // Private mapped roles receive path guidance directly; Planner need not repeat it in handoffs.
   const pathGuideline = 'Use project-root-relative paths in Bash commands and project files.';
   const graphNode = process.env.GRAPHER_MODE === 'node' && graph;
   if (graphNode) {
@@ -153,6 +153,9 @@ export default function (pi: ExtensionAPI) {
       // Normalize existing prompt paths only. Planner gets no extra addendum,
       // cwd announcement, environment hint or instruction to re-read files.
       if (planner) return;
+      // Serial is the ordinary source-project Pi session. It has no path
+      // adapter, so its prompt stays exactly as Pi and the project defined it.
+      if (!graphNode && process.env.GRAPHER_MODE !== 'merger') return;
       if (process.env.GRAPHER_MODE === 'node' && process.env.GRAPHER_FEEDBACK_SOURCE === 'true') {
         // A custom rules section replaces Pi's generated rules, even when the
         // preamble is the default. Inject there rather than into guidelines
