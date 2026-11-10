@@ -3432,13 +3432,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     color: "#b91c1c",
                     fontSize: 12,
                     display: "flex",
-                    alignItems: "flex-start",
+                    alignItems: "center",
                     gap: 6,
                     border: "1px solid #fca5a5",
                     boxShadow: "0 1px 4px rgba(239, 68, 68, 0.08)",
                   }}
                 >
-                  <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1, color: "#ef4444" }} />
+                  <AlertCircle size={14} style={{ flexShrink: 0, color: "#ef4444" }} />
                   <span>{t("规划未通过：")}{localizeError(failedPlanning.error || t("规划阶段异常中断"))}</span>
                 </div>
               )}
@@ -3676,7 +3676,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         <button
                           key="execution-control-btn"
                           type="button"
-                          className="primary"
+                          className="primary graph-execution-control"
                           // A settled run with nothing running or paused has no
                           // pause/resume semantics: pausing is a no-op and the
                           // following 继续 would just un-pause it without

@@ -1996,6 +1996,11 @@ button.session-label-toggle:focus-visible {
   padding: 8px;
 }
 
+/* Give the topology's persistent Continue/Pause control a subtle lift. */
+.graph-execution-control {
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.18);
+}
+
 /* Write-back failures surface under the topology footer instead of a banner. */
 .publication-failure {
   margin: 10px 0 0;
