@@ -20,7 +20,7 @@ struct Key {
 
 static PARTITIONER: OnceLock<Pool<Key, ReadyProcess>> = OnceLock::new();
 static PLANNER: OnceLock<Pool<Key, ReadyProcess>> = OnceLock::new();
-static SERIAL: OnceLock<Pool<Key, ReadyProcess>> = OnceLock::new();
+static NODE_SOURCE: OnceLock<Pool<Key, ReadyProcess>> = OnceLock::new();
 
 fn mode(role: PiRole) -> &'static str {
     match role {
@@ -34,7 +34,7 @@ fn slot(role: PiRole) -> &'static OnceLock<Pool<Key, ReadyProcess>> {
     match role {
         PiRole::Partitioner => &PARTITIONER,
         PiRole::Planner => &PLANNER,
-        PiRole::NodeAgent => &SERIAL,
+        PiRole::NodeAgent => &NODE_SOURCE,
         PiRole::Merger => unreachable!(),
     }
 }
@@ -83,12 +83,7 @@ fn schedule(config: &Config, role: PiRole, refill: bool) -> Result<(), String> {
         )?;
         Ok((prepare_key, process))
     };
-    let label = if role == PiRole::NodeAgent {
-        "Serial"
-    } else {
-        role.name()
-    };
-    let pool = slot(role).get_or_init(|| Pool::new(label));
+    let pool = slot(role).get_or_init(|| Pool::new(role.name()));
     if refill {
         pool.refill(key, prepare);
     } else {
@@ -159,19 +154,19 @@ pub(super) fn bind(
 }
 
 pub(super) fn invalidate() {
-    for slot in [&PARTITIONER, &PLANNER, &SERIAL] {
+    for slot in [&PARTITIONER, &PLANNER, &NODE_SOURCE] {
         if let Some(pool) = slot.get() {
             pool.invalidate();
         }
     }
 }
 pub(super) fn shutdown() {
-    for slot in [&PARTITIONER, &PLANNER, &SERIAL] {
+    for slot in [&PARTITIONER, &PLANNER, &NODE_SOURCE] {
         if let Some(pool) = slot.get() {
             pool.shutdown();
         }
     }
-    for slot in [&PARTITIONER, &PLANNER, &SERIAL] {
+    for slot in [&PARTITIONER, &PLANNER, &NODE_SOURCE] {
         if let Some(pool) = slot.get() {
             if !pool.wait_idle(Duration::from_secs(5)) {
                 eprintln!("[Grapher] Process preparation shutdown timed out");

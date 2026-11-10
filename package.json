@@ -48,15 +48,15 @@
     "start": "node scripts/cargo.mjs run --release --manifest-path backend/Cargo.toml --bin grapher"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.5.1",
-    "@earendil-works/pi-coding-agent": "1.5.1",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
     "@xyflow/react": "12.8.5",
     "clsx": "^2.1.1",
     "katex": "^0.18.10",
     "lucide-react": "0.468.0",
     "marked": "^18.0.13",
     "motion": "^13.2.0",
-    "pi-better-web-search": "0.1.9",
+    "pi-better-web-search": "0.1.11",
     "pi-continuity": "0.4.0",
     "pi-trim": "0.2.2",
     "react": "19.2.0",

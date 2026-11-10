@@ -255,6 +255,7 @@ fn prepare_warm_node(
         // It must never inherit a surrounding feedback node's protocol flag.
         .env_remove("GRAPHER_FEEDBACK_SOURCE")
         .env("GRAPHER_MODE", "node")
+        .env("GRAPHER_AGENT_KIND", "serial")
         .env("GRAPHER_EXECUTION_KIND", "source")
         .env("GRAPHER_SOURCE_ALIAS", &key.5)
         .env("GRAPHER_WORKSPACE_ROOT", &key.0)
@@ -525,6 +526,22 @@ pub fn terminate_node(run_id: &str, node: &str) {
 /// also rejects a process that reaches registration after the request.
 pub fn stop_planning(run_id: &str) -> Result<(), String> {
     process_control::stop_owner(&process_control::planning_owner(run_id))
+}
+
+/// Runtime agent identity, separate from Pi's model/settings role.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AgentKind {
+    Serial,
+    Node,
+}
+
+impl AgentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Serial => "serial",
+            Self::Node => "node",
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -936,9 +953,11 @@ fn run_pi_with_timeout(
         command.args(&config.pi_args);
         command
     };
-    // Session-scoped temp state and shell path hygiene apply to source and
-    // private roles alike; bind_command may re-apply them through clean_command.
-    crate::native::bind_process_paths(&mut command, request.session_dir);
+    // Node Agents working directly in the source preserve host temp variables;
+    // private Graph/Planner sessions remain bound to their owned session temp.
+    if !is_source_native_agent(&request) {
+        crate::native::bind_process_paths(&mut command, request.session_dir);
+    }
     // Fixture tests opt in with an explicit marker; existing print-mode fixtures
     // retain their original protocol.
     // RPC's stdin-EOF shutdown exits promptly after agent_settled. Print mode
@@ -1049,6 +1068,9 @@ fn run_pi_with_timeout(
     command.env_remove("PI_SESSION_ID");
     command.env_remove("PI_SESSION_FILE");
     crate::native::clear_git_environment(&mut command);
+    // Only the current request may identify its agent. Never inherit a parent's
+    // Serial/Node selection into Planner, Partitioner or unrelated Node work.
+    command.env_remove("GRAPHER_AGENT_KIND");
     // Only an explicit per-turn binding may activate the feedback protocol.
     command.env_remove("GRAPHER_FEEDBACK_SOURCE");
     for (key, value) in &request.environment {
@@ -1973,17 +1995,21 @@ pub fn stop_lingering() {}
 #[cfg(feature = "fixture")]
 pub fn stop_lingering_for_run(_run_id: &str) {}
 
-/// Serial source-native sessions are the only parkable shells: a Node Agent
-/// whose cwd is the bound source and that has no managed environment. Graph node
-/// agents run in a private workspace and are never parked.
+/// Serial Agent sessions are the only parkable shells. Their Pi model role is
+/// `NodeAgent`, but only an explicit Serial identity may enter this pool.
 #[cfg(not(feature = "fixture"))]
 fn serial_linger_key(request: &PiRequest<'_>) -> Option<lingering::SessionKey> {
-    // Only a source-native Serial Node Agent is parked. A Planner is never
-    // parked: its launch binding is per planning attempt (`GRAPHER_GRAPH_PATH`
-    // is `graph-{planningId}.json`), so a reused process would mutate the
-    // previous attempt's graph. Reuse would need a per-turn rebind, which the
-    // one-use prepared-host binding does not provide.
-    if request.role != PiRole::NodeAgent || request.config.environment.is_some() {
+    // A Serial Agent is never identified by cwd alone: source-direct Graph Node
+    // Agents can also run from the bound source and must not claim parked shells.
+    let agent_kind = request
+        .environment
+        .iter()
+        .find(|(key, _)| *key == "GRAPHER_AGENT_KIND")
+        .map(|(_, value)| value.as_str());
+    if request.role != PiRole::NodeAgent
+        || agent_kind != Some("serial")
+        || request.config.environment.is_some()
+    {
         return None;
     }
     let session_id = request.session_id?;
@@ -2145,11 +2171,48 @@ pub(crate) const FEEDBACK_REPAIR_PROMPT: &str =
     "Feedback Protocol Error: final line must be exactly <ACCEPT> or <FEEDBACK>.";
 pub(crate) const FEEDBACK_REPAIR_ATTEMPTS: usize = 2;
 
+fn request_agent_kind<'a>(request: &'a PiRequest<'_>) -> Option<&'a str> {
+    request
+        .environment
+        .iter()
+        .find(|(key, _)| *key == "GRAPHER_AGENT_KIND")
+        .map(|(_, value)| value.as_str())
+}
+
+fn source_native_agent(
+    role: PiRole,
+    config: &Config,
+    cwd: &Path,
+    agent_kind: Option<&str>,
+) -> bool {
+    role == PiRole::NodeAgent
+        && config.environment.is_none()
+        && matches!(agent_kind, Some("serial" | "node"))
+        && cwd.canonicalize().ok().is_some_and(|cwd| {
+            Path::new(&config.repository)
+                .canonicalize()
+                .ok()
+                .is_some_and(|repository| crate::path_identity::same_path(&cwd, &repository))
+        })
+}
+
+fn is_source_native_agent(request: &PiRequest<'_>) -> bool {
+    source_native_agent(
+        request.role,
+        request.config,
+        request.cwd,
+        request_agent_kind(request),
+    )
+}
+
+/// Serial Agent and source-direct Graph Node Agent each use a source-native
+/// shell. Keep them separate from Pi's shared NodeAgent model/settings role.
 pub fn execute(
     config: &Config,
     execution: &Execution,
     task: &str,
     feedback_source: bool,
+    agent_kind: AgentKind,
     resume_execution_id: Option<&str>,
     continuation: bool,
     initial_recovery: bool,
@@ -2157,6 +2220,18 @@ pub fn execute(
     root: &Path,
     on_output: impl FnMut(String),
 ) -> Result<String, String> {
+    if agent_kind == AgentKind::Serial
+        && !source_native_agent(
+            PiRole::NodeAgent,
+            config,
+            Path::new(&execution.worktree),
+            Some(agent_kind.as_str()),
+        )
+    {
+        return Err(
+            "Serial Agent requires its source project and cannot use a managed environment".into(),
+        );
+    }
     #[cfg(feature = "fixture")]
     if config.engine == crate::fixture::ENGINE {
         return crate::fixture::execute(execution, task, feedback_source, on_output);
@@ -2206,6 +2281,7 @@ pub fn execute(
             extra_args,
             environment: vec![
                 ("GRAPHER_MODE", "node".into()),
+                ("GRAPHER_AGENT_KIND", agent_kind.as_str().into()),
                 ("GRAPHER_NODE_EXECUTION_ID", execution.id.clone()),
                 ("GRAPHER_CONTINUE_INTERRUPTED", continuation.to_string()),
                 ("GRAPHER_FEEDBACK_SOURCE", feedback_source.to_string()),
@@ -2243,6 +2319,7 @@ pub fn feedback(output: &str) -> Result<bool, String> {
 pub fn repair_feedback_verdict(
     config: &Config,
     execution: &Execution,
+    agent_kind: AgentKind,
     output: String,
     resume_execution_id: Option<&str>,
     root: &Path,
@@ -2262,6 +2339,7 @@ pub fn repair_feedback_verdict(
             execution,
             FEEDBACK_REPAIR_PROMPT,
             true,
+            agent_kind,
             resume_execution_id,
             false,
             false,
@@ -2374,6 +2452,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
                 &execution,
                 task,
                 feedback_source,
+                AgentKind::Node,
                 None,
                 false,
                 false,
@@ -2733,10 +2812,24 @@ sys.stdin.read()
             tools: None,
             session_id: Some("linger-session"),
             extra_args: vec!["--thinking", "medium"],
-            environment: vec![],
+            environment: vec![("GRAPHER_AGENT_KIND", "serial".into())],
             system_prompt: None,
             images: None,
         };
+        assert!(
+            is_source_native_agent(&request),
+            "Serial source execution keeps host Bash environment setup"
+        );
+        request.environment[0].1 = "node".into();
+        assert!(
+            is_source_native_agent(&request),
+            "source-direct Graph Node Agents also retain host temp bindings"
+        );
+        assert!(
+            serial_linger_key(&request).is_none(),
+            "source-bound Node Agents are not Serial"
+        );
+        request.environment[0].1 = "serial".into();
         let outcome = TurnOutcome {
             final_text: "done".into(),
             agent_error: None,

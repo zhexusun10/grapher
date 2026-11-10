@@ -139,10 +139,8 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
 // The model's shell is the one place Grapher's own control paths must not appear:
 // a single `env` otherwise hands the agent the Run's `data/` and `.grapher-state/`
 // layout, which it can then walk into (other nodes' sessions, graph Git, the
-// install directory). Grapher-owned keys are dropped, Pi session/credential keys
-// are dropped (pi-trim removed the "inspect PI_*" guidance, so the shell needs
-// none of them), and session-directory temp bindings are retargeted to the Run's
-// cache scratch, which never reveals `data/`.
+// install directory). Grapher-owned keys, Pi session paths and selected editor
+// breadcrumbs are dropped; temp bindings use safe cache scratch when available.
 //
 // The host Git credential helper (GIT_ASKPASS and the VSCODE_GIT_ASKPASS_* the
 // askpass script reads) is deliberately KEPT: a task that authenticates to a
@@ -167,7 +165,7 @@ function modelShellScratch(env) {
   }
   return undefined;
 }
-/** Strip Grapher-owned paths from the shell env; returns the temp scratch to create. */
+/** Strip Grapher-owned and selected Pi paths; returns an optional temp scratch to create. */
 export function scrubModelShellEnvironment(env) {
   const scratch = modelShellScratch(env);
   for (const key of Object.keys(env)) {
@@ -175,7 +173,7 @@ export function scrubModelShellEnvironment(env) {
   }
   for (const key of ['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR']) {
     if (scratch) env[key] = scratch;
-    else delete env[key];
+    else if (typeof env[key] === 'string' && dataPathComponent.test(env[key])) delete env[key];
   }
   return scratch;
 }
@@ -190,16 +188,25 @@ export function managedBashOptions(options, managed = false) {
   // omit it entirely. Keep the same Runtime bytecode policy in both cases.
   const env = { ...(options.env ?? process.env) };
   env.PYTHONDONTWRITEBYTECODE = '1';
-  for (const key of Object.keys(env)) if (/^(BASH_ENV|ENV|SHELLOPTS|BASHOPTS|CDPATH|OLDPWD|GLOBIGNORE)$/i.test(key) || active && /^PATH$/i.test(key)) delete env[key];
-  if (active) env.PATH = activePath;
+  if (active) {
+    for (const key of Object.keys(env)) if (/^PATH$/i.test(key)) delete env[key];
+    env.PATH = activePath;
+  }
   Object.assign(env, runtimeEnvironment, deviceEnvironment);
+  const originalTemp = Object.fromEntries(['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR'].map(key => [key, env[key]]));
   const scratch = scrubModelShellEnvironment(env);
   if (scratch) {
     // 0o700: the scratch is also XDG_RUNTIME_DIR, which the spec requires to be
     // private. Ignored on Windows; the parent cache dir already exists, so only
     // the leaf is created here.
     try { mkdirSync(toHostInput(scratch), { recursive: true, mode: 0o700 }); }
-    catch { for (const key of ['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR']) delete env[key]; }
+    catch {
+      for (const key of ['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR']) {
+        const value = originalTemp[key];
+        if (typeof value === 'string' && !dataPathComponent.test(value)) env[key] = value;
+        else delete env[key];
+      }
+    }
   }
   return { ...options, env };
 }

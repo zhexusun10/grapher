@@ -14,26 +14,62 @@ fn targeted_continue_retries_only_the_selected_failure_even_with_another_writer(
     let graph = Graph {
         original_goal: "independent failures".into(),
         nodes: ["first", "other", "live", "child"]
-            .into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
-        edges: vec![Edge { from: "first".into(), to: "child".into(), feedback: false }],
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![Edge {
+            from: "first".into(),
+            to: "child".into(),
+            feedback: false,
+        }],
     };
     let (_temp, source, mut runtime) = setup(true, graph);
     runtime.state.config.as_mut().unwrap().max_parallel = 3;
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
     assert_eq!(jobs.len(), 3);
-    let first = &jobs.iter().find(|job| job.execution.node == "first").unwrap().execution;
-    let other = &jobs.iter().find(|job| job.execution.node == "other").unwrap().execution;
+    let first = &jobs
+        .iter()
+        .find(|job| job.execution.node == "first")
+        .unwrap()
+        .execution;
+    let other = &jobs
+        .iter()
+        .find(|job| job.execution.node == "other")
+        .unwrap()
+        .execution;
     for execution in [first, other] {
-        workspace::prepare(&source, Path::new(&execution.worktree), &execution.before, &[]).unwrap();
-        runtime.emit(EventKind::Prepared { execution_id: execution.id.clone(), head: execution.before.clone() }).unwrap();
+        workspace::prepare(
+            &source,
+            Path::new(&execution.worktree),
+            &execution.before,
+            &[],
+        )
+        .unwrap();
+        runtime
+            .emit(EventKind::Prepared {
+                execution_id: execution.id.clone(),
+                head: execution.before.clone(),
+            })
+            .unwrap();
         record_session(&runtime, execution);
-        runtime.finish(execution, Err("provider failure".into())).unwrap();
+        runtime
+            .finish(execution, Err("provider failure".into()))
+            .unwrap();
     }
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.nodes["child"].status, "blocked");
-    assert!(!runtime.state.can_resume_node("child"), "an upstream dependency block is not its own failure");
-    assert!(!runtime.state.can_resume(), "run-wide retry waits for the live writer");
+    assert!(
+        !runtime.state.can_resume_node("child"),
+        "an upstream dependency block is not its own failure"
+    );
+    assert!(
+        !runtime.state.can_resume(),
+        "run-wide retry waits for the live writer"
+    );
     assert!(runtime.state.can_resume_node("first"));
     let metadata = crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap();
     assert_eq!(metadata["nodes"]["first"]["canResume"], true);
@@ -52,7 +88,10 @@ fn targeted_continue_retries_only_the_selected_failure_even_with_another_writer(
     assert!(retry[0].task.is_empty(), "retry must not add a user prompt");
     assert_eq!(retry[0].execution.session_id, first.session_id);
     assert_eq!(retry[0].execution.worktree, first.worktree);
-    assert!(runtime.resume_node("first").is_err(), "an active retry cannot be started twice");
+    assert!(
+        runtime.resume_node("first").is_err(),
+        "an active retry cannot be started twice"
+    );
 }
 
 #[test]
@@ -62,7 +101,9 @@ fn targeted_continue_can_unpause_a_single_serial_node_without_adding_a_message()
     runtime.approve().unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
     record_session(&runtime, &failed.execution);
-    runtime.finish(&failed.execution, Err("provider failure".into())).unwrap();
+    runtime
+        .finish(&failed.execution, Err("provider failure".into()))
+        .unwrap();
     runtime.pause(true).unwrap();
     assert!(runtime.state.can_resume_node("task"));
     runtime.resume_node("task").unwrap();
@@ -75,12 +116,25 @@ fn targeted_continue_can_unpause_a_single_serial_node_without_adding_a_message()
 
 #[test]
 fn targeted_continue_does_not_bypass_a_global_graph_pause() {
-    let graph = Graph { original_goal: "paused".into(), nodes: ["first", "other"].into_iter()
-        .map(|name| Node { name: name.into(), task: name.into() }).collect(), edges: vec![] };
+    let graph = Graph {
+        original_goal: "paused".into(),
+        nodes: ["first", "other"]
+            .into_iter()
+            .map(|name| Node {
+                name: name.into(),
+                task: name.into(),
+            })
+            .collect(),
+        edges: vec![],
+    };
     let (_temp, _source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
-    let first = &jobs.iter().find(|job| job.execution.node == "first").unwrap().execution;
+    let first = &jobs
+        .iter()
+        .find(|job| job.execution.node == "first")
+        .unwrap()
+        .execution;
     runtime.finish(first, Err("failure".into())).unwrap();
     runtime.pause(true).unwrap();
     let count = runtime.state.events.len();
@@ -638,6 +692,7 @@ fn production_continue_fails_closed_when_an_active_session_is_missing() {
         &retry.execution,
         &retry.task,
         retry.feedback_source,
+        crate::engine::AgentKind::Serial,
         retry.resume_execution_id.as_deref(),
         retry.continuation,
         retry.initial_recovery,

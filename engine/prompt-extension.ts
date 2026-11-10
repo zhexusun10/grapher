@@ -220,86 +220,81 @@ export default function (pi: ExtensionAPI) {
       ? { message: view(event.message) } : undefined);
   }
 
-  const toolCallExitCodes = new Map<string, { exitCode: number | null; command: string; truncated?: boolean }>();
+  // Serial and Node Agent are distinct execution agents. Rust binds this identity
+  // before factories run, including when a prepared host is claimed.
+  const serialAgent = process.env.GRAPHER_AGENT_KIND === 'serial';
   const launch = managedLaunch();
-  const localOps = createLocalBashOperations(launch ? { shellPath: launch.shell } : undefined);
-  const baseBashTool = createBashToolDefinition(cwd);
-  if (launch || process.env.GRAPHER_EXECUTION_KIND === 'graph') {
+  if (!serialAgent && (launch || graph)) {
+    const localOps = createLocalBashOperations(launch ? { shellPath: launch.shell } : undefined);
     pi.on('user_bash', async () => ({ operations: {
       exec: (command, workingDirectory, options) => localOps.exec(managedBashCommand(activePaths ? activePaths.command(command) : command),
         activePaths?.root || workingDirectory, managedBashOptions(options, managedShell)),
     } }));
   }
+  // Serial leaves Pi's default Bash definition and execution path untouched.
+  if (!serialAgent) {
+    const toolCallExitCodes = new Map<string, { exitCode: number | null; command: string; truncated?: boolean }>();
+    const localOps = createLocalBashOperations(launch ? { shellPath: launch.shell } : undefined);
+    const baseBashTool = createBashToolDefinition(cwd);
+    pi.registerTool({
+      ...baseBashTool,
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        // Preserve native bash semantics. Callers can request errexit/pipefail
+        // explicitly; injecting them changes otherwise valid shell programs.
+        const rawCmd = params.command;
 
-  pi.registerTool({
-    ...baseBashTool,
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      // Preserve native bash semantics. Callers can request errexit/pipefail
-      // explicitly; injecting them changes otherwise valid shell programs.
-      const rawCmd = params.command;
+        let callExitCode: number | null = null;
+        const scopedOps: BashOperations = {
+          exec: async (command, cwd, options) => {
+            const res = await localOps.exec(managedBashCommand(command), activePaths?.root || cwd, managedBashOptions(options, managedShell));
+            callExitCode = res.exitCode;
+            return res;
+          },
+        };
 
-      // Call-local isolated exit code variable specific to this invocation closure
-      let callExitCode: number | null = null;
-      const scopedOps: BashOperations = {
-        exec: async (command, cwd, options) => {
-          const res = await localOps.exec(managedBashCommand(command), activePaths?.root || cwd, managedBashOptions(options, managedShell));
-          callExitCode = res.exitCode;
-          return res;
-        },
-      };
+        const scopedBashTool = createBashToolDefinition(cwd, { operations: scopedOps });
+        let result: any;
+        let execError: any;
+        try {
+          const mapped = { ...params, command: activePaths ? activePaths.command(rawCmd) : rawCmd };
+          const toolContext = activePaths && ctx ? { ...ctx, cwd: activePaths.root } : ctx;
+          result = view(await scopedBashTool.execute(toolCallId, mapped, signal,
+            onUpdate ? update => onUpdate(view(update)) : undefined, toolContext));
+        } catch (err) {
+          execError = err;
+        }
 
-      const scopedBashTool = createBashToolDefinition(cwd, {
-        operations: scopedOps,
-      });
+        const exitCode = callExitCode;
+        const isTruncated = !!(result?.details?.truncation?.truncated || result?.details?.truncated);
+        toolCallExitCodes.set(toolCallId, { exitCode, command: rawCmd, truncated: isTruncated });
 
-      let result: any;
-      let execError: any;
-      try {
-        const mapped = { ...params, command: activePaths ? activePaths.command(rawCmd) : rawCmd };
-        const toolContext = activePaths && ctx ? { ...ctx, cwd: activePaths.root } : ctx;
-        result = view(await scopedBashTool.execute(toolCallId, mapped, signal,
-          onUpdate ? update => onUpdate(view(update)) : undefined, toolContext));
-      } catch (err) {
-        execError = err;
-      }
+        if (execError) {
+          if (execError instanceof Error && activePaths) execError.message = view(execError.message);
+          throw execError;
+        }
 
-      const exitCode = callExitCode;
-      const isTruncated = !!(result?.details?.truncation?.truncated || result?.details?.truncated);
-      toolCallExitCodes.set(toolCallId, { exitCode, command: rawCmd, truncated: isTruncated });
+        return {
+          ...result,
+          details: view({
+            ...result?.details,
+            exitCode,
+            command: rawCmd,
+            truncated: isTruncated,
+          }),
+        };
+      },
+    });
 
-      if (execError) {
-        if (execError instanceof Error && activePaths) execError.message = view(execError.message);
-        throw execError;
-      }
-
-      return {
-        ...result,
-        details: view({
-          ...result?.details,
-          exitCode,
-          command: rawCmd,
-          truncated: isTruncated,
-        }),
-      };
-    },
-  });
-
-  pi.on("tool_result", async event => {
-    if (event.toolName === "bash") {
+    pi.on("tool_result", async event => {
+      if (event.toolName !== "bash") return;
       const recorded = toolCallExitCodes.get(event.toolCallId);
-      if (recorded) {
-        toolCallExitCodes.delete(event.toolCallId);
-      }
+      if (recorded) toolCallExitCodes.delete(event.toolCallId);
       // Strictly preserve null when unknown; NEVER guess 0 without provenance
-      const exitCode = recorded ? recorded.exitCode : null;
       const details = ((event.details || {}) as Record<string, unknown>);
-      details.exitCode = exitCode;
+      details.exitCode = recorded ? recorded.exitCode : null;
       details.command = recorded?.command ?? event.input?.command;
       details.truncated = recorded?.truncated ?? !!(details.truncation as any)?.truncated;
-      return {
-        details: view(details),
-        isError: event.isError,
-      };
-    }
-  });
+      return { details: view(details), isError: event.isError };
+    });
+  }
 }

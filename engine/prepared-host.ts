@@ -5,7 +5,7 @@ import { samePath } from './path-identity.mjs';
 
 const roles = new Set(['partition', 'planner', 'node']);
 const bindingEnvironment = new Set([
-  'GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_SOURCE_ALIAS',
+  'GRAPHER_MODE', 'GRAPHER_AGENT_KIND', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_SOURCE_ALIAS',
   'GRAPHER_WORKSPACE_ROOT', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_GRAPH_PATH', 'GRAPHER_UNREMOVABLE_NODES',
   'GRAPHER_PLANNER_RUN_ID', 'GRAPHER_ACTIVE_RUN_ID', 'GRAPHER_PLANNER_FOLLOWUP', 'GRAPHER_PLANNER_WORKSPACES', 'GRAPHER_PLANNER_WORKSPACES_FILE', 'GRAPHER_PLANNER_WRITE_TOOLS', 'GRAPHER_NODE_EXECUTION_ID',
   'GRAPHER_COMPILER_PATH', 'PI_CODING_AGENT_DIR', 'GRAPHER_TRUSTED_GIT', 'GRAPHER_LAUNCH_BINDING', 'GRAPHER_UPSTREAM_PI_MODELS',
@@ -17,7 +17,7 @@ const clearedEnvironment = new Set([
   'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY',
   'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS', 'GIT_CEILING_DIRECTORIES', 'GRAPHER_LAUNCH_BINDING',
-  'CDPATH', 'OLDPWD', 'GLOBIGNORE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_FEEDBACK_SOURCE',
+  'GRAPHER_AGENT_KIND', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_FEEDBACK_SOURCE',
 ]);
 const valueArguments = new Set([
   '--mode', '--model', '--thinking', '--session-id', '--session-dir', '--system-prompt',
@@ -90,6 +90,12 @@ function validateBinding(value: any, role: string, cwd: string): asserts value i
     if (!bindingEnvironment.has(key) || typeof entry !== 'string' || entry.includes('\0')) throw new Error(`Unsupported task environment: ${key}`);
   }
   if (value.environment.GRAPHER_MODE !== role || value.environment.GRAPHER_EXECUTION_KIND !== 'source') throw new Error('Task role/source binding required');
+  if (role === 'node' && !['serial', 'node'].includes(value.environment.GRAPHER_AGENT_KIND ?? '')) {
+    throw new Error('Node agent identity required');
+  }
+  if (role !== 'node' && value.environment.GRAPHER_AGENT_KIND != null) {
+    throw new Error('Only Node roles may bind a node agent identity');
+  }
   for (const key of ['GRAPHER_WORKSPACE_ROOT', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS']) {
     if (!value.environment[key] || !samePath(value.environment[key], cwd)) throw new Error(`Invalid ${key}`);
   }
@@ -99,7 +105,7 @@ export async function bindPreparedHost(role: string): Promise<string[] | null> {
   if (!roles.has(role)) throw new Error('Unsupported prepared role');
   const cwd = process.cwd();
   // Do not inherit an outer Run's identity. Factories are only loaded after bind.
-  for (const key of ['GRAPHER_GRAPH_PATH', 'GRAPHER_UNREMOVABLE_NODES', 'GRAPHER_PLANNER_RUN_ID', 'GRAPHER_ACTIVE_RUN_ID', 'GRAPHER_PLANNER_FOLLOWUP', 'GRAPHER_PLANNER_WORKSPACES', 'GRAPHER_PLANNER_WORKSPACES_FILE', 'GRAPHER_PLANNER_WRITE_TOOLS', 'GRAPHER_NODE_EXECUTION_ID', 'GRAPHER_NODE_NAME', 'GRAPHER_COMPILER_PATH', 'GRAPHER_ENVIRONMENT_DATA', 'GRAPHER_CONTINUE_INTERRUPTED', 'GRAPHER_FEEDBACK_SOURCE']) delete process.env[key];
+  for (const key of ['GRAPHER_AGENT_KIND', 'GRAPHER_GRAPH_PATH', 'GRAPHER_UNREMOVABLE_NODES', 'GRAPHER_PLANNER_RUN_ID', 'GRAPHER_ACTIVE_RUN_ID', 'GRAPHER_PLANNER_FOLLOWUP', 'GRAPHER_PLANNER_WORKSPACES', 'GRAPHER_PLANNER_WORKSPACES_FILE', 'GRAPHER_PLANNER_WRITE_TOOLS', 'GRAPHER_NODE_EXECUTION_ID', 'GRAPHER_NODE_NAME', 'GRAPHER_COMPILER_PATH', 'GRAPHER_ENVIRONMENT_DATA', 'GRAPHER_CONTINUE_INTERRUPTED', 'GRAPHER_FEEDBACK_SOURCE']) delete process.env[key];
   await preparePiCli();
   const first = await controlLine();
   if (first === null) return null;

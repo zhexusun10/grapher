@@ -37,6 +37,7 @@ pub struct ManualNodeRequest {
 #[derive(Clone)]
 pub struct Job {
     pub execution: Execution,
+    pub agent_kind: engine::AgentKind,
     pub run_id: String,
     pub parent_heads: Vec<String>,
     pub config: Config,
@@ -1951,12 +1952,22 @@ impl Runtime {
         if self.state.run_id.is_empty() || self.is_serial() {
             return Err("Node task edits require an existing Graph run".into());
         }
-        let current = self.state.graph.nodes.iter().find(|item| item.name == node)
+        let current = self
+            .state
+            .graph
+            .nodes
+            .iter()
+            .find(|item| item.name == node)
             .ok_or("Node no longer exists")?;
         if current.task != old_task {
             return Err("Node task changed; reload and try again".into());
         }
-        if self.state.executions.iter().any(|execution| execution.node == node) {
+        if self
+            .state
+            .executions
+            .iter()
+            .any(|execution| execution.node == node)
+        {
             return Err("Node has already started; reload before editing its task".into());
         }
         let task = task.trim();
@@ -1967,8 +1978,14 @@ impl Runtime {
             return Ok(());
         }
         let mut graph = self.state.graph.clone();
-        graph.nodes.iter_mut().find(|item| item.name == node).unwrap().task = task.into();
-        compile(&graph, true).map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
+        graph
+            .nodes
+            .iter_mut()
+            .find(|item| item.name == node)
+            .unwrap()
+            .task = task.into();
+        compile(&graph, true)
+            .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
         self.emit(EventKind::NodeTaskUpdated {
             node: node.into(),
             task: task.into(),
@@ -4368,6 +4385,11 @@ impl Runtime {
             }
             jobs.push(Job {
                 execution,
+                agent_kind: if self.is_serial() {
+                    engine::AgentKind::Serial
+                } else {
+                    engine::AgentKind::Node
+                },
                 run_id: self.state.run_id.clone(),
                 parent_heads,
                 config: node_config,
@@ -6533,6 +6555,7 @@ fn perform_with_merger_inner(
         &execution_view,
         &job.task,
         job.feedback_source,
+        job.agent_kind,
         job.resume_execution_id.as_deref(),
         job.continuation,
         job.initial_recovery,
@@ -6548,6 +6571,7 @@ fn perform_with_merger_inner(
         engine::repair_feedback_verdict(
             &job.config,
             &execution_view,
+            job.agent_kind,
             output,
             job.resume_execution_id.as_deref(),
             root,

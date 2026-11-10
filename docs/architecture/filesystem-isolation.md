@@ -14,7 +14,7 @@
 | Partitioner | Source project | Host-user process; classification has no tools |
 | Planner | Source initially/after publication; selected current node worktree for follow-ups | Native Bash without write-command filtering; follows the selected workspace's platform/source policy |
 | Serial agent | Source project | Host-user project access |
-| Graph node | Current private Run repository | Platform policy below; path adaptation is not additional permission |
+| Graph Node Agent | Current private Run repository | Platform policy below; path adaptation is not additional permission |
 | Merger | Conflicted node workspace or source project | Follows that workspace's platform/source policy, without extra conflict-repair access |
 
 Exact tool, extension, MCP, skill and context loading belongs to the [Pi role policy](../development/pi-integration.md#role-loading-policy).
@@ -72,7 +72,7 @@ output. The precise project/Git contract and capability gaps belong to
 
 ## Path convention
 
-Private Graph nodes and Mergers receive this path convention in their prompt; Serial uses the ordinary source-project Pi prompt without a Grapher addendum.
+Serial is a separate source-native agent, not a Graph Node Agent running at a different cwd. It keeps the ordinary source-project Pi prompt and native Pi Bash; Graph Node Agents use Grapher's workspace adapters and receive the relative-path convention.
 
 Use project-root-relative paths for tasks, handoffs, and generated configuration:
 
@@ -124,7 +124,7 @@ Private executions load the shared engine copy from [prepare-native-runtime.mjs]
 
 Pi authentication uses its dedicated configuration directory, not a per-node credential vault. Model tools may read auth material available to their process. Shared HOME, temporary files, hard links, services and global configuration are outside Git node-version isolation.
 
-Environment exposure is separate from path mapping. The Bash environment handed to a Graph node, Planner or Merger drops all Grapher variables (`GRAPHER_*`, including `GRAPHER_NODE_NAME`), Pi session/credential path variables and host editor/credential-helper injection, and retargets `TMPDIR`/`TMP`/`TEMP`/`XDG_RUNTIME_DIR` to the Run's cache scratch instead of the session directory under the Run's `data/`. Bash scrubbing retains ordinary non-Grapher variables that reached the Pi host, including Git credential-helper bindings needed by host Git; it is not an allowlist or credential filter. Earlier native-environment admission may restrict inherited variables, so this does not guarantee that every source-shell variable reaches a managed execution. OS plumbing and the Run-state HOME/cache bindings remain. The Pi host and its loaded extensions still receive internal control variables required by the runtime, but `GRAPHER_NODE_NAME` is removed from their launch environment, including inherited outer values. Bash scrubbing does not otherwise change the host process environment. This removes environment breadcrumbs only; it is not an access boundary, and a variable the host shell itself re-injects is left alone. See the [launch binding](../../engine/launch-binding.mjs).
+Environment exposure is separate from path mapping. Grapher's custom Bash adapters for Graph nodes, Planner and Merger remove Grapher variables (`GRAPHER_*`, including `GRAPHER_NODE_NAME`), Pi session/credential path variables and selected path-free editor breadcrumbs. They retain inherited Bash startup/option variables (`BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `OLDPWD`, `GLOBIGNORE`) and ordinary `PATH`; an explicitly bound native environment still supplies its declared complete `PATH`. When a safe Run-cache scratch exists, `TMPDIR`/`TMP`/`TEMP`/`XDG_RUNTIME_DIR` point there instead of the session directory under `data/`. Without one, safe inherited temporary paths are retained and only paths into private `data/` are removed. Bash scrubbing retains ordinary non-Grapher variables that reached the Pi host, including Git credential-helper bindings needed by host Git; it is not an allowlist or credential filter. Earlier native-environment admission may restrict inherited variables, so this does not guarantee that every source-shell variable reaches a managed execution. OS plumbing and the Run-state HOME/cache bindings remain. Serial uses Pi's native Bash tool without Grapher's Bash adapter. The Pi host and its loaded extensions still receive internal control variables required by the runtime, but `GRAPHER_NODE_NAME` is removed from their launch environment, including inherited outer values. This removes selected environment breadcrumbs only; it is not an access boundary, and a variable the host shell itself re-injects is left alone. See the [launch binding](../../engine/launch-binding.mjs).
 
 ## Process lifecycle
 
@@ -159,13 +159,11 @@ service it started (for example a dev server) stay alive. A dead or mismatched
 entry is retired and that turn cold-launches the persisted session instead;
 retirement stops the shell and any services it owns.
 
-Serial means a source-native Node Agent: its cwd is the bound source and it has
-no managed environment. A **Planner is never parked**, even when it runs in the
+Serial is a separate source-native agent: its cwd is the bound source and it has no managed environment. A **Planner is never parked**, even when it runs in the
 source: its launch binding is per planning attempt (`GRAPHER_GRAPH_PATH` is
 `graph-{planningId}.json`), so a reused process would mutate the previous
-attempt's graph. A Graph node agent — any turn with a managed environment or a
-private workspace — is reclaimed at turn end exactly as before; its shell and Pi
-process are not retained.
+attempt's graph. Graph Node Agents are reclaimed at turn end regardless of cwd;
+only Serial conversations are parked.
 
 Because a parked boundary no longer answers `terminate_node`/`terminate_owner`
 for the execution that created it, invalidating or retrying that turn cannot

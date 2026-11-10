@@ -10,8 +10,11 @@ Scope: Grapher-side integration, not an upstream Pi implementation guide. [CONTR
 | --- | --- |
 | Partitioner | No tools, context files, user extensions, MCP, or skills; bundled `pi-trim` only. |
 | Planner | `node`, `edge`, `read`, `bash`, selected extensions/MCP/skills; `write`/`edit` only when `plannerWriteTools` is enabled (default false). Eligible [follow-ups](../architecture/execution-model.md#planner-follow-up-workspaces) expose `switch_workspace`. No automatic project context files. |
-| Node Agent / Serial | Native file/shell tools, selected extensions/MCP/skills, and trusted workspace resources. Serial keeps the ordinary source-project prompt without a Grapher path addendum; private Graph nodes receive the relative-path convention. |
+| Serial Agent | Pi's native file/shell tools, selected extensions/MCP/skills, trusted source resources and the ordinary source-project prompt. |
+| Graph Node Agent | Grapher's path-adapted tools, selected extensions/MCP/skills and trusted workspace resources; private Graph nodes receive the relative-path convention. |
 | Merger | Native file/shell tools, bundled `pi-trim` and selected `pi-continuity`; no user extensions, MCP, skills, or automatic context files. Git repair appends the repair addendum; follow-ups retain the user's instruction. |
+
+Serial Agent and Graph Node Agent have distinct execution identities and Bash policies. They currently share the `nodeAgent` model/thinking settings profile; that profile does not determine runtime agent identity.
 
 Working directories, source-write effects, and platform permissions belong to [Execution model](../architecture/execution-model.md) and [Filesystem isolation](../architecture/filesystem-isolation.md), not this loading table.
 
@@ -35,7 +38,7 @@ Provider refresh and new execution runtimes read `~/.pi/agent/models.json` as an
 
 ## Prewarming and prepared runtime
 
-Source Partitioner/Planner/Serial roles prepare unbound processes without sessions, user extensions, project writes, or model calls. A matching request binds its own role/project/session before prompting; pending preparation is a cold-path miss, not a request-path wait. Claimed processes are not recycled across Runs. Serial may separately retain a verified continuation session.
+Source Partitioner/Planner/Node roles prepare unbound processes without sessions, user extensions, project writes, or model calls. A matching request binds its execution agent kind, project and session before extension factories and tools are initialized; the role-neutral source prewarm can therefore become either a Serial Agent or a source-direct Graph Node Agent. Pending preparation is a cold-path miss, not a request-path wait. Claimed processes are not recycled across Runs. Serial may separately retain a verified continuation session.
 
 Provider/Auth readiness loads code without constructing a credential runtime, checking credentials, or initiating login. A parked Serial shell must match the next turn's model and thinking settings; see [Process lifecycle](../architecture/filesystem-isolation.md#parked-serial-shells). Private Graph nodes, private Planner turns, and Mergers cold-start through their platform launcher; an already-started source process cannot acquire that private sandbox later.
 

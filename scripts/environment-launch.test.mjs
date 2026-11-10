@@ -28,10 +28,27 @@ test('declared hook runs before factories and cannot change Pi/Runtime identity 
   assert.deepEqual(JSON.parse(result.stdout), { value: 'hook', prefix: 'declared-prefix', role: 'node' });
 });
 
-test('Pi PATH preprocessing and shell startup variables cannot change managed Bash binding', () => {
-  const result = run(base(), "console.log(JSON.stringify(managedBashOptions({env:{PATH:'old',Path:'old-too',bAsH_EnV:'poison',ENV:'poison',PYTHONDONTWRITEBYTECODE:'0',KEEP:'yes'}}).env))");
+test('Pi PATH preprocessing cannot change an explicit managed Bash PATH and shell controls are preserved', () => {
+  const result = run(base(), "console.log(JSON.stringify(managedBashOptions({env:{PATH:'old',Path:'old-too',bAsH_EnV:'startup',ENV:'startup-env',SHELLOPTS:'pipefail',BASHOPTS:'nullglob',CDPATH:'project-cd',OLDPWD:'previous-dir',GLOBIGNORE:'*.tmp',PYTHONDONTWRITEBYTECODE:'0',KEEP:'yes'}}).env))");
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { KEEP: 'yes', PYTHONDONTWRITEBYTECODE: '1', PATH: dirname(process.execPath) });
+  assert.deepEqual(JSON.parse(result.stdout), {
+    bAsH_EnV: 'startup', ENV: 'startup-env', SHELLOPTS: 'pipefail', BASHOPTS: 'nullglob',
+    CDPATH: 'project-cd', OLDPWD: 'previous-dir', GLOBIGNORE: '*.tmp',
+    PYTHONDONTWRITEBYTECODE: '1', KEEP: 'yes', PATH: dirname(process.execPath),
+  });
+});
+
+test('a managed shell without an explicit environment preserves PATH and shell controls', () => {
+  const moduleUrl = JSON.stringify(module);
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', `import {managedBashOptions} from ${moduleUrl}; console.log(JSON.stringify(managedBashOptions({env:{PATH:'host-path',BASH_ENV:'host-startup',SHELLOPTS:'pipefail',TMPDIR:'host-tmp'}},true).env))`], {
+    encoding: 'utf8', env: { ...process.env, GRAPHER_LAUNCH_BINDING: '', GRAPHER_EXECUTION_KIND: '' }, timeout: 15000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const env = JSON.parse(result.stdout);
+  assert.equal(env.PATH, 'host-path');
+  assert.equal(env.BASH_ENV, 'host-startup');
+  assert.equal(env.SHELLOPTS, 'pipefail');
+  assert.equal(env.TMPDIR, 'host-tmp');
 });
 
 test('actual native Bash PATH has no implicit MSYS host bins and temporary exports do not rebind the next call', () => {
@@ -80,7 +97,7 @@ test('an explicit leased CUDA UUID overrides hook/device visibility before facto
   });
 });
 
-test('activation hooks and Bash option rewriting retain external runtime paths', () => {
+test('activation hooks and managed Bash environment retain external runtime paths', () => {
   const directory = mkdtempSync(join(tmpdir(), 'grapher-state-binding-'));
   try {
     const launch = base();

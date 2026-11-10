@@ -51,6 +51,31 @@ async function plannerTools(source: string, workspace = source, writeTools = tru
   }
 }
 
+test('Serial and Node Agent identities select different Bash implementations at the source cwd', () => {
+  const keys = ['GRAPHER_MODE', 'GRAPHER_AGENT_KIND', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_CONTINUE_INTERRUPTED', 'GRAPHER_LAUNCH_BINDING'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, { GRAPHER_MODE: 'node', GRAPHER_EXECUTION_KIND: 'source', GRAPHER_CONTINUE_INTERRUPTED: 'false' });
+    delete process.env.GRAPHER_LAUNCH_BINDING;
+    for (const [agentKind, adapted] of [['serial', false], ['node', true]] as const) {
+      process.env.GRAPHER_AGENT_KIND = agentKind;
+      const tools: string[] = [];
+      const hooks = new Map<string, unknown[]>();
+      workspacePolicy({
+        registerTool(tool: { name: string }) { tools.push(tool.name); },
+        on(name: string, handler: unknown) { hooks.set(name, [...(hooks.get(name) ?? []), handler]); },
+      } as any);
+      assert.deepEqual(tools, adapted ? ['bash'] : []);
+      assert.equal(hooks.has('user_bash'), false);
+      assert.equal(hooks.has('tool_result'), adapted);
+    }
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
 test('Planner can withhold write and edit tools while retaining read and Bash', { timeout: 30_000 }, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-planner-files-')));
   try {
@@ -272,15 +297,21 @@ test('the model shell never receives Grapher data/state or install paths', () =>
   assert.equal(env.HOME, 'C:/run/workspaces/.grapher-worktrees/run/.grapher-state/abc/process/.agent-home');
 });
 
-test('a shell with no Grapher cache base drops the session temp binding instead of leaking data/', () => {
+test('without a cache scratch, the shell keeps safe host temp bindings and removes only private session paths', () => {
   const env: Record<string, string> = {
     HOME: '/c/Users/user',
-    TMPDIR: '/tmp/run/data/sessions/abc',
+    TMPDIR: '/tmp/host-temp',
+    TMP: '/tmp/run/data/sessions/abc',
+    TEMP: 'C:\\Users\\user\\AppData\\Local\\Temp',
+    XDG_RUNTIME_DIR: '/run/user/1000',
     GRAPHER_MODE: 'planner',
     PI_SESSION_FILE: '/tmp/run/data/sessions/abc/session.jsonl',
   };
   assert.equal(scrubModelShellEnvironment(env), undefined);
-  assert.equal('TMPDIR' in env, false);
+  assert.equal(env.TMPDIR, '/tmp/host-temp');
+  assert.equal('TMP' in env, false, 'a private session path must not be exposed');
+  assert.equal(env.TEMP, 'C:\\Users\\user\\AppData\\Local\\Temp');
+  assert.equal(env.XDG_RUNTIME_DIR, '/run/user/1000');
   assert.equal('GRAPHER_MODE' in env, false);
   assert.equal('PI_SESSION_FILE' in env, false);
 });

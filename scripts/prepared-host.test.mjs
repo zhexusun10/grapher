@@ -120,8 +120,9 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     const agent = join(directory, 'agent');
     const global = join(directory, 'global');
     const marker = join(directory, 'loaded.jsonl');
+    const bashSources = join(directory, 'bash-sources.jsonl');
     for (const path of [source, other, agent, join(global, 'extensions')]) await mkdir(path, { recursive: true });
-    await writeFile(join(global, 'extensions/probe.ts'), `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH, continuation: process.env.GRAPHER_CONTINUE_INTERRUPTED, feedback: process.env.GRAPHER_FEEDBACK_SOURCE, unremovableNodes: process.env.GRAPHER_UNREMOVABLE_NODES }) + '\\n'); }`);
+    await writeFile(join(global, 'extensions/probe.ts'), `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, agentKind: process.env.GRAPHER_AGENT_KIND, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH, continuation: process.env.GRAPHER_CONTINUE_INTERRUPTED, feedback: process.env.GRAPHER_FEEDBACK_SOURCE, unremovableNodes: process.env.GRAPHER_UNREMOVABLE_NODES }) + '\\n'); pi.on('session_start', () => appendFileSync(${JSON.stringify(bashSources)}, JSON.stringify({ role: process.env.GRAPHER_MODE, agentKind: process.env.GRAPHER_AGENT_KIND, bash: pi.getAllTools().find(tool => tool.name === 'bash')?.sourceInfo }) + '\\n')); }`);
     await new Promise(completed => server.listen(0, '127.0.0.1', completed));
     const model = id => ({ id, reasoning: false, input: ['text', 'image'], contextWindow: 128000, maxTokens: 4096,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
@@ -131,6 +132,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     } } }));
     const env = { ...process.env, PI_CODING_AGENT_DIR: agent, GRAPHER_GLOBAL_PI_AGENT_DIR: global,
       GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1', GRAPHER_ACTIVE_RUN_ID: 'outer-must-not-leak',
+      GRAPHER_AGENT_KIND: 'outer-agent-kind-must-not-leak',
       GRAPHER_GRAPH_PATH: join(other, 'outer-graph.json'), GRAPHER_NODE_NAME: 'outer-node-must-not-leak',
       GRAPHER_CONTINUE_INTERRUPTED: 'outer-continuation-must-not-leak', GRAPHER_FEEDBACK_SOURCE: 'outer-feedback-must-not-leak',
       GRAPHER_UNREMOVABLE_NODES: JSON.stringify(['outer-node-must-not-leak']) };
@@ -166,6 +168,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       else args.push('--approve');
       const binding = { type: 'grapher_bind', role, cwd: source, args, environment: {
         GRAPHER_MODE: role, GRAPHER_EXECUTION_KIND: 'source', GRAPHER_SOURCE_ALIAS: source,
+        ...(role === 'node' ? { GRAPHER_AGENT_KIND: 'serial' } : { GRAPHER_AGENT_KIND: null }),
         GRAPHER_WORKSPACE_ROOT: source, GRAPHER_ORIGINAL_ROOT: source, GRAPHER_GRAPH_PATH: graph,
         GRAPHER_ACTIVE_RUN_ID: `run-${role}`, GRAPHER_NODE_EXECUTION_ID: `execution-${role}`,
         ...(role === 'planner' ? { GRAPHER_UNREMOVABLE_NODES: JSON.stringify(['published']), GRAPHER_PLANNER_WRITE_TOOLS: 'true' } : {}),
@@ -204,7 +207,8 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       const system = body.messages.filter(message => ['system', 'developer'].includes(message.role)).map(message => text(message.content)).join('\n');
       assert.doesNotMatch(system, /If \.venv is present|copied activate\/pip wrappers|Filesystem inheritance does not rewrite paths inside programs/);
       if (role === 'node') {
-        assert.match(system, /<rules>[\s\S]*End your response with exactly one standalone final line:[\s\S]*<ACCEPT>[\s\S]*<FEEDBACK>[\s\S]*<\/rules>/);
+        assert.doesNotMatch(system, /End your response with exactly one standalone final line:[\s\S]*<ACCEPT>[\s\S]*<FEEDBACK>/,
+          'a source-bound Node Agent is Serial, not a Graph feedback target');
         assert.ok(body.messages.filter(message => message.role === 'user').every(message => !text(message.content).includes('<ACCEPT>')));
       } else assert.doesNotMatch(system, /End your response with exactly one standalone final line/);
       const tools = body.tools?.map(tool => tool.function.name) ?? [];
@@ -240,6 +244,8 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     const loaded = (await readFile(marker, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
     assert.deepEqual(loaded.map(value => value.role).sort(), ['node', 'planner']);
     assert.equal(loaded.find(value => value.role === 'node').nodeName, undefined, 'node extensions must not inherit an outer node identity');
+    assert.equal(loaded.find(value => value.role === 'node').agentKind, 'serial');
+    assert.equal(loaded.find(value => value.role === 'planner').agentKind, undefined, 'the prepared Planner must not inherit a node agent kind');
     assert.equal(loaded.find(value => value.role === 'node').continuation, 'false');
     assert.equal(loaded.find(value => value.role === 'node').feedback, 'true');
     assert.equal(loaded.find(value => value.role === 'planner').feedback, undefined, 'prepared roles must not inherit an outer feedback flag');
@@ -248,6 +254,39 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     assert.equal(loaded.find(value => value.role === 'planner').unremovableNodes, JSON.stringify(['published']));
     assert.equal(loaded.find(value => value.role === 'node').unremovableNodes, undefined, 'prepared roles must not inherit another Run\'s published-node constraints');
     assert.ok(loaded.every(value => value.run === `run-${value.role}` && value.execution === `execution-${value.role}` && value.graph === join(directory, `graph-${value.role}.json`)));
+    const bashToolSources = (await readFile(bashSources, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
+    assert.deepEqual(bashToolSources.map(value => value.role).sort(), ['node', 'planner']);
+    assert.equal(bashToolSources.find(value => value.role === 'node' && value.agentKind === 'serial').bash.path, 'builtin:bash',
+      'a bound Serial Agent must retain Pi\'s native Bash tool');
+    assert.match(bashToolSources.find(value => value.role === 'planner').bash.path, /grapher-workspace-policy/,
+      'Planner keeps the Grapher Bash adapter');
+
+    // A source-direct Graph Node Agent has the same Pi model role and cwd as
+    // Serial, but its explicit agent identity must still select Grapher Bash.
+    const sourceNode = host('node', source, env);
+    children.push(sourceNode);
+    assert.equal((await sourceNode.request({ type: 'grapher_prepare', role: 'node' })).success, true);
+    const sourceNodeSession = join(directory, 'sessions-source-node');
+    await mkdir(sourceNodeSession);
+    const sourceNodeId = randomUUID();
+    const sourceNodeArgs = [...nodeBinding.args];
+    sourceNodeArgs[sourceNodeArgs.indexOf('--session-id') + 1] = sourceNodeId;
+    sourceNodeArgs[sourceNodeArgs.indexOf('--session-dir') + 1] = sourceNodeSession;
+    const sourceNodeBinding = { ...nodeBinding, args: sourceNodeArgs, environment: {
+      ...nodeBinding.environment,
+      GRAPHER_AGENT_KIND: 'node',
+      GRAPHER_NODE_EXECUTION_ID: 'source-direct-graph-node',
+      GRAPHER_FEEDBACK_SOURCE: null,
+    } };
+    const sourceNodeReply = await sourceNode.request(sourceNodeBinding);
+    assert.equal(sourceNodeReply.success, true, sourceNodeReply.error);
+    const sourceNodeState = await sourceNode.request({ type: 'get_state' });
+    assert.equal(sourceNodeState.success, true, sourceNode.diagnostics);
+    sourceNode.child.stdin.write(`${JSON.stringify({ id: 'source-node-prompt', type: 'prompt', message: 'SENTINEL-source-direct-node' })}\n`);
+    await sourceNode.wait(() => sourceNode.events.find(event => event.type === 'agent_settled'));
+    const boundSources = (await readFile(bashSources, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
+    const sourceNodeTool = boundSources.find(value => value.role === 'node' && value.agentKind === 'node')?.bash;
+    assert.ok(sourceNodeTool?.path.includes('grapher-workspace-policy'), 'source-direct Graph Node Agent uses Grapher Bash');
     assert.deepEqual(await readdir(other), [], 'outer Run graph path must never be touched');
 
     // A failed bind must not initialize resources, create a session or invoke a model.

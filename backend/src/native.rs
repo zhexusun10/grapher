@@ -326,12 +326,9 @@ fn home_dir_for_expansion() -> Option<PathBuf> {
     value.map(PathBuf::from)
 }
 
-/// Keep temporary files inside the per-execution session and remove inherited
-/// shell path state that would otherwise make relative `cd` unpredictable.
+/// Bind temporary files to the session for private execution processes. Source
+/// Node Agents skip this so their Bash inherits the host's temporary directories.
 pub(crate) fn bind_process_paths(command: &mut Command, temp: &Path) {
-    for key in ["CDPATH", "OLDPWD", "GLOBIGNORE"] {
-        command.env_remove(key);
-    }
     if !temp.as_os_str().is_empty() {
         let _ = fs::create_dir_all(temp);
     }
@@ -532,10 +529,8 @@ pub fn command(role: PiRole, repository: &Path, cwd: &Path) -> Result<Command, S
     command.current_dir(host_path(&cwd));
     command.env("PI_CODING_AGENT_DIR", host_path(&agent_dir()?));
     command.env_remove("GRAPHER_EXECUTION_KIND");
+    command.env_remove("GRAPHER_AGENT_KIND");
     clear_git_environment(&mut command);
-    for key in ["CDPATH", "OLDPWD", "GLOBIGNORE"] {
-        command.env_remove(key);
-    }
     bind_trusted_git(&mut command)?;
     command.env("PYTHONDONTWRITEBYTECODE", "1");
     Ok(command)
@@ -877,6 +872,36 @@ mod tests {
             "source metadata must never be hidden as node metadata"
         );
         assert!(crate::workspace::private_git_dir(&source).is_none());
+    }
+
+    #[test]
+    fn process_path_binding_preserves_host_bash_variables() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("session");
+        let mut command = Command::new("node");
+        for (key, value) in [
+            ("CDPATH", "project-cd"),
+            ("OLDPWD", "previous-dir"),
+            ("GLOBIGNORE", "*.tmp"),
+            ("TMPDIR", "host-temp"),
+        ] {
+            command.env(key, value);
+        }
+
+        bind_process_paths(&mut command, &session);
+
+        for (key, expected) in [
+            ("CDPATH", "project-cd"),
+            ("OLDPWD", "previous-dir"),
+            ("GLOBIGNORE", "*.tmp"),
+        ] {
+            assert!(command.get_envs().any(|(name, value)| {
+                name == std::ffi::OsStr::new(key) && value == Some(std::ffi::OsStr::new(expected))
+            }));
+        }
+        assert!(command.get_envs().any(|(name, value)| {
+            name == std::ffi::OsStr::new("TMPDIR") && value == Some(session.as_os_str())
+        }));
     }
 
     #[test]
