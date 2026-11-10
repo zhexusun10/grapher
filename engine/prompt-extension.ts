@@ -227,8 +227,14 @@ export default function (pi: ExtensionAPI) {
   if (!serialAgent && (launch || graph)) {
     const localOps = createLocalBashOperations(launch ? { shellPath: launch.shell } : undefined);
     pi.on('user_bash', async () => ({ operations: {
-      exec: (command, workingDirectory, options) => localOps.exec(managedBashCommand(activePaths ? activePaths.command(command) : command),
-        activePaths?.root || workingDirectory, managedBashOptions(options, managedShell)),
+      exec: (command, workingDirectory, options) => {
+        const workspaceCwd = activePaths?.root || workingDirectory;
+        return localOps.exec(
+          managedBashCommand(activePaths ? activePaths.command(command) : command, workspaceCwd),
+          workspaceCwd,
+          managedBashOptions(options, managedShell),
+        );
+      },
     } }));
   }
   // Serial leaves Pi's default Bash definition and execution path untouched.
@@ -246,7 +252,12 @@ export default function (pi: ExtensionAPI) {
         let callExitCode: number | null = null;
         const scopedOps: BashOperations = {
           exec: async (command, cwd, options) => {
-            const res = await localOps.exec(managedBashCommand(command), activePaths?.root || cwd, managedBashOptions(options, managedShell));
+            const workspaceCwd = activePaths?.root || cwd;
+            const res = await localOps.exec(
+              managedBashCommand(command, workspaceCwd),
+              workspaceCwd,
+              managedBashOptions(options, managedShell),
+            );
             callExitCode = res.exitCode;
             return res;
           },

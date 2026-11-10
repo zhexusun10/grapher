@@ -332,7 +332,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         </div>
       </div>
 
-      <div className="projects-list">
+      <div className={`projects-list${projects.length === 1 ? " has-single-project" : ""}`}>
         {reduceMotion ? projectCards : <AnimatePresence>{projectCards}</AnimatePresence>}
         {projects.length === 0 && (
           <div className="projects-placeholder">

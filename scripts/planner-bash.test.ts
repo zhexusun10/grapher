@@ -76,6 +76,49 @@ test('Serial and Node Agent identities select different Bash implementations at 
   }
 });
 
+test('source-direct Graph Node Bash restores its requested cwd after BASH_ENV', { timeout: 30_000 }, async () => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-source-node-bash-env-')));
+  const startupCwd = join(directory, 'startup cwd');
+  const startup = join(directory, 'bash-env');
+  const previousCwd = process.cwd();
+  const keys = ['GRAPHER_MODE', 'GRAPHER_AGENT_KIND', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT',
+    'GRAPHER_SOURCE_ALIAS', 'GRAPHER_CONTINUE_INTERRUPTED', 'GRAPHER_LAUNCH_BINDING', 'BASH_ENV'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    await mkdir(startupCwd);
+    await writeFile(startup, `export BASH_ENV_TEST_VALUE=source-node\ncd ${quote(shellPath(startupCwd))}\n`);
+    process.chdir(directory);
+    Object.assign(process.env, {
+      GRAPHER_MODE: 'node', GRAPHER_AGENT_KIND: 'node', GRAPHER_EXECUTION_KIND: 'source',
+      GRAPHER_ORIGINAL_ROOT: directory, GRAPHER_SOURCE_ALIAS: directory,
+      GRAPHER_CONTINUE_INTERRUPTED: 'false', BASH_ENV: startup,
+    });
+    delete process.env.GRAPHER_LAUNCH_BINDING;
+
+    const tools = new Map<string, any>();
+    workspacePolicy({
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      on() {},
+    } as any);
+    assert.deepEqual([...tools.keys()], ['bash']);
+    const result = await tools.get('bash').execute('source-node-bash-env', {
+      command: `printf '%s' "$BASH_ENV_TEST_VALUE"; printf node > source-node-relative.txt`,
+    }, undefined, undefined, {
+      cwd: directory,
+      sessionManager: { getSessionId: () => 'source-node-test', getSessionFile: () => undefined },
+    } as any);
+    assert.equal(text(result).trim(), 'source-node');
+    assert.equal(await readFile(join(directory, 'source-node-relative.txt'), 'utf8'), 'node');
+    assert.equal(await readFile(join(startupCwd, 'source-node-relative.txt'), 'utf8').catch(() => undefined), undefined);
+  } finally {
+    process.chdir(previousCwd);
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
+  }
+});
+
 test('Planner can withhold write and edit tools while retaining read and Bash', { timeout: 30_000 }, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-planner-files-')));
   try {
@@ -134,6 +177,44 @@ test('Planner preserves native Bash semantics and immediate source writes on eve
       await assert.rejects(() => tool.execute('timeout', { command: 'sleep 2', timeout: 0.1 }, undefined, undefined, context), /timed out/i);
     }
   } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
+  }
+});
+
+test('Planner Bash restores the selected workspace after BASH_ENV while retaining startup setup', { timeout: 30_000 }, async () => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-planner-bash-env-')));
+  const source = join(directory, 'source project');
+  const workspace = join(directory, 'private workspace');
+  const startupCwd = join(directory, 'startup cwd');
+  const previousBashEnv = process.env.BASH_ENV;
+  try {
+    await Promise.all([source, workspace, startupCwd].map(path => mkdir(path)));
+    const startup = `shopt -s expand_aliases\nalias builtin='false'\nexport BASH_ENV_TEST_VALUE=initialized\ncd ${quote(shellPath(startupCwd))}\ncd() { return 91; }\ncommand() { return 92; }\n`;
+    await Promise.all([source, workspace].map(path => writeFile(join(path, 'startup-env.sh'), startup)));
+    // BASH_ENV is intentionally relative: Bash resolves it from the cwd given
+    // to this tool, before the startup script changes directories.
+    process.env.BASH_ENV = 'startup-env.sh';
+
+    for (const selectedWorkspace of [source, workspace]) {
+      const { tools, context } = await plannerTools(source, selectedWorkspace, false);
+      const result = await tools.get('bash').execute('bash-env-cwd', {
+        command: `printf '%s:%s:%s' "$BASH_ENV_TEST_VALUE" "$(type -t cd)" "$(type -t command)"; printf relative > startup-relative.txt`,
+      }, undefined, undefined, context);
+      assert.equal(text(result).trim(), 'initialized:function:function');
+      assert.equal(await readFile(join(selectedWorkspace, 'startup-relative.txt'), 'utf8'), 'relative');
+      assert.equal(await readFile(join(startupCwd, 'startup-relative.txt'), 'utf8').catch(() => undefined), undefined);
+    }
+
+    // Pi-native Bash (used by Serial) is intentionally not given the workspace
+    // adapter's cwd restoration and continues to honor BASH_ENV's native `cd`.
+    const { context } = await plannerTools(source, workspace, false);
+    const native = createBashToolDefinition(workspace);
+    await native.execute('native-bash-env-cwd', { command: 'printf native > native-relative.txt' }, undefined, undefined, context);
+    assert.equal(await readFile(join(startupCwd, 'native-relative.txt'), 'utf8'), 'native');
+    assert.equal(await readFile(join(workspace, 'native-relative.txt'), 'utf8').catch(() => undefined), undefined);
+  } finally {
+    if (previousBashEnv === undefined) delete process.env.BASH_ENV;
+    else process.env.BASH_ENV = previousBashEnv;
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
   }
 });

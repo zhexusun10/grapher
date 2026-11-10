@@ -37,8 +37,17 @@ function bindBashPath(path) {
   if (process.platform === 'win32') return `__grapher_path=$(/usr/bin/cygpath -u -p ${quote(path)}) || exit $?\nexport PATH="$__grapher_path"\nunset __grapher_path\n`;
   return `export PATH=${quote(path)}\n`;
 }
-export function managedBashCommand(command) {
-  if (!active) return command;
+export function managedBashCommand(command, workspaceCwd) {
+  const restoreWorkspace = workspaceCwd === undefined ? '' : (() => {
+    if (typeof workspaceCwd !== 'string' || workspaceCwd.includes('\0') || !isAbsolute(workspaceCwd)) {
+      throw new Error('Invalid Bash workspace cwd');
+    }
+    // BASH_ENV runs before this command string. Keep its setup effects, but
+    // restore the tool's requested cwd before model-authored relative paths run.
+    const path = process.platform === 'win32' ? toHostInput(workspaceCwd).replaceAll('\\', '/') : workspaceCwd;
+    return `if [ -n "\${BASH_VERSION-}\${ZSH_VERSION-}" ]; then\n\\builtin cd -- ${quote(path)} || exit $?\nelse\ncd -- ${quote(path)} || exit $?\nfi\n`;
+  })();
+  if (!active) return restoreWorkspace + command;
   let observer = '';
   if (process.env.GRAPHER_ENVIRONMENT_DISCOVERY) {
     const helper = process.env.GRAPHER_ENVIRONMENT_HELPER;
@@ -49,7 +58,7 @@ export function managedBashCommand(command) {
     observer = `__grapher_env_tool() { local __grapher_tool="$1"; shift; local __grapher_exe; __grapher_exe=$(type -P "$__grapher_tool") || return 127; ${quote(helper.replaceAll('\\', '/'))} --grapher-env-tool ${quote(context.replaceAll('\\', '/'))} "$__grapher_tool" "$__grapher_exe" "$@"; }\n`;
     for (const tool of ['python', 'python3', 'pip', 'pip3', 'conda']) observer += `${tool}() { __grapher_env_tool ${tool} "$@"; }\n`;
   }
-  return bindBashPath(activePath) + observer + command;
+  return bindBashPath(activePath) + observer + restoreWorkspace + command;
 }
 
 export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
@@ -166,8 +175,8 @@ function modelShellScratch(env) {
   return undefined;
 }
 /** Strip Grapher-owned and selected Pi paths; returns an optional temp scratch to create. */
-export function scrubModelShellEnvironment(env) {
-  const scratch = modelShellScratch(env);
+export function scrubModelShellEnvironment(env, { useCacheScratch = true } = {}) {
+  const scratch = useCacheScratch ? modelShellScratch(env) : undefined;
   for (const key of Object.keys(env)) {
     if (grapherInternalKey.test(key) || hiddenModelKeys.has(key.toUpperCase())) delete env[key];
   }
@@ -194,7 +203,14 @@ export function managedBashOptions(options, managed = false) {
   }
   Object.assign(env, runtimeEnvironment, deviceEnvironment);
   const originalTemp = Object.fromEntries(['TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR'].map(key => [key, env[key]]));
-  const scratch = scrubModelShellEnvironment(env);
+  const sourceNativeNode = process.env.GRAPHER_MODE === 'node'
+    && process.env.GRAPHER_AGENT_KIND === 'node'
+    && process.env.GRAPHER_EXECUTION_KIND === 'source';
+  const scratch = scrubModelShellEnvironment(env, {
+    // A source-direct Graph Node Agent keeps host temp variables like Serial.
+    // Private Graph and Planner roles bind a safe Run-cache scratch instead.
+    useCacheScratch: !sourceNativeNode,
+  });
   if (scratch) {
     // 0o700: the scratch is also XDG_RUNTIME_DIR, which the spec requires to be
     // private. Ignored on Windows; the parent cache dir already exists, so only
