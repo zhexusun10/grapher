@@ -683,8 +683,16 @@ fn feedback_reexecutes_only_affected_branch_in_place() {
 }
 
 #[test]
+fn missing_feedback_budget_defaults_to_eight() {
+    let mut value = serde_json::to_value(config()).unwrap();
+    value.as_object_mut().unwrap().remove("maxFeedback");
+    let restored: Config = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.max_feedback, 8);
+}
+
+#[test]
 fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
-    for configured_limit in [0, 1, 3, 8] {
+    for configured_limit in [0, 1, 3, 8, 9] {
         let temp = TempDir::new().unwrap();
         let mut runtime = Runtime::open(temp.path()).unwrap();
         let mut graph = graph();
@@ -709,7 +717,7 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
             .unwrap();
         finish_wave(&mut runtime, "<ACCEPT>");
         finish_wave(&mut runtime, "<ACCEPT>");
-        let limit = configured_limit.min(5);
+        let limit = configured_limit.min(8);
         for _ in 0..limit {
             finish_wave(&mut runtime, "Earlier rework\n<FEEDBACK>");
             finish_wave(&mut runtime, "<ACCEPT>");

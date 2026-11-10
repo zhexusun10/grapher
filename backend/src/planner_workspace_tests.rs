@@ -1,4 +1,21 @@
 use super::*;
+
+#[test]
+fn planner_workspace_result_accepts_current_and_historical_identifiers() {
+    assert_eq!(
+        planner_workspace_requested_id(&serde_json::json!({"requestedId":"current"})),
+        Some("current")
+    );
+    assert_eq!(
+        planner_workspace_requested_id(&serde_json::json!({"requestedNode":"legacy"})),
+        Some("legacy")
+    );
+    assert_eq!(
+        planner_workspace_requested_id(&serde_json::json!({"requestedId":"current", "requestedNode":"legacy"})),
+        Some("current")
+    );
+    assert_eq!(planner_workspace_requested_id(&serde_json::json!({})), None);
+}
 use crate::runtime::Job;
 use std::path::Path;
 
@@ -71,7 +88,8 @@ let input = ''; for await (const chunk of process.stdin) input += chunk;
     }
   }
 } else {
-  fs.writeFileSync(`${process.env.GRAPHER_NODE_NAME}.txt`, 'node result');
+  const name = ['root', 'left', 'right', 'join'].includes(input.trim()) ? input.trim() : 'root';
+  fs.writeFileSync(`${name}.txt`, 'node result');
 }
 const actionText = fs.existsSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'action'))
   ? fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'action'),'utf8') : '';

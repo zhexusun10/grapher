@@ -3,19 +3,20 @@ import test from "node:test";
 import { plannerEdgeEdits, plannerNodeEdits } from "../src/lib/plannerGraphEdits.ts";
 
 test("Planner node previews accept every backend-tolerated edit shape", () => {
-  const edit = { name: "worker", task: "Do the work" };
-  for (const args of [
-    { nodes: [edit] },
-    { nodes: edit },
-    { nodes: JSON.stringify([edit]) },
-    { nodes: JSON.stringify(edit) },
-    edit,
-    JSON.stringify({ nodes: [edit] }),
-    { nodes: [], ...edit },
-    [edit],
-    JSON.stringify([edit]),
-  ]) {
-    assert.deepEqual(plannerNodeEdits(args), [{ ...edit, delete: false }], JSON.stringify(args));
+  for (const edit of [{ id: "worker", task: "Do the work" }, { name: "worker", task: "Do the work" }]) {
+    for (const args of [
+      { nodes: [edit] },
+      { nodes: edit },
+      { nodes: JSON.stringify([edit]) },
+      { nodes: JSON.stringify(edit) },
+      edit,
+      JSON.stringify({ nodes: [edit] }),
+      { nodes: [], ...edit },
+      [edit],
+      JSON.stringify([edit]),
+    ]) {
+      assert.deepEqual(plannerNodeEdits(args), [{ name: "worker", task: "Do the work", delete: false }], JSON.stringify(args));
+    }
   }
 });
 
@@ -37,7 +38,7 @@ test("Planner edge previews accept every backend-tolerated edit shape", () => {
 });
 
 test("Planner graph previews mirror backend primitive coercion", () => {
-  assert.deepEqual(plannerNodeEdits({ nodes: [{ name: 7, task: 42, delete: "true" }, { name: "x", delete: 0 }] }), [
+  assert.deepEqual(plannerNodeEdits({ nodes: [{ id: 7, task: 42, delete: "true" }, { name: "x", delete: 0 }] }), [
     { name: "7", task: "42", delete: true },
     { name: "x", task: "", delete: false },
   ]);

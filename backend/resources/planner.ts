@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 
 type Graph = { originalGoal: string; nodes: { name: string; task: string }[]; edges: { from: string; to: string; feedback: boolean }[] };
 
-type NodeEdit = { name: string; task?: string; delete?: boolean };
+type NodeEdit = { id: string; task?: string; delete?: boolean };
 type EdgeEdit = { from: string; to: string; feedback?: boolean; delete?: boolean };
 type Diagnostic = { code: string; message: string };
 
@@ -100,6 +100,43 @@ function normalizeEdits(raw: unknown, key: "nodes" | "edges", required: readonly
   return list === undefined ? raw : { [key]: list };
 }
 
+// Older Planner sessions may replay node calls using `name`. Keep that
+// input compatible without exposing it in the current tool schema.
+function nodeIdAlias(value: unknown): unknown {
+  if (!isRecord(value) || !Object.hasOwn(value, "name")) return value;
+  if (Object.hasOwn(value, "id")) throw new Error('Invalid node edit: supply "id", not both "id" and legacy "name".');
+  const { name, ...rest } = value;
+  return { ...rest, id: name };
+}
+
+// Project old tool-call arguments to the current Planner vocabulary without
+// rewriting stored sessions or interpreting task text as graph metadata.
+function plannerHistoryArguments(value: unknown, tool: "node" | "switch_workspace"): unknown {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      const projected = plannerHistoryArguments(parsed, tool);
+      return projected === parsed ? value : JSON.stringify(projected);
+    } catch { return value; }
+  }
+  if (Array.isArray(value)) {
+    const items = value.map(item => plannerHistoryArguments(item, tool));
+    return items.some((item, index) => item !== value[index]) ? items : value;
+  }
+  if (!isRecord(value)) return value;
+  let projected = value;
+  const legacy = tool === "node" ? "name" : "node";
+  if (Object.hasOwn(value, legacy)) {
+    const { [legacy]: oldId, ...rest } = value;
+    projected = { ...rest, id: Object.hasOwn(value, "id") ? value.id : oldId };
+  }
+  if (tool === "node" && Object.hasOwn(value, "nodes")) {
+    const nodes = plannerHistoryArguments(value.nodes, tool);
+    if (nodes !== value.nodes) projected = { ...projected, nodes };
+  }
+  return projected;
+}
+
 function describeShape(value: unknown): string {
   if (Array.isArray(value)) return "an array";
   if (isRecord(value)) {
@@ -166,7 +203,7 @@ function editArguments(
   example: string,
 ): any {
   const label = key === "nodes" ? "node" : "edge";
-  const parsed = parseArguments(raw);
+  const parsed = key === "nodes" ? nodeIdAlias(parseArguments(raw)) : parseArguments(raw);
   if (isRecord(parsed)) {
     const allowed = new Set([key, ...fields]);
     const unsupported = Object.keys(parsed).filter(field => !allowed.has(field));
@@ -182,14 +219,14 @@ function editArguments(
     throw new Error(`Invalid ${label} call: ${key} must contain at least one edit. Expected ${example}.`);
   }
   const booleanFields = key === "nodes" ? ["delete"] : ["feedback", "delete"];
-  const edits = normalized[key].map(edit => normalizeEdit(edit, label, required, fields, booleanFields, example));
+  const edits = normalized[key].map(edit => normalizeEdit(key === "nodes" ? nodeIdAlias(edit) : edit, label, required, fields, booleanFields, example));
   return { [key]: edits };
 }
 
 function applyNode(graph: Graph, edit: NodeEdit) {
-  graph.nodes = graph.nodes.filter(node => node.name !== edit.name);
-  if (edit.delete) graph.edges = graph.edges.filter(edge => edge.from !== edit.name && edge.to !== edit.name);
-  else graph.nodes.push({ name: edit.name, task: edit.task ?? "" });
+  graph.nodes = graph.nodes.filter(node => node.name !== edit.id);
+  if (edit.delete) graph.edges = graph.edges.filter(edge => edge.from !== edit.id && edge.to !== edit.id);
+  else graph.nodes.push({ name: edit.id, task: edit.task ?? "" });
 }
 
 function applyEdge(graph: Graph, edit: EdgeEdit) {
@@ -210,6 +247,54 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   } as any);
   // Pi derives execution errors from tool_result hooks, not an isError property
   // returned by execute. Keep diagnostic codes in internal details only.
+  pi.on("context", event => {
+    let changed = false;
+    // Provider signatures can bind an assistant turn's original content. Do
+    // not change any of its tool calls, or their corresponding tool results.
+    const signedCalls = new Set<string>();
+    for (const message of event.messages) {
+      if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+      if (!message.content.some(part => isRecord(part)
+        && ["thoughtSignature", "thinkingSignature", "textSignature"].some(key => typeof part[key] === "string" && part[key] !== ""))) continue;
+      for (const part of message.content) if (part.type === "toolCall") signedCalls.add(part.id);
+    }
+    const messages = event.messages.map(message => {
+      if (message.role === "toolResult" && message.toolName === "switch_workspace"
+        && !signedCalls.has(message.toolCallId) && Array.isArray(message.content)) {
+        let edited = false;
+        const content = message.content.map(part => {
+          if (part.type !== "text") return part;
+          try {
+            const value: unknown = JSON.parse(part.text);
+            if (!isRecord(value) || (!Object.hasOwn(value, "requestedNode") && !Object.hasOwn(value, "actualNode"))) return part;
+            const { requestedNode, actualNode, ...rest } = value;
+            edited = true;
+            return { ...part, text: JSON.stringify({ ...rest,
+              ...(requestedNode !== undefined ? { requestedId: requestedNode } : {}),
+              ...(actualNode !== undefined ? { actualId: actualNode } : {}),
+            }) };
+          } catch { return part; }
+        });
+        if (!edited) return message;
+        changed = true;
+        return { ...message, content };
+      }
+      if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
+      let edited = false;
+      const content = message.content.map(part => {
+        if (part.type !== "toolCall" || signedCalls.has(part.id)
+          || (part.name !== "node" && part.name !== "switch_workspace")) return part;
+        const args = plannerHistoryArguments(part.arguments, part.name);
+        if (args === part.arguments) return part;
+        edited = true;
+        return { ...part, arguments: args as typeof part.arguments };
+      });
+      if (!edited) return message;
+      changed = true;
+      return { ...message, content };
+    });
+    return changed ? { messages } : undefined;
+  });
   pi.on("tool_result", async event => {
     if ((event.toolName === "node" || event.toolName === "edge")
       && (event.details as { diagnosticCodes?: string[] } | undefined)?.diagnosticCodes) {
@@ -251,7 +336,9 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     const rejected = (diagnostics: Diagnostic[]) => result(JSON.stringify({
       applied: false,
       topology: topology(saved),
-      diagnostics: diagnostics.map(diagnostic => stripDiagnosticCode(diagnostic.message)),
+      diagnostics: diagnostics.map(diagnostic => stripDiagnosticCode(diagnostic.message)
+        .replace(/^Node names\b/, "Node ids")
+        .replace(/^Node name\b/, "Node id")),
     }), diagnostics.map(diagnostic => diagnostic.code));
     const inputErrors = change(graph);
     if (inputErrors?.length) return rejected(inputErrors);
@@ -292,15 +379,15 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       "Create, replace, or delete graph nodes.",
     parameters: Type.Object({
       nodes: Type.Array(Type.Object({
-        name: Type.String({ description: "Stable unique node name" }),
+        id: Type.String({ description: "Stable unique identifier for referencing this node in the graph" }),
         task: Type.Optional(Type.String({ description: "Task to execute (required unless deleting)" })),
         delete: Type.Optional(Type.Boolean({ description: "Delete the node and its connected edges (default: false)" })),
       }, { additionalProperties: false }), { minItems: 1, description: "One or more node edits, applied in order" }),
     }, { additionalProperties: false }),
-    prepareArguments: raw => prepareWithContext(() => editArguments(raw, "nodes", ["name"], ["name", "task", "delete"], '{"nodes":[{"name":"...","task":"..."}]}')),
+    prepareArguments: raw => prepareWithContext(() => editArguments(raw, "nodes", ["id"], ["id", "task", "delete"], '{"nodes":[{"id":"...","task":"..."}]}')),
     async execute(id, parameters, signal) {
       return mutate(id, signal, "node", graph => {
-        const duplicates = duplicateTargets("nodes", parameters.nodes.map(edit => edit.name));
+        const duplicates = duplicateTargets("nodes", parameters.nodes.map(edit => edit.id));
         if (duplicates.length) return duplicates;
         for (const edit of parameters.nodes) applyNode(graph, edit);
       });
@@ -313,8 +400,8 @@ export default function grapherPlanner(pi: ExtensionAPI) {
       "Create, replace, or delete directed edges between existing nodes. Only one edge per ordered pair. By default, A -> B makes B depend on A. B waits for A to complete and receives A's workspace state. Multiple dependencies' workspace states are merged before B runs. With feedback: true, B -> A lets B optionally send a feedback message to A, which must be an ancestor of B. Each feedback source has at most one target. When feedback is sent, A receives B's completed workspace state and feedback, and continues from A's own context to improve its previous work. A's descendants wait and run again using updated workspace state.",
     parameters: Type.Object({
       edges: Type.Array(Type.Object({
-        from: Type.String({ description: "Source node name" }),
-        to: Type.String({ description: "Target node name (differ from source)" }),
+        from: Type.String({ description: "Source node id" }),
+        to: Type.String({ description: "Target node id (differ from source)" }),
         feedback: Type.Optional(Type.Boolean({ description: "True for a feedback edge (default: false)" })),
         delete: Type.Optional(Type.Boolean({ description: "Delete the edge (default: false)" })),
       }, { additionalProperties: false }), { minItems: 1, description: "One or more edge edits, applied in order" }),

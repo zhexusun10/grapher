@@ -41,7 +41,7 @@ interface Graph {
 }
 ```
 
-Names are semantic identifiers, not directory names. Edges are unique by ordered `(from, to)` pair. Historical `relation` fields are ignored on read and never serialized back.
+The persisted Graph IR uses `name` as its stable node identifier, not as a directory name. The Planner-facing `node` tool calls the same identifier `id`; edges reference these identifiers through `from` and `to`. Older Planner node calls using `name` remain accepted for session compatibility. Unsigned historical Planner tool calls are projected as `id` in model context without rewriting stored sessions; signature-bearing assistant turns and their tool results retain their original fields for provider replay. Persisted graphs, APIs and historical transcripts retain their existing `name` fields. Edges are unique by ordered `(from, to)` pair. Historical `relation` fields are ignored on read and never serialized back.
 
 Compiler validation requires:
 

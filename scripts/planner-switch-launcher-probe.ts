@@ -14,7 +14,14 @@ export default async function (pi: any) {
   };
   const text = (result: any) => result.content?.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('\n') || '';
   const target = JSON.parse(process.env.GRAPHER_PLANNER_WORKSPACES!).target;
-  await call('switch_workspace', { node: 'target' });
+  const switchTool = tools.find(tool => tool.name === 'switch_workspace');
+  assert.deepEqual(switchTool.prepareArguments({ node: 'target' }), { id: 'target' });
+  assert.throws(() => switchTool.prepareArguments({ id: 'target', node: 'other' }), /not both/);
+  const switched = JSON.parse(text(await call('switch_workspace', { id: 'target' })));
+  assert.equal(switched.requestedId, 'target');
+  assert.equal(switched.actualId, target.actualNode);
+  assert.equal('requestedNode' in switched, false);
+  assert.equal('actualNode' in switched, false);
   assert.equal(process.cwd(), realpathSync.native(target.workspace));
   assert.equal(readFileSync('business.txt', 'utf8'), 'target');
   assert.equal(process.env.HOME, target.runtimeEnvironment.HOME);

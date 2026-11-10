@@ -37,13 +37,42 @@ try {
   const bashDescription = loaded.extensions[1].tools.get("bash")!.definition.description;
   assert.match(bashDescription, /Execute a bash command/);
   assert.equal(extension.handlers.has("tool_call"), false, "Planner has no path or read guards");
+  const contextHook = extension.handlers.get("context")![0];
+  const historic = [{ role: "assistant", content: [
+    { type: "toolCall", id: "old-node", name: "node", arguments: { nodes: [{ name: "old", task: "literal name stays here" }] } },
+    { type: "toolCall", id: "old-switch", name: "switch_workspace", arguments: { node: "old" } },
+  ] }, { role: "toolResult", toolName: "switch_workspace", content: [
+    { type: "text", text: '{"switched":true,"requestedNode":"old","actualNode":"new"}' },
+  ] }];
+  const projected = await contextHook({ messages: historic });
+  assert.deepEqual(projected.messages[0].content.map((part: any) => part.arguments), [
+    { nodes: [{ id: "old", task: "literal name stays here" }] }, { id: "old" },
+  ]);
+  assert.deepEqual(JSON.parse(projected.messages[1].content[0].text), {
+    switched: true, requestedId: "old", actualId: "new",
+  });
+  assert.equal((historic[0].content[0] as any).arguments.nodes[0].name, "old", "stored session objects are unchanged");
+  assert.match((historic[1].content[0] as any).text, /requestedNode/, "stored tool results are unchanged");
+  for (const signature of [
+    { type: "thinking", thinking: "reasoning", thinkingSignature: "opaque" },
+    { type: "text", text: "reasoning", textSignature: "opaque" },
+    { type: "toolCall", id: "signed-node", name: "node", arguments: { name: "signed", task: "work" }, thoughtSignature: "opaque" },
+  ]) {
+    const signedMessages = [{ role: "assistant", content: [signature,
+      { type: "toolCall", id: "signed-switch", name: "switch_workspace", arguments: { node: "old" } },
+    ] }, { role: "toolResult", toolName: "switch_workspace", toolCallId: "signed-switch", content: [
+      { type: "text", text: '{"requestedNode":"old","actualNode":"old"}' },
+    ] }];
+    assert.equal(await contextHook({ messages: signedMessages }), undefined, "signed provider turns and their results remain untouched");
+  }
   const edgeDescription = extension.tools.get("edge")!.definition.description;
   assert.match(edgeDescription, /feedback source (?:has at most one target|may have only one feedback target)/i);
   assert.doesNotMatch(edgeDescription, /maxFeedback|retry budget|reviewer|ignored|non-Git|drain|fork/i);
   const context = { cwd: repository, sessionManager: { getSessionId: () => "planner-test", getSessionFile: () => undefined } } as unknown as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
     const tool = (extension.tools.get(name) ?? loaded.extensions[1].tools.get(name))!.definition;
-    const args = validateToolArguments(tool, { type: "toolCall", id: "test", name, arguments: parameters });
+    const prepared = tool.prepareArguments ? tool.prepareArguments(parameters) as Record<string, unknown> : parameters;
+    const args = validateToolArguments(tool, { type: "toolCall", id: "test", name, arguments: prepared });
     const before = name === "node" || name === "edge"
       ? JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8")) : undefined;
     const response = await tool.execute("test", args, undefined, undefined, context);
@@ -98,7 +127,8 @@ try {
     assert.equal(wire.parameters.additionalProperties, false);
     assert.equal(wire.parameters.properties[key].type, "array");
     const item = wire.parameters.properties[key].items;
-    assert.deepEqual(Object.keys(item.properties), name === "node" ? ["name", "task", "delete"] : ["from", "to", "feedback", "delete"]);
+    assert.deepEqual(Object.keys(item.properties), name === "node" ? ["id", "task", "delete"] : ["from", "to", "feedback", "delete"]);
+    if (name === "node") assert.ok(item.required.includes("id"));
     for (const field of name === "node" ? ["task", "delete"] : ["feedback", "delete"]) {
       assert.ok(item.properties[field].anyOf.some((variant: any) => variant.type === "null"));
     }
@@ -122,9 +152,9 @@ try {
     }
     assert.fail("Expected the call to be rejected");
   }
-  const bareNode = JSON.parse((await preparedCall("node", { name: "tolerant-bare", task: "Bare node" })).content[0].text);
+  const bareNode = JSON.parse((await preparedCall("node", { id: "tolerant-bare", task: "Bare node" })).content[0].text);
   assert.equal(bareNode.applied, true);
-  const arrayNode = JSON.parse((await preparedCall("node", [{ name: "tolerant-array", task: "Array node" }])).content[0].text);
+  const arrayNode = JSON.parse((await preparedCall("node", [{ id: "tolerant-array", task: "Array node" }])).content[0].text);
   assert.equal(arrayNode.applied, true);
   const objectNode = JSON.parse((await preparedCall("node", { nodes: { name: "tolerant-object", task: "Object node" } })).content[0].text);
   assert.equal(objectNode.applied, true);
@@ -156,25 +186,27 @@ try {
   assertArgumentError(invalidEdgeShape, /Invalid edge call.*Expected \{"edges":/);
   // Item-level violations are converted to the same short domain errors, so
   // Pi's generic validator never gets to append `Received arguments:`.
+  const ambiguousNode = captureError(() => extension.tools.get("node")!.definition.prepareArguments!({ nodes: [{ id: "a", name: "b", task: "x" }] }));
+  assertArgumentError(ambiguousNode, /supply "id", not both/);
   const invalidItem = captureError(() => extension.tools.get("node")!.definition.prepareArguments!({ nodes: [{}] }));
-  assertArgumentError(invalidItem, /Invalid node edit: "name" must be a string/);
+  assertArgumentError(invalidItem, /Invalid node edit: "id" must be a string/);
   const unsupportedItem = captureError(() => extension.tools.get("node")!.definition.prepareArguments!({ nodes: [{ name: "x", extra: true }] }));
-  assertArgumentError(unsupportedItem, /Invalid node edit: unsupported field\(s\) extra.*Allowed fields: name, task, delete/);
+  assertArgumentError(unsupportedItem, /Invalid node edit: unsupported field\(s\) extra.*Allowed fields: id, task, delete/);
   const invalidEdgeItem = captureError(() => extension.tools.get("edge")!.definition.prepareArguments!({ edges: [{ from: "x" }] }));
   assertArgumentError(invalidEdgeItem, /Invalid edge edit: "to" must be a string/);
   assert.deepEqual(
     extension.tools.get("node")!.definition.prepareArguments!({ nodes: [{ name: 123, task: 456, delete: 0 }] }),
-    { nodes: [{ name: "123", task: "456", delete: false }] },
+    { nodes: [{ id: "123", task: "456", delete: false }] },
     "Primitive coercion matches Pi's Value.Convert",
   );
   assert.deepEqual(
     extension.tools.get("node")!.definition.prepareArguments!({ name: 123, task: 456 }),
-    { nodes: [{ name: "123", task: "456" }] },
+    { nodes: [{ id: "123", task: "456" }] },
     "A bare single edit is coerced through the same item path",
   );
   assert.deepEqual(
     extension.tools.get("node")!.definition.prepareArguments!({ nodes: [{ name: "nullable-args", task: null, delete: null }] }),
-    { nodes: [{ name: "nullable-args" }] },
+    { nodes: [{ id: "nullable-args" }] },
     "Optional nulls are dropped before validation",
   );
   const cleanedTolerant = JSON.parse((await call("node", { nodes: [
@@ -342,7 +374,10 @@ try {
     await call("bash", { command });
   }
   assert.equal(readFileSync(join(repository, "changed"), "utf8"), "changed");
-  assert.equal(extension.handlers.has("context"), false, "Planner must preserve file contents and tool results");
+  assert.equal(await contextHook({ messages: [
+    { role: "user", content: "name is ordinary task text" },
+    { role: "toolResult", toolName: "read", content: [{ type: "text", text: '{"name":"project data"}' }] },
+  ] }), undefined, "Ordinary task and file contents are not rewritten");
   const deletedBuild = JSON.parse((await node({ name: "build", delete: true })).content[0].text);
   assert.deepEqual(deletedBuild.topology, { rootNodes: ["review"], directDependencies: { review: [] }, feedbackTo: {} });
   assert.equal(deletedBuild.warnings.length, 1);
@@ -363,7 +398,8 @@ try {
   const publishedExtension = publishedLoaded.extensions[0];
   const publishedCall = async (name: string, parameters: Record<string, unknown>) => {
     const tool = publishedExtension.tools.get(name)!.definition;
-    const args = validateToolArguments(tool, { type: "toolCall", id: "test-published", name, arguments: parameters });
+    const prepared = tool.prepareArguments ? tool.prepareArguments(parameters) as Record<string, unknown> : parameters;
+    const args = validateToolArguments(tool, { type: "toolCall", id: "test-published", name, arguments: prepared });
     return await tool.execute("test-published", args, undefined, undefined, context);
   };
   const publishedBefore = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");

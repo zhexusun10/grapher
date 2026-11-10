@@ -135,10 +135,10 @@ export default function App() {
     })).sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
   });
   const [config, setConfig] = useState<Config>(() => {
-    let initialConfig: Config = { ...defaultConfig, maxFeedback: 5 };
+    let initialConfig: Config = { ...defaultConfig };
     const parsed = readStorageJson<Partial<Config>>(STORAGE_KEYS.config);
     if (parsed) {
-      initialConfig = { ...initialConfig, ...parsed, model: "", maxFeedback: 5 };
+      initialConfig = { ...initialConfig, ...parsed, model: "", maxFeedback: defaultConfig.maxFeedback };
     }
     const list = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
     if (Array.isArray(list) && list.length > 0) {
@@ -147,7 +147,7 @@ export default function App() {
         initialConfig.repository = normalizeWorkspacePath(sorted[0].path);
       }
     }
-    return { ...initialConfig, repository: normalizeWorkspacePath(initialConfig.repository), maxFeedback: 5 };
+    return { ...initialConfig, repository: normalizeWorkspacePath(initialConfig.repository), maxFeedback: defaultConfig.maxFeedback };
   });
   // Model defaults for new conversations. A settings save inside a conversation
   // records a conversation override instead of replacing these defaults.
@@ -914,14 +914,14 @@ export default function App() {
     let nextConfigObj: Config = {
       ...(accepted ?? data.config),
       repository: activeRepository,
-      maxFeedback: 5,
+      maxFeedback: defaultConfig.maxFeedback,
     };
     // A settings save accepted while this bootstrap was in flight wins over the
     // disk snapshot it was based on.
     if (acceptedSettingsRef.current !== acceptedAtStart && acceptedSettingsRef.current) {
-      nextConfigObj = { ...acceptedSettingsRef.current, repository: activeRepository, maxFeedback: 5 };
+      nextConfigObj = { ...acceptedSettingsRef.current, repository: activeRepository, maxFeedback: defaultConfig.maxFeedback };
     } else {
-      setDefaultSettings({ ...data.config, maxFeedback: 5 });
+      setDefaultSettings({ ...data.config, maxFeedback: defaultConfig.maxFeedback });
     }
     setConfig(nextConfigObj);
     hasConversationSummariesRef.current = Array.isArray(data.conversations);
@@ -1490,7 +1490,7 @@ export default function App() {
     const repoPath = normalizeWorkspacePath(config.repository.trim());
     const info = repoInfo && workspaceKey(repoInfo.path) === workspaceKey(repoPath) ? repoInfo : null;
     if (generation !== foregroundGeneration.current) return false;
-    const nextConfig = { ...draftConfig, repository: repoPath, maxFeedback: 5 };
+    const nextConfig = { ...draftConfig, repository: repoPath, maxFeedback: defaultConfig.maxFeedback };
     try {
       const boot = await runtimeService.saveConfig(nextConfig, state.runId || undefined);
       if (generation !== foregroundGeneration.current) return false;
@@ -1506,7 +1506,7 @@ export default function App() {
         writeStorageString(STORAGE_KEYS.dataPath, cleanDataPath);
       }
       if (boot.envOverrides) setEnvOverrides(boot.envOverrides);
-      setDefaultSettings({ ...boot.config, maxFeedback: 5 });
+      setDefaultSettings({ ...boot.config, maxFeedback: defaultConfig.maxFeedback });
     } catch (error) {
       throw new Error(t("保存设置失败：{0}", String(error)));
     }

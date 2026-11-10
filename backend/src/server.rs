@@ -706,7 +706,7 @@ fn bootstrap_projection(
             role_models: Default::default(),
             thinking_level: "low".into(),
             max_parallel: 0,
-            max_feedback: 3,
+            max_feedback: MAX_FEEDBACK,
             auto_approve: false,
             post_task_review: true,
             planner_write_tools: false,
@@ -718,7 +718,7 @@ fn bootstrap_projection(
             #[cfg(feature = "fixture")]
             pi_args: vec![entrypoint.to_string_lossy().into()],
         });
-    config.max_feedback = config.max_feedback.min(5);
+    config.max_feedback = config.max_feedback.min(MAX_FEEDBACK);
     // Settings are future-Run defaults, not an environment selection surface.
     // Historical Run/descriptor policies remain in their immutable projections.
     config.environment = None;
@@ -960,7 +960,7 @@ fn save_config_projection(
 ) -> Result<Bootstrap, String> {
     config.environment = None; // Native admission is Runtime-owned, never a UI default.
     config.validate_model_settings()?;
-    config.max_feedback = 5;
+    config.max_feedback = MAX_FEEDBACK;
     let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
     if let Some(run_id) = &run_id {
         if runtime.state.run_id != *run_id {
@@ -1496,6 +1496,12 @@ fn restrict_planner_workspace_targets(targets: &mut serde_json::Value, grants: &
                 })
         });
     }
+}
+
+fn planner_workspace_requested_id(result: &serde_json::Value) -> Option<&str> {
+    result["requestedId"]
+        .as_str()
+        .or_else(|| result["requestedNode"].as_str())
 }
 
 fn planner_workspace_notice(
@@ -2043,7 +2049,7 @@ fn plan_goal_internal_with_options(
         return Err(("Enter a goal".into(), None));
     }
     let mut config = config;
-    config.max_feedback = config.max_feedback.min(5);
+    config.max_feedback = config.max_feedback.min(MAX_FEEDBACK);
     #[cfg(feature = "fixture")]
     if config.engine != "pi" {
         return Err((
@@ -2787,8 +2793,7 @@ fn plan_goal_internal_with_options(
                                                 serde_json::from_str::<serde_json::Value>(&text)
                                                     .ok()
                                             }) {
-                                                let requested_node = result["requestedNode"]
-                                                    .as_str()
+                                                let requested_node = planner_workspace_requested_id(&result)
                                                     .unwrap_or_default()
                                                     .to_string();
                                                 let resolution =

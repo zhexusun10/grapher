@@ -95,7 +95,9 @@ test('default environment discovery binds one private venv across a parallel Gra
       if (tools.length === 0) {
         let command: string;
         if (prompt.includes('PREP_BRANCH')) {
-          command = `node -e ${quote("const fs=require('node:fs');fs.mkdirSync('reports',{recursive:true});fs.writeFileSync('reports/'+process.env.GRAPHER_NODE_NAME+'.txt',process.env.GRAPHER_NODE_NAME+'\\n')")}`;
+          const branch = prompt.includes('PREP_BRANCH left') ? 'left' : prompt.includes('PREP_BRANCH right') ? 'right' : undefined;
+          if (!branch) throw new Error('Missing explicit branch task');
+          command = `node -e ${quote(`const fs=require('node:fs');if(Object.keys(process.env).some(key=>/^GRAPHER_/i.test(key)))throw Error('Grapher identity leaked into node Bash');fs.mkdirSync('reports',{recursive:true});fs.writeFileSync('reports/${branch}.txt','${branch}\\n')`)}`;
         } else if (prompt.includes('CREATE_PROBE')) {
           command = `${venvCreationCommand(python)} --without-pip && ${activate}python -c ${quote(createProbe)}`;
         } else if (prompt.includes('VERIFY_PROBE')) {
@@ -145,6 +147,7 @@ test('default environment discovery binds one private venv across a parallel Gra
       GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'engine-cache'), GRAPHER_WORKSPACE_PARENT: join(directory, 'workspaces'),
       GRAPHER_GLOBAL_PI_AGENT_DIR: join(directory, 'global-agent'), NODE_AGENT_MODEL: 'environment-chain/chain', NODE_AGENT_THINKING: 'off',
       VIRTUAL_ENV: 'outer-poison', CONDA_PREFIX: 'outer-poison', PYTHONPATH: 'outer-poison', PYTHONHOME: 'outer-poison', BASH_ENV: 'outer-poison',
+      GRAPHER_NODE_NAME: 'outer-node-must-not-leak',
       LOCALAPPDATA: join(directory, 'local-app-data'), USERPROFILE: join(directory, 'profile') };
     backend = spawn(executable, [], { env, stdio: ['ignore', 'ignore', 'pipe'] });
     backend.stderr!.on('data', chunk => { diagnostics += chunk.toString(); });
@@ -167,7 +170,7 @@ test('default environment discovery binds one private venv across a parallel Gra
     const graph = {
       originalGoal: 'Default environment discovery with a parallel branch and a serial create/verify/report chain',
       nodes: [
-        { name: 'left', task: 'PREP_BRANCH' }, { name: 'right', task: 'PREP_BRANCH' },
+        { name: 'left', task: 'PREP_BRANCH left' }, { name: 'right', task: 'PREP_BRANCH right' },
         { name: 'create', task: 'CREATE_PROBE' }, { name: 'verify', task: 'VERIFY_PROBE' }, { name: 'report', task: 'REPORT_PROBE' },
       ],
       edges: [
@@ -280,7 +283,7 @@ test('default environment discovery binds one private venv across a parallel Gra
     // Reuse the existing business tasks, with no new prompt or reconciliation
     // session: a bound parent forks into a local bound and a fresh unbound task.
     const fork = await api('save_graph', { graph: { originalGoal: graph.originalGoal,
-      nodes: [{ name: 'create', task: 'CREATE_PROBE' }, { name: 'left', task: 'PREP_BRANCH' }, { name: 'right', task: 'PREP_BRANCH' }],
+      nodes: [{ name: 'create', task: 'CREATE_PROBE' }, { name: 'left', task: 'PREP_BRANCH left' }, { name: 'right', task: 'PREP_BRANCH right' }],
       edges: [{ from: 'create', to: 'left', feedback: false }, { from: 'create', to: 'right', feedback: false }] }, config });
     await api('control', { runId: fork.runId, action: 'approve' });
     const forkSettled = () => until(async () => {

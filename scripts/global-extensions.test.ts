@@ -9,6 +9,7 @@ import { bundledTrim, bundledContinuity, bundledWebSearch, continuityId, extensi
 import workspacePolicy from '../engine/prompt-extension.ts';
 import { loadGrapherMcpConfig } from '../engine/mcp-config.ts';
 import { loadMcpConfig } from '../engine/pi-compat.ts';
+import { buildSystemPromptState, normalizeBuildSystemPromptOptions, diffSystemPromptSections } from '../pi/packages/coding-agent/src/core/system-prompt.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 function fixture() {
@@ -159,17 +160,150 @@ test('execution path guidance directly follows existing prompts without a blank 
           const expected = preceding.trimEnd() ? `${preceding.trimEnd()}\n${guideline}` : guideline;
           const options = { appendSystemPrompt: preceding, forceSystemPrompt: undefined };
           assert.equal(await hook({ systemPromptOptions: options }), undefined);
-          assert.equal(options.appendSystemPrompt, expected, `${role}/${kind}: append prompt spacing`);
+          assert.equal(options.appendSystemPrompt, role === 'node' && kind === 'graph' ? preceding : expected, `${role}/${kind}: append prompt spacing`);
           assert.equal(options.forceSystemPrompt, undefined, 'preserve structured prompts for pi-trim');
           const forced = { appendSystemPrompt: 'Unchanged addendum.', forceSystemPrompt: preceding };
           assert.equal(await hook({ systemPromptOptions: forced }), undefined);
           assert.equal(forced.forceSystemPrompt, expected, `${role}/${kind}: forced prompt spacing`);
           assert.equal(forced.appendSystemPrompt, 'Unchanged addendum.');
         }
-        const custom = { appendSystemPrompt: 'Base.', forceSystemPrompt: undefined };
+        const custom = { customPrompt: 'Custom system prompt.', appendSystemPrompt: 'Base.', forceSystemPrompt: undefined };
         assert.equal(await hook({ messageType: 'custom', message: { role: 'custom' }, systemPromptOptions: custom }), undefined);
-        assert.equal(custom.appendSystemPrompt, `Base.\n${guideline}`, `${role}/${kind}: custom-message run spacing`);
+        assert.equal(custom.appendSystemPrompt, `Base.\n${guideline}`, `${role}/${kind}: custom system prompt retains guidance`);
       }
+    }
+  } finally {
+    for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
+  }
+});
+
+test('graph node replaces the default rule in model requests without changing other roles or stored messages', async () => {
+  const keys = ['GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS', 'GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  const oldRule = '- Show file paths clearly when working with files';
+  const newRule = '- Use project-root-relative paths in Bash commands and project files.';
+  try {
+    delete process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS;
+    for (const [role, kind] of [['node', 'graph'], ['node', 'source'], ['planner', 'graph'], ['merger', 'graph']]) {
+      Object.assign(process.env, { GRAPHER_MODE: role, GRAPHER_EXECUTION_KIND: kind,
+        GRAPHER_ORIGINAL_ROOT: process.cwd(), GRAPHER_SOURCE_ALIAS: process.cwd() });
+      const hooks = new Map<string, any>();
+      workspacePolicy({ registerTool() {}, on(name: string, handler: any) { hooks.set(name, handler); } } as any);
+      const hook = hooks.get('context_with_system');
+      if (role !== 'node' || kind !== 'graph') {
+        assert.equal(hook, undefined, `${role}/${kind} must not replace rules`);
+        continue;
+      }
+      const options = { appendSystemPrompt: '', forceSystemPrompt: undefined };
+      await hooks.get('before_agent_start')({ systemPromptOptions: options });
+      assert.equal(options.appendSystemPrompt, '', 'default graph node does not create an addendum');
+      const state = buildSystemPromptState({ cwd: process.cwd(), appendSystemPrompt: options.appendSystemPrompt,
+        contextFiles: [{ path: 'AGENTS.md', content: oldRule }] });
+      assert.equal(state.sections?.addendum, undefined);
+      const messages = [
+        { role: 'system', ...state, timestamp: 1 },
+        { role: 'user', content: oldRule, timestamp: 2 },
+        { role: 'system', content: '', sections: { rules: `<rules>\n${oldRule}\n</rules>`, obsolete: null }, timestamp: 3 },
+        { role: 'system', content: `Custom prompt: ${oldRule}`, timestamp: 4 },
+      ];
+      const snapshot = structuredClone(messages);
+      const result = await hook({ messages });
+      assert.deepEqual(messages, snapshot, 'request projection must not mutate stored messages');
+      assert.ok(result.messages[0].sections.rules.includes(newRule));
+      assert.ok(!result.messages[0].sections.rules.includes(oldRule));
+      assert.ok(result.messages[0].sections.project_context.includes(oldRule));
+      assert.strictEqual(result.messages[1], messages[1]);
+      assert.ok(result.messages[2].sections.rules.includes(newRule));
+      assert.equal(result.messages[2].sections.obsolete, null);
+      assert.strictEqual(result.messages[3], messages[3]);
+      assert.equal(await hook({ messages: result.messages }), undefined, 'projection is idempotent');
+      process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS = 'previous agent environment hint';
+      const hinted = { appendSystemPrompt: 'Existing user addendum.', forceSystemPrompt: undefined };
+      await hooks.get('before_agent_start')({ systemPromptOptions: hinted });
+      assert.equal(hinted.appendSystemPrompt, 'Existing user addendum.\nprevious agent environment hint');
+      delete process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS;
+    }
+  } finally {
+    for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
+  }
+});
+
+test('feedback protocol is a per-turn system rule, scoped to the feedback source and removable on revision', async () => {
+  const keys = ['GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS', 'GRAPHER_FEEDBACK_SOURCE', 'GRAPHER_CONTINUE_INTERRUPTED'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  const rule = 'End your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker.';
+  try {
+    Object.assign(process.env, { GRAPHER_EXECUTION_KIND: 'graph', GRAPHER_ORIGINAL_ROOT: process.cwd(), GRAPHER_SOURCE_ALIAS: process.cwd() });
+    let withFeedback: ReturnType<typeof buildSystemPromptState> | undefined;
+    for (const [role, enabled, continuation] of [
+      ['node', 'true', 'false'], ['node', 'true', 'true'], ['node', 'false', 'false'],
+      ['planner', 'true', 'false'], ['merger', 'true', 'false'], ['partition', 'true', 'false'],
+    ]) {
+      Object.assign(process.env, { GRAPHER_MODE: role, GRAPHER_FEEDBACK_SOURCE: enabled, GRAPHER_CONTINUE_INTERRUPTED: continuation });
+      const hooks = new Map<string, any>();
+      workspacePolicy({ registerTool() {}, on(name: string, handler: any) { hooks.set(name, handler); } } as any);
+      const options = normalizeBuildSystemPromptOptions({ cwd: process.cwd() });
+      await hooks.get('before_agent_start')?.({ systemPromptOptions: options });
+      const state = buildSystemPromptState(options);
+      const expected = role === 'node' && enabled === 'true';
+      assert.equal(state.sections?.rules.includes(rule), expected, `${role}/${enabled}/${continuation}`);
+      assert.ok(!state.sections?.addendum?.includes(rule), 'feedback protocol never belongs to addendum');
+      if (expected && !withFeedback) withFeedback = state;
+      if (role === 'node' && !expected) {
+        const update = diffSystemPromptSections(withFeedback!.sections!, state.sections!);
+        assert.ok(update?.rules && !update.rules.includes(rule), 'removing an edge updates the persisted rules section');
+      }
+    }
+    Object.assign(process.env, { GRAPHER_MODE: 'node', GRAPHER_FEEDBACK_SOURCE: 'true', GRAPHER_CONTINUE_INTERRUPTED: 'false' });
+    const hooks = new Map<string, any>();
+    workspacePolicy({ registerTool() {}, on(name: string, handler: any) { hooks.set(name, handler); } } as any);
+    const custom = normalizeBuildSystemPromptOptions({ cwd: process.cwd(), customPrompt: 'Custom identity', sections: { rules: '- Existing custom rule' } });
+    await hooks.get('before_agent_start')({ systemPromptOptions: custom });
+    assert.equal(buildSystemPromptState(custom).sections?.rules, `<rules>\n- Existing custom rule\n- ${rule}\n</rules>`);
+    const forced = normalizeBuildSystemPromptOptions({ cwd: process.cwd(), forceSystemPrompt: 'Forced system prompt' });
+    await hooks.get('before_agent_start')({ systemPromptOptions: forced });
+    assert.ok(buildSystemPromptState(forced).content.includes(`<rules>\n- ${rule}\n</rules>`));
+  } finally {
+    for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
+  }
+});
+
+test('extension-supplied rules retain graph path guidance and the feedback protocol', async () => {
+  const keys = ['GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS', 'GRAPHER_FEEDBACK_SOURCE'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  const pathRule = '- Use project-root-relative paths in Bash commands and project files.';
+  const oldPathRule = '- Show file paths clearly when working with files';
+  const feedbackRule = 'End your response with exactly one standalone final line:';
+  try {
+    Object.assign(process.env, { GRAPHER_MODE: 'node', GRAPHER_EXECUTION_KIND: 'graph',
+      GRAPHER_ORIGINAL_ROOT: process.cwd(), GRAPHER_SOURCE_ALIAS: process.cwd() });
+    for (const [existing, feedback] of [
+      ['- Extension rule', 'true'],
+      [`- Extension rule\n${oldPathRule}`, 'true'],
+      [`- Extension rule\n${pathRule}`, 'true'],
+      ['- Extension rule', 'false'],
+    ]) {
+      process.env.GRAPHER_FEEDBACK_SOURCE = feedback;
+      const hooks = new Map<string, any>();
+      workspacePolicy({ registerTool() {}, on(name: string, handler: any) { hooks.set(name, handler); } } as any);
+      const options = normalizeBuildSystemPromptOptions({ cwd: process.cwd(), sections: { rules: existing } });
+      await hooks.get('before_agent_start')({ systemPromptOptions: options });
+      const state = buildSystemPromptState(options);
+      assert.ok(state.sections!.rules.includes('- Extension rule'));
+      assert.equal(state.sections!.rules.split(pathRule).length - 1, 1);
+      assert.ok(!state.sections!.rules.includes(oldPathRule));
+      assert.equal(state.sections!.rules.includes(feedbackRule), feedback === 'true');
+      assert.ok(!state.sections?.addendum?.includes(feedbackRule));
+      assert.ok(!state.sections?.addendum?.includes(pathRule));
+    }
+    // Serial and non-node roles must not get the Graph-specific replacement.
+    for (const [role, kind] of [['node', 'source'], ['planner', 'graph'], ['merger', 'graph']]) {
+      Object.assign(process.env, { GRAPHER_MODE: role, GRAPHER_EXECUTION_KIND: kind, GRAPHER_FEEDBACK_SOURCE: 'false' });
+      const hooks = new Map<string, any>();
+      workspacePolicy({ registerTool() {}, on(name: string, handler: any) { hooks.set(name, handler); } } as any);
+      const options = normalizeBuildSystemPromptOptions({ cwd: process.cwd(), sections: { rules: oldPathRule } });
+      await hooks.get('before_agent_start')?.({ systemPromptOptions: options });
+      assert.equal(options.sections.rules, oldPathRule, `${role}/${kind} retains its own rules`);
     }
   } finally {
     for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }

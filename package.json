@@ -48,8 +48,8 @@
     "start": "node scripts/cargo.mjs run --release --manifest-path backend/Cargo.toml --bin grapher"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.5.0",
-    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.1",
+    "@earendil-works/pi-coding-agent": "1.5.1",
     "@xyflow/react": "12.8.5",
     "clsx": "^2.1.1",
     "katex": "^0.18.10",

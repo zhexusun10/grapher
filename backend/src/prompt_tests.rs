@@ -4029,10 +4029,10 @@ fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
 
     let script = root.join("worker.sh");
     fs::write(&script, format!(r#"task=$(cat)
-case "$GRAPHER_NODE_NAME" in
+case "$task" in
   slow) echo started > '{slow_started}'; while [ ! -f '{release}' ]; do sleep 0.02; done; echo completed > slow.txt ;;
   related) echo started > '{related_started}'; while [ ! -f '{release_related}' ]; do sleep 0.02; done; echo completed > related.txt ;;
-  review) while [ ! -f '{related_started}' ]; do sleep 0.02; done; printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
+  review*) while [ ! -f '{related_started}' ]; do sleep 0.02; done; printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
   consumer) printf '%s\n' "$task" > consumer-input.txt; echo completed > consumer.txt ;;
   *) echo completed > owner.txt ;;
 esac
@@ -4048,7 +4048,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                     .into_iter()
                     .map(|name| Node {
                         name: name.into(),
-                        task: "Work".into(),
+                        task: name.into(),
                     })
                     .collect(),
                 edges: [
@@ -4238,7 +4238,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
     let input = fs::read_to_string(repository.join("consumer-input.txt")).unwrap();
     assert_eq!(
         input.trim_end(),
-        "Work",
+        "consumer",
         "the consumer receives only its own task, not upstream feedback or budget warnings"
     );
 }

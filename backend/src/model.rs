@@ -350,8 +350,10 @@ impl Config {
     }
 }
 
+pub const MAX_FEEDBACK: usize = 8;
+
 fn default_max_feedback() -> usize {
-    5
+    MAX_FEEDBACK
 }
 
 pub(crate) fn default_thinking_level() -> String {

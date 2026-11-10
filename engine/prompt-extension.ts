@@ -13,6 +13,7 @@ import {
 } from './pi-compat.ts';
 
 const INTERRUPTED_CONTINUATION = '__grapher_continue_interrupted__';
+const FEEDBACK_RULE = 'End your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker.';
 
 export default function (pi: ExtensionAPI) {
   const continuation = process.env.GRAPHER_CONTINUE_INTERRUPTED === 'true';
@@ -88,6 +89,25 @@ export default function (pi: ExtensionAPI) {
   const view = (value: any): any => activePaths ? activePaths.view(value) : value;
   // Execution roles receive path guidance directly; Planner need not repeat it in handoffs.
   const pathGuideline = 'Use project-root-relative paths in Bash commands and project files.';
+  const graphNode = process.env.GRAPHER_MODE === 'node' && graph;
+  if (graphNode) {
+    // Pi owns the default rules and unconditionally adds its final path rule.
+    // Replace only that top-level rule in request projections, including
+    // mid-session system updates, without modifying stored history or custom prompts.
+    pi.on('context_with_system', event => {
+      let changed = false;
+      const messages = event.messages.map(message => {
+        if (message.role !== 'system' || typeof message.sections?.rules !== 'string') return message;
+        const rules = message.sections.rules.replace(
+          /^- Show file paths clearly when working with files\r?$/gm, `- ${pathGuideline}`,
+        );
+        if (rules === message.sections.rules) return message;
+        changed = true;
+        return { ...message, sections: { ...message.sections, rules } };
+      });
+      return changed ? { messages } : undefined;
+    });
+  }
   const plannerTargets = planner && process.env.GRAPHER_PLANNER_FOLLOWUP === 'true'
     ? JSON.parse(process.env.GRAPHER_PLANNER_WORKSPACES || '{}') as Record<string, unknown>
     : {};
@@ -100,15 +120,23 @@ export default function (pi: ExtensionAPI) {
       label: 'switch workspace',
       description: "Switch to the latest valid workspace state for a graph node. The result tells you the actual node and workspace state selected.",
       parameters: obj({
-        node: str({ description: 'Node whose latest workspace state you want to inspect or modify' }),
+        id: str({ description: 'Id of the node whose latest workspace state you want to inspect or modify' }),
       }),
       promptSnippet: 'Switch Planner workspace',
-      async execute(_id: string, params: { node: string }) {
-        const target = switchPlannerWorkspace(params.node);
+      // Old Planner conversations can still produce the historical argument.
+      // Normalize it before Pi validates the id-only model-facing schema.
+      prepareArguments(raw: unknown) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Object.hasOwn(raw, 'node')) return raw;
+        const { node, ...rest } = raw as Record<string, unknown>;
+        if (Object.hasOwn(rest, 'id')) throw new Error('Supply id, not both id and legacy node.');
+        return { ...rest, id: node };
+      },
+      async execute(_id: string, params: { id: string }) {
+        const target = switchPlannerWorkspace(params.id);
         return { content: [{ type: 'text', text: JSON.stringify({
           switched: true,
-          requestedNode: target.requestedNode,
-          actualNode: target.actualNode,
+          requestedId: target.requestedNode,
+          actualId: target.actualNode,
           message: target.redirected
             ? `The requested node's workspace was inherited and modified by ${target.actualNode}; you are now at the latest downstream workspace state.`
             : `You are now at ${target.actualNode}'s workspace.`,
@@ -125,9 +153,40 @@ export default function (pi: ExtensionAPI) {
       // Normalize existing prompt paths only. Planner gets no extra addendum,
       // cwd announcement, environment hint or instruction to re-read files.
       if (planner) return;
+      if (process.env.GRAPHER_MODE === 'node' && process.env.GRAPHER_FEEDBACK_SOURCE === 'true') {
+        // A custom rules section replaces Pi's generated rules, even when the
+        // preamble is the default. Inject there rather than into guidelines
+        // that Pi would discard. Forced prompts are opaque and need a block.
+        if (options.forceSystemPrompt !== undefined) {
+          options.forceSystemPrompt = `${options.forceSystemPrompt.trimEnd()}\n\n<rules>\n- ${FEEDBACK_RULE}\n</rules>`;
+        } else if (options.customPrompt || options.sections?.rules) {
+          const existing = options.sections.rules?.trimEnd();
+          if (!existing?.includes(FEEDBACK_RULE)) {
+            options.sections.rules = `${existing ? `${existing}\n` : ''}- ${FEEDBACK_RULE}`;
+          }
+        } else {
+          options.promptGuidelines.push(FEEDBACK_RULE);
+        }
+      }
+      // Extension-supplied rules replace Pi's defaults entirely. In that case
+      // the request-time default-rule replacement has nothing to match.
+      if (graphNode && !options.customPrompt && options.forceSystemPrompt === undefined && options.sections?.rules) {
+        let rules = options.sections.rules.replace(
+          /^- Show file paths clearly when working with files\r?$/gm, `- ${pathGuideline}`,
+        );
+        if (!rules.split(/\r?\n/).includes(`- ${pathGuideline}`)) {
+          const existing = rules.trimEnd();
+          rules = `${existing ? `${existing}\n` : ''}- ${pathGuideline}`;
+        }
+        options.sections.rules = rules;
+      }
       const rawHints = process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS?.trim();
       const hints = rawHints && paths ? paths.visible(rawHints) : rawHints;
-      const guidance = hints ? `${pathGuideline}\n${hints}` : pathGuideline;
+      // Custom/forced prompts have no Pi rules section to replace. Preserve
+      // their existing guidance behavior; default graph nodes need only hints.
+      const useRules = graphNode && !options.customPrompt && options.forceSystemPrompt === undefined;
+      const guidance = useRules ? hints : (hints ? `${pathGuideline}\n${hints}` : pathGuideline);
+      if (!guidance) return;
       if (options.forceSystemPrompt !== undefined) {
         // Respect an explicit override supplied by another extension. Such
         // overrides require separate compatibility review with Pi's projection.

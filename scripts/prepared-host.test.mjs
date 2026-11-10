@@ -104,7 +104,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       requests.push(value);
       const toolResults = value.messages.filter(message => message.role === 'tool');
       const editGraph = value.model === 'planner' && toolResults.length < 2;
-      const nodes = toolResults.length === 0 ? [{ name: 'published', delete: true }] : [{ name: 'A', task: 'Return completed' }];
+      const nodes = toolResults.length === 0 ? [{ id: 'published', delete: true }] : [{ id: 'A', task: 'Return completed' }];
       const delta = editGraph ? { role: 'assistant', tool_calls: [{ index: 0, id: `edit-node-${toolResults.length}`, type: 'function',
         function: { name: 'node', arguments: JSON.stringify({ nodes }) } }] }
         : { role: 'assistant', content: `completed-${value.model}` };
@@ -121,7 +121,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     const global = join(directory, 'global');
     const marker = join(directory, 'loaded.jsonl');
     for (const path of [source, other, agent, join(global, 'extensions')]) await mkdir(path, { recursive: true });
-    await writeFile(join(global, 'extensions/probe.ts'), `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH, continuation: process.env.GRAPHER_CONTINUE_INTERRUPTED, unremovableNodes: process.env.GRAPHER_UNREMOVABLE_NODES }) + '\\n'); }`);
+    await writeFile(join(global, 'extensions/probe.ts'), `import { appendFileSync } from 'node:fs';\nexport default function(pi) { appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ role: process.env.GRAPHER_MODE, run: process.env.GRAPHER_ACTIVE_RUN_ID, execution: process.env.GRAPHER_NODE_EXECUTION_ID, nodeName: process.env.GRAPHER_NODE_NAME, graph: process.env.GRAPHER_GRAPH_PATH, continuation: process.env.GRAPHER_CONTINUE_INTERRUPTED, feedback: process.env.GRAPHER_FEEDBACK_SOURCE, unremovableNodes: process.env.GRAPHER_UNREMOVABLE_NODES }) + '\\n'); }`);
     await new Promise(completed => server.listen(0, '127.0.0.1', completed));
     const model = id => ({ id, reasoning: false, input: ['text', 'image'], contextWindow: 128000, maxTokens: 4096,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
@@ -132,7 +132,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     const env = { ...process.env, PI_CODING_AGENT_DIR: agent, GRAPHER_GLOBAL_PI_AGENT_DIR: global,
       GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1', GRAPHER_ACTIVE_RUN_ID: 'outer-must-not-leak',
       GRAPHER_GRAPH_PATH: join(other, 'outer-graph.json'), GRAPHER_NODE_NAME: 'outer-node-must-not-leak',
-      GRAPHER_CONTINUE_INTERRUPTED: 'outer-continuation-must-not-leak',
+      GRAPHER_CONTINUE_INTERRUPTED: 'outer-continuation-must-not-leak', GRAPHER_FEEDBACK_SOURCE: 'outer-feedback-must-not-leak',
       GRAPHER_UNREMOVABLE_NODES: JSON.stringify(['outer-node-must-not-leak']) };
     const roles = ['partition', 'planner', 'node'];
     const started = performance.now();
@@ -146,6 +146,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     await assert.rejects(readFile(join(agent, 'sessions')), { code: 'ENOENT' });
     const sessionIds = [];
     let plannerBinding;
+    let nodeBinding;
     for (let index = 0; index < roles.length; index++) {
       const role = roles[index];
       const value = prepared[index];
@@ -168,12 +169,14 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         GRAPHER_WORKSPACE_ROOT: source, GRAPHER_ORIGINAL_ROOT: source, GRAPHER_GRAPH_PATH: graph,
         GRAPHER_ACTIVE_RUN_ID: `run-${role}`, GRAPHER_NODE_EXECUTION_ID: `execution-${role}`,
         ...(role === 'planner' ? { GRAPHER_UNREMOVABLE_NODES: JSON.stringify(['published']), GRAPHER_PLANNER_WRITE_TOOLS: 'true' } : {}),
-        ...(role === 'node' ? { GRAPHER_NODE_NAME: 'task', GRAPHER_CONTINUE_INTERRUPTED: 'false' } : {}),
+        GRAPHER_FEEDBACK_SOURCE: role === 'node' ? 'true' : null,
+        ...(role === 'node' ? { GRAPHER_NODE_NAME: null, GRAPHER_CONTINUE_INTERRUPTED: 'false' } : {}),
         GRAPHER_COMPILER_PATH: join(target, `debug/grapher${process.platform === 'win32' ? '.exe' : ''}`),
         GRAPHER_TRUSTED_GIT: process.env.GRAPHER_TRUSTED_GIT ?? 'git',
         PI_MODEL: null, PI_SESSION_ID: null, GIT_CEILING_DIRECTORIES: null, GIT_CONFIG_PARAMETERS: null,
       } };
       if (role === 'planner') plannerBinding = binding;
+      if (role === 'node') nodeBinding = binding;
       const bindStarted = performance.now();
       const bindId = randomUUID();
       const stateId = randomUUID();
@@ -200,6 +203,10 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       assert.ok(body.messages.some(message => message.role === 'user' && text(message.content) === `SENTINEL-${role}`));
       const system = body.messages.filter(message => ['system', 'developer'].includes(message.role)).map(message => text(message.content)).join('\n');
       assert.doesNotMatch(system, /If \.venv is present|copied activate\/pip wrappers|Filesystem inheritance does not rewrite paths inside programs/);
+      if (role === 'node') {
+        assert.match(system, /<rules>[\s\S]*End your response with exactly one standalone final line:[\s\S]*<ACCEPT>[\s\S]*<FEEDBACK>[\s\S]*<\/rules>/);
+        assert.ok(body.messages.filter(message => message.role === 'user').every(message => !text(message.content).includes('<ACCEPT>')));
+      } else assert.doesNotMatch(system, /End your response with exactly one standalone final line/);
       const tools = body.tools?.map(tool => tool.function.name) ?? [];
       if (role === 'partition') assert.deepEqual(tools, []);
       else if (role === 'planner') {
@@ -232,8 +239,10 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
     assert.equal(new Set(sessionIds).size, 3);
     const loaded = (await readFile(marker, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
     assert.deepEqual(loaded.map(value => value.role).sort(), ['node', 'planner']);
-    assert.equal(loaded.find(value => value.role === 'node').nodeName, 'task');
+    assert.equal(loaded.find(value => value.role === 'node').nodeName, undefined, 'node extensions must not inherit an outer node identity');
     assert.equal(loaded.find(value => value.role === 'node').continuation, 'false');
+    assert.equal(loaded.find(value => value.role === 'node').feedback, 'true');
+    assert.equal(loaded.find(value => value.role === 'planner').feedback, undefined, 'prepared roles must not inherit an outer feedback flag');
     assert.equal(loaded.find(value => value.role === 'planner').nodeName, undefined, 'prepared roles must not inherit an outer node identity');
     assert.equal(loaded.find(value => value.role === 'planner').continuation, undefined, 'prepared roles must not inherit an outer continuation flag');
     assert.equal(loaded.find(value => value.role === 'planner').unremovableNodes, JSON.stringify(['published']));
@@ -251,6 +260,19 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       assert.equal(reply.success, false);
       assert.equal(requests.length, before);
     }
+    // Start from a valid node binding: an incomplete binding would be rejected
+    // anyway and would not prove that an injected node name is forbidden.
+    const namedNode = host('node', source, env);
+    children.push(namedNode);
+    assert.equal((await namedNode.request({ type: 'grapher_prepare', role: 'node' })).success, true);
+    const before = requests.length;
+    const rejectedName = await namedNode.request({
+      ...nodeBinding,
+      environment: { ...nodeBinding.environment, GRAPHER_NODE_NAME: 'forbidden' },
+    });
+    assert.equal(rejectedName.success, false);
+    assert.match(rejectedName.error, /Unsupported task environment: GRAPHER_NODE_NAME/);
+    assert.equal(requests.length, before);
   } finally {
     await Promise.all(children.map(value => value.stop()));
     server.closeAllConnections();

@@ -219,7 +219,7 @@ fn batch_conflict_blocks_repair_preserves_sources_and_can_retry_with_merger() {
     let script = temp.path().join("agent.sh");
     let original = fs::read_to_string(&script).unwrap();
     fs::write(&script, original.replace("echo evidence > reports/audit.json",
-        "echo evidence > reports/audit.json\n    echo \"$GRAPHER_NODE_NAME\" > reports/conflict.txt")).unwrap();
+        "echo evidence > reports/audit.json\n    echo \"$name\" > reports/conflict.txt")).unwrap();
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
     history(&runtime, &owner, "OWNER HISTORY");

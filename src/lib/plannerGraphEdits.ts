@@ -57,7 +57,9 @@ function editItems(raw: unknown, key: "nodes" | "edges", required: readonly stri
   else if (isRecord(value)) items = [value];
   // Models often omit the one-element batch wrapper, or send a bare edit next
   // to an empty batch. Treat the single edit as the intended payload.
-  if (required.every(field => parsed[field] !== undefined && parsed[field] !== null) && (!items || items.length === 0)) {
+  const hasRequired = required.every(field => parsed[field] !== undefined && parsed[field] !== null)
+    || (key === "nodes" && parsed.name !== undefined && parsed.name !== null);
+  if (hasRequired && (!items || items.length === 0)) {
     items = [parsed];
   }
   return (items ?? []).filter(isRecord);
@@ -65,8 +67,9 @@ function editItems(raw: unknown, key: "nodes" | "edges", required: readonly stri
 
 export function plannerNodeEdits(raw: unknown): PlannerNodeEdit[] {
   const edits: PlannerNodeEdit[] = [];
-  for (const item of editItems(raw, "nodes", ["name"])) {
-    const name = asText(item.name);
+  for (const item of editItems(raw, "nodes", ["id"])) {
+    // Persisted Planner transcripts may still contain the historical `name`.
+    const name = asText(item.id ?? item.name);
     if (!name) continue;
     edits.push({ name, task: asText(item.task) ?? "", delete: asBoolean(item.delete) ?? false });
   }

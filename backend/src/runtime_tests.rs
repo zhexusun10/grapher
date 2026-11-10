@@ -2614,7 +2614,8 @@ fn dependency_chain_hands_off_one_workspace_and_earlier_node_messages_use_the_te
     let (_temp, _source, mut runtime) = setup(true, graph);
     let script = _temp.path().join("chain-agent.sh");
     fs::write(&script, r#"task=$(cat)
-echo "$GRAPHER_NODE_NAME" > "$GRAPHER_NODE_NAME.txt"
+case "$task" in a|b|c) name="$task" ;; *) name=a ;; esac
+echo "$name" > "$name.txt"
 if printf '%s' "$task" | grep -q 'add a final adjustment'; then echo 'shared final tree' > from-a-followup.txt; fi
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Completed"}]}}'
 "#).unwrap();

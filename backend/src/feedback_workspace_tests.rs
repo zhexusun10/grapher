@@ -42,9 +42,17 @@ fn configured(names: &[&str], limit: usize) -> (TempDir, PathBuf, Runtime) {
     fs::create_dir(source.join(".cache")).unwrap();
     fs::write(source.join(".cache/source"), "source cache").unwrap();
     let script = temp.path().join("agent.sh");
-    fs::write(&script, r#"cat >/dev/null
+    fs::write(&script, r#"task=$(cat)
 mkdir -p .cache
-case "$GRAPHER_NODE_NAME" in
+case "$task" in
+  review_accept*) name=review_accept ;;
+  review_one*) name=review_one ;;
+  review_two*) name=review_two ;;
+  review*) name=review ;;
+  related*) name=related ;;
+  *) name=owner ;;
+esac
+case "$name" in
   owner)
     if [ -f reports/audit.json ]; then
       test "$(cat .cache/review)" = evidence || exit 17
@@ -58,9 +66,9 @@ case "$GRAPHER_NODE_NAME" in
     test -f .cache/source && test -f .cache/owner || exit 18
     mkdir -p reports
     echo evidence > reports/audit.json
-    echo evidence > "reports/$GRAPHER_NODE_NAME.txt"
+    echo evidence > "reports/$name.txt"
     echo evidence > .cache/review
-    if grep -q fixed owner.txt || [ "$GRAPHER_NODE_NAME" = review_accept ]; then verdict=ACCEPT; else verdict=FEEDBACK; fi
+    if grep -q fixed owner.txt || [ "$name" = review_accept ]; then verdict=ACCEPT; else verdict=FEEDBACK; fi
     printf '%s\n' "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Read reports/audit.json.\\n<$verdict>\"}]}}"
     exit 0 ;;
   related)
@@ -673,7 +681,7 @@ fn publication_writes_ordinary_files_back_to_source_through_git() {
 fn post_publication_direct_edit_runs_in_source_and_failed_retry_uses_graph_worktree() {
     let (temp, source, mut runtime) = configured(&["owner", "related"], 0);
     let script = temp.path().join("agent.sh");
-    fs::write(&script, "cat >/dev/null\necho first > .cache/$GRAPHER_NODE_NAME\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\"}]}}'\n").unwrap();
+    fs::write(&script, "task=$(cat)\necho first > .cache/$task\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\"}]}}'\n").unwrap();
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
     let related = runtime.jobs().unwrap().remove(0);
@@ -758,7 +766,7 @@ fn fan_in_tracked_file_conflict_invokes_git_merger() {
     let (temp, source, mut runtime) = setup(true, candidate.clone());
     fs::write(source.join(".gitignore"), ".cache/\n").unwrap();
     let script = temp.path().join("agent.sh");
-    fs::write(&script, "cat >/dev/null\nmkdir -p .cache\nif [ \"$GRAPHER_NODE_NAME\" != join ]; then echo \"$GRAPHER_NODE_NAME\" > .cache/shared; fi\necho completed > \"$GRAPHER_NODE_NAME.txt\"\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\"}]}}'\n").unwrap();
+    fs::write(&script, "task=$(cat)\nmkdir -p .cache\nif [ \"$task\" != join ]; then echo \"$task\" > .cache/shared; fi\necho completed > \"$task.txt\"\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\"}]}}'\n").unwrap();
     let config = runtime.state.config.as_mut().unwrap();
     config.pi_command = "/bin/sh".into();
     config.pi_args = vec![script.to_string_lossy().into()];
@@ -791,7 +799,7 @@ fn terminal_node_followup_uses_the_shared_workspace_and_preserves_its_conversati
     let repair = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &repair);
     runtime
-        .intervene("review", "additional inspection")
+        .intervene("review", "review additional inspection")
         .unwrap();
     let next = runtime.jobs().unwrap().remove(0);
     assert_eq!(next.execution.worktree, repair.execution.worktree);
@@ -1272,7 +1280,7 @@ fn malformed_feedback_verdict_pushes_a_synchronous_repair_turn_instead_of_failin
     let (_temp, mut runtime) = verdict_runtime(
         &["owner", "review"],
         r##"task=$(cat)
-if [ "$GRAPHER_NODE_NAME" = owner ]; then
+if [ "$task" = owner ]; then
   echo initial > owner.txt
   printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Completed"}]}}'
   exit 0
@@ -1336,7 +1344,7 @@ fn exhausted_feedback_repairs_still_fail_the_node_closed() {
     let (_temp, mut runtime) = verdict_runtime(
         &["owner", "review"],
         r##"task=$(cat)
-if [ "$GRAPHER_NODE_NAME" = owner ]; then
+if [ "$task" = owner ]; then
   echo initial > owner.txt
   printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Completed"}]}}'
   exit 0
@@ -1385,7 +1393,7 @@ fn pending_feedback_stops_running_scope_work_instead_of_waiting_for_it() {
     let (_temp, mut runtime) = verdict_runtime(
         &["owner", "review", "related"],
         r##"task=$(cat)
-if [ "$GRAPHER_NODE_NAME" = owner ]; then
+if [ "$task" = owner ]; then
   echo initial > owner.txt
 fi
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Review notes\n<FEEDBACK>"}]}}'

@@ -251,6 +251,9 @@ fn prepare_warm_node(
         .env_remove("PI_REASONING_LEVEL")
         .env_remove("PI_SESSION_ID")
         .env_remove("PI_SESSION_FILE")
+        // A warmed Serial session is not bound from the later launch command.
+        // It must never inherit a surrounding feedback node's protocol flag.
+        .env_remove("GRAPHER_FEEDBACK_SOURCE")
         .env("GRAPHER_MODE", "node")
         .env("GRAPHER_EXECUTION_KIND", "source")
         .env("GRAPHER_SOURCE_ALIAS", &key.5)
@@ -1046,9 +1049,14 @@ fn run_pi_with_timeout(
     command.env_remove("PI_SESSION_ID");
     command.env_remove("PI_SESSION_FILE");
     crate::native::clear_git_environment(&mut command);
+    // Only an explicit per-turn binding may activate the feedback protocol.
+    command.env_remove("GRAPHER_FEEDBACK_SOURCE");
     for (key, value) in &request.environment {
         command.env(key, value);
     }
+    // Never pass a node label, even when Grapher was started inside another
+    // execution or a role-specific request accidentally includes one.
+    command.env_remove("GRAPHER_NODE_NAME");
     #[cfg(not(feature = "fixture"))]
     if !crate::path_identity::same_path(request.cwd, Path::new(&config.repository)) {
         // Git environment cleanup above must not erase the external project
@@ -2125,6 +2133,8 @@ fn run_resumed(
     )
 }
 
+// Legacy sessions stored this suffix in user messages. Keep it for history
+// editing and replay; new feedback-source turns carry the rule in Pi instead.
 pub(crate) const FEEDBACK_INSTRUCTIONS: &str = "\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker.";
 
 /// A malformed verdict is a protocol error, not a node failure: the runtime
@@ -2153,8 +2163,6 @@ pub fn execute(
     }
     let task = if continuation {
         "__grapher_continue_interrupted__".to_string()
-    } else if feedback_source {
-        format!("{task}{FEEDBACK_INSTRUCTIONS}")
     } else {
         task.into()
     };
@@ -2199,8 +2207,8 @@ pub fn execute(
             environment: vec![
                 ("GRAPHER_MODE", "node".into()),
                 ("GRAPHER_NODE_EXECUTION_ID", execution.id.clone()),
-                ("GRAPHER_NODE_NAME", execution.node.clone()),
                 ("GRAPHER_CONTINUE_INTERRUPTED", continuation.to_string()),
+                ("GRAPHER_FEEDBACK_SOURCE", feedback_source.to_string()),
                 ("GRAPHER_ENVIRONMENT_DATA", root.to_string_lossy().into()),
             ],
             system_prompt: None,
@@ -2315,13 +2323,14 @@ mod tests {
 
     #[cfg(feature = "fixture")]
     #[test]
-    fn feedback_source_prompt_uses_generic_feedback_marker() {
+    fn feedback_source_signal_does_not_modify_user_message() {
         let _guard = lock_env();
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("capture_task.py");
-        fs::write(&script, r#"import json, sys
+        fs::write(&script, r#"import json, os, sys
+assert 'GRAPHER_NODE_NAME' not in os.environ, 'node identity must not reach the agent process'
 text = sys.stdin.read()
-print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':text}]}}), flush=True)
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':json.dumps({'task':text,'feedback':os.environ.get('GRAPHER_FEEDBACK_SOURCE')})}]}}), flush=True)
 "#).unwrap();
         let config = Config {
             environment: None,
@@ -2373,11 +2382,9 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
                 |_| {},
             )
             .unwrap();
-            if feedback_source {
-                assert_eq!(captured, format!("{task}\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker."));
-            } else {
-                assert_eq!(captured, task);
-            }
+            let captured: serde_json::Value = serde_json::from_str(&captured).unwrap();
+            assert_eq!(captured["task"], task);
+            assert_eq!(captured["feedback"], feedback_source.to_string());
         }
     }
 
@@ -2409,10 +2416,24 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
     #[ignore = "requires an isolated real Pi process and warm-node slot"]
     fn serial_node_prewarm_reuses_session_and_rejects_modified_history() {
         use std::io::Read;
+        let _guard = lock_env();
         let temp = tempfile::tempdir().unwrap();
         invalidate_warm_node();
         let repository = temp.path().join("repository");
         fs::create_dir(&repository).unwrap();
+        // The warm Pi process does not receive the subsequent request's env.
+        // Observe what an actual extension sees when the backend inherited a
+        // feedback-source flag from its parent.
+        let extensions = repository.join(".pi").join("extensions");
+        fs::create_dir_all(&extensions).unwrap();
+        let marker = temp.path().join("feedback-env.txt");
+        fs::write(
+            extensions.join("feedback-env.ts"),
+            format!(
+                "import {{ writeFileSync }} from 'node:fs';\nexport default function() {{ writeFileSync({}, process.env.GRAPHER_FEEDBACK_SOURCE ?? 'cleared'); }}\n",
+                serde_json::to_string(&marker.to_string_lossy()).unwrap()
+            ),
+        ).unwrap();
         let session_dir = temp.path().join("sessions");
         fs::create_dir(&session_dir).unwrap();
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -2439,6 +2460,8 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             auto_approve: false,
             role_models: Default::default(),
         };
+        let inherited_feedback = std::env::var_os("GRAPHER_FEEDBACK_SOURCE");
+        std::env::set_var("GRAPHER_FEEDBACK_SOURCE", "true");
         warm_node(
             config.clone(),
             repository.clone(),
@@ -2446,6 +2469,12 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             session_id.clone(),
         );
         assert!(WARM_NODE.get().unwrap().wait_idle(Duration::from_secs(30)));
+        if let Some(value) = inherited_feedback {
+            std::env::set_var("GRAPHER_FEEDBACK_SOURCE", value);
+        } else {
+            std::env::remove_var("GRAPHER_FEEDBACK_SOURCE");
+        }
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "cleared");
         let mut other = config.clone();
         other.model = "other/model".into();
         assert!(claim_warm_node(&other, &repository, &session_dir, &session_id).is_none());

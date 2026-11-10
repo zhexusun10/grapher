@@ -282,6 +282,7 @@ test("first-launch discovery cannot be overwritten by an older settings response
     await nodeModel(page).selectOption("test/new");
     await page.locator(".save-config-btn").click();
     await until(() => !!saving);
+    assert.equal(saving.config.maxFeedback, 8, "saving upgrades the legacy browser and bootstrap budget");
     await discovery.fulfill({ json: { result: { ...info, path: "/discovered" } } });
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_config")).repository === "/discovered");
     await saving.route.fulfill({ json: { result: { ...fresh, config: saving.config } } });

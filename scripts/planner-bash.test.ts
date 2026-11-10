@@ -188,8 +188,10 @@ test('Planner Bash never exposes Grapher control paths to the model shell', { ti
   const previousXdgCache = process.env.XDG_CACHE_HOME;
   const previousAskpass = process.env.GIT_ASKPASS;
   const previousAskpassNode = process.env.VSCODE_GIT_ASKPASS_NODE;
+  const previousNodeName = process.env.GRAPHER_NODE_NAME;
   try {
     process.env.GRAPHER_CACHE_DIR = cache;
+    process.env.GRAPHER_NODE_NAME = 'private-node-label';
     // Control the scratch base: modelShellScratch prefers XDG_CACHE_HOME.
     delete process.env.XDG_CACHE_HOME;
     // The host Git credential helper must survive so private-remote auth works.
@@ -225,6 +227,8 @@ test('Planner Bash never exposes Grapher control paths to the model shell', { ti
     else process.env.GIT_ASKPASS = previousAskpass;
     if (previousAskpassNode === undefined) delete process.env.VSCODE_GIT_ASKPASS_NODE;
     else process.env.VSCODE_GIT_ASKPASS_NODE = previousAskpassNode;
+    if (previousNodeName === undefined) delete process.env.GRAPHER_NODE_NAME;
+    else process.env.GRAPHER_NODE_NAME = previousNodeName;
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
     await rm(cache, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
   }
@@ -242,11 +246,14 @@ test('the model shell never receives Grapher data/state or install paths', () =>
     GRAPHER_ENVIRONMENT_DISCOVERY: 'C:\\run\\data\\sessions\\abc\\observer.json',
     GRAPHER_ENVIRONMENT_HELPER: 'C:\\install\\grapher.exe',
     GRAPHER_COMPILER_PATH: 'C:\\install\\grapher.exe',
+    GRAPHER_NODE_NAME: 'review',
+    grapher_node_execution_id: 'execution-123',
     GRAPHER_ENVIRONMENT_DATA: '\\\\?\\C:\\run\\data',
     PI_SESSION_FILE: 'C:\\run\\data\\sessions\\abc\\session.jsonl',
     PI_CODING_AGENT_DIR: 'C:\\Users\\user\\.grapher\\pi-agent',
     PI_SESSION_ID: 'abc-session',
     PI_MODEL: 'example/model',
+    PROJECT_SETTING: 'project-value',
     GIT_ASKPASS: 'C:\\ide\\git\\askpass.sh',
     VSCODE_GIT_ASKPASS_NODE: 'C:\\ide\\node.exe',
     ANTIGRAVITY_CLI_ALIAS: 'agy-ide',
@@ -261,6 +268,7 @@ test('the model shell never receives Grapher data/state or install paths', () =>
   assert.equal(env.GIT_ASKPASS, 'C:\\ide\\git\\askpass.sh', 'the host credential helper must stay usable');
   assert.equal(env.VSCODE_GIT_ASKPASS_NODE, 'C:\\ide\\node.exe', 'the askpass script needs its node binding');
   assert.equal(env.PI_MODEL, 'example/model', 'PI_* metadata without a path is kept');
+  assert.equal(env.PROJECT_SETTING, 'project-value', 'ordinary project environment stays available');
   assert.equal(env.HOME, 'C:/run/workspaces/.grapher-worktrees/run/.grapher-state/abc/process/.agent-home');
 });
 
