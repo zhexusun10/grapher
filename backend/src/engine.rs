@@ -2220,6 +2220,10 @@ pub fn execute(
     root: &Path,
     on_output: impl FnMut(String),
 ) -> Result<String, String> {
+    #[cfg(feature = "fixture")]
+    if config.engine == crate::fixture::ENGINE {
+        return crate::fixture::execute(execution, task, feedback_source, on_output);
+    }
     if agent_kind == AgentKind::Serial
         && !source_native_agent(
             PiRole::NodeAgent,
@@ -2231,10 +2235,6 @@ pub fn execute(
         return Err(
             "Serial Agent requires its source project and cannot use a managed environment".into(),
         );
-    }
-    #[cfg(feature = "fixture")]
-    if config.engine == crate::fixture::ENGINE {
-        return crate::fixture::execute(execution, task, feedback_source, on_output);
     }
     let task = if continuation {
         "__grapher_continue_interrupted__".to_string()

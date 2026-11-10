@@ -124,7 +124,7 @@ test('Auto refills during routing and older completions cannot revert a newly co
       roleModels: { partitioner: { model: 'prewarm-test/router', thinkingLevel: 'off' } } };
     await api('save_config', { config });
     const readyCount = () => (diagnostics.match(/Partitioner prewarm ready in /g) || []).length;
-    await until(() => readyCount() >= 1 && diagnostics.includes('Planner prewarm ready in ') && diagnostics.includes('Serial prewarm ready in '),
+    await until(() => readyCount() >= 1 && diagnostics.includes('Planner prewarm ready in ') && diagnostics.includes('NodeAgent prewarm ready in '),
       'All three source roles did not become process-ready');
     assert.deepEqual(requests, [], 'preloading must not make model calls');
     const catalog = await api('provider_auth', { version: 1, operation: 'catalog', refresh: false });
