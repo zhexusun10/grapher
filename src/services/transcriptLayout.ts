@@ -7,15 +7,42 @@ export function visibleTranscriptRows(rows: TranscriptItem[], starts = new Map<s
   const blank = (item: TranscriptItem) => item.type === "text" && item.role === "assistant" &&
     !item.content?.trim() && !item.images?.length && !item.files?.length;
   const first = rows.findIndex(blank);
-  if (first < 0) return { rows, starts };
-
-  const visible = rows.slice(0, first);
-  const indices = Array.from({ length: first + 1 }, (_, index) => index);
-  for (let index = first; index < rows.length; index++) {
-    if (!blank(rows[index])) visible.push(rows[index]);
-    indices.push(visible.length);
+  const visible = first < 0 ? rows : rows.filter(item => !blank(item));
+  let visibleStarts = starts;
+  if (first >= 0) {
+    const indices = Array.from({ length: first + 1 }, (_, index) => index);
+    for (let index = first; index < rows.length; index++) {
+      if (!blank(rows[index])) indices.push(indices[indices.length - 1] + 1);
+      else indices.push(indices[indices.length - 1]);
+    }
+    visibleStarts = new Map([...starts].map(([source, index]) => [source, indices[index]]));
   }
-  return { rows: visible, starts: new Map([...starts].map(([source, index]) => [source, indices[index]])) };
+
+  const isError = (item: TranscriptItem) => (item.type === "system" || (item.type === "text" && item.role === "assistant")) &&
+    (item.isError || item.status === "error");
+  const boundaries = new Set(visibleStarts.values());
+  const grouped: TranscriptItem[] = [];
+  const collapsedRanges: Array<{ start: number; end: number }> = [];
+  for (let index = 0; index < visible.length;) {
+    if (!isError(visible[index])) {
+      grouped.push(visible[index++]);
+      continue;
+    }
+    let end = index + 1;
+    while (end < visible.length && !boundaries.has(end) && isError(visible[end])) end++;
+    if (end - index > 1) {
+      grouped.push({ ...visible[index], errorItems: visible.slice(index, end) });
+      collapsedRanges.push({ start: index, end });
+    } else {
+      grouped.push(visible[index]);
+    }
+    index = end;
+  }
+
+  if (!collapsedRanges.length) return { rows: visible, starts: visibleStarts };
+  const remappedStarts = new Map([...visibleStarts].map(([source, index]) => [source,
+    index - collapsedRanges.reduce((removed, range) => removed + (range.end <= index ? range.end - range.start - 1 : 0), 0)]));
+  return { rows: grouped, starts: remappedStarts };
 }
 
 export function estimateTranscriptRowHeight(id: string): number {

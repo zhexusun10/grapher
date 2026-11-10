@@ -10,6 +10,7 @@ import { upsertToolCall } from "../src/services/toolCallUpdates.ts";
 import { injectStreamingCursor } from "../src/components/MarkdownRenderer.tsx";
 import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.tsx";
 import { PlannerTranscript } from "../src/components/PlannerTranscript.tsx";
+import { TranscriptErrorCard } from "../src/components/TranscriptErrorCard.tsx";
 import { closeThinkingItems, finalizeThinkingItems, splitThinkingTagDelta, updateThinkingItems } from "../src/services/thinkingTranscript.ts";
 import { appendPlannerError, applyPartitionerDelta, applyPlannerTextDelta, initialPlannerStream } from "../src/services/plannerStream.ts";
 import { setAutoExpandCot, readAutoExpandCot, autoExpandCotEnabled, AUTO_EXPAND_COT_KEY } from "../src/services/displayPreferences.ts";
@@ -375,6 +376,34 @@ test("active agent conversation auto-opens running COT while settled history sta
     assert.match(live, /<span class="thinking-title">Chain of Thought<\/span>/);
     assert.doesNotMatch(live, /思维链推理/);
   });
+});
+
+test("consecutive transcript errors render as a compact counted card with full expandable details", () => {
+  const items: TranscriptItem[] = [
+    { id: "pi-error-1", type: "text", role: "assistant", content: "FIRST_FULL_ERROR_DETAIL", status: "error", isError: true },
+    { id: "pi-error-2", type: "system", role: "assistant", content: "LATEST_ERROR_PREVIEW", status: "error", isError: true },
+  ];
+  const planner = renderToStaticMarkup(createElement(PlannerTranscript, {
+    items, isPlanning: false, locked: false, draft: "",
+    onDraftChange: () => {}, onSendMessage: () => false, onUserResize: () => {},
+  }));
+  assert.match(planner, /data-testid="transcript-error-card"/);
+  assert.match(planner, /aria-label="复制错误"/);
+  assert.match(planner, /LATEST_ERROR_PREVIEW/);
+  assert.doesNotMatch(planner, /FIRST_FULL_ERROR_DETAIL/, "collapsed card keeps full details out of the transcript");
+  assert.ok(planner.includes(t(" - {0}", 2)));
+
+  const single = renderToStaticMarkup(createElement(TranscriptErrorCard, { item: items[0] }));
+  assert.match(single, /FIRST_FULL_ERROR_DETAIL/);
+  assert.match(single, /aria-label="复制错误"/);
+  assert.doesNotMatch(single, /transcript-error-count/, "a single error has no count label");
+  assert.doesNotMatch(single, /aria-expanded|transcript-error-details|tool-expand-chevron/, "a single error is not expandable");
+
+  const expanded = renderToStaticMarkup(createElement(TranscriptErrorCard, {
+    item: { ...items[0], errorItems: items }, expanded: true,
+  }));
+  assert.match(expanded, /FIRST_FULL_ERROR_DETAIL/);
+  assert.match(expanded, /LATEST_ERROR_PREVIEW/);
 });
 
 test("chain of thought stays folded while watching when the display option is disabled", () => {

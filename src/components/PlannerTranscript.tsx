@@ -6,6 +6,7 @@ import { VirtualizedList } from "./VirtualizedList";
 import { visibleTranscriptRows } from "../services/transcriptLayout";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
+import { TranscriptErrorCard } from "./TranscriptErrorCard";
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
 import { AnimatedUserTurn } from "./AnimatedUserTurn";
 
@@ -35,6 +36,10 @@ const PlannerRow = memo(function PlannerRow({ item, streaming, locked, editing, 
   </AnimatedUserTurn>;
   if (item.type === "divider") return <div className="transcript-divider" role="separator" aria-hidden="true" />;
   if (item.type === "tool_call") return <ToolCallCard item={item} expanded={expanded} onExpandedChange={expand} />;
+  if (item.errorItems || (item.type === "system" && (item.isError || item.status === "error")) ||
+      (item.type === "text" && item.role === "assistant" && (item.isError || item.status === "error"))) {
+    return <TranscriptErrorCard item={item} expanded={expanded} onExpandedChange={expand} />;
+  }
   if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}>
     <span className={`system-pill${item.isError && item.role === "assistant" ? " conversation-error-message" : ""}`}>{item.content}</span>
   </div>;

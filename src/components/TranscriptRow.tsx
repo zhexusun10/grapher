@@ -2,6 +2,7 @@ import React, { memo, useCallback } from "react";
 import type { FileAttachment, ImageAttachment, TranscriptItem } from "../types";
 import { ToolCallCard } from "./ToolCallCard";
 import { ThinkingCard } from "./ThinkingCard";
+import { TranscriptErrorCard } from "./TranscriptErrorCard";
 import { EditableUserBubble, StreamingAssistantBubble } from "./views/ChatBubbles";
 import { AnimatedUserTurn } from "./AnimatedUserTurn";
 import { motion } from "motion/react";
@@ -24,6 +25,9 @@ export const TranscriptRow = memo(function TranscriptRow({ item, expanded, onExp
   if (item.type === "thinking") return <ThinkingCard item={item} isStreaming={item.status === "running"}
     title="Chain of Thought"
     defaultExpanded={item.defaultExpanded ?? (item.status === "running")} autoExpandWhileStreaming={true} expanded={expanded} onExpandedChange={expand} />;
+  if (item.errorItems || ((item.type === "text" || item.type === "system") && (item.isError || item.status === "error"))) {
+    return <TranscriptErrorCard item={item} expanded={expanded} onExpandedChange={expand} />;
+  }
   if (item.type === "system") return <div className={`transcript-row system-row ${item.isError ? "error" : ""}`}>
     <span className={`system-pill${item.isError && item.role === "assistant" ? " conversation-error-message" : ""}`}>{item.content}</span>
   </div>;

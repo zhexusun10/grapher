@@ -67,6 +67,25 @@ test("blank assistant rows do not consume layout or move revision boundaries", (
   assert.equal(visibleTranscriptRows(alreadyVisible).rows, alreadyVisible, "unchanged rows retain their identity");
 });
 
+test("consecutive transcript errors fold into one display row without mutating source rows", () => {
+  const errors: TranscriptItem[] = [
+    { id: "before", type: "text", role: "assistant", content: "before" },
+    { id: "err-1", type: "system", role: "assistant", isError: true, content: "503 first" },
+    { id: "err-2", type: "text", role: "assistant", status: "error", content: "503 second" },
+    { id: "err-3", type: "system", isError: true, content: "502 latest" },
+    { id: "after", type: "text", role: "assistant", content: "after" },
+  ];
+  const projected = visibleTranscriptRows(errors, new Map([["later-source", 4]]));
+  assert.deepEqual(projected.rows.map(row => row.id), ["before", "err-1", "after"]);
+  assert.deepEqual(projected.rows[1].errorItems?.map(row => row.content), ["503 first", "503 second", "502 latest"]);
+  assert.deepEqual([...projected.starts], [["later-source", 2]]);
+  assert.equal(errors[1].errorItems, undefined, "projection does not annotate parser-owned rows");
+
+  const split = visibleTranscriptRows(errors.slice(1, 3), new Map([["next-revision", 1]]));
+  assert.equal(split.rows.length, 2, "errors from separate transcript revisions stay separate");
+  assert.equal(split.rows.some(row => row.errorItems), false);
+});
+
 test("prepend anchors use retained row identity and ignore simultaneous live growth", () => {
   const before = ["a", "b", "c"];
   const after = ["old-1", "old-2", ...before, "live-1", "live-2"];

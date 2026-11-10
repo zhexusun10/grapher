@@ -351,6 +351,8 @@ export interface TranscriptItem {
   argsTruncated?: boolean;
   result?: string;
   isError?: boolean;
+  /** Consecutive transcript failures folded into this display row. */
+  errorItems?: TranscriptItem[];
   status?: "running" | "success" | "error" | "interrupted";
   exitCode?: number | null;
   /** Tool-reported result truncation, never the bounded UI display preview. */
