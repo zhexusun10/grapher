@@ -98,9 +98,9 @@ export default function (pi: ExtensionAPI) {
       let changed = false;
       const messages = event.messages.map(message => {
         if (message.role !== 'system' || typeof message.sections?.rules !== 'string') return message;
-        const rules = message.sections.rules.replace(
-          /^- Show file paths clearly when working with files\r?$/gm, `- ${pathGuideline}`,
-        );
+        const rules = message.sections.rules
+          .replace(/^- Be concise in your responses(?:\r?\n|$)/gm, '')
+          .replace(/^- Show file paths clearly when working with files\r?$/gm, `- ${pathGuideline}`);
         if (rules === message.sections.rules) return message;
         changed = true;
         return { ...message, sections: { ...message.sections, rules } };

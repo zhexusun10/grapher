@@ -186,10 +186,11 @@ test('execution path guidance directly follows existing prompts without a blank 
   }
 });
 
-test('graph node replaces the default rule in model requests without changing other roles or stored messages', async () => {
+test('graph node removes the concise rule and replaces the default rule in model requests without changing other roles or stored messages', async () => {
   const keys = ['GRAPHER_MODE', 'GRAPHER_EXECUTION_KIND', 'GRAPHER_ORIGINAL_ROOT', 'GRAPHER_SOURCE_ALIAS', 'GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS'];
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   const oldRule = '- Show file paths clearly when working with files';
+  const conciseRule = '- Be concise in your responses';
   const newRule = '- Use project-root-relative paths in Bash commands and project files.';
   try {
     delete process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS;
@@ -212,7 +213,7 @@ test('graph node replaces the default rule in model requests without changing ot
       const messages = [
         { role: 'system', ...state, timestamp: 1 },
         { role: 'user', content: oldRule, timestamp: 2 },
-        { role: 'system', content: '', sections: { rules: `<rules>\n${oldRule}\n</rules>`, obsolete: null }, timestamp: 3 },
+        { role: 'system', content: '', sections: { rules: `<rules>\n${oldRule}\n${conciseRule}\n</rules>`, obsolete: null }, timestamp: 3 },
         { role: 'system', content: `Custom prompt: ${oldRule}`, timestamp: 4 },
       ];
       const snapshot = structuredClone(messages);
@@ -220,9 +221,11 @@ test('graph node replaces the default rule in model requests without changing ot
       assert.deepEqual(messages, snapshot, 'request projection must not mutate stored messages');
       assert.ok(result.messages[0].sections.rules.includes(newRule));
       assert.ok(!result.messages[0].sections.rules.includes(oldRule));
+      assert.ok(!result.messages[0].sections.rules.includes(conciseRule));
       assert.ok(result.messages[0].sections.project_context.includes(oldRule));
       assert.strictEqual(result.messages[1], messages[1]);
       assert.ok(result.messages[2].sections.rules.includes(newRule));
+      assert.ok(!result.messages[2].sections.rules.includes(conciseRule));
       assert.equal(result.messages[2].sections.obsolete, null);
       assert.strictEqual(result.messages[3], messages[3]);
       assert.equal(await hook({ messages: result.messages }), undefined, 'projection is idempotent');
