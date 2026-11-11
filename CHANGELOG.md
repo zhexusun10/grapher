@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-11-11
+
+### Changed
+
+- Refined Graph Node Agent prompt rules by removing the unnecessary concision directive.
+
+### Added
+
+- Added transcript API error cards with grouped consecutive errors, expandable details, and a copy action.
+
 ## [1.7.0] - 2026-11-10
 
 ### Changed
@@ -512,8 +522,8 @@ Baseline release. The changelog is restarted from the current codebase at v1.1.0
   - **Configurable**: Can be toggled on/off in Settings (`postTaskReview`, enabled by default).
   - **Loop engineering**: When combined with Auto Approve, creates a robust, closed-loop engineering cycle that autonomously plans, executes, verifies, and iterates until the Planner concludes.
 
-
-[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.6.2...HEAD
+[Unreleased]: https://github.com/zhexusun10/grapher/compare/v1.7.1...HEAD
+[1.7.1]: https://github.com/zhexusun10/grapher/compare/v1.7.0...v1.7.1
 [1.6.2]: https://github.com/zhexusun10/grapher/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/zhexusun10/grapher/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/zhexusun10/grapher/compare/v1.5.0...v1.6.0
