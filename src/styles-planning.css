@@ -602,7 +602,7 @@
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
-  padding: 9px 10px 9px 12px;
+  padding: 8px 12px;
   background: rgba(255, 255, 255, 0.015);
 }
 
@@ -632,8 +632,6 @@ button.transcript-error-toggle {
 
 .transcript-error-copy {
   flex-shrink: 0;
-  width: 26px;
-  height: 26px;
 }
 
 .transcript-error-title {
@@ -656,8 +654,8 @@ button.transcript-error-toggle {
 }
 
 .transcript-error-count {
-  font-size: 11px;
-  font-weight: 400;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .transcript-error-preview {
