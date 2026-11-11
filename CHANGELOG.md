@@ -510,7 +510,7 @@ This release is a refinement pass over the workbench rather than a new surface: 
 - Global extension deduplication kept only a scoped package's directory basename for skills, so `@a/tools` and `@b/tools` could shadow each other; skills now use the full package name. Native launch validation now resolves symlinks and compares filesystem identity, covering macOS `/var` aliases, symlinked environments and case-insensitive volumes.
 - Settings mirrored unrelated application errors, so a failed node or Planner action also appeared inside the modal; it now reports only its own save, language, provider-auth and extension-operation failures.
 
-## [1.1.0]
+## [1.1.0] 2026-09-12 - 2026-10-16
 
 Baseline release. The changelog is restarted from the current codebase at v1.1.0; this version is the reference point for future entries. Project development began on 2026-09-12.
 
