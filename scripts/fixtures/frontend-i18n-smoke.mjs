@@ -109,7 +109,22 @@ try {
     }
     if (name === "Sidebar") assert.ok(html.includes(t("暂无工作区")));
     if (name === "GraphWorkbench") {
-      if (props.activity) assert.ok(html.includes(t("正在复制节点工作区：{0}", "foundation_contract")), "activity status must render localized copy");
+      if (props.activity) {
+        for (const [phase, label] of [
+          [undefined, "正在复制节点工作区"],
+          ["compose", "正在准备节点工作区（合并上游结果）"],
+          ["conflict", "正在准备节点工作区（解决合并冲突）"],
+        ]) {
+          for (const nodes of [[], ["unique_workspace_one"], ["unique_workspace_one", "unique_workspace_two"]]) {
+            const statusHtml = renderToStaticMarkup(React.createElement(module[name], {
+              ...props, activity: [{ kind: "workspace_prepare", phase, nodes }],
+            }));
+            assert.ok(statusHtml.includes(t(label)), "activity status must render localized phase copy");
+            assert.ok(!statusHtml.includes("unique_workspace_"), "activity status must not list node names");
+            assert.doesNotMatch(statusHtml, /\(1\s*\/\s*1\)/, "a single workspace must not show progress");
+          }
+        }
+      }
       if (props.selectedMergerId) {
         assert.ok(html.includes(t("merger · {0}", "join")) || html.includes(t("publication merger")), "merger card heading must render localized copy");
         if (props.selectedMergerId === "merger-running") {

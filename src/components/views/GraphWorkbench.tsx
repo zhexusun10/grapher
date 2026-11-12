@@ -84,23 +84,16 @@ function activityStatusText(activity: RuntimeActivity[]): string | null {
   const byKind = (kind: string) => activity.find(item => item.kind === kind);
   const prepare = byKind("workspace_prepare");
   if (prepare) {
-    const nodes = prepare.nodes.join("、");
     // A preparation pass covers Git composition, conflict preparation and a
-    // full metadata verification, not only copying. Report the phase so a long
-    // merge/conflict step is not mistaken for a slow directory copy.
+    // full metadata verification, not only copying. Report the phase without
+    // listing nodes, which can make the status bar excessively wide.
     switch (prepare.phase) {
       case "compose":
-        return nodes
-          ? t("正在准备节点工作区（合并上游结果）：{0}", nodes)
-          : t("正在准备节点工作区（合并上游结果）");
+        return t("正在准备节点工作区（合并上游结果）");
       case "conflict":
-        return nodes
-          ? t("正在准备节点工作区（解决合并冲突）：{0}", nodes)
-          : t("正在准备节点工作区（解决合并冲突）");
+        return t("正在准备节点工作区（解决合并冲突）");
       default:
-        return nodes
-          ? t("正在复制节点工作区：{0}", nodes)
-          : t("正在复制节点工作区");
+        return t("正在复制节点工作区");
     }
   }
   if (byKind("source_materialize")) return t("正在建立临时 Git 快照（首次收录项目文件）");
