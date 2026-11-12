@@ -397,7 +397,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     name: "edge", label: "Graph edge",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     description:
-      "Create, replace, or delete directed edges between existing nodes. Only one edge per ordered pair. By default, A -> B makes B depend on A. B waits for A to complete and receives A's workspace state. Multiple dependencies' workspace states are merged before B runs. With feedback: true, B -> A lets B optionally send a feedback message to A, which must be an ancestor of B. Each feedback source has at most one target. When feedback is sent, A receives B's completed workspace state and feedback, and continues from A's own context to improve its previous work. A's descendants wait and run again using updated workspace state.",
+      "Create, replace, or delete directed edges between existing nodes. Only one edge per ordered pair. By default, the `to` node depends on the `from` node and waits for it to complete. Multiple dependencies' workspace states are merged before the `to` node runs. With feedback: true, the `from` node can optionally send a feedback message to the `to` node, which must be an ancestor of the `from` node. Each feedback source has at most one target. When feedback is sent, the target receives the source's completed workspace state and feedback, and continues from its own context to improve its previous work. The target's descendants wait and run again using updated workspace state.",
     parameters: Type.Object({
       edges: Type.Array(Type.Object({
         from: Type.String({ description: "Source node id" }),

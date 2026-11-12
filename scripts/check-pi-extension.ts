@@ -66,8 +66,12 @@ try {
     assert.equal(await contextHook({ messages: signedMessages }), undefined, "signed provider turns and their results remain untouched");
   }
   const edgeDescription = extension.tools.get("edge")!.definition.description;
+  assert.match(edgeDescription, /the `to` node depends on the `from` node and waits for it to complete/);
+  assert.match(edgeDescription, /Multiple dependencies' workspace states are merged before the `to` node runs/);
+  assert.match(edgeDescription, /the `from` node can optionally send a feedback message to the `to` node, which must be an ancestor of the `from` node/);
+  assert.match(edgeDescription, /the target receives the source's completed workspace state and feedback/);
   assert.match(edgeDescription, /feedback source (?:has at most one target|may have only one feedback target)/i);
-  assert.doesNotMatch(edgeDescription, /maxFeedback|retry budget|reviewer|ignored|non-Git|drain|fork/i);
+  assert.doesNotMatch(edgeDescription, /->|maxFeedback|retry budget|reviewer|ignored|non-Git|drain|fork/i);
   const context = { cwd: repository, sessionManager: { getSessionId: () => "planner-test", getSessionFile: () => undefined } } as unknown as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
     const tool = (extension.tools.get(name) ?? loaded.extensions[1].tools.get(name))!.definition;
