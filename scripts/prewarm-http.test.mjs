@@ -175,7 +175,8 @@ test('Auto refills during routing and older completions cannot revert a newly co
     // Windows has no Graph sandbox prerequisite. The direct source-role
     // contract tests Planner on every host without depending on bubblewrap.
     if (process.platform === 'win32') {
-      const graphState = await api('plan_goal', { goal: 'Create one node A without approving execution', config: nextConfig, mode: 'graph' });
+      const graphState = await api('plan_goal', { goal: 'Create one node A without approving execution',
+        config: { ...nextConfig, autoApprove: false }, mode: 'graph' });
       await assertReused(graphState, 'planner');
       assert.equal(graphState.graph.nodes[0].name, 'A');
       assert.equal(graphState.approved, false);

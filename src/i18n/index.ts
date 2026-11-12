@@ -115,7 +115,7 @@ function annotateProviderError(message: string, language: Locale): string {
 }
 
 const W303_SENT_REGEX =
-  /^(?:W303:\s*)?If\s+<FEEDBACK>\s+is\s+sent\s+from\s+(.+?)\s+to\s+(.+?),\s+these\s+nodes\s+will\s+rerun:\s*(.+?)\.\s*(.+?)\s+resumes\s+its\s+own\s+session\s+on\s+rework\.?$/i;
+  /^(?:W303:\s*)?If\s+<FEEDBACK>\s+is\s+sent\s+from\s+(.+?)\s+to\s+(.+?),\s+these\s+nodes\s+will\s+rerun:\s*(.+?)\.(?:\s*.+?\s+resumes\s+its\s+own\s+session\s+on\s+rework\.?)?$/i;
 
 // Older saved plans retain the original longer warning.
 const W303_REGEX =
@@ -136,7 +136,7 @@ export function localizePlanWarning(warning: string, language: Locale = locale):
   if (sent303) {
     return translate(
       language,
-      "若 {0} 向 {1} 发送 <FEEDBACK>，这些节点将重跑：{2}。{1} 返工时延续自己的会话。",
+      "若 {0} 向 {1} 发送 <FEEDBACK>，这些节点将重跑：{2}。",
       sent303[1],
       sent303[2],
       sent303[3]

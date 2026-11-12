@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provider sign-in panels now appear directly below the selected provider card or bound-credential row with an entrance animation and primary text colors. Bound credentials start collapsed when Settings reopens, and successful authentication collapses the supported-provider list after three seconds.
 - Simplified Provider credential cards and Settings copy, aligned credential action hover states, and kept catalog refresh progress in the Refresh button without shifting the panel or flashing Save. Actual saves retain their busy appearance and refresh failures remain visible.
 - Refreshed the English and Chinese README screenshots to match the current workbench.
+- Planner tool results now express ordinary edges as `from: [to]` adjacency lists. Feedback scope warnings are shorter and appear only when an edge edit adds the corresponding feedback route; existing saved warning formats still localize correctly.
 
 ### Fixed
 
@@ -54,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provider search no longer hides an active login prompt, exiting login panels no longer accept input, and closing Settings immediately stops late authorization pages from opening. Catalog refresh errors remain visible after the provider list automatically collapses.
 - Workspace preparation status no longer lists node names, preventing the bottom bar from expanding when many nodes prepare concurrently. Preparation phase labels remain visible without a progress counter (`src/components/views/GraphWorkbench.tsx`).
 - Resuming nodes and other generic workspace-preparation stages no longer claim files are being copied. Only an explicit backend `copy` phase displays the copying label; unknown or mixed stages display preparation.
+- Appending a Planner follow-up or review preserves mounted history, expanded rows and reading position even after global transcript-cache eviction. The live turn stays visible until its durable log is ready.
+- Updated regression fixtures to explicitly select manual approval and exercise private workspaces with three-node batches. Legacy scheduler tests retain their original persisted-event contract instead of accidentally testing new batch defaults.
 
 ## [1.7.1] - 2026-11-11
 

@@ -14,25 +14,27 @@ function stripDiagnosticCode(message: string): string {
 }
 
 function topology(graph: Graph) {
+  // Keep ordinary edges in the edge tool's from -> to direction, including
+  // every node so an empty list explicitly means no outgoing ordinary edges.
   // Map is safe for arbitrary node names, including __proto__ and constructor.
-  const directDependencies = new Map(graph.nodes.map(node => [node.name, [] as string[]]));
+  const ordinaryTo = new Map(graph.nodes.map(node => [node.name, [] as string[]]));
   const feedbackTo = new Map<string, string>();
   const unrepresentedEdges: Graph["edges"] = [];
   for (const edge of graph.edges) {
     // Valid graphs always have known endpoints and at most one feedback target
     // per source. Preserve anomalous saved/legacy edges rather than hiding them
     // if a rejected edit has to report an invalid pre-existing candidate.
-    if (!directDependencies.has(edge.from) || !directDependencies.has(edge.to)
+    if (!ordinaryTo.has(edge.from) || !ordinaryTo.has(edge.to)
       || (edge.feedback && feedbackTo.has(edge.from))) {
       unrepresentedEdges.push(edge);
     } else if (edge.feedback) {
       feedbackTo.set(edge.from, edge.to);
     } else {
-      directDependencies.get(edge.to)!.push(edge.from);
+      ordinaryTo.get(edge.from)!.push(edge.to);
     }
   }
   return {
-    directDependencies: Object.fromEntries(directDependencies),
+    "from: [to]": Object.fromEntries(ordinaryTo),
     feedbackTo: Object.fromEntries(feedbackTo),
     ...(unrepresentedEdges.length ? { unrepresentedEdges } : {}),
   };
@@ -350,6 +352,17 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     if (output.diagnostics?.length) return rejected(output.diagnostics);
     if (!output.plan) return rejected([{ code: "compiler-response", message: "Compiler returned no plan." }]);
     writeFileSync(graphPath, JSON.stringify(graph));
+    // The compiler emits one W303 per feedback edge, in graph order. Pair by
+    // position rather than parsing messages: node ids may contain arbitrary text.
+    // Only newly added routes need a scope warning; keep other warnings intact.
+    const savedFeedback = new Set(saved.edges.filter(edge => edge.feedback)
+      .map(edge => JSON.stringify([edge.from, edge.to])));
+    const addedFeedback = graph.edges.filter(edge => edge.feedback)
+      .map(edge => !savedFeedback.has(JSON.stringify([edge.from, edge.to])));
+    let feedbackIndex = 0;
+    const warnings = (output.plan.warnings ?? []).filter((warning: string) =>
+      !warning.startsWith("W303:") || (kind === "edge" && addedFeedback[feedbackIndex++]))
+      .map(stripDiagnosticCode);
     // The first node batch has no edges yet, so its compiler roots merely repeat
     // every node and can be mistaken for the intended final roots. Later edits
     // expose the compiler's sorted list as rootNodes to make extra roots visible.
@@ -358,7 +371,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     return result(JSON.stringify({
       applied: true,
       topology: { ...(initialNodeBatch ? {} : { rootNodes: output.plan.rootNodes ?? output.plan.roots }), ...topology(graph) },
-      ...(output.plan.warnings?.length ? { warnings: output.plan.warnings.map(stripDiagnosticCode) } : {}),
+      ...(warnings.length ? { warnings } : {}),
     }));
   }
   // Argument errors happen before execute(), so no mutation or graph read has

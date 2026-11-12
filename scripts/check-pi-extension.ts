@@ -97,10 +97,10 @@ try {
         // Except for the initial node batch, report the compiler's sorted roots.
         ...(feedback.applied && !initialNodeBatch ? { rootNodes: saved.nodes.map((node: { name: string }) => node.name)
           .filter((name: string) => !consumed.has(name)).sort() } : {}),
-        directDependencies: Object.fromEntries(saved.nodes.map((node: { name: string }) => [
+        "from: [to]": Object.fromEntries(saved.nodes.map((node: { name: string }) => [
           node.name,
-          saved.edges.filter((edge: { to: string; feedback: boolean }) => !edge.feedback && edge.to === node.name)
-            .map((edge: { from: string }) => edge.from),
+          saved.edges.filter((edge: { from: string; feedback: boolean }) => !edge.feedback && edge.from === node.name)
+            .map((edge: { to: string }) => edge.to),
         ])),
         feedbackTo: Object.fromEntries(saved.edges.filter((edge: { feedback: boolean }) => edge.feedback)
           .map((edge: { from: string; to: string }) => [edge.from, edge.to])),
@@ -116,7 +116,7 @@ try {
   const node = (edit: Record<string, unknown>) => call("node", { nodes: [edit] });
   const edge = (edit: Record<string, unknown>) => call("edge", { edges: [edit] });
   const feedbackWarning = (from: string, to: string, nodes: string[]) =>
-    `If <FEEDBACK> is sent from ${from} to ${to}, these nodes will rerun: ${nodes.join(", ")}. ${to} resumes its own session on rework.`;
+    `If <FEEDBACK> is sent from ${from} to ${to}, these nodes will rerun: ${nodes.join(", ")}.`;
   // Verify the actual provider schema, then exercise nullable wire arguments
   // through Pi's validator and the real compiler (not direct execute alone).
   for (const name of ["node", "edge"]) {
@@ -217,10 +217,10 @@ try {
     "tolerant-bare", "tolerant-array", "tolerant-object", "tolerant-mixed", "tolerant-string",
   ].map(name => ({ name, delete: true })) })).content[0].text);
   assert.equal(cleanedTolerant.applied, true);
-  assert.deepEqual(cleanedTolerant.topology, { rootNodes: [], directDependencies: {}, feedbackTo: {} });
+  assert.deepEqual(cleanedTolerant.topology, { rootNodes: [], "from: [to]": {}, feedbackTo: {} });
 
   // Node names are arbitrary strings, not safe object-property identifiers.
-  // Direct dependencies, transitive ancestors and feedback remain distinct.
+  // Direct successors, transitive descendants and feedback remain distinct.
   const unusualNames = ["__proto__", "constructor", "toString", "任务•完成"];
   await call("node", { nodes: unusualNames.map(name => ({ name, task: `Work on ${name}` })) });
   const unusual = JSON.parse((await call("edge", { edges: [
@@ -229,12 +229,17 @@ try {
     { from: "__proto__", to: "toString" },
     { from: "任务•完成", to: "__proto__", feedback: true },
   ] })).content[0].text);
-  assert.deepEqual(unusual.topology.directDependencies["__proto__"], []);
+  assert.deepEqual(unusual.topology["from: [to]"]["__proto__"], ["constructor", "toString"],
+    "one source lists all direct targets, but not transitive descendants");
   assert.deepEqual(unusual.topology.rootNodes, ["__proto__"], "only the node with no ordinary parent is a root");
-  assert.deepEqual(unusual.topology.directDependencies.constructor, ["__proto__"]);
-  assert.deepEqual(unusual.topology.directDependencies["任务•完成"], ["constructor"],
-    "an ancestor must not be reported as a direct dependency");
+  assert.deepEqual(unusual.topology["from: [to]"].constructor, ["任务•完成"]);
+  assert.deepEqual(unusual.topology["from: [to]"].toString, []);
+  assert.deepEqual(unusual.topology["from: [to]"]["任务•完成"], [], "feedback is not an ordinary outgoing edge");
   assert.equal(unusual.topology.feedbackTo["任务•完成"], "__proto__");
+  const removedBranch = JSON.parse((await edge({ from: "__proto__", to: "toString", delete: true })).content[0].text);
+  assert.deepEqual(removedBranch.topology["from: [to]"]["__proto__"], ["constructor"],
+    "deleting one outgoing edge preserves the source's other targets");
+  assert.deepEqual(removedBranch.topology.rootNodes, ["__proto__", "toString"]);
   await call("node", { nodes: unusualNames.map(name => ({ name, delete: true })) });
 
   // Preserve unexpected pre-existing edges on a rejected edit instead of
@@ -253,7 +258,7 @@ try {
   const legacy = JSON.parse((await preparedCall("node", { name: "new", task: "new" })).content[0].text);
   assert.equal(legacy.applied, false);
   assert.deepEqual(legacy.topology, {
-    directDependencies: { a: [], b: ["a"], c: ["b"] },
+    "from: [to]": { a: ["b"], b: ["c"], c: [] },
     feedbackTo: { c: "a" },
     unrepresentedEdges: [invalidLegacy.edges[3], invalidLegacy.edges[4]],
   }, "a rejected edit describes the saved topology without a root list");
@@ -275,25 +280,25 @@ try {
   await node({ name: "nullable-build", task: null, delete: true });
   const emptyGraph = JSON.parse((await node({ name: "nullable-review", delete: true })).content[0].text);
   assert.equal(emptyGraph.applied, true, "Mutation checks are not final graph validation");
-  assert.deepEqual(emptyGraph.topology, { rootNodes: [], directDependencies: {}, feedbackTo: {} });
+  assert.deepEqual(emptyGraph.topology, { rootNodes: [], "from: [to]": {}, feedbackTo: {} });
   assert.equal(emptyGraph.warnings, undefined);
   const initialWarnings = JSON.parse((await call("node", { nodes: [
     { name: "initial-a", task: "Same task" }, { name: "initial-b", task: "Same task" },
   ] })).content[0].text);
   assert.deepEqual(initialWarnings.topology, {
-    directDependencies: { "initial-a": [], "initial-b": [] }, feedbackTo: {},
+    "from: [to]": { "initial-a": [], "initial-b": [] }, feedbackTo: {},
   });
   assert.deepEqual(initialWarnings.warnings, ["Nodes initial-a, initial-b have identical task text; they may duplicate work. Confirm that this is intentional."]);
   await call("node", { nodes: [{ name: "initial-a", delete: true }, { name: "initial-b", delete: true }] });
   const rejectedFirst = JSON.parse((await node({ name: "build" })).content[0].text);
   assert.equal(rejectedFirst.applied, false);
-  assert.deepEqual(rejectedFirst.topology, { directDependencies: {}, feedbackTo: {} });
+  assert.deepEqual(rejectedFirst.topology, { "from: [to]": {}, feedbackTo: {} });
   const firstMutation = await node({ name: "build", task: "Build it" });
   assert.deepEqual(Object.keys(firstMutation), ["content"]);
   const firstResult = JSON.parse(firstMutation.content[0].text);
   assert.deepEqual(firstResult, {
     applied: true,
-    topology: { directDependencies: { build: [] }, feedbackTo: {} },
+    topology: { "from: [to]": { build: [] }, feedbackTo: {} },
   });
   const secondMutation = JSON.parse((await node({ name: "review", task: "Review it" })).content[0].text);
   assert.deepEqual(secondMutation.topology.rootNodes, ["build", "review"], "Later node edits still expose current roots");
@@ -312,14 +317,13 @@ try {
     applied: true,
     topology: {
       rootNodes: ["build"],
-      directDependencies: { build: [], review: ["build"] },
+      "from: [to]": { build: ["review"], review: [] },
       feedbackTo: {},
     },
   });
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges[0].feedback, false);
-  // A node added without an edge becomes a second root. The short list must
-  // expose it directly, because scanning a 40-key map for an empty list hid
-  // exactly this case in a reported plan.
+  // A node added without an edge becomes a second root. Keep roots explicit:
+  // empty outgoing lists describe terminals or isolated nodes, not all roots.
   const secondRoot = JSON.parse((await node({ name: "leftover", task: "Leftover" })).content[0].text);
   assert.deepEqual(secondRoot.topology.rootNodes, ["build", "leftover"]);
   const linked = JSON.parse((await edge({ from: "build", to: "leftover" })).content[0].text);
@@ -361,7 +365,7 @@ try {
   assert.equal(repairedFeedback.applied, true);
   assert.deepEqual(repairedFeedback.topology, {
     rootNodes: ["build"],
-    directDependencies: { build: [], review: ["build"] },
+    "from: [to]": { build: ["review"], review: [] },
     feedbackTo: { review: "build" },
   });
   assert.deepEqual(repairedFeedback.warnings, [feedbackWarning("review", "build", ["build", "review"])], "Adding a feedback route replaces the missing-route warning with its conditional invalidation scope");
@@ -383,7 +387,7 @@ try {
     { role: "toolResult", toolName: "read", content: [{ type: "text", text: '{"name":"project data"}' }] },
   ] }), undefined, "Ordinary task and file contents are not rewritten");
   const deletedBuild = JSON.parse((await node({ name: "build", delete: true })).content[0].text);
-  assert.deepEqual(deletedBuild.topology, { rootNodes: ["review"], directDependencies: { review: [] }, feedbackTo: {} });
+  assert.deepEqual(deletedBuild.topology, { rootNodes: ["review"], "from: [to]": { review: [] }, feedbackTo: {} });
   assert.equal(deletedBuild.warnings.length, 1);
   assert.match(deletedBuild.warnings[0], /review mentions <FEEDBACK>/, "Deleting the feedback target removes the scope warning and exposes the missing-route warning again");
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
@@ -456,7 +460,7 @@ fn main() {
   const nodeBatch = JSON.parse((await call("node", { nodes: batchNodes })).content[0].text);
   assert.equal(nodeBatch.applied, true);
   assert.deepEqual(nodeBatch.topology, {
-    directDependencies: { contract: [], parser: [], search: [], integration: [], verification: [] },
+    "from: [to]": { contract: [], parser: [], search: [], integration: [], verification: [] },
     feedbackTo: {},
   });
   assert.equal(nodeBatch.warnings, undefined);
@@ -471,9 +475,9 @@ fn main() {
   assert.equal(batchResult.applied, true);
   assert.deepEqual(batchResult.topology, {
     rootNodes: ["contract"],
-    directDependencies: {
-      contract: [], parser: ["contract"], search: ["contract"],
-      integration: ["parser", "search"], verification: ["integration"],
+    "from: [to]": {
+      contract: ["parser", "search"], parser: ["integration"], search: ["integration"],
+      integration: ["verification"], verification: [],
     },
     feedbackTo: {},
   });
@@ -580,9 +584,9 @@ fn main() {
   assert.equal(rewired.applied, true);
   assert.deepEqual(rewired.topology, {
     rootNodes: ["parser"],
-    directDependencies: {
-      contract: ["parser"], parser: [], search: ["contract"],
-      integration: ["search"], verification: ["integration"],
+    "from: [to]": {
+      contract: ["search"], parser: ["contract"], search: ["integration"],
+      integration: ["verification"], verification: [],
     },
     feedbackTo: { verification: "parser" },
   });
@@ -607,9 +611,60 @@ fn main() {
   assert.ok(afterDeletion.edges.every((e: { from: string; to: string }) => e.from !== "contract" && e.to !== "contract"));
   // A dependency and its feedback route can be created in one edge batch.
   assert.equal(JSON.parse((await call("node", { nodes: [{ name: "fix", task: "Fix" }, { name: "check", task: "Check" }] })).content[0].text).applied, true);
-  assert.equal(JSON.parse((await call("edge", { edges: [
+  const addedBranch = JSON.parse((await call("edge", { edges: [
     { from: "check", to: "fix", feedback: true }, { from: "fix", to: "check" },
-  ] })).content[0].text).applied, true);
+  ] })).content[0].text);
+  assert.equal(addedBranch.applied, true);
+  assert.deepEqual(addedBranch.warnings, [feedbackWarning("check", "fix", ["check", "fix"])], "Existing feedback routes are not repeated when adding another branch");
+
+  // Feedback-scope warnings belong only to routes newly added by this call,
+  // not to node edits, dependency changes, or idempotent edge replacements.
+  const beforeIncrementalWarnings = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({
+    originalGoal: "Incremental warnings",
+    nodes: ["base", "review", "inspect", "ship", "unrelated"].map(name => ({ name, task: name })),
+    edges: [
+      { from: "base", to: "review", feedback: false },
+      { from: "review", to: "inspect", feedback: false },
+      { from: "inspect", to: "ship", feedback: false },
+      { from: "review", to: "base", feedback: true },
+    ],
+  }));
+  const nodeEdit = JSON.parse((await node({ id: "unrelated", task: "Updated unrelated task" })).content[0].text);
+  assert.equal(nodeEdit.warnings, undefined, "Node returns omit existing feedback-scope warnings");
+  const duplicateTaskWarning = "Nodes base, unrelated have identical task text; they may duplicate work. Confirm that this is intentional.";
+  assert.deepEqual(JSON.parse((await node({ id: "unrelated", task: "base" })).content[0].text).warnings, [duplicateTaskWarning]);
+  assert.deepEqual(JSON.parse((await edge({ from: "review", to: "base", feedback: true })).content[0].text).warnings, [duplicateTaskWarning], "Non-scope warnings remain on edge results");
+  await node({ id: "unrelated", task: "unrelated" });
+  const dependencyEdit = JSON.parse((await edge({ from: "ship", to: "unrelated" })).content[0].text);
+  assert.equal(dependencyEdit.warnings, undefined, "Even changed scopes of existing feedback edges are not repeated");
+  const beforeRejectedFeedback = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
+  const rejectedFeedback = JSON.parse((await call("edge", { edges: [
+    { from: "inspect", to: "base", feedback: true }, { from: "ship", to: "base" },
+  ] })).content[0].text);
+  assert.equal(rejectedFeedback.applied, false);
+  assert.equal(rejectedFeedback.warnings, undefined);
+  assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeRejectedFeedback);
+  const allScope = ["base", "inspect", "review", "ship", "unrelated"];
+  const mixedFeedback = JSON.parse((await call("edge", { edges: [
+    { from: "inspect", to: "base", feedback: true },
+    { from: "review", to: "base", feedback: true },
+    { from: "ship", to: "inspect", feedback: true },
+  ] })).content[0].text);
+  assert.deepEqual(mixedFeedback.warnings, [
+    feedbackWarning("inspect", "base", allScope),
+    feedbackWarning("ship", "inspect", ["inspect", "ship", "unrelated"]),
+  ], "Batch results include every new route, but not an existing route interleaved between them");
+  assert.equal(JSON.parse((await edge({ from: "inspect", to: "base", feedback: true })).content[0].text).warnings, undefined, "Reapplying a route does not add it again");
+  const retargetedFeedback = JSON.parse((await call("edge", { edges: [
+    { from: "ship", to: "inspect", delete: true }, { from: "ship", to: "base", feedback: true },
+  ] })).content[0].text);
+  assert.deepEqual(retargetedFeedback.warnings, [feedbackWarning("ship", "base", allScope)], "Retargeting reports only the new route");
+  assert.equal(JSON.parse((await edge({ from: "inspect", to: "base", delete: true })).content[0].text).warnings, undefined, "Removing a route does not report other routes");
+  assert.deepEqual(JSON.parse((await edge({ from: "inspect", to: "base", feedback: true })).content[0].text).warnings, [feedbackWarning("inspect", "base", allScope)], "Re-adding a removed route reports it again");
+  assert.equal(JSON.parse((await node({ id: "unrelated", delete: true })).content[0].text).warnings, undefined, "Node deletions also omit feedback-scope warnings");
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH, beforeIncrementalWarnings);
+
   const beforeUnavailable = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   process.env.GRAPHER_COMPILER_PATH = join(root, "missing-compiler");
   const unavailable = await call("node", { nodes: [{ name: "fix", task: "Changed" }] });
@@ -638,7 +693,7 @@ fn main() {
   process.env.GRAPHER_COMPILER_PATH = legacyCompiler;
   const legacyCompilerResult = JSON.parse((await node({ name: "legacy", task: "Updated" })).content[0].text);
   assert.deepEqual(legacyCompilerResult.topology, {
-    rootNodes: ["legacy"], directDependencies: { legacy: [] }, feedbackTo: {},
+    rootNodes: ["legacy"], "from: [to]": { legacy: [] }, feedbackTo: {},
   });
   process.env.GRAPHER_COMPILER_PATH = compilerPath;
   writeFileSync(process.env.GRAPHER_GRAPH_PATH, beforeLegacyCompiler);
@@ -679,10 +734,10 @@ fn main() {
   assert.deepEqual(restoreFeedback.warnings, [feedbackWarning("review", "build", ["build", "consumer", "review"])], "Reverting the edit removes the rerun warning");
   revisionContext();
   const changeTask = JSON.parse((await node({ name: "build", task: "Changed build" })).content[0].text);
-  assert.ok(changeTask.warnings.includes("Current changes will invalidate and rerun 3 completed nodes: build, consumer, review."), "Node task changes use the same cumulative impact");
+  assert.deepEqual(changeTask.warnings, ["Current changes will invalidate and rerun 3 completed nodes: build, consumer, review."], "Node task changes retain cumulative impact without feedback-scope warnings");
   revisionContext();
   const restoreTask = JSON.parse((await node({ name: "build", task: "build" })).content[0].text);
-  assert.deepEqual(restoreTask.warnings, [feedbackWarning("review", "build", ["build", "consumer", "review"])]);
+  assert.equal(restoreTask.warnings, undefined, "Restoring a node task does not repeat existing feedback-scope warnings");
 
   revisionContext(["build", "review", "unrelated"]);
   const changedState = JSON.parse((await edge({ from: "review", to: "build", feedback: true, delete: true })).content[0].text);

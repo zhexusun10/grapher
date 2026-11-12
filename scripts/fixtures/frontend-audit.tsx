@@ -279,6 +279,8 @@ function PlannerRouteFixture() {
 }
 
 function PlannerReviewFixture() {
+  const reviewMode = new URLSearchParams(location.search).get("reviewMode");
+  const background = reviewMode === "background";
   const [phase, setPhase] = useState<"initial" | "review" | "done">("initial");
   audit.startReview = () => setPhase("review");
   audit.finishReview = () => setPhase("done");
@@ -300,7 +302,9 @@ function PlannerReviewFixture() {
   return <div style={{ height: "calc(100vh - 64px)", display: "flex" }}>
     <GraphWorkbench state={state} routeType="graph" selected="" setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
       effectiveMessages={[]} isPlanning={phase === "review"}
-      plannerStream={{ runId: "review-run", stage: phase === "review" ? "planning" : "completed", items: [] }}
+      plannerStream={{ runId: "review-run", stage: phase === "review" && !background ? "planning" : "completed",
+        items: reviewMode === "foreground" && phase !== "initial" ? [{ id: "review-live", type: "text", role: "assistant",
+          content: "LIVE_REVIEW_OUTPUT", status: "success" }] : [] }}
       onSendMessage={noop} onRequestConfirmation={noop}
       onControl={noop} onSave={noop} onAddManualNode={async () => true} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop}
       repoInfo={null} config={{ ...config, repository: "/mock/review" }} active={false} locked={false} pendingRequest={false}

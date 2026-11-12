@@ -2671,6 +2671,75 @@ test("planner: cached follow-ups stay with their revisions while history pages l
   } finally { releaseTwo?.(); releaseOne?.(); await context.close(); }
 });
 
+for (const reviewMode of ["background", "foreground"]) {
+  for (const evicted of [false, true]) {
+    test(`planner: ${reviewMode} review preserves mounted history with ${evicted ? "evicted" : "cached"} logs`, { timeout: 30_000 }, async () => {
+      const initial = assistant("RETAINED_PLANNER_HISTORY") + startTool("retained-tool", "echo retained") + endTool("retained-tool", "RETAINED_TOOL_OUTPUT");
+      const requests = [];
+      let releaseReview;
+      const reviewGate = new Promise(resolve => { releaseReview = resolve; });
+      const { context, page, errors } = await newPage(async route => {
+        const body = route.request().postDataJSON();
+        if (new URL(route.request().url()).pathname !== "/api/get_planning_output") return route.fulfill({ json: { result: {} } });
+        requests.push(body);
+        if (body.planningId === "plan-review") await reviewGate;
+        const bytes = Buffer.from(body.planningId === "plan-initial" ? initial : assistant("NEW_REVIEW_OUTPUT"));
+        const start = body.offset ?? 0;
+        try { await route.fulfill({ json: { result: { planningId: body.planningId, role: "planner",
+          content: bytes.subarray(start).toString(), startOffset: start, nextOffset: bytes.length,
+          totalBytes: bytes.length, complete: true, running: false } } }); } catch {}
+      });
+      try {
+        await page.goto(`${origin}/__history?case=plannerReview&reviewMode=${reviewMode}`, { waitUntil: "domcontentloaded" });
+        await page.getByText("RETAINED_PLANNER_HISTORY", { exact: true }).waitFor();
+        await page.locator(".planning-activity .tool-call-header").click();
+        await page.getByText("RETAINED_TOOL_OUTPUT", { exact: true }).waitFor();
+        await page.evaluate(async evict => {
+          const { planningTranscriptCache } = await import("/src/services/transcriptCache.ts");
+          // A mounted window may outlive its LRU entry (or exceed the cache budget).
+          if (evict) planningTranscriptCache.delete("review-run:plan-initial");
+          const history = document.querySelector(".planning-activity");
+          const card = history.querySelector(".tool-call-body");
+          window.reviewPaints = [];
+          window.reviewHistory = history;
+          window.reviewCard = card;
+          window.watchReviewPaints = true;
+          const sample = () => {
+            window.reviewPaints.push(history.isConnected && card.isConnected && card.getClientRects().length > 0);
+            if (window.watchReviewPaints) requestAnimationFrame(sample);
+          };
+          requestAnimationFrame(sample);
+          window.audit.startReview();
+        }, evicted);
+        // Foreground review output joins durable replay at completion; a
+        // background review joins as soon as its start snapshot arrives.
+        if (reviewMode === "foreground") {
+          await page.getByText("LIVE_REVIEW_OUTPUT", { exact: true }).waitFor();
+          await page.evaluate(() => window.audit.finishReview());
+        }
+        for (let i = 0; i < 100 && !requests.some(body => body.planningId === "plan-review"); i++) await page.waitForTimeout(20);
+        assert.ok(requests.some(body => body.planningId === "plan-review"), "review output is requested");
+        await page.waitForTimeout(200);
+        assert.equal(await page.evaluate(() => window.reviewHistory === document.querySelector(".planning-activity")), true,
+          "adding a review must not remount the existing history");
+        assert.ok(await page.evaluate(() => window.reviewPaints.length > 0 && window.reviewPaints.every(Boolean)),
+          "history and expanded cards must stay painted while the new log is delayed");
+        releaseReview();
+        await page.getByText("NEW_REVIEW_OUTPUT", { exact: true }).waitFor();
+        if (reviewMode === "foreground") assert.equal(await page.getByText("LIVE_REVIEW_OUTPUT", { exact: true }).count(), 0,
+          "the settled review renders only its durable output");
+        if (reviewMode === "background") await page.evaluate(() => window.audit.finishReview());
+        await page.waitForTimeout(100);
+        assert.equal(await page.evaluate(() => window.reviewCard === document.querySelector(".planning-activity .tool-call-body")), true,
+          "review completion preserves the expanded historical card");
+        assert.equal(requests.filter(body => body.planningId === "plan-initial" && body.tail).length, 1,
+          "the mounted byte window must not be reloaded even when its cache entry was evicted");
+        assert.deepEqual(errors, []);
+      } finally { releaseReview(); await page.evaluate(() => { window.watchReviewPaints = false; }).catch(() => {}); await context.close(); }
+    });
+  }
+}
+
 test("planner: starting and finishing a review keeps the earlier planning conversation", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await newPage(async route => {
     const body = route.request().postDataJSON();

@@ -1123,12 +1123,16 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     routeType,
     state.planType,
   ]);
+  const savedPlannerReady = savedPlannerIds.length > 0 && readySavedPlannerKey === savedPlannerKey;
+  // Appending a turn must not hide already-visible history while its first
+  // page loads. Readiness of the new turn still gates the live-to-saved handoff.
+  const extendsReadyPlannerHistory = !!readySavedPlannerKey && savedPlannerKey.startsWith(`${readySavedPlannerKey}:`);
   const useSavedPlanner = savedPlannerIds.length > 0 &&
-    (!showLivePlanner || readySavedPlannerKey === savedPlannerKey || Boolean(plannerStream.isContinuation));
+    (!showLivePlanner || savedPlannerReady || extendsReadyPlannerHistory || Boolean(plannerStream.isContinuation));
   // A failure (or a stop) leaves the live rows as the only complete record of
   // the turn, so the durable replay must not replace them until the next turn.
   const renderLivePlanner = showLivePlanner &&
-    (isPlanning || Boolean(failedLivePlanningId) || !useSavedPlanner);
+    (isPlanning || Boolean(failedLivePlanningId) || !savedPlannerReady);
   // A saved transcript only replaces optimistic user turns while it actually
   // renders user rows; hiding a message the transcript suppresses would lose it.
   const savedPlannerShowsUserTurns = !isPlanning || backgroundReview || !!recoveredPlanningId
@@ -3267,7 +3271,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     {savedPlannerIds.length > 0 && (
                       <div style={!useSavedPlanner ? { display: "none" } : undefined}>
                         <PlanningActivity
-                          key={savedPlannerKey}
                           runId={transcriptRunId}
                           planningIds={savedPlannerIds}
                           showUserTurns={savedPlannerShowsUserTurns}

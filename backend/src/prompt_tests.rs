@@ -1,5 +1,14 @@
 use super::*;
 
+#[cfg(feature = "fixture")]
+fn create_legacy_private_run(runtime: &mut Runtime, graph: Graph, config: Config) -> Result<(), String> {
+    // These tests exercise the still-supported pre-batch scheduler/private
+    // workspace contract. New adaptive Runs are covered by batch_workspace_tests.
+    runtime.state.run_id = Uuid::new_v4().to_string();
+    runtime.emit(EventKind::Created { graph, config, planning_id: None, planning: None })?;
+    runtime.store.select_run(Some(&runtime.state.run_id))
+}
+
 #[test]
 fn busy_background_poll_is_retryable_instead_of_a_client_error() {
     let result = busy_snapshot_poll(
@@ -1267,7 +1276,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 
 #[cfg(feature = "fixture")]
 #[test]
-fn planner_followup_after_publication_reuses_the_session_and_schedules_new_roots() {
+fn planner_followup_after_shared_completion_reuses_the_session_and_schedules_new_roots() {
     let temp = tempfile::TempDir::new().unwrap();
     let repo = crate::fixture::repository(temp.path()).unwrap();
     let script = temp.path().join("followup-after-publication.sh");
@@ -1370,10 +1379,15 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         let runtime = service.runtime.lock().unwrap();
         assert_eq!(runtime.state.run_id, run_id);
         assert_eq!(runtime.state.phase, "completed");
-        assert!(runtime.state.published_head.is_some());
+        assert_eq!(runtime.state.isolated_workspaces, Some(false));
+        assert!(runtime.state.published_head.is_none());
+        for execution in &runtime.state.executions {
+            assert_eq!(PathBuf::from(&execution.worktree), repo);
+            assert!(repo.join(format!("node-{}.txt", execution.id)).is_file());
+        }
     }
 
-    // The Planner turn is over and its workspace was published; a new message
+    // The shared-source turn is complete and its files are visible; a new message
     // must still continue the same conversation and revise the same Run.
     let revised = plan_goal_internal(
         "add another workstream".into(),
@@ -2072,8 +2086,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         planner_write_tools: true,
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    runtime
-        .create(
+    create_legacy_private_run(&mut runtime,
             Graph {
                 original_goal: "test".into(),
                 nodes: vec![
@@ -2197,8 +2210,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         planner_write_tools: true,
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    runtime
-        .create(
+    create_legacy_private_run(&mut runtime,
             Graph {
                 original_goal: "test".into(),
                 nodes: ["change", "other"]
@@ -3013,7 +3025,7 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
             edges: vec![],
         };
         let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-        runtime.create(graph.clone(), config.clone()).unwrap();
+        create_legacy_private_run(&mut runtime, graph.clone(), config.clone()).unwrap();
         runtime.set_route("graph").unwrap();
         runtime.approve().unwrap();
         runtime.pause(true).unwrap(); // Keep the driver out of this snapshot assertion.
@@ -3178,7 +3190,8 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 runtime.attach_job_source(&mut job, &exclusions).unwrap();
             }
             let node = std::path::Path::new(&job.execution.worktree);
-            crate::workspace::prepare(&repository, node, &job.execution.before, &[]).unwrap();
+            assert_eq!(node, repository.as_path(), "one-node batches reuse source");
+            assert!(!job.materialize_source);
             assert_eq!(
                 fs::read_to_string(node.join("tracked.txt")).unwrap(),
                 "planner edit"
@@ -3189,8 +3202,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             );
             assert!(!node.join("deleted.txt").exists());
             if !standard_git {
-                fs::remove_dir_all(crate::workspace::shadow_repo_dir(&repository).unwrap())
-                    .unwrap();
+                assert!(crate::workspace::shadow_repo_if_exists(&repository).unwrap().is_none());
             }
         }
     }
@@ -3589,8 +3601,7 @@ esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
 "#, release.display())).unwrap();
     let mut runtime = Runtime::open(root).unwrap();
-    runtime
-        .create(
+    create_legacy_private_run(&mut runtime,
             Graph {
                 original_goal: "Check real completion order".into(),
                 nodes: ["a_slow", "z_fast", "after_fast"]
@@ -4057,8 +4068,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
 "#, release = release.display(), release_related = release_related.display(),
         slow_started = slow_started.display(), related_started = related_started.display())).unwrap();
     let mut runtime = Runtime::open(root).unwrap();
-    runtime
-        .create(
+    create_legacy_private_run(&mut runtime,
             Graph {
                 original_goal: "Feedback barrier".into(),
                 nodes: ["owner", "slow", "related", "review", "consumer"]
@@ -4801,17 +4811,10 @@ fn completed_graph_is_published_by_driver() {
     runtime
         .create(
             Graph {
-                original_goal: "Publish both independent outcomes".into(),
-                nodes: vec![
-                    Node {
-                        name: "first".into(),
-                        task: "First".into(),
-                    },
-                    Node {
-                        name: "last".into(),
-                        task: "Last".into(),
-                    },
-                ],
+                original_goal: "Publish an isolated batch of independent outcomes".into(),
+                nodes: ["first", "middle", "last"].into_iter().map(|name| Node {
+                    name: name.into(), task: name.into(),
+                }).collect(),
                 edges: Vec::new(),
             },
             config,
@@ -4900,6 +4903,7 @@ fn completed_graph_is_published_by_driver() {
     );
     let source = root.join("fixture-repository");
     assert!(source.join("first.md").exists());
+    assert!(source.join("middle.md").exists());
     assert!(source.join("last.md").exists());
     assert_eq!(
         crate::workspace::git(&source, &["rev-list", "--count", "HEAD"]).unwrap(),
@@ -5829,6 +5833,7 @@ printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"
 "#).unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": repository, "model": "legacy/default", "thinkingLevel": "medium", "maxParallel": 1,
+        "autoApprove": false, "postTaskReview": false,
         "engine": "pi", "piCommand": "/bin/sh", "piArgs": [script],
         "roleModels": {
             "partitioner": {"model": "example/small", "thinkingLevel": "off"},

@@ -34,7 +34,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
   const failures: unknown[] = [];
   const repositories = new Map<string, string>();
   const initialHeads = new Map<string, string>();
-  const config = (repository: string) => ({ repository, model: 'windows-test/native', thinkingLevel: 'off', maxParallel: 2, maxFeedback: 1, postTaskReview: false });
+  const config = (repository: string) => ({ repository, model: 'windows-test/native', thinkingLevel: 'off', maxParallel: 2, maxFeedback: 1, autoApprove: false, postTaskReview: false });
   const git = (repository: string, ...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=NUL', '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: repository, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const modelServer = createServer(async (request, response) => {
     try {
@@ -187,9 +187,11 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       const alpha = executions.find((execution: any) => execution.node === 'alpha');
       const beta = executions.find((execution: any) => execution.node === 'beta');
       assert.ok(alpha.startedAt <= beta.completedAt && beta.startedAt <= alpha.completedAt, 'Branches must overlap');
+      assert.equal(snapshot.isolatedWorkspaces, false, 'two-node batches use source');
       for (const execution of executions) {
-        assert.notEqual(execution.worktree, plan.repository);
-        assert.throws(() => git(plan.repository, 'cat-file', '-e', `${execution.after}^{commit}`), 'node commits stay outside the user database');
+        assert.equal(resolve(execution.worktree).toLowerCase(), resolve(plan.repository).toLowerCase());
+        assert.equal(execution.after, '', 'shared-source jobs do not manufacture result commits');
+        assert.equal(execution.result, null, 'shared-source jobs do not claim a private E/L result');
       }
     }
     progress('Both Graph runs completed; inheritance and publication verified');

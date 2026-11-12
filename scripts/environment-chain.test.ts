@@ -15,6 +15,7 @@ import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { venvCreationCommand } from './fixtures/environment-native.mjs';
 import { removeSandboxMasks } from './fixtures/sandbox-masks.mjs';
+import { legacyGraph } from './fixtures/legacy-run.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -65,7 +66,7 @@ const reportProbe = verifyProbe
   .replace("pathlib.Path('reports/verify.json')", "pathlib.Path('reports/report.json')")
   .replace('PROBE_VERIFIED', 'PROBE_REPORTED');
 
-test('default environment discovery binds one private venv across a parallel Graph and isolates new Runs', { timeout: 900000 }, async t => {
+test('legacy environment discovery binds one private venv across a parallel Graph and isolates Runs', { timeout: 900000 }, async t => {
   const started = Date.now();
   const directory = await mkdtemp(join(tmpdir(), 'ge-chain-中 space-'));
   const source = join(directory, 'source 中文 space');
@@ -181,7 +182,9 @@ test('default environment discovery binds one private venv across a parallel Gra
     // The post-task Planner review is accepted by its own harness; this deterministic
     // local model only speaks this Run's chain tasks, so opt the review out.
     const config = { repository: source, model: 'environment-chain/chain', thinkingLevel: 'off', maxParallel: 4, maxFeedback: 1, postTaskReview: false };
-    const saved = await api('save_graph', { graph, config });
+    // Replay the pre-batch private contract, which retains E/L through a serial
+    // chain. New adaptive one/two-node batches intentionally execute in source.
+    const saved = await legacyGraph(api, data, { graph, config });
     assert.equal(saved.environmentPolicy, 'automatic-pending', 'no client environment policy is supplied');
     const runId = saved.runId;
     await api('control', { runId, action: 'approve' });
@@ -267,7 +270,7 @@ test('default environment discovery binds one private venv across a parallel Gra
     // Host Python still cannot provide the private probe.
     assert.throws(() => execFileSync(python, ['-I', '-c', 'import grapher_probe'], { cwd: source, stdio: 'pipe' }), 'host Python never provides the private probe');
     // A new Run starts unbound and never references the previous Run's E.
-    const isolated = await api('save_graph', { graph: { originalGoal: 'New Run isolation', nodes: [{ name: 'plain', task: 'NOOP_ISOLATED_RUN' }], edges: [] }, config });
+    const isolated = await legacyGraph(api, data, { graph: { originalGoal: 'New Run isolation', nodes: [{ name: 'plain', task: 'NOOP_ISOLATED_RUN' }], edges: [] }, config });
     await api('control', { runId: isolated.runId, action: 'approve' });
     const plain = await until(async () => {
       const check = await api('snapshot', { runId: isolated.runId, detail: 'metadata' });
@@ -282,7 +285,7 @@ test('default environment discovery binds one private venv across a parallel Gra
     assert.ok(!Object.keys(isolatedManifest.entries).some((name: string) => name.startsWith('.venv/')), 'a new Run does not see the previous environment');
     // Reuse the existing business tasks, with no new prompt or reconciliation
     // session: a bound parent forks into a local bound and a fresh unbound task.
-    const fork = await api('save_graph', { graph: { originalGoal: graph.originalGoal,
+    const fork = await legacyGraph(api, data, { graph: { originalGoal: graph.originalGoal,
       nodes: [{ name: 'create', task: 'CREATE_PROBE' }, { name: 'left', task: 'PREP_BRANCH left' }, { name: 'right', task: 'PREP_BRANCH right' }],
       edges: [{ from: 'create', to: 'left', feedback: false }, { from: 'create', to: 'right', feedback: false }] }, config });
     await api('control', { runId: fork.runId, action: 'approve' });

@@ -13,6 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { venvCreationCommand } from './fixtures/environment-native.mjs';
 import { removeSandboxMasks } from './fixtures/sandbox-masks.mjs';
+import { legacyGraph } from './fixtures/legacy-run.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -52,7 +53,7 @@ function nativeShell() {
   return join(resolve(git, '../../..'), 'bin/bash.exe');
 }
 
-test('native managed environment: install once, real Pi tools, editable/launchers, current follow-up, result startup and drain', { timeout: 1800000 }, async t => {
+test('legacy native managed environment: install once, real Pi tools, editable/launchers, current follow-up, result startup and drain', { timeout: 1800000 }, async t => {
   const started = Date.now();
   const mlManifestPath = process.env.GRAPHER_ENV_TEST_ML_MANIFEST;
   const ml = mlManifestPath ? JSON.parse(await readFile(mlManifestPath, 'utf8')) : undefined;
@@ -281,7 +282,9 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     // harness; here it would reach the environment actuator model, which only
     // understands environment tasks, so this Run opts out of it explicitly.
     const config = { repository: source, model: 'environment-test/native', thinkingLevel: 'off', maxParallel: 4, maxFeedback: 1, postTaskReview: false, ...(ml ? { environment } : {}) };
-    const saved = await api('save_graph', { graph, config });
+    // Retained private Runs keep E/L inheritance across single-node dispatches;
+    // new adaptive Runs deliberately switch such batches back to source.
+    const saved = await legacyGraph(api, data, { graph, config });
     if (!ml) assert.equal(saved.environmentPolicy, 'automatic-pending');
     const runId = saved.runId;
     const progress = ml ? setInterval(() => {
@@ -375,7 +378,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
     const retry = await api('launch_result', { runId, args: ['-c', "import pathlib; assert pathlib.Path('reports/result-started').read_text()=='partial'; print('RETRY_KEPT_PARTIAL')"] });
     assert.match(retry.output, /RETRY_KEPT_PARTIAL/); await settled();
     const backgroundRun = async (task: string) => {
-      const run = await api('save_graph', { graph: { originalGoal: 'native drain boundary', nodes: [{ name: 'writer', task }, { name: 'downstream', task: 'B_AFTER_RETRY' }], edges: [{ from: 'writer', to: 'downstream', feedback: false }] }, config });
+      const run = await legacyGraph(api, data, { graph: { originalGoal: 'native drain boundary', nodes: [{ name: 'writer', task }, { name: 'downstream', task: 'B_AFTER_RETRY' }], edges: [{ from: 'writer', to: 'downstream', feedback: false }] }, config });
       await api('control', { runId: run.runId, action: 'approve' });
       return run;
     };
@@ -469,7 +472,7 @@ test('native managed environment: install once, real Pi tools, editable/launcher
       await writeFile(join(plain, 'README.md'), 'An ordinary project without a business environment.\n');
       execFileSync('git', ['add', 'README.md'], { cwd: plain });
       execFileSync('git', ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'), '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-qm', 'plain baseline'], { cwd: plain });
-      const empty = await api('save_graph', { graph: { originalGoal: 'No environment needed', nodes: [{ name: 'plain', task: 'NO_ENVIRONMENT' }], edges: [] }, config: { ...config, repository: plain } });
+      const empty = await legacyGraph(api, data, { graph: { originalGoal: 'No environment needed', nodes: [{ name: 'plain', task: 'NO_ENVIRONMENT' }], edges: [] }, config: { ...config, repository: plain } });
       await api('control', { runId: empty.runId, action: 'approve' });
       const completed = await until(async () => {
         const state = await api('snapshot', { runId: empty.runId });

@@ -1,7 +1,7 @@
 import { t, localizeError } from "../i18n";
 import type { ChatMessage } from "../types";
 import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, memo, useMemo } from "react";
 import { runtimeService } from "../services/runtime";
 import { isRuntimeEventsConnected, RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS, subscribePlanningOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
@@ -58,7 +58,15 @@ function olderTarget(ids: string[], segments: ReadonlyMap<string, TranscriptWind
 const MIN_LIVE_REREAD_MS = 120;
 
 export const PlanningActivity = memo(function PlanningActivity(props: Props) {
-  return <PlanningHistory key={`${props.runId ?? ""}:${props.planningIds.join(":")}`} {...props} />;
+  const [identity, setIdentity] = useState({ runId: props.runId, ids: props.planningIds, generation: 0 });
+  const extendsHistory = identity.runId === props.runId && identity.ids.every((id, index) => props.planningIds[index] === id);
+  if (!extendsHistory || identity.ids.length !== props.planningIds.length) {
+    setIdentity({ runId: props.runId, ids: props.planningIds, generation: identity.generation + (extendsHistory ? 0 : 1) });
+  }
+  // A review/follow-up appends a log, not a new conversation. Keep mounted
+  // windows and row state even if their global LRU entries have been evicted.
+  // Replacing/reordering history (or changing Run) still starts a fresh reader.
+  return <PlanningHistory key={identity.generation} {...props} />;
 });
 
 function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onLoadingChange, showUserTurns = false,
@@ -74,8 +82,21 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     return loaded;
   });
   const segments = useRef(initialSegments);
-  const [output, setOutput] = useState(() => composePlanningOutput(planningIds, initialSegments));
-  const [ready, setReady] = useState(!planningIds.length || initialSegments.has(planningIds.at(-1)!));
+  const [segmentVersion, setSegmentVersion] = useState(0);
+  const output = useMemo(() => composePlanningOutput(planningIds, segments.current), [key, segmentVersion]);
+  const [readKey, setReadKey] = useState<string | null>(null);
+  const ready = !planningIds.length || segments.current.has(planningIds.at(-1)!) || readKey === key;
+  // Appended turns may already be cached, but the mounted windows are the
+  // authority for earlier turns and must never be replaced with shorter tails.
+  useLayoutEffect(() => {
+    let changed = false;
+    for (const id of planningIds) {
+      if (segments.current.has(id)) continue;
+      const window = transcriptFromCache(planningTranscriptCache.get(planningTranscriptKey(runId, id)));
+      if (window) { segments.current.set(id, window); changed = true; }
+    }
+    if (changed) setSegmentVersion(value => value + 1);
+  }, [runId, key]);
   const [revealFallback, setRevealFallback] = useState(false);
   const [error, setError] = useState("");
   const failedOlder = useRef(false);
@@ -85,8 +106,9 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
   const olderBusy = useRef(false);
   const olderRequested = useRef(false);
   const announcedRef = useRef(false);
+  const announcedKeyRef = useRef<string | null>(null);
   const sectionRef = useRef<HTMLElement>(null);
-  const lifetime = useTranscriptReader("planning", `${runId}:view:${key}`);
+  const lifetime = useTranscriptReader("planning", `${runId}:view`);
   const notifyReady = useStableCallback(() => onReady?.());
   const notifyOutput = useStableCallback((text: string) => onOutputChange?.(text));
   const notifyLoading = useStableCallback((loading: boolean) => onLoadingChange?.(loading));
@@ -98,11 +120,11 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
   const skipInitialUser = skipFirstUser && historyStartsAtBeginning;
   const hasOlder = ready && olderTarget(planningIds, segments.current) !== null;
 
-  const publish = useCallback((planningId: string, window: TranscriptWindow) => {
+  const publish = useStableCallback((planningId: string, window: TranscriptWindow) => {
     segments.current.set(planningId, window);
     planningTranscriptCache.set(planningTranscriptKey(runId, planningId), cacheTranscriptWindow(window));
-    setOutput(composePlanningOutput(planningIds, segments.current));
-  }, [runId, key]);
+    setSegmentVersion(value => value + 1);
+  });
 
   // A page the reader has not scrolled to yet: it stays out of the layout (and
   // out of the byte cursor) until its insertion point reaches the viewport top.
@@ -206,7 +228,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     preserveReading => { void loadOlder(preserveReading); }, ready, loadedBytes, holdingOlder,
     olderTarget(planningIds, segments.current) ?? undefined);
 
-  useLayoutEffect(() => { notifyOutput(output); }, [output, notifyOutput]);
+  useLayoutEffect(() => { notifyOutput(output); }, [key, output, notifyOutput]);
   useLayoutEffect(() => {
     notifyLoading(!initialReady);
     return () => notifyLoading(false);
@@ -222,11 +244,12 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     return () => clearTimeout(timer);
   }, [running, ready, initialReady]);
   useLayoutEffect(() => {
-    if (!ready || announcedRef.current) return;
+    if (!ready || announcedKeyRef.current === key) return;
     if (!running && !initialReady && !revealFallback) return;
     announcedRef.current = true;
+    announcedKeyRef.current = key;
     notifyReady();
-  }, [running, ready, initialReady, revealFallback, notifyReady]);
+  }, [key, running, ready, initialReady, revealFallback, notifyReady]);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -246,7 +269,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         (emptyRetries.get(id) ?? 0) < 2;
     };
     setError("");
-    if (!planningIds.length) { setReady(true); return () => abort.abort(); }
+    if (!planningIds.length) { setReadKey(key); return () => abort.abort(); }
     const stop = startVisibilityPolling(async () => {
       try {
         const latestId = planningIds.at(-1)!;
@@ -277,14 +300,14 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
           publish(planningId, next); // Also publish empty terminal pages.
           emptyPages = page.content ? 0 : emptyPages + 1;
           if (planningId === latestId) {
-            setReady(true);
+            setReadKey(key);
             if (settled) {
               const remaining = terminalChecks.get(planningId);
               terminalChecks.set(planningId, remaining === undefined || page.content ? 2 : Math.max(0, remaining - 1));
             }
           }
         }
-        setReady(true);
+        setReadKey(key);
         const loaded = [...segments.current.values()];
         if (loaded.some(window => window.end < window.total)) return 0;
         if (loaded.some(window => !window.settled)) {
@@ -301,7 +324,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         // only authority on a log being final, and it must still be able to wake us.
         return Infinity;
       } catch (caught) {
-        if (!signal.aborted) { failedOlder.current = false; setError(caught instanceof Error ? caught.message : String(caught)); setReady(true); }
+        if (!signal.aborted) { failedOlder.current = false; setError(caught instanceof Error ? caught.message : String(caught)); setReadKey(key); }
         return null;
       }
     });

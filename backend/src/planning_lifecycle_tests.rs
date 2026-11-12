@@ -560,6 +560,7 @@ fn run_started_is_published_after_persistence_and_commit_reuses_its_id() {
         "echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"completed\"}],\"stopReason\":\"stop\"}}'\n",
     )).unwrap();
     let mut cfg = config(&repository);
+    cfg.auto_approve = false; // This lifecycle test stops at the approval boundary.
     cfg.pi_command = "/bin/sh".into();
     cfg.pi_args = vec![script.to_string_lossy().into()];
     let mut published = None;

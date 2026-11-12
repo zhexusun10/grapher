@@ -72,6 +72,8 @@ async function openFollowUp({ repository, firstRead = "ready" }) {
   const outputs = { "old-plan": assistant("OLD TURN ANSWER"), "new-plan": assistant("NEW ANSWER MARKER") };
   let newPlanReads = 0;
   let closed = false;
+  let releaseOutput;
+  const outputGate = new Promise(resolve => { releaseOutput = resolve; });
   onPlanStream = (_body, res) => {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
     res.write(`event: run_started\ndata: ${JSON.stringify({ runId: running.runId })}\n\n`);
@@ -81,7 +83,7 @@ async function openFollowUp({ repository, firstRead = "ready" }) {
     res.write(`event: complete\ndata: ${JSON.stringify({ snapshot: completed })}\n\n`);
     res.end();
   };
-  const { context, page, errors } = await newPage(route => {
+  const { context, page, errors } = await newPage(async route => {
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     if (command === "plan_goal_stream") return route.continue();
     let result;
@@ -95,7 +97,10 @@ async function openFollowUp({ repository, firstRead = "ready" }) {
       case "list_skills": result = { skills: [] }; break;
       case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
       case "get_planning_output": {
-        if (body.planningId === "new-plan") newPlanReads += 1;
+        if (body.planningId === "new-plan") {
+          newPlanReads += 1;
+          if (firstRead === "held") await outputGate;
+        }
         // A race with the writer can return an empty page that still claims to be
         // terminal; the panel must not accept that as the final revision.
         const empty = body.planningId === "new-plan" && firstRead === "empty" && newPlanReads === 1;
@@ -114,12 +119,16 @@ async function openFollowUp({ repository, firstRead = "ready" }) {
   await page.goto(origin, { waitUntil: "networkidle" });
   await page.locator('[data-run-id="handoff-run"]').click();
   await page.locator(".pane-bottom-chat").first().waitFor();
+  if (firstRead === "held") {
+    await page.getByText("OLD TURN ANSWER", { exact: true }).waitFor();
+    await page.evaluate(() => { window.handoffHistory = document.querySelector(".planning-activity"); });
+  }
   const input = page.locator(".pane-bottom-chat textarea");
   await input.fill("ASK DURING RUN");
   await input.press("Enter");
   await page.locator(".chat-bubble-user", { hasText: "ASK DURING RUN" }).waitFor();
-  const close = async () => { closed = true; onPlanStream = undefined; await context.close(); };
-  return { page, errors, close, transcriptReads: () => newPlanReads, isClosed: () => closed };
+  const close = async () => { closed = true; releaseOutput(); onPlanStream = undefined; await context.close(); };
+  return { page, errors, close, releaseOutput, transcriptReads: () => newPlanReads, isClosed: () => closed };
 }
 
 /** A settled Planner with a short tail, while only graph workers keep updating. */
@@ -358,10 +367,26 @@ test("a completed Planner follow-up keeps its answer when the live stream hands 
   } finally { await session.close(); }
 });
 
+test("a delayed follow-up replay keeps mounted history and the live answer until its own page arrives", { timeout: 45_000 }, async () => {
+  const session = await openFollowUp({ repository: "/mock/handoff-delayed", firstRead: "held" });
+  try {
+    for (let i = 0; i < 100 && !session.transcriptReads(); i++) await session.page.waitForTimeout(20);
+    assert.ok(session.transcriptReads() > 0, "the new turn is loading its durable output");
+    await session.page.locator(".planner-transcript").getByText("NEW ANSWER MARKER", { exact: true }).waitFor();
+    await session.page.locator(".planning-activity").getByText("OLD TURN ANSWER", { exact: true }).waitFor();
+    assert.equal(await session.page.evaluate(() => window.handoffHistory === document.querySelector(".planning-activity")), true);
+    session.releaseOutput();
+    await session.page.locator(".planning-activity").getByText("NEW ANSWER MARKER", { exact: true }).waitFor();
+    await session.page.locator(".planner-transcript").waitFor({ state: "detached" });
+    assert.equal(await session.page.getByText("NEW ANSWER MARKER", { exact: true }).count(), 1);
+    assert.deepEqual(session.errors, []);
+  } finally { await session.close(); }
+});
+
 test("a terminal transcript read that raced the writer does not hide the turn until reload", { timeout: 45_000 }, async () => {
   const session = await openFollowUp({ repository: "/mock/handoff-empty", firstRead: "empty" });
   try {
-    await session.page.getByText("NEW ANSWER MARKER", { exact: true }).waitFor();
+    await session.page.locator(".planning-activity").getByText("NEW ANSWER MARKER", { exact: true }).waitFor();
     assert.ok(session.transcriptReads() >= 2,
       `the empty terminal page must be retried (reads=${session.transcriptReads()})`);
     assert.deepEqual(session.errors, []);

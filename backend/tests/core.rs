@@ -374,17 +374,11 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
         },
     ]);
     let plan = compile(&candidate, true).unwrap();
-    assert_eq!(plan.warnings.len(), 2);
-    assert!(plan
-        .warnings
-        .iter()
-        .all(|warning| warning.starts_with("W303:")));
-    assert!(plan.warnings.iter().any(|warning| warning ==
-        "W303: If <FEEDBACK> is sent from review to frontend, these nodes will rerun: delivery, frontend, inspect, review. frontend resumes its own session on rework."
-    ));
-    assert!(plan.warnings.iter().any(|warning| warning ==
-        "W303: If <FEEDBACK> is sent from inspect to spec, these nodes will rerun: backend, delivery, frontend, inspect, review, spec. spec resumes its own session on rework."
-    ));
+    // Planner results pair W303 warnings with feedback edges in graph order.
+    assert_eq!(plan.warnings, vec![
+        "W303: If <FEEDBACK> is sent from review to frontend, these nodes will rerun: delivery, frontend, inspect, review.",
+        "W303: If <FEEDBACK> is sent from inspect to spec, these nodes will rerun: backend, delivery, frontend, inspect, review, spec.",
+    ]);
     // Compare the reported set to the actual event, not a size heuristic or
     // merely the dependency path from the target to the feedback source.
     let temp = TempDir::new().unwrap();

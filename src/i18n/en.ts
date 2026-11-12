@@ -401,7 +401,7 @@ export const en: Record<string, string> = {
   "每个节点分配独立隔离会话；验证失败最多自动反馈重试 5 次。": "Each node receives an isolated session. Failed validation triggers up to 5 automatic feedback retries.",
   "节点执行期间在隔离工作区内修改文件；整图完成后会将结果写回 ": "Nodes modify files in isolated workspaces. Once the graph completes, results will be written back to ",
   "Execution Instance 可执行 shell 指令并调用模型，请审视节点任务定义后再行批准。": "Execution Instances can run shell commands and call models. Review node task definitions before approving.",
-  "若 {0} 向 {1} 发送 <FEEDBACK>，这些节点将重跑：{2}。{1} 返工时延续自己的会话。": "If <FEEDBACK> is sent from {0} to {1}, these nodes will rerun: {2}. {1} resumes its own session on rework.",
+  "若 {0} 向 {1} 发送 <FEEDBACK>，这些节点将重跑：{2}。": "If <FEEDBACK> is sent from {0} to {1}, these nodes will rerun: {2}.",
   "若应用从 {0} 到 {1} 的 <FEEDBACK>，目标节点及其依赖后代将被置为失效：{2}。已完成的结果必须重新计算；{1} 将基于自己的会话历史继续执行。该集合之外的节点不受影响。": "If <FEEDBACK> from {0} to {1} is applied, the target and dependency descendants will be invalidated: {2}. Completed results must be recomputed; {1} continues from its own conversation history. Nodes outside this set are unaffected.",
   "节点 {0} 包含相同的任务描述，可能存在重复工作。请确认这是否符合预期。": "Nodes {0} have identical task text; they may duplicate work. Confirm that this is intentional.",
   "{0} 提及了 <FEEDBACK>，但没有向外发出的反馈边；该标记无法发送反馈。": "{0} mentions <FEEDBACK> but has no outgoing feedback edge; the marker cannot send feedback.",

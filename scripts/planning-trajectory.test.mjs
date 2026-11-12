@@ -9,7 +9,9 @@ for (const appliedField of ['applied', 'mutationApplied']) for (const [format, t
   ['legacy', { nodes: ['build'], edges: [] }],
   ['direct dependencies', { directDependencies: { build: [] }, feedbackTo: {} }],
   ['historical roots', { roots: ['build'], directDependencies: { build: [] }, feedbackTo: {} }],
-  ['root nodes', { rootNodes: ['build'], directDependencies: { build: [] }, feedbackTo: {} }],
+  ['historical root nodes', { rootNodes: ['build'], directDependencies: { build: [] }, feedbackTo: {} }],
+  ['outgoing edges, initial batch', { 'from: [to]': { build: [], review: [], tests: [] }, feedbackTo: {} }],
+  ['outgoing edges, multiple targets', { rootNodes: ['build'], 'from: [to]': { build: ['review', 'tests'], review: [], tests: [] }, feedbackTo: { review: 'build' } }],
 ]) test(`separates graph attempts and process outcome (${appliedField}, ${format})`, () => {
   const dir = mkdtempSync(join(tmpdir(), 'grapher-trajectory-'));
   try {

@@ -11,6 +11,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { removeSandboxMasks } from './fixtures/sandbox-masks.mjs';
+import { legacyGraph } from './fixtures/legacy-run.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -25,7 +26,7 @@ const delay = (ms: number) => new Promise(completed => setTimeout(completed, ms)
 
 // Real Pi processes make the Windows production path roughly twice as slow
 // as local runs; keep headroom so host load is not reported as a hang.
-test('production Planner writes source directly; Merger repairs node and publication conflicts', { timeout: 600000 }, async () => {
+test('production Planner writes source directly; legacy private Runs retain node and publication Mergers', { timeout: 600000 }, async () => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'grapher-merger-')));
   const agent = join(directory, 'agent');
   const data = join(directory, 'data');
@@ -42,7 +43,7 @@ test('production Planner writes source directly; Merger repairs node and publica
   // The post-task Planner review is a Planning turn accepted by its own harness; this
   // deterministic local model must only answer the Merger/node turns under test, so
   // the review would otherwise write the source out from under these assertions.
-  const config = (repository: string) => ({ repository: toNamespacedPath(repository), model: 'merger-test/native', thinkingLevel: 'off', maxParallel: 2, maxFeedback: 1, postTaskReview: false });
+  const config = (repository: string) => ({ repository: toNamespacedPath(repository), model: 'merger-test/native', thinkingLevel: 'off', maxParallel: 2, maxFeedback: 1, autoApprove: false, postTaskReview: false });
   const modelServer = createServer(async (request, response) => {
     try {
       const chunks = [];
@@ -268,7 +269,9 @@ test('production Planner writes source directly; Merger repairs node and publica
       } else {
         const nodes = [{ name: 'left', task: `${label} WRITE_LEFT` }, { name: 'right', task: `${label} WRITE_RIGHT` }];
         if (kind === 'node') nodes.push({ name: 'join', task: `${label} VERIFY_RESOLUTION` });
-        initial = await api('save_graph', { config: config(repository), graph: { originalGoal: label, nodes,
+        // Keep historical node-Merger coverage: new adaptive batches deliver
+        // private results before downstream dispatch rather than at its fan-in.
+        initial = await legacyGraph(api, data, { config: config(repository), graph: { originalGoal: label, nodes,
           edges: kind === 'node' ? [{ from: 'left', to: 'join', feedback: false },
             { from: 'right', to: 'join', feedback: false }] : [] } });
       }
@@ -301,7 +304,10 @@ test('production Planner writes source directly; Merger repairs node and publica
       } else {
         assert.equal((await readFile(join(repository, 'shared.txt'), 'utf8')).trim(), kind === 'planner' ? 'planner change' : 'resolved');
         if (kind !== 'publication') assert.equal(await readFile(join(repository, 'verified.txt'), 'utf8'), 'verified');
-        assert.equal(state.publication.status, 'completed');
+        if (kind === 'planner') {
+          assert.equal(state.isolatedWorkspaces, false);
+          assert.equal(state.publication, null, 'shared-source results are already visible');
+        } else assert.equal(state.publication.status, 'completed');
         if (kind === 'publication') {
           // The publication Merger accepts follow-ups after it settles, without
           // re-entering the publication lifecycle.
@@ -365,9 +371,8 @@ test('production Planner writes source directly; Merger repairs node and publica
         // materializes from the current source files. Standard Git keeps
         // snapshotting its own repository at revision time.
         assert.ok(revised.events.some((event: any) => event.type === 'graph_revised'));
-        if (!plain) {
-          assert.ok(revised.events.some((event: any) => event.type === 'graph_revised' && event.source_head));
-        }
+        assert.ok(revised.events.filter((event: any) => event.type === 'graph_revised')
+          .every((event: any) => !event.source_head), 'shared-source revisions do not create snapshots');
         assert.equal(revised.executions.filter((execution: any) => execution.node === 'verify').length, 1);
         assert.deepEqual(revised.executions.find((execution: any) => execution.id === state.executions[0].id), state.executions[0]);
         assert.equal(await readFile(join(repository, 'late.txt'), 'utf8'), 'inherited');

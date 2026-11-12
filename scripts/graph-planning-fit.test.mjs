@@ -71,8 +71,13 @@ test("actual App: node results render before Planner completion; edges rearrange
   const endTool = (id, toolName, topology, isError = false, legacy = false, rootField = "rootNodes") => {
     const projection = legacy ? topology : {
       ...(rootField ? { [rootField]: topology.nodes.filter(name => !topology.edges.some(edge => !edge.feedback && edge.to === name)) } : {}),
-      directDependencies: Object.fromEntries(topology.nodes.map(name => [name,
-        topology.edges.filter(edge => !edge.feedback && edge.to === name).map(edge => edge.from)])),
+      ...(rootField === "roots" ? {
+        directDependencies: Object.fromEntries(topology.nodes.map(name => [name,
+          topology.edges.filter(edge => !edge.feedback && edge.to === name).map(edge => edge.from)])),
+      } : {
+        "from: [to]": Object.fromEntries(topology.nodes.map(name => [name,
+          topology.edges.filter(edge => !edge.feedback && edge.from === name).map(edge => edge.to)])),
+      }),
       feedbackTo: Object.fromEntries(topology.edges.filter(edge => edge.feedback).map(edge => [edge.from, edge.to])),
     };
     planner({ type: "tool_execution_end", toolCallId: id, toolName, isError,

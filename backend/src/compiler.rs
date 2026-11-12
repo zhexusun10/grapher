@@ -344,12 +344,12 @@ fn compile_with_policy(
     for edge in graph.edges.iter().filter(|edge| edge.feedback) {
         // Match the runtime's invalidation set exactly: target plus dependency
         // descendants, without following other feedback edges or judging size.
+        // Keep one W303 per feedback edge in graph order for Planner projection.
         warnings.push(format!(
-            "W303: If <FEEDBACK> is sent from {} to {}, these nodes will rerun: {}. {} resumes its own session on rework.",
+            "W303: If <FEEDBACK> is sent from {} to {}, these nodes will rerun: {}.",
             edge.from,
             edge.to,
-            downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", "),
-            edge.to
+            downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
     Ok(Plan {
