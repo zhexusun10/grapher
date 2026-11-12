@@ -28,8 +28,8 @@
 </p>
 
 <p align="center">
-  <img src="assets/readme-graph.png" width="100%" alt="Grapher workbench showing a 21-node video detection research plan awaiting approval">
-  <br><sub>From a complex goal to an inspectable 21-node execution graph with parallel branches and bounded feedback.</sub>
+  <img src="assets/readme-graph.png" width="100%" alt="Current Grapher workbench showing a 21-node example video detection research plan awaiting approval">
+  <br><sub>Current UI with a 21-node example plan: parallel branches, execution batches and bounded feedback. Shown with manual approval enabled; not a completed run.</sub>
 </p>
 
 ## Typical multi-agent systems vs Grapher
@@ -64,19 +64,11 @@ Goal → Planner → Compiled Graph → Deterministic Runtime
 - **Inspectable execution graph & loop engineering** — See dependencies, parallel branches, and bounded rework in the UI. Auto Approve and post-task Planner review default on for autonomous multi-turn iteration; turn off Auto Approve to review each graph before execution.
 - **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
 
-<details>
-<summary><strong>See a completed 16-node run in the earlier UI</strong></summary>
-<p align="center">
-  <img src="assets/execution-graph.png" width="100%" alt="Earlier Grapher interface showing a machine-learning run marked 16 of 16 nodes completed">
-  <br><sub>Actual Grapher UI showing a 16-node execution graph compiled and executed for a multi-stage machine-learning task.</sub>
-</p>
-</details>
-
 ## When should I use Grapher?
 
 <p align="center">
-  <img src="assets/readme-home.png" width="100%" alt="Grapher's home screen with a video detection research goal and Auto, Serial, and Graph mode controls">
-  <br><sub>Start with a goal, then choose the route that fits the work: Auto, Serial, or Graph.</sub>
+  <img src="assets/readme-home.png" width="100%" alt="Current Grapher home screen with a video detection research goal and Serial and Graph mode controls">
+  <br><sub>Start with a goal, then choose Serial or Graph. Auto can be enabled in Harness settings.</sub>
 </p>
 
 **More agents are not always better.** Grapher works best when a coding task contains independent workstreams, for example:

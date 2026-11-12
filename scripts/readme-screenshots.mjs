@@ -1,5 +1,6 @@
 // Capture the real frontend with synthetic API data; no backend or credentials required.
-// Run from the repository root after installing the Playwright Chromium browser.
+// Run from the repository root with Playwright Chromium (Edge on Windows),
+// or select an installed browser with GRAPHER_BROWSER_CHANNEL.
 import assert from 'node:assert/strict';
 import { chromium } from '@playwright/test';
 import { createServer } from 'vite';
@@ -9,9 +10,10 @@ const config = { repository, model: 'demo/model', thinkingLevel: 'medium', maxPa
 const empty = { runId: '', config: null, graph: { originalGoal: '', nodes: [], edges: [] }, nodes: {}, plan: null, executions: [], events: [], approved: false, paused: false, phase: 'draft', base: '', feedbackCounts: {} };
 const repoInfo = { path: repository, name: 'video-forensics', branch: 'main', head: '', clean: true };
 const server = await createServer({ cacheDir: 'node_modules/.vite-readme-capture', server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false, open: false } });
-await server.listen();
-const browser = await chromium.launch({ channel: 'chromium', headless: true });
+let browser;
 try {
+  await server.listen();
+  browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === 'win32' ? 'msedge' : 'chromium'), headless: true });
   for (const lang of ['en', 'zh-CN']) {
     const zh = lang === 'zh-CN';
     const title = zh ? '视频检测研究流水线' : 'Video detection research pipeline';
@@ -148,11 +150,13 @@ try {
     await page.locator('.landing-screen').waitFor();
     await page.locator('.landing-screen textarea').fill(goal);
     await page.locator('.landing-screen textarea').blur();
+    await page.evaluate(() => document.fonts.ready);
     await page.waitForTimeout(500);
-    await page.screenshot({ path: `assets/readme-home${zh ? '-zh' : ''}.png` });
+    assert.deepEqual(await page.locator('.landing-screen .prompt-box-mode-btn').allTextContents(), ['Serial', 'Graph']);
+    await page.screenshot({ path: `assets/readme-home${zh ? '-zh' : ''}.png`, animations: 'disabled' });
     await page.locator('[data-run-id="demo-graph"]').click();
     await page.locator('.react-flow__node').first().waitFor();
-    await page.getByRole('button', { name: 'Approve', exact: true }).waitFor();
+    await page.getByRole('button', { name: zh ? '批准' : 'Approve', exact: true }).waitFor();
     await page.locator('.tool-call-card').first().waitFor();
     await page.waitForTimeout(1000);
     // History opens at the latest output; show the complete research goal in the overview.
@@ -165,8 +169,8 @@ try {
     assert.equal(await page.locator('.react-flow__node').count(), 21);
     assert.equal(await page.getByText('Non-contiguous transcript append').count(), 0);
     assert.deepEqual(errors, []);
-    await page.screenshot({ path: `assets/readme-graph${zh ? '-zh' : ''}.png` });
+    await page.screenshot({ path: `assets/readme-graph${zh ? '-zh' : ''}.png`, animations: 'disabled' });
     console.log(`Captured ${lang} home and workbench`);
     await context.close();
   }
-} finally { await browser.close(); await server.close(); }
+} finally { await browser?.close(); await server.close(); }

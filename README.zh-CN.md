@@ -28,8 +28,8 @@
 </p>
 
 <p align="center">
-  <img src="assets/readme-graph-zh.png" width="100%" alt="Grapher 工作台：视频检测研究任务被规划为等待批准的 21 节点执行图">
-  <br><sub>从复杂目标到可检查的 21 节点执行图，直观呈现并行分支、依赖拓扑与有界反馈。</sub>
+  <img src="assets/readme-graph-zh.png" width="100%" alt="当前 Grapher 工作台：等待批准的视频检测研究示例计划，包含 21 个节点">
+  <br><sub>当前 UI 中的 21 节点示例计划：直观呈现并行分支、执行批次与有界反馈。图中已开启手动审批，并非已完成的运行记录。</sub>
 </p>
 
 ## 典型多智能体系统 vs Grapher
@@ -64,19 +64,11 @@ Grapher
 - **可检查的执行图与闭环迭代** — 在 UI 中查看依赖、并行分支和有界返工。自动批准和任务后 Planner 复盘默认开启，支持多轮自主迭代（Loop Engineering）；关闭自动批准可在执行前逐图审核。
 - **本地优先** — 在你的机器上运行，并在宣告完成前把有效的 Graph 结果发布回代码库。模型请求仍会发送给你配置的服务商。
 
-<details>
-<summary><strong>查看旧版界面中的 16 节点实际完成记录</strong></summary>
-<p align="center">
-  <img src="assets/execution-graph-zh.png" width="100%" alt="旧版 Grapher 界面：机器学习任务的 16 个节点均显示已完成">
-  <br><sub>真实 Grapher 界面，展示复杂机器学习任务编译生成的 16 节点执行拓扑图与全流程完成记录。</sub>
-</p>
-</details>
-
 ## 什么时候应该使用 Grapher？
 
 <p align="center">
-  <img src="assets/readme-home-zh.png" width="100%" alt="Grapher 首页：输入视频检测研究目标，并可选择 Auto、Serial 或 Graph 模式">
-  <br><sub>从一个目标出发，选择适合当前任务的执行路线：Auto、Serial 或 Graph。</sub>
+  <img src="assets/readme-home-zh.png" width="100%" alt="当前 Grapher 首页：输入视频检测研究目标，并可选择 Serial 或 Graph 模式">
+  <br><sub>从一个目标出发，选择 Serial 或 Graph；Auto 可在 Harness 设置中开启。</sub>
 </p>
 
 **Agent 并不是越多越好。** Grapher 最适合包含独立工作流的编程任务，例如：

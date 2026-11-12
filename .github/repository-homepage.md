@@ -54,6 +54,8 @@ gh repo view zhexusun10/grapher --json description,homepageUrl,repositoryTopics
 - [Chinese product homepage](../README.zh-CN.md)
 - [Canonical documentation index](../docs/index.md)
 
-The primary README screenshots show the current frontend with a hand-authored 21-node research-plan fixture. The graph is awaiting approval; it does not demonstrate execution success, benchmark performance or a graph-size limit. The optional historical screenshot shows an earlier UI with a 16-node run marked complete. To refresh the screenshots, install the project dependencies and Playwright Chromium (`npx playwright install chromium`), then run `node scripts/readme-screenshots.mjs` from the repository root. The capture mocks the API and does not require a backend, a real project or provider credentials.
+The English and Chinese README screenshots show the current frontend with a hand-authored 21-node research-plan fixture. The graph has Auto Approve disabled and is awaiting approval; it does not demonstrate execution success, benchmark performance or a graph-size limit. The home screen uses the default Serial / Graph controls (Auto is hidden).
+
+To refresh all four screenshots, install the project dependencies and Playwright Chromium (`npx playwright install chromium`), then run `node scripts/readme-screenshots.mjs` from the repository root. Windows uses installed Microsoft Edge by default; `GRAPHER_BROWSER_CHANNEL` can select another installed browser. The capture mocks the API and does not require a backend, a real project or provider credentials. Review both languages and keep README captions aligned with the captured controls; do not mix historical UI screenshots into the current showcase.
 
 Maintainer checks belong in development documentation or issue tracking, not the product README.
