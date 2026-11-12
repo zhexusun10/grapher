@@ -121,6 +121,7 @@ test('Auto refills during routing and older completions cannot revert a newly co
     await until(() => diagnostics.includes('Provider/Auth prewarm ready in '), 'Provider/Auth host not prepared');
     assert.deepEqual(requests, []);
     const config = { repository: source, model: 'prewarm-test/node', thinkingLevel: 'off', maxParallel: 1, maxFeedback: 0,
+      autoApprove: false, postTaskReview: false,
       roleModels: { partitioner: { model: 'prewarm-test/router', thinkingLevel: 'off' } } };
     await api('save_config', { config });
     const readyCount = () => (diagnostics.match(/Partitioner prewarm ready in /g) || []).length;
@@ -175,8 +176,7 @@ test('Auto refills during routing and older completions cannot revert a newly co
     // Windows has no Graph sandbox prerequisite. The direct source-role
     // contract tests Planner on every host without depending on bubblewrap.
     if (process.platform === 'win32') {
-      const graphState = await api('plan_goal', { goal: 'Create one node A without approving execution',
-        config: { ...nextConfig, autoApprove: false }, mode: 'graph' });
+      const graphState = await api('plan_goal', { goal: 'Create one node A without approving execution', config: nextConfig, mode: 'graph' });
       await assertReused(graphState, 'planner');
       assert.equal(graphState.graph.nodes[0].name, 'A');
       assert.equal(graphState.approved, false);

@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Upgraded bundled SQLite through `rusqlite` 0.41 / `libsqlite3-sys` 0.39.1 to fix the crafted database/WAL memory-disclosure advisory RUSTSEC-2026-0459 (CVE-2026-119375). Updated `rustix` to 1.1.6 for RUSTSEC-2026-0486; no audit exceptions were added.
 - Execution overview batch labels now share an automatically sized column with padding, preventing two- and three-digit numbers or translated labels from touching the divider. Internal dividers remain continuous and use matching 1px borders and colors so the vertical rule no longer looks heavier than the horizontal rules (`src/styles-workbench.css`, `scripts/responsive-layout.test.mjs`).
 - Restored direction arrows on dependency, feedback, node-merger and publication-merger edges by correcting React Flow marker references. Target connection dots now stay hidden instead of covering arrowheads (`src/hooks/useGraphElements.ts`, `src/styles-workbench.css`, `scripts/graph-elements.test.ts`, `scripts/graph-planning-fit.test.mjs`).
 - Busy Graph IR and approval dialogs now consistently disable closing and conflicting actions, including Clear template and Adjust plan; the editor draft becomes read-only until the operation settles. Dialogs expose their busy state to assistive technology (`src/components/modals/EditorModal.tsx`, `src/components/modals/ApprovalModal.tsx`, `src/components/modals/SettingsModal.tsx`).

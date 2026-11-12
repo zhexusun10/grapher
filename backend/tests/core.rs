@@ -862,7 +862,7 @@ fn exhausted_feedback_does_not_wait_for_running_siblings() {
     };
     let mut config = config();
     config.max_feedback = 0;
-    runtime.create(graph, config).unwrap();
+    create_private(&mut runtime, graph, config);
     runtime
         .emit(EventKind::Approved {
             base: "base".into(),

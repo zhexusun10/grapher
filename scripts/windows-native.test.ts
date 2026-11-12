@@ -191,7 +191,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       for (const execution of executions) {
         assert.equal(resolve(execution.worktree).toLowerCase(), resolve(plan.repository).toLowerCase());
         assert.equal(execution.after, '', 'shared-source jobs do not manufacture result commits');
-        assert.equal(execution.result, null, 'shared-source jobs do not claim a private E/L result');
+        assert.equal(execution.result ?? null, null, 'shared-source jobs do not claim a private E/L result');
       }
     }
     progress('Both Graph runs completed; inheritance and publication verified');
