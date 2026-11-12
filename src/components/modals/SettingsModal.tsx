@@ -269,7 +269,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <label className="settings-number-row">
                 <span>
                   <strong>{t("反馈预算")}</strong>
-                  <small>{t("限制单条反馈边可触发的最大返工次数（范围 2–40，默认 4）。对新创建的运行生效。")}</small>
+                  <small>{t("反馈边可触发的最大返工次数（范围 2–40，默认 4）。对新创建的运行生效。")}</small>
                 </span>
                 <input
                   type="number"
@@ -299,7 +299,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <label className="settings-toggle-row">
                 <span>
                   <strong>{t("执行时自动展开思维链")}</strong>
-                  <small>{t("节点或 Planner 思考时自动展开 COT 卡片。关闭时保持折叠，点击标题才展开；折叠状态不渲染卡片内容。")}</small>
+                  <small>{t("节点或 Planner 思考时自动展开 COT 卡片。")}</small>
                 </span>
                 <input
                   type="checkbox"
@@ -399,7 +399,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <button type="button" className="settings-cancel-btn" disabled={saving} onClick={onClose}>
               {t("取消")}
             </button>
-            <button type="button" className="primary save-config-btn" disabled={saving || catalogBusy} onClick={() => void save()}>
+            <button type="button" className="primary save-config-btn" disabled={saving || catalogBusy} aria-busy={saving} onClick={() => void save()}>
               <Check size={14} />{t("保存")}
             </button>
           </footer>

@@ -315,6 +315,27 @@ test("Codex OAuth presents its method selection, opens the URL once and accepts 
   } finally { await context.close(); }
 });
 
+test("supported providers title has no hover shading and still toggles the list", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("settings");
+  try {
+    const title = page.locator(".providers-grid-title");
+    const grid = page.locator(".providers-card-grid");
+    for (const expanded of [false, true]) {
+      assert.equal(await title.getAttribute("aria-expanded"), String(expanded));
+      await title.hover();
+      await page.waitForTimeout(200);
+      assert.deepEqual(await title.evaluate(element => {
+        const style = getComputedStyle(element);
+        return { background: style.backgroundColor, shadow: style.boxShadow, filter: style.filter };
+      }), { background: "rgba(0, 0, 0, 0)", shadow: "none", filter: "none" });
+      await title.click();
+      await grid.waitFor({ state: expanded ? "detached" : "visible" });
+      assert.equal(await title.getAttribute("aria-expanded"), String(!expanded));
+    }
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 for (const status of ["complete", "failed", "cancelled"]) {
   test(`supported providers collapse after three seconds only for ${status} authentication`, { timeout: 30_000 }, async () => {
     const provider = { id: "test", name: "Test", configured: false, methods: [{ id: "api_key", name: "API Key" }] };
@@ -448,6 +469,74 @@ test("an exiting provider login panel is inert until its animation finishes", { 
   } finally { await context.close(); }
 });
 
+test("provider loading stays in the Refresh icon without a status panel or layout shift", { timeout: 30_000 }, async () => {
+  const requests = [];
+  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+    if (command !== "provider_auth" || body.operation !== "catalog") return false;
+    requests.push(route);
+    return true;
+  });
+  const refresh = page.locator(".pi-auth-actions-row .compact-btn");
+  const save = page.locator(".save-config-btn");
+  const saveAppearance = () => save.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { opacity: style.opacity, shadow: style.boxShadow, background: style.backgroundColor, border: style.borderColor };
+  });
+  let idleSaveAppearance;
+  const assertLoading = async () => {
+    await refresh.locator(".spin-icon").waitFor();
+    assert.equal(await refresh.isDisabled(), true);
+    assert.equal(await refresh.getAttribute("aria-busy"), "true");
+    assert.equal(await refresh.locator("svg").evaluate(element => getComputedStyle(element).animationName), "spin");
+    assert.equal(await page.locator(".provider-status-loading").count(), 0);
+    assert.equal(await page.getByText("Communicating with Pi and syncing provider status...", { exact: true }).count(), 0);
+    assert.equal(await save.isDisabled(), true, "catalog loading still prevents saving");
+    assert.equal(await save.getAttribute("aria-busy"), "false", "refresh is not a settings save");
+    assert.equal((await saveAppearance()).opacity, "1");
+    if (idleSaveAppearance) assert.deepEqual(await saveAppearance(), idleSaveAppearance, "refresh must not flash the Save button");
+  };
+  const assertReady = async () => {
+    await page.waitForFunction(() => document.querySelector(".pi-auth-actions-row .compact-btn")?.disabled === false);
+    assert.equal(await refresh.getAttribute("aria-busy"), "false");
+    assert.equal(await refresh.locator(".spin-icon").count(), 0);
+  };
+  try {
+    await waitFor(() => requests.length === 1);
+    await assertLoading();
+    await requests[0].fulfill({ json: { result: catalog } });
+    await assertReady();
+    await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    await page.evaluate(() => window.audit.open());
+    await refresh.waitFor();
+    await assertReady();
+    assert.equal(requests.length, 1, "reopening Settings reuses the catalog without a loading panel");
+    assert.equal(await page.locator(".provider-status-loading").count(), 0);
+
+    const providerPanel = page.locator(".provider-settings-container");
+    const idleBounds = await providerPanel.boundingBox();
+    idleSaveAppearance = await saveAppearance();
+    assert.equal(await save.isDisabled(), false);
+    await refresh.click();
+    await waitFor(() => requests.length === 2);
+    await assertLoading();
+    assert.deepEqual(await providerPanel.boundingBox(), idleBounds, "refresh does not insert a row or move Settings sections");
+    await requests[1].fulfill({ json: { result: catalog } });
+    await assertReady();
+    assert.deepEqual(await providerPanel.boundingBox(), idleBounds);
+    assert.deepEqual(await saveAppearance(), idleSaveAppearance);
+
+    await refresh.click();
+    await waitFor(() => requests.length === 3);
+    await assertLoading();
+    await requests[2].fulfill({ status: 500, json: { error: "Mock provider refresh failed" } });
+    await page.getByText("Error: Mock provider refresh failed", { exact: true }).waitFor();
+    await assertReady();
+    assert.deepEqual(await saveAppearance(), idleSaveAppearance);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("catalog refresh errors remain visible after successful login collapses the provider list", { timeout: 30_000 }, async () => {
   const provider = { id: "test", name: "Test", configured: false, methods: [{ id: "api_key", name: "API Key" }] };
   const complete = { id: "refresh-login", provider: "test", status: "complete", events: [], error: null, prompt: null };
@@ -475,6 +564,50 @@ test("catalog refresh errors remain visible after successful login collapses the
   } finally { await context.close(); }
 });
 
+test("bound credentials omit source badges, update hover matches Refresh and delete keeps its danger hover", { timeout: 30_000 }, async () => {
+  const providers = [
+    { id: "stored", name: "Stored key", authType: "api_key", authSource: "stored" },
+    { id: "env", name: "Environment key", authType: "api_key", authSource: "env", authEnvVar: "TEST_API_KEY" },
+    { id: "oauth", name: "OAuth", authType: "oauth", authSource: "stored" },
+  ].map(provider => ({ ...provider, configured: true, methods: [] }));
+  const { context, page, errors } = await fixture("settings", async (route, command) => {
+    if (command !== "provider_auth") return false;
+    await route.fulfill({ json: { result: { ...catalog, providers } } });
+    return true;
+  });
+  try {
+    await page.locator(".configured-card-header").click();
+    assert.deepEqual(await page.locator(".configured-name").allTextContents(), providers.map(provider => provider.name));
+    assert.equal(await page.locator(".configured-type-badge").count(), 0);
+    assert.doesNotMatch(await page.locator(".configured-list").innerText(), /API Key saved|Environment variable|Browser authorization saved|TEST_API_KEY/);
+    const hoverSurface = async button => {
+      await button.hover();
+      await page.waitForTimeout(200);
+      return button.evaluate(element => {
+        const style = getComputedStyle(element);
+        return { background: style.backgroundColor, border: style.borderTopColor,
+          shadow: style.boxShadow, filter: style.filter, transition: style.transition };
+      });
+    };
+    const refreshSurface = await hoverSurface(page.locator(".pi-auth-actions-row .compact-btn"));
+    await page.locator(".providers-grid-title").click();
+    for (const section of [".configured-actions", ".provider-card-actions"]) {
+      const actions = page.locator(`${section} .card-action-btn`);
+      assert.equal(await actions.count(), providers.length * 2);
+      for (const button of await actions.all()) {
+        const textColor = await button.evaluate(element => getComputedStyle(element).color);
+        const isDelete = await button.evaluate(element => element.classList.contains("logout-btn"));
+        const expectedSurface = isDelete
+          ? { ...refreshSurface, background: "rgba(239, 68, 68, 0.1)", border: "rgb(239, 68, 68)" }
+          : refreshSurface;
+        assert.deepEqual(await hoverSurface(button), expectedSurface);
+        assert.equal(await button.evaluate(element => getComputedStyle(element).color), textColor, "hover preserves the action text color");
+      }
+    }
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("configured-provider login stays below its row and bound credentials do not remember expansion", { timeout: 30_000 }, async () => {
   const provider = { id: "test", name: "Test", configured: true, authType: "api_key", authSource: "stored",
     methods: [{ id: "api_key", name: "API Key" }] };
@@ -491,12 +624,30 @@ test("configured-provider login stays below its row and bound credentials do not
     const credentials = page.locator(".configured-card-header");
     await credentials.waitFor();
     assert.equal(await credentials.getAttribute("aria-expanded"), "false");
+    const credentialColors = element => {
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, border: style.borderTopColor };
+    };
+    const neutralColors = { background: "rgb(247, 247, 248)", border: "rgb(226, 232, 240)" };
+    assert.deepEqual(await page.locator(".configured-credentials-card").evaluate(credentialColors), neutralColors);
+    assert.equal(await page.locator(".configured-title-group").evaluate(element => getComputedStyle(element).color), "rgb(15, 23, 42)");
     await credentials.click();
+    assert.equal(await page.locator(".configured-type-badge").count(), 0);
+    assert.deepEqual(await page.locator(".configured-actions .card-action-btn").evaluateAll(buttons => buttons.map(button => {
+      const style = getComputedStyle(button);
+      return { width: style.borderTopWidth, style: style.borderTopStyle };
+    })), Array(2).fill({ width: "1px", style: "solid" }), "modify and delete keep visible button outlines");
     await page.locator(".configured-row .reauth-btn").click();
     await page.locator("#auth-answer").waitFor();
     assert.equal(await page.locator(".configured-row").evaluate(row => row.nextElementSibling?.classList.contains("active-login-reveal")), true);
     assert.equal(await page.locator(".configured-list .active-login-panel").count(), 1);
     await page.locator(".active-login-header .icon-button-close").click();
+    await page.locator(".configured-row .logout-btn").click();
+    await page.locator(".confirm-delete-modal").waitFor({ state: "visible" });
+    await page.locator(".confirm-cancel-btn").click();
+    await page.locator(".confirm-delete-modal").waitFor({ state: "detached" });
+    assert.equal(await page.locator(".configured-row .reauth-btn").isVisible(), true);
+    assert.equal(await page.locator(".configured-row .logout-btn").isVisible(), true);
     await page.locator(".providers-grid-title").click();
     await page.getByRole("button", { name: "Close dialog", exact: true }).click();
     await page.locator(".settings-modal").waitFor({ state: "detached" });

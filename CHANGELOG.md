@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All five **Settings → Harness settings** options now default on: Hide Auto mode, Auto Approve, post-task Planner review, parallel-node workspace isolation, and Planner write/edit tools. Frontend and backend defaults agree, including missing legacy settings; explicit saved opt-outs remain unchanged.
 - Upgraded the bundled `pi-continuity` extension from 0.4.0 to 0.5.0. This adds bounded recovery for unknown provider errors, improves cooldown/retry-delay parsing, and recovers reasoning-only responses without a visible answer or tool call. Recovery retains the no-prompt-injection policy; restart the whole application to load the new extension (`package.json`, `package-lock.json`).
 - Provider sign-in panels now appear directly below the selected provider card or bound-credential row with an entrance animation and primary text colors. Bound credentials start collapsed when Settings reopens, and successful authentication collapses the supported-provider list after three seconds.
+- Simplified Provider credential cards and Settings copy, aligned credential action hover states, and kept catalog refresh progress in the Refresh button without shifting the panel or flashing Save. Actual saves retain their busy appearance and refresh failures remain visible.
+- Refreshed the English and Chinese README screenshots to match the current workbench.
 
 ### Fixed
 
@@ -51,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Codex OAuth now exposes the upstream browser/device-code selection and other interactive prompts. Authorization pages open once per URL, with a clickable fallback when automatic opening is blocked; pasted callback URLs remain supported.
 - Provider search no longer hides an active login prompt, exiting login panels no longer accept input, and closing Settings immediately stops late authorization pages from opening. Catalog refresh errors remain visible after the provider list automatically collapses.
 - Workspace preparation status no longer lists node names, preventing the bottom bar from expanding when many nodes prepare concurrently. Preparation phase labels remain visible without a progress counter (`src/components/views/GraphWorkbench.tsx`).
+- Resuming nodes and other generic workspace-preparation stages no longer claim files are being copied. Only an explicit backend `copy` phase displays the copying label; unknown or mixed stages display preparation.
 
 ## [1.7.1] - 2026-11-11
 

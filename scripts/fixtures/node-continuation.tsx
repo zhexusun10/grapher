@@ -13,7 +13,10 @@ function Fixture() {
   const planner = mode === "planner";
   const graph = mode === "graph" || planner;
   const [calls, setCalls] = useState<string[]>([]);
-  const state = { ...emptySnapshot, runId: "resume-run", config, phase: "needs_attention", approved: true,
+  // Resuming an existing workspace reports preparation without a copy phase.
+  const activity = calls.some(call => call === "resume" || call === "resume_node:task")
+    ? [{ kind: "workspace_prepare", nodes: ["task"] }] : [];
+  const state = { ...emptySnapshot, runId: "resume-run", config, phase: "needs_attention", approved: true, canResume: true,
     planType: graph ? "graph" : "serial", graph: { originalGoal: "Original task", nodes: [{ name: "task", task: "Original task" }], edges: [] },
     ...(planner ? { planning: { planningId: "failed-planner", runId: "resume-run", planType: "graph", status: "failed", error: "failed" } } : {}),
     nodes: { task: { status: "failed", canResume: true, revision: 0, instruction: "", error: "failure" } },
@@ -21,12 +24,12 @@ function Fixture() {
       completedAt: 2, sessionId: "session", worktree: "/mock", before: "", after: "" }] } as Snapshot;
   const noop = () => {};
   return <><output data-testid="calls">{calls.join("|")}</output>
-    <div style={{ height: 800, display: "flex" }}><GraphWorkbench state={state} routeType={graph ? "graph" : "serial"}
+    <div style={{ height: 800, display: "flex" }}><GraphWorkbench state={state} activity={activity} routeType={graph ? "graph" : "serial"}
       selected={graph && !planner ? "task" : ""} setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
       effectiveMessages={[{ id: "initial", role: "user", text: "Original task" }]} isPlanning={false} plannerStream={{ items: [] }}
       onSendMessage={text => { setCalls(previous => [...previous, `send:${text}`]); return true; }}
       onContinuePlanner={() => setCalls(previous => [...previous, "resume_planner"])}
-      onRequestConfirmation={noop} onControl={(action, extra) => setCalls(previous => [...previous, `${action}:${extra?.node}`])}
+      onRequestConfirmation={noop} onControl={(action, extra) => setCalls(previous => [...previous, extra?.node ? `${action}:${extra.node}` : action])}
       onSave={noop} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop}
       repoInfo={null} config={config} active={false} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
       nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} /></div></>;

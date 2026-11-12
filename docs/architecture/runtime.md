@@ -373,10 +373,13 @@ only short Run-mutex reads; node workspace preparation/copy and final publicatio
 run outside the Run mutex. The Run state is revalidated before completion events
 commit. Activity reporting uses a non-blocking Run-mutex attempt, so status polls
 return progress instead of queueing behind I/O. Activity is display-only and
-never changes durable event state. Metadata, history,
-settings, and provider-catalog waits have a 15-second browser deadline; planning
-streams, approvals and native result execution do not. A settings timeout asks the
-user to refresh and verify; it never rolls back or automatically retries a save.
+never changes durable event state. `workspace_prepare` includes workspace reuse,
+validation and environment setup; the UI reports copying only for an explicit
+`copy` phase. Missing, mixed or unrecognized phases use a generic preparation
+label. Metadata, history, settings, and provider-catalog waits have a 15-second
+browser deadline; planning streams, approvals and native result execution do not.
+A settings timeout asks the user to refresh and verify; it never rolls back or
+automatically retries a save.
 See [request deadlines](../../src/services/requestTimeout.ts).
 
 ### Live updates

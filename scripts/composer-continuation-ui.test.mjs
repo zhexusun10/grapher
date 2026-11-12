@@ -44,7 +44,19 @@ test("empty composer continues without submitting a message; drafts and stop ret
         for (let i = 0; i < 2; i++) input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
       });
       assert.equal(await page.getByTestId("calls").textContent(), mode === "planner" ? "resume_planner" : "resume_node:task", `${mode} must address its own agent only once`);
+      if (mode === "graph") {
+        await page.getByText("正在准备节点工作区", { exact: true }).waitFor();
+        assert.equal(await page.getByText("正在复制节点工作区", { exact: true }).count(), 0,
+          "node continuation must not infer copying from generic preparation");
+      }
     }
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__node-continuation?mode=graph`);
+    assert.equal(await page.getByText("正在准备节点工作区", { exact: true }).count(), 0);
+    await page.getByRole("button", { name: "继续", exact: true }).click();
+    assert.equal(await page.getByTestId("calls").textContent(), "resume");
+    await page.getByText("正在准备节点工作区", { exact: true }).waitFor();
+    assert.equal(await page.getByText("正在复制节点工作区", { exact: true }).count(), 0,
+      "run-wide continuation must not infer copying from generic preparation");
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__composer-continuation?pending=1`);
     await page.locator("textarea").evaluate(input => {
       for (let i = 0; i < 2; i++) input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));

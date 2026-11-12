@@ -404,6 +404,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             type="button"
             className="secondary compact-btn"
             disabled={busy || pending}
+            aria-busy={busy}
             onClick={() => void load(true)}
           >
             <RefreshCw size={13} className={busy ? "spin-icon" : ""} />{t(" 刷新")}</button>
@@ -458,15 +459,6 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                         <span className="configured-name">{p.name}</span>
                         <code className="configured-id">{p.id}</code>
                       </div>
-                      {p.authEnvVar === "configured API key" ? null : (
-                        <span className={`configured-type-badge ${p.authSource === "env" ? "env-badge" : "stored-badge"}`}>
-                          {p.authSource === "env"
-                            ? t("环境变量 ({0})", p.authEnvVar || "ENV")
-                            : p.authType === "oauth"
-                            ? t("浏览器授权已保存 (OAuth)")
-                            : t("API Key 已保存")}
-                        </span>
-                      )}
                     </div>
 
                     <div className="configured-actions">
@@ -905,13 +897,6 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
           </div>
         )}
       </CollapsibleCardBody>
-
-      {busy && (
-        <div className="provider-status-loading">
-          <RefreshCw size={14} className="spin-icon" />
-          <span>{t("正在与 Pi 内核通信，同步 Provider 状态...")}</span>
-        </div>
-      )}
 
       {catalog?.warning && (
         <div className="login-status-alert warning">

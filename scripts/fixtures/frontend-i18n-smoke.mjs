@@ -120,7 +120,10 @@ try {
     if (name === "GraphWorkbench") {
       if (props.activity) {
         for (const [phase, label] of [
-          [undefined, "正在复制节点工作区"],
+          [undefined, "正在准备节点工作区"], // Resumes and mixed concurrent stages have no phase.
+          ["verify", "正在准备节点工作区"],
+          ["unknown", "正在准备节点工作区"],
+          ["copy", "正在复制节点工作区"],
           ["compose", "正在准备节点工作区（合并上游结果）"],
           ["conflict", "正在准备节点工作区（解决合并冲突）"],
         ]) {
@@ -129,6 +132,8 @@ try {
               ...props, activity: [{ kind: "workspace_prepare", phase, nodes }],
             }));
             assert.ok(statusHtml.includes(t(label)), "activity status must render localized phase copy");
+            assert.equal(statusHtml.includes(t("正在复制节点工作区")), phase === "copy",
+              "only an explicit copy phase may claim that workspaces are being copied");
             assert.ok(!statusHtml.includes("unique_workspace_"), "activity status must not list node names");
             assert.doesNotMatch(statusHtml, /\(1\s*\/\s*1\)/, "a single workspace must not show progress");
           }

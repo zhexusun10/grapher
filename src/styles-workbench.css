@@ -1008,7 +1008,7 @@
 button.session-label-toggle {
   background: transparent;
   border: none;
-  padding: 6px 10px;
+  padding: 4px 6px;
   margin: 4px 0 8px 0;
   width: 100%;
   font: inherit;
@@ -1019,18 +1019,17 @@ button.session-label-toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
   border-radius: 8px;
   box-sizing: border-box;
   transition: background-color 0.15s ease, opacity 0.15s ease;
 }
 
 button.session-label-toggle:hover {
-  background: var(--bg-surface-hover);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 button.session-label-toggle:focus-visible {
-  outline: 2px solid var(--border-focus);
+  outline: 2px solid var(--accent, #6366f1);
   outline-offset: 1px;
 }
 
@@ -1539,52 +1538,9 @@ button.session-label-toggle:focus-visible {
 }
 
 .status.dirty,
-.status.paused {
+.status.paused,
+.status-badge.paused {
   color: var(--status-warning);
-}
-
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  padding: 2px 7px;
-  border-radius: 4px;
-  background: var(--bg-canvas);
-  border: 1px solid var(--border-default);
-  color: var(--text-secondary);
-}
-
-.status-badge.running {
-  background: var(--brand-subtle);
-  border-color: var(--brand-border);
-  color: var(--brand-default);
-}
-
-.status-badge.completed {
-  background: var(--status-success-subtle);
-  border-color: var(--status-success-border);
-  color: var(--status-success-strong);
-}
-
-.status-badge.failed {
-  background: var(--status-danger-subtle);
-  border-color: var(--status-danger-border);
-  color: var(--status-danger-text);
-}
-
-.status-badge.paused,
-.status-badge.dirty {
-  background: var(--status-warning-subtle);
-  border-color: var(--status-warning-border);
-  color: var(--status-warning-text);
-}
-
-.status-badge.blocked {
-  background: var(--status-blocked-subtle);
-  border-color: var(--status-blocked-border);
-  color: var(--status-blocked-text);
 }
 
 .intervention {
@@ -3349,9 +3305,16 @@ button.session-label-toggle:focus-visible {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
+/* Provider refresh locks saving without flashing the footer's opacity/shadow.
+   Only an actual settings save gets the dimmed busy appearance. */
 .save-config-btn:disabled {
-  box-shadow: none;
+  opacity: 1;
   pointer-events: none;
+}
+
+.save-config-btn[aria-busy="true"] {
+  opacity: 0.45;
+  box-shadow: none;
 }
 
 /* 响应式适配 */

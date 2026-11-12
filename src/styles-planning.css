@@ -1603,11 +1603,6 @@ button.transcript-error-toggle {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text-primary);
-  transition: background-color 0.15s ease;
-}
-
-.providers-grid-title:hover {
-  background: var(--bg-surface-hover);
 }
 
 .providers-grid-title small {
@@ -1728,7 +1723,7 @@ button.transcript-error-toggle {
   align-items: center;
   gap: 4px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background 0.15s, border-color 0.15s;
   border: 1px solid transparent;
 }
 
@@ -1752,14 +1747,15 @@ button.transcript-error-toggle {
   color: var(--text-primary);
 }
 
-.card-action-btn.reauth-btn:hover {
-  border-color: var(--brand-default);
-}
-
 .card-action-btn.logout-btn {
   background: transparent;
   color: #ef4444;
   border-color: rgba(239, 68, 68, 0.2);
+}
+
+.card-action-btn.reauth-btn:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-hover);
 }
 
 .card-action-btn.logout-btn:hover {
@@ -1788,8 +1784,8 @@ button.transcript-error-toggle {
 
 /* Configured Credentials Panel */
 .configured-credentials-card {
-  background: var(--status-success-subtle);
-  border: 1px solid var(--status-success-border);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
   border-radius: 12px;
   padding: 12px 14px;
   display: flex;
@@ -1872,25 +1868,6 @@ button.transcript-error-toggle {
   font-size: 12px;
   color: var(--text-secondary);
   font-family: var(--font-mono, monospace);
-}
-
-.configured-type-badge {
-  font-size: 11.5px;
-  padding: 2px 7px;
-  border-radius: 5px;
-  font-weight: 500;
-}
-
-.configured-type-badge.stored-badge {
-  background: var(--status-success-subtle);
-  color: var(--status-success-strong);
-  border: 1px solid var(--status-success-border);
-}
-
-.configured-type-badge.env-badge {
-  background: var(--brand-subtle);
-  color: var(--brand-hover);
-  border: 1px solid var(--brand-border);
 }
 
 /* Custom In-App Deletion Confirmation Modal */
@@ -2034,7 +2011,7 @@ button.transcript-error-toggle {
 }
 
 .source-tag.local {
-  background: rgba(34, 197, 94, 0.1);
+  background: var(--provider-credentials-bg);
   color: #16a34a;
   border: 1px solid rgba(34, 197, 94, 0.25);
 }
@@ -2086,10 +2063,6 @@ button.transcript-error-toggle {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
-}
-
-.configured-actions .card-action-btn {
-  border: none;
 }
 
 .env-only-hint {
@@ -2404,8 +2377,8 @@ button.transcript-error-toggle {
 
 .login-status-alert.success {
   background: #ffffff;
-  border: 1px solid #bbf7d0;
-  color: #15803d;
+  border: 1px solid var(--provider-credentials-border);
+  color: var(--provider-credentials-text);
   box-shadow: 0 1px 4px rgba(34, 197, 94, 0.08);
 }
 
@@ -2421,15 +2394,6 @@ button.transcript-error-toggle {
   border: 1px solid #fde68a;
   color: #b45309;
   box-shadow: 0 1px 4px rgba(245, 158, 11, 0.08);
-}
-
-.provider-status-loading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  padding: 6px 0;
 }
 
 .spin-icon {

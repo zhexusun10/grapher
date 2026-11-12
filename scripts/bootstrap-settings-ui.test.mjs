@@ -543,6 +543,8 @@ test("a stalled settings save releases busy state, preserves its draft and can r
     await page.locator(".save-config-btn").click(); await until(() => saves === 1);
     assert.equal(calls.filter(call => call.command === "detect_repository").length, 0);
     assert.equal(await page.locator(".save-config-btn").isDisabled(), true);
+    assert.equal(await page.locator(".save-config-btn").getAttribute("aria-busy"), "true");
+    assert.equal(await page.locator(".save-config-btn").evaluate(element => getComputedStyle(element).opacity), "0.45", "an actual save still shows its busy appearance");
     await page.clock.fastForward(15_001);
     await page.waitForFunction(() => document.querySelector(".save-config-btn")?.disabled === false);
     assert.equal(await nodeModel(page).inputValue(), "test/new", "timed-out save retains the model draft");

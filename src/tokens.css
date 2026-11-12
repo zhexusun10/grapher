@@ -53,6 +53,11 @@
   --status-warning-border: #FDE68A;
   --status-warning-text: #92400E;
 
+  /* 已绑定 Provider 凭据：沿用本地凭据标签底色与认证成功提示的边框、文字色 */
+  --provider-credentials-bg: rgba(34, 197, 94, 0.1);
+  --provider-credentials-border: #BBF7D0;
+  --provider-credentials-text: #15803D;
+
   /* 阻塞与等待状态（灰色体系） */
   --status-blocked: #64748B;
   --status-blocked-subtle: #F1F5F9;
