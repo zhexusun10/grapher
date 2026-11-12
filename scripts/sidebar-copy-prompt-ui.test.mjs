@@ -20,8 +20,8 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await server?.close(); });
 
-async function openApp(handler, language = "en") {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, locale: language === "en" ? "en-US" : "zh-CN", reducedMotion: "reduce" });
+async function openApp(handler, language = "en", reducedMotion = "reduce") {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, locale: language === "en" ? "en-US" : "zh-CN", reducedMotion });
   await context.addInitScript(({ repository, config, language }) => {
     localStorage.setItem("grapher_language_v1", language);
     localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Sidebar", lastOpened: 1 }]));
@@ -77,7 +77,7 @@ async function openApp(handler, language = "en") {
 
 async function copyPrompt(page, runId, label = "Copy prompt") {
   await page.locator(`.run-item[data-run-id="${runId}"]`).click({ button: "right" });
-  await page.getByRole("button", { name: label, exact: true }).click();
+  await page.getByRole("menuitem", { name: label, exact: true }).click();
 }
 
 test("the sidebar always opens expanded, even with a stale collapsed preference", { timeout: 30_000 }, async () => {
@@ -87,6 +87,7 @@ test("the sidebar always opens expanded, even with a stale collapsed preference"
     assert.equal(await sidebar.evaluate(element => element.classList.contains("is-collapsed")), false);
     await page.getByRole("button", { name: "Collapse sidebar" }).click();
     assert.equal(await sidebar.evaluate(element => element.classList.contains("is-collapsed")), true);
+    assert.equal(await sidebar.locator("[title], [role='tooltip']").count(), 0, "the collapsed rail deliberately has no hover labels");
 
     await page.evaluate(() => localStorage.setItem("grapher_sidebar_collapsed_v1", "true"));
     await page.reload({ waitUntil: "domcontentloaded" });
@@ -94,6 +95,115 @@ test("the sidebar always opens expanded, even with a stale collapsed preference"
     assert.equal(await sidebar.evaluate(element => element.classList.contains("is-collapsed")), false,
       "a new launch starts expanded");
     assert.equal(await page.getByRole("button", { name: "Collapse sidebar" }).isVisible(), true);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("sidebar cards and menus support keyboard navigation without opening conversations", { timeout: 30_000 }, async () => {
+  const { context, page, calls, errors } = await openApp(async () => false);
+  try {
+    const project = page.getByRole("button", { name: "Sidebar /mock/sidebar", exact: true });
+    await project.focus();
+    assert.equal(await project.getAttribute("aria-current"), "true");
+    assert.equal(await project.getAttribute("aria-label"), `Sidebar\n${repository}`);
+    await project.hover();
+    assert.equal(await page.locator(".sidebar [title], .sidebar [role='tooltip']").count(), 0,
+      "sidebar labels remain accessible without hover tooltips");
+    await page.keyboard.press("Shift+F10");
+    assert.equal(await project.getAttribute("aria-expanded"), "true");
+    const path = page.getByRole("menuitem", { name: "Copy repository path", exact: true });
+    assert.equal(await path.evaluate(item => item === document.activeElement), true);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => window.copiedTexts.length === 1);
+    assert.deepEqual(await page.evaluate(() => window.copiedTexts), [repository]);
+    assert.equal(await project.evaluate(item => item === document.activeElement), true);
+    assert.equal(await project.getAttribute("aria-expanded"), "false");
+
+    const run = page.locator('.run-item[data-run-id="a"]');
+    await run.focus();
+    assert.equal(await run.getAttribute("title"), null);
+    assert.ok((await run.innerText()).trim(), "the full conversation label supplies the accessible name");
+    await page.keyboard.press("ContextMenu");
+    const items = page.getByRole("menuitem");
+    const focused = () => items.evaluateAll(elements => elements.findIndex(item => item === document.activeElement));
+    assert.equal(await focused(), 0);
+    await page.keyboard.press("ArrowUp");
+    assert.equal(await focused(), 2);
+    await page.keyboard.press("ArrowDown");
+    assert.equal(await focused(), 0);
+    await page.keyboard.press("End");
+    assert.equal(await focused(), 2);
+    await page.keyboard.press("Home");
+    assert.equal(await focused(), 0);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.getByRole("menu").count(), 0);
+    assert.equal(await run.evaluate(item => item === document.activeElement), true);
+
+    await page.keyboard.press("Shift+F10");
+    await page.keyboard.press("Tab");
+    assert.equal(await page.getByRole("menu").count(), 0);
+    assert.equal(await page.locator('.run-item[data-run-id="b"]').evaluate(item => item === document.activeElement), true);
+    await page.keyboard.press("Shift+F10");
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await run.evaluate(item => item === document.activeElement), true);
+    await page.keyboard.press("Shift+F10");
+    await page.locator(".runs-list").evaluate(list => {
+      list.style.maxHeight = "40px";
+      list.scrollTop = list.scrollHeight;
+    });
+    await page.getByRole("menu").waitFor({ state: "detached" });
+    assert.equal(calls.some(call => call.command === "history" || call.command === "load_run"), false);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const [language, reducedMotion] of [["en", "no-preference"], ["zh-CN", "reduce"]]) {
+  test(`sidebar menus fit measured content and dismiss on layout changes (${language}, ${reducedMotion})`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await openApp(async () => false, language, reducedMotion);
+    try {
+      for (const selector of [".project-workspace-item", '.run-item[data-run-id="b"]']) {
+        await page.locator(selector).evaluate(card => card.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 1279, clientY: 719 })));
+        const menu = page.getByRole("menu");
+        // Text scaling may change the menu after its first measurement.
+        await page.addStyleTag({ content: ".keyboard-context-menu .context-menu-item { font-size: 22px; }" });
+        await page.waitForFunction(() => {
+          const box = document.querySelector(".keyboard-context-menu")?.getBoundingClientRect();
+          return box && box.left >= 7 && box.top >= 7 && box.right <= innerWidth - 7 && box.bottom <= innerHeight - 7;
+        });
+        await menu.evaluate(element => Promise.allSettled(element.getAnimations().map(animation => animation.finished)));
+        const box = await menu.boundingBox();
+        assert.ok(box.x >= 7 && box.y >= 7 && box.x + box.width <= 1273 && box.y + box.height <= 713, JSON.stringify(box));
+        await page.keyboard.press("Escape");
+      }
+      await page.locator('.run-item[data-run-id="b"]').click({ button: "right" });
+      await page.setViewportSize({ width: 360, height: 300 });
+      await page.getByRole("menu").waitFor({ state: "detached" });
+      await page.locator(".sidebar-toggle-btn").click();
+      await page.locator(".project-workspace-item").evaluate(card => card.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 359, clientY: 299 })));
+      await page.waitForFunction(() => {
+        const box = document.querySelector(".keyboard-context-menu")?.getBoundingClientRect();
+        return box && box.left >= 7 && box.top >= 7 && box.right <= 353 && box.bottom <= 293;
+      });
+      // Outside pointer dismissal must not steal the next control's focus.
+      await page.locator(".sidebar-toggle-btn").click();
+      assert.equal(await page.getByRole("menu").count(), 0);
+      assert.equal(await page.locator(".sidebar-toggle-btn").evaluate(item => item === document.activeElement), true);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("collapsed sidebar lists immediately leave the keyboard tab order", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await openApp(async () => false, "en", "no-preference");
+  try {
+    await page.getByRole("button", { name: "Collapse sidebar" }).click();
+    for (let index = 0; index < 3; index++) await page.keyboard.press("Tab");
+    assert.equal(await page.getByRole("button", { name: "Settings", exact: true }).evaluate(item => item === document.activeElement), true);
+    await page.getByRole("button", { name: "Expand sidebar" }).click();
+    await page.locator(".project-workspace-item").waitFor({ state: "visible" });
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    assert.equal(await page.locator(".project-workspace-item").evaluate(item => item === document.activeElement), true);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -106,7 +216,7 @@ test("copy menu items remain legible while hovered", { timeout: 30_000 }, async 
     await menu.evaluate(element => Promise.allSettled(element.getAnimations().map(animation => animation.finished)));
 
     for (const label of ["Copy snapshot ID", "Copy prompt"]) {
-      const item = page.getByRole("button", { name: label, exact: true });
+      const item = page.getByRole("menuitem", { name: label, exact: true });
       await page.mouse.move(1000, 650);
       await page.waitForTimeout(150);
       const bounds = await item.boundingBox();
@@ -166,10 +276,10 @@ test("copies the selected Run's complete current prompt without opening it", { t
     await page.locator(".context-menu").evaluate(menu => Promise.allSettled(menu.getAnimations().map(animation => animation.finished)));
     const bounds = await page.locator(".context-menu").boundingBox();
     assert.ok(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 1280 && bounds.y + bounds.height <= 720, JSON.stringify(bounds));
-    assert.equal(await page.getByRole("button", { name: "Copy snapshot ID", exact: true }).count(), 1);
-    assert.equal(await page.getByRole("button", { name: "Delete this history entry", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("menuitem", { name: "Copy snapshot ID", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("menuitem", { name: "Delete this history entry", exact: true }).count(), 1);
     assert.equal(calls.filter(call => call.command === "history").length, 0, "opening a menu does not load histories");
-    await page.getByRole("button", { name: "Copy prompt", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Copy prompt", exact: true }).click();
     await page.waitForFunction(() => window.copiedTexts.length === 1);
     assert.deepEqual(await page.evaluate(() => window.copiedTexts), [prompt]);
     assert.equal(await page.locator(".context-menu").count(), 0);
@@ -178,7 +288,7 @@ test("copies the selected Run's complete current prompt without opening it", { t
     assert.deepEqual(calls.filter(call => call.command === "history").map(call => call.body.runId), ["b"]);
 
     await page.locator('.run-item[data-run-id="a"]').click({ button: "right" });
-    await page.getByRole("button", { name: "Copy snapshot ID", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Copy snapshot ID", exact: true }).click();
     assert.deepEqual(await page.evaluate(() => window.copiedTexts), [prompt, "a"]);
     // Older clipboard implementations still support the writeText fallback.
     await page.evaluate(() => { delete navigator.clipboard.write; });
@@ -255,7 +365,7 @@ test("a slow copy cannot overwrite a newer prompt selection", { timeout: 30_000 
     await copyPrompt(page, "a");
     while (calls.filter(call => call.command === "history" && call.body.runId === "a").length < 2) await page.waitForTimeout(10);
     await page.locator('.run-item[data-run-id="b"]').click({ button: "right" });
-    await page.getByRole("button", { name: "Copy snapshot ID", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Copy snapshot ID", exact: true }).click();
     response = page.waitForResponse(item => item.url().endsWith("/api/history") && item.request().postDataJSON().runId === "a");
     releaseSlow();
     await response;
@@ -284,8 +394,13 @@ test("a provisional conversation keeps its prompt when the durable ID arrives", 
     const pending = page.locator('.run-item[data-run-id^="pending-"]');
     await pending.waitFor();
     await pending.click({ button: "right" });
-    assert.equal(await page.getByRole("button", { name: "删除此条历史", exact: true }).isDisabled(), true);
-    await page.getByRole("button", { name: "复制提示词", exact: true }).click();
+    assert.equal(await page.getByRole("menuitem", { name: "删除此条历史", exact: true }).isDisabled(), true);
+    await page.keyboard.press("End");
+    assert.equal(await page.getByRole("menuitem", { name: "复制提示词", exact: true }).evaluate(item => item === document.activeElement), true,
+      "keyboard navigation skips the disabled delete action");
+    await page.keyboard.press("ArrowDown");
+    assert.equal(await page.getByRole("menuitem", { name: "复制快照 ID", exact: true }).evaluate(item => item === document.activeElement), true);
+    await page.getByRole("menuitem", { name: "复制提示词", exact: true }).click();
     await page.waitForFunction(() => window.copiedTexts.length === 1);
     assert.deepEqual(await page.evaluate(() => window.copiedTexts), [prompt]);
     assert.equal(calls.filter(call => call.command === "history").length, 0);
@@ -294,7 +409,7 @@ test("a provisional conversation keeps its prompt when the durable ID arrives", 
     while (!requested) await page.waitForTimeout(10);
     releasePlanning();
     await page.locator('.run-item[data-run-id="new-run"]').waitFor();
-    await page.getByRole("button", { name: "复制提示词", exact: true }).click();
+    await page.getByRole("menuitem", { name: "复制提示词", exact: true }).click();
     await page.waitForFunction(() => window.copiedTexts.length === 2);
     assert.deepEqual(await page.evaluate(() => window.copiedTexts), [prompt, prompt]);
     assert.equal(calls.filter(call => call.command === "history").length, 0);

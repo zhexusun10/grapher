@@ -13,7 +13,7 @@ import { cacheTranscriptWindow, composePlanningOutput, planningTranscriptCache, 
 import { activePlannerOutput } from "../lib/plannerOutput";
 import { appendTranscriptPage, prependTranscriptPage, validateTranscriptPrepend, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
 import { markTranscriptPrepend, markTranscriptPrependIfReading, olderPageFits, onTranscriptScroll } from "../services/transcriptScroll";
-import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES } from "../services/transcriptPaging";
+import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES, TRANSCRIPT_REVEAL_FALLBACK_MS } from "../services/transcriptPaging";
 import { TranscriptHistoryStatus } from "./TranscriptHistoryStatus";
 export { planningTranscriptCache } from "../services/transcriptCache";
 export { activePlannerOutput } from "../lib/plannerOutput";
@@ -76,6 +76,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
   const segments = useRef(initialSegments);
   const [output, setOutput] = useState(() => composePlanningOutput(planningIds, initialSegments));
   const [ready, setReady] = useState(!planningIds.length || initialSegments.has(planningIds.at(-1)!));
+  const [revealFallback, setRevealFallback] = useState(false);
   const [error, setError] = useState("");
   const failedOlder = useRef(false);
   const [retry, setRetry] = useState(0);
@@ -164,7 +165,10 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         setHoldingOlder(true);
         return true;
       }
-      if (!preserveReading) markTranscriptPrependIfReading(sectionRef.current);
+      // Before reveal the caller has not placed the viewport yet. Being above
+      // the bottom then is not scrollback: marking it as such makes a revision
+      // preload start another reader-owned page and can stall initial readiness.
+      if (!preserveReading && announcedRef.current) markTranscriptPrependIfReading(sectionRef.current);
       const latest = segments.current.get(id);
       const next = latest ? prependTranscriptPage(latest, page) : windowFromPage(page, !page.running);
       publish(id, next);
@@ -207,14 +211,22 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     notifyLoading(!initialReady);
     return () => notifyLoading(false);
   }, [initialReady, notifyLoading]);
-  // Reveal on the newest revision's first page. The viewport auto-fill keeps
-  // running behind the painted overview instead of gating the reveal on it.
+  // An idle Planner remains history even while graph workers are running.
+  // Like execution history, finish the initial fill/measurement before fading
+  // it in; revealing the short tail first moves it across the pane mid-fade.
+  // Live Planner output must remain immediate, and a stalled older read must
+  // not hide already available rows indefinitely.
+  useEffect(() => {
+    if (running || !ready || initialReady || announcedRef.current) return;
+    const timer = setTimeout(() => setRevealFallback(true), TRANSCRIPT_REVEAL_FALLBACK_MS);
+    return () => clearTimeout(timer);
+  }, [running, ready, initialReady]);
   useLayoutEffect(() => {
-    if (ready && !announcedRef.current) {
-      announcedRef.current = true;
-      notifyReady();
-    }
-  }, [ready, notifyReady]);
+    if (!ready || announcedRef.current) return;
+    if (!running && !initialReady && !revealFallback) return;
+    announcedRef.current = true;
+    notifyReady();
+  }, [running, ready, initialReady, revealFallback, notifyReady]);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -332,7 +344,12 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     {ready && !error && !output && <p>{t("没有可用的规划输出。")}</p>}
     {output && <div className="planning-activity-output">
       <VirtualizedTranscript output={activeOutput} inline sourceOrder={planningIds}
-        onReachTop={hasOlder && !error ? () => { void loadOlder(); } : undefined}
+        onReachTop={hasOlder && !error ? () => {
+          // Before reveal, virtual-row measurements can clamp the scroller up.
+          // That is not a history request; only the bounded auto-fill owns reads
+          // until the caller can establish its initial position.
+          if (announcedRef.current) void loadOlder();
+        } : undefined}
         showUserTurns={showUserTurns} skipFirstUser={skipInitialUser} onUserResize={onUserResize}
         settled={!running}
         liveSource={running ? livePlanningId : undefined}

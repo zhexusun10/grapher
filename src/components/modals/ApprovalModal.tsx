@@ -1,8 +1,9 @@
 import { t, localizePlanWarning } from "../../i18n";
-import React, { useEffect } from "react";
+import React, { useId } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { ShieldCheck, Play, X } from "lucide-react";
 import { Snapshot, Config } from "../../types";
+import { useDialogFocus } from "../../hooks/useDialogFocus";
 
 interface ApprovalModalProps {
   isOpen: boolean;
@@ -24,13 +25,8 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
   onApprove,
 }) => {
   const reduceMotion = useReducedMotion();
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, busy]);
+  const titleId = useId();
+  const dialogRef = useDialogFocus<HTMLElement>({ open: isOpen, onClose: busy ? null : onClose });
 
   if (!isOpen) return null;
 
@@ -47,17 +43,20 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
     >
       <motion.section
         className="modal"
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="modal-title"
+        aria-labelledby={titleId}
+        aria-busy={busy}
         initial={{ opacity: 0, scale: reduceMotion ? 1 : 0.98, y: reduceMotion ? 0 : 8 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: reduceMotion ? 1 : 0.98, y: reduceMotion ? 0 : 6 }}
         transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.16, 1, 0.3, 1] }}
       >
         <header>
-          <h2 id="modal-title">{t("审批执行图计划")}</h2>
-          <button className="icon-button" aria-label={t("关闭弹窗")} onClick={onClose}>
+          <h2 id={titleId}>{t("审批执行图计划")}</h2>
+          <button type="button" className="icon-button" aria-label={t("关闭弹窗")} disabled={busy} onClick={onClose}>
             <X size={18} />
           </button>
         </header>
@@ -83,6 +82,7 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = React.memo(({
           <button
             type="button"
             className="secondary"
+            disabled={busy}
             onClick={onAdjustPlan}
           >
             {t("调整计划")}</button>

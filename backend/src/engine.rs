@@ -2418,6 +2418,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
             thinking_level: "medium".into(),
+            isolate_parallel_nodes: true,
             post_task_review: false,
             planner_write_tools: true,
             max_parallel: 1,
@@ -2530,6 +2531,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
         let config = Config {
             environment: None,
             repository: repository.to_string_lossy().into(),
+            isolate_parallel_nodes: true,
             model: "openai-codex/gpt-6-sol".into(),
             post_task_review: false,
             planner_write_tools: true,
@@ -2650,6 +2652,7 @@ sys.stdin.read()
             role_models: Default::default(),
             post_task_review: false,
             planner_write_tools: true,
+            isolate_parallel_nodes: true,
         };
         let mut output = String::new();
         let result = run_pi(
@@ -2791,6 +2794,7 @@ sys.stdin.read()
         };
         let session_dir = temp.path().join("session");
         let config = Config {
+            isolate_parallel_nodes: true,
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
             thinking_level: "medium".into(),
@@ -2912,6 +2916,7 @@ delta('FAILED_SUFFIX')
 sys.exit(2) # No message_end/agent_settled: the partial text must still survive.
 "#).unwrap();
         let config = Config {
+            isolate_parallel_nodes: true,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -2979,6 +2984,7 @@ print(json.dumps({'type':'message_update','assistantMessageEvent':{'type':'text_
 time.sleep(10)
 "#).unwrap();
         let config = Config {
+            isolate_parallel_nodes: true,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -3036,6 +3042,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read() # RPC shutdown is requested by closing stdin.
 "#).unwrap();
         let config = Config {
+            isolate_parallel_nodes: true,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -3086,6 +3093,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.exit(3)  # Windows fail-fast teardown cannot be represented portably; any nonzero code must be tolerated after settle.
 "#).unwrap();
         let config = Config {
+            isolate_parallel_nodes: true,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -3160,6 +3168,7 @@ sys.stdin.read()
             role_models: Default::default(),
             post_task_review: false,
             planner_write_tools: true,
+            isolate_parallel_nodes: true,
         };
         let session = temp.path().join("planning-1").join("planner-session");
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -3234,6 +3243,7 @@ sys.stdin.read()
             role_models: Default::default(),
             post_task_review: false,
             planner_write_tools: true,
+            isolate_parallel_nodes: true,
         };
         // Both the first-attempt layout and manual Graph revisions must keep
         // independent RPC channels. Manual revisions share the parent directory
@@ -3317,6 +3327,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            isolate_parallel_nodes: true,
             post_task_review: false,
             planner_write_tools: true,
             environment: None,
@@ -3407,6 +3418,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            isolate_parallel_nodes: true,
             post_task_review: false,
             planner_write_tools: true,
             environment: None,
@@ -3490,6 +3502,7 @@ sys.stdin.read()
             role_models: Default::default(),
             post_task_review: false,
             planner_write_tools: true,
+            isolate_parallel_nodes: true,
         };
         let result = run_pi_with_timeout(
             PiRequest {
@@ -3526,6 +3539,7 @@ sys.stdin.read()
                 engine: "pi".into(),
                 pi_command: "/bin/sh".into(),
                 pi_args: vec!["-c".into(), script.into()],
+                isolate_parallel_nodes: true,
                 repository: temp.path().to_string_lossy().into(),
                 model: "mock/model".into(),
                 role_models: Default::default(),
@@ -3585,7 +3599,7 @@ sys.stdin.read()
             model: "mock/model".into(),
             thinking_level: "medium".into(),
             max_parallel: 1,
-            max_feedback: 0, auto_approve: false, post_task_review: false, planner_write_tools: true,
+            max_feedback: 0, isolate_parallel_nodes: true, auto_approve: false, post_task_review: false, planner_write_tools: true,
             role_models: Default::default(),
         };
         let result = run_pi(
@@ -3619,6 +3633,7 @@ sys.stdin.read()
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
             post_task_review: false, planner_write_tools: true,
+            isolate_parallel_nodes: true,
             environment: None,
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
@@ -3669,6 +3684,7 @@ sys.stdin.read()
             planner_write_tools: true,
             environment: None,
             repository: "/tmp/fake".into(),
+            isolate_parallel_nodes: true,
             model: "mock/model".into(),
             thinking_level: "medium".into(),
             max_parallel: 1,
@@ -3738,6 +3754,7 @@ sys.stdin.read()
             planner_write_tools: true,
             environment: None,
             repository: "/tmp/fake".into(),
+            isolate_parallel_nodes: true,
             model: "anthropic/claude-3-7-sonnet".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
@@ -3775,6 +3792,7 @@ sys.stdin.read()
             repository: "/tmp/fake".into(),
             post_task_review: false,
             planner_write_tools: true,
+            isolate_parallel_nodes: true,
             model: String::new(),
             role_models: Default::default(),
             thinking_level: "medium".into(),
@@ -3804,6 +3822,7 @@ sys.stdin.read()
             repository: "/tmp/fake".into(),
             post_task_review: false,
             planner_write_tools: true,
+            isolate_parallel_nodes: true,
             model: "some-model".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,
@@ -3942,6 +3961,7 @@ sys.stdin.read()
             repository: "/tmp/fake".into(),
             post_task_review: false,
             planner_write_tools: true,
+            isolate_parallel_nodes: true,
             model: "claude-3-7-sonnet".into(),
             thinking_level: "medium".into(),
             max_parallel: 4,

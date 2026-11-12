@@ -522,7 +522,7 @@
 }
 
 .tool-call-card:hover {
-  border-color: var(--border-subtle);
+  border-color: var(--border-hover);
 }
 
 @keyframes tool-running-glow {
@@ -587,12 +587,13 @@
   padding: 8px 12px;
   cursor: pointer;
   user-select: none;
-  background: rgba(255, 255, 255, 0.015);
+  background: transparent;
   font-size: 12.5px;
+  transition: background-color 0.15s ease;
 }
 
 .tool-call-header:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--bg-surface);
 }
 
 .transcript-error-header {
@@ -603,7 +604,7 @@
   min-width: 0;
   box-sizing: border-box;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.015);
+  background: transparent;
 }
 
 .transcript-error-toggle {
@@ -954,7 +955,9 @@ button.transcript-error-toggle {
 .tool-command-code,
 .tool-args-code,
 .tool-result-code {
-  font: inherit;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.55;
   background: #0f141c;
   color: #e2e8f0;
   padding: 8px 10px;
@@ -1158,11 +1161,11 @@ button.transcript-error-toggle {
 
 .markdown-content blockquote {
   margin: 8px 0;
-  padding: 4px 12px;
+  padding: 6px 12px;
   border-left: 3px solid var(--brand-default);
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: 0 4px 4px 0;
+  background: var(--bg-surface);
+  border-radius: 0 6px 6px 0;
 }
 
 .markdown-content table {
@@ -1249,20 +1252,20 @@ button.transcript-error-toggle {
   box-sizing: border-box;
   font-size: 12px;
   line-height: 1.45;
-  color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  background: var(--bg-canvas);
   padding: 4px 10px;
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-default);
   max-width: 100%;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
 .system-row.error .system-pill {
-  color: #ef4444;
-  background: rgba(239, 68, 68, 0.08);
-  border-color: rgba(239, 68, 68, 0.2);
+  color: var(--status-danger-text);
+  background: var(--status-danger-subtle);
+  border-color: var(--status-danger-border);
 }
 
 .chat-message-row.assistant > .node-error,
@@ -1482,9 +1485,9 @@ button.transcript-error-toggle {
 }
 
 .pi-auth-header-card {
-  background: linear-gradient(135deg, rgba(6, 182, 212, 0.06) 0%, rgba(59, 130, 246, 0.04) 100%);
-  border: 1px solid rgba(6, 182, 212, 0.2);
-  border-radius: var(--radius-surface);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
   padding: 10px 14px;
   display: flex;
   flex-direction: row;
@@ -1505,7 +1508,7 @@ button.transcript-error-toggle {
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: rgba(6, 182, 212, 0.15);
+  background: var(--brand-subtle);
   color: var(--brand-default);
   display: flex;
   align-items: center;
@@ -1592,11 +1595,19 @@ button.transcript-error-toggle {
 .providers-grid-title {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
-  margin-top: 4px;
-  font-size: 12px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin: 2px -8px 0;
+  border-radius: 8px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--text-primary);
+  transition: background-color 0.15s ease;
+}
+
+.providers-grid-title:hover {
+  background: var(--bg-surface-hover);
 }
 
 .providers-grid-title small {
@@ -1613,16 +1624,16 @@ button.transcript-error-toggle {
      A second scroll container here meant a floating scrollbar track could sit
      over the right-hand cards (and its appearance/narrowing reflowed the grid),
      so the grid never scrolls on its own. */
-  padding: 6px;
+  padding: 2px;
   box-sizing: border-box;
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 .provider-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-surface);
-  padding: 10px 12px;
+  border-radius: 12px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -1636,8 +1647,8 @@ button.transcript-error-toggle {
  * hovering a card has no effect: a hover border made the whole grid look
  * interactive while nothing happened. */
 .provider-card.configured {
-  border-color: rgba(34, 197, 94, 0.35);
-  background: linear-gradient(180deg, rgba(34, 197, 94, 0.04) 0%, var(--bg-surface) 100%);
+  border-color: var(--status-success-border);
+  background: linear-gradient(180deg, var(--status-success-subtle) 0%, var(--bg-surface) 100%);
 }
 
 .provider-card.selected {
@@ -1675,24 +1686,24 @@ button.transcript-error-toggle {
 }
 
 .provider-badge {
-  font-size: 12px;
-  padding: 2px 6px;
-  border-radius: 4px;
+  font-size: 11.5px;
+  padding: 2px 7px;
+  border-radius: 5px;
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   font-weight: 500;
   flex-shrink: 0;
 }
 
 .badge-configured {
-  background: rgba(34, 197, 94, 0.15);
-  color: #4ade80;
-  border: 1px solid rgba(34, 197, 94, 0.25);
+  background: var(--status-success-subtle);
+  color: var(--status-success-strong);
+  border: 1px solid var(--status-success-border);
 }
 
 .badge-unconfigured {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--bg-canvas);
   color: var(--text-secondary);
   border: 1px solid var(--border-default);
 }
@@ -1777,10 +1788,10 @@ button.transcript-error-toggle {
 
 /* Configured Credentials Panel */
 .configured-credentials-card {
-  background: linear-gradient(135deg, rgba(34, 197, 94, 0.06) 0%, rgba(6, 182, 212, 0.04) 100%);
-  border: 1px solid rgba(34, 197, 94, 0.3);
-  border-radius: var(--radius-surface);
-  padding: 12px 16px;
+  background: var(--status-success-subtle);
+  border: 1px solid var(--status-success-border);
+  border-radius: 12px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
 }
@@ -1814,7 +1825,7 @@ button.transcript-error-toggle {
 }
 
 .configured-key-icon {
-  color: #4ade80;
+  color: var(--status-success-strong);
 }
 
 .configured-list {
@@ -1825,25 +1836,28 @@ button.transcript-error-toggle {
 }
 
 .configured-row {
-  background: var(--bg-surface);
+  background: var(--bg-canvas);
   border: 1px solid var(--border-default);
   border-radius: 8px;
-  padding: 8px 12px;
+  padding: 10px 12px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
 }
 
 .configured-info {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 6px 10px;
   min-width: 0;
 }
 
 .configured-name-wrap {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 6px;
 }
@@ -1861,22 +1875,22 @@ button.transcript-error-toggle {
 }
 
 .configured-type-badge {
-  font-size: 12px;
+  font-size: 11.5px;
   padding: 2px 7px;
-  border-radius: 4px;
+  border-radius: 5px;
   font-weight: 500;
 }
 
 .configured-type-badge.stored-badge {
-  background: rgba(34, 197, 94, 0.15);
-  color: #4ade80;
-  border: 1px solid rgba(34, 197, 94, 0.3);
+  background: var(--status-success-subtle);
+  color: var(--status-success-strong);
+  border: 1px solid var(--status-success-border);
 }
 
 .configured-type-badge.env-badge {
-  background: rgba(59, 130, 246, 0.15);
-  color: #60a5fa;
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: var(--brand-subtle);
+  color: var(--brand-hover);
+  border: 1px solid var(--brand-border);
 }
 
 /* Custom In-App Deletion Confirmation Modal */
@@ -1890,6 +1904,7 @@ button.transcript-error-toggle {
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 20px;
 }
 
 .confirm-delete-modal {
@@ -2083,11 +2098,25 @@ button.transcript-error-toggle {
   font-style: italic;
 }
 
+/* Full-width details occupy the next grid row below the selected provider. */
+.active-login-reveal {
+  display: grid;
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.active-login-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+
 /* Active Login Wizard Panel */
 .active-login-panel {
+  color: var(--text-primary);
   background: var(--bg-surface);
-  border: none;
-  border-radius: var(--radius-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 12px;
   padding: 14px 16px;
   display: flex;
   flex-direction: column;
@@ -2107,7 +2136,7 @@ button.transcript-error-toggle {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: var(--brand-default);
+  color: var(--text-primary);
 }
 
 .icon-button-close {
@@ -2116,24 +2145,26 @@ button.transcript-error-toggle {
   color: var(--text-secondary);
   cursor: pointer;
   padding: 4px;
-  border-radius: 4px;
+  border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 .icon-button-close:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--bg-surface-hover);
 }
 
 .auth-method-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .auth-method-tab {
-  flex: 1;
+  flex: 1 1 140px;
   padding: 8px 12px;
   border-radius: 8px;
   background: var(--bg-canvas);
@@ -2149,9 +2180,9 @@ button.transcript-error-toggle {
 }
 
 .auth-method-tab.active {
-  background: rgba(6, 182, 212, 0.12);
+  background: var(--brand-subtle);
   border-color: var(--brand-default);
-  color: var(--brand-default);
+  color: var(--brand-active);
   font-weight: 600;
 }
 
@@ -2187,7 +2218,7 @@ button.transcript-error-toggle {
   font-size: 16px;
   font-weight: 700;
   letter-spacing: 2px;
-  color: var(--brand-default);
+  color: var(--text-primary);
   background: rgba(6, 182, 212, 0.1);
   padding: 4px 10px;
   border-radius: 4px;
@@ -2233,7 +2264,7 @@ button.transcript-error-toggle {
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: var(--brand-default);
+  color: var(--text-primary);
   padding: 6px 0;
 }
 
@@ -2349,6 +2380,7 @@ button.transcript-error-toggle {
 
 .prompt-action-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 

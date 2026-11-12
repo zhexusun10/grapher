@@ -19,11 +19,11 @@ export function ExtensionItem({ extension, disabled, onToggle }: {
       <strong>{extension.name}</strong>
       <code>{description}</code>
     </div>
-    {extension.required ? <span className="extension-settings-required" role="img" aria-label={t('始终启用，不可删除')}>
+    {extension.required ? <span className="extension-settings-required" role="img" aria-label={t('始终启用，不可移除')}>
       <LockKeyhole size={14} aria-hidden="true" />
     </span> : <button type="button" className="secondary" disabled={disabled} onClick={() => onToggle(extension)}
-      aria-label={t('{0}扩展 {1}', extension.enabled ? t('删除') : t('添加'), extension.name)}>
-      {extension.enabled ? <Trash2 size={14} /> : <Plus size={14} />}{extension.enabled ? t('删除') : t('添加')}
+      aria-label={t('{0}扩展 {1}', extension.enabled ? t('移除') : t('添加'), extension.name)}>
+      {extension.enabled ? <Trash2 size={14} /> : <Plus size={14} />}{extension.enabled ? t('移除') : t('添加')}
     </button>}
   </li>;
 }
@@ -69,7 +69,7 @@ export function ExtensionSettings({ disabled = false }: { disabled?: boolean }) 
       <Puzzle size={16} /><h4 id="extension-settings-title">{t('Pi 全局扩展')}</h4>
       <button type="button" className="icon-button" aria-label={t('刷新扩展')} disabled={busy || disabled} onClick={() => void update()}><RefreshCw size={14} /></button>
     </div>
-    <p className="section-desc">{t('删除仅在 Grapher 中停用，不卸载全局扩展；可从待选列表随时加回。')}</p>
+    <p className="section-desc">{t('移除仅在 Grapher 中停用，不卸载全局扩展；可从待选列表随时加回。')}</p>
     <p className="section-desc">{t('pi-trim 对所有角色生效；pi-continuity 对 Planner、Node Agent 和 Merger 生效；pi-better-web-search 默认停用，需在设置中手动启用且仅对 Planner、Node Agent 生效；其他扩展、MCP 和 Skill 仅对 Planner、Node Agent 生效。')}</p>
     {catalog && <code className="extension-settings-directory">{catalog.globalDirectory}</code>}
     {busy && <p role="status" className="section-desc">{t('正在读取扩展…')}</p>}

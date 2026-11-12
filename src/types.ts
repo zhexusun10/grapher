@@ -15,7 +15,7 @@ export interface Plan { executionBatches: string[][]; rootNodes: string[]; termi
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ModelRole = "partitioner" | "planner" | "nodeAgent";
 export interface RoleModelConfig { model: string; thinkingLevel?: ThinkingLevel }
-export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; maxFeedback: number; autoApprove: boolean; postTaskReview?: boolean; plannerWriteTools?: boolean }
+export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; isolateParallelNodes?: boolean; maxFeedback: number; autoApprove: boolean; postTaskReview?: boolean; plannerWriteTools?: boolean }
 export interface ConversationModelConfig { model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>> }
 export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; canResume?: boolean; modelConfig?: RoleModelConfig; modelRetry?: boolean; pendingMessages?: Array<{ sequence: number; instruction: string; images?: ImageAttachment[] | null }> }
 export interface FeedbackExhaustion { from: string; to: string; count: number; limit: number }
@@ -152,6 +152,8 @@ export interface SkillItem {
 
 export interface Snapshot {
   runId: string;
+  isolatedWorkspaces?: boolean | null;
+  batchHandoff?: { recoveryExecutionIds: string[] } | null;
   planType?: "serial" | "graph";
   planningId?: string;
   planning?: PlanningSummary | null;
@@ -230,8 +232,32 @@ export interface Bootstrap {
   envOverrides?: Record<string, string>;
 }
 
+export const MIN_MAX_PARALLEL = 2;
+export const DEFAULT_MAX_PARALLEL = 8;
+export const MAX_MAX_PARALLEL = 40;
+
+export const MIN_MAX_FEEDBACK = 2;
+export const DEFAULT_MAX_FEEDBACK = 4;
+export const MAX_MAX_FEEDBACK = 40;
+
+function normalizeBoundedSetting(value: unknown, min: number, fallback: number, max: number): number {
+  const raw = typeof value === "string" ? value.trim() : value;
+  if (raw === "" || raw === null || raw === undefined) return fallback;
+  const numeric = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(numeric) || numeric === 0) return fallback;
+  return Math.min(max, Math.max(min, Math.round(numeric)));
+}
+
+export function normalizeMaxParallel(value: unknown): number {
+  return normalizeBoundedSetting(value, MIN_MAX_PARALLEL, DEFAULT_MAX_PARALLEL, MAX_MAX_PARALLEL);
+}
+
+export function normalizeMaxFeedback(value: unknown): number {
+  return normalizeBoundedSetting(value, MIN_MAX_FEEDBACK, DEFAULT_MAX_FEEDBACK, MAX_MAX_FEEDBACK);
+}
+
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: 0, maxFeedback: 8, autoApprove: false, postTaskReview: true, plannerWriteTools: false };
+export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: DEFAULT_MAX_PARALLEL, isolateParallelNodes: true, maxFeedback: DEFAULT_MAX_FEEDBACK, autoApprove: true, postTaskReview: true, plannerWriteTools: true };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},

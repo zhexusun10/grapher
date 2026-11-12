@@ -14,12 +14,13 @@
 | Partitioner | Source project | Host-user process; classification has no tools |
 | Planner | Source initially/after publication; selected current node worktree for follow-ups | Native Bash without write-command filtering; follows the selected workspace's platform/source policy |
 | Serial agent | Source project | Host-user project access |
-| Graph Node Agent | Current private Run repository | Platform policy below; path adaptation is not additional permission |
+| Graph Node Agent (private) | Current private Run repository | Platform policy below; path adaptation is not additional permission |
+| Graph Node Agent (shared source) | Source project | Host-user project access; no per-node filesystem isolation |
 | Merger | Conflicted node workspace or source project | Follows that workspace's platform/source policy, without extra conflict-repair access |
 
 Exact tool, extension, MCP, skill and context loading belongs to the [Pi role policy](../development/pi-integration.md#role-loading-policy).
 
-Source-native Planner turns use host-user permissions; private-workspace turns retain the platform boundaries below, without extra source/sibling access. A Merger gets no additional conflict-repair permissions. Tool availability and immediate-write/rollback behavior belong to [Planning and approval](execution-model.md#planning-and-approval).
+The [adaptive workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy) selects shared-source versus private execution before launch; sharing is not a fallback for a failed private sandbox. Source-native Planner and shared Graph node turns use host-user permissions; private-workspace turns retain the platform boundaries below, without extra source/sibling access. A Merger gets no additional conflict-repair permissions. Tool availability and immediate-write/rollback behavior belong to [Planning and approval](execution-model.md#planning-and-approval).
 
 ## Platform boundaries
 
@@ -36,7 +37,7 @@ Private Graph executions, Planner turns and Mergers use Seatbelt through `sandbo
 
 ### Linux
 
-Private Graph executions, Planner turns and Mergers use bubblewrap. Source-native Planner execution does not use these private-workspace mounts. The host/task container must allow unprivileged user, mount, and PID namespaces plus required bind/proc mounts. Graph preflight fails closed; it does not replace a rejected Graph with an unisolated execution or test fixture.
+Private Graph executions, Planner turns and Mergers use bubblewrap. Source-native Planner execution does not use these private-workspace mounts. The host/task container must allow unprivileged user, mount, and PID namespaces plus required bind/proc mounts. Private Graph preflight fails closed; it does not replace a rejected Graph with an unisolated execution or test fixture.
 
 The mount layout exposes the current private repository/session, masks source and unrelated workspace/data paths, and makes the shared engine and original installation read-only, including linked dependency targets. A masked directory is made unreadable rather than left empty, so listing or traversing it fails with a permission error instead of a silent empty listing. The container's `/dev` is explicitly mounted and `/dev/null` read/write is checked. Network access remains available for configured providers.
 

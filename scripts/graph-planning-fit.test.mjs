@@ -509,6 +509,20 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       // Rewire with identical node/edge counts: count-only effects miss this.
       await update({ graph: graph([["a", "b"], ["a", "c"], ["b", "d"]]) }, true);
       await assertFitted(page, [["a"], ["b", "c"], ["d"]]);
+      const edgeArrows = await page.evaluate(() => {
+        const markerIds = new Set([...document.querySelectorAll("marker[id]")].map(m => m.id));
+        const paths = [...document.querySelectorAll(".react-flow__edge-path")].map(p => p.getAttribute("marker-end"));
+        const visibleTargets = [...document.querySelectorAll(".react-flow__handle.target")]
+          .filter(h => getComputedStyle(h).opacity !== "0").length;
+        return { markerIds: [...markerIds], paths, visibleTargets };
+      });
+      assert.equal(edgeArrows.paths.length, 3);
+      for (const markerEnd of edgeArrows.paths) {
+        const match = /^url\('#?([^')]+)'?\)$/.exec(markerEnd ?? "");
+        assert.ok(match && edgeArrows.markerIds.includes(match[1]),
+          `edge markerEnd must reference a defined <marker> id, got: ${markerEnd}`);
+      }
+      assert.equal(edgeArrows.visibleTargets, 0, "target handles stay hidden so they never cover edge arrowheads");
       // No geometry change at completion, but the footer changes canvas height.
       await update({}, false);
       await page.getByRole("button", { name: "Approve", exact: true }).waitFor();

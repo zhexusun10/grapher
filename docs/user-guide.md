@@ -8,14 +8,18 @@
 ## Choose the right mode
 
 - **Serial:** one agent works directly in your project. Prefer it for small, linear or tightly coupled changes.
-- **Graph:** review a compiled task graph, then run independent branches in private workspaces. Dependencies carry completed project-file state, not other agents' conversations. A Graph can have just one node.
+- **Graph:** review a compiled task graph, then run independent nodes. Each small execution batch shares your source directory; larger parallel batches use private workspaces by default. Nodes keep separate conversations. A Graph can have just one node.
 - **Auto:** let the Partitioner choose Serial or Graph from your goal.
 
 More agents help only when work can progress independently. Repeatedly splitting edits to the same files can add conflicts instead of useful parallelism.
 
+All five **Settings → Harness settings** options default on; saved opt-outs remain off. **Hide Auto mode** keeps only Serial and Graph in the composer and hides Partitioner configuration without deleting its saved settings. If Auto is selected, it switches to Graph; an explicit Serial or Graph choice stays unchanged. This visibility preference applies only in this browser; turn it off and save to show Auto and Partitioner again.
+
 ## Refresh local Pi models
 
 After editing `~/.pi/agent/models.json`, open **Settings → Model & Provider** and click **Refresh**. Grapher reads the latest local definitions for the catalog and for new execution runtimes. A model appears in role selectors only when its Provider is available; authenticate it in Settings if needed. Running sessions retain their current runtime.
+
+For OpenAI Codex OAuth, choose **Browser login (default)** in the sign-in panel below its Provider card, then click **Continue sign-in**. If your browser blocks the authorization page from opening, use the authorization link in that panel. Device-code login is also available. After successful authentication, the supported-provider list automatically collapses after a short confirmation period. Bound credentials start collapsed each time you reopen Settings.
 
 If Grapher also has its own `models.json`, local Pi definitions win on conflicts and Grapher-only models remain. The original Grapher file is retained and backed up as `models.json.grapher-backup`. To remove an old model that only exists in that file, remove it there as well. These files may contain credentials; keep them private. Merged snapshots are normally removed on exit, but a forced termination or crash may leave a `grapher-models-*` directory in the system temporary directory; check it before sharing or cleaning temporary files.
 
@@ -23,9 +27,29 @@ If Grapher also has its own `models.json`, local Pi definitions win on conflicts
 
 At the bottom of **Settings**, choose the static **Dot pattern** (the default) or **Animated paths**, then save. The choice affects the home screen and is stored in the current browser; it does not change a conversation or backend settings.
 
+## Choose node workspace isolation
+
+**Settings → Harness settings → Isolate parallel node workspaces** applies to new
+conversations. Each dispatch batch of up to two nodes shares your source
+directory; a batch with more nodes uses independent workspaces. This is based on
+actual dispatch count, not the whole graph. Every batch drains and hands off its
+results before the next starts, so a later smaller batch returns to source.
+Planner review's new work follows the same rule. A failed handoff blocks the next
+batch for repair/retry rather than losing files or claiming completion. Manually
+resolved private inputs are delivered before a retry moves to source; successful
+managed result runs also deliver their new files before another result launch.
+
+Turn the option off to always share source, reducing environment setup and merge
+cost and making intermediate files visible immediately. Shared agents have no
+per-node filesystem isolation: concurrent edits can overwrite each other, failed
+work remains in source, and there is no automatic file rollback. Your external
+file edits before or during a source-native node's execution are accepted as live
+changes, not treated as workspace-integrity failures. Keep backups and avoid
+assigning overlapping edits. Each node still has its own conversation.
+
 ## Before you approve
 
-**Approval starts execution; it is not a “no changes yet” checkpoint.**
+**Approval starts execution; it is not a “no changes yet” checkpoint.** **Auto Approve** defaults on. To inspect each Graph before execution, turn it off in **Settings → Harness settings** and save before submitting your goal.
 
 - Initial Planner commands run in your source project and can change files before approval. Rejecting a plan, stopping it or encountering a failure does **not** roll those writes back.
 - Git snapshots collect project files even when `.gitignore` matches them. Graph snapshots/history stay private and leave your branch and staging area unchanged. Final publication writes files only and creates no commit. Runtime internals and managed environment scopes are excluded; `.gitignore` is not a secret or artifact filter.
@@ -36,7 +60,7 @@ Start with a disposable project and keep an independent backup of important work
 
 ## Follow and steer the work
 
-For Graph, inspect tasks and dependencies, then choose **Approve**. Independent ready nodes can run in parallel. Failure in one branch need not stop unrelated branches.
+For Graph with **Auto Approve** off, inspect tasks and dependencies, then choose **Approve**; otherwise execution starts automatically. Independent ready nodes can run in parallel. Failure in one branch need not stop unrelated branches.
 
 | What you want | Action and effect |
 | --- | --- |
@@ -47,7 +71,7 @@ For Graph, inspect tasks and dependencies, then choose **Approve**. Independent 
 | Copy a conversation's original prompt | Right-click it in the sidebar and choose **Copy prompt**; saved conversations use the backend's original goal. |
 | Find running Graph work | Use the topology's **Fit View** button. If the whole graph cannot fit at the minimum zoom, it centers running cards where possible; otherwise it fits the whole graph. |
 | Collapse or reopen the Graph | Drag the divider past the graph's minimum width to collapse it; use the edge arrow to reopen it at the previous width. You can also focus the divider and press Enter. |
-| Pause Graph node work | Use the topology's **Pause**; it interrupts active node processes and stops new dispatches for that Run. Wait for pausing to finish before **Continue**. It does not stop the Planner or other Runs. |
+| Pause Graph node work | Use the topology's **Pause**; it interrupts active node processes and stops new dispatches for that Run. Pause/Continue is disabled while the Planner is working; use the Planner conversation's **Stop** for that turn. Wait for node pausing to finish before **Continue**. Other Runs are unaffected. |
 | Stop just one conversation | Use that node conversation's **Stop** to interrupt only that node. The Planner conversation's **Stop** cancels only its current Planner turn and leaves running node agents untouched. A run-wide Stop/cancel also cancels planning. |
 | Inspect a changed file | Open the file-change list and click a row. The file opens in your system default application from its execution workspace, Planner workspace or the source repository. Deleted files remain listed but are not clickable. |
 
@@ -65,7 +89,7 @@ Switching conversations does not stop Runs. Unsent text survives switches only i
 
 ### Planner follow-ups and review
 
-Planner follow-ups may use a current node workspace alongside its active writer, not a merged view of parallel branches. Check **Planning session details** for the directory used. If the newest workspace is still preparing, the Planner uses the source project, never that partial workspace.
+Shared-source Planner follow-ups stay in your project and have no workspace-switch tool. With private execution, follow-ups may use a current node workspace alongside its active writer, not a merged view of parallel branches. Check **Planning session details** for the directory used. If the newest workspace is still preparing, the Planner uses the source project, never that partial workspace.
 
 Review nodes can send bounded feedback to their graph-defined target. The target continues its own conversation with explicit instructions and completed file state; agent chat histories are not passed between nodes. An exhausted feedback budget means the requested rework was **not applied**, not that the review passed.
 
@@ -82,17 +106,17 @@ After fixing the cause, use the play button in an empty Node, Serial Agent or Pl
 | Conflict while combining parent results | Inspect the node's Merger conversation and retained workspace. Retry the node to re-attempt preparation; publication retry does not fix this conflict. |
 | Final publication failed | Inspect the publication panel and any publication Merger, then retry publication. It reuses retained results rather than rerunning the graph. A changed branch is not silently written; interrupted-checkout recovery may require restoring the captured branch. Staged changes in excluded environment/runtime scopes stay staged and are not published; commit or unstage them explicitly. |
 
-Changing the Node Agent model or reasoning level in a conversation applies to all its future node attempts, including retries, feedback repairs, rerun descendants and follow-ups to completed nodes. A running attempt keeps its current model and is not restarted; its recorded model remains in the history. Session details show a retry selection separately from the previous model. Other conversations keep their own settings, and environment overrides take precedence.
+Changing the Node Agent model or reasoning level in a conversation applies to all its future node attempts, including retries, feedback repairs, rerun descendants and follow-ups to completed nodes. A running attempt keeps its current model and is not restarted; its recorded model remains in the history. Session details show a retry selection separately from the previous model. Other conversations keep their own settings, and environment overrides take precedence. After saving, reopening Settings shows that conversation's saved selection. Saving from the home screen instead changes the defaults for new conversations.
 
-In Graph, Continue resumes paused or queued work first; after it settles, Continue again retries failed nodes without rerunning completed branches. Retained workspaces preserve partial work; missing or changed recovery evidence may require explicit repair. Editing an old message branches history: Serial does **not** rewind project files, while Graph retains Git rollback semantics.
+In Graph, Continue resumes paused or queued work first; after it settles, Continue again retries failed nodes without rerunning completed branches. Retained workspaces preserve partial work; missing or changed recovery evidence may require explicit repair. Editing an old message branches history: Serial does **not** rewind project files, while private Graph workspaces retain Git rollback semantics. Shared-source Graphs do not rewind project files.
 
 ## Know when the result is delivered
 
-**Graph is complete only after successful publication to your project.** Green task cards or a model's final answer are not delivery evidence.
+**Private Graph results require successful publication to your project.** Green task cards or a model's final answer alone are not delivery evidence. Shared-source Graphs already edit your project directly and finish without a separate publication step.
 
 Publication combines terminal results with source changes privately and writes files only: no commit, branch/HEAD advance or staging-area change. Graph workspaces do not expose internal Git history. A private Merger handles Git conflicts; failed composition leaves the source untouched and can be retried. Repository and permission errors remain failures. Ordinary folders use external Git metadata; Grapher does not add `.git`.
 
-**Post-task Planner review** defaults on for new Graph Runs. After publication, the Planner can inspect, report, wrap up or propose more work. With **Auto Approve**, further work and model calls can run without another click; publication still writes files without commits. Set review before creating the Run; Auto Approve applies live, including to a waiting or planning Graph. Interrupted reviews are not silently repeated.
+**Post-task Planner review** defaults on for new Graph Runs. After publication or shared-source completion, the Planner can inspect, report, wrap up or propose more work. With **Auto Approve**, further work and model calls can run without another click; publication still writes files without commits. Set review before creating the Run; Auto Approve applies live, including to a waiting or planning Graph. Interrupted reviews are not silently repeated.
 
 Native environment support is **experimental**. There is no user environment-mode selector; tasks use native tools and backend-verified bindings when available. Reuse is best-effort, not a promise of portable environments. Managed environments are not copied into source. Published result descriptors and launch/retry/cancel controls are not exposed in the interface; they remain available only through the local API.
 

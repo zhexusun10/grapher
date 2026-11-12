@@ -9,12 +9,13 @@ const thinkingLabels: Record<ThinkingLevel, string> = {
   medium: t("中 (medium)"), high: t("高 (high)"), xhigh: t("极高 (xhigh)"), max: t("最大 (max)"),
 };
 
-export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {}, busy }: {
+export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {}, busy, hidePartitioner = false }: {
   config: Config;
   setConfig: React.Dispatch<React.SetStateAction<Config>>;
   catalog?: ProviderCatalog;
   envOverrides?: Record<string, string>;
   busy: boolean;
+  hidePartitioner?: boolean;
 }) {
   const [providerFilter, setProviderFilter] = useState("");
   const draft = normalizeModelThinkingLevels(config, catalog);
@@ -36,7 +37,7 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
       </label>
       {!catalog && <p className="role-model-note" role="status">{busy ? t("正在加载可用模型…") : t("模型列表暂不可用，请在上方刷新 Provider 状态。")}</p>}
       {catalog && availableModels.length === 0 && <p className="role-model-note" role="status">{t("暂无可用模型，请先在上方登录 Provider 或绑定 API Key，然后刷新状态。")}</p>}
-      {modelRoles.map(role => {
+      {modelRoles.filter(role => !hidePartitioner || role.id !== "partitioner").map(role => {
         const selected = draft.roleModels?.[role.id];
         const model = selected?.model ?? (role.id === "nodeAgent" ? draft.model : "");
         const settings = roleModelConfig(draft, role.id);
@@ -83,13 +84,13 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
                 </select>
               </label>
             </div>
-            <small className={override || !effective.model ? "role-model-warning" : "role-model-effective"}>
-              {override
-                ? `${t("环境变量覆盖：")}${effective.model ? `${effective.model} · ${effective.thinkingLevel}` : t("未设置模型")}`
-                : effective.model
-                  ? `${t("保存后使用：")}${effective.model} · ${effective.thinkingLevel}`
+            {(override || !effective.model) && (
+              <small className="role-model-warning">
+                {override
+                  ? `${t("环境变量覆盖：")}${effective.model ? `${effective.model} · ${effective.thinkingLevel}` : t("未设置模型")}`
                   : t("未设置模型")}
-            </small>
+              </small>
+            )}
             {unavailable && <small className="role-model-warning">{t("当前使用的模型不可用，请先认证对应 Provider 或重新选择可用模型。")}</small>}
             {role.id === "nodeAgent" && (envOverrides.merger || envOverrides.mergerThinking) && (
               <small className="role-model-warning">

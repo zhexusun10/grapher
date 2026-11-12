@@ -315,9 +315,11 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
     await page.locator('[data-run-id="run-a"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Alpha conversation" }).waitFor();
 
-    // Switching while repository detection yields cannot bind Alpha to Beta,
-    // and always lands on home instead of opening the newest conversation.
-    await page.locator(".project-workspace-item", { hasText: "Beta" }).click();
+    // Keyboard selection follows the same workspace switching path. Switching
+    // while repository detection yields cannot bind Alpha to Beta, and always
+    // lands on home instead of opening the newest conversation.
+    await page.locator(".project-workspace-item", { hasText: "Beta" }).focus();
+    await page.keyboard.press("Enter");
     await page.locator(".landing-screen").waitFor();
     await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
     assert.equal(await page.locator(".run-item.chosen").count(), 0);
@@ -331,8 +333,10 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
     await page.locator('[data-run-id="run-b"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Beta conversation" }).waitFor();
 
+    // Space also activates workspace cards without a mouse.
     // Start Alpha planning, navigate away, then release its delayed SSE result.
-    await page.locator(".project-workspace-item", { hasText: "Alpha" }).click();
+    await page.locator(".project-workspace-item", { hasText: "Alpha" }).focus();
+    await page.keyboard.press("Space");
     await page.locator(".landing-screen").waitFor();
     await page.waitForFunction(() => !document.querySelector(".chat-messages-stream"));
     assert.equal(await page.locator(".run-item.chosen").count(), 0);

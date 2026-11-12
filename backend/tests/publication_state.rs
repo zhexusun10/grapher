@@ -13,6 +13,7 @@ fn config(source: &Path) -> Config {
         auto_approve: false,
         post_task_review: false,
         planner_write_tools: true,
+        isolate_parallel_nodes: true,
         #[cfg(feature = "fixture")]
         engine: "pi".into(),
         #[cfg(feature = "fixture")]
@@ -39,9 +40,11 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
     let (source, head) = source(temp.path());
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
+    // Seed the legacy private contract; adaptive small Graphs settle in source.
+    runtime.state.run_id = uuid::Uuid::new_v4().to_string();
     runtime
-        .create(
-            Graph {
+        .emit(EventKind::Created {
+            graph: Graph {
                 original_goal: "Goal".into(),
                 nodes: vec![
                     Node {
@@ -55,9 +58,12 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
                 ],
                 edges: Vec::new(),
             },
-            config(&source),
-        )
+            config: config(&source),
+            planning_id: None,
+            planning: None,
+        })
         .unwrap();
+    runtime.store.select_run(Some(&runtime.state.run_id)).unwrap();
     runtime.approve().unwrap();
     for job in runtime.jobs().unwrap() {
         runtime

@@ -14,13 +14,17 @@
   /* 边框、分割线与容器圆角 */
   --radius-surface: 18px;
   --border-default: #E2E8F0;
+  --border-hover: #CBD5E1;
   --border-subtle: #F1F5F9;
   --border-focus: #2563EB;
 
   /* 文本与图标 */
   --text-primary: #0F172A;
   --text-secondary: #64748B;
+  --text-tertiary: #94A3B8;
+  --text-muted: #94A3B8;
   --text-inverse: #FFFFFF;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 
   /* 品牌色体系 */
   --brand-default: #2563EB;
@@ -28,9 +32,12 @@
   --brand-active: #1E40AF;
   --brand-subtle: #EFF6FF;
   --brand-border: #BFDBFE;
+  --accent: #2563EB;
+  --accent-color: #2563EB;
 
   /* 危险与警告状态 */
   --status-danger: #EF4444;
+  --status-error: #EF4444;
   --status-danger-subtle: #FEF2F2;
   --status-danger-border: #FECACA;
   --status-danger-text: #991B1B;

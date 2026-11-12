@@ -17,6 +17,7 @@ import {
   Play,
 } from "lucide-react";
 import { runtimeService } from "../../services/runtime";
+import { useHideAutoMode } from "../../services/displayPreferences";
 import { formatFileSize, getFileIcon } from "../../utils/attachmentUtils";
 import type { SkillItem, ImageAttachment } from "../../types";
 
@@ -78,6 +79,65 @@ const MODE_OPTIONS: Array<{ id: "auto" | "serial" | "graph"; label: string }> = 
   { id: "graph", label: "Graph" },
 ];
 
+function PromptModeOption({ item, selected, onSelect, pillLayoutId, reduceMotion }: {
+  item: (typeof MODE_OPTIONS)[number];
+  selected: boolean;
+  onSelect: NonNullable<PromptBoxProps["onPlanModeChange"]>;
+  pillLayoutId: string;
+  reduceMotion: boolean | null;
+}) {
+  const isPresent = useIsPresent();
+  const [animating, setAnimating] = useState(false);
+  const active = selected && isPresent;
+  const collapsed = { width: 0, opacity: 0, "--mode-gap-progress": 0 };
+  return (
+    <motion.div
+      className="prompt-box-mode-option"
+      inert={!isPresent}
+      initial={reduceMotion ? false : collapsed}
+      animate={{ width: "auto", opacity: 1, "--mode-gap-progress": 1 }}
+      exit={collapsed}
+      transition={{ duration: reduceMotion ? 0 : 0.22, ease: COMPOSER_EASE }}
+      onAnimationStart={() => setAnimating(true)}
+      onAnimationComplete={() => setAnimating(false)}
+      style={{
+        // Clip only during the reveal. The selected pill must paint outside
+        // its button while sliding between settled options.
+        overflow: animating || !isPresent ? "hidden" : "visible",
+        marginRight: "calc((var(--mode-gap-progress, 1) - 1) * var(--prompt-mode-gap))",
+      }}
+    >
+      <button
+        type="button"
+        className={`prompt-box-mode-btn ${active ? "active" : ""}`}
+        aria-pressed={active}
+        data-label={item.label}
+        disabled={!isPresent}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (isPresent) onSelect(item.id);
+        }}
+      >
+        {active && (
+          <motion.div
+            layoutId={`mode-pill-indicator-${pillLayoutId}`}
+            layoutCrossfade={false}
+            initial={false}
+            aria-hidden="true"
+            className="prompt-box-mode-pill-indicator"
+            transition={{ layout: reduceMotion ? { duration: 0 } : {
+              type: "spring",
+              stiffness: 520,
+              damping: 36,
+            } }}
+          />
+        )}
+        <span className="prompt-box-mode-text">{item.label}</span>
+      </button>
+    </motion.div>
+  );
+}
+
 export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
   (
     {
@@ -108,6 +168,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     forwardedRef
   ) => {
     const reduceMotion = useReducedMotion();
+    const hideAutoMode = useHideAutoMode();
+    const visiblePlanMode = hideAutoMode && planMode === "auto" ? "graph" : planMode;
     const isPresent = useIsPresent();
     const containerRef = useRef<HTMLDivElement | null>(null);
     const flowRef = useRef<HTMLDivElement | null>(null);
@@ -1213,38 +1275,18 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                 role="group"
                 aria-label={t("执行规划模式")}
               >
-                {MODE_OPTIONS.map((item) => {
-                  const isSelected = planMode === item.id;
-                  return (
-                    <button
+                <AnimatePresence initial={false}>
+                  {MODE_OPTIONS.filter(item => !hideAutoMode || item.id !== "auto").map(item => (
+                    <PromptModeOption
                       key={item.id}
-                      type="button"
-                      className={`prompt-box-mode-btn ${isSelected ? "active" : ""}`}
-                      aria-pressed={isSelected}
-                      data-label={item.label}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onPlanModeChange(item.id);
-                      }}
-                    >
-                      {isSelected && (
-                        <motion.div
-                          layoutId={`mode-pill-indicator-${pillLayoutId}`}
-                          layoutCrossfade={false}
-                          initial={false}
-                          aria-hidden="true"
-                          className="prompt-box-mode-pill-indicator"
-                          transition={{ layout: reduceMotion ? { duration: 0 } : {
-                            type: "spring",
-                            stiffness: 520,
-                            damping: 36,
-                          } }}
-                        />
-                      )}
-                      <span className="prompt-box-mode-text">{item.label}</span>
-                    </button>
-                  );
-                })}
+                      item={item}
+                      selected={visiblePlanMode === item.id}
+                      onSelect={onPlanModeChange}
+                      pillLayoutId={pillLayoutId}
+                      reduceMotion={reduceMotion}
+                    />
+                  ))}
+                </AnimatePresence>
               </div>
             )}
 

@@ -40,13 +40,17 @@ after(async () => { await browser?.close(); await server?.close(); });
 
 async function fixture(name, handler = async () => false, reducedMotion = "reduce", autoExpandCot = undefined, clockTime = undefined, browserInstance = browser) {
   const context = await browserInstance.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion });
-  await context.addInitScript(enabled => {
+  await context.addInitScript(({ enabled, showAuto }) => {
     localStorage.setItem("grapher_language_v1", "en");
+    // Mode-transition fixtures explicitly restore Auto; preserve later choices on reload.
+    if (showAuto && localStorage.getItem("grapher_hide_auto_mode_v1") === null) {
+      localStorage.setItem("grapher_hide_auto_mode_v1", "0");
+    }
     // COT cards auto-expand by default; "0" disables, "1" enables.
     if (enabled === true) localStorage.setItem("grapher_auto_expand_cot_v1", "1");
     else if (enabled === false) localStorage.setItem("grapher_auto_expand_cot_v1", "0");
     else localStorage.removeItem("grapher_auto_expand_cot_v1");
-  }, autoExpandCot);
+  }, { enabled: autoExpandCot, showAuto: ["landingPrompt", "compactModePrompt"].includes(name) });
   const errors = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
@@ -245,6 +249,342 @@ test("cancelled Provider login/respond replies cannot reopen the panel or replac
     assert.equal(responses, 1);
     assert.deepEqual(errors, []);
   } finally { loginGate.resolve(); responseGate.resolve(); await context.close(); }
+});
+
+test("Codex OAuth presents its method selection, opens the URL once and accepts a pasted callback", { timeout: 30_000 }, async () => {
+  const provider = { id: "openai-codex", name: "OpenAI Codex", configured: false,
+    methods: [{ id: "oauth", name: "Browser login" }] };
+  const url = "https://auth.openai.com/authorize?state=fixture-only";
+  const initial = { id: "codex", provider: provider.id, status: "pending", events: [], error: null,
+    prompt: { id: "method", type: "select", message: "Select OpenAI Codex login method:", options: [
+      { id: "browser", label: "Browser login (default)" }, { id: "device_code", label: "Device code login (headless)" },
+    ] } };
+  let current = initial;
+  const responses = [];
+  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+    if (command !== "provider_auth") return false;
+    let result;
+    switch (body.operation) {
+      case "catalog": result = { ...catalog, providers: [provider] }; break;
+      case "login": result = current; break;
+      case "poll": result = current; break;
+      case "respond":
+        responses.push(body);
+        current = body.promptId === "method"
+          ? { ...initial, events: [{ type: "auth_url", url }], prompt: {
+            id: "callback", type: "manual_code", message: "Paste callback", placeholder: "http://127.0.0.1:1455/auth/callback" } }
+          : { ...current, status: "complete", prompt: null };
+        result = current;
+        break;
+      case "cancel": result = { ...current, status: "cancelled", prompt: null }; break;
+      default: throw new Error(`Unexpected auth operation: ${body.operation}`);
+    }
+    await route.fulfill({ json: { result } });
+    return true;
+  });
+  try {
+    await page.evaluate(() => { window.audit.opened = []; window.open = (...args) => { window.audit.opened.push(args); return null; }; });
+    await page.locator(".providers-grid-title").click();
+    await page.locator(".login-btn").click();
+    const prompt = page.locator("select#auth-answer");
+    await prompt.waitFor();
+    assert.match(await page.locator(".prompt-label").innerText(), /Select OpenAI Codex login method/);
+    assert.equal(await page.locator(".pending-poll-indicator").count(), 0, "choose a method before waiting for browser authorization");
+    const placement = await page.locator(".provider-card.selected").evaluate(card => {
+      const panel = card.nextElementSibling;
+      return { follows: panel?.classList.contains("active-login-reveal"), below: panel?.getBoundingClientRect().top >= card.getBoundingClientRect().bottom };
+    });
+    assert.deepEqual(placement, { follows: true, below: true });
+    await prompt.selectOption("browser");
+    await page.getByRole("button", { name: "Continue sign-in", exact: true }).click();
+    const link = page.locator(".provider-oauth-btn");
+    await link.waitFor();
+    assert.equal(await link.getAttribute("href"), url, "a clickable fallback survives popup blocking");
+    await page.waitForFunction(() => window.audit.opened.length === 1);
+    await page.waitForTimeout(1600); // repeated polls must not reopen the browser
+    assert.deepEqual(await page.evaluate(() => window.audit.opened), [[url, "_blank", "noopener,noreferrer"]]);
+    await page.locator("#auth-answer").fill("http://127.0.0.1:1455/auth/callback?code=fixture-only");
+    await page.getByRole("button", { name: "Submit callback URL" }).click();
+    await page.locator(".active-login-panel .login-status-alert.success").waitFor();
+    assert.deepEqual(responses.map(({ promptId, value }) => ({ promptId, value })), [
+      { promptId: "method", value: "browser" },
+      { promptId: "callback", value: "http://127.0.0.1:1455/auth/callback?code=fixture-only" },
+    ]);
+    assert.equal(await page.locator(".active-login-panel").count(), 1);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const status of ["complete", "failed", "cancelled"]) {
+  test(`supported providers collapse after three seconds only for ${status} authentication`, { timeout: 30_000 }, async () => {
+    const provider = { id: "test", name: "Test", configured: false, methods: [{ id: "api_key", name: "API Key" }] };
+    let current = { id: "delayed-collapse", provider: "test", status: "pending", events: [], error: null,
+      prompt: { id: "key", type: "secret", message: "Enter API key" } };
+    const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+      if (command !== "provider_auth") return false;
+      if (body.operation === "respond") current = { ...current, status, prompt: null };
+      const result = body.operation === "catalog" ? { ...catalog, providers: [provider] } : current;
+      await route.fulfill({ json: { result } });
+      return true;
+    }, "reduce", undefined, new Date("2026-10-17T08:00:00Z"));
+    try {
+      await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now()) + 1000));
+      const list = page.locator(".providers-grid-title");
+      await list.click();
+      await page.locator(".login-btn").click();
+      await page.locator("#auth-answer").waitFor();
+      await page.clock.runFor(5000);
+      assert.equal(await list.getAttribute("aria-expanded"), "true", "pending authentication never schedules a collapse");
+      await page.locator("#auth-answer").fill("fixture-only-key");
+      await page.locator(".submit-key-btn").click();
+      await page.locator(".auth-prompt-form").waitFor({ state: "detached" });
+      if (status === "complete") {
+        await page.locator(".active-login-panel .login-status-alert.success").waitFor();
+        await page.waitForFunction(() => !document.querySelector(".save-config-btn")?.disabled);
+      }
+      await page.clock.runFor(2999);
+      assert.equal(await list.getAttribute("aria-expanded"), "true", "the confirmation remains visible for the full delay");
+      await page.clock.runFor(1);
+      if (status === "complete") {
+        await page.waitForFunction(() => document.querySelector(".providers-grid-title")?.getAttribute("aria-expanded") === "false");
+        await page.locator(".providers-card-grid").waitFor({ state: "detached" });
+        await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+        await page.locator(".settings-modal").waitFor({ state: "detached" });
+        await page.evaluate(() => window.audit.open());
+        await list.waitFor();
+        assert.equal(await list.getAttribute("aria-expanded"), "false", "automatic collapse also updates page-session expansion");
+      } else {
+        assert.equal(await list.getAttribute("aria-expanded"), "true", "unsuccessful authentication leaves the list open");
+      }
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("a completed authentication cannot collapse a newer login", { timeout: 30_000 }, async () => {
+  const provider = { id: "test", name: "Test", configured: false, methods: [{ id: "api_key", name: "API Key" }] };
+  let logins = 0;
+  let current;
+  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+    if (command !== "provider_auth") return false;
+    if (body.operation === "login") {
+      logins++;
+      current = { id: `login-${logins}`, provider: "test", status: logins === 1 ? "complete" : "pending", events: [], error: null,
+        prompt: logins === 1 ? null : { id: "new-key", type: "secret", message: "Enter API key" } };
+    }
+    const result = body.operation === "catalog" ? { ...catalog, providers: [provider] } : current;
+    await route.fulfill({ json: { result } });
+    return true;
+  }, "reduce", undefined, new Date("2026-10-17T08:00:00Z"));
+  try {
+    await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now()) + 1000));
+    const list = page.locator(".providers-grid-title");
+    await list.click();
+    await page.locator(".login-btn").click();
+    await page.locator(".active-login-panel .login-status-alert.success").waitFor();
+    await page.waitForFunction(() => !document.querySelector(".save-config-btn")?.disabled);
+    await page.clock.runFor(1000);
+    await page.locator(".login-btn").click();
+    await page.locator("#auth-answer").waitFor();
+    await page.clock.runFor(3000);
+    assert.equal(await list.getAttribute("aria-expanded"), "true");
+    assert.equal(await page.locator("#auth-answer").isVisible(), true);
+    assert.equal(logins, 2);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("changing the provider search cannot hide an active authentication prompt", { timeout: 30_000 }, async () => {
+  const provider = { id: "test", name: "Test", configured: false, methods: [{ id: "api_key", name: "API Key" }] };
+  const pending = { id: "search-login", provider: "test", status: "pending", events: [], error: null,
+    prompt: { id: "key", type: "secret", message: "Enter API key" } };
+  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+    if (command !== "provider_auth") return false;
+    const result = body.operation === "catalog" ? { ...catalog, providers: [provider] }
+      : body.operation === "cancel" ? { ...pending, status: "cancelled" } : pending;
+    await route.fulfill({ json: { result } });
+    return true;
+  });
+  try {
+    await page.locator(".providers-grid-title").click();
+    await page.locator(".login-btn").click();
+    await page.locator("#auth-answer").waitFor();
+    await page.locator(".provider-search-box input").fill("no matching provider");
+    assert.equal(await page.locator(".active-login-panel").count(), 1, "a pending login stays reachable when the filter changes");
+    assert.equal(await page.locator("#auth-answer").isVisible(), true);
+    await page.locator(".active-login-header .icon-button-close").click();
+    await page.locator(".active-login-panel").waitFor({ state: "detached" });
+    assert.equal(await page.locator(".provider-card").count(), 0, "closing the flow restores normal filtering");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("an exiting provider login panel is inert until its animation finishes", { timeout: 30_000 }, async () => {
+  const provider = { id: "test", name: "Test", configured: false, methods: [{ id: "api_key", name: "API Key" }] };
+  const pending = { id: "exit-login", provider: "test", status: "pending", events: [], error: null,
+    prompt: { id: "key", type: "secret", message: "Enter API key" } };
+  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+    if (command !== "provider_auth") return false;
+    const result = body.operation === "catalog" ? { ...catalog, providers: [provider] }
+      : body.operation === "cancel" ? { ...pending, status: "cancelled" } : pending;
+    await route.fulfill({ json: { result } });
+    return true;
+  }, "no-preference", undefined, new Date("2026-10-17T08:00:00Z"));
+  try {
+    await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now()) + 1000));
+    await page.locator(".providers-grid-title").click();
+    await page.clock.runFor(300);
+    await page.locator(".login-btn").click();
+    await page.locator("#auth-answer").waitFor({ state: "attached" });
+    await page.clock.runFor(300);
+    await page.locator(".active-login-header .icon-button-close").click();
+    await page.waitForFunction(() => !document.querySelector(".provider-card.selected"));
+    const reveal = page.locator(".active-login-reveal");
+    assert.equal(await reveal.count(), 1, "the closing animation retains the old panel");
+    assert.equal(await reveal.evaluate(element => element.inert), true, "old controls must not cancel or submit into a later login");
+    await page.clock.runFor(300);
+    await reveal.waitFor({ state: "detached" });
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("catalog refresh errors remain visible after successful login collapses the provider list", { timeout: 30_000 }, async () => {
+  const provider = { id: "test", name: "Test", configured: false, methods: [{ id: "api_key", name: "API Key" }] };
+  const complete = { id: "refresh-login", provider: "test", status: "complete", events: [], error: null, prompt: null };
+  let catalogs = 0;
+  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+    if (command !== "provider_auth") return false;
+    if (body.operation === "catalog" && ++catalogs > 1) {
+      await route.fulfill({ status: 500, json: { error: "Catalog refresh unavailable" } });
+    } else {
+      await route.fulfill({ json: { result: body.operation === "catalog" ? { ...catalog, providers: [provider] } : complete } });
+    }
+    return true;
+  }, "reduce", undefined, new Date("2026-10-17T08:00:00Z"));
+  try {
+    await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now()) + 1000));
+    await page.locator(".providers-grid-title").click();
+    await page.locator(".login-btn").click();
+    await page.locator(".active-login-panel .login-status-alert.error").waitFor();
+    await page.clock.runFor(3000);
+    await page.waitForFunction(() => document.querySelector(".providers-grid-title")?.getAttribute("aria-expanded") === "false");
+    await page.locator(".providers-card-grid").waitFor({ state: "detached" });
+    assert.equal(await page.getByText("Error: Catalog refresh unavailable", { exact: true }).isVisible(), true,
+      "automatic collapse must not hide an actionable refresh failure");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("configured-provider login stays below its row and bound credentials do not remember expansion", { timeout: 30_000 }, async () => {
+  const provider = { id: "test", name: "Test", configured: true, authType: "api_key", authSource: "stored",
+    methods: [{ id: "api_key", name: "API Key" }] };
+  const pending = { id: "configured", provider: "test", status: "pending", events: [], error: null,
+    prompt: { id: "key", type: "secret", message: "Enter API key" } };
+  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+    if (command !== "provider_auth") return false;
+    const result = body.operation === "catalog" ? { ...catalog, providers: [provider] }
+      : body.operation === "cancel" ? { ...pending, status: "cancelled" } : pending;
+    await route.fulfill({ json: { result } });
+    return true;
+  });
+  try {
+    const credentials = page.locator(".configured-card-header");
+    await credentials.waitFor();
+    assert.equal(await credentials.getAttribute("aria-expanded"), "false");
+    await credentials.click();
+    await page.locator(".configured-row .reauth-btn").click();
+    await page.locator("#auth-answer").waitFor();
+    assert.equal(await page.locator(".configured-row").evaluate(row => row.nextElementSibling?.classList.contains("active-login-reveal")), true);
+    assert.equal(await page.locator(".configured-list .active-login-panel").count(), 1);
+    await page.locator(".active-login-header .icon-button-close").click();
+    await page.locator(".providers-grid-title").click();
+    await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    await page.evaluate(() => window.audit.open());
+    await credentials.waitFor();
+    assert.equal(await credentials.getAttribute("aria-expanded"), "false", "bound-credential expansion is local to this opening");
+    assert.equal(await page.locator(".configured-row").count(), 0);
+    await page.waitForFunction(() => document.querySelector(".providers-grid-title")?.getAttribute("aria-expanded") === "true");
+    assert.equal(await page.locator(".active-login-panel").count(), 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("provider login details grow below the selected card across grid positions", { timeout: 30_000 }, async () => {
+  const providers = Array.from({ length: 6 }, (_, index) => ({ id: `provider-${index}`, name: `Provider ${index}`,
+    configured: false, methods: [{ id: "api_key", name: "API Key" }] }));
+  let pending;
+  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+    if (command !== "provider_auth") return false;
+    if (body.operation === "login") pending = { id: body.provider, provider: body.provider, status: "pending", events: [], error: null,
+      prompt: { id: `${body.provider}-key`, type: "secret", message: "Enter API key" } };
+    const result = body.operation === "catalog" ? { ...catalog, providers }
+      : body.operation === "cancel" ? { ...pending, status: "cancelled" } : pending;
+    await route.fulfill({ json: { result } });
+    return true;
+  }, "no-preference", undefined, new Date("2026-10-17T08:00:00Z"));
+  try {
+    await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now()) + 1000));
+    await page.locator(".providers-grid-title").click();
+    await page.clock.runFor(300);
+    for (const index of [0, 3, 5]) {
+      const card = page.locator(".provider-card").nth(index);
+      await card.locator(".login-btn").click();
+      await page.locator("#auth-answer").waitFor({ state: "attached" });
+      const reveal = page.locator(".active-login-reveal");
+      const height = () => reveal.evaluate(element => element.getBoundingClientRect().height);
+      const initial = await height();
+      await page.clock.runFor(80);
+      const growing = await height();
+      await page.clock.runFor(300);
+      const final = await height();
+      assert.ok(initial < 1 && growing > initial && growing < final && final > 100,
+        `login details must grow into place: ${JSON.stringify({ initial, growing, final })}`);
+      assert.equal(await card.evaluate(element => {
+        const panel = element.nextElementSibling;
+        return panel?.classList.contains("active-login-reveal") && panel.getBoundingClientRect().top >= element.getBoundingClientRect().bottom;
+      }), true);
+      await page.locator(".active-login-header .icon-button-close").click();
+      await page.waitForFunction(() => !document.querySelector(".provider-card.selected"));
+      await page.clock.runFor(300);
+      await reveal.waitFor({ state: "detached" });
+    }
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("OAuth text prompts remain usable and unsafe authorization URLs never open", { timeout: 30_000 }, async () => {
+  const provider = { id: "test", name: "Test", configured: false, methods: [{ id: "oauth", name: "OAuth" }] };
+  let current = { id: "text", provider: "test", status: "pending", events: [], error: null,
+    prompt: { id: "domain", type: "text", message: "Enter domain", placeholder: "example.com" } };
+  const { context, page, errors } = await fixture("settings", async (route, command, body) => {
+    if (command !== "provider_auth") return false;
+    if (body.operation === "respond") {
+      assert.equal(body.value, "example.com");
+      current = { ...current, prompt: null, events: [{ type: "auth_url", url: "javascript:alert(1)" },
+        { type: "device_code", userCode: "FIXTURE", verificationUri: "https://example.com/device" }] };
+    }
+    const result = body.operation === "catalog" ? { ...catalog, providers: [provider] } : current;
+    await route.fulfill({ json: { result } });
+    return true;
+  });
+  try {
+    await page.evaluate(() => { window.audit.opened = []; window.open = url => { window.audit.opened.push(url); return null; }; });
+    await page.locator(".providers-grid-title").click();
+    await page.locator(".login-btn").click();
+    const input = page.locator("#auth-answer");
+    await input.waitFor();
+    assert.equal(await input.getAttribute("type"), "text");
+    assert.equal(await page.locator(".eye-toggle-btn").count(), 0);
+    await input.fill("example.com");
+    await page.getByRole("button", { name: "Continue sign-in" }).click();
+    await page.locator(".device-code-value").waitFor();
+    await page.waitForFunction(() => window.audit.opened.length === 1);
+    assert.deepEqual(await page.evaluate(() => window.audit.opened), ["https://example.com/device"]);
+    assert.equal(await page.locator(".provider-oauth-btn").count(), 1);
+    assert.equal(await page.locator(".provider-oauth-btn").getAttribute("href"), "https://example.com/device");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
 });
 
 test("polling graph metadata cannot overwrite an open editor draft", { timeout: 30_000 }, async () => {
@@ -2361,6 +2701,120 @@ test("Planner and Node Agent tool history both render cards in headless browser"
 
 
 for (const fixtureName of ["landingPrompt", "compactModePrompt"]) {
+  test(`${fixtureName} hides Auto live and retains the visible mode selection`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(fixtureName);
+    try {
+      const modes = page.locator(".prompt-box-mode-btn");
+      await modes.filter({ hasText: "Auto" }).waitFor();
+      await page.evaluate(async () => (await import("/src/services/displayPreferences.ts")).setHideAutoMode(true));
+      await page.waitForFunction(() => document.querySelectorAll(".prompt-box-mode-btn").length === 2);
+      assert.deepEqual(await modes.allTextContents(), ["Serial", "Graph"]);
+      assert.equal(await modes.filter({ hasText: "Graph" }).getAttribute("aria-pressed"), "true");
+      await modes.filter({ hasText: "Serial" }).click();
+      await page.evaluate(async () => (await import("/src/services/displayPreferences.ts")).setHideAutoMode(false));
+      await modes.filter({ hasText: "Auto" }).waitFor();
+      assert.equal(await modes.filter({ hasText: "Serial" }).getAttribute("aria-pressed"), "true");
+      await page.evaluate(async () => (await import("/src/services/displayPreferences.ts")).setHideAutoMode(true));
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await modes.filter({ hasText: "Graph" }).waitFor();
+      assert.deepEqual(await modes.allTextContents(), ["Serial", "Graph"]);
+      assert.equal(await modes.filter({ hasText: "Graph" }).getAttribute("aria-pressed"), "true", "a hidden controlled Auto selection projects to Graph on mount");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+
+  test(`${fixtureName} fades and shrinks Auto without leaving a gap or an active exit control`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(fixtureName, undefined, "no-preference");
+    try {
+      for (const selected of ["Auto", "Serial"]) {
+        await page.setViewportSize({ width: selected === "Auto" ? 1280 : 350, height: 900 });
+        await page.getByRole("button", { name: selected, exact: true }).click();
+        await page.waitForTimeout(300);
+        const frames = await page.evaluate(async () => {
+          const { setHideAutoMode } = await import("/src/services/displayPreferences.ts");
+          const selector = document.querySelector(".prompt-box-mode-selector");
+          const sample = () => {
+            const auto = selector.querySelector('[data-label="Auto"]');
+            const option = auto?.closest(".prompt-box-mode-option");
+            return { width: option?.getBoundingClientRect().width ?? null,
+              opacity: option ? Number(getComputedStyle(option).opacity) : null,
+              inert: option?.inert, disabled: auto?.disabled,
+              active: [...selector.querySelectorAll('[aria-pressed="true"]')].map(button => button.textContent),
+              track: selector.getBoundingClientRect().width };
+          };
+          const frames = [sample()];
+          setHideAutoMode(true);
+          return new Promise(resolve => {
+            const started = performance.now();
+            const record = () => {
+              frames.push(sample());
+              if (performance.now() - started >= 400) resolve(frames);
+              else requestAnimationFrame(record);
+            };
+            requestAnimationFrame(record);
+          });
+        });
+        const first = frames[0], final = frames.at(-1);
+        assert.ok(frames.some(frame => frame.width > 1 && frame.width < first.width - 1 && frame.opacity > 0 && frame.opacity < 1),
+          `Auto must visibly shrink and fade before removal: ${JSON.stringify(frames)}`);
+        assert.ok(frames.some(frame => frame.width !== null && frame.inert && frame.disabled && !frame.active.includes("Auto")),
+          "the disappearing option cannot be selected or retain its selected pill");
+        assert.equal(final.width, null);
+        assert.deepEqual(final.active, [selected === "Auto" ? "Graph" : "Serial"]);
+        assert.ok(final.track < first.track - 10);
+        const gapError = await page.locator(".prompt-box-mode-selector").evaluate(selector => {
+          const style = getComputedStyle(selector);
+          const buttons = [...selector.querySelectorAll("button")];
+          const expected = buttons.reduce((sum, button) => sum + button.getBoundingClientRect().width, 0) +
+            (buttons.length - 1) * parseFloat(style.columnGap) + parseFloat(style.paddingLeft) +
+            parseFloat(style.paddingRight) + parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+          return selector.getBoundingClientRect().width - expected;
+        });
+        assert.ok(Math.abs(gapError) < 0.2, "removing Auto leaves no extra flex gap, including on narrow composers");
+        await page.evaluate(async () => (await import("/src/services/displayPreferences.ts")).setHideAutoMode(false));
+        await page.waitForFunction(() => {
+          const option = document.querySelector('[data-label="Auto"]')?.closest(".prompt-box-mode-option");
+          return option && getComputedStyle(option).opacity === "1" && option.style.overflow === "visible";
+        });
+      }
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+
+  test(`${fixtureName} reverses an unfinished Auto reveal without leaving clipped or duplicate controls`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(fixtureName, undefined, "no-preference");
+    try {
+      const selector = page.locator(".prompt-box-mode-selector");
+      await selector.waitFor();
+      const initial = await selector.evaluate(element => element.getBoundingClientRect().width);
+      await page.evaluate(async () => {
+        const { setHideAutoMode } = await import("/src/services/displayPreferences.ts");
+        const changes = [true, false, true, false, true, false];
+        const started = performance.now();
+        let next = 0;
+        await new Promise(resolve => {
+          const step = () => {
+            const elapsed = performance.now() - started;
+            while (next < changes.length && elapsed >= next * 40) setHideAutoMode(changes[next++]);
+            if (elapsed >= 650) resolve(undefined);
+            else requestAnimationFrame(step);
+          };
+          requestAnimationFrame(step);
+        });
+      });
+      assert.deepEqual(await selector.locator("button").allTextContents(), ["Auto", "Serial", "Graph"]);
+      const final = await selector.evaluate(element => ({ width: element.getBoundingClientRect().width,
+        clipped: [...element.querySelectorAll(".prompt-box-mode-option")].some(option => getComputedStyle(option).overflow !== "visible"),
+        inert: [...element.querySelectorAll(".prompt-box-mode-option")].some(option => option.inert),
+        disabled: [...element.querySelectorAll("button")].some(button => button.disabled),
+        selected: [...element.querySelectorAll('[aria-pressed="true"]')].map(button => button.textContent),
+      }));
+      assert.ok(Math.abs(final.width - initial) < 0.2, "the restored control reclaims exactly its original width and gap");
+      assert.deepEqual({ ...final, width: undefined }, { width: undefined, clipped: false, inert: false, disabled: false, selected: ["Auto"] });
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+
   for (const reducedMotion of ["no-preference", "reduce"]) {
     test(`${fixtureName} mode switching keeps the selector fixed with inertia (${reducedMotion})`, { timeout: 30_000 }, async () => {
       const { context, page, errors } = await fixture(fixtureName, undefined, reducedMotion);
@@ -2404,7 +2858,7 @@ for (const fixtureName of ["landingPrompt", "compactModePrompt"]) {
         // The pill reprojects from the previous button, so it paints outside the
         // button it belongs to for most of its flight. Any clipping ancestor
         // (overflow other than visible) swallows the slide into a sudden pop.
-        const clippedBy = await selector.evaluate(element => [element, ...element.querySelectorAll("button")]
+        const clippedBy = await selector.evaluate(element => [element, ...element.querySelectorAll(".prompt-box-mode-option, button")]
           .filter(node => getComputedStyle(node).overflow !== "visible").map(node => node.className));
         assert.deepEqual(clippedBy, [], "the sliding pill must not be clipped by the mode selector or its buttons");
         // Repeated reversals arrive before the spring settles, not only after
@@ -3057,6 +3511,8 @@ for (const approved of [false, true]) {
         assert.match(await bottom.locator(".progress-label > span").innerText(), /^\d+ \/ \d+ nodes completed$/);
         assert.ok(!(await bottom.innerText()).includes("Running"));
         assert.ok(!(await bottom.innerText()).includes("Deterministic runtime"));
+        if (approved) assert.equal(await bottom.locator(".graph-execution-control").isDisabled(), true,
+          "the topology control cannot pause or resume a Planner revision");
       };
       await checkPlanning();
       // Even an old awaiting_approval poll cannot bring the buttons back mid-turn.
@@ -3136,6 +3592,62 @@ for (const wireStatus of ["completed", "done"]) {
   });
 }
 
+for (const reducedMotion of ["no-preference", "reduce"]) {
+  test(`paused topology controls share the pane entrance without a second reveal (${reducedMotion})`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture("unrunNode", undefined, reducedMotion);
+    try {
+      await page.addInitScript(() => {
+        window.samplePausedControls = () => {
+          window.pausedControlFrames = [];
+          window.pausedControlSamplingDone = false;
+          let enteredAt;
+          const sample = () => {
+            const button = document.querySelector(".graph-execution-control");
+            if (button) {
+              enteredAt ??= performance.now();
+              let opacity = 1;
+              for (let element = button; element; element = element.parentElement) {
+                opacity *= Number(getComputedStyle(element).opacity);
+              }
+              window.pausedControlFrames.push({
+                opacity, groupOpacity: Number(getComputedStyle(button.parentElement).opacity),
+                label: button.textContent.trim(), disabled: button.disabled,
+                count: document.querySelectorAll(".graph-execution-control").length,
+              });
+            }
+            if (enteredAt === undefined || performance.now() - enteredAt < 650) requestAnimationFrame(sample);
+            else window.pausedControlSamplingDone = true;
+          };
+          requestAnimationFrame(sample);
+        };
+        window.samplePausedControls();
+      });
+      const checkEntrance = async () => {
+        await page.waitForFunction(() => window.pausedControlSamplingDone);
+        const frames = await page.evaluate(() => window.pausedControlFrames);
+        assert.ok(frames.length > 0 && frames.at(-1).opacity > 0.99, "the paused control finishes visible");
+        for (const [index, frame] of frames.entries()) {
+          assert.ok(frame.groupOpacity > 0.99, "the persistent control does not add a separate fade or restart its reveal");
+          assert.ok(frame.opacity >= (frames[index - 1]?.opacity ?? 0) - 0.01,
+            `the paused control never flashes back to transparent: ${JSON.stringify(frame)}`);
+          assert.equal(frame.label, "Resume");
+          assert.equal(frame.disabled, false);
+          assert.equal(frame.count, 1);
+        }
+      };
+      await page.reload({ waitUntil: "networkidle" });
+      await checkEntrance();
+      const splitter = page.getByRole("separator", { name: "Resize execution graph", exact: true });
+      await splitter.press("Enter");
+      await page.locator(".graph-pane").waitFor({ state: "detached" });
+      await page.evaluate(() => window.samplePausedControls());
+      await page.getByRole("button", { name: "Expand execution graph", exact: true }).click();
+      await checkEntrance();
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
 test("topology Pause/Continue controls running nodes and distinguishes paused attempts from failures", { timeout: 30_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const execution = (id, node, status) => ({ id, node, status, revision: 1, attempt: 1, sessionId: id,
@@ -3162,6 +3674,8 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
       case "list_skills": result = { skills: [] }; break;
       case "provider_auth": result = catalog; break;
       case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+      case "get_planning_output": result = { planningId: body.planningId, role: body.role, content: "", startOffset: 0,
+        nextOffset: 0, totalBytes: 0, complete: current.planning?.status !== "running", running: current.planning?.status === "running" }; break;
       case "get_execution_output": result = { runId: current.runId, executionId: body.executionId, content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true,
         status: current.executions.find(item => item.id === body.executionId)?.status }; break;
       case "control":
@@ -3187,6 +3701,23 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.locator(`[data-run-id="${current.runId}"]`).click();
     const bottom = page.locator(".graph-bottom");
+    const checkPlanningControl = async (label, planningId) => {
+      // Recovered/background Planner work does not set the local request lock.
+      current = { ...current, planningId, planning: { planningId, runId: current.runId,
+        repository: config.repository, planType: "graph", status: "running", createdAt: 2, roles: { planner: {} } } };
+      await page.locator(".workbench.planning-active").waitFor();
+      const button = bottom.getByRole("button", { name: label, exact: true });
+      assert.equal(await button.isDisabled(), true, "Planner activity disables the topology execution control");
+      const before = actions.length;
+      await button.evaluate(element => element.click());
+      assert.equal(actions.length, before, "the disabled control sends no pause/resume request");
+      const stop = page.locator(".pane-bottom-chat .prompt-box-send-btn");
+      assert.equal(await stop.isDisabled(), false, "the Planner composer keeps its own Stop available");
+      current = { ...current, planning: { ...current.planning, status: "success" } };
+      await page.locator(".workbench.historical-settled").waitFor();
+      await page.waitForFunction(() => !document.querySelector(".graph-execution-control")?.disabled);
+    };
+    await checkPlanningControl("Pause", "pause-planner");
     await page.locator('[data-node-name="task"]').click();
     await bottom.getByRole("button", { name: "Pause", exact: true }).click();
     await bottom.getByRole("button", { name: "Pausing", exact: true }).waitFor();
@@ -3198,6 +3729,8 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
     await page.locator('[data-node-name="task"] .status', { hasText: "Paused" }).waitFor();
     await page.locator('[data-node-name="broken"] .status', { hasText: "Failed" }).waitFor();
     await bottom.getByText("Continue first resumes paused tasks; retry other failed nodes afterward.").waitFor();
+    await page.locator(".back-to-query-btn").click();
+    await checkPlanningControl("Resume", "resume-planner");
     await bottom.getByRole("button", { name: "Resume", exact: true }).click();
     await page.locator('[data-node-name="task"] .status', { hasText: "Running" }).waitFor();
     await page.locator('[data-node-name="broken"] .status', { hasText: "Failed" }).waitFor();

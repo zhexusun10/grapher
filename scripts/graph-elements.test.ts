@@ -93,7 +93,9 @@ test("graph projections use endpoints and feedback without relation labels", () 
     "c → a (feedback)", "a → b", "b → c\nc → a (feedback)",
   ]);
   assert.ok(elements!.edges.every(edge => !Object.hasOwn(edge.data!, "relation")));
-  assert.equal(elements!.edges[2].markerEnd, "url(#workflow-arrow-feedback)");
+  assert.equal(elements!.edges[0].markerEnd, "workflow-arrow-default");
+  assert.equal(elements!.edges[1].markerEnd, "workflow-arrow-default");
+  assert.equal(elements!.edges[2].markerEnd, "workflow-arrow-feedback");
 });
 
 test("dependency layers follow the DAG", () => {
@@ -193,6 +195,7 @@ test("a publication merger is a card below the terminal layer", () => {
   assert.equal(terminal.data.hasBottom, true);
   const publicationEdges = idle.edges.filter(edge => edge.target === "merger:publication");
   assert.deepEqual(publicationEdges.map(edge => edge.source), ["b"]);
+  assert.equal(publicationEdges[0].markerEnd, "workflow-arrow-default");
   assert.ok(!idle.edges.some(edge => edge.source === "a" && edge.target === "merger:publication"));
 
   const selected = projectGraph(state, "merger:publication", "publish-merger");
@@ -205,6 +208,20 @@ test("a publication merger is a card below the terminal layer", () => {
   plain.mergers = [];
   assert.ok(!projectGraph(plain, "").nodes.some(node => node.id === "merger:publication"));
   assert.ok(!projectGraph(plain, "").edges.some(edge => edge.target === "merger:publication"));
+});
+
+test("a batch handoff merger connects delivered producers, not unstarted graph terminals", () => {
+  const state = publicationMergerState();
+  state.batchHandoff = { recoveryExecutionIds: [] };
+  state.phase = 'merging';
+  state.nodes.b.status = 'waiting';
+  state.nodes.b.head = null;
+  state.publication = { repository: '/source', heads: ['ha'], status: 'merging', head: null, error: null, startedAt: 1, completedAt: null };
+  state.mergers![0].status = 'running';
+  const projected = projectGraph(state, '');
+  const edges = projected.edges.filter(edge => edge.target === 'merger:publication');
+  assert.deepEqual(edges.map(edge => edge.source), ['a']);
+  assert.equal(projected.nodes.find(node => node.id === 'b')!.data.hasBottom, false);
 });
 
 test("a node-composition merger is a selectable card in the topology", () => {
@@ -224,6 +241,7 @@ test("a node-composition merger is a selectable card in the topology", () => {
   const mergerEdge = idle.edges.find(edge => edge.id === "merger:join->join")!;
   assert.equal(mergerEdge.sourceHandle, "merger-right-source");
   assert.equal(mergerEdge.targetHandle, "merger-left-target");
+  assert.equal(mergerEdge.markerEnd, "workflow-arrow-default");
 
   // Selecting the merger card highlights it without highlighting the node card.
   const mergerSelected = projectGraph(state, "join", "merger-1");

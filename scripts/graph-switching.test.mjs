@@ -264,6 +264,8 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
               canvas: graph.querySelector(".graph-canvas").clientWidth,
               ready: Number(getComputedStyle(flow).opacity) > 0.99,
               viewport: getComputedStyle(flow.querySelector(".react-flow__viewport")).transform,
+              progress: graph.querySelector(".progress-track > div").getBoundingClientRect().width /
+                graph.querySelector(".progress-track").getBoundingClientRect().width,
             });
             if (window.sampleOpen) requestAnimationFrame(sample);
           };
@@ -274,6 +276,8 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         await page.waitForFunction(width => Math.abs(document.querySelector(".conversation-pane").getBoundingClientRect().width - width) < 1, originalWidth);
         await page.waitForTimeout(100);
         const openFrames = await page.evaluate(() => { window.sampleOpen = false; return window.openFrames; });
+        assert.ok(openFrames.length > 0 && openFrames.every(frame => Math.abs(frame.progress - 1) < 0.005),
+          "reopening a completed graph shows its full progress from the first frame");
         if (reducedMotion === "reduce") {
           const durations = await pane.evaluate(element => getComputedStyle(element).transitionDuration.split(",").map(parseFloat));
           assert.ok(durations.every(duration => duration === 0), "reduced motion also disables the reopening width transition");
@@ -357,7 +361,9 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         // has waited for the layout/animation to become stable.
         await page.evaluate(({ id, expectedNames }) => {
           window.switchFrames = [];
+          window.surfaceFrames = [];
           window.summaryFrames = [];
+          window.progressFrames = [];
           window.composerFrames = [];
           window.workbenchChanges = 0;
           window.switchSamplingCompleted = false;
@@ -365,6 +371,11 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
           const sourceWorkbench = previousWorkbench;
           const started = performance.now();
           let enteredAt = null;
+          const opacity = element => {
+            let value = element ? 1 : 0;
+            for (; element; element = element.parentElement) value *= Number(getComputedStyle(element).opacity);
+            return value;
+          };
           const sample = () => {
             const workbench = document.querySelector(".workbench");
             if (workbench !== previousWorkbench) {
@@ -374,6 +385,19 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
               }
               previousWorkbench = workbench;
             }
+            if (workbench && workbench !== sourceWorkbench) {
+              const pane = workbench.querySelector(".conversation-pane");
+              const surfaces = [pane, ...workbench.querySelectorAll(".graph-toolbar, .graph-bottom")];
+              window.surfaceFrames.push({
+                surfaces: surfaces.map(element => ({ opacity: opacity(element), background: getComputedStyle(element).backgroundColor })),
+                content: opacity(workbench.querySelector(".initial-query-scroll")),
+                graph: opacity(workbench.querySelector(".graph-pane")),
+                flow: opacity(workbench.querySelector(".react-flow")),
+              });
+            }
+            const progress = workbench !== sourceWorkbench && workbench?.querySelector(".progress-track");
+            if (progress) window.progressFrames.push(progress.firstElementChild.getBoundingClientRect().width /
+              progress.getBoundingClientRect().width);
             const composer = workbench !== sourceWorkbench && workbench?.querySelector(".prompt-box-container");
             if (composer) {
               const rect = composer.getBoundingClientRect();
@@ -435,10 +459,28 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
           document.querySelector(`[data-run-id="${id}"]`).click();
         }, { id, expectedNames: Object.keys(snapshots[id].nodes).sort() });
         await page.waitForFunction(() => window.switchSamplingCompleted);
-        const { frames, summaries, changes, composers } = await page.evaluate(() => ({
-          frames: window.switchFrames, summaries: window.summaryFrames, changes: window.workbenchChanges,
-          composers: window.composerFrames,
+        const { frames, surfaces, summaries, changes, composers, progress } = await page.evaluate(() => ({
+          frames: window.switchFrames, surfaces: window.surfaceFrames,
+          summaries: window.summaryFrames, changes: window.workbenchChanges,
+          composers: window.composerFrames, progress: window.progressFrames,
         }));
+        assert.ok(surfaces.length > 0, `${id}: sample the workbench from its first frame`);
+        const background = surfaces.at(-1).surfaces[0].background;
+        assert.notEqual(background, "rgba(0, 0, 0, 0)", "the conversation paints an opaque surface");
+        for (const frame of surfaces) {
+          assert.ok(frame.surfaces.every(surface => surface.opacity > 0.99 && surface.background === background),
+            `${id}: grey pane backgrounds paint immediately, without fading with content: ${JSON.stringify(frame)}`);
+          if (hasGraph(id)) assert.ok(frame.graph > 0.99, `${id}: topology chrome appears with the conversation surface`);
+        }
+        assert.ok(surfaces.some(frame => frame.content === 0), `${id}: content stays hidden while preparing history`);
+        if (reducedMotion === "no-preference") {
+          assert.ok(surfaces.some(frame => frame.content > 0.05 && frame.content < 0.95),
+            `${id}: only conversation content fades in after preparation`);
+        }
+        if (hasGraph(id)) {
+          assert.ok(surfaces.some(frame => frame.flow > 0.99 && frame.content === 0),
+            `${id}: transcript loading does not delay the topology or pane backgrounds`);
+        }
         if (sourceComposer && sourceComposer.graph !== hasGraph(id) && reducedMotion === "no-preference") {
           const distance = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
           const destination = composers.at(-1);
@@ -479,6 +521,8 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
           if (!hasGraph(id)) assert.equal(frame.graphPanes, 0, `${id}: no departing graph should affect the new conversation`);
         }
         if (hasGraph(id)) {
+          assert.ok(progress.length > 0 && progress.every(value => Math.abs(value - 1) < 0.005),
+            `${id}: completed progress is full from the first frame instead of replaying a fill animation`);
           assert.ok(summaries.length > 0, `${id}: overview must be painted`);
           const finalSummary = summaries.at(-1);
           for (const summary of summaries) {

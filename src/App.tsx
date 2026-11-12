@@ -4,7 +4,7 @@ import { AlertTriangle, X } from "lucide-react";
 import { motion, AnimatePresence, LayoutGroup } from "motion/react";
 
 import {
-  defaultConfig, emptyGraph, emptySnapshot, publicationMergerCardId,
+  defaultConfig, emptyGraph, emptySnapshot, normalizeMaxFeedback, normalizeMaxParallel, publicationMergerCardId,
   type Config, type Graph, type ManualNodeRequest, type ProjectItem, type RepositoryInfo,
   type Snapshot, type PlanRouteType,
   type RuntimeActivity,
@@ -49,7 +49,7 @@ import { useRunIndicators } from "./hooks/useRunIndicators";
 import { Sidebar } from "./components/layout/Sidebar";
 import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspacePath, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "./services/workspaceConversations";
 import { loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
-import { useLandingBackground } from "./services/displayPreferences";
+import { useHideAutoMode, useLandingBackground } from "./services/displayPreferences";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
 import { ApprovalModal } from "./components/modals/ApprovalModal";
@@ -122,6 +122,7 @@ function snapshotModelConfig(snapshot: Snapshot | null | undefined, repository: 
 
 export default function App() {
   const landingBackground = useLandingBackground();
+  const hideAutoMode = useHideAutoMode();
   const [state, setState] = useSnapshotState(emptySnapshot);
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
     const items = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
@@ -138,7 +139,7 @@ export default function App() {
     let initialConfig: Config = { ...defaultConfig };
     const parsed = readStorageJson<Partial<Config>>(STORAGE_KEYS.config);
     if (parsed) {
-      initialConfig = { ...initialConfig, ...parsed, model: "", maxFeedback: defaultConfig.maxFeedback };
+      initialConfig = { ...initialConfig, ...parsed, model: "", maxFeedback: normalizeMaxFeedback(parsed.maxFeedback) };
     }
     const list = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
     if (Array.isArray(list) && list.length > 0) {
@@ -147,7 +148,12 @@ export default function App() {
         initialConfig.repository = normalizeWorkspacePath(sorted[0].path);
       }
     }
-    return { ...initialConfig, repository: normalizeWorkspacePath(initialConfig.repository), maxFeedback: defaultConfig.maxFeedback };
+    return {
+      ...initialConfig,
+      repository: normalizeWorkspacePath(initialConfig.repository),
+      maxFeedback: normalizeMaxFeedback(initialConfig.maxFeedback),
+      maxParallel: normalizeMaxParallel(initialConfig.maxParallel),
+    };
   });
   // Model defaults for new conversations. A settings save inside a conversation
   // records a conversation override instead of replacing these defaults.
@@ -219,6 +225,9 @@ export default function App() {
   // replaced. Persisting it is pointless: pending cards do not survive reload.
   const [runCardKeys, setRunCardKeys] = useState<Record<string, string>>({});
   const acceptedSettingsRef = useRef<Config | null>(null);
+  // A Settings refresh belongs to one opening. Closing, reopening or saving
+  // supersedes its read even when the foreground Run has not changed.
+  const settingsReadGeneration = useRef(0);
   const [runLabels, setRunLabels] = useState<Record<string, string>>(
     () => readStorageJson<Record<string, string>>(STORAGE_KEYS.runLabels) ?? {}
   );
@@ -448,15 +457,23 @@ export default function App() {
   const planningAbortControllerRef = useRef<AbortController | null>(null);
 
   // 规划路由模式选择：graph (默认，Planner跳过Partitioner) / serial (单Agent跳过Partitioner) / auto (Partitioner评估)
-  const [planMode, setPlanMode] = useState<PlanMode>(() => {
+  const [selectedPlanMode, setPlanMode] = useState<PlanMode>(() => {
     const saved = readStorageString(STORAGE_KEYS.planMode);
     return saved === "serial" || saved === "graph" || saved === "auto" ? saved : "graph";
   });
+  const planMode = hideAutoMode && selectedPlanMode === "auto" ? "graph" : selectedPlanMode;
+
+  useEffect(() => {
+    if (planMode === selectedPlanMode) return;
+    setPlanMode(planMode);
+    writeStorageString(STORAGE_KEYS.planMode, planMode);
+  }, [planMode, selectedPlanMode]);
 
   const handlePlanModeChange = useCallback((mode: PlanMode) => {
-    setPlanMode(mode);
-    writeStorageString(STORAGE_KEYS.planMode, mode);
-  }, []);
+    const nextMode = hideAutoMode && mode === "auto" ? "graph" : mode;
+    setPlanMode(nextMode);
+    writeStorageString(STORAGE_KEYS.planMode, nextMode);
+  }, [hideAutoMode]);
 
   const resetSessionMessages = useCallback(() => {
     resetPresentedCardIds();
@@ -914,14 +931,24 @@ export default function App() {
     let nextConfigObj: Config = {
       ...(accepted ?? data.config),
       repository: activeRepository,
-      maxFeedback: defaultConfig.maxFeedback,
+      maxFeedback: normalizeMaxFeedback((accepted ?? data.config).maxFeedback),
+      maxParallel: normalizeMaxParallel((accepted ?? data.config).maxParallel),
     };
     // A settings save accepted while this bootstrap was in flight wins over the
     // disk snapshot it was based on.
     if (acceptedSettingsRef.current !== acceptedAtStart && acceptedSettingsRef.current) {
-      nextConfigObj = { ...acceptedSettingsRef.current, repository: activeRepository, maxFeedback: defaultConfig.maxFeedback };
+      nextConfigObj = {
+        ...acceptedSettingsRef.current,
+        repository: activeRepository,
+        maxFeedback: normalizeMaxFeedback(acceptedSettingsRef.current.maxFeedback),
+        maxParallel: normalizeMaxParallel(acceptedSettingsRef.current.maxParallel),
+      };
     } else {
-      setDefaultSettings({ ...data.config, maxFeedback: defaultConfig.maxFeedback });
+      setDefaultSettings({
+        ...data.config,
+        maxFeedback: normalizeMaxFeedback(data.config.maxFeedback),
+        maxParallel: normalizeMaxParallel(data.config.maxParallel),
+      });
     }
     setConfig(nextConfigObj);
     hasConversationSummariesRef.current = Array.isArray(data.conversations);
@@ -1462,12 +1489,13 @@ export default function App() {
   const handleOpenSettings = () => {
     const runId = state.runId;
     const generation = foregroundGeneration.current;
+    const readGeneration = ++settingsReadGeneration.current;
     setModal("settings");
     if (runId && !runId.startsWith("pending-")) {
       void (async () => {
         try {
           const snapshot = await runtimeService.snapshotForRun(runId);
-          if (generation !== foregroundGeneration.current) return;
+          if (generation !== foregroundGeneration.current || readGeneration !== settingsReadGeneration.current) return;
           if (snapshot.runId === runId && snapshotBelongsToWorkspace(snapshot, config.repository)) {
             const conversationConfig = snapshotModelConfig(snapshot, config.repository);
             if (conversationConfig) {
@@ -1481,16 +1509,25 @@ export default function App() {
     }
   };
 
-  const handleCloseSettings = useCallback(() => setModal(null), []);
+  const handleCloseSettings = useCallback(() => {
+    settingsReadGeneration.current += 1;
+    setModal(null);
+  }, []);
 
   const handleSaveConfig = useCallback(async (draftConfig: Config): Promise<boolean> => {
+    settingsReadGeneration.current += 1;
     const generation = foregroundGeneration.current;
     // Settings change models/defaults, not the selected workspace. Rediscovery
     // or Git status here can stall saving behind an unrelated large tree scan.
     const repoPath = normalizeWorkspacePath(config.repository.trim());
     const info = repoInfo && workspaceKey(repoInfo.path) === workspaceKey(repoPath) ? repoInfo : null;
     if (generation !== foregroundGeneration.current) return false;
-    const nextConfig = { ...draftConfig, repository: repoPath, maxFeedback: defaultConfig.maxFeedback };
+    const nextConfig = {
+      ...draftConfig,
+      repository: repoPath,
+      maxFeedback: normalizeMaxFeedback(draftConfig.maxFeedback),
+      maxParallel: normalizeMaxParallel(draftConfig.maxParallel),
+    };
     try {
       const boot = await runtimeService.saveConfig(nextConfig, state.runId || undefined);
       if (generation !== foregroundGeneration.current) return false;
@@ -1506,7 +1543,11 @@ export default function App() {
         writeStorageString(STORAGE_KEYS.dataPath, cleanDataPath);
       }
       if (boot.envOverrides) setEnvOverrides(boot.envOverrides);
-      setDefaultSettings({ ...boot.config, maxFeedback: defaultConfig.maxFeedback });
+      setDefaultSettings({
+        ...boot.config,
+        maxFeedback: normalizeMaxFeedback(boot.config.maxFeedback),
+        maxParallel: normalizeMaxParallel(boot.config.maxParallel),
+      });
     } catch (error) {
       throw new Error(t("保存设置失败：{0}", String(error)));
     }
@@ -1611,7 +1652,8 @@ export default function App() {
     // (or has live work) must keep showing the committed topology; an idle
     // approved graph may preview.
     const liveRevision = isContinuing && state.approved && (active || state.phase === "running");
-    const effectiveMode = mode || (isContinuing ? "graph" : planMode);
+    const requestedMode = mode || (isContinuing ? "graph" : planMode);
+    const effectiveMode = hideAutoMode && requestedMode === "auto" ? "graph" : requestedMode;
     const targetRepo = config.repository;
     if (!targetRepo) {
       setModal("settings");

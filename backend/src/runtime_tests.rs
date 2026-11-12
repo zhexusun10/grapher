@@ -1,6 +1,9 @@
 use super::*;
 use tempfile::TempDir;
 
+#[path = "workspace_policy_tests.rs"]
+mod workspace_policy;
+
 #[path = "node_model_tests.rs"]
 mod node_models;
 
@@ -114,21 +117,28 @@ fn legacy_created_runs_keep_their_unmanaged_contract_on_replay_and_approval() {
 #[test]
 fn new_graph_runs_require_composite_evidence_and_retain_managed_workspaces() {
     let (_temp, source, mut runtime) = setup(true, single());
-    runtime
-        .create(single(), runtime.state.config.clone().unwrap())
-        .unwrap();
+    let mut config = runtime.state.config.clone().unwrap();
+    config.max_parallel = 0;
+    let mut graph = single();
+    for name in ["parallel-a", "parallel-b"] {
+        graph.nodes.push(Node { name: name.into(), task: name.into() });
+    }
+    runtime.create(graph, config).unwrap();
     assert_eq!(
         runtime.state.environment_policy.as_deref(),
         Some("automatic-pending")
     );
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
-    assert_eq!(
-        runtime.state.environment_policy.as_deref(),
-        Some("automatic-lazy")
-    );
+    assert!(runtime.state.environment_baseline.is_none());
+    let mut jobs = runtime.jobs().unwrap();
+    assert_eq!(runtime.state.environment_policy.as_deref(), Some("automatic-lazy"));
     assert!(runtime.state.environment_baseline.is_some());
-    let job = runtime.jobs().unwrap().remove(0);
+    let mut job = jobs.remove(0);
+    attach(&mut runtime, &mut job);
+    for other in jobs {
+        runtime.finish(&other.execution, Err("test admission only".into())).unwrap();
+    }
     let checkout = Path::new(&job.execution.worktree);
     workspace::prepare(&source, checkout, &job.execution.before, &[]).unwrap();
     runtime
@@ -518,7 +528,7 @@ fn deleting_a_noncurrent_running_run_is_rejected() {
 fn node_workers_respect_per_run_limit_and_keep_scheduling_as_slots_open() {
     let graph = Graph {
         original_goal: "parallel".into(),
-        nodes: (0..12)
+        nodes: (0..45)
             .map(|i| Node {
                 name: format!("worker{i}"),
                 task: "work".into(),
@@ -526,7 +536,7 @@ fn node_workers_respect_per_run_limit_and_keep_scheduling_as_slots_open() {
             .collect(),
         edges: vec![],
     };
-    for (max_parallel, limit) in [(0, 8), (1, 1), (2, 2), (8, 8), (100, 8)] {
+    for (max_parallel, limit) in [(0, 8), (1, 1), (2, 2), (8, 8), (24, 24), (40, 40), (100, 40)] {
         let (_temp, _source, mut runtime) = setup(true, graph.clone());
         let mut config = runtime.state.config.clone().unwrap();
         config.max_parallel = max_parallel;

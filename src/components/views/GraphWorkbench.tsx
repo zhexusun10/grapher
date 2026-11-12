@@ -6,7 +6,7 @@ import { useGraphViewport } from "../../hooks/useGraphViewport";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   Code2, ArrowLeft,
-  Workflow, Play, Pause, Compass, ArrowDown, Clock, Loader2, ChevronRight,
+  Play, Pause, Compass, ArrowDown, Clock, Loader2, ChevronRight,
   AlertCircle, ChevronLeft, Plus
 } from "lucide-react";
 import { motion, AnimatePresence, useAnimationControls, useIsPresent, useReducedMotion } from "motion/react";
@@ -230,7 +230,11 @@ function FooterStatusLabel({ token, disabled, title, children }: {
 function FooterControlsGroup({ token, disabled, children }: {
   token: string; disabled: boolean | null; children: React.ReactNode;
 }) {
-  const controls = useFooterReveal(token, disabled, { opacity: [0, 1], x: [6, 0] }, 0.24);
+  const persistent = token === "execution";
+  const controls = useFooterReveal(token, disabled || persistent, { opacity: [0, 1], x: [6, 0] }, 0.24);
+  // Pause/Continue already enters with the pane and footer. A second reveal
+  // makes this persistent control blink, especially when reopening a paused run.
+  if (persistent) return <div>{children}</div>;
   return <motion.div initial={disabled ? false : { opacity: 0, x: 6 }} animate={controls}>{children}</motion.div>;
 }
 
@@ -1211,8 +1215,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const [readyConversationKey, setReadyConversationKey] = useState("");
   const isConversationReady = readyConversationKey === conversationViewKey;
   const reduceMotion = useReducedMotion();
-  // Reveal the entire scrollable view together, including the topology overview
-  // and publication cards, only after history and its initial scroll have settled.
+  // Fade only scrollable content after history and its initial scroll settle.
+  // The conversation surface and topology chrome paint immediately, independently
+  // of transcript readiness; the composer stays outside this fade too.
   const conversationRevealStyle: React.CSSProperties = {
     opacity: isConversationReady ? 1 : 0,
     transition: isConversationReady && !reduceMotion ? "opacity 0.25s ease-out" : "none",
@@ -2094,25 +2099,26 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     state.phase,
   ]);
 
-  const summaryNodes = useMemo(() => {
+  const summaryBatches = useMemo(() => {
     if (!state.graph.nodes.length) return [];
     const nodeMap = new Map(state.graph.nodes.map((node) => [node.name, node]));
     const layers = computeExecutionLayers(state.graph, state.plan);
     const seen = new Set<string>();
-    const ordered: GraphNode[] = [];
-    for (const name of layers.flat()) {
-      const node = nodeMap.get(name);
-      if (node && !seen.has(name)) {
-        seen.add(name);
-        ordered.push(node);
+    const batches: GraphNode[][] = [];
+    for (const layer of layers) {
+      const batchNodes: GraphNode[] = [];
+      for (const name of layer) {
+        const node = nodeMap.get(name);
+        if (node && !seen.has(name)) {
+          seen.add(name);
+          batchNodes.push(node);
+        }
       }
+      if (batchNodes.length > 0) batches.push(batchNodes);
     }
-    for (const node of state.graph.nodes) {
-      if (!seen.has(node.name)) {
-        ordered.push(node);
-      }
-    }
-    return ordered;
+    const remaining = state.graph.nodes.filter((node) => !seen.has(node.name));
+    if (remaining.length > 0) batches.push(remaining);
+    return batches;
   }, [state.graph, state.plan]);
 
   const serialNode = routeType === "serial" && state.graph.nodes.length > 0 ? state.graph.nodes[0] : undefined;
@@ -2645,8 +2651,26 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     })}
   />;
 
+  const totalGraphNodes = state.graph.nodes.length;
+  const summaryBatchCount = Math.max(summaryBatches.length, state.plan?.executionBatches.length ?? 0, totalGraphNodes > 0 ? 1 : 0);
+
+  const renderSummaryNodeChip = (node: GraphNode) => {
+    const status = state.nodes[node.name]?.status ?? "waiting";
+    return (
+      <button
+        type="button"
+        key={node.name}
+        className="node-chip"
+        onClick={() => { setSelected(node.name); setSelectedMergerId(""); }}
+      >
+        <span className={`chip-dot ${status}`} aria-hidden="true" />
+        <span className="chip-name">{node.name}</span>
+      </button>
+    );
+  };
+
   const plannerResultCards = <>
-    {routeType === "graph" && (state.graph.nodes.length > 0 || hasCompletedPublication) && (
+    {routeType === "graph" && (totalGraphNodes > 0 || hasCompletedPublication) && (
       <motion.div
         className="plan-summary-card"
         initial={false}
@@ -2655,51 +2679,39 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       >
         <div className="plan-summary-header">
           <span>{t("执行拓扑概览")}</span>
-          <span className={`phase-tag ${graphPhase}`}>{phaseText[graphPhase] ?? t("草稿")}</span>
-        </div>
-
-        <div className="plan-stats-row">
-          <div className="plan-stat">
-            <span className="stat-num">{state.graph.nodes.length}</span>
-            <span className="stat-lbl">{t("规划节点")}</span>
-          </div>
-          <div className="plan-stat">
-            <span className="stat-num">{state.plan?.executionBatches.length ?? 1}</span>
-            <span className="stat-lbl">{t("执行批次")}</span>
-          </div>
-          <div className="plan-stat">
-            <span className="stat-num">{state.graph.edges.length}</span>
-            <span className="stat-lbl">{t("拓扑边")}</span>
-          </div>
-          <div className="plan-stat">
-            <span className="stat-num">
-              {`${completed}/${state.graph.nodes.length}`}
+          {totalGraphNodes > 0 && (
+            <span className="plan-summary-stats">
+              <span>{t("{0} 节点", totalGraphNodes)}</span>
+              <span className="plan-summary-sep" aria-hidden="true">·</span>
+              <span>{t("{0} 批次", summaryBatchCount)}</span>
+              <span className="plan-summary-sep" aria-hidden="true">·</span>
+              <span>{t("{0} 拓扑边", state.graph.edges.length)}</span>
+              <span className="plan-summary-sep" aria-hidden="true">·</span>
+              <span className="plan-summary-completed">{t("已完成 {0}/{1}", completed, totalGraphNodes)}</span>
             </span>
-            <span className="stat-lbl">{t("已完成")}</span>
-          </div>
+          )}
         </div>
 
-        <div className="plan-nodes-list">
-          <span className="nodes-list-title">
-            {t("节点列表（点击聚焦查看详细日志与独立沙箱）：")}
-          </span>
-          <div className="nodes-chips">
-            {summaryNodes.map((node) => {
-              const nState = state.nodes[node.name];
-              return (
-                <button
-                  type="button"
-                  key={node.name}
-                  className="node-chip"
-                  onClick={() => { setSelected(node.name); setSelectedMergerId(""); }}
-                >
-                  <span className={`chip-dot ${nState?.status ?? "waiting"}`} />
-                  <span className="chip-name">{node.name}</span>
-                </button>
-              );
-            })}
+        {totalGraphNodes > 0 && (
+          <div className="plan-nodes-list">
+            {summaryBatches.length > 1 ? (
+              <div className="plan-batches-list">
+                {summaryBatches.map((batchNodes, index) => (
+                  <div className="plan-batch-row" key={`batch-${index}`}>
+                    <span className="plan-batch-label">{t("批次 {0}", index + 1)}</span>
+                    <div className="nodes-chips">
+                      {batchNodes.map(renderSummaryNodeChip)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="nodes-chips">
+                {(summaryBatches[0] ?? state.graph.nodes).map(renderSummaryNodeChip)}
+              </div>
+            )}
           </div>
-        </div>
+        )}
 
         {hasCompletedPublication && (
           <PublicationCompletedDetails
@@ -2732,8 +2744,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           </button>
         </div>
       )}
-      {/* 左侧/居中对话与日志面板 */}
-      <motion.div
+      {/* Keep the grey surface outside all content reveal animations. */}
+      <div
         className={`conversation-pane ${showGraphPane ? "split" : "full-width"}`}
         style={showGraphPane ? undefined : { width: "100%", maxWidth: "100%" }}
       >
@@ -2756,12 +2768,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           <div className="initial-query-view">
             <div className="conversation-heading">
               <div className="heading-title-col">
-                <h2>{selectedNodeLabel}</h2>
+                <h2 title={selectedNodeLabel}>{selectedNodeLabel}</h2>
               </div>
               {routeType === "graph" && (
                 <button
                   type="button"
                   className="back-to-query-btn"
+                  aria-label={t("返回规划对话")}
+                  title={t("返回规划对话")}
                   onClick={() => { setSelected(""); setSelectedMergerId(""); }}
                 >
                   <ArrowLeft size={16} />
@@ -3411,27 +3425,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
               {/* 规划失败提示 */}
               {failedPlanning && !isPlanning && (failedPlanning.error || failedPlanning.status === "failed") && (
-                <div
-                  ref={failureNoticeRef}
-                  className="planning-error-notice"
-                  style={{
-                    margin: "10px auto",
-                    maxWidth: 860,
-                    width: "calc(100% - 36px)",
-                    boxSizing: "border-box",
-                    padding: "8px 12px",
-                    background: "#ffffff",
-                    borderRadius: 8,
-                    color: "#b91c1c",
-                    fontSize: 12,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    border: "1px solid #fca5a5",
-                    boxShadow: "0 1px 4px rgba(239, 68, 68, 0.08)",
-                  }}
-                >
-                  <AlertCircle size={14} style={{ flexShrink: 0, color: "#ef4444" }} />
+                <div ref={failureNoticeRef} className="planning-error-notice">
+                  <AlertCircle size={14} />
                   <span>{t("规划未通过：")}{localizeError(failedPlanning.error || t("规划阶段异常中断"))}</span>
                 </div>
               )}
@@ -3497,7 +3492,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             </motion.div>
           </div>
         )}
-      </motion.div>
+      </div>
 
       {hasGraphPane && graphPaneCollapsed && (
         <button
@@ -3533,7 +3528,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           </button>
         </div>, document.body,
       )}
-      <AnimatePresence mode="wait" onExitComplete={() => {
+      {/* A newly opened Conversation paints both panes immediately. Only later
+          graph expansion/collapse animates the pane; history fades separately. */}
+      <AnimatePresence mode="wait" initial={false} onExitComplete={() => {
         setGraphPane(current => current.collapsed ? { ...current, generation: current.generation + 1 } : current);
       }}>
         {showGraphPane && (
@@ -3569,13 +3566,13 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             >
               <div className="graph-toolbar">
                 <div className="toolbar-left">
-                  <Workflow size={15} />
                   <strong>{t("执行拓扑图")}</strong>
                 </div>
                 <div className="toolbar-right">
                   <button
                     type="button"
                     className="icon-button"
+                    aria-label={t("编辑 Graph IR")}
                     title={t("编辑 Graph IR")}
                     onClick={onOpenEditor}
                   >
@@ -3612,12 +3609,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 >
                   <div className="progress-label">
                     <FooterProgressLabel token={String(completed)} disabled={reduceMotion}>
-                      <span className="progress-dot" />
-                      {completed} / {state.graph.nodes.length}{t(" 节点完成")}</FooterProgressLabel>
+                      {completed} / {state.graph.nodes.length}{t(" 节点完成")}
+                    </FooterProgressLabel>
                   </div>
-                  <div className="progress-track">
+                  <div className="progress-track" role="progressbar"
+                    aria-label={t("节点完成进度")}
+                    aria-valuemin={0} aria-valuemax={state.graph.nodes.length} aria-valuenow={completed}>
                     <motion.div
-                      initial={reduceMotion ? false : { width: 0 }}
+                      initial={false}
                       animate={{ width: `${(completed / Math.max(1, state.graph.nodes.length)) * 100}%` }}
                       transition={{ duration: reduceMotion ? 0 : 0.5, ease: [0.22, 1, 0.36, 1] }}
                     />
@@ -3649,7 +3648,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                     // output. The percentage is the prompt cache-hit rate.
                                     formatTokenCount(consumedTokenCount(state.runMetrics?.totalUsage)),
                                     formatCacheHitRate(state.runMetrics?.totalUsage))
-                                    : state.approved ? phaseText[graphPhase] ?? graphPhase : ""}
+                                    : phaseText[graphPhase] ?? (state.approved ? graphPhase : "")}
                     </FooterStatusLabel>
                     <FooterControlsGroup token={footerControlKey} disabled={reduceMotion}>
                       {publicationFailedNow ? (
@@ -3659,10 +3658,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                       ) : graphPhase === "awaiting_approval" ? (
                         <>
                           <button key="reject-btn" type="button" className="text-button" disabled={locked} onClick={() => onControl("reject")}>
-                            Reject
+                            {t("拒绝")}
                           </button>
                           <button key="approve-btn" type="button" className="primary" disabled={locked} onClick={onOpenApproval}>
-                            <Play size={13} fill="currentColor" />Approve
+                            <Play size={13} fill="currentColor" aria-hidden="true" />{t("批准")}
                           </button>
                         </>
                       ) : state.approved && !publicationWorking ? (
@@ -3675,7 +3674,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           // following 继续 would just un-pause it without
                           // continuing any node. The backend recovery hint
                           // identifies failed attempts that Continue can retry.
-                          disabled={locked || controlPending !== null || publishing || publicationFailed || (state.phase === "completed" && !canContinue) || graphPhase === "pausing"
+                          // Planner turns use their composer's Stop, not this control.
+                          disabled={isPlanning || locked || controlPending !== null || publishing || publicationFailed || (state.phase === "completed" && !canContinue) || graphPhase === "pausing"
                             || (graphPhase === "needs_attention" && !canContinue)}
                           title={graphPhase === "needs_attention" && !canContinue ? t("执行已停止；请在失败节点的对话中发送介入指令以继续") : undefined}
                           onClick={() => {

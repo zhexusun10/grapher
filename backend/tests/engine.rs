@@ -28,6 +28,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
         auto_approve: false,
         post_task_review: false,
         planner_write_tools: true,
+        isolate_parallel_nodes: true,
         thinking_level: "medium".into(),
         role_models: Default::default(),
     };
@@ -315,7 +316,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         auto_approve: false,
         thinking_level: "medium".into(),
         role_models: Default::default(),
-        post_task_review: false,
+        isolate_parallel_nodes: true, post_task_review: false,
         planner_write_tools: true,
     };
     for role in [
@@ -368,6 +369,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
         pi_args: vec![script_path.to_string_lossy().into()],
+        isolate_parallel_nodes: true,
         model: "test-model".into(),
         post_task_review: false,
         planner_write_tools: true,
@@ -462,6 +464,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     // request keeps the full descriptive list so Config stays authoritative.
     let read_only_config = Config {
         planner_write_tools: false,
+        isolate_parallel_nodes: true,
         ..config.clone()
     };
     let mut read_only_planner_out = String::new();
@@ -579,6 +582,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
         pi_args: vec![script.to_string_lossy().into()],
+        isolate_parallel_nodes: true,
         model: "test-model".into(),
         post_task_review: false,
         planner_write_tools: true,
@@ -657,7 +661,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_command: "/bin/sh".into(),
         pi_args: vec![script.to_string_lossy().into()],
         model: "test-model".into(),
-        thinking_level: "medium".into(),
+        isolate_parallel_nodes: true, thinking_level: "medium".into(),
         max_parallel: 2,
         max_feedback: 3,
         auto_approve: false,
@@ -725,7 +729,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
         pi_args: vec![script_path.to_string_lossy().into()],
-        model: "internal-grapher-model".into(),
+        isolate_parallel_nodes: true, model: "internal-grapher-model".into(),
         role_models: Default::default(),
         thinking_level: "medium".into(),
         max_parallel: 2,

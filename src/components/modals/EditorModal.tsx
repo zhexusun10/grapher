@@ -1,9 +1,10 @@
 import { t } from "../../i18n";
-import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
+import React, { useState, useLayoutEffect, useRef, useId } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { Check, X } from "lucide-react";
 import { Graph, emptyGraph } from "../../types";
 import { dialogVeilMotion, largeDialogMotion } from "./dialogMotion";
+import { useDialogFocus } from "../../hooks/useDialogFocus";
 
 interface EditorModalProps {
   isOpen: boolean;
@@ -25,6 +26,7 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
   onError,
 }) => {
   const reduceMotion = useReducedMotion();
+  const titleId = useId();
   const [editorText, setEditorText] = useState(() => JSON.stringify(initialGraph, null, 2));
   const wasOpen = useRef(isOpen);
 
@@ -35,13 +37,11 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
     wasOpen.current = isOpen;
   }, [isOpen, initialGraph]);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, busy]);
+  const dialogRef = useDialogFocus<HTMLElement>({
+    open: isOpen,
+    onClose: busy ? null : onClose,
+    initialFocus: ".json-editor",
+  });
 
   if (!isOpen) return null;
 
@@ -60,14 +60,17 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
       <motion.div className="modal-backdrop-tint" aria-hidden="true" {...veilMotion} />
       <motion.section
         className="modal wide surface-modal"
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="modal-title"
+        aria-labelledby={titleId}
+        aria-busy={busy}
         {...dialogMotion}
       >
         <header>
-          <h2 id="modal-title">{t("Graph IR · 编辑与编译")}</h2>
-          <button className="icon-button" aria-label={t("关闭弹窗")} onClick={onClose}>
+          <h2 id={titleId}>{t("Graph IR · 编辑与编译")}</h2>
+          <button type="button" className="icon-button" aria-label={t("关闭弹窗")} disabled={busy} onClick={onClose}>
             <X size={18} />
           </button>
         </header>
@@ -81,11 +84,13 @@ export const EditorModal: React.FC<EditorModalProps> = React.memo(({
           onChange={(e) => setEditorText(e.target.value)}
           rows={16}
           spellCheck={false}
+          readOnly={busy}
         />
         <footer>
           <button
             type="button"
             className="secondary"
+            disabled={busy}
             onClick={() => setEditorText(JSON.stringify(emptyGraph, null, 2))}
           >
             {t("清空模板")}</button>

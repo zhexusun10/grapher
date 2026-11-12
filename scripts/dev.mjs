@@ -140,7 +140,9 @@ export async function runDev({
     });
     await ensureReady({ installationRoot, env, run, log });
     const cargo = findCargoExecutable(env) ?? 'cargo';
-    const cargoArgs = ['--locked', '--manifest-path', 'backend/Cargo.toml', '--bin', 'grapher'];
+    // Keep Cargo's versioned progress lines out of startup; warnings and errors
+    // still inherit the terminal, alongside our version-independent status.
+    const cargoArgs = ['--quiet', '--locked', '--manifest-path', 'backend/Cargo.toml', '--bin', 'grapher'];
     log('[dev] Building backend. The first download/compilation can take several minutes; Ctrl+C cancels.');
     await run(cargo, ['build', ...cargoArgs]);
     controller.signal.throwIfAborted();

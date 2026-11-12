@@ -71,6 +71,7 @@ try {
   const cases = [
     ["layout/Sidebar", "Sidebar", { projects: [], activeRepo: "", runs: [], currentRunId: "", runIndicators: {}, onSelectProject: noop, onOpenProject: noop, onRemoveProject: noop, onLoadRun: noop, onDeleteRun: noop, onNewConversation: noop, onOpenSettings: noop }],
     ["modals/SettingsModal", "SettingsModal", { isOpen: true, config, setConfig: noop, dataPath: "", onClose: noop, onSaveConfig: noop }],
+    ["ExtensionSettings", "ExtensionItem", { extension: { id: "probe.ts", name: "probe", source: "auto", path: "probe.ts", enabled: true, required: false, bundled: false }, disabled: false, onToggle: noop }],
     ["modals/ApprovalModal", "ApprovalModal", { isOpen: true, state, config, onClose: noop, onAdjustPlan: noop, onApprove: noop }],
     ["modals/EditorModal", "EditorModal", { isOpen: true, initialGraph: example, onClose: noop, onSave: noop, onError: noop }],
     ["modals/ConfirmModal", "ConfirmModal", { config: { title: t("删除历史"), message: t("确定清空当前工作区的所有历史运行记录吗？"), confirmText: t("清空全部"), onConfirm: noop }, onClose: noop }],
@@ -95,9 +96,17 @@ try {
     if (locale === "en") assert.doesNotMatch(html, /\p{Script=Han}/u, `${name} has untranslated UI copy`);
     if (name === "SettingsModal") {
       assert.ok(html.includes("Settings"));
+      assert.ok(html.includes(`>${locale === "en" ? "Provider configuration" : "Provider配置"}</h4>`));
+      assert.ok(html.includes(`>${locale === "en" ? "Model configuration" : "模型配置"}</h4>`));
+      assert.ok(html.includes(`>${locale === "en" ? "Harness settings" : "Harness设置"}</h4>`));
+      assert.ok(html.includes(`>${locale === "en" ? "UI settings" : "UI设置"}</h4>`));
       assert.ok(html.includes(t("界面语言")));
       assert.ok(html.includes(`value="${preference}" selected=""`));
       assert.ok(!html.includes('role="alertdialog"'), "confirmation is not shown before a language change");
+    }
+    if (name === "ExtensionItem") {
+      assert.ok(html.includes(`>${locale === "en" ? "Remove" : "移除"}</button>`), "enabled extensions offer removal, not deletion");
+      assert.ok(html.includes(`aria-label="${t('{0}扩展 {1}', t('移除'), 'probe')}"`));
     }
     if (name === "ApprovalModal") {
       // Verify the rendered disclosure, not a particular translation call or sentence.

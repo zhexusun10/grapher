@@ -23,10 +23,12 @@ This page owns managed state outside project Git. [Workspace allocation](workspa
 
 Runtime admits environments from native tool evidence. Settings exposes no environment mode, policy JSON, device selector or relocation assertion. Ambiguity/missing capabilities produce diagnostics, not a request to choose an authoritative parent or CPU/OS fallback. Graph approval, result entry selection and arguments are business controls, not environment policy.
 
-Graph approval without an already frozen environment policy records
-`EnvironmentPolicyRequested`. After Planner's existing source writes, Rust resolves
-the current workspace execution contract at approval; the contract is backend-owned
-and not a user environment choice:
+New Graph Runs record `EnvironmentPolicyRequested` and defer native admission to
+the first private [execution batch](workspace-snapshots-and-feedback.md#adaptive-workspace-policy),
+after Planner's source writes. Shared batches never initialize/load private E/L
+bindings or require private completion seals; existing private evidence remains
+Run-owned for later batches and recovery. Legacy private Runs still resolve at
+approval. The execution contract is backend-owned, not a user environment choice:
 
 - Standard Git Graph projects start with **no business environment binding**
   (`automatic-lazy`), irrespective of language or ML declarations. No venv,
@@ -38,7 +40,7 @@ and not a user environment choice:
   workspace contracts are not execution inputs. Start a new Run rather than
   migrating/relocating an old workspace. No SQLite/data migration, service stop
   or destructive legacy cleanup is implied. A project that never needs an environment can complete and launch results while
-  remaining unbound. Serial/shadow projects retain their source-native contract.
+  remaining unbound. Serial/shared batches use source-native launches; ordinary-folder private batches retain their unmanaged launch contract.
 - Ordinary business tasks may create, install into, activate and switch between
   whatever native Python/Conda environments their Bash process can access.
   For the active workspace, the adapter does not reject an ambient interpreter,
@@ -207,12 +209,16 @@ one named business entry per terminal, each retaining its own E/L and fixed
 workspace. Every entry uses the final published code commit and passes native
 integrity/startup checks. Validation and code preparation run outside the Run
 mutex; descriptor/completion events commit together after the publication worker
-identity/state check. Graph completion still requires successful publication.
+identity/state check. Private results must complete their batch handoff before
+graph completion.
 Descriptor construction is best-effort and does not itself gate code
 publication: if environment evidence cannot produce a descriptor, the Run still
 publishes without one. Live-writer and workspace-exclusion safety checks still
 apply. A descriptor whose code reference is not the current published head is
-rejected.
+rejected. Under the [batch policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy),
+current-result queries/launches also require `ResultPublished` after the latest
+batch started; shared edits or file-only delivery must not reuse an older private
+code/E/L descriptor merely because the historical published head still matches.
 
 Different terminal environments do not prevent publication. A default entry is
 available only when startup bindings and business-prefix bytes agree (private

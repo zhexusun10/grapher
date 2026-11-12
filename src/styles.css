@@ -387,7 +387,7 @@ a,
   height: 32px;
   padding: 0;
   border: none;
-  border-radius: 7px;
+  border-radius: 8px;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -635,6 +635,7 @@ a,
 }
 
 .project-workspace-item {
+  text-align: left;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -658,13 +659,17 @@ a,
 
 .project-workspace-item:hover {
   background: var(--bg-surface-hover);
-  border-color: var(--border-subtle);
+  border-color: var(--border-default);
 }
 
 .project-workspace-item.active {
   background: var(--brand-subtle);
   border-color: var(--brand-border);
   box-shadow: 0 1px 3px rgba(37, 99, 235, 0.06);
+}
+
+.project-workspace-item.active .proj-name-row strong {
+  font-weight: 600;
 }
 
 .proj-icon {
@@ -740,6 +745,34 @@ a,
   animation: contextMenuFadeIn 0.12s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* Measured menus stay inside the viewport even with long translated labels. */
+.keyboard-context-menu {
+  box-sizing: border-box;
+  min-width: min(150px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+  transform-origin: top left;
+}
+
+.keyboard-context-menu .context-menu-item:focus-visible:not(:disabled) {
+  background: var(--brand-default);
+  color: #FFFFFF;
+  outline-offset: -2px;
+}
+
+.keyboard-context-menu .context-menu-item.danger:focus-visible:not(:disabled) {
+  background: var(--status-danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .keyboard-context-menu {
+    animation: none;
+  }
+}
+
 @keyframes contextMenuFadeIn {
   from {
     opacity: 0;
@@ -791,15 +824,15 @@ a,
   color: var(--status-danger);
 }
 
-.context-menu-item.danger:hover {
+.context-menu-item.danger:hover:not(:disabled) {
   background: var(--status-danger);
   color: #FFFFFF;
 }
 
 .context-menu-divider {
   height: 1px;
-  background: var(--border-subtle);
-  margin: 3px 2px;
+  background: var(--border-default);
+  margin: 4px 2px;
 }
 
 /* 应用内确认弹窗 */
@@ -815,7 +848,10 @@ a,
   transform: translateZ(0);
   width: 480px;
   max-width: 100%;
-  background: #ffffff;
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--bg-canvas);
   border: 1px solid var(--border-default);
   border-radius: 12px;
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(0, 0, 0, 0.04);
@@ -827,6 +863,7 @@ a,
 
 .confirm-header {
   display: flex;
+  flex-shrink: 0;
   gap: 14px;
   align-items: flex-start;
 }
@@ -851,6 +888,8 @@ a,
 .confirm-texts {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
   gap: 4px;
 }
 
@@ -859,25 +898,28 @@ a,
   font-weight: 600;
   color: var(--text-primary);
   margin: 0;
+  line-height: 1.35;
   letter-spacing: -0.2px;
 }
 
 .confirm-texts p {
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.5;
   color: var(--text-primary);
   margin: 0;
 }
 
 .confirm-texts small {
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.5;
   color: var(--text-secondary);
   margin-top: 2px;
 }
 
 .confirm-actions {
   display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
@@ -886,10 +928,11 @@ a,
 
 .confirm-actions button {
   font-family: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 500;
+  min-height: 34px;
   border-radius: 8px;
-  padding: 6px 14px;
+  padding: 7px 14px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
@@ -987,7 +1030,7 @@ a,
 .nav-section .icon-tiny-btn {
   width: 32px;
   height: 32px;
-  border-radius: 7px;
+  border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1038,9 +1081,10 @@ a,
   align-items: center;
   justify-content: space-between;
   height: 32px;
-  font-size: 13.5px;
-  letter-spacing: -0.1px;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
   font-weight: 600;
+  text-transform: uppercase;
   color: var(--text-secondary);
   padding: 0 4px;
   box-sizing: border-box;
@@ -1058,9 +1102,9 @@ a,
 }
 
 .nav-section > span {
-  font-size: 13.5px;
+  font-size: 11.5px;
   font-weight: 600;
-  letter-spacing: -0.1px;
+  letter-spacing: 0.04em;
   line-height: 1;
 }
 
@@ -1202,13 +1246,19 @@ a,
 
 .run-item:hover {
   background: var(--bg-surface-hover);
-  border-color: var(--border-subtle);
+  border-color: var(--border-default);
 }
 
-/* Sidebar cards are buttons; cancel the global hover brightness so their
-   hover treatment matches the div-based workspace cards. */
-.sidebar .run-item:hover {
+/* Both lists use native buttons without the global brightness overlay. */
+.sidebar .run-item:hover,
+.sidebar .project-workspace-item:hover {
   filter: none;
+}
+
+/* An inset ring remains visible inside the clipped list viewports. */
+.sidebar .run-item:focus-visible,
+.sidebar .project-workspace-item:focus-visible {
+  outline-offset: -2px;
 }
 
 .run-item.chosen {
@@ -1224,6 +1274,7 @@ a,
 
 .run-item.chosen .run-title-text {
   color: var(--text-primary);
+  font-weight: 600;
 }
 
 .run-title-text {
@@ -1306,16 +1357,15 @@ a,
 
 .projects-placeholder,
 .run-placeholder {
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--text-secondary);
   display: flex;
   align-items: center;
   padding: 8px 10px;
-  opacity: 0.8;
   user-select: none;
   white-space: normal;
   word-break: break-word;
-  line-height: 1.4;
+  line-height: 1.45;
   width: var(--sidebar-content-width, 230px);
   min-width: var(--sidebar-content-width, 230px);
   box-sizing: border-box;
@@ -1336,7 +1386,7 @@ a,
 .sidebar-bottom {
   margin-top: auto;
   padding-top: 10px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--border-default);
   flex-shrink: 0;
   animation: sidebarItemFadeIn 0.24s cubic-bezier(0.16, 1, 0.3, 1) both;
   animation-delay: 90ms;
@@ -1352,7 +1402,7 @@ a,
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   transition:
@@ -1368,7 +1418,7 @@ a,
 .sidebar-bottom-btn:hover {
   background: var(--bg-surface-hover);
   color: var(--text-primary);
-  border-color: var(--border-subtle);
+  border-color: var(--border-default);
 }
 
 .sidebar .sidebar-bottom-btn:hover {
@@ -1492,8 +1542,8 @@ a,
 }
 
 .icon-button {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   display: grid;
   place-items: center;
   color: var(--text-secondary);
@@ -1508,11 +1558,12 @@ a,
 
 /* 按钮基础通用规范 */
 .secondary {
+  min-height: 34px;
   border: 1px solid var(--border-default);
   border-radius: 8px;
-  padding: 7px 12px;
+  padding: 7px 14px;
   background: var(--bg-canvas);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 500;
   color: var(--text-primary);
   white-space: nowrap;
@@ -1521,16 +1572,18 @@ a,
 
 .secondary:hover {
   background: var(--bg-surface-hover);
+  border-color: var(--border-hover);
 }
 
 .primary {
+  min-height: 34px;
   background: var(--brand-default);
   color: var(--text-inverse);
   border: 1px solid var(--brand-default);
   border-radius: 8px;
-  padding: 8px 14px;
-  font-size: 12px;
-  font-weight: 550;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
   white-space: nowrap;
   transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
@@ -1961,7 +2014,7 @@ a,
 }
 
 .prompt-box-icon-btn:hover:not(:disabled) {
-  background: var(--bg-surface-hover);
+  background: rgba(15, 23, 42, 0.06);
   color: var(--text-primary);
   /* The global hover filter re-rasterizes these round targets and nudges their
      icons; the painted surface already gives the pointer feedback. */
@@ -2050,22 +2103,22 @@ a,
   width: 26px;
   height: 26px;
   border-radius: 7px;
-  background: rgba(99, 102, 241, 0.14);
-  color: #818cf8;
+  background: var(--brand-subtle);
+  color: var(--brand-default);
   flex-shrink: 0;
   margin-top: 1px;
 }
 
 .prompt-box-file-icon .prompt-box-file-icon-code {
-  color: #60a5fa;
+  color: var(--brand-default);
 }
 
 .prompt-box-file-icon .prompt-box-file-icon-text {
-  color: #34d399;
+  color: var(--status-success-strong);
 }
 
 .prompt-box-file-icon .prompt-box-file-icon-generic {
-  color: #9ca3af;
+  color: var(--text-secondary);
 }
 
 .prompt-box-file-info {
@@ -2185,6 +2238,20 @@ a,
   transform: scale(1.15);
 }
 
+.prompt-box-interrupt-btn {
+  background: var(--status-danger-subtle);
+  color: var(--status-danger);
+  border: 1px solid var(--status-danger-border);
+}
+
+.prompt-box-interrupt-btn:hover:not(:disabled) {
+  background: var(--status-danger);
+  color: #ffffff;
+  border-color: var(--status-danger);
+  transform: scale(1.05);
+  filter: none;
+}
+
 /* 右侧操作区：模式选择器与发送按钮水平对齐 */
 .prompt-box-right-actions {
   display: flex;
@@ -2204,13 +2271,14 @@ a,
 
 /* 发送按钮左侧模式选择器 (auto / serial / graph) - 高度与发送按钮严格一致 (32px / compact 26px) */
 .prompt-box-mode-selector {
+  --prompt-mode-gap: 3px;
   display: inline-flex;
   align-items: center;
-  background: rgba(0, 0, 0, 0.05);
+  background: rgba(15, 23, 42, 0.05);
   border: 1px solid var(--border-default, #E2E8F0);
   border-radius: 9999px;
   padding: 2.5px 3px;
-  gap: 3px;
+  gap: var(--prompt-mode-gap);
   height: 32px;
   max-width: 100%;
   min-width: 0;
@@ -2219,9 +2287,18 @@ a,
 }
 
 .prompt-box-container.compact .prompt-box-mode-selector {
+  --prompt-mode-gap: 2px;
   height: 26px;
   padding: 2px 2.5px;
-  gap: 2px;
+}
+
+.prompt-box-mode-option {
+  display: flex;
+  min-width: 0;
+}
+
+.prompt-box-mode-option > .prompt-box-mode-btn {
+  flex-shrink: 0;
 }
 
 .prompt-box-mode-btn {
@@ -2247,7 +2324,7 @@ a,
   align-items: center;
   justify-content: center;
   user-select: none;
-  transition: color 0.16s ease, background 0.16s ease;
+  transition: color 0.15s ease, background-color 0.15s ease;
   z-index: 1;
 }
 
@@ -2269,8 +2346,17 @@ a,
 }
 
 .prompt-box-mode-btn:not(.active):hover {
-  color: #000000;
-  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-primary);
+  background: rgba(15, 23, 42, 0.06);
+  filter: none;
+}
+
+.prompt-box-mode-btn.active:hover {
+  filter: none;
+}
+
+.prompt-box-mode-btn.active:hover .prompt-box-mode-pill-indicator {
+  background: var(--brand-hover);
 }
 
 /* 滑动动画药丸背景 (Framer Motion layoutId 驱动) */
@@ -2280,6 +2366,7 @@ a,
   border-radius: 9999px;
   background: var(--brand-default, #2563eb);
   box-shadow: 0 1px 3px rgba(37, 99, 235, 0.35);
+  transition: background-color 0.15s ease;
   z-index: 0;
   pointer-events: none;
 }
@@ -2314,7 +2401,7 @@ a,
   }
 
   .prompt-box-mode-selector {
-    gap: 2px;
+    --prompt-mode-gap: 2px;
     padding: 1.5px 2px;
   }
 

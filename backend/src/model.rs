@@ -283,15 +283,20 @@ pub struct Config {
     // Missing role settings retain the legacy model/thinking defaults.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub role_models: BTreeMap<String, RoleModelConfig>,
+    #[serde(default = "default_max_parallel")]
     pub max_parallel: usize,
+    /// Each dispatch batch shares source unless it contains more than two nodes.
+    /// False keeps every batch source-native regardless of its size.
+    #[serde(default = "default_isolate_parallel_nodes")]
+    pub isolate_parallel_nodes: bool,
     #[serde(default = "default_max_feedback")]
     pub max_feedback: usize,
-    #[serde(default)]
+    #[serde(default = "default_auto_approve")]
     pub auto_approve: bool,
     #[serde(default = "default_post_task_review")]
     pub post_task_review: bool,
-    // Planner file mutations are an explicit capability, not an implication of
-    // model selection. Legacy configs keep the historical write/edit surface.
+    // Planner file mutations are a separate capability from model selection.
+    // Missing settings enable the tools; explicit opt-outs remain disabled.
     #[serde(default = "default_planner_write_tools")]
     pub planner_write_tools: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -350,22 +355,55 @@ impl Config {
     }
 }
 
-pub const MAX_FEEDBACK: usize = 8;
+pub const MIN_MAX_PARALLEL: usize = 2;
+pub const DEFAULT_MAX_PARALLEL: usize = 8;
+pub const MAX_GRAPH_NODE_WORKERS: usize = 40;
+pub const MIN_MAX_FEEDBACK: usize = 2;
+pub const DEFAULT_MAX_FEEDBACK: usize = 4;
+pub const MAX_FEEDBACK: usize = 40;
+
+pub fn normalize_max_parallel(value: usize) -> usize {
+    if value == 0 {
+        DEFAULT_MAX_PARALLEL
+    } else {
+        value.clamp(MIN_MAX_PARALLEL, MAX_GRAPH_NODE_WORKERS)
+    }
+}
+
+pub fn normalize_max_feedback(value: usize) -> usize {
+    if value == 0 {
+        DEFAULT_MAX_FEEDBACK
+    } else {
+        value.clamp(MIN_MAX_FEEDBACK, MAX_FEEDBACK)
+    }
+}
+
+fn default_max_parallel() -> usize {
+    DEFAULT_MAX_PARALLEL
+}
 
 fn default_max_feedback() -> usize {
-    MAX_FEEDBACK
+    DEFAULT_MAX_FEEDBACK
 }
 
 pub(crate) fn default_thinking_level() -> String {
     "low".into()
 }
 
+fn default_auto_approve() -> bool {
+    true
+}
+
 fn default_post_task_review() -> bool {
     true
 }
 
+fn default_isolate_parallel_nodes() -> bool {
+    true
+}
+
 fn default_planner_write_tools() -> bool {
-    false
+    true
 }
 
 #[cfg(feature = "fixture")]
@@ -946,6 +984,28 @@ pub enum EventKind {
     Approved {
         base: String,
     },
+    /// Absent on legacy Runs, which retain private workspace semantics.
+    WorkspaceIsolationSelected {
+        isolated: bool,
+    },
+    WorkspaceIsolationRequested,
+    /// The scheduler freezes the actual ready group, after applying worker limits.
+    ExecutionBatchStarted {
+        nodes: Vec<String>,
+        isolated: bool,
+    },
+    /// Delivery between batches uses normal recoverable Git publication.
+    BatchHandoffRequested {
+        recovery_execution_ids: Vec<String>,
+    },
+    /// Partial work was captured, not completed. These heads must be delivered
+    /// before the failed nodes can continue in a different physical directory.
+    BatchRecoveryCaptured {
+        heads: BTreeMap<String, String>,
+    },
+    SharedWorkspaceReviewRequested {
+        execution_id: String,
+    },
     /// Native Planner writes survive a failed/cancelled revision too.
     SourceSnapshotted {
         head: String,
@@ -1270,6 +1330,12 @@ pub struct ResultExecution {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchHandoff {
+    pub recovery_execution_ids: Vec<String>,
+}
+
 /// Publication state is separate from node state. Retain the exact heads and
 /// target across retries/restarts instead of replaying historical attempts.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1311,6 +1377,10 @@ pub struct Snapshot {
     pub planning_turns: BTreeMap<String, PlanningSummary>,
     pub graph: Graph,
     pub config: Option<Config>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolated_workspaces: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_handoff: Option<BatchHandoff>,
     /// Model/thinking selection saved for this conversation. Missing on Runs
     /// that never changed models; those keep using their creation settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2284,6 +2354,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     }
                 }
                 state.publication = None;
+                // A resumed private Planner can produce files after the last
+                // batch completed, even without changing the graph. Delivery
+                // must run again; keeping `completed` would bypass the barrier.
+                if state.isolated_workspaces.is_some()
+                    && state.approved
+                    && state.phase == "completed"
+                    && !state.paused
+                {
+                    state.phase = "running".into();
+                }
             }
         }
         EventKind::PlannerReviewStarted { planning } => {
@@ -2355,6 +2435,31 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         }
         EventKind::Routed { plan_type } => {
             state.plan_type = Some(plan_type.clone());
+        }
+        EventKind::WorkspaceIsolationSelected { isolated } => {
+            state.isolated_workspaces = Some(*isolated);
+        }
+        EventKind::ExecutionBatchStarted { isolated, .. } => {
+            state.isolated_workspaces = Some(*isolated);
+            state.publication = None;
+            state.phase = "running".into();
+        }
+        EventKind::BatchHandoffRequested { recovery_execution_ids } => {
+            state.batch_handoff = Some(BatchHandoff {
+                recovery_execution_ids: recovery_execution_ids.clone(),
+            });
+        }
+        EventKind::BatchRecoveryCaptured { heads } => {
+            if let Some(handoff) = &mut state.batch_handoff {
+                handoff.recovery_execution_ids.retain(|id| !heads.contains_key(id));
+            }
+            for (id, head) in heads {
+                if let Some(execution) = state.executions.iter().find(|execution| execution.id == *id) {
+                    if let Some(node) = state.nodes.get_mut(&execution.node) {
+                        node.head = Some(head.clone());
+                    }
+                }
+            }
         }
         EventKind::Approved { base } => {
             state.approved = true;
@@ -2623,7 +2728,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     .is_some_and(|sequences| !sequences.contains(&message.sequence))
             });
             node.source_direct_recovery = false;
-            if source_direct {
+            if source_direct && state.isolated_workspaces.is_none() {
                 state.phase = "followup".into();
             }
             // Live work owns the displayed topology; provisional draft edits
@@ -2668,7 +2773,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 }
             }
         }
-        EventKind::SourceSnapshotted { .. }
+        EventKind::WorkspaceIsolationRequested
+        | EventKind::SharedWorkspaceReviewRequested { .. }
+        | EventKind::SourceSnapshotted { .. }
         | EventKind::SourceFilesRecorded { .. }
         | EventKind::WorkspaceFilesChanged { .. }
         | EventKind::NodeMessaged { .. } => {}
@@ -2689,7 +2796,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
         }
         EventKind::EnvironmentPolicyResolved { environment, .. } => {
-            if state.environment_policy.as_deref() == Some("automatic-pending") && !state.approved {
+            if (state.environment_policy.as_deref() == Some("automatic-pending") && !state.approved)
+                || (state.isolated_workspaces.is_some()
+                    && !state.executions.iter().any(|execution| execution.status == "running"))
+            {
                 if let Some(config) = state.config.as_mut() {
                     config.environment = environment.clone();
                     state.environment_policy = Some(
@@ -2912,7 +3022,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         node.instruction = message.instruction.clone();
                         node.instruction_images = message.images.clone();
                         node.shared_workspace = message.shared_workspace;
-                        if message.source_direct {
+                        if message.source_direct && state.isolated_workspaces.is_none() {
                             state.phase = "followup".into();
                         }
                     }
@@ -3245,7 +3355,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 publication.completed_at = Some(event.timestamp);
                 publication.error = None;
             }
-            state.phase = "completed".into();
+            // A handoff delivers files, never claims unfinished nodes completed.
+            state.phase = if state.batch_handoff.take().is_some() {
+                if !state.pending_feedback.is_empty()
+                    || state.nodes.values().any(|node| node.status != "completed") {
+                    state.publication = None;
+                }
+                "running"
+            } else {
+                "completed"
+            }.into();
             state.paused = false;
         }
         EventKind::PublicationFailed { error } => {
@@ -3498,33 +3617,47 @@ mod metrics_tests {
     }
 
     #[test]
-    fn legacy_configs_disable_planner_file_tools_by_default() {
+    fn harness_settings_default_on_and_preserve_explicit_opt_outs() {
         let legacy: Config = serde_json::from_value(serde_json::json!({
             "repository": "repo", "model": "provider/model", "maxParallel": 1
         }))
         .unwrap();
-        assert!(!legacy.planner_write_tools);
-        let enabled: Config = serde_json::from_value(serde_json::json!({
-            "repository": "repo", "model": "provider/model", "maxParallel": 1,
-            "plannerWriteTools": true
-        }))
-        .unwrap();
-        assert!(enabled.planner_write_tools);
-    }
-
-    #[test]
-    fn legacy_configs_enable_post_task_review_by_default() {
-        let legacy: Config = serde_json::from_value(serde_json::json!({
-            "repository": "repo", "model": "provider/model", "maxParallel": 1
-        }))
-        .unwrap();
+        assert!(legacy.auto_approve);
+        assert!(legacy.planner_write_tools);
         assert!(legacy.post_task_review);
+        assert!(legacy.isolate_parallel_nodes);
+        let missing_defaults: Config = serde_json::from_value(serde_json::json!({
+            "repository": "repo", "model": "provider/model"
+        }))
+        .unwrap();
+        assert_eq!(missing_defaults.max_parallel, DEFAULT_MAX_PARALLEL);
+        assert_eq!(missing_defaults.max_feedback, DEFAULT_MAX_FEEDBACK);
+        assert_eq!(normalize_max_parallel(0), 8);
+        assert_eq!(normalize_max_parallel(1), 2);
+        assert_eq!(normalize_max_parallel(2), 2);
+        assert_eq!(normalize_max_parallel(8), 8);
+        assert_eq!(normalize_max_parallel(24), 24);
+        assert_eq!(normalize_max_parallel(40), 40);
+        assert_eq!(normalize_max_parallel(99), 40);
+        assert_eq!(normalize_max_feedback(0), 4);
+        assert_eq!(normalize_max_feedback(1), 2);
+        assert_eq!(normalize_max_feedback(2), 2);
+        assert_eq!(normalize_max_feedback(8), 8);
+        assert_eq!(normalize_max_feedback(24), 24);
+        assert_eq!(normalize_max_feedback(40), 40);
+        assert_eq!(normalize_max_feedback(99), 40);
         let disabled: Config = serde_json::from_value(serde_json::json!({
             "repository": "repo", "model": "provider/model", "maxParallel": 1,
-            "postTaskReview": false
+            "autoApprove": false, "plannerWriteTools": false,
+            "postTaskReview": false, "isolateParallelNodes": false
         }))
         .unwrap();
-        assert!(!disabled.post_task_review);
+        let restored: Config =
+            serde_json::from_value(serde_json::to_value(disabled).unwrap()).unwrap();
+        assert!(!restored.auto_approve);
+        assert!(!restored.planner_write_tools);
+        assert!(!restored.post_task_review);
+        assert!(!restored.isolate_parallel_nodes);
     }
 
     #[test]

@@ -18,16 +18,17 @@
   flex-direction: column;
   gap: 8px;
   background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
   padding: 10px 12px;
 }
 
 .pub-card-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 4px 12px;
   font-size: 12.5px;
 }
 
@@ -45,7 +46,7 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
-  max-width: 75%;
+  max-width: 100%;
 }
 
 .pub-card-path {
@@ -95,10 +96,10 @@
 
 /* Merger 现场记录折叠面板 */
 .pub-card-mergers {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
   background: var(--bg-surface);
-  padding: 6px 10px;
+  padding: 8px 12px;
   font-size: 12px;
 }
 

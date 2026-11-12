@@ -19,6 +19,13 @@ fn planner_workspace_result_accepts_current_and_historical_identifiers() {
 use crate::runtime::Job;
 use std::path::Path;
 
+fn create_private(runtime: &mut Runtime, graph: Graph, config: Config) -> Result<(), String> {
+    // Keep private-workspace switching/recovery tests on the legacy contract.
+    runtime.state.run_id = uuid::Uuid::new_v4().to_string();
+    runtime.emit(EventKind::Created { graph, config, planning_id: None, planning: None })?;
+    runtime.store.select_run(Some(&runtime.state.run_id))
+}
+
 fn setup(shadow: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>, Config) {
     setup_with_environment(shadow, false)
 }
@@ -111,8 +118,8 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
             .0;
     }
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    runtime
-        .create(
+    create_private(
+        &mut runtime,
             Graph {
                 original_goal: "frontier".into(),
                 nodes: ["root", "left", "right", "join"]
@@ -1659,8 +1666,8 @@ console.log(JSON.stringify({ type: 'message_end', message: {
     }))
     .unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    runtime
-        .create(
+    create_private(
+        &mut runtime,
             Graph {
                 original_goal: "frontier".into(),
                 nodes: ["root", "join"]

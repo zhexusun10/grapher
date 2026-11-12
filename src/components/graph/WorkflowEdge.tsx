@@ -2,11 +2,29 @@ import React from "react";
 import { BaseEdge, getBezierPath, Position, type EdgeProps } from "@xyflow/react";
 
 function workflowPath(sourceX: number, sourceY: number, targetX: number, targetY: number) {
-  const bend = Math.max(18, Math.abs(targetY - sourceY) * 0.46);
+  const dy = targetY - sourceY;
+  const dx = targetX - sourceX;
+  const midX = (sourceX + targetX) / 2;
+  const midY = (sourceY + targetY) / 2;
+  if (Math.abs(dx) < 0.5) {
+    return [`M${sourceX},${sourceY} L${targetX},${targetY}`, midX, midY] as [string, number, number];
+  }
+  if (dy > 0) {
+    // End with a short vertical lead-in so slanted curves enter the arrowhead dead-center.
+    const targetLead = Math.min(16, Math.max(0, dy * 0.16));
+    const endY = targetY - targetLead;
+    const bend = Math.max(16, (endY - sourceY) * 0.48);
+    return [
+      `M${sourceX},${sourceY} C${sourceX},${sourceY + bend} ${targetX},${endY - bend} ${targetX},${endY} L${targetX},${targetY}`,
+      midX,
+      midY,
+    ] as [string, number, number];
+  }
+  const bend = Math.max(18, Math.abs(dy) * 0.46);
   return [
     `M${sourceX},${sourceY} C${sourceX},${sourceY + bend} ${targetX},${targetY - bend} ${targetX},${targetY}`,
-    (sourceX + targetX) / 2,
-    (sourceY + targetY) / 2,
+    midX,
+    midY,
   ] as [string, number, number];
 }
 

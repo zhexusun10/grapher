@@ -10,7 +10,7 @@ This page defines lifecycle operations, not their underlying storage algorithms.
 | | Serial | Graph |
 | --- | --- | --- |
 | Planning | A single `task` node; automatically approved | Planner, compiler, and graph approval |
-| Agent directory | The user's project | Private Run repositories with one writer per directory; ordinary dependencies and applied feedback can transfer ownership |
+| Agent directory | The user's project | Source or private Run repositories under the [adaptive workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy) |
 | Dependency inputs | One agent works directly on the project | Children inherit completed parents' workspace state |
 | Completion | Task completion and snapshot | Valid results successfully published to the project |
 
@@ -22,7 +22,7 @@ The Partitioner is a tool-free classifier; its `parallel` response maps to the i
 2. For Graph's initial planning, the Planner runs directly in the bound source project directory, not a private copy. Later turns select their cwd afresh as described below.
 3. Tools follow the [Pi role-loading policy](../development/pi-integration.md#role-loading-policy). Native Bash has no write-command filter, including when dedicated `write`/`edit` tools are disabled. Writes affect the selected directory immediately, even on failure/cancellation.
 4. Planning output, Pi session history and Graph IR are kept in runtime/session data directories, not copied project workspaces. Neither Partitioner nor Planner creates a Git worktree/project copy. There is no separate Planner publication or preview merge. A `planner-workspace` marker records that turn's actual cwd for session/legacy compatibility; it is not a directory allocation.
-5. The graph is validated and presented for approval. Approval validates the binding. Standard Git Graphs record a source snapshot; ordinary folders defer it to [first-node shadow materialization](workspace-snapshots-and-feedback.md#shadow-repository-lifecycle). Serial records no approval snapshot. With **Auto Approve** enabled, a Graph is approved and starts executing without a manual click; enabling it while a Graph is already waiting for approval, or while its Planner turn is still running, takes effect immediately.
+5. The graph is validated and presented for approval. Approval validates the binding. New Graph Runs defer workspace selection and source capture to their [actual execution batches](workspace-snapshots-and-feedback.md#adaptive-workspace-policy). Legacy private standard-Git Graphs still snapshot at approval; ordinary folders defer to the first private worker. Serial records no approval snapshot. **Auto Approve** defaults on when unset and preserves explicit saved opt-outs. When enabled, a Graph is approved and starts executing without a manual click; enabling it while a Graph is already waiting for approval, or while its Planner turn is still running, takes effect immediately.
 
 **Graph approval is permission to execute the plan, not a promise that no project changes occurred earlier.** Planner commands change the source before approval. Reject, failure, and cancellation do not undo those changes, Git commits, or external command side effects. Host source snapshots use a private index and internal commits: they do not stage into the user's index or advance the user's branch. Existing source changes are included in the final files-only delivery.
 
@@ -32,11 +32,11 @@ Source-lock scope and cross-Run races belong to [Runtime concurrency](runtime.md
 
 ### Planner follow-up workspaces
 
-Every Graph Planner follow-up reselects cwd immediately before launch. Selection and the turn block new node dispatches and defer publication for that Run; unrelated active writers continue.
+Every new Graph Planner follow-up reselects cwd immediately before launch. An explicit continuation of an interrupted Planner instead validates its retained cwd/session/draft; it cannot bypass the [current batch workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy). Selection and the turn block new node dispatches and defer publication for that Run; unrelated active writers continue.
 
 | Run/workspace state | Selection |
 | --- | --- |
-| No node workspace yet, published, all nodes completed, or awaiting approval | Source project |
+| Shared-source mode, no node workspace yet, published, all nodes completed, or awaiting approval | Source project |
 | Unfinished node work | Most recently started eligible execution's surviving workspace; the linear frontier is the single-branch case |
 | Prior explicit move, with no newer node workspace update | Keep the explicit selection |
 | Requested slot inherited downstream | Resolve to its latest recorded execution owner, not its allocation name |
@@ -77,7 +77,8 @@ Auto Approve, enabled by default (including saved configurations that predate
 it). Unlike Auto Approve, it is captured in a new Run's configuration. It applies
 to Graph Runs, which already have a Planner conversation, not Serial Runs.
 
-After every successful publication, when all nodes are completed, an enabled Run
+After every successful publication (or shared-source settlement under the
+[workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy)), when all nodes are completed, an enabled Run
 appends a brief neutral completion notification to its existing Planner session.
 The notification is not a user bubble and is omitted from the browser transcript,
 including after reload; the shared Planner system prompt is unchanged. The rework
@@ -94,8 +95,8 @@ work before the turn finishes. The saved conversation replays review output as
 its own section, separated from the planned turns by a divider, so the review
 reply does not read as part of the turn that produced the published graph.
 
-A completed turn validates and commits its graph and snapshots any Planner source
-writes. Existing unaffected results stay completed. If more work is needed, Auto
+A completed turn validates and commits its graph and retains Planner source
+writes; only private execution snapshots them. Existing unaffected results stay completed. If more work is needed, Auto
 Approve dispatches it immediately; otherwise the new graph waits for **Approve**,
 without rerunning completed nodes. New workspaces use the newly published source
 plus any source writes made during review, never the previous approval baseline.
@@ -130,7 +131,7 @@ If a Git Merger fails or leaves an unresolved conflict, the affected node is blo
 - A new node starts with a fresh Pi session and its own task. It does not inherit Planner or parent-node conversations. Editing the task of a node that has never started updates only that task in the same Run, without resetting execution state or creating a conversation. The backend rejects stale edits or an edit racing with node dispatch.
 - A Serial Agent turn parks its shell instead of terminating it. A compatible next turn reuses the resident process, so the conversation and any service it started stay alive; model changes and other retirement conditions are described in [Process lifecycle](filesystem-isolation.md#parked-serial-shells). A Planner — whose launch binding is per planning attempt — and every Graph Node Agent are reclaimed at turn end as before. This changes only process lifetime — a follow-up is still an appended instruction and a new execution.
 - Follow-ups continue the node's own history. Sending from a completed node's composer starts a new execution with the appended instruction, not a record-only note or a resend of the original task. Before publication, a follow-up edits the current terminal workspace and produces a new Git snapshot containing all project files; completed descendants remain valid only under the existing shared-workspace invalidation rules. After successful publication, node follow-ups edit the source directory directly without creating another Git snapshot.
-- Applied feedback continues the target's own history through an explicit Pi session fork; input composition and sender eligibility follow [feedback handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits). Other continuations fork when cwd changes. A previous writer may reuse the current shared terminal tree when eligible; needing an earlier independent state does not permit rewinding another active writer's directory.
+- Applied feedback continues the target's own history (forking when private workspace ownership changes); input composition and sender eligibility follow [feedback handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits). Other continuations fork when cwd changes. A previous writer may reuse the current shared terminal tree when eligible; needing an earlier independent state does not permit rewinding another active writer's directory.
 - While a node runs, steering sends a message to its live session without ending the execution. Merger steering/continuation eligibility follows [Merger lifecycle](#parent-composition-conflicts).
 - Accepted node/Merger steering and continuation turns persist their attachment-bearing text and image payloads in Run events, not just optimistic UI state. Their attachment cards/thumbnails survive Run selection and reload. Legacy steering events without image payloads remain readable but cannot reconstruct an image from those events.
 - Outside shared-terminal follow-ups, changing a completed node's Git result—including a file that was previously ignored—invalidates affected ordinary dependency descendants. Applied feedback and explicit history edits still trigger their Git/session invalidation rules.
@@ -138,11 +139,17 @@ If a Git Merger fails or leaves an unresolved conflict, the affected node is blo
 - A revision that changes a node which already ran (its task or its inputs) discards that node's previous session entirely: its executions become superseded, its revision increments, and the rework starts a fresh Pi session instead of continuing the old conversation. Nodes whose task and inputs are unchanged, and whose upstream is unaffected, keep their results, revisions, sessions and workspaces.
 - Unsent composer text is retained in browser memory for each Run and conversation target (Planner/Serial, node, or Merger). Switching conversations or returning from home restores that target's draft, without sending it or sharing it with another target. An accepted send clears only its originating draft; a rejected send keeps it. Draft text is not Pi history or persisted browser storage: reload/closing the page clears it, and unsent file attachments are not retained.
 
-Editing a historical user turn creates a branch in the node's Pi JSONL session and retains the old branch. Consumed steers are editable user turns too, including inside the first execution: editing one retains earlier user turns and does not replace the opening task/goal. New node edits identify a user row by its execution and absolute UTF-8 log cursor, validate its membership in the active Pi tree before interrupting the writer, and persist the exclusive transcript cutoff. This distinguishes repeated instructions without guessing by text. The active conversation renders bounded prefixes of superseded executions, including their prior assistant/tool output and editable user rows; those prefixes are history views, not runnable executions. Re-editing an earlier retained row replaces its cutoff and discards the later displayed suffix. A retained prefix follows the edit lineage across a session fork (its Pi session ID changed but the conversation continued); only a from-zero restart discards the earlier history. Legacy events without a cutoff remain readable without a migration. The replacement instruction owns its new execution and renders before its response. While a paged transcript has not loaded a Steer's inline row, its fallback bubble precedes the owning execution's output instead of falling below the response. Pause returns unread text to the composer only when the loaded transcript window can prove the turn was not consumed; a tail page that starts after an earlier occurrence of a repeated instruction keeps it instead of resending work. A queued text steer has no Pi tree entry to branch yet; its historical edit is unavailable until consumed. A history edit retires the Run's parked source-native shell, so the next turn re-reads the branched Pi session instead of continuing the pre-edit conversation held in memory. Serial branches rewind conversation context, **not project files**. Graph branches keep the existing Git rollback behavior; all project files are restored through Git history, and no `before-*` file snapshots are required. Changed Git results invalidate affected descendants. Planner history edits likewise branch the Planner session.
+Editing a historical user turn creates a branch in the node's Pi JSONL session and retains the old branch. Consumed steers are editable user turns too, including inside the first execution: editing one retains earlier user turns and does not replace the opening task/goal. New node edits identify a user row by its execution and absolute UTF-8 log cursor, validate its membership in the active Pi tree before interrupting the writer, and persist the exclusive transcript cutoff. This distinguishes repeated instructions without guessing by text. The active conversation renders bounded prefixes of superseded executions, including their prior assistant/tool output and editable user rows; those prefixes are history views, not runnable executions. Re-editing an earlier retained row replaces its cutoff and discards the later displayed suffix. A retained prefix follows the edit lineage across a session fork (its Pi session ID changed but the conversation continued); only a from-zero restart discards the earlier history. Legacy events without a cutoff remain readable without a migration. The replacement instruction owns its new execution and renders before its response. While a paged transcript has not loaded a Steer's inline row, its fallback bubble precedes the owning execution's output instead of falling below the response. Pause returns unread text to the composer only when the loaded transcript window can prove the turn was not consumed; a tail page that starts after an earlier occurrence of a repeated instruction keeps it instead of resending work. A queued text steer has no Pi tree entry to branch yet; its historical edit is unavailable until consumed. A history edit retires the Run's parked source-native shell, so the next turn re-reads the branched Pi session instead of continuing the pre-edit conversation held in memory. Serial branches rewind conversation context, **not project files**. Private Graph branches keep the existing Git rollback behavior; shared-source branches, like Serial, do not rewind project files; all project files are restored through Git history, and no `before-*` file snapshots are required. Changed Git results invalidate affected descendants. Planner history edits likewise branch the Planner session.
 
 An execution record is not identical to a new model conversation. This distinction matters when inspecting retries and feedback.
 
 ## Final publication
+
+For adaptive Runs, each private batch uses this delivery path as a handoff and
+returns to `running`; only subsequent scheduler settlement establishes graph
+completion. The [batch policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy)
+owns this barrier and partial-retry delivery. The terminal-publication lifecycle
+below also remains the contract for legacy private Runs.
 
 ```text
 running -> publishing -> completed
@@ -155,6 +162,6 @@ running -> publishing -> completed
 
 Only a real Git conflict invokes a dedicated Merger in the private publication workspace. A missing/inaccessible repository or permission error is a publication failure, not a request for the model to improvise a workaround. Node preparation never inspects the live source working tree; source changes are incorporated at publication.
 
-`retry_publication` reuses retained Git heads, private merge state and durable delivery evidence without rerunning the graph. Internal composition must preserve input ancestry, but delivery never creates a commit or advances the user's branch/index. Recovery and concurrent-source handling follow [Git publication](workspace-snapshots-and-feedback.md#publication). Only `PublicationCompleted` establishes Graph completion.
+`retry_publication` reuses retained Git heads, private merge state and durable delivery evidence without rerunning the graph. Internal composition must preserve input ancestry, but delivery never creates a commit or advances the user's branch/index. Recovery and concurrent-source handling follow [Git publication](workspace-snapshots-and-feedback.md#publication). For private execution, only `PublicationCompleted` establishes delivery; shared-source Graphs settle directly under the [workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy).
 
 After an earlier successful publication or Planner revision, new and revised nodes build on the latest recorded source snapshot rather than overlaying a stale approval baseline.

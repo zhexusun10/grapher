@@ -241,6 +241,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             auto_approve: false,
             post_task_review: false,
             planner_write_tools: true,
+            isolate_parallel_nodes: true,
         };
         let runtime_root = temp.path().join("runtime");
         let mut events = Vec::new();
@@ -352,6 +353,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         auto_approve: false,
         post_task_review: false,
         planner_write_tools: true,
+        isolate_parallel_nodes: true,
     };
     let root = temp.path().join("runtime");
     let session_dir = root.join("mergers").join("publication-merger");

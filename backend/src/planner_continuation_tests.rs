@@ -11,6 +11,80 @@ fn service(root: &std::path::Path) -> Arc<Service> {
 }
 
 #[test]
+fn private_planner_continuation_cannot_bypass_a_later_shared_batch() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = crate::fixture::repository(temp.path()).unwrap();
+    let script = temp.path().join("planner.mjs");
+    fs::write(&script, r#"
+import fs from 'node:fs'; import path from 'node:path';
+let input=''; for await (const chunk of process.stdin) input += chunk;
+const arg = name => process.argv[process.argv.indexOf(name)+1];
+const dir=arg('--session-dir'), id=arg('--session-id');
+if (process.env.GRAPHER_CONTINUE_INTERRUPTED !== 'true') {
+  fs.writeFileSync(path.join(dir, `test_${id}.jsonl`), JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n'+
+    JSON.stringify({type:'message',id:'request',parentId:null,message:{role:'user',content:'retained turn'}})+'\n');
+  process.exit(1);
+}
+fs.writeFileSync('continued-in-private.txt', 'must not execute in the previous batch');
+console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}));
+"#).unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository":repository, "piCommand":"node", "piArgs":[script],
+        "model":"mock/model", "postTaskReview":false, "maxParallel":3
+    })).unwrap();
+    let current = service(&temp.path().join("runtime"));
+    current.driving.store(true, Ordering::SeqCst);
+    let run_id = {
+        let mut runtime = current.runtime.lock().unwrap();
+        runtime.create(Graph {
+            original_goal:"batch handoff".into(),
+            nodes:["a","b","c","join"].into_iter().map(|name| Node { name:name.into(), task:name.into() }).collect(),
+            edges:["a","b","c"].into_iter().map(|name| Edge { from:name.into(), to:"join".into(), feedback:false }).collect(),
+        }, config.clone()).unwrap();
+        runtime.set_route("graph").unwrap();
+        runtime.approve().unwrap();
+        let root = runtime.root.clone();
+        for mut job in runtime.jobs().unwrap() {
+            runtime.attach_job_source(&mut job, &[]).unwrap();
+            let error = perform_with_merger(&job, &root, &[], |_| {}, |head| {
+                runtime.emit(EventKind::Prepared { execution_id:job.execution.id.clone(), head })?;
+                Err("prepared only".into())
+            }, |_| Err("unexpected merger".into())).unwrap_err();
+            assert_eq!(error, "prepared only");
+            let head = crate::workspace::git(std::path::Path::new(&job.execution.worktree), &["rev-parse", "HEAD"]).unwrap();
+            runtime.finish(&job.execution, Ok((head, "done".into()))).unwrap();
+        }
+        runtime.state.run_id.clone()
+    };
+    let failed = plan_goal_internal("revise".into(), config.clone(), Some("graph"), None,
+        Some(run_id.clone()), &current, |_| {}, |_| {}, |_| {}).unwrap_err().1.unwrap();
+    let private = PathBuf::from(failed.worktree.as_ref().unwrap());
+    assert!(!crate::path_identity::same_path(&private, &repository));
+    {
+        let mut runtime = current.runtime.lock().unwrap();
+        assert!(runtime.jobs().unwrap().is_empty());
+        let publication = runtime.state.publication.clone().unwrap();
+        let head = crate::graph_merge::merge_graph_scoped(&repository, &publication.heads,
+            &runtime.exclusions().unwrap(), |_| Err("unexpected merger".into())).unwrap();
+        runtime.emit(EventKind::PublicationCompleted { head }).unwrap();
+        let join = runtime.jobs().unwrap().remove(0);
+        assert!(join.source_direct);
+        runtime.finish(&join.execution, Ok((String::new(), "done".into()))).unwrap();
+        runtime.jobs().unwrap();
+        assert!(runtime.shared_source_workspace());
+    }
+    let mut started = false;
+    let result = plan_goal_internal_with_options("revise".into(), config, Some("graph"), None,
+        Some(run_id), &current, false, Some(&failed.planning_id),
+        |_| { started = true; }, |_| {}, |_| {}, |_| {});
+    let error = result.unwrap_err().0;
+    assert!(error.contains("workspace policy"), "{error}");
+    assert!(!started, "reject before recording or launching a replacement turn");
+    assert!(!private.join("continued-in-private.txt").exists());
+    assert_eq!(current.runtime.lock().unwrap().state.planning.as_ref().unwrap().planning_id, failed.planning_id);
+}
+
+#[test]
 fn approved_graph_revision_continues_its_failed_draft_without_replacing_the_run() {
     let temp = tempfile::tempdir().unwrap();
     let repository = crate::fixture::repository(temp.path()).unwrap();

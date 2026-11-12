@@ -124,7 +124,13 @@ export const runtimeService = {
   repositoryStatus: (repository: string, signal?: AbortSignal) =>
     request<{ repository: string; valid: boolean; error: string | null; missing?: boolean }>("repository_status", { repository }, signal),
   snapshot: (signal?: AbortSignal) => request<Snapshot>("snapshot", {}, signal),
-  snapshotForRun: (runId: string, signal?: AbortSignal) => request<Snapshot>("snapshot", { runId }, signal),
+  snapshotForRun: async (runId: string, signal?: AbortSignal) => {
+    const snapshot = await request<Snapshot>("snapshot", { runId }, signal);
+    // Workspace ownership alone cannot distinguish two conversations. Never
+    // paint another Run if an older backend ignores the targeted request.
+    if (!snapshot || snapshot.runId !== runId) throw new Error(t("执行记录与请求不匹配"));
+    return snapshot;
+  },
   snapshotIfChanged: (version: string | null, signal?: AbortSignal, runId?: string) =>
     request<{ version: string; snapshot: Snapshot | null; activity?: RuntimeActivity[]; busy?: boolean }>("snapshot_if_changed", { version, ...(runId ? { runId } : {}) }, signal),
   history: (runId: string) => {

@@ -21,6 +21,9 @@ pnpm-debug.log*
 MYLOG.md
 /release/
 
+# Promotional video project
+/my-motion/
+
 # Local environment and credentials; only the placeholder is publishable
 .env*
 !.env.example

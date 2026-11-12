@@ -1,5 +1,5 @@
 use super::*;
-use std::time::{Duration, Instant};
+use std::{path::Path, time::{Duration, Instant}};
 
 fn wait(service: &Arc<Service>, predicate: impl Fn(&Snapshot) -> bool) -> Snapshot {
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -27,6 +27,10 @@ fn wait_for_driver_exit(service: &Arc<Service>) {
 }
 
 fn setup(enabled: bool, auto: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>) {
+    setup_with_isolation(enabled, auto, true)
+}
+
+fn setup_with_isolation(enabled: bool, auto: bool, isolate: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>) {
     let temp = tempfile::tempdir().unwrap();
     let repo = crate::fixture::repository(temp.path()).unwrap();
     let script = temp.path().join("agent.mjs");
@@ -45,11 +49,12 @@ if (process.env.GRAPHER_MODE === 'planner') {
   fs.writeFileSync('review.txt', 'fresh source');
   const graph = JSON.parse(fs.readFileSync(process.env.GRAPHER_GRAPH_PATH));
   graph.nodes.push({name:'second',task:'second'});
+  if (fs.existsSync('parallel-review')) graph.nodes.push({name:'third',task:'second'}, {name:'fourth',task:'second'});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
   emit({type:'tool_execution_end',toolName:'node',isError:false});
   if (fs.existsSync('fail-review')) throw Error('review failed deliberately');
   while (!fs.existsSync('release-review')) await new Promise(completed=>setTimeout(completed,20));
-  graph.edges.push({from:'first',to:'second',feedback:false});
+  for (const node of graph.nodes.filter(node => node.name !== 'first')) graph.edges.push({from:'first',to:node.name,feedback:false});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
   emit({type:'tool_execution_end',toolName:'edge',isError:false});
   say('A next step');
@@ -67,8 +72,8 @@ if (process.env.GRAPHER_MODE === 'planner') {
 "#).unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": repo, "engine": "pi", "piCommand": "node", "piArgs": [script],
-        "model": "mock/review", "thinkingLevel": "off", "maxParallel": 2,
-        "postTaskReview": enabled, "autoApprove": auto
+        "model": "mock/review", "thinkingLevel": "off", "maxParallel": 0,
+        "isolateParallelNodes": isolate, "postTaskReview": enabled, "autoApprove": auto
     }))
     .unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
@@ -95,6 +100,31 @@ if (process.env.GRAPHER_MODE === 'planner') {
         extension: temp.path().join("unused.ts"),
     });
     (temp, repo, service)
+}
+
+#[test]
+fn shared_review_promotes_new_parallel_nodes_only_when_isolation_is_enabled() {
+    for isolate in [true, false] {
+        let (_temp, repo, service) = setup_with_isolation(true, true, isolate);
+        fs::write(repo.join("parallel-review"), "three new branches").unwrap();
+        fs::write(repo.join("release-review"), "go").unwrap();
+        drive(service.clone());
+        let completed = wait(&service, |state| {
+            state.phase == "completed" && state.nodes.len() == 4
+                && state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerReviewFinished { .. })).count() == 2
+        });
+        wait_for_driver_exit(&service);
+        assert_eq!(completed.executions.len(), 4);
+        assert!(crate::path_identity::same_path(Path::new(&completed.executions[0].worktree), &repo));
+        assert_eq!(completed.isolated_workspaces, Some(isolate));
+        for execution in &completed.executions[1..] {
+            assert_eq!(crate::path_identity::same_path(Path::new(&execution.worktree), &repo), !isolate);
+        }
+        assert_eq!(completed.events.iter().filter(|event| matches!(event.kind, EventKind::PublicationCompleted { .. })).count(), usize::from(isolate));
+        assert_eq!(fs::read_to_string(repo.join("second.txt")).unwrap(), "continued");
+        let runtime = service.runtime.lock().unwrap();
+        assert_eq!(runtime.store.load(&completed.run_id).unwrap().isolated_workspaces, Some(isolate));
+    }
 }
 
 #[test]
@@ -263,17 +293,17 @@ fn continuation(auto: bool, followup_first: bool) {
         fs::read_to_string(repo.join("first.txt")).unwrap(),
         "published"
     );
-    let publication = live
+    let completion = live
         .events
         .iter()
-        .position(|e| matches!(e.kind, EventKind::PublicationCompleted { .. }))
+        .position(|e| matches!(e.kind, EventKind::SharedWorkspaceReviewRequested { .. }))
         .unwrap();
     let review = live
         .events
         .iter()
         .position(|e| matches!(e.kind, EventKind::PlannerReviewStarted { .. }))
         .unwrap();
-    assert!(review > publication);
+    assert!(review > completion);
     fs::write(repo.join("release-review"), "go").unwrap();
     if !auto {
         let pending = wait(&service, |s| s.phase == "awaiting_approval");
@@ -313,7 +343,7 @@ fn continuation(auto: bool, followup_first: bool) {
         completed
             .events
             .iter()
-            .filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. }))
+            .filter(|e| matches!(e.kind, EventKind::SharedWorkspaceReviewRequested { .. }))
             .count(),
         2
     );
@@ -551,10 +581,11 @@ fn post_task_review_failure_preserves_published_graph_and_source_writes() {
         fs::read_to_string(repo.join("review.txt")).unwrap(),
         "fresh source"
     );
-    assert!(completed
+    assert!(!completed
         .events
         .iter()
         .any(|e| matches!(e.kind, EventKind::SourceSnapshotted { .. })));
+    assert_eq!(completed.isolated_workspaces, Some(false));
     assert!(planner_tasks(&temp)[0].contains(PLANNER_REWORK_NOTE));
     wait(&service, |_| !service.driving.load(Ordering::SeqCst));
     let reopened = service

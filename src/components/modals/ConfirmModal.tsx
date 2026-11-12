@@ -1,7 +1,8 @@
 import { t } from "../../i18n";
-import React, { useEffect } from "react";
+import React, { useId } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { AlertTriangle, Trash2 } from "lucide-react";
+import { useDialogFocus } from "../../hooks/useDialogFocus";
 
 export interface ConfirmModalState {
   title: string;
@@ -21,17 +22,18 @@ interface ConfirmModalProps {
 
 export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, onClose }) => {
   const reduceMotion = useReducedMotion();
+  const titleId = useId();
+  const messageId = useId();
+  const detailId = useId();
   const cancel = () => {
     config?.onCancel?.();
     onClose();
   };
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") cancel();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [config, onClose]);
+  const dialogRef = useDialogFocus<HTMLDivElement>({
+    open: config !== null,
+    onClose: cancel,
+    initialFocus: ".cancel-btn",
+  });
 
   if (!config) return null;
 
@@ -42,14 +44,18 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: reduceMotion ? 0 : 0.16, ease: "easeOut" }}
-      onClick={cancel}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) cancel();
+      }}
     >
       <motion.div
         className="confirm-dialog"
+        ref={dialogRef}
+        tabIndex={-1}
         role="alertdialog"
         aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
-        aria-describedby="confirm-dialog-message"
+        aria-labelledby={titleId}
+        aria-describedby={`${messageId}${config.detail ? ` ${detailId}` : ""}`}
         initial={{ opacity: 0, scale: reduceMotion ? 1 : 0.96, y: reduceMotion ? 0 : 8 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: reduceMotion ? 1 : 0.97, y: reduceMotion ? 0 : 6 }}
@@ -61,10 +67,10 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = React.memo(({ config, o
             {config.icon ?? (config.danger ? <AlertTriangle size={18} /> : <Trash2 size={18} />)}
           </div>
           <div className="confirm-texts">
-            <h4 id="confirm-dialog-title">{config.title}</h4>
-            <p id="confirm-dialog-message">{config.message}</p>
+            <h4 id={titleId}>{config.title}</h4>
+            <p id={messageId}>{config.message}</p>
             {config.detail && (
-              <small style={{ whiteSpace: "pre-wrap" }}>{config.detail}</small>
+              <small id={detailId} style={{ whiteSpace: "pre-wrap" }}>{config.detail}</small>
             )}
           </div>
         </div>

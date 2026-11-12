@@ -165,7 +165,10 @@ pub(super) fn setup(
         "engine": "pi", "piCommand": native::trusted_node().unwrap(), "piArgs": [script], "environment": policy,
     })).unwrap();
     let mut runtime = Runtime::open(&temp.path().join("data")).unwrap();
-    runtime.create(graph, config).unwrap();
+    // Explicit E/L fixtures test private workspace mechanics, not adaptive admission.
+    runtime.state.run_id = Uuid::new_v4().to_string();
+    runtime.emit(EventKind::Created { graph, config, planning_id: None, planning: None }).unwrap();
+    runtime.store.select_run(Some(&runtime.state.run_id)).unwrap();
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
     (temp, source, runtime)
@@ -202,6 +205,141 @@ pub(super) fn run(runtime: &mut Runtime, job: &Job) {
         "{:?}",
         runtime.state.nodes[&job.execution.node].error
     );
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn shared_batch_cannot_launch_an_older_private_result() {
+    let mut policy = state_policy();
+    policy.best_effort = true;
+    policy.discovery = true;
+    let (_temp, source, mut runtime) = setup(graph(&["A", "B", "C"], &[]), policy, "");
+    // The fixture seeds frozen native E/L; exercise batch scheduling on that
+    // real evidence rather than manufacturing a launchable descriptor.
+    runtime.emit(EventKind::WorkspaceIsolationSelected { isolated: false }).unwrap();
+    for job in runtime.jobs().unwrap() {
+        run(&mut runtime, &job);
+    }
+    runtime.jobs().unwrap();
+    let publication = runtime.state.publication.clone().unwrap();
+    let head = crate::graph_merge::merge_graph_scoped(&source, &publication.heads,
+        &runtime.exclusions().unwrap(), |_| Err("unexpected conflict".into())).unwrap();
+    runtime.emit(EventKind::PublicationCompleted { head }).unwrap();
+    runtime.jobs().unwrap();
+    assert!(runtime.state.published_result.is_some());
+    assert!(runtime.result_descriptor().is_ok());
+    runtime.intervene("A", "update source code").unwrap();
+    let job = runtime.jobs().unwrap().remove(0);
+    assert!(job.source_direct);
+    fs::write(source.join("code.txt"), "new source version").unwrap();
+    runtime.finish(&job.execution, Ok((String::new(), "done".into()))).unwrap();
+    runtime.jobs().unwrap();
+    runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+    let error = match runtime.start_result_entry(&[], Some("A")) {
+        Err(error) => error,
+        Ok(_) => panic!("a shared-source update must not launch the previous private code/environment"),
+    };
+    assert!(error.contains("source"), "{error}");
+    assert!(runtime.state.result_execution.is_none(), "refuse before reserving a result launch");
+    assert!(runtime.result_descriptor().unwrap_err().contains("latest batch"));
+    // Selecting private work again does not make the old descriptor current:
+    // only a new ResultPublished can prove the new batch's code/E/L together.
+    for node in ["A", "B", "C"] { runtime.intervene(node, "new work").unwrap(); }
+    let next = runtime.jobs().unwrap();
+    assert_eq!(next.len(), 3);
+    assert!(next.iter().all(|job| !job.source_direct));
+    assert!(runtime.result_descriptor().unwrap_err().contains("latest batch"));
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn batch_business_result_republishes_code_and_remains_launchable_after_restart() {
+    fn publish(runtime: &mut Runtime, source: &Path) {
+        assert_eq!(runtime.state.phase, "publishing");
+        let publication = runtime.state.publication.clone().unwrap();
+        let job = runtime.publication_environment_input().unwrap().unwrap();
+        job.validate().unwrap();
+        let head = crate::graph_merge::merge_graph_scoped(
+            source, &publication.heads, &runtime.exclusions().unwrap(),
+            |_| Err("unexpected publication conflict".into()),
+        ).unwrap();
+        if runtime.state.result_execution.is_some() {
+            // Accept an unchanged prior publication in another private entry,
+            // but still reject unrecorded mutations of that sealed project.
+            let sibling = Path::new(job.inputs.last().unwrap().1.layout.as_deref().unwrap());
+            let file = sibling.join("code.txt");
+            let original = fs::read(&file).unwrap();
+            fs::write(&file, "unrecorded private change").unwrap();
+            let error = job.descriptor(&head).unwrap_err();
+            assert!(error.contains("changed"), "{error}");
+            assert_eq!(fs::read_to_string(&file).unwrap(), "unrecorded private change");
+            fs::write(file, original).unwrap();
+        }
+        let descriptor = job.descriptor(&head).unwrap();
+        runtime.emit_outputs(vec![
+            EventKind::ResultPublished { descriptor },
+            EventKind::PublicationCompleted { head },
+        ]).unwrap();
+        runtime.jobs().unwrap();
+        assert_eq!(runtime.state.phase, "completed");
+        runtime.result_descriptor().unwrap();
+    }
+
+    let mut policy = state_policy();
+    policy.best_effort = true;
+    policy.discovery = true;
+    let (_temp, source, mut runtime) = setup(
+        graph(&["A", "B", "C"], &[]), policy,
+        "fs.writeFileSync(`${name}.txt`, name);",
+    );
+    let source_head = workspace::git(&source, &["rev-parse", "HEAD"]).unwrap();
+    let source_index = fs::read(source.join(".git/index")).unwrap();
+    runtime.emit(EventKind::WorkspaceIsolationSelected { isolated: false }).unwrap();
+    for job in runtime.jobs().unwrap() { run(&mut runtime, &job); }
+    runtime.jobs().unwrap();
+    publish(&mut runtime, &source);
+    assert!(runtime.take_shared_workspace_review().unwrap().is_some());
+    let historical_heads: Vec<_> = runtime.state.executions.iter()
+        .map(|execution| execution.after.clone()).collect();
+
+    for (entry, script) in [
+        ("A", "from pathlib import Path; Path('business.txt').write_text('first output')"),
+        ("B", "from pathlib import Path; p = Path('business.txt'); assert p.read_text() == 'first output'; p.write_text('second output')"),
+    ] {
+        let (job, control) = runtime.start_result_entry(&["-c".into(), script.into()], Some(entry)).unwrap();
+        let outcome = crate::runtime::perform_result(&job, &control, |input|
+            runtime.emit(EventKind::ResultExecutionPrepared { input }));
+        runtime.finish_result(&job, &control, outcome).unwrap();
+        let result_head = runtime.state.result_execution.as_ref().unwrap()
+            .result.as_ref().unwrap().code_ref.clone();
+        let root = runtime.root.clone();
+        drop(runtime);
+        runtime = Runtime::open(&root).unwrap();
+        runtime.resume_scheduling().unwrap();
+        assert!(runtime.jobs().unwrap().is_empty());
+        assert_eq!(runtime.state.phase, "publishing");
+        assert_eq!(runtime.state.publication.as_ref().unwrap().heads, [result_head.clone()]);
+        assert!(runtime.start_result_entry(&[], Some(entry)).is_err());
+
+        drop(runtime);
+        runtime = Runtime::open(&root).unwrap();
+        assert_eq!(runtime.state.phase, "publication_failed");
+        runtime.retry_publication().unwrap();
+        assert_eq!(runtime.state.publication.as_ref().unwrap().heads, [result_head]);
+        publish(&mut runtime, &source);
+        assert_eq!(fs::read_to_string(source.join("business.txt")).unwrap(),
+            if entry == "A" { "first output" } else { "second output" });
+        assert!(runtime.take_shared_workspace_review().unwrap().is_none());
+        assert_eq!(runtime.state.executions.iter().map(|execution| execution.after.clone()).collect::<Vec<_>>(), historical_heads);
+    }
+    assert_eq!(workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(), source_head);
+    assert_eq!(fs::read(source.join(".git/index")).unwrap(), source_index);
+    assert_eq!(runtime.state.events.iter().filter(|event|
+        matches!(event.kind, EventKind::PublicationCompleted { .. })).count(), 3);
+    runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+    runtime.result_descriptor().unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "completed");
 }
 
 #[test]

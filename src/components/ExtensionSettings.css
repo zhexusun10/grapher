@@ -1,8 +1,12 @@
 .extension-settings .settings-card-title .icon-button { margin-left: auto; }
 .extension-settings ul { list-style: none; padding: 0; margin: 0; }
-.extension-settings h5 { margin: 14px 0 6px; }
-.extension-settings-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
+.extension-settings h5 { margin: 16px 0 6px; font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+.extension-settings .section-desc + .section-desc { margin-top: -6px; }
+.extension-settings-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
+.extension-settings-row:last-child { border-bottom: none; }
 .extension-settings-row > div { flex: 1; min-width: 0; }
-.extension-settings-row code, .extension-settings-directory { display: block; font-size: 12px; overflow-wrap: anywhere; opacity: .65; }
+.extension-settings-row strong { display: block; font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px; }
+.extension-settings-row code, .extension-settings-directory { display: block; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; color: var(--text-secondary); }
+.extension-settings-directory { padding: 6px 10px; border-radius: 6px; background: var(--bg-surface); border: 1px solid var(--border-default); font-family: var(--font-mono, monospace); }
 .extension-settings-row button, .extension-settings-required { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; }
-.extension-settings-required { font-size: 12px; opacity: .65; }
+.extension-settings-required { font-size: 12px; color: var(--text-secondary); }

@@ -14,6 +14,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "workspace_policy.rs"]
+mod workspace_policy;
+
 /// Confirmation is tied to the completed result the user actually reviewed.
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +41,9 @@ pub struct ManualNodeRequest {
 pub struct Job {
     pub execution: Execution,
     pub agent_kind: engine::AgentKind,
+    /// Batch inputs are fully resolved by the scheduler, including an empty
+    /// parent set when those results were already delivered into source.
+    pub batch_workspaces: bool,
     pub run_id: String,
     pub parent_heads: Vec<String>,
     pub config: Config,
@@ -59,16 +65,19 @@ pub struct Job {
     /// A failed attempt with durable Prepared evidence. Its own working tree,
     /// including uncommitted files and agent commits, must not be recomposed.
     pub preserved_workspace: Option<Execution>,
+    /// Complete attachment receipts from a failed private attempt whose files
+    /// were already delivered through the batch recovery barrier.
+    pub recovered_workspace: Option<String>,
     /// Physical baseline for one-time copies of files that are outside the
     /// recorded Git commit; normal project outputs are inherited through Git.
     pub copy_from_workspace: Option<String>,
     pub history_edit: bool,
     pub feedback_source: bool,
-    /// First job batch of a plain-directory graph run: materialize the external
-    /// shadow repository before any prepare/hand-off work.
+    /// First private batch of a plain-directory Run or promoted shared Run:
+    /// capture the source before any preparation/handoff.
     pub materialize_source: bool,
-    /// Post-publication follow-up of a completed node runs directly in the source
-    /// directory (no worktree, no commit, no invalidation of descendants).
+    /// Explicit source-native ownership: adaptive shared Graph work or a
+    /// post-publication follow-up. No worktree, composition or result commit.
     pub source_direct: bool,
     pub expected_source_head: String,
     pub environment_input: Option<crate::environment::CompositeResult>,
@@ -121,8 +130,8 @@ pub(crate) fn resolve_repository(root: &Path, config: &Config) -> Result<PathBuf
     Ok(repository)
 }
 
-/// Collect (or reuse) the lazily created source snapshot for a plain-directory
-/// job. `fresh` is true when this Run has no recorded snapshot yet: the current
+/// Collect (or reuse) the lazy source snapshot for a plain-directory job or
+/// the first private batch after shared-source promotion. `fresh` is true when this Run has no recorded snapshot yet: the current
 /// source files are force-collected then. Git work runs without the runtime
 /// lock; production callers serialize it with the per-source lock.
 pub(crate) fn collect_source_snapshot(
@@ -131,7 +140,11 @@ pub(crate) fn collect_source_snapshot(
     fresh: bool,
 ) -> Result<String, String> {
     if fresh {
-        return workspace::materialize_shadow_repo(repository, exclusions);
+        return if workspace::is_standard_git(repository) {
+            workspace::snapshot_repository_scoped(repository, exclusions)
+        } else {
+            workspace::materialize_shadow_repo(repository, exclusions)
+        };
     }
     let shadow = workspace::shadow_repo_if_exists(repository)?
         .ok_or_else(|| "临时 Git 快照不存在或已回收；请重新派发节点或开启新对话。".to_string())?;
@@ -386,12 +399,13 @@ impl Runtime {
 
     pub fn emit(&mut self, mut kind: EventKind) -> Result<(), String> {
         if let EventKind::Prepared { execution_id, .. } = &kind {
-            if self
-                .state
-                .config
-                .as_ref()
-                .and_then(|c| c.environment.as_ref())
-                .is_some()
+            if !self.shared_source_workspace()
+                && self
+                    .state
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.environment.as_ref())
+                    .is_some()
                 && self.state.executions.iter().any(|e| e.id == *execution_id)
             {
                 let input = self
@@ -724,7 +738,8 @@ impl Runtime {
             Some(published_head) => {
                 let heads =
                     Self::undelivered_heads(&self.state.published_heads, &publication.heads);
-                if heads.is_empty() {
+                if heads.is_empty() && self.state.batch_handoff.as_ref()
+                    .is_none_or(|handoff| handoff.recovery_execution_ids.is_empty()) {
                     // Nothing new to deliver: restore the completed phase and mark
                     // the record successful without touching reclaimed Git state.
                     return self.emit_outputs(vec![EventKind::PublicationCompleted {
@@ -767,6 +782,11 @@ impl Runtime {
     /// removal. Failed cleanup is retried without relying on a source binding.
     pub fn cleanup_worktrees(&self) -> Result<(), String> {
         if self.state.run_id.is_empty() {
+            return Ok(());
+        }
+        if self.batch_workspaces()
+            && (self.active() || !self.state.pending_feedback.is_empty()
+                || self.state.nodes.values().any(|node| node.status != "completed")) {
             return Ok(());
         }
         // Managed launchable results retain their fixed layout, resources and
@@ -887,6 +907,8 @@ impl Runtime {
                 head: head.to_string(),
             })?;
         }
+        let source_based = job.execution.before.is_empty()
+            || job.execution.before == job.expected_source_head;
         job.expected_source_head = head.to_string();
         // A history edit or feedback repair pins its own base (the anchor or the
         // feedback source). The freshly collected source snapshot must not
@@ -898,7 +920,7 @@ impl Runtime {
             .is_some_and(|node| {
                 node.edit_execution_id.is_some() || node.feedback_workspace.is_some()
             });
-        if !pinned {
+        if (!pinned && source_based) || job.execution.before.is_empty() {
             job.execution.before = head.to_string();
         }
         Ok(())
@@ -1099,7 +1121,8 @@ impl Runtime {
         }
         let mut config = config;
         config.max_feedback = config.max_feedback.min(MAX_FEEDBACK);
-        // max_parallel = 0 uses the default node worker limit.
+        // max_parallel = 0 uses the default node worker limit (8); positive values are capped at MAX_GRAPH_NODE_WORKERS (40).
+        config.max_parallel = config.max_parallel.min(MAX_GRAPH_NODE_WORKERS);
         #[cfg(feature = "fixture")]
         if config.engine == "pi" && config.pi_command.trim().is_empty() {
             return Err("Test process command is required".into());
@@ -1122,12 +1145,11 @@ impl Runtime {
         // Production workspace admission is resolved by Rust after planning;
         // it is not a frontend environment choice.
         let automatic = config.environment.is_none() && !cfg!(feature = "fixture");
-        let mut events = vec![EventKind::Created {
-            graph,
-            config,
-            planning_id,
-            planning,
-        }];
+        let mut events = vec![
+            EventKind::Created { graph, config, planning_id, planning },
+            // Enable batch policy; no workspace is allocated before dispatch.
+            EventKind::WorkspaceIsolationSelected { isolated: false },
+        ];
         if automatic {
             events.push(EventKind::EnvironmentPolicyRequested);
         }
@@ -1144,7 +1166,7 @@ impl Runtime {
             return Err("Invalid execution route or routing phase".into());
         }
         #[cfg(not(feature = "fixture"))]
-        if plan_type == "graph" {
+        if plan_type == "graph" && self.state.isolated_workspaces.is_none() {
             crate::native::require_graph_execution()?;
         }
         self.emit(EventKind::Routed {
@@ -1225,6 +1247,9 @@ impl Runtime {
                 }
                 | EventKind::SourceSnapshotted { head }
                 | EventKind::PublicationCompleted { head } => Some(head.as_str()),
+                // Each private batch captures the current source after the prior
+                // batch's handoff. Never reuse a baseline predating shared edits.
+                EventKind::ExecutionBatchStarted { isolated: true, .. } => Some(""),
                 EventKind::Approved { base } => Some(base.as_str()),
                 _ => None,
             })
@@ -1290,6 +1315,9 @@ impl Runtime {
     /// still has to answer the user, so it falls back to the source project
     /// rather than blocking the conversation or silently using an older slot.
     pub(crate) fn planner_workspace(&self) -> Result<Option<Execution>, String> {
+        if self.shared_source_workspace() {
+            return Ok(None);
+        }
         let Some(execution) = self.planner_workspace_candidate()? else {
             return Ok(None);
         };
@@ -1353,6 +1381,10 @@ impl Runtime {
                 }
                 _ => None,
             })
+            .chain(self.state.executions.iter().filter(|execution|
+                self.batch_workspaces() && execution.status == "failed"
+                    && !self.batch_recovery_was_delivered(execution)
+            ).map(|execution| execution.id.as_str()))
             .collect();
 
         // A Planner may explicitly ask to move to another existing node
@@ -1598,6 +1630,10 @@ impl Runtime {
                 }
                 _ => None,
             })
+            .chain(self.state.executions.iter().filter(|execution|
+                self.batch_workspaces() && execution.status == "failed"
+                    && !self.batch_recovery_was_delivered(execution)
+            ).map(|execution| execution.id.as_str()))
             .collect();
         for requested in self.state.executions.iter().rev() {
             if requested.node != node
@@ -1647,6 +1683,9 @@ impl Runtime {
         current_workspace: &Path,
     ) -> Result<serde_json::Value, String> {
         let mut targets = serde_json::Map::new();
+        if self.shared_source_workspace() {
+            return Ok(serde_json::Value::Object(targets));
+        }
         let repository = resolve_repository(
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
@@ -1807,7 +1846,7 @@ impl Runtime {
 
     pub(crate) fn capture_planner_source(&mut self) -> Result<(), String> {
         self.require_current_file_contract()?;
-        if self.is_serial() {
+        if self.is_serial() || self.batch_workspaces() {
             return Ok(());
         }
         let repository = resolve_repository(
@@ -1836,19 +1875,22 @@ impl Runtime {
         let config = self.state.config.as_ref().ok_or("No graph")?;
         let repository = resolve_repository(&self.root, config)?;
         #[cfg(not(feature = "fixture"))]
-        if !self.is_serial() {
+        if !self.is_serial() && !self.batch_workspaces() {
             crate::native::require_graph_execution()?;
         }
         if self.state.environment_policy.as_deref() == Some("automatic-pending") {
-            let (environment, reason) =
-                crate::environment_automatic::resolve(&repository, self.is_serial())?;
+            let (environment, reason) = if self.batch_workspaces() {
+                (None, "Native admission is deferred to each dispatch batch".into())
+            } else {
+                crate::environment_automatic::resolve(&repository, self.is_serial())?
+            };
             self.emit(EventKind::EnvironmentPolicyResolved {
                 environment,
                 reason,
             })?;
         }
         let config = self.state.config.as_ref().ok_or("No graph")?;
-        if let Some(environment) = &config.environment {
+        if let Some(environment) = config.environment.as_ref().filter(|_| !self.batch_workspaces()) {
             if self.is_serial() {
                 return Err("Managed environments require explicit Graph mode; Planner/Serial keep native source semantics".into());
             }
@@ -1861,16 +1903,20 @@ impl Runtime {
             environment.check_tracked(&repository)?;
         }
         workspace::validate_binding(&repository)?;
-        if let Some(store) = self.environments()? {
+        let approval_environment = if self.batch_workspaces() {
+            None
+        } else {
+            self.environments()?
+        };
+        if let Some(store) = approval_environment {
             if self.state.environment_baseline.is_none() {
                 let result = store.initialize(&repository)?;
                 self.emit(EventKind::EnvironmentInitialized { result })?;
             }
         }
-        // Approval is immutable. Serial never records a Git snapshot. Graph
-        // snapshots standard Git sources here; plain directories defer their
-        // snapshot to the first node worker.
-        let base = if self.is_serial() || !workspace::is_standard_git(&repository) {
+        // Approval is immutable. Serial/shared Graphs create no snapshot.
+        // Private Git sources capture here; plain folders defer to the worker.
+        let base = if self.is_serial() || self.batch_workspaces() || !workspace::is_standard_git(&repository) {
             String::new()
         } else {
             workspace::verify(&repository)?;
@@ -1910,9 +1956,12 @@ impl Runtime {
             return Err("Unknown test actuator".into());
         }
         config.max_feedback = config.max_feedback.min(MAX_FEEDBACK);
-        // max_parallel = 0 uses the default node worker limit.
+        // max_parallel = 0 uses the default node worker limit (8); positive values are capped at MAX_GRAPH_NODE_WORKERS (40).
+        config.max_parallel = config.max_parallel.min(MAX_GRAPH_NODE_WORKERS);
         #[cfg(not(feature = "fixture"))]
-        crate::native::require_graph_execution()?;
+        if self.state.isolated_workspaces.is_none() {
+            crate::native::require_graph_execution()?;
+        }
         self.emit(EventKind::DraftEdited { graph, config })
     }
 
@@ -2123,7 +2172,7 @@ impl Runtime {
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
         )?;
-        let source_head = if !self.state.approved
+        let source_head = if !self.state.approved || self.batch_workspaces()
             || (!workspace::is_standard_git(&repository)
                 && workspace::shadow_repo_if_exists(&repository)?.is_none())
         {
@@ -2261,8 +2310,8 @@ impl Runtime {
         // Plain directories that were never materialized (no node dispatched
         // yet) have no snapshot to record; the eventual first dispatch will
         // materialize from the current source files instead.
-        let source_head = if !workspace::is_standard_git(&repository)
-            && workspace::shadow_repo_if_exists(&repository)?.is_none()
+        let source_head = if self.batch_workspaces() || (!workspace::is_standard_git(&repository)
+            && workspace::shadow_repo_if_exists(&repository)?.is_none())
         {
             None
         } else {
@@ -2428,10 +2477,21 @@ impl Runtime {
             match &event.kind {
                 EventKind::RecoveryQueued {
                     nodes,
+                    continuation_nodes,
                     source_direct_nodes,
                     ..
                 } if nodes.contains(&execution.node) => {
-                    return source_direct_nodes.contains(&execution.node)
+                    if source_direct_nodes.contains(&execution.node) {
+                        return true;
+                    }
+                    // In batch Runs a standalone follow-up may have used a
+                    // private cwd. Retrying it must retain its no-review intent,
+                    // independently of the next batch's directory choice.
+                    return self.batch_workspaces() && continuation_nodes.contains(&execution.node)
+                        && self.state.events[..index].iter().rev().find_map(|event| match &event.kind {
+                            EventKind::Started { execution: previous, .. } if previous.node == execution.node => Some(previous),
+                            _ => None,
+                        }).is_some_and(|previous| self.execution_was_source_direct(previous));
                 }
                 EventKind::Started {
                     execution: previous,
@@ -2479,11 +2539,11 @@ impl Runtime {
         // Record that ownership so replay does not turn its retry into a Graph
         // workspace or publish the source-direct turn a second time.
         let source_direct_nodes = if !self.is_serial()
-            && self
+            && (self.batch_workspaces() || self
                 .state
                 .config
                 .as_ref()
-                .is_some_and(|config| config.environment.is_none())
+                .is_some_and(|config| config.environment.is_none()))
         {
             let repository = resolve_repository(&self.root, self.state.config.as_ref().unwrap())?;
             roots
@@ -2777,7 +2837,15 @@ impl Runtime {
             })
             .ok_or("Select an active node message to edit")?
             .clone();
-        if let Some(store) = self.environments()? {
+        // Batch selection decides whether this edit needs private E/L evidence.
+        // Source execution must not load a dormant private environment just to
+        // branch a conversation; private admission validates it at dispatch.
+        let historical_environment = if self.batch_workspaces() {
+            None
+        } else {
+            self.environments()?
+        };
+        if let Some(store) = historical_environment {
             let input = anchor
                 .input
                 .as_ref()
@@ -3062,11 +3130,11 @@ impl Runtime {
             .map(|execution| PathBuf::from(execution.worktree)))
     }
 
-    /// A regular node's attachment is written in place only for a source-direct
-    /// follow-up. Every other node owns a private workspace that must be staged,
+    /// Shared-source nodes and source-direct follow-ups accept attachments in
+    /// place. Private nodes need staged delivery,
     /// including a node that has not run yet and therefore has no workspace.
     pub(crate) fn node_attachment_is_source_direct(&self, node: &str) -> bool {
-        self.source_direct_context(node)
+        self.shared_source_workspace() || self.source_direct_context(node)
     }
 
     /// Filesystem inputs accepted for the unfinished turn(s) of a node session.
@@ -3080,6 +3148,7 @@ impl Runtime {
         session: &str,
         resent_task: &str,
     ) -> String {
+        let across_forks = self.batch_workspaces();
         let executions: BTreeSet<_> = self
             .state
             .executions
@@ -3087,9 +3156,12 @@ impl Runtime {
             .rev()
             .filter(|execution| {
                 execution.node == node
-                    && execution.session_id == session
+                    && (across_forks || execution.session_id == session)
                     && !self.state.superseded_execution_ids.contains(&execution.id)
             })
+            // A cwd-changing recovery forks Pi's session ID, not the unfinished
+            // turn's input ownership. Walk its retained failed predecessors too.
+            .skip_while(|execution| execution.session_id != session)
             // Only the unfinished turn and its recovery attempts need inputs;
             // older completed turns must not resurrect deliberately removed files.
             .take_while(|execution| execution.status != "completed")
@@ -3147,12 +3219,12 @@ impl Runtime {
             return true;
         }
         !self.is_serial()
-            && self
+            && (self.batch_workspaces() || self
                 .state
                 .config
                 .as_ref()
                 .and_then(|config| config.environment.as_ref())
-                .is_none()
+                .is_none())
             && matches!(self.state.phase.as_str(), "completed" | "followup")
             && self
                 .state
@@ -3198,7 +3270,7 @@ impl Runtime {
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
         )?;
-        if !self.is_serial() && !workspace::is_standard_git(&repository) {
+        if !self.is_serial() && !self.shared_source_workspace() && !workspace::is_standard_git(&repository) {
             // Explicit node updates must not be blocked by live user edits;
             // they only require the recorded source snapshot to still exist.
             workspace::check_shadow_base(&repository, self.latest_source_head())?;
@@ -3226,6 +3298,28 @@ impl Runtime {
             .cloned()
             .ok_or("No workspace to resolve")?;
         let path = Path::new(&execution.worktree);
+        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        if Self::same_workspace_path(path, &repository) {
+            return Err("Source-native nodes have no private Git composition to resolve; retry the node instead".into());
+        }
+        // Lazy source materialization updates the worker's Job before the
+        // durable Prepared event. A composition failure can therefore retain an
+        // empty `before`; the owned slot's pinned base is its recovery evidence.
+        // Never substitute that ref for a nonempty recorded preparation head.
+        let base = if execution.before.is_empty() {
+            if !workspace::has_private_git(path)
+                || self.planner_workspace_owner(&execution)
+                    .is_none_or(|owner| owner.id != execution.id)
+            {
+                return Err("Cannot resolve workspace: its private preparation evidence is missing or reassigned".into());
+            }
+            workspace::git(path, &["rev-parse", "--verify", "refs/grapher/base^{commit}"])
+                .map_err(|error| format!("Cannot resolve workspace without its recorded preparation base: {error}"))?
+        } else {
+            execution.before.clone()
+        };
+        // Reject missing/discarded history before staging or committing a repair.
+        workspace::verify_prepared_ancestor(path, &base)?;
         if crate::workspace_view::is_bound(path) {
             crate::graph_merge::finish_project_resolution(path, &self.exclusions()?)?;
         }
@@ -3238,7 +3332,7 @@ impl Runtime {
         }
         let config = self.state.config.as_ref().ok_or("Missing config")?;
         let repository = resolve_repository(&self.root, config)?;
-        workspace::verify_prepared_ancestor(path, &execution.before)?;
+        workspace::verify_prepared_ancestor(path, &base)?;
         let head =
             workspace::snapshot_node_for_run(path, &repository, node, Some(&self.state.run_id))?;
         // This was a preparation failure, not a completed node task. Commit
@@ -3359,18 +3453,22 @@ impl Runtime {
         }
         self.require_current_file_contract()?;
         self.drain_feedback()?;
+        let batch_workspaces = self.batch_workspaces();
+        // A batch is a barrier, not another opportunity to fill freed slots.
+        if batch_workspaces && self.active() {
+            return Ok(Vec::new());
+        }
         let config = self.state.effective_config().ok_or("Missing config")?;
         // Check before emitting Started or allocating workspaces, including jobs
         // resumed without a UI request. perform() checks again before filesystem work.
         resolve_repository(&self.root, &config)?;
         #[cfg(not(feature = "fixture"))]
-        if !self.is_serial() {
+        if !self.is_serial() && !batch_workspaces {
             crate::native::require_graph_execution()?;
         }
         // Only Graph nodes share this Run's worker slots. There is no cap on
         // concurrent Runs, Planners, or sessions belonging to different Runs.
         // Serial has exactly one node and is not subject to a Graph worker cap.
-        const MAX_GRAPH_NODE_WORKERS: usize = 8;
         let running = self
             .state
             .nodes
@@ -3381,7 +3479,7 @@ impl Runtime {
             1usize.saturating_sub(running)
         } else {
             let limit = if config.max_parallel == 0 {
-                MAX_GRAPH_NODE_WORKERS
+                DEFAULT_MAX_PARALLEL
             } else {
                 config.max_parallel.min(MAX_GRAPH_NODE_WORKERS)
             };
@@ -3458,34 +3556,38 @@ impl Runtime {
             .take(available)
             .cloned()
             .collect();
+        if !self.prepare_execution_batch(&ready, allow_publication && pending_sources.is_empty())? {
+            return Ok(Vec::new());
+        }
+        let shared_source = self.shared_source_workspace();
+        let mut config = self.state.effective_config().ok_or("Missing config")?;
+        if shared_source {
+            // Retain private E/L evidence in the Run, but never bind it to source.
+            config.environment = None;
+        }
         let mut jobs = Vec::new();
-        // A source-direct follow-up runs in the user's directory and must not
-        // rebuild/invalidate anything else. `followup` is entered only by a
-        // source_direct Invalidated event, so every job scheduled here is one.
-        let source_direct_run = self.state.phase == "followup"
-            || self.state.nodes.values().any(|node| {
-                node.pending_messages
-                    .first()
-                    .is_some_and(|message| message.source_direct)
-            });
+        let source_direct_run = shared_source || (!batch_workspaces
+            && (self.state.phase == "followup" || self.state.nodes.values().any(|node| {
+                node.pending_messages.first().is_some_and(|message| message.source_direct)
+            })));
         let resolved_repository = resolve_repository(&self.root, &config)?;
         let materialize_source = !source_direct_run
             && !self.is_serial()
-            && !workspace::is_standard_git(&resolved_repository)
+            && (!workspace::is_standard_git(&resolved_repository) || self.latest_source_head().is_empty())
             && self.job_source_is_fresh(&resolved_repository)?;
         for node in ready {
             let source_direct_run = source_direct_run
-                || (self.state.nodes[&node.name].continuation
+                || (!batch_workspaces && self.state.nodes[&node.name].continuation
                     && self.state.nodes[&node.name].source_direct_recovery);
             let id = Uuid::new_v4().to_string();
             // Dependency nodes normally take over their parent's physical workspace.
-            let source_head = if self.is_serial() {
+            let source_head = if self.is_serial() || shared_source {
                 String::new()
             } else {
                 self.latest_source_head().to_owned()
             };
             let parent_names = self.parents(&node.name);
-            let parent_heads = parent_names
+            let mut parent_heads = parent_names
                 .iter()
                 .map(|parent| {
                     self.state.nodes[parent]
@@ -3494,12 +3596,18 @@ impl Runtime {
                         .ok_or("Ready node has no completed parent head")
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            if batch_workspaces {
+                parent_heads.retain(|head| !head.is_empty() && !self.state.published_heads.contains(head));
+            }
             let mut before = if self.is_serial() || source_direct_run {
                 String::new()
             } else {
                 self.state.nodes[&node.name]
                     .head
                     .clone()
+                    .filter(|head| !head.is_empty() && (!batch_workspaces
+                        || self.state.nodes[&node.name].edit_execution_id.is_some()
+                        || !self.state.published_heads.contains(head)))
                     .unwrap_or_else(|| source_head.clone())
             };
             let queued_prompt = self.state.nodes[&node.name].pending_prompt();
@@ -3732,6 +3840,8 @@ impl Runtime {
                     previous.status == "failed"
                         && !self.is_serial()
                         && !source_direct_run
+                        && !self.batch_recovery_was_delivered(previous)
+                        && !Self::same_workspace_path(Path::new(&previous.worktree), &resolved_repository)
                         && self.state.nodes[&node.name].edit_execution_id.is_none()
                         && self.state.nodes[&node.name].feedback_workspace.as_ref()
                             .is_none_or(|input| !input.additional_sources.is_empty())
@@ -3756,7 +3866,14 @@ impl Runtime {
             if let Some(previous) = &preserved_workspace {
                 before = previous.before.clone();
             }
-            let feedback_workspace = self.state.nodes[&node.name].feedback_workspace.clone();
+            let recovered_workspace = resume
+                .filter(|previous| batch_workspaces && self.batch_recovery_was_delivered(previous))
+                .map(|previous| previous.worktree.clone());
+            let feedback_workspace = if batch_workspaces {
+                None // prior private results are already in the batch's source baseline
+            } else {
+                self.state.nodes[&node.name].feedback_workspace.clone()
+            };
             let fresh_path = || {
                 workspace::normalize_workspace_display_path(
                     &self
@@ -3764,14 +3881,15 @@ impl Runtime {
                         .join(format!("{}-{id}", crate::compiler::node_id(&node.name))),
                 )
             };
-            let busy = |path: &Path| self.workspace_reserved(path, Some(&node.name));
+            let busy = |path: &Path| self.allocation_workspace_reserved(path, Some(&node.name));
             let shared_terminal = self.state.nodes[&node.name]
                 .shared_workspace
                 .then(|| self.terminal_workspace_for(&node.name))
-                .flatten();
+                .flatten()
+                .filter(|execution| !Self::same_workspace_path(Path::new(&execution.worktree), &resolved_repository));
             let mut inherit_workspace = false;
             let mut workspace_lineage = BTreeSet::new();
-            let worktree = if let Some(input) = &self.state.nodes[&node.name].feedback_workspace {
+            let worktree = if let Some(input) = &feedback_workspace {
                 for source in input.sources() {
                     if let Some(execution) = self
                         .state
@@ -3826,7 +3944,11 @@ impl Runtime {
             } else if let Some(previous) = resume {
                 let path = Path::new(&previous.worktree);
                 workspace_lineage.extend(previous.workspace_lineage.iter().cloned());
-                if !busy(path) {
+                if Self::same_workspace_path(path, &resolved_repository) {
+                    // Promotion forks this node's own conversation, never the
+                    // source directory or another node's session.
+                    fresh_path()
+                } else if !busy(path) {
                     if path.is_dir() {
                         inherit_workspace = self.workspace_has_head(path, &before);
                         previous.worktree.clone()
@@ -3852,6 +3974,7 @@ impl Runtime {
                 let parent_executions: Vec<_> = parent_names
                     .iter()
                     .filter_map(|parent| self.latest_node_execution(parent))
+                    .filter(|execution| !Self::same_workspace_path(Path::new(&execution.worktree), &resolved_repository))
                     .collect();
                 let inherited_parent = parent_executions.iter().find(|execution| {
                     let path = Path::new(&execution.worktree);
@@ -3940,7 +4063,7 @@ impl Runtime {
                 None
             };
             workspace_lineage.insert(node.name.clone());
-            if self.state.executions.iter().any(|execution| {
+            if !shared_source && self.state.executions.iter().any(|execution| {
                 execution.status == "running"
                     && Self::same_workspace_path(
                         Path::new(&execution.worktree),
@@ -4118,7 +4241,10 @@ impl Runtime {
                 format!("{}\n{}", node.task, state.instruction)
             };
             let attachment_instructions = if continuation || initial_recovery {
-                self.recovery_attachment_instructions(&node.name, &execution.session_id, &task)
+                let input_session = resume
+                    .map(|previous| previous.session_id.as_str())
+                    .unwrap_or(&execution.session_id);
+                self.recovery_attachment_instructions(&node.name, input_session, &task)
             } else {
                 task.clone()
             };
@@ -4175,7 +4301,12 @@ impl Runtime {
                         )
                         && Path::new(&execution.worktree).is_dir()
                 });
-            if let Some(store) = self.environments()? {
+            let node_environment = if shared_source {
+                None
+            } else {
+                self.environments()?
+            };
+            if let Some(store) = node_environment {
                 let selected = (|| -> Result<_, String> {
                     if !history_edit
                         && feedback_workspace.is_none()
@@ -4187,6 +4318,7 @@ impl Runtime {
                                     .is_ok_and(|state| !state.exists())
                                 && crate::workspace::private_git_dir(path).is_none();
                             previous.status == "failed"
+                                && !Self::same_workspace_path(path, &resolved_repository)
                                 && (!Self::same_workspace_path(
                                     path,
                                     Path::new(&execution.worktree),
@@ -4195,8 +4327,13 @@ impl Runtime {
                     {
                         return Err("Failed partial environment view is missing or cannot be reused; refusing to silently restore old input".into());
                     }
+                    let source_resume = resume.is_some_and(|previous|
+                        Self::same_workspace_path(Path::new(&previous.worktree), &resolved_repository));
                     let selected = if let Some(input) = &feedback_workspace {
                         store.load_record_metadata(&input.source_execution_id, "after")?
+                    } else if source_resume {
+                        self.state.environment_baseline.clone()
+                            .ok_or("Environment baseline is missing")?
                     } else if history_edit {
                         resume
                             .and_then(|e| e.input.clone())
@@ -4225,6 +4362,9 @@ impl Runtime {
                     } else if !parent_names.is_empty() {
                         let inputs = parent_names
                             .iter()
+                            // Shared-source parents are already in the new
+                            // source baseline; they have no private E/L record.
+                            .filter(|name| self.state.nodes[*name].head.as_ref().is_some_and(|head| !head.is_empty()))
                             .map(|name| {
                                 Ok((
                                     name.clone(),
@@ -4385,6 +4525,7 @@ impl Runtime {
             }
             jobs.push(Job {
                 execution,
+                batch_workspaces,
                 agent_kind: if self.is_serial() {
                     engine::AgentKind::Serial
                 } else {
@@ -4412,6 +4553,7 @@ impl Runtime {
                 feedback_workspace,
                 inherit_workspace,
                 preserved_workspace,
+                recovered_workspace,
                 copy_from_workspace,
                 history_edit,
                 feedback_source,
@@ -4437,7 +4579,7 @@ impl Runtime {
             // A source-direct follow-up settles the Run instead of publishing:
             // the user's directory already holds the result.
             if self.state.phase != "followup"
-                && !self.is_serial()
+                && !self.is_serial() && !batch_workspaces
                 && self
                     .state
                     .nodes
@@ -4499,12 +4641,13 @@ impl Runtime {
                 // heads are dropped from the request, so new work still
                 // publishes and an all-delivered graph settles instead of
                 // failing a redundant merge forever.
+                let heads: Vec<_> = heads.into_iter().filter(|head| !head.is_empty()).collect();
                 let heads = if self.state.published_head.is_some() {
                     Self::undelivered_heads(&self.state.published_heads, &heads)
                 } else {
                     heads
                 };
-                if self.state.published_head.is_some() && heads.is_empty() {
+                if heads.is_empty() {
                     self.emit(EventKind::Settled)?;
                 } else {
                     let repository = resolve_repository(&self.root, &config)?
@@ -4770,13 +4913,17 @@ impl Runtime {
     fn idle_workspace_path(&self) -> Option<PathBuf> {
         self.existing_workspace_paths()
             .into_iter()
-            .find(|path| !self.workspace_reserved(path, None))
+            .find(|path| !self.allocation_workspace_reserved(path, None))
     }
 
     /// Keep only live worker workspaces and the just-completed handoff workspace.
     /// Git refs and commits are durable; a physical slot is still retained
     /// while it is needed by an active writer, feedback request, or recovery.
     fn reclaim_workspace_slots(&self, completed: &Execution) -> Result<(), String> {
+        // Batch delivery/retry still owns completed and failed partial slots.
+        if self.batch_workspaces() {
+            return Ok(());
+        }
         // Fixed native layouts and failed partial views are result dependencies,
         // not expendable allocator caches. Do not reclaim them opportunistically.
         if self
@@ -4905,7 +5052,12 @@ impl Runtime {
         match result {
             Ok((head, output)) => {
                 let mut composite = None;
-                if let Some(store) = self.environments()? {
+                let node_environment = if self.shared_source_workspace() {
+                    None
+                } else {
+                    self.environments()?
+                };
+                if let Some(store) = node_environment {
                     let evidence = (|| {
                         let input = store.load_record_metadata(&execution.id, "before")?;
                         let result = store.load_record_metadata(&execution.id, "after")?;
@@ -5397,7 +5549,7 @@ impl Runtime {
                 instruction: instructions.join("\n\n"),
                 human: false,
                 images: None,
-                workspace: Some(FeedbackWorkspace {
+                workspace: (!self.batch_workspaces()).then_some(FeedbackWorkspace {
                     source_execution_id: source.source_execution_id,
                     target_execution_id: target.id.clone(),
                     worktree: source.worktree,
@@ -5420,7 +5572,7 @@ impl Runtime {
         if self.state.config.is_none() {
             return Err("Missing config".into());
         }
-        if self.environments()?.is_none() {
+        if self.state.batch_handoff.is_some() || self.environments()?.is_none() {
             return Ok(None);
         }
         for (_, input) in self.terminal_results()? {
@@ -5437,6 +5589,11 @@ impl Runtime {
     /// outside the actor, including independent terminal result publication.
     pub(crate) fn publication_environment_input(&self) -> Result<Option<PublicationJob>, String> {
         self.require_current_file_contract()?;
+        if self.state.batch_handoff.is_some()
+            && (!self.state.pending_feedback.is_empty()
+                || self.state.nodes.values().any(|node| node.status != "completed")) {
+            return Ok(None);
+        }
         let Some(store) = self.environments()? else {
             return Ok(None);
         };
@@ -5446,6 +5603,9 @@ impl Runtime {
             .as_ref()
             .is_some_and(|policy| policy.best_effort);
         let terminals = self.terminal_results()?;
+        if terminals.is_empty() {
+            return Ok(None);
+        }
         let inputs = if independent {
             terminals
         } else {
@@ -5478,11 +5638,32 @@ impl Runtime {
             store,
             inputs,
             independent,
+            previous_code_ref: self.state.published_head.clone(),
         }))
+    }
+
+    /// A source batch has no managed result, and even a private batch may
+    /// publish only files. An older descriptor is history, not a launch target
+    /// for newer work. Use replay evidence rather than the current cwd flag or
+    /// a checkpoint's retained published_head (source work never advances it).
+    fn require_current_batch_result(&self) -> Result<(), String> {
+        if !self.batch_workspaces() {
+            return Ok(());
+        }
+        let current = self.state.events.iter().rev().find_map(|event| match &event.kind {
+            EventKind::ResultPublished { .. } => Some(true),
+            EventKind::ExecutionBatchStarted { .. } => Some(false),
+            _ => None,
+        });
+        if current == Some(false) {
+            return Err("The latest batch has no current managed result; a retained private result cannot represent source or newer batch work".into());
+        }
+        Ok(())
     }
 
     pub fn result_descriptor(&self) -> Result<crate::environment::ResultDescriptor, String> {
         self.require_current_file_contract()?;
+        self.require_current_batch_result()?;
         let descriptor = self
             .state
             .published_result
@@ -5562,6 +5743,7 @@ impl Runtime {
         if args.iter().any(|arg| arg.contains('\0')) {
             return Err("NUL in result arguments".into());
         }
+        self.require_current_batch_result()?;
         let descriptor = self
             .state
             .published_result
@@ -5665,6 +5847,9 @@ impl Runtime {
             .graph
             .nodes
             .iter()
+            // Completed shared-source terminals are already delivered and have
+            // no native environment/result descriptor to publish after promotion.
+            .filter(|node| self.state.nodes[&node.name].head.as_deref() != Some(""))
             .filter(|node| {
                 !self
                     .state
@@ -5701,6 +5886,7 @@ pub(crate) struct PublicationJob {
     repository: PathBuf,
     store: crate::environment::Environments,
     independent: bool,
+    previous_code_ref: Option<String>,
 }
 
 impl PublicationJob {
@@ -5726,13 +5912,16 @@ impl PublicationJob {
             let exclusions = self.store.exclusions(&selected.launch_ref)?;
             let present = path.is_dir();
             if present {
-                // The descriptor materializes the publication head into the
-                // entry workspace. On a re-publish the workspace already holds
-                // that head, so verify against it instead of the entry's
-                // original node code.
+                // Other entries still hold the previous publication after one
+                // business entry advances code. Validate that recorded view, not
+                // its historical node input or the not-yet-installed new result.
+                // A retried descriptor may already hold `head`. No other live
+                // head or unrecorded project mutation is accepted.
                 let current = workspace::git(path, &["rev-parse", "HEAD"])?;
-                let expected = if current == selected.code_ref {
-                    selected.code_ref.as_str()
+                let expected = if current == selected.code_ref
+                    || self.previous_code_ref.as_deref() == Some(current.as_str())
+                {
+                    current.as_str()
                 } else {
                     head
                 };
@@ -6076,6 +6265,9 @@ fn perform_with_merger_inner(
     // A private Graph slot that aliases the source must fail closed, not gain
     // source-direct semantics merely by resolving to the same physical path.
     let source_tree = path == repository;
+    if source_tree && !job.source_direct && job.agent_kind != engine::AgentKind::Serial {
+        return Err("Private Graph job cannot execute in the source directory".into());
+    }
     if !source_tree && crate::path_identity::same_path(path, &repository) {
         return Err(
             "Graph workspace resolves to the source directory; an isolated workspace is required"
@@ -6152,7 +6344,10 @@ fn perform_with_merger_inner(
         && crate::workspace_view::is_bound(path)
         && (pending_merge || crate::workspace_view::validate_ready(path, &repository).is_err());
     let preserve_failed_environment = job.preserve_failed_environment && !incomplete_preparation;
-    if reused
+    // Source-native jobs use live files: user/Planner/other-node edits are
+    // allowed, not a violation of a private workspace's completion seal.
+    if !source_tree
+        && reused
         && preserved_head.is_none()
         && !incomplete_preparation
         && !job.history_edit
@@ -6326,7 +6521,7 @@ fn perform_with_merger_inner(
                 adopted_feedback_head = Some(feedback_head.clone());
             }
             if let Some(target) = &job.session_fork {
-                if let Some(head) = &target.after {
+                if let Some(head) = target.after.as_ref().filter(|head| !head.is_empty()) {
                     workspace::verify_prepared_ancestor(source_path, head)?;
                 }
             }
@@ -6343,7 +6538,6 @@ fn perform_with_merger_inner(
     let materialized_base = if job.materialize_source
         && !source_tree
         && !job.source_direct
-        && !workspace::is_standard_git(&repository)
     {
         Some(collect_source_snapshot(
             &repository,
@@ -6363,7 +6557,7 @@ fn perform_with_merger_inner(
             .as_deref()
             .unwrap_or(&job.execution.before)
     };
-    let parent_refs = if job.parent_heads.is_empty() {
+    let parent_refs = if job.parent_heads.is_empty() && !job.batch_workspaces {
         parents
     } else {
         &job.parent_heads
@@ -6539,14 +6733,27 @@ fn perform_with_merger_inner(
     // Uploads for a closed node are staged outside its immutable project
     // view. Deliver accepted inputs only after validation/preparation and the
     // durable Prepared boundary, so failed/interrupted delivery is recoverable.
-    crate::attachment_inputs::deliver_prepared(
-        root,
-        &job.run_id,
-        &job.execution.node,
-        &job.attachment_instructions,
-        path,
-        job.preserved_workspace.is_some(),
-    )?;
+    if let Some(previous) = &job.recovered_workspace {
+        crate::attachment_inputs::deliver_recovered(
+            root,
+            &job.run_id,
+            &job.execution.node,
+            &job.attachment_instructions,
+            path,
+            Path::new(previous),
+        )?;
+    } else {
+        crate::attachment_inputs::deliver_prepared(
+            root,
+            &job.run_id,
+            &job.execution.node,
+            &job.attachment_instructions,
+            path,
+            // A shared batch uses live source, never a recomposed project view.
+            // Proven input deletions there remain edits even on a later retry.
+            job.preserved_workspace.is_some() || (job.batch_workspaces && source_tree),
+        )?;
+    }
     let mut execution_view = job.execution.clone();
     execution_view.input = environment_input.clone();
     let mut on_output = on_output;

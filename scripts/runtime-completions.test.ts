@@ -130,6 +130,26 @@ test("aborted requests retain their cancellation error instead of reporting a ba
   } finally { globalThis.fetch = original; }
 });
 
+test("targeted snapshot reads reject a different conversation even inside the same workspace", async () => {
+  const original = globalThis.fetch;
+  const controller = new AbortController();
+  let result: unknown = { ...emptySnapshot, runId: "requested", config: defaultConfig };
+  try {
+    globalThis.fetch = async (_url, init) => {
+      assert.equal(JSON.parse(String(init?.body)).runId, "requested");
+      assert.ok(init?.signal, "navigation cancellation is passed through");
+      return response(result);
+    };
+    assert.equal((await runtimeService.snapshotForRun("requested", controller.signal)).runId, "requested");
+    for (const runId of ["other", "", undefined]) {
+      result = { ...emptySnapshot, runId, config: defaultConfig };
+      await assert.rejects(runtimeService.snapshotForRun("requested", controller.signal));
+    }
+    result = null;
+    await assert.rejects(runtimeService.snapshotForRun("requested", controller.signal), error => error instanceof Error && !(error instanceof TypeError));
+  } finally { globalThis.fetch = original; }
+});
+
 test("legacy Plan roots normalize across snapshot and compile APIs without mutating the wire payload", async () => {
   const original = globalThis.fetch;
   const legacyPlan = Object.freeze({

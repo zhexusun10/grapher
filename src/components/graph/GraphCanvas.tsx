@@ -73,11 +73,11 @@ export const GraphCanvas = memo(function GraphCanvas({ runKey, ready, nodes, edg
   return <>
     <svg style={{ position: "absolute", width: 0, height: 0, pointerEvents: "none" }} aria-hidden="true">
       <defs>
-        <marker id="workflow-arrow-default" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto">
-          <path d="M 2 2.5 L 10 6 L 2 9.5 Z" fill={tokens.graphEdgeDefault || "#94A3B8"} />
+        <marker id="workflow-arrow-default" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto">
+          <path d="M 1.25 1.75 L 9 5 L 1.25 8.25 L 3 5 Z" fill={tokens.graphEdgeDefault || "#94A3B8"} />
         </marker>
-        <marker id="workflow-arrow-feedback" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto">
-          <path d="M 2 2.5 L 10 6 L 2 9.5 Z" fill={tokens.graphEdgeFeedback || "#8B5CF6"} />
+        <marker id="workflow-arrow-feedback" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto">
+          <path d="M 1.25 1.75 L 9 5 L 1.25 8.25 L 3 5 Z" fill={tokens.graphEdgeFeedback || "#8B5CF6"} />
         </marker>
       </defs>
     </svg>

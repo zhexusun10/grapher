@@ -49,13 +49,22 @@ fn config() -> Config {
         auto_approve: false,
         post_task_review: false,
         planner_write_tools: true,
+        isolate_parallel_nodes: true,
         role_models: Default::default(),
     }
 }
 
+// These Git/publication tests exercise the retained legacy private contract.
+// Adaptive source-sharing coverage lives in workspace_policy_tests.rs.
+fn create_private(runtime: &mut Runtime, graph: Graph, config: Config) {
+    runtime.state.run_id = uuid::Uuid::new_v4().to_string();
+    runtime.emit(EventKind::Created { graph, config, planning_id: None, planning: None }).unwrap();
+    runtime.store.select_run(Some(&runtime.state.run_id)).unwrap();
+}
+
 fn runtime(root: &Path) -> Runtime {
     let mut runtime = Runtime::open(root).unwrap();
-    runtime.create(graph(), config()).unwrap();
+    create_private(&mut runtime, graph(), config());
     runtime
 }
 
@@ -683,16 +692,16 @@ fn feedback_reexecutes_only_affected_branch_in_place() {
 }
 
 #[test]
-fn missing_feedback_budget_defaults_to_eight() {
+fn missing_feedback_budget_defaults_to_four() {
     let mut value = serde_json::to_value(config()).unwrap();
     value.as_object_mut().unwrap().remove("maxFeedback");
     let restored: Config = serde_json::from_value(value).unwrap();
-    assert_eq!(restored.max_feedback, 8);
+    assert_eq!(restored.max_feedback, 4);
 }
 
 #[test]
 fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
-    for configured_limit in [0, 1, 3, 8, 9] {
+    for configured_limit in [0, 1, 3, 8, 9, 41] {
         let temp = TempDir::new().unwrap();
         let mut runtime = Runtime::open(temp.path()).unwrap();
         let mut graph = graph();
@@ -709,7 +718,7 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
         }
         let mut config = config();
         config.max_feedback = configured_limit;
-        runtime.create(graph, config).unwrap();
+        create_private(&mut runtime, graph, config);
         runtime
             .emit(EventKind::Approved {
                 base: "base".into(),
@@ -717,7 +726,7 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
             .unwrap();
         finish_wave(&mut runtime, "<ACCEPT>");
         finish_wave(&mut runtime, "<ACCEPT>");
-        let limit = configured_limit.min(8);
+        let limit = configured_limit.min(40);
         for _ in 0..limit {
             finish_wave(&mut runtime, "Earlier rework\n<FEEDBACK>");
             finish_wave(&mut runtime, "<ACCEPT>");
@@ -1382,8 +1391,8 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
-    runtime
-        .create(
+    create_private(
+        &mut runtime,
             Graph {
                 original_goal: "Resolve a composed workspace".into(),
                 nodes: vec![Node {
@@ -1393,8 +1402,7 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
                 edges: Vec::new(),
             },
             config(),
-        )
-        .unwrap();
+        );
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     let repository = grapher::fixture::repository(&root).unwrap();

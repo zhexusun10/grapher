@@ -282,7 +282,7 @@ test("first-launch discovery cannot be overwritten by an older settings response
     await nodeModel(page).selectOption("test/new");
     await page.locator(".save-config-btn").click();
     await until(() => !!saving);
-    assert.equal(saving.config.maxFeedback, 8, "saving upgrades the legacy browser and bootstrap budget");
+    assert.equal(saving.config.maxFeedback, 3, "saving preserves the configured feedback budget");
     await discovery.fulfill({ json: { result: { ...info, path: "/discovered" } } });
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_config")).repository === "/discovered");
     await saving.route.fulfill({ json: { result: { ...fresh, config: saving.config } } });
@@ -389,6 +389,120 @@ test("conversation settings stay scoped and new conversations use defaults", { t
     assert.equal(await nodeModel(page).inputValue(), "test/plain",
       "a new conversation uses the global settings composition");
     assert.equal(await thinking().inputValue(), "off");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a closing Settings modal cannot open a late OAuth authorization page", { timeout: 30_000 }, async () => {
+  let loginRequest;
+  const cancelled = [];
+  const pending = { id: "closing-oauth", provider: "test", status: "pending", prompt: null, error: null,
+    events: [{ type: "auth_url", url: "https://example.com/authorize" }] };
+  const { context, page, errors } = await app(async (route, command, body) => {
+    if (command !== "provider_auth") return false;
+    if (body.operation === "login") { loginRequest = route; return true; }
+    if (body.operation === "cancel") cancelled.push(body.id);
+    const result = body.operation === "catalog" ? { ...catalog,
+      providers: [{ id: "test", name: "Test", configured: false, methods: [{ id: "oauth", name: "OAuth" }] }] }
+      : body.operation === "cancel" ? { ...pending, status: "cancelled" } : pending;
+    await route.fulfill({ json: { result } });
+    return true;
+  }, undefined, undefined, false, "no-preference");
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    await openSettings(page);
+    await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now()) + 1000));
+    await page.evaluate(() => { window.authOpened = []; window.open = url => { window.authOpened.push(url); return null; }; });
+    await page.locator(".providers-grid-title").click();
+    await page.clock.runFor(300);
+    await page.locator(".login-btn").click();
+    await until(() => !!loginRequest);
+    await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+    assert.equal(await page.locator(".settings-modal").count(), 1, "the modal remains mounted for its exit animation");
+    await loginRequest.fulfill({ json: { result: pending } });
+    await page.locator(".provider-oauth-btn").waitFor({ state: "attached" });
+    await page.waitForTimeout(50);
+    assert.deepEqual(await page.evaluate(() => window.authOpened), [], "closing Settings revokes automatic browser opening immediately");
+    await page.clock.runFor(300);
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    await until(() => cancelled.includes(pending.id));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a delayed Settings snapshot cannot overwrite newly saved role models", { timeout: 30_000 }, async () => {
+  let current = fast, stallReads = false;
+  const pendingReads = [], savedConfigs = [];
+  const { context, page, errors } = await app(async (route, command, body) => {
+    if (command === "history" || command === "snapshot") {
+      if (command === "snapshot" && stallReads) pendingReads.push({ route, snapshot: current });
+      else await route.fulfill({ json: { result: current } });
+      return true;
+    }
+    if (command !== "save_config") return false;
+    assert.equal(body.runId, "fast");
+    savedConfigs.push(body.config);
+    current = { ...current, modelConfig: { model: body.config.model, thinkingLevel: body.config.thinkingLevel, roleModels: body.config.roleModels } };
+    await route.fulfill({ json: { result: { ...bootstrap, snapshot: current } } });
+    return true;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-run-id="fast"]')?.classList.contains("chosen") &&
+      !document.querySelector('[data-run-id="fast"]')?.classList.contains("is-loading"));
+    stallReads = true;
+    await openSettings(page);
+    await until(() => pendingReads.length === 1);
+    await nodeModel(page).selectOption("test/new");
+    await page.locator(".role-model-group").nth(1).locator("select").first().selectOption("test/plain");
+    await page.locator(".save-config-btn").click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    assert.equal(savedConfigs[0].model, "test/new");
+    assert.equal(savedConfigs[0].roleModels.planner.model, "test/plain");
+    await pendingReads[0].route.fulfill({ json: { result: pendingReads[0].snapshot } });
+    await page.waitForTimeout(100);
+    await openSettings(page); // Its own refresh stays pending while we inspect the saved projection.
+    await until(() => pendingReads.length === 2);
+    assert.equal(await nodeModel(page).inputValue(), "test/new", "a pre-save snapshot must not roll back the accepted Node Agent selection");
+    assert.equal(await page.locator(".role-model-group").nth(1).locator("select").first().inputValue(), "test/plain");
+    await pendingReads[1].route.fulfill({ json: { result: current } });
+    await page.locator(".save-config-btn").click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    assert.equal(savedConfigs[1].model, "test/new", "saving again must not persist a rolled-back selection");
+    assert.equal(savedConfigs[1].roleModels.planner.model, "test/plain");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("only the latest Settings opening may adopt its refreshed role models", { timeout: 30_000 }, async () => {
+  let current = fast, stallReads = false;
+  const pendingReads = [];
+  const { context, page, errors } = await app(async (route, command) => {
+    if (command !== "history" && command !== "snapshot") return false;
+    if (command === "snapshot" && stallReads) pendingReads.push({ route, snapshot: current });
+    else await route.fulfill({ json: { result: current } });
+    return true;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-run-id="fast"]')?.classList.contains("chosen") &&
+      !document.querySelector('[data-run-id="fast"]')?.classList.contains("is-loading"));
+    stallReads = true;
+    await openSettings(page);
+    await until(() => pendingReads.length === 1);
+    await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    current = { ...fast, modelConfig: { model: "test/new", thinkingLevel: "high", roleModels: {
+      nodeAgent: { model: "test/new", thinkingLevel: "high" }, planner: { model: "test/plain", thinkingLevel: "off" },
+    } } };
+    await openSettings(page);
+    await until(() => pendingReads.length === 2);
+    await pendingReads[1].route.fulfill({ json: { result: pendingReads[1].snapshot } });
+    await page.waitForFunction(() => document.querySelector(".role-model-group select")?.value === "test/new");
+    await pendingReads[0].route.fulfill({ json: { result: pendingReads[0].snapshot } });
+    await page.waitForTimeout(100);
+    assert.equal(await nodeModel(page).inputValue(), "test/new", "a response for a closed Settings opening is stale");
+    assert.equal(await page.locator(".role-model-group").nth(1).locator("select").first().inputValue(), "test/plain");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -730,6 +844,7 @@ test("model-specific thinking levels update inherited roles, remain independent 
   });
   try {
     await page.locator('[data-run-id="fast"]').waitFor(); await openSettings(page);
+    await page.getByRole("checkbox", { name: "Hide Auto mode", exact: true }).uncheck();
     const cards = page.locator(".role-model-group");
     const model = i => cards.nth(i).locator("select").first();
     const thinking = i => cards.nth(i).locator("select").nth(1);

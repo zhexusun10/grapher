@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { defaultConfig, type Config } from "../src/types.ts";
+import { defaultConfig, normalizeMaxFeedback, normalizeMaxParallel, type Config } from "../src/types.ts";
 import { applyModelConfig, defaultRoleThinkingLevel, normalizeModelThinkingLevels, planningModelRoles, providerIdForModel, resolveExecutionModelAndThinking, resolveRetryModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
 import { providerAuth, hasUnsupportedCredentialCharacters, type ProviderCatalog } from "../src/services/providerAuth.ts";
@@ -94,6 +94,20 @@ test("role selectors offer only available models and their providers, without fr
   assert.ok(!markup.includes("<datalist"));
 });
 
+test("hiding Partitioner omits only its controls and preserves its saved model settings", () => {
+  const config = updateRoleModelConfig(legacy, "partitioner", { model: "example/restricted", thinkingLevel: "max" });
+  const original = JSON.stringify(config);
+  const render = (hidePartitioner: boolean) => renderToStaticMarkup(React.createElement(RoleModelSettings, {
+    config, setConfig: () => {}, catalog, busy: false, hidePartitioner,
+  }));
+  const hidden = render(true);
+  assert.ok(hidden.includes(`aria-label="${t("{0} 模型配置", "Node Agent")}"`));
+  assert.ok(hidden.includes(`aria-label="${t("{0} 模型配置", "Planner")}"`));
+  assert.ok(!hidden.includes(`aria-label="${t("{0} 模型配置", "Partitioner")}"`));
+  assert.ok(render(false).includes(`aria-label="${t("{0} 模型配置", "Partitioner")}"`));
+  assert.equal(JSON.stringify(config), original);
+});
+
 test("role sections do not repeat agent names in field labels", () => {
   const markup = renderToStaticMarkup(React.createElement(RoleModelSettings, { config: legacy, setConfig: () => {}, catalog, busy: false }));
   assert.ok(markup.includes(`<span>${t("模型")}</span>`));
@@ -104,6 +118,18 @@ test("role sections do not repeat agent names in field labels", () => {
   assert.ok(!markup.includes("<span>Planner 思维等级</span>"));
   assert.ok(!markup.includes("<span>Partitioner 模型</span>"));
   assert.ok(!markup.includes("<span>Partitioner 思维等级</span>"));
+});
+
+test("role settings omit the after-saving summary but retain missing-model and override warnings", () => {
+  const render = (config: Config, envOverrides = {}) => renderToStaticMarkup(React.createElement(RoleModelSettings, {
+    config, setConfig: () => {}, catalog, envOverrides, busy: false,
+  }));
+  const markup = render(legacy);
+  assert.ok(!markup.includes("role-model-effective"));
+  assert.ok(!markup.includes("example/default ·"));
+  assert.ok(render({ ...legacy, model: "" }).includes(t("未设置模型")));
+  assert.ok(render(legacy, { planner: "example/plain", plannerThinking: "off" })
+    .includes(`${t("环境变量覆盖：")}example/plain · off`));
 });
 
 test("an unavailable saved model is preserved as a disabled option with a warning", () => {
@@ -293,12 +319,12 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
     const required = render(true);
     assert.ok(!required.includes('<button'));
     assert.match(required, /role="img"/);
-    assert.ok(required.includes(t('始终启用，不可删除')));
-    assert.ok(render(false).includes(t('{0}扩展 {1}', t('删除'), 'probe')));
+    assert.ok(required.includes(t('始终启用，不可移除')));
+    assert.ok(render(false).includes(t('{0}扩展 {1}', t('移除'), 'probe')));
     assert.ok(render(false, false).includes(t('{0}扩展 {1}', t('添加'), 'probe')));
-    assert.ok(render(true, true, false).includes(t('{0}扩展 {1}', t('删除'), 'pi-continuity')));
+    assert.ok(render(true, true, false).includes(t('{0}扩展 {1}', t('移除'), 'pi-continuity')));
     assert.ok(render(true, false, false).includes(t('{0}扩展 {1}', t('添加'), 'pi-continuity')));
-    assert.ok(!render(true, true, false).includes(t('始终启用，不可删除')));
+    assert.ok(!render(true, true, false).includes(t('始终启用，不可移除')));
     assert.ok(render(true, true, false).includes(t('更稳健的循环工程：自动恢复意外的流式中断、消息截断、网络断连，以及 API 5 小时/每周额度限制。')),
       'continuity describes its recovery guarantees');
     for (const enabled of [true, false]) {
@@ -309,7 +335,7 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
         disabled: false, onToggle() {},
       }));
       assert.ok(!markup.includes(path), 'bundled continuity describes its purpose instead of exposing a local path');
-      assert.ok(markup.includes(t('{0}扩展 {1}', enabled ? t('删除') : t('添加'), 'pi-continuity')));
+      assert.ok(markup.includes(t('{0}扩展 {1}', enabled ? t('移除') : t('添加'), 'pi-continuity')));
     }
     const webSearch = renderToStaticMarkup(React.createElement(ExtensionItem, {
       extension: { id: 'npm:pi-better-web-search', name: 'pi-better-web-search', source: 'npm:pi-better-web-search',
@@ -323,10 +349,29 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
   } finally { await vite.close(); }
 });
 
-test('approval, review and Planner file-tool defaults survive legacy configs', async () => {
-  assert.equal(defaultConfig.autoApprove, false);
+test('all Harness settings default on and preserve explicit opt-outs', async () => {
+  assert.equal(defaultConfig.autoApprove, true);
   assert.equal(defaultConfig.postTaskReview, true);
-  assert.equal(defaultConfig.plannerWriteTools, false);
+  assert.equal(defaultConfig.plannerWriteTools, true);
+  assert.equal(defaultConfig.isolateParallelNodes, true);
+  assert.equal(defaultConfig.maxParallel, 8);
+  assert.equal(defaultConfig.maxFeedback, 4);
+  assert.equal(normalizeMaxParallel(0), 8);
+  assert.equal(normalizeMaxParallel(1), 2);
+  assert.equal(normalizeMaxParallel(2), 2);
+  assert.equal(normalizeMaxParallel(24), 24);
+  assert.equal(normalizeMaxParallel(40), 40);
+  assert.equal(normalizeMaxParallel(99), 40);
+  assert.equal(normalizeMaxParallel(""), 8);
+  assert.equal(normalizeMaxFeedback(0), 4);
+  assert.equal(normalizeMaxFeedback(1), 2);
+  assert.equal(normalizeMaxFeedback(2), 2);
+  assert.equal(normalizeMaxFeedback(24), 24);
+  assert.equal(normalizeMaxFeedback(40), 40);
+  assert.equal(normalizeMaxFeedback(99), 40);
+  assert.equal(normalizeMaxFeedback(""), 4);
+  assert.equal(normalizeMaxFeedback(undefined), 4);
+  assert.equal(normalizeMaxFeedback(null), 4);
   const { createServer } = await import('vite');
   const vite = await createServer({
     configFile: false, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] },
@@ -342,24 +387,20 @@ test('approval, review and Planner file-tool defaults survive legacy configs', a
       assert.ok(input, `${label} checkbox is present`);
       return input;
     };
-    // Auto Approve stays off by default, including legacy configs.
-    assert.doesNotMatch(checkbox(defaultConfig, 'Auto Approve Planner 图纸'), /checked=""/);
-    const legacyApproval: Partial<Config> = { ...defaultConfig }; delete legacyApproval.autoApprove;
-    assert.doesNotMatch(checkbox(legacyApproval as Config, 'Auto Approve Planner 图纸'), /checked=""/);
-    assert.match(checkbox({ ...defaultConfig, autoApprove: true }, 'Auto Approve Planner 图纸'), /checked=""/);
-    // Post-task review turns on by default, including legacy configs.
-    assert.match(checkbox(defaultConfig, '任务后 Planner 复盘'), /checked=""/);
-    const legacyReview: Partial<Config> = { ...defaultConfig }; delete legacyReview.postTaskReview;
-    assert.match(checkbox(legacyReview as Config, '任务后 Planner 复盘'), /checked=""/);
-    assert.doesNotMatch(checkbox({ ...defaultConfig, postTaskReview: false }, '任务后 Planner 复盘'), /checked=""/);
-    // The two toggles remain independent.
+    for (const [key, label] of [
+      ['autoApprove', 'Auto Approve Planner 图纸'],
+      ['postTaskReview', '任务后 Planner 复盘'],
+      ['plannerWriteTools', '挂载 Planner write 和 edit 工具'],
+      ['isolateParallelNodes', '并行节点独立工作区'],
+    ] as const) {
+      assert.match(checkbox(defaultConfig, label), /checked=""/, `${label} defaults on`);
+      const legacy: Partial<Config> = { ...defaultConfig }; delete legacy[key];
+      assert.match(checkbox(legacy as Config, label), /checked=""/, `${label} defaults on when absent`);
+      assert.doesNotMatch(checkbox({ ...defaultConfig, [key]: false }, label), /checked=""/, `${label} preserves opt-outs`);
+    }
+    // Approval and review remain independent.
     assert.doesNotMatch(checkbox({ ...defaultConfig, autoApprove: true, postTaskReview: false }, '任务后 Planner 复盘'), /checked=""/);
     assert.match(checkbox({ ...defaultConfig, autoApprove: false, postTaskReview: true }, '任务后 Planner 复盘'), /checked=""/);
-    // Planner file tools default off, including legacy configs that predate the toggle.
-    assert.doesNotMatch(checkbox(defaultConfig, '挂载 Planner write 和 edit 工具'), /checked=""/);
-    const legacyPlannerTools: Partial<Config> = { ...defaultConfig }; delete legacyPlannerTools.plannerWriteTools;
-    assert.doesNotMatch(checkbox(legacyPlannerTools as Config, '挂载 Planner write 和 edit 工具'), /checked=""/);
-    assert.match(checkbox({ ...defaultConfig, plannerWriteTools: true }, '挂载 Planner write 和 edit 工具'), /checked=""/);
 
     // Reasoning cards:
     // - auto-expansion is a display-only, default-on option rendered below plan
@@ -370,11 +411,57 @@ test('approval, review and Planner file-tool defaults survive legacy configs', a
     const markup = renderToStaticMarkup(React.createElement(SettingsModal, {
       isOpen: true, onClose() {}, config: defaultConfig, dataPath: '', onSaveConfig() {},
     }));
-    const headings = [t('图纸审批'), t('Planner 文件工具'), t('思维链展示'), t('界面语言')]
+    const headings = [t('Harness设置'), t('UI设置'), t('界面语言')]
       .map(label => markup.indexOf(`>${label}<`));
     assert.ok(headings.every(index => index >= 0), 'all requested setting sections are present');
     assert.deepEqual([...headings].sort((a, b) => a - b), headings,
-      'Planner file tools sit between plan approval and reasoning display, above the language selector');
+      'the Harness settings card sits above UI settings and the language selector');
+    const planningCard = markup.match(/<section\b[^>]*aria-labelledby="execution-planning-settings-title"[^>]*>([\s\S]*?)<\/section>/)?.[1];
+    assert.ok(planningCard, 'the combined execution planning card is present');
+    assert.equal(planningCard.match(/type="checkbox"/g)?.length, 5);
+    for (const label of ['隐藏 Auto 模式', 'Auto Approve Planner 图纸', '任务后 Planner 复盘', '并行节点独立工作区', '挂载 Planner write 和 edit 工具']) {
+      assert.ok(planningCard.includes(`aria-label="${t(label)}"`), `${label} is inside the combined card`);
+      assert.match(checkbox(defaultConfig, label), /checked=""/, `${label} is checked by default`);
+    }
+    try {
+      prefs.setHideAutoMode(false);
+      assert.doesNotMatch(checkbox(defaultConfig, '隐藏 Auto 模式'), /checked=""/, 'the stored Auto visibility opt-out is preserved');
+    } finally {
+      prefs.setHideAutoMode(true);
+    }
+    assert.ok(planningCard.includes(t('不超过 2 个节点共用源目录，超过 2 个启用独立工作区。关闭后所有批次共用源目录，并发修改可能互相覆盖。')));
+    const maxParallelMarkup = (config: Config) => {
+      const rendered = renderToStaticMarkup(React.createElement(SettingsModal, {
+        isOpen: true, onClose() {}, config, dataPath: '', onSaveConfig() {},
+      }));
+      return rendered.match(/<input\b[^>]*>/g)?.find(input => input.includes(`aria-label="${t('可并行 Agent 数量')}"`));
+    };
+    const defaultParallelInput = maxParallelMarkup(defaultConfig);
+    assert.ok(defaultParallelInput && planningCard.includes(`aria-label="${t('可并行 Agent 数量')}"`), 'parallel agents input is inside the Harness card');
+    assert.match(defaultParallelInput, /type="number"/);
+    assert.match(defaultParallelInput, /min="2"/);
+    assert.match(defaultParallelInput, /max="40"/);
+    assert.match(defaultParallelInput, /value="8"/);
+    assert.match(maxParallelMarkup({ ...defaultConfig, maxParallel: 0 }) ?? '', /value="8"/);
+    assert.match(maxParallelMarkup({ ...defaultConfig, maxParallel: 24 }) ?? '', /value="24"/);
+    assert.match(maxParallelMarkup({ ...defaultConfig, maxParallel: 99 }) ?? '', /value="40"/);
+    assert.match(maxParallelMarkup({ ...defaultConfig, maxParallel: 1 }) ?? '', /value="2"/);
+    const maxFeedbackMarkup = (config: Config) => {
+      const rendered = renderToStaticMarkup(React.createElement(SettingsModal, {
+        isOpen: true, onClose() {}, config, dataPath: '', onSaveConfig() {},
+      }));
+      return rendered.match(/<input\b[^>]*>/g)?.find(input => input.includes(`aria-label="${t('反馈预算')}"`));
+    };
+    const defaultFeedbackInput = maxFeedbackMarkup(defaultConfig);
+    assert.ok(defaultFeedbackInput && planningCard.includes(`aria-label="${t('反馈预算')}"`), 'feedback budget input is inside the Harness card');
+    assert.match(defaultFeedbackInput, /type="number"/);
+    assert.match(defaultFeedbackInput, /min="2"/);
+    assert.match(defaultFeedbackInput, /max="40"/);
+    assert.match(defaultFeedbackInput, /value="4"/);
+    assert.match(maxFeedbackMarkup({ ...defaultConfig, maxFeedback: 0 }) ?? '', /value="4"/);
+    assert.match(maxFeedbackMarkup({ ...defaultConfig, maxFeedback: 24 }) ?? '', /value="24"/);
+    assert.match(maxFeedbackMarkup({ ...defaultConfig, maxFeedback: 99 }) ?? '', /value="40"/);
+    assert.match(maxFeedbackMarkup({ ...defaultConfig, maxFeedback: 1 }) ?? '', /value="2"/);
     const cotToggle = markup.match(/<input\b[^>]*>/g)?.find(input => input.includes(`aria-label="${t('执行时自动展开思维链')}"`));
     assert.ok(cotToggle, 'reasoning auto-expand checkbox is present');
     assert.match(cotToggle ?? '', /checked=""/, 'reasoning auto-expansion is on by default');
@@ -668,6 +755,8 @@ test("ProviderSettings does not include 'configured API key' cards under bound c
       assert.ok(markup.includes(`${t("已绑定的 Provider 凭据 (")}1)`));
       assert.ok(!markup.includes(`${t("已绑定的 Provider 凭据 (")}2)`));
       assert.ok(!markup.includes("configured API key"));
+      assert.ok(markup.includes(t("点击任意 Provider 登陆/配置API 或管理凭据")));
+      assert.ok(!markup.includes("/login"));
     } finally {
       ssrAuth.setCachedCatalog(null);
     }

@@ -70,6 +70,64 @@ test('Provider/Auth private readiness loads code only and preserves authenticati
   }
 });
 
+test('Provider/Auth Codex browser login exposes method and callback prompts and can restart after cancellation', { timeout: 30000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-codex-login-'));
+  const auth = join(directory, 'auth.json');
+  const original = '{}\n';
+  writeFileSync(auth, original);
+  const child = spawn(process.execPath, ['--import', resolverUrl, join(root, 'engine/provider-host.ts')], {
+    cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: directory, GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const exit = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+  const lines = createInterface({ input: child.stdout });
+  const replies = lines[Symbol.asyncIterator]();
+  let diagnostics = '';
+  child.stderr.on('data', bytes => { diagnostics += bytes; });
+  async function call(fields) {
+    child.stdin.write(`${JSON.stringify({ version: 1, ...fields })}\n`);
+    const next = await replies.next();
+    assert.equal(next.done, false, diagnostics);
+    const reply = JSON.parse(next.value);
+    assert.ok(reply.result, 'Provider/Auth must not return a transport error');
+    return reply.result;
+  }
+  async function pollUntil(id, ready) {
+    for (let attempt = 0; attempt < 150; attempt++) {
+      const state = await call({ operation: 'poll', id });
+      if (ready(state)) return state;
+      assert.equal(state.status, 'pending', 'login must stay interactive until cancellation');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.fail('Expected Codex authentication prompt did not arrive');
+  }
+  try {
+    const started = await call({ operation: 'login', provider: 'openai-codex', method: 'oauth' });
+    const selection = await pollUntil(started.id, state => state.prompt?.type === 'select');
+    assert.ok(selection.prompt.options.some(option => option.id === 'browser'));
+    assert.ok(selection.prompt.options.some(option => option.id === 'device_code'));
+    await call({ operation: 'respond', id: started.id, promptId: selection.prompt.id, value: 'browser' });
+    const browser = await pollUntil(started.id, state => state.prompt?.type === 'manual_code' && state.events.some(event => event.type === 'auth_url'));
+    const authorization = browser.events.find(event => event.type === 'auth_url');
+    assert.equal(new URL(authorization.url).origin, 'https://auth.openai.com');
+    await call({ operation: 'cancel', id: started.id });
+    await pollUntil(started.id, state => state.status === 'cancelled');
+    const restarted = await call({ operation: 'login', provider: 'openai-codex', method: 'oauth' });
+    assert.notEqual(restarted.id, started.id);
+    await pollUntil(restarted.id, state => state.prompt?.type === 'select');
+    await call({ operation: 'cancel', id: restarted.id });
+    await pollUntil(restarted.id, state => state.status === 'cancelled');
+    assert.equal(readFileSync(auth, 'utf8'), original, 'starting and cancelling login never stores credentials');
+    child.stdin.end();
+    assert.equal(await exit, 0, diagnostics);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await exit;
+    lines.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('Settings IPC discovers extensions and persists removal/restoration without executing user code', () => {
   const dir = mkdtempSync(join(tmpdir(), 'grapher-pi-extensions-ipc-'));
   try {

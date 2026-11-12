@@ -159,6 +159,33 @@ pub(crate) fn deliver_prepared(
     workspace: &Path,
     preserve_partial_work: bool,
 ) -> Result<(), String> {
+    deliver_prepared_from(root, run, node, task, workspace, preserve_partial_work, None)
+}
+
+/// The scheduler proved that this node's failed private work was captured and
+/// delivered. Carry only that exact directory's complete-input receipts across
+/// the handoff, so recovery preserves agent edits/deletions instead of treating
+/// them as a truncated new upload. Unreceipted inputs still fail closed.
+pub(crate) fn deliver_recovered(
+    root: &Path,
+    run: &str,
+    node: &str,
+    task: &str,
+    workspace: &Path,
+    previous: &Path,
+) -> Result<(), String> {
+    deliver_prepared_from(root, run, node, task, workspace, true, Some(previous))
+}
+
+fn deliver_prepared_from(
+    root: &Path,
+    run: &str,
+    node: &str,
+    task: &str,
+    workspace: &Path,
+    preserve_partial_work: bool,
+    previous: Option<&Path>,
+) -> Result<(), String> {
     let prefix = format!("{PROJECT_DIRECTORY}/");
     let mut ids = BTreeSet::new();
     for (offset, _) in task.match_indices(prefix.as_str()) {
@@ -199,6 +226,22 @@ pub(crate) fn deliver_prepared(
                 .as_bytes(),
         )?;
         let receipt = directory.join("delivered").join(workspace_key);
+        if let Some(previous) = previous {
+            let key = hash(
+                previous.canonicalize().map_err(|error| error.to_string())?
+                    .to_string_lossy().as_bytes(),
+            )?;
+            if let Some(proof) = real_child_path(root, &directory.join("delivered").join(key), true)? {
+                if fs::read(proof).map_err(|error| error.to_string())? != input.hash.as_bytes() {
+                    return Err("Attachment delivery receipt is damaged".into());
+                }
+                ensure_directory(
+                    root,
+                    receipt.parent().ok_or("Missing attachment receipt directory")?,
+                )?;
+                immutable_file(root, &receipt, input.hash.as_bytes())?;
+            }
+        }
         let completed = real_child_path(root, &receipt, true)?;
         if let Some(completed) = &completed {
             if fs::read(completed).map_err(|error| error.to_string())? != input.hash.as_bytes() {

@@ -179,6 +179,13 @@ export function useGraphElements(
   );
   const publicationTargets = useMemo(() => {
     const names = new Set(state.graph.nodes.map((node) => node.name));
+    if (state.batchHandoff) {
+      const heads = new Set(state.publication?.heads ?? []);
+      return new Set(Array.from(names).filter(name => {
+        const head = state.nodes[name]?.head;
+        return !!head && heads.has(head);
+      }));
+    }
     const planned = (state.plan?.terminals ?? []).filter((name) => names.has(name));
     if (planned.length) return new Set(planned);
     const hasDependencyChild = new Set(
@@ -187,7 +194,7 @@ export function useGraphElements(
         .map((edge) => edge.from),
     );
     return new Set(Array.from(names).filter((name) => !hasDependencyChild.has(name)));
-  }, [state.graph, state.plan]);
+  }, [state.graph, state.plan, state.batchHandoff, state.publication, state.nodes]);
   const publicationPosition = useMemo(() => {
     let lastLayer = 0;
     for (const position of graphLayout.positions.values()) lastLayer = Math.max(lastLayer, position.layer);
@@ -393,7 +400,7 @@ export function useGraphElements(
         targetHandle: routing?.targetHandle ?? "top",
         className: isNew ? "edge-entering" : undefined,
         animated,
-        markerEnd: isFeedback ? "url(#workflow-arrow-feedback)" : "url(#workflow-arrow-default)",
+        markerEnd: isFeedback ? "workflow-arrow-feedback" : "workflow-arrow-default",
         data: { isNew, routeX: routing?.routeX, routeSide: routing?.routeSide },
         style: {
           stroke: isFeedback ? tokens.graphEdgeFeedback : tokens.graphEdgeDefault,
@@ -410,7 +417,7 @@ export function useGraphElements(
           return {
             id: `publication:${name}->merger`, source: name, target: publicationMergerCardId,
             sourceHandle: routing?.sourceHandle ?? "bottom", targetHandle: "top", type: "workflow",
-            markerEnd: "url(#workflow-arrow-default)",
+            markerEnd: "workflow-arrow-default",
             animated: isTerminalCompleted && isMergerRunning,
             data: { routeX: routing?.routeX, routeSide: routing?.routeSide },
             style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
@@ -442,7 +449,7 @@ export function useGraphElements(
         sourceHandle: placeLeft ? "merger-right-source" : "merger-left-source",
         targetHandle: placeLeft ? "merger-left-target" : "merger-right-target",
         type: "workflow",
-        markerEnd: "url(#workflow-arrow-default)",
+        markerEnd: "workflow-arrow-default",
         animated,
         style: { stroke: tokens.graphEdgeDefault, strokeWidth: 1.5 },
       };

@@ -138,14 +138,87 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     assert.equal(await switcher.isVisible(), false, "wide workspaces keep the split view");
     assert.ok((await page.locator(".conversation-pane").boundingBox()).width >= 279, "a stored small split does not crush the conversation");
     assert.ok((await page.locator(".graph-pane").boundingBox()).width >= 319, "the graph retains its minimum width");
-    await page.locator(".plan-stats-row").waitFor();
-    const stats = await page.locator(".plan-stats-row").evaluate(row => {
+    await page.locator(".plan-summary-stats").waitFor();
+    const stats = await page.locator(".plan-summary-stats").evaluate(row => {
       const bounds = row.getBoundingClientRect();
       const cells = [...row.children].map(child => child.getBoundingClientRect());
       return { withinRow: cells.every(cell => cell.left >= bounds.left && cell.right <= bounds.right + 1),
         wraps: cells.at(-1).top > cells[0].top };
     });
     assert.equal(stats.withinRow && stats.wraps, true, "overview statistics wrap rather than overflow a narrow split");
+    const dividers = await page.locator(".plan-batches-list").evaluate(list => {
+      const bounds = list.getBoundingClientRect();
+      const rule = getComputedStyle(list, "::before");
+      const rows = [...list.children];
+      const nodeList = list.closest(".plan-nodes-list");
+      const publication = nodeList.nextElementSibling;
+      return {
+        continuous: rule.position === "absolute" && rule.top === "0px" && rule.bottom === "0px"
+          && rule.width === "1px" && Math.abs(parseFloat(rule.height) - bounds.height) < 1,
+        aligned: rule.gridColumnStart === "2" && rule.left === "0px" && rows.every(row => {
+          const label = row.querySelector(".plan-batch-label").getBoundingClientRect();
+          const chips = row.querySelector(".nodes-chips").getBoundingClientRect();
+          return Math.abs(label.right - chips.left) < 1
+            && Math.abs(chips.left - rows[0].querySelector(".nodes-chips").getBoundingClientRect().left) < 1;
+        }),
+        joinedRows: rows.slice(1).every((row, index) => {
+          const rect = row.getBoundingClientRect();
+          return Math.abs(rect.top - rows[index].getBoundingClientRect().bottom) < 1
+            && rect.left === bounds.left && rect.right === bounds.right
+            && getComputedStyle(row).borderTopWidth === "1px";
+        }),
+        joinsHeader: Math.abs(bounds.top - nodeList.getBoundingClientRect().top
+          - parseFloat(getComputedStyle(nodeList).borderTopWidth)) < 1,
+        joinsPublication: Math.abs(publication.getBoundingClientRect().top - bounds.bottom) < 1,
+        nonInteractive: rule.pointerEvents === "none",
+        uniformStroke: rule.borderLeftWidth === "1px" && rule.borderLeftStyle === "solid"
+          && [nodeList, ...rows.slice(1), publication].every(element => {
+            const horizontal = getComputedStyle(element);
+            return horizontal.borderTopWidth === rule.borderLeftWidth
+              && horizontal.borderTopColor === rule.borderLeftColor;
+          }),
+      };
+    });
+    assert.deepEqual(dividers, { continuous: true, aligned: true, joinedRows: true,
+      joinsHeader: true, joinsPublication: true, nonInteractive: true, uniformStroke: true },
+    "overview dividers span the batch area and meet adjacent rules without gaps");
+    // Exercise label widths without changing the mocked run or its graph layout.
+    const labelLayouts = await page.locator(".plan-batches-list").evaluate(list => {
+      const rows = [...list.children];
+      const labels = rows.map(row => row.querySelector(".plan-batch-label"));
+      const original = labels.map(label => label.textContent);
+      try {
+        return [["批次 1", "批次 2"], ["批次 9", "批次 10"],
+          ["Batch 9", "Batch 10"], ["Batch 99", "Batch 100"]].map(texts => {
+          labels.forEach((label, index) => { label.textContent = texts[index]; });
+          const bounds = list.getBoundingClientRect();
+          const cells = rows.map((row, index) => {
+            const range = document.createRange();
+            range.selectNodeContents(labels[index]);
+            const chips = row.querySelector(".nodes-chips").getBoundingClientRect();
+            return { left: chips.left, gap: chips.left - range.getBoundingClientRect().right,
+              fits: [...row.querySelectorAll(".node-chip")].every(chip => chip.getBoundingClientRect().right <= bounds.right + 1) };
+          });
+          const vertical = getComputedStyle(list, "::before");
+          const horizontal = getComputedStyle(rows[1]);
+          return { texts, width: cells[0].left - bounds.left,
+            separated: cells.every(cell => cell.gap >= 11.5),
+            aligned: cells.every(cell => Math.abs(cell.left - cells[0].left) < 1),
+            fits: cells.every(cell => cell.fits),
+            uniformStroke: vertical.borderLeftWidth === "1px" && vertical.borderLeftStyle === "solid"
+              && vertical.borderLeftWidth === horizontal.borderTopWidth
+              && vertical.borderLeftColor === horizontal.borderTopColor };
+        });
+      } finally {
+        labels.forEach((label, index) => { label.textContent = original[index]; });
+      }
+    });
+    for (const layout of labelLayouts) {
+      assert.ok(layout.separated && layout.aligned && layout.fits && layout.uniformStroke,
+        `batch labels retain padding beside a continuous, uniformly thin divider: ${JSON.stringify(layout)}`);
+    }
+    assert.ok(labelLayouts[1].width > labelLayouts[0].width && labelLayouts[3].width > labelLayouts[2].width,
+      "the shared label column grows with two- and three-digit batch numbers");
     const storedRatio = await page.evaluate(() => localStorage.getItem("grapher_workbench_split_ratio"));
 
     // The graph canvas has its own sizing container. Both the workbench and

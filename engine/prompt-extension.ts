@@ -89,7 +89,8 @@ export default function (pi: ExtensionAPI) {
   const view = (value: any): any => activePaths ? activePaths.view(value) : value;
   // Private mapped roles receive path guidance directly; Planner need not repeat it in handoffs.
   const pathGuideline = 'Use project-root-relative paths in Bash commands and project files.';
-  const graphNode = process.env.GRAPHER_MODE === 'node' && graph;
+  const graphNode = process.env.GRAPHER_MODE === 'node' &&
+    (graph || process.env.GRAPHER_AGENT_KIND === 'node');
   if (graphNode) {
     // Pi owns the default rules and unconditionally adds its final path rule.
     // Replace only that top-level rule in request projections, including

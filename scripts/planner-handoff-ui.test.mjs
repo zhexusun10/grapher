@@ -122,6 +122,114 @@ async function openFollowUp({ repository, firstRead = "ready" }) {
   return { page, errors, close, transcriptReads: () => newPlanReads, isClosed: () => closed };
 }
 
+/** A settled Planner with a short tail, while only graph workers keep updating. */
+async function openPagedPlanner({ graphRunning = true, stalled = false } = {}) {
+  const config = { repository: "/mock/planner-fill", model: "test/model", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: true };
+  const planning = { planningId: "fill-plan", status: "success", createdAt: 1, runId: "fill-run", repository: config.repository, roles: { planner: {} } };
+  const snapshot = { runId: "fill-run", config, planType: "graph", phase: graphRunning ? "running" : "completed",
+    approved: true, paused: false, base: "", feedbackCounts: {}, planningId: planning.planningId, planning,
+    graph: { originalGoal: "Planner fill regression", nodes: [{ name: "worker", task: "Task" }], edges: [] },
+    nodes: { worker: { status: graphRunning ? "running" : "completed", revision: 1, instruction: "", error: null } },
+    plan: { executionBatches: [["worker"]], roots: ["worker"], terminals: ["worker"], warnings: [] },
+    executions: [{ id: "worker-execution", node: "worker", status: graphRunning ? "running" : "completed", revision: 1,
+      attempt: 1, startedAt: 1, output: "", outputBytes: 0 }],
+    events: [{ type: "created", sequence: 1, planning_id: planning.planningId, planning, timestamp: 1 }] };
+  const prefix = Array.from({ length: 65 }, (_, i) => assistant(`OLDER_PLANNER_ROW_${i}`)).join("");
+  const bytes = Buffer.from(prefix + assistant("PLANNER_FILL_TAIL")), split = Buffer.byteLength(prefix);
+  let releaseOlder, polls = 0, reads = 0;
+  const { context, page, errors } = await newPage(async route => {
+    const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+    let result;
+    switch (command) {
+      case "bootstrap": result = { config, snapshot: { ...snapshot, runId: "", graph: { originalGoal: "", nodes: [], edges: [] },
+        nodes: {}, executions: [], events: [], phase: "draft", planning: null, planningId: undefined }, runs: [snapshot.runId],
+        repositoryInfo: { path: config.repository, name: "Planner fill", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "snapshot": case "history": result = snapshot; break;
+      case "snapshot_if_changed": {
+        polls++;
+        result = { version: String(polls), snapshot: { ...snapshot,
+          executions: snapshot.executions.map(execution => ({ ...execution, outputBytes: polls })),
+          events: [...snapshot.events, { type: "execution_progress", node: "worker", sequence: polls + 1, timestamp: polls + 1 }] } };
+        break;
+      }
+      case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
+      case "list_plannings": result = []; break;
+      case "list_files": result = { files: [] }; break;
+      case "list_skills": result = { skills: [] }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "get_planning_output": {
+        reads++;
+        if (body.before !== undefined) {
+          if (stalled) await new Promise(resolve => { releaseOlder = resolve; });
+          else await new Promise(resolve => setTimeout(resolve, 120));
+        }
+        const start = body.before !== undefined ? 0 : body.tail ? split : body.offset ?? 0;
+        const end = body.before ?? bytes.length;
+        result = { planningId: body.planningId, role: "planner", content: bytes.subarray(start, end).toString(),
+          startOffset: start, nextOffset: end, totalBytes: bytes.length, complete: end === bytes.length, running: false }; break;
+      }
+      default: result = {};
+    }
+    try { await route.fulfill({ json: { result } }); } catch { /* a closed view cancels its reads */ }
+  });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto(origin, { waitUntil: "domcontentloaded" });
+  await page.evaluate(() => {
+    window.plannerFillFrames = [];
+    window.samplePlannerFill = true;
+    const sample = () => {
+      const scroll = document.querySelector(".initial-query-scroll");
+      const row = [...(scroll?.querySelectorAll("[data-transcript-id]") ?? [])].find(el => el.textContent.includes("PLANNER_FILL_TAIL"));
+      if (scroll && row) window.plannerFillFrames.push({ opacity: Number(getComputedStyle(scroll).opacity),
+        top: row.getBoundingClientRect().top, filled: scroll.scrollHeight > 2000 });
+      if (window.samplePlannerFill) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+  await page.locator('[data-run-id="fill-run"]').click();
+  return { context, page, errors, release: () => releaseOlder?.(), polls: () => polls, reads: () => reads };
+}
+
+for (const graphRunning of [true, false]) {
+  test(`settled Planner fills before fading while graph is ${graphRunning ? "running" : "completed"}`, { timeout: 30_000 }, async () => {
+    const { context, page, errors, polls, reads } = await openPagedPlanner({ graphRunning });
+    try {
+      await page.waitForFunction(() => document.querySelector(".initial-query-scroll")?.style.opacity === "1" &&
+        getComputedStyle(document.querySelector(".initial-query-scroll")).opacity === "1");
+      await page.waitForTimeout(350);
+      const frames = await page.evaluate(() => { window.samplePlannerFill = false; return window.plannerFillFrames; });
+      const fading = frames.filter(frame => frame.opacity > 0.01 && frame.opacity < 0.99);
+      assert.ok(fading.length >= 3, "sample the reveal itself");
+      assert.ok(fading.every(frame => frame.filled), `history must fill before painting: ${JSON.stringify(fading)}`);
+      const tops = fading.map(frame => frame.top);
+      assert.ok(Math.max(...tops) - Math.min(...tops) <= 1.5, "the tail must not move mid-fade");
+      assert.equal(await page.locator(".workbench.planning-active").count(), 0, "graph activity does not revive Planner");
+      await page.evaluate(() => { window.savedPlannerElement = document.querySelector(".planning-activity"); });
+      const previousPolls = polls(), previousReads = reads();
+      await page.waitForTimeout(2800);
+      assert.ok(polls() > previousPolls, "exercise worker snapshot updates");
+      assert.equal(reads(), previousReads, "worker output does not reread settled Planner logs");
+      assert.ok(await page.evaluate(() => window.savedPlannerElement === document.querySelector(".planning-activity")), "snapshot updates do not remount history");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("a stalled Planner history fill still reveals the available tail", { timeout: 30_000 }, async () => {
+  const { context, page, errors, release } = await openPagedPlanner({ stalled: true });
+  try {
+    await page.waitForFunction(() => {
+      const scroll = document.querySelector(".initial-query-scroll");
+      return scroll && getComputedStyle(scroll).opacity === "1";
+    }, null, { timeout: 4000 });
+    assert.equal(await page.locator(".planning-activity").getAttribute("aria-busy"), "true");
+    await page.getByText("PLANNER_FILL_TAIL", { exact: true }).waitFor();
+    release();
+    await page.waitForFunction(() => document.querySelector(".planning-activity").getAttribute("aria-busy") === "false");
+    assert.deepEqual(errors, []);
+  } finally { release(); await context.close(); }
+});
+
 test("empty failed Planner composer resumes its own turn without adding a user message", { timeout: 45_000 }, async () => {
   const config = { repository: "/mock/planner-resume", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const summary = { planningId: "failed-plan", runId: "planner-resume-run", planType: "graph", status: "failed",

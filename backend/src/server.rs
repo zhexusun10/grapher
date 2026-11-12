@@ -28,8 +28,6 @@ mod sse;
 mod workspace_attachments;
 #[cfg(all(test, windows))]
 use crate::path_identity::windows_repository_key;
-#[cfg(test)]
-use std::path::Path;
 use crate::path_identity::same_repository_binding;
 pub(crate) use activity::set_prepare_phase;
 use activity::*;
@@ -564,6 +562,9 @@ mod node_message_delivery_tests;
 #[path = "planner_review_tests.rs"]
 mod planner_review_tests;
 #[cfg(all(test, feature = "fixture"))]
+#[path = "batch_workspace_tests.rs"]
+mod batch_workspace_tests;
+#[cfg(all(test, feature = "fixture"))]
 #[path = "planner_continuation_tests.rs"]
 mod planner_continuation_tests;
 #[cfg(all(test, feature = "fixture"))]
@@ -705,11 +706,12 @@ fn bootstrap_projection(
             model: String::new(),
             role_models: Default::default(),
             thinking_level: "low".into(),
-            max_parallel: 0,
-            max_feedback: MAX_FEEDBACK,
-            auto_approve: false,
+            max_parallel: DEFAULT_MAX_PARALLEL,
+            max_feedback: DEFAULT_MAX_FEEDBACK,
+            auto_approve: true,
             post_task_review: true,
-            planner_write_tools: false,
+            planner_write_tools: true,
+            isolate_parallel_nodes: true,
             environment: None,
             #[cfg(feature = "fixture")]
             engine: "pi".into(),
@@ -718,7 +720,8 @@ fn bootstrap_projection(
             #[cfg(feature = "fixture")]
             pi_args: vec![entrypoint.to_string_lossy().into()],
         });
-    config.max_feedback = config.max_feedback.min(MAX_FEEDBACK);
+    config.max_feedback = normalize_max_feedback(config.max_feedback);
+    config.max_parallel = normalize_max_parallel(config.max_parallel);
     // Settings are future-Run defaults, not an environment selection surface.
     // Historical Run/descriptor policies remain in their immutable projections.
     config.environment = None;
@@ -960,7 +963,8 @@ fn save_config_projection(
 ) -> Result<Bootstrap, String> {
     config.environment = None; // Native admission is Runtime-owned, never a UI default.
     config.validate_model_settings()?;
-    config.max_feedback = MAX_FEEDBACK;
+    config.max_feedback = normalize_max_feedback(config.max_feedback);
+    config.max_parallel = normalize_max_parallel(config.max_parallel);
     let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
     if let Some(run_id) = &run_id {
         if runtime.state.run_id != *run_id {
@@ -2050,6 +2054,7 @@ fn plan_goal_internal_with_options(
     }
     let mut config = config;
     config.max_feedback = config.max_feedback.min(MAX_FEEDBACK);
+    config.max_parallel = config.max_parallel.min(MAX_GRAPH_NODE_WORKERS);
     #[cfg(feature = "fixture")]
     if config.engine != "pi" {
         return Err((
@@ -2172,6 +2177,14 @@ fn plan_goal_internal_with_options(
                     let runtime = service.runtime.lock().map_err(|error| (error.to_string(), None))?;
                     let previous = runtime.state.planning.as_ref().ok_or(("Missing Planner turn".into(), None))?;
                     let workspace = PathBuf::from(previous.worktree.as_ref().ok_or(("Missing Planner workspace".into(), None))?);
+                    // A retained cwd must not override the current batch policy.
+                    // Do not silently relocate an unfinished turn: its private
+                    // edits/draft may not have been delivered to source.
+                    if runtime.shared_source_workspace()
+                        && !crate::path_identity::same_path(&workspace, &repository)
+                    {
+                        return Err(("Cannot continue this Planner turn: the workspace policy now uses source. Its private workspace and history are retained; send a new Planner message to work in source.".into(), None));
+                    }
                     if !workspace.is_dir() || runtime.path_is_running(&workspace) {
                         return Err(("The retained Planner workspace is missing or currently in use".into(), None));
                     }
@@ -2442,12 +2455,8 @@ fn plan_goal_internal_with_options(
                             },
                         )?;
                     }
-                    // Do not spend Planner tokens on a Graph that cannot run in this
-                    // environment (e.g. a Harbor container without user namespaces).
-                    #[cfg(not(feature = "fixture"))]
-                    if route.plan_type == "graph" {
-                        crate::native::require_graph_execution()?;
-                    }
+                    // Private-workspace admission belongs to the actual dispatch
+                    // batch. A graph's width does not select its workspace policy.
                     let mut planner_metrics = None;
                     let graph = match route.plan_type.as_str() {
                         "serial" => Graph {
@@ -3592,6 +3601,27 @@ fn drive(service: Arc<Service>) {
                         thread::sleep(std::time::Duration::from_millis(50));
                         continue;
                     }
+                    // Every batch has drained and delivered before settlement.
+                    // Review is run-level, never an intermediate handoff step.
+                    {
+                        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                        if runtime.batch_workspaces() && runtime.state.phase == "completed" {
+                            if let Err(error) = runtime.cleanup_worktrees() {
+                                eprintln!("Cannot clean completed batch workspaces: {error}");
+                            }
+                        }
+                    }
+                    let shared_review = service.runtime.lock().map_err(|e| e.to_string())?
+                        .take_shared_workspace_review()?;
+                    if let Some(config) = shared_review {
+                        if let Err((error, _)) = plan_goal_internal_with_started(
+                            POST_TASK_REVIEW_PROMPT.into(), config, Some("graph"), None,
+                            Some(run_id.clone()), &service, true, |_| {}, |_| {}, |_| {}, |_| {},
+                        ) {
+                            eprintln!("Post-task Planner review failed: {error}");
+                        }
+                        continue;
+                    }
                     // PublicationStarted is durable before any user files change.
                     let publication = {
                         let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
@@ -3609,8 +3639,37 @@ fn drive(service: Arc<Service>) {
                             None
                         }
                     };
-                    if let Some((config, query, publication)) = publication {
+                    if let Some((config, query, mut publication)) = publication {
                         let repository = PathBuf::from(&publication.repository);
+                        // Preserve failed private work before a retry can move
+                        // to source. Snapshot I/O runs outside the Run mutex.
+                        let captured = crate::process_control::with_owner(&run_id, || -> Result<(), String> {
+                            let recoveries = {
+                                let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                                runtime.state.batch_handoff.as_ref().into_iter()
+                                    .flat_map(|handoff| &handoff.recovery_execution_ids)
+                                    .map(|id| runtime.state.executions.iter().find(|execution| execution.id == *id)
+                                        .cloned().ok_or_else(|| "Missing batch recovery execution".to_string()))
+                                    .collect::<Result<Vec<_>, _>>()?
+                            };
+                            if !recoveries.is_empty() {
+                                let heads = recoveries.iter().map(|execution| {
+                                    Runtime::capture_batch_recovery(&root, &run_id, &config, execution)
+                                        .map(|head| (execution.id.clone(), head))
+                                }).collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+                                let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+                                if runtime.state.run_id != run_id {
+                                    return Err("Run changed during batch recovery capture".into());
+                                }
+                                publication = runtime.record_batch_recoveries(heads)?;
+                            }
+                            Ok(())
+                        });
+                        if let Err(error) = captured {
+                            service.runtime.lock().map_err(|e| e.to_string())?
+                                .emit(EventKind::PublicationFailed { error })?;
+                            break;
+                        }
                         // Publication/model sessions are deliberately not guarded by
                         // a per-project lock. Concurrent Runs are allowed to reach
                         // Git publication; any resulting repository conflict is left
@@ -3690,6 +3749,7 @@ fn drive(service: Arc<Service>) {
                                 if let Some(descriptor) = descriptor { events.push(EventKind::ResultPublished { descriptor }); }
                                 events.push(EventKind::PublicationCompleted { head });
                                 runtime.emit_outputs(events)?;
+                                let batch_workspaces = runtime.batch_workspaces();
                                 if let Err(error) = runtime.cleanup_worktrees() {
                                     eprintln!("Cannot clean completed run worktrees: {error}");
                                 }
@@ -3704,6 +3764,11 @@ fn drive(service: Arc<Service>) {
                                     &published_commit,
                                 );
                                 reclaim_source_snapshot(&service, &repository);
+                                if batch_workspaces {
+                                    // Publication delivered a batch, not the graph.
+                                    // Recompute readiness and concurrency next.
+                                    continue;
+                                }
                                 let review = {
                                     let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                                     runtime.state.effective_config().filter(|config| config.post_task_review)

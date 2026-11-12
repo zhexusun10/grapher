@@ -35,6 +35,21 @@ test("empty live pages, gaps, stale cursors and malformed byte ranges are distin
   assert.throws(() => windowFromPage({ ...page("中文", 0, 6), nextOffset: 5 }, false));
 });
 
+test("transcript cursors reject invalid metadata before caching or scheduling another read", () => {
+  for (const field of ["startOffset", "nextOffset", "totalBytes"] as const) {
+    for (const value of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "1", null]) {
+      if (field === "startOffset" && value === null) continue; // Legacy omitted starts are inferred.
+      const invalid = { ...page("", 0, 0), [field]: value };
+      assert.throws(() => windowFromPage(invalid as unknown as Parameters<typeof windowFromPage>[0], false),
+        /Invalid transcript byte range/, `${field}=${String(value)}`);
+    }
+  }
+  // A huge but exact cursor is valid; the limit is precision, not log size.
+  assert.equal(windowFromPage(page("", Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER), true).end, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(windowFromPage({ content: "中文", nextOffset: 10, totalBytes: 10 }, true),
+    { text: "中文", start: 4, end: 10, total: 10, settled: true }, "legacy pages may omit startOffset");
+});
+
 test("a small tail of a huge log is cached by retained bytes, not its absolute cursor", () => {
   executionTranscriptCache.clear();
   const offset = 100 * 1024 * 1024;

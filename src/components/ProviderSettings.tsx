@@ -1,6 +1,6 @@
 import { t, localizeError } from "../i18n";
-import { useEffect, useRef, useState } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { motion, AnimatePresence, useIsPresent, useReducedMotion } from "motion/react";
 import {
   Key,
   Globe,
@@ -20,6 +20,7 @@ import {
   ChevronUp,
 } from "lucide-react";
 import { CollapsibleCardBody } from "./CollapsibleCardBody";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import {
   providerAuth,
   hasUnsupportedCredentialCharacters,
@@ -28,19 +29,21 @@ import {
   type ProviderInfo,
 } from "../services/providerAuth";
 
-// The Settings modal unmounts while it is closed, so local state alone would
-// collapse both lists again every time the user reopens Settings: an expanded
-// list silently shrank back to its header. Keep the user's choice for this
-// page session instead of resetting it on every mount.
-const sectionExpansion = { providers: false, credentials: false };
+// Only the supported-provider list remembers its expansion for this page.
+// Bound credentials always start collapsed when Settings is reopened.
+let providersExpanded = false;
 
-function AuthLink({ url, label }: { url?: string; label?: string }) {
+function safeAuthUrl(url?: string) {
   if (!url) return null;
   try {
-    if (!["https:", "http:"].includes(new URL(url).protocol)) return null;
+    return ["https:", "http:"].includes(new URL(url).protocol) ? url : null;
   } catch {
     return null;
   }
+}
+
+function AuthLink({ url, label }: { url?: string; label?: string }) {
+  if (!safeAuthUrl(url)) return null;
   return (
     <a
       href={url}
@@ -55,12 +58,33 @@ function AuthLink({ url, label }: { url?: string; label?: string }) {
   );
 }
 
+function LoginPanelReveal({ children }: { children: ReactNode }) {
+  const reduceMotion = useReducedMotion();
+  const isPresent = useIsPresent();
+  return (
+    <motion.div
+      className="active-login-reveal"
+      inert={!isPresent}
+      aria-hidden={!isPresent || undefined}
+      initial={reduceMotion ? false : { gridTemplateRows: "0fr", opacity: 0, y: -6 }}
+      animate={{ gridTemplateRows: "1fr", opacity: 1, y: 0 }}
+      exit={{ gridTemplateRows: "0fr", opacity: 0, y: -6 }}
+      transition={{ duration: reduceMotion ? 0 : 0.22, ease: [0.25, 1, 0.5, 1] }}
+    >
+      <div className="active-login-clip">{children}</div>
+    </motion.div>
+  );
+}
+
 export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   onCatalogChange: (catalog: ProviderCatalog | undefined) => void;
   onBusyChange: (busy: boolean) => void;
 }) {
+  const settingsPresent = useIsPresent();
   const [catalog, setCatalog] = useState<ProviderCatalog | undefined>(() => providerAuth.getCachedCatalog() ?? undefined);
   const [activeProvider, setActiveProvider] = useState<ProviderInfo | null>(null);
+  const [loginAnchor, setLoginAnchor] = useState<"providers" | "credentials">("providers");
+  const openedAuthUrls = useRef(new Set<string>());
   const [selectedMethod, setSelectedMethod] = useState<"api_key" | "oauth">("api_key");
   const [login, setLogin] = useState<LoginState>();
   const [answer, setAnswer] = useState("");
@@ -123,29 +147,39 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   // reopening Settings still plays the open animation instead of popping the
   // body in fully rendered (motion skips the mount animation otherwise).
   useEffect(() => {
-    if (sectionExpansion.providers) setShowProviders(true);
-    if (sectionExpansion.credentials) setShowConfigured(true);
+    if (providersExpanded) setShowProviders(true);
   }, []);
 
   function setProvidersExpanded(expanded: boolean) {
-    sectionExpansion.providers = expanded;
+    providersExpanded = expanded;
     setShowProviders(expanded);
   }
 
-  function setCredentialsExpanded(expanded: boolean) {
-    sectionExpansion.credentials = expanded;
-    setShowConfigured(expanded);
-  }
-
   useEffect(() => {
-    if (login?.status === "complete") {
-      activeId.current = undefined;
-      void load(true);
+    if (!settingsPresent || selectedMethod !== "oauth" || login?.status !== "pending") return;
+    for (const event of login.events) {
+      const url = safeAuthUrl(event.type === "auth_url" ? event.url : event.type === "device_code" ? event.verificationUri : undefined);
+      if (!url || openedAuthUrls.current.has(url)) continue;
+      openedAuthUrls.current.add(url);
+      // Try once per URL, never on every poll. The visible AuthLink remains
+      // available when browser popup policy blocks the automatic opening.
+      try { window.open(url, "_blank", "noopener,noreferrer"); } catch { /* Use the link instead. */ }
     }
-  }, [login?.id, login?.status]);
+  }, [login, selectedMethod, settingsPresent]);
 
   useEffect(() => {
-    if (!login || login.status !== "pending") return;
+    if (!settingsPresent || login?.status !== "complete") return;
+    activeId.current = undefined;
+    void load(true);
+    const generation = authGeneration.current;
+    const timer = setTimeout(() => {
+      if (generation === authGeneration.current) setProvidersExpanded(false);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [login?.id, login?.status, settingsPresent]);
+
+  useEffect(() => {
+    if (!settingsPresent || !login || login.status !== "pending") return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
 
@@ -177,9 +211,9 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       stopped = true;
       clearTimeout(timer);
     };
-  }, [login?.id, login?.status]);
+  }, [login?.id, login?.status, settingsPresent]);
 
-  async function startLogin(p: ProviderInfo, method: "api_key" | "oauth") {
+  async function startLogin(p: ProviderInfo, method: "api_key" | "oauth", anchor = loginAnchor) {
     if (actionInFlight.current) return;
     const generation = ++authGeneration.current;
     loginRevision.current += 1;
@@ -191,7 +225,9 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
     setBusy(true);
     setError("");
     setLogin(undefined);
+    openedAuthUrls.current.clear();
     setActiveProvider(p);
+    setLoginAnchor(anchor);
     setSelectedMethod(method);
 
     try {
@@ -240,14 +276,11 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
     }
   }
 
-  useEffect(() => {
-    if (!confirmDeleteProvider) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setConfirmDeleteProvider(null);
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [confirmDeleteProvider]);
+  const deleteDialogRef = useDialogFocus<HTMLDivElement>({
+    open: confirmDeleteProvider !== null,
+    onClose: () => setConfirmDeleteProvider(null),
+    initialFocus: ".confirm-cancel-btn",
+  });
 
   async function logout(p: ProviderInfo) {
     setBusy(true);
@@ -329,6 +362,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   const providers = catalog?.providers ?? [];
   const filteredProviders = providers.filter(
     (p) =>
+      // Keep the selected card and its interactive flow reachable while searching.
+      (loginAnchor === "providers" && p.id === activeProvider?.id) ||
       p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       p.id.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -336,9 +371,12 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
   const configuredProviders = providers.filter(
     (p) => p.configured && p.authEnvVar !== "configured API key"
   );
+  const loginPanelVisible = loginAnchor === "credentials"
+    ? showConfigured && configuredProviders.some(p => p.id === activeProvider?.id)
+    : showProviders && filteredProviders.some(p => p.id === activeProvider?.id);
 
-  return (
-    <div className="provider-settings-container">
+  const providerOverview = (
+    <>
       {/* Pi Auth Center Header */}
       <div className="pi-auth-header-card">
         <div className="pi-auth-title-group">
@@ -384,14 +422,14 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
         <div className="configured-credentials-card">
           <div
             className="configured-card-header"
-            onClick={() => setCredentialsExpanded(!showConfigured)}
+            onClick={() => setShowConfigured(!showConfigured)}
             role="button"
             tabIndex={0}
             aria-expanded={showConfigured}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
-                setCredentialsExpanded(!showConfigured);
+                setShowConfigured(!showConfigured);
               }
             }}
             style={{ cursor: "pointer", userSelect: "none" }}
@@ -413,7 +451,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             {() => (
               <div className="configured-list">
                 {configuredProviders.map((p) => (
-                  <div key={p.id} className="configured-row">
+                  <Fragment key={p.id}>
+                  <div className="configured-row">
                     <div className="configured-info">
                       <div className="configured-name-wrap">
                         <span className="configured-name">{p.name}</span>
@@ -440,7 +479,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                             p.authType === "oauth"
                               ? "oauth"
                               : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
-                          void startLogin(p, defaultMethod as "api_key" | "oauth");
+                          void startLogin(p, defaultMethod as "api_key" | "oauth", "credentials");
                         }}
                       >
                         {p.authType === "oauth" ? (
@@ -462,15 +501,22 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                         <Trash2 size={12} />{p.authType === "oauth" ? t(" 解除授权") : t(" 删除 API Key")}</button>
                     </div>
                   </div>
+                  <AnimatePresence>
+                    {activeProvider?.id === p.id && loginAnchor === "credentials" && renderLoginPanel()}
+                  </AnimatePresence>
+                  </Fragment>
                 ))}
               </div>
             )}
           </CollapsibleCardBody>
         </div>
       )}
+    </>
+  );
 
-      {/* Active Login Flow Modal/Drawer */}
-      {(login || activeProvider) && (
+  function renderLoginPanel() {
+    return (
+      <LoginPanelReveal key={activeProvider?.id}>
         <div className="active-login-panel" aria-live="polite">
           <div className="active-login-header">
             <div className="active-login-title">
@@ -555,7 +601,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
               )}
 
               {/* Pending Pulse Waiter */}
-              {pending && (
+              {pending && (!login?.prompt || login.prompt.type === "manual_code") && (
                 <div className="pending-poll-indicator">
                   <div className="pulse-dot"></div>
                   <span>{t("正在等待 Pi 内核完成授权校验，请在浏览器中确认...")}</span>
@@ -597,6 +643,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                 </div>
               )}
 
+              {(!login?.prompt || login.prompt.type === "manual_code") && (
               <div className="prompt-action-row" style={{ marginTop: "4px" }}>
                 {activeProvider?.configured && (
                   <button
@@ -615,14 +662,15 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                 >
                   {t("取消")}</button>
               </div>
+              )}
             </>
           )}
 
-          {/* API Key / Secret / Select Login Flow */}
-          {selectedMethod !== "oauth" && login?.prompt && (
+          {/* OAuth also requests select/text/secret prompts before its URL. */}
+          {login?.prompt && (selectedMethod !== "oauth" || login.prompt.type !== "manual_code") && (
             <div className="auth-prompt-form">
               <label htmlFor="auth-answer" className="prompt-label">
-                <Key size={14} />
+                {selectedMethod === "oauth" ? <Globe size={14} /> : <Key size={14} />}
                 <span>{login.prompt.message || t("输入 API Key")}</span>
               </label>
 
@@ -647,13 +695,13 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   <input
                     id="auth-answer"
                     disabled={busy}
-                    type={showKey ? "text" : "password"}
+                    type={login.prompt.type !== "secret" || showKey ? "text" : "password"}
                     autoComplete="off"
                     spellCheck={false}
                     value={answer}
                     aria-invalid={credentialInputError ? true : undefined}
                     placeholder={
-                      login.prompt.placeholder || t("输入 API Key (如 sk-...)")
+                      login.prompt.placeholder || (login.prompt.type === "secret" ? t("输入 API Key (如 sk-...)") : "")
                     }
                     onChange={(e) => setAnswer(e.target.value)}
                     onKeyDown={(e) => {
@@ -661,14 +709,14 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     }}
                     className="auth-input-field"
                   />
-                  <button
+                  {login.prompt.type === "secret" && <button
                     type="button"
                     className="eye-toggle-btn"
                     onClick={() => setShowKey(!showKey)}
                     aria-label={showKey ? t("隐藏") : t("显示")}
                   >
                     {showKey ? <EyeOff size={15} /> : <Eye size={15} />}
-                  </button>
+                  </button>}
                 </div>
               )}
 
@@ -686,7 +734,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                   disabled={busy || !answer.trim() || !!credentialInputError}
                   onClick={() => void respond()}
                 >
-                  <Check size={14} />{t(" 保存并绑定到 Pi")}</button>
+                  <Check size={14} />{selectedMethod === "oauth" ? t("继续登录") : t(" 保存并绑定到 Pi")}</button>
                 {activeProvider?.configured && (
                   <button
                     type="button"
@@ -722,9 +770,20 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
               <span>{localizeError(login.error)}</span>
             </div>
           )}
+          {error && (
+            <div className="login-status-alert error">
+              <AlertCircle size={15} />
+              <span>{localizeError(error)}</span>
+            </div>
+          )}
         </div>
-      )}
+      </LoginPanelReveal>
+    );
+  }
 
+  return (
+    <div className="provider-settings-container">
+      {providerOverview}
       {/* Provider List Grid */}
       <div
         className="providers-grid-title"
@@ -742,7 +801,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       >
         <div style={{ display: "flex", flexDirection: "column" }}>
           <span>{t("支持的 Provider 列表")}</span>
-          <small>{t("点击任意 Provider 可一键发起 ")}<code>/login</code>{t(" 或管理凭据")}</small>
+          <small>{t("点击任意 Provider 登陆/配置API 或管理凭据")}</small>
         </div>
         <ChevronDown
           size={16}
@@ -759,8 +818,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             {filteredProviders.map((p) => {
               const isSelected = activeProvider?.id === p.id;
               return (
+                <Fragment key={p.id}>
                 <div
-                  key={p.id}
                   className={`provider-card ${p.configured ? "configured" : ""} ${isSelected ? "selected" : ""}`}
                 >
                   <div className="provider-card-header">
@@ -793,7 +852,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                               p.authType === "oauth"
                                 ? "oauth"
                                 : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
-                            void startLogin(p, defaultMethod as "api_key" | "oauth");
+                            void startLogin(p, defaultMethod as "api_key" | "oauth", "providers");
                           }}
                         >
                           {p.authType === "oauth" ? (
@@ -826,7 +885,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                                 p.authType === "oauth"
                                   ? "oauth"
                                   : (p.methods.find((m) => m.id === "api_key")?.id ?? p.methods[0]?.id ?? "api_key");
-                              void startLogin(p, defaultMethod as "api_key" | "oauth");
+                              void startLogin(p, defaultMethod as "api_key" | "oauth", "providers");
                             }}
                           >
                             <LogIn size={13} />{t(" 登陆")}</button>
@@ -837,6 +896,10 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
                     )}
                   </div>
                 </div>
+                <AnimatePresence>
+                  {isSelected && loginAnchor === "providers" && renderLoginPanel()}
+                </AnimatePresence>
+                </Fragment>
               );
             })}
           </div>
@@ -857,7 +920,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
         </div>
       )}
 
-      {error && (
+      {error && !loginPanelVisible && (
         <div className="login-status-alert error">
           <AlertCircle size={15} />
           <span>{localizeError(error)}</span>
@@ -879,6 +942,8 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
             <motion.div
               key="confirm-delete-modal"
               className="confirm-delete-modal"
+              ref={deleteDialogRef}
+              tabIndex={-1}
               role="alertdialog"
               aria-modal="true"
               aria-labelledby="confirm-delete-title"

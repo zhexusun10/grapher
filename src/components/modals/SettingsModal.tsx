@@ -1,18 +1,19 @@
 import { t, localizeError, languagePreference, restartFrontendWithLanguage, type LanguagePreference } from "../../i18n";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useId } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { RotateCcw, Terminal, Cpu, Check, X, Copy, GitBranch, Languages, RefreshCw, FilePenLine, Brain, Wallpaper } from "lucide-react";
-import { Config } from "../../types";
+import { RotateCcw, Terminal, Cpu, Check, X, Copy, GitBranch, Languages, RefreshCw, Wallpaper } from "lucide-react";
+import { Config, MAX_MAX_FEEDBACK, MAX_MAX_PARALLEL, MIN_MAX_FEEDBACK, MIN_MAX_PARALLEL, normalizeMaxFeedback, normalizeMaxParallel } from "../../types";
 import { normalizeModelThinkingLevels } from "../../modelConfig";
 import { providerAuth, type ProviderCatalog } from "../../services/providerAuth";
 import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
 import { ExtensionSettings } from "../ExtensionSettings";
 import { normalizeWorkspacePath } from "../../services/workspaceConversations";
-import { autoExpandCotEnabled, setAutoExpandCot, currentLandingBackground, setLandingBackground } from "../../services/displayPreferences";
+import { autoExpandCotEnabled, setAutoExpandCot, currentLandingBackground, setLandingBackground, hideAutoModeEnabled, setHideAutoMode } from "../../services/displayPreferences";
 import { DotPattern } from "../ui/dot-pattern";
 import { ConfirmModal } from "./ConfirmModal";
 import { dialogVeilMotion, largeDialogMotion } from "./dialogMotion";
+import { useDialogFocus } from "../../hooks/useDialogFocus";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -34,14 +35,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   onSaveConfig,
 }) => {
   const reduceMotion = useReducedMotion();
+  const titleId = useId();
   const [draftConfig, setDraftConfig] = useState(() => ({ ...config }));
-  const [autoApprove, setAutoApprove] = useState(config.autoApprove ?? false);
+  const [autoApprove, setAutoApprove] = useState(config.autoApprove ?? true);
   const [postTaskReview, setPostTaskReview] = useState(config.postTaskReview ?? true);
-  const [plannerWriteTools, setPlannerWriteTools] = useState(config.plannerWriteTools ?? false);
+  const [plannerWriteTools, setPlannerWriteTools] = useState(config.plannerWriteTools ?? true);
+  const [isolateParallelNodes, setIsolateParallelNodes] = useState(config.isolateParallelNodes ?? true);
+  const [maxParallelInput, setMaxParallelInput] = useState(() => String(normalizeMaxParallel(config.maxParallel)));
+  const [maxFeedbackInput, setMaxFeedbackInput] = useState(() => String(normalizeMaxFeedback(config.maxFeedback)));
   // Display-only preference, but it follows the same contract as the other
   // toggles: staged here, committed only when the settings save is accepted.
   const [autoExpandCot, setAutoExpandCotDraft] = useState(() => autoExpandCotEnabled());
   const [landingBackground, setLandingBackgroundDraft] = useState(() => currentLandingBackground());
+  const [hideAutoMode, setHideAutoModeDraft] = useState(() => hideAutoModeEnabled());
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveError] = useState("");
@@ -60,17 +66,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
     syncedConfigRef.current = config;
     if (dirtyRef.current) return;
     setDraftConfig({ ...config });
-    setAutoApprove(config.autoApprove ?? false);
+    setAutoApprove(config.autoApprove ?? true);
     setPostTaskReview(config.postTaskReview ?? true);
-    setPlannerWriteTools(config.plannerWriteTools ?? false);
+    setPlannerWriteTools(config.plannerWriteTools ?? true);
+    setIsolateParallelNodes(config.isolateParallelNodes ?? true);
+    setMaxParallelInput(String(normalizeMaxParallel(config.maxParallel)));
+    setMaxFeedbackInput(String(normalizeMaxFeedback(config.maxFeedback)));
   }, [config]);
   const save = async () => {
     if (savingRef.current) return;
     savingRef.current = true;
     setSaving(true);
     setSaveError("");
+    const maxParallel = normalizeMaxParallel(maxParallelInput);
+    const maxFeedback = normalizeMaxFeedback(maxFeedbackInput);
+    setMaxParallelInput(String(maxParallel));
+    setMaxFeedbackInput(String(maxFeedback));
     try {
-      const ok = await onSaveConfig({ ...normalizeModelThinkingLevels(draftConfig, catalog), autoApprove, postTaskReview, plannerWriteTools });
+      const ok = await onSaveConfig({ ...normalizeModelThinkingLevels(draftConfig, catalog), autoApprove, postTaskReview, plannerWriteTools, isolateParallelNodes, maxParallel, maxFeedback });
       if (ok === false) {
         savingRef.current = false;
         setSaving(false);
@@ -80,6 +93,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
       // cancelling or failing the save leaves the stored preference untouched.
       setAutoExpandCot(autoExpandCot);
       setLandingBackground(landingBackground);
+      setHideAutoMode(hideAutoMode);
     } catch (error) {
       savingRef.current = false;
       setSaving(false);
@@ -96,15 +110,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
     en: t("英文"),
   };
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Escape dismisses only the confirmation when it is open.
-      if (e.key === "Escape" && pendingLanguage === null && !savingRef.current &&
-          !document.querySelector(".settings-modal [role='alertdialog']")) onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, pendingLanguage]);
+  const dialogRef = useDialogFocus<HTMLElement>({
+    open: isOpen,
+    onClose: () => { if (!savingRef.current && pendingLanguage === null) onClose(); },
+  });
 
   if (!isOpen) return null;
 
@@ -123,15 +132,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
       />
       <motion.section
         className="modal settings-modal surface-modal"
+        ref={dialogRef}
+        tabIndex={-1}
         inert={pendingLanguage !== null}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="modal-title"
+        aria-labelledby={titleId}
+        aria-busy={saving}
         {...dialogMotion}
       >
         <header className="settings-modal-header">
           <div className="settings-header-title-wrap">
-            <h2 id="modal-title">Settings</h2>
+            <h2 id={titleId}>Settings</h2>
           </div>
           <button className="icon-button" aria-label={t("关闭弹窗")} disabled={saving} onClick={onClose}>
             <X size={18} />
@@ -143,7 +155,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <section className="settings-card" aria-labelledby="provider-settings-title">
               <div className="settings-card-title">
                 <Cpu size={16} />
-                <h4 id="provider-settings-title">{t("模型与 Provider")}</h4>
+                <h4 id="provider-settings-title">{t("Provider配置")}</h4>
               </div>
               <ProviderSettings onCatalogChange={setCatalog} onBusyChange={setCatalogBusy} />
             </section>
@@ -151,22 +163,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
             <section className="settings-card" aria-labelledby="role-model-settings-title">
               <div className="settings-card-title">
                 <Terminal size={16} />
-                <h4 id="role-model-settings-title">{t("角色模型配置")}</h4>
+                <h4 id="role-model-settings-title">{t("模型配置")}</h4>
               </div>
               <p className="section-desc">{conversationScoped
                 ? t("当前显示并编辑此对话的模型配置；保存只影响此对话。")
                 : t("当前显示并编辑新对话的默认模型配置；已有对话保留各自配置。")}</p>
-              <RoleModelSettings config={draftConfig} setConfig={updateDraftConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy || saving} />
+              <RoleModelSettings config={draftConfig} setConfig={updateDraftConfig} catalog={catalog} envOverrides={envOverrides} busy={catalogBusy || saving} hidePartitioner={hideAutoMode} />
             </section>
 
             <ExtensionSettings disabled={saving} />
 
-            {/* 图纸审批 */}
-            <div className="settings-card">
+            <section className="settings-card" aria-labelledby="execution-planning-settings-title">
               <div className="settings-card-title">
                 <GitBranch size={16} />
-                <h4>{t("图纸审批")}</h4>
+                <h4 id="execution-planning-settings-title">{t("Harness设置")}</h4>
               </div>
+              <label className="settings-toggle-row">
+                <span>
+                  <strong>{t("隐藏 Auto 模式")}</strong>
+                  <small>{t("保存后隐藏输入框中的 Auto 和 Partitioner 模型配置，仅在此浏览器中生效。")}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={hideAutoMode}
+                  disabled={saving}
+                  onChange={(event) => setHideAutoModeDraft(event.target.checked)}
+                  aria-label={t("隐藏 Auto 模式")}
+                />
+              </label>
               <label className="settings-toggle-row">
                 <span>
                   <strong>Auto Approve</strong>
@@ -193,18 +217,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   aria-label={t("任务后 Planner 复盘")}
                 />
               </label>
-            </div>
-
-            {/* Planner 工具 */}
-            <div className="settings-card">
-              <div className="settings-card-title">
-                <FilePenLine size={16} />
-                <h4>{t("Planner 文件工具")}</h4>
-              </div>
               <label className="settings-toggle-row">
                 <span>
-                  <strong>{t("挂载 write 和 edit 工具")}</strong>
-                  <small>{t("允许 Planner 直接修改工作区文件；默认关闭。关闭时不再挂载 write 和 edit，但 read、Bash、node/edge 及扩展工具仍然可用。对后续规划生效。")}</small>
+                  <strong>{t("并行节点独立工作区")}</strong>
+                  <small>{t("不超过 2 个节点共用源目录，超过 2 个启用独立工作区。关闭后所有批次共用源目录，并发修改可能互相覆盖。")}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={isolateParallelNodes}
+                  disabled={saving}
+                  onChange={(event) => { markDirty(); setIsolateParallelNodes(event.target.checked); }}
+                  aria-label={t("并行节点独立工作区")}
+                />
+              </label>
+              <label className="settings-toggle-row">
+                <span>
+                  <strong>{t("挂载 Planner write 和 edit 工具")}</strong>
+                  <small>{t("允许 Planner 直接修改工作区文件；默认开启。关闭时不再挂载 write 和 edit，但 read、Bash、node/edge 及扩展工具仍然可用。对后续规划生效。")}</small>
                 </span>
                 <input
                   type="checkbox"
@@ -214,13 +243,58 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   aria-label={t("挂载 Planner write 和 edit 工具")}
                 />
               </label>
-            </div>
+              <label className="settings-number-row">
+                <span>
+                  <strong>{t("可并行 Agent 数量")}</strong>
+                  <small>{t("可并行 Agent 数量（范围 2–40，默认 8）。对新创建的运行生效。")}</small>
+                </span>
+                <input
+                  type="number"
+                  min={MIN_MAX_PARALLEL}
+                  max={MAX_MAX_PARALLEL}
+                  step={1}
+                  inputMode="numeric"
+                  value={maxParallelInput}
+                  disabled={saving}
+                  onChange={(event) => {
+                    markDirty();
+                    setMaxParallelInput(event.target.value);
+                  }}
+                  onBlur={() => {
+                    setMaxParallelInput(String(normalizeMaxParallel(maxParallelInput)));
+                  }}
+                  aria-label={t("可并行 Agent 数量")}
+                />
+              </label>
+              <label className="settings-number-row">
+                <span>
+                  <strong>{t("反馈预算")}</strong>
+                  <small>{t("限制单条反馈边可触发的最大返工次数（范围 2–40，默认 4）。对新创建的运行生效。")}</small>
+                </span>
+                <input
+                  type="number"
+                  min={MIN_MAX_FEEDBACK}
+                  max={MAX_MAX_FEEDBACK}
+                  step={1}
+                  inputMode="numeric"
+                  value={maxFeedbackInput}
+                  disabled={saving}
+                  onChange={(event) => {
+                    markDirty();
+                    setMaxFeedbackInput(event.target.value);
+                  }}
+                  onBlur={() => {
+                    setMaxFeedbackInput(String(normalizeMaxFeedback(maxFeedbackInput)));
+                  }}
+                  aria-label={t("反馈预算")}
+                />
+              </label>
+            </section>
 
-            {/* 思维链展示 */}
-            <div className="settings-card">
+            <section className="settings-card" aria-labelledby="ui-settings-title">
               <div className="settings-card-title">
-                <Brain size={16} />
-                <h4>{t("思维链展示")}</h4>
+                <Wallpaper size={16} />
+                <h4 id="ui-settings-title">{t("UI设置")}</h4>
               </div>
               <label className="settings-toggle-row">
                 <span>
@@ -235,65 +309,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   aria-label={t("执行时自动展开思维链")}
                 />
               </label>
-            </div>
-
-            <section className="settings-card" aria-labelledby="language-settings-title">
-              <div className="settings-card-title">
-                <Languages size={16} />
-                <h4 id="language-settings-title">{t("界面语言")}</h4>
-              </div>
-              <div className="settings-language-row">
-                <p className="section-desc">{t("切换语言需确认并重启前端后生效。")}</p>
-                <select
-                  aria-label={t("界面语言")}
-                  disabled={saving}
-                  value={languagePreference}
-                  onChange={(event) => {
-                    const next = event.target.value as LanguagePreference;
-                    if (next === languagePreference) return;
-                    setLanguageError("");
-                    setPendingLanguage(next);
-                  }}
-                >
-                  <option value="auto">{languageLabels.auto}</option>
-                  <option value="zh-CN">{languageLabels["zh-CN"]}</option>
-                  <option value="en">{languageLabels.en}</option>
-                </select>
-              </div>
-              {languageError && <p role="alert" className="settings-language-error">{languageError}</p>}
-            </section>
-
-            {/* 存储与重置 */}
-            <div className="settings-card">
-              <div className="settings-card-title">
-                <RotateCcw size={16} />
-                <h4>{t("存储与重置")}</h4>
-              </div>
-              <div className="section-desc">
-                <p>{t("数据路径")}</p>
-                <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" }}>
-                  <code>{normalizeWorkspacePath(dataPath) || t("本地系统应用目录")}</code>
-                  <button 
-                    type="button"
-                    className="icon-tiny-btn"
-                    disabled={!dataPath}
-                    onClick={() => {
-                      const cleanPath = normalizeWorkspacePath(dataPath);
-                      if (cleanPath) void navigator.clipboard.writeText(cleanPath);
-                    }}
-                    aria-label={t("复制路径")}
-                  >
-                    <Copy size={13} />
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <section className="settings-card" aria-labelledby="background-settings-title">
-              <div className="settings-card-title">
-                <Wallpaper size={16} />
-                <h4 id="background-settings-title">{t("首页背景")}</h4>
-              </div>
+              <h5 className="settings-ui-group-title">{t("首页背景")}</h5>
               <p className="section-desc">{t("选择首页背景，保存后在此浏览器中生效。")}</p>
               <fieldset className="settings-background-options" disabled={saving}>
                 <legend className="sr-only">{t("首页背景")}</legend>
@@ -324,15 +340,67 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                 </label>
               </fieldset>
             </section>
+
+            <section className="settings-card" aria-labelledby="language-settings-title">
+              <div className="settings-card-title">
+                <Languages size={16} />
+                <h4 id="language-settings-title">{t("界面语言")}</h4>
+              </div>
+              <div className="settings-language-row">
+                <p className="section-desc">{t("切换语言需确认并重启前端后生效。")}</p>
+                <select
+                  aria-label={t("界面语言")}
+                  disabled={saving}
+                  value={languagePreference}
+                  onChange={(event) => {
+                    const next = event.target.value as LanguagePreference;
+                    if (next === languagePreference) return;
+                    setLanguageError("");
+                    setPendingLanguage(next);
+                  }}
+                >
+                  <option value="auto">{languageLabels.auto}</option>
+                  <option value="zh-CN">{languageLabels["zh-CN"]}</option>
+                  <option value="en">{languageLabels.en}</option>
+                </select>
+              </div>
+              {languageError && <p role="alert" className="settings-language-error">{languageError}</p>}
+            </section>
+
+            {/* 存储与重置 */}
+            <section className="settings-card" aria-labelledby="storage-settings-title">
+              <div className="settings-card-title">
+                <RotateCcw size={16} />
+                <h4 id="storage-settings-title">{t("存储与重置")}</h4>
+              </div>
+              <div className="section-desc">
+                <p>{t("数据路径")}</p>
+                <div className="settings-data-path-row">
+                  <code>{normalizeWorkspacePath(dataPath) || t("本地系统应用目录")}</code>
+                  <button
+                    type="button"
+                    className="icon-tiny-btn"
+                    disabled={!dataPath}
+                    onClick={() => {
+                      const cleanPath = normalizeWorkspacePath(dataPath);
+                      if (cleanPath) void navigator.clipboard.writeText(cleanPath);
+                    }}
+                    aria-label={t("复制路径")}
+                  >
+                    <Copy size={13} />
+                  </button>
+                </div>
+              </div>
+            </section>
           </div>
 
-          {saveError && <p role="alert" className="settings-language-error">{localizeError(saveError)}</p>}
+          {saveError && <p role="alert" className="settings-save-error">{localizeError(saveError)}</p>}
           <footer className="settings-modal-footer">
             <button type="button" className="settings-cancel-btn" disabled={saving} onClick={onClose}>
               {t("取消")}
             </button>
             <button type="button" className="primary save-config-btn" disabled={saving || catalogBusy} onClick={() => void save()}>
-              <Check size={18} />{t("保存")}
+              <Check size={14} />{t("保存")}
             </button>
           </footer>
         </div>

@@ -118,7 +118,9 @@ test("failed node attempts keep their execution record spacing even", { timeout:
     await page.evaluate(executions => window.audit.setExecutions(executions), [
       execution("failed", 1, "failed", failedOutput), execution("retry", 2, "completed", retryOutput),
     ]);
-    await page.locator('[data-execution-id="failed"] .conversation-error-message').waitFor();
+    const failureCard = page.locator('[data-execution-id="failed"]').getByTestId("transcript-error-card");
+    await failureCard.getByText("Connection failed", { exact: true }).waitFor();
+    assert.equal(await failureCard.count(), 1, "the failed attempt retains exactly one error card");
     await page.locator('[data-execution-id="retry"] .tool-call-card').last().waitFor();
 
     for (const width of [1280, 700]) {
@@ -169,7 +171,7 @@ test("failed node attempts keep their execution record spacing even", { timeout:
     });
     assert.ok(Math.abs(collapsedGap - 10) < 0.6, `collapsed records keep the same gap: ${collapsedGap}`);
     await headers.first().click();
-    await page.locator('[data-execution-id="failed"] .conversation-error-message').waitFor();
+    await failureCard.getByText("Connection failed", { exact: true }).waitFor();
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -3497,9 +3499,12 @@ test("an edited Planner follow-up keeps its turn and the failure notice", { time
     await editor.fill("EDITED FOLLOW UP");
     await editor.press("Enter");
     await page.locator(".planning-error-notice").waitFor();
+    const liveFailure = page.locator(".planner-transcript").getByTestId("transcript-error-card");
+    await liveFailure.getByText(failure.error, { exact: true }).waitFor();
     await page.waitForTimeout(1200);
+    assert.equal(await liveFailure.count(), 1, "the live failure is retained once, not replaced by a banner or duplicated");
     assert.equal(edited?.goal, "EDITED FOLLOW UP", "the edit starts a replacement Planner turn");
-    const view = await page.evaluate(() => {
+    const view = await page.evaluate(expectedError => {
       const scroll = document.querySelector(".initial-query-scroll");
       const pane = scroll.getBoundingClientRect();
       const notice = document.querySelector(".planning-error-notice")?.getBoundingClientRect();
@@ -3508,9 +3513,9 @@ test("an edited Planner follow-up keeps its turn and the failure notice", { time
       return { top: scroll.scrollTop, height: scroll.scrollHeight, client: scroll.clientHeight,
         notice: notice && { top: notice.top, bottom: notice.bottom }, pane: { top: pane.top, bottom: pane.bottom },
         editedTurn: text(".planner-transcript"), priorTurn: text(".planning-activity"),
-        liveError: [...document.querySelectorAll(".node-error, .conversation-error-message")]
-          .some(element => element.textContent.includes("OAuth refresh failed") && visibleText(element)) };
-    });
+        liveError: [...document.querySelectorAll('.planner-transcript [data-testid="transcript-error-card"]')]
+          .some(element => element.textContent.includes(expectedError) && visibleText(element)) };
+    }, failure.error);
     assert.ok(view.editedTurn.includes("EDITED FOLLOW UP"),
       `the failed replacement turn stays visible: ${JSON.stringify(view)}`);
     assert.ok(view.liveError, `the live failure row stays visible: ${JSON.stringify(view)}`);

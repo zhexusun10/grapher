@@ -64,6 +64,48 @@ test('backend Planner target rebinds cwd, HOME/cache/Git and native Bash togethe
   }
 });
 
+test('shared-source Planner exposes no workspace switch even on a follow-up', () => {
+  const previous = { ...process.env };
+  try {
+    process.env.GRAPHER_MODE = 'planner';
+    process.env.GRAPHER_EXECUTION_KIND = 'source';
+    process.env.GRAPHER_ORIGINAL_ROOT = process.cwd();
+    process.env.GRAPHER_PLANNER_FOLLOWUP = 'true';
+    process.env.GRAPHER_PLANNER_WORKSPACES = '{}';
+    const tools: string[] = [];
+    workspacePolicy({ on() {}, registerTool(tool: { name: string }) { tools.push(tool.name); } } as any);
+    assert.ok(!tools.includes('switch_workspace'));
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
+  }
+});
+
+test('shared-source Graph nodes retain the existing Graph rules and feedback protocol', async () => {
+  const previous = { ...process.env };
+  try {
+    process.env.GRAPHER_MODE = 'node';
+    process.env.GRAPHER_AGENT_KIND = 'node';
+    process.env.GRAPHER_ORIGINAL_ROOT = process.cwd();
+    process.env.GRAPHER_FEEDBACK_SOURCE = 'true';
+    delete process.env.GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS;
+    const rules: string[] = [];
+    for (const kind of ['graph', 'source']) {
+      process.env.GRAPHER_EXECUTION_KIND = kind;
+      const handlers = new Map<string, (event: any) => any>();
+      workspacePolicy({ on(name: string, handler: (event: any) => any) { handlers.set(name, handler); }, registerTool() {} } as any);
+      const options = { sections: { rules: '- Show file paths clearly when working with files' }, customPrompt: false, appendSystemPrompt: '', promptGuidelines: [] };
+      await handlers.get('before_agent_start')!({ systemPromptOptions: options });
+      rules.push(options.sections.rules);
+    }
+    assert.equal(rules[0], rules[1]);
+    assert.ok(rules[1].includes('<ACCEPT>') && rules[1].includes('<FEEDBACK>'));
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
+  }
+});
+
 test('the mandatory Planner extension removes steer identity from every model context', async () => {
   const previous = { ...process.env };
   try {

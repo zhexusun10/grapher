@@ -1,12 +1,12 @@
 import { t } from "../../i18n";
 import React, { useState } from "react";
-import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Plus, Settings2, Trash2, Copy, PanelLeftClose, PanelLeftOpen, Loader2 } from "lucide-react";
 import { ProjectItem } from "../../types";
 import type { RunIndicator } from "../../hooks/useRunIndicators";
 import { normalizeWorkspacePath, workspaceKey } from "../../services/workspaceConversations";
 import { workspacePathDisplay } from "./workspacePathDisplay";
+import { ContextMenu, contextMenuAnchor, type ContextMenuAnchor } from "../ui/context-menu";
 
 export { normalizeWorkspacePath } from "../../services/workspaceConversations";
 
@@ -95,15 +95,24 @@ const RunItem: React.FC<{
   skipEntrance?: boolean;
   className?: string;
   onClick: () => void;
-  onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onContextMenu: (event: React.MouseEvent<HTMLButtonElement> | React.KeyboardEvent<HTMLButtonElement>) => void;
+  selected: boolean;
+  busy: boolean;
+  menuOpen: boolean;
   children: React.ReactNode;
-}> = ({ runId, index, reduceMotion, skipEntrance = false, className = "", onClick, onContextMenu, children }) => {
+}> = ({ runId, index, reduceMotion, skipEntrance = false, className = "", onClick, onContextMenu, selected, busy, menuOpen, children }) => {
   return (
     <motion.button
+      type="button"
+      aria-current={selected ? "true" : undefined}
+      aria-busy={busy}
+      aria-haspopup="menu"
+      aria-expanded={menuOpen}
       data-run-id={runId}
       className={`run-item ${className}`.trim()}
       onClick={onClick}
       onContextMenu={onContextMenu}
+      onKeyDown={onContextMenu}
       {...cardMotion(reduceMotion, index, skipEntrance)}
     >
       {children}
@@ -170,8 +179,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
     setRunContextMenu(null);
   };
 
-  const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; project: ProjectItem } | null>(null);
-  const [runContextMenu, setRunContextMenu] = useState<{ x: number; y: number; runId: string; provisionalPrompt?: string } | null>(null);
+  const [projectContextMenu, setProjectContextMenu] = useState<(ContextMenuAnchor & { project: ProjectItem }) | null>(null);
+  const [runContextMenu, setRunContextMenu] = useState<(ContextMenuAnchor & { runId: string; provisionalPrompt?: string }) | null>(null);
   const reduceMotion = useReducedMotion() ?? false;
   // Cards restored on the first paint keep their final visual state; only cards
   // that arrive later (bootstrap, opening a project, or switching workspaces)
@@ -206,44 +215,37 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
     return () => query.removeEventListener("change", handleChange);
   }, []);
 
-  React.useEffect(() => {
-    const handleClose = () => {
-      setProjectContextMenu(null);
-      setRunContextMenu(null);
-    };
-    window.addEventListener("click", handleClose);
-    // Capture before another menu's handler stops propagation, so only the
-    // newly opened context menu stays visible across the sidebar and graph.
-    window.addEventListener("contextmenu", handleClose, true);
-    return () => {
-      window.removeEventListener("click", handleClose);
-      window.removeEventListener("contextmenu", handleClose, true);
-    };
-  }, []);
-
   const projectCards = projects.map((proj, index) => {
     const isActive = workspaceKey(activeRepo) === workspaceKey(proj.path);
     const isSwitching = switchingProjectPath ? workspaceKey(switchingProjectPath) === workspaceKey(proj.path) : false;
+    const openMenu = (event: React.MouseEvent<HTMLButtonElement> | React.KeyboardEvent<HTMLButtonElement>) => {
+      const anchor = contextMenuAnchor(event);
+      if (!anchor) return;
+      setRunContextMenu(null);
+      setProjectContextMenu({ ...anchor, project: proj });
+    };
     return (
-      <motion.div
+      <motion.button
+        type="button"
         key={proj.path}
+        aria-label={`${proj.name}\n${normalizeWorkspacePath(proj.path)}`}
+        aria-current={isActive ? "true" : undefined}
+        aria-busy={isSwitching}
+        aria-haspopup="menu"
+        aria-expanded={projectContextMenu?.project.path === proj.path}
         className={`project-workspace-item ${isActive ? "active" : ""} ${isSwitching ? "is-switching" : ""}`}
         onClick={() => onSelectProject(proj)}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          setRunContextMenu(null);
-          setProjectContextMenu({ x: e.clientX, y: e.clientY, project: proj });
-        }}
+        onContextMenu={openMenu}
+        onKeyDown={openMenu}
         {...cardMotion(reduceMotion, index, restoredProjectKeys.has(workspaceKey(proj.path)), PROJECT_LIST_GAP)}
       >
-        <div className="proj-details">
-          <div className="proj-name-row">
+        <span className="proj-details">
+          <span className="proj-name-row">
             <strong>{proj.name}</strong>
-          </div>
+          </span>
           <small className="proj-path-text">{workspacePathDisplay(proj.path)}</small>
-        </div>
-      </motion.div>
+        </span>
+      </motion.button>
     );
   });
 
@@ -271,12 +273,15 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         skipEntrance={restoredRunKeys.has(runCardKeys[id] ?? id)}
         className={`${isChosen ? "chosen" : ""} ${isLoadingThisRun ? "is-loading" : ""}`}
         onClick={() => onLoadRun(id)}
+        selected={isChosen}
+        busy={isLoadingThisRun}
+        menuOpen={runContextMenu?.runId === id}
         onContextMenu={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
+          const anchor = contextMenuAnchor(e);
+          if (!anchor) return;
           setProjectContextMenu(null);
           setRunContextMenu({
-            x: e.clientX, y: e.clientY, runId: id,
+            ...anchor, runId: id,
             // The durable ID may replace a pending card while its menu is open.
             provisionalPrompt: id.startsWith("pending-") ? runLabels[id] : undefined,
           });
@@ -309,7 +314,6 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           className="sidebar-toggle-btn"
           onClick={toggleCollapsed}
           aria-label={isCollapsed ? t("展开侧边栏") : t("收起侧边栏")}
-          title={isCollapsed ? t("展开侧边栏") : t("收起侧边栏")}
           aria-expanded={!isCollapsed}
         >
           {isCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
@@ -332,7 +336,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         </div>
       </div>
 
-      <div className={`projects-list${projects.length === 1 ? " has-single-project" : ""}`}>
+      <div className={`projects-list${projects.length === 1 ? " has-single-project" : ""}`} inert={isCollapsed}>
         {reduceMotion ? projectCards : <AnimatePresence>{projectCards}</AnimatePresence>}
         {projects.length === 0 && (
           <div className="projects-placeholder">
@@ -355,7 +359,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         </div>
       </div>
 
-      <div className="runs-list">
+      <div className="runs-list" inert={isCollapsed}>
         {!isReady ? (
           <div className="sidebar-skeleton-wrap" aria-hidden="true">
             <div className="sidebar-skeleton-item">
@@ -406,17 +410,16 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
         </button>
       </div>
 
-      {projectContextMenu &&
-        createPortal(
-          <div
-            className="context-menu"
-            style={{
-              left: Math.min(projectContextMenu.x, window.innerWidth - 180),
-              top: Math.min(projectContextMenu.y, window.innerHeight - 120),
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
+      {projectContextMenu && (
+        <ContextMenu
+          anchor={projectContextMenu}
+          label={projectContextMenu.project.name}
+          onClose={() => setProjectContextMenu(null)}
+        >
           <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
             className="context-menu-item"
             onClick={() => {
               onCancelPendingPromptCopy();
@@ -429,6 +432,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           </button>
           <div className="context-menu-divider" />
           <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
             className="context-menu-item danger"
             onClick={() => {
               const project = projectContextMenu.project;
@@ -439,21 +445,19 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             <Trash2 size={14} />
             <span>{t("从工作区移除")}</span>
           </button>
-          </div>,
-          document.body,
-        )}
+        </ContextMenu>
+      )}
 
-      {runContextMenu &&
-        createPortal(
-          <div
-            className="context-menu"
-            style={{
-              left: Math.min(runContextMenu.x, window.innerWidth - 180),
-              top: Math.max(0, Math.min(runContextMenu.y, window.innerHeight - 150)),
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
+      {runContextMenu && (
+        <ContextMenu
+          anchor={runContextMenu}
+          label={runLabels[runContextMenu.runId] || `Graph ${runContextMenu.runId.slice(0, 8)}`}
+          onClose={() => setRunContextMenu(null)}
+        >
           <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
             className="context-menu-item"
             onClick={() => {
               onCancelPendingPromptCopy();
@@ -465,6 +469,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             <span>{t("复制快照 ID")}</span>
           </button>
           <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
             className="context-menu-item"
             onClick={() => {
               const { runId, provisionalPrompt } = runContextMenu;
@@ -477,6 +484,9 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
           </button>
           <div className="context-menu-divider" />
           <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
             className="context-menu-item danger"
             disabled={runContextMenu.runId.startsWith("pending-")}
             onClick={() => {
@@ -488,9 +498,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
             <Trash2 size={14} />
             <span>{t("删除此条历史")}</span>
           </button>
-          </div>,
-          document.body,
-        )}
+        </ContextMenu>
+      )}
     </aside>
   );
 });

@@ -105,14 +105,16 @@ Nodes remain stable across recorded execution attempts. Historical output and ba
 
 ## Scheduling and concurrency
 
-Only ready nodes dispatch, subject to the **per-Graph-Run** limit. `maxParallel=0` defaults to 8; positive values can lower that limit, with a hard maximum of 8.
+Only ready nodes dispatch, subject to the **per-Graph-Run** limit. `maxParallel=0` defaults to 8; positive values configure the limit (range 2–40 in Settings, default 8), with a hard maximum of 40. New Runs dispatch through the [batch workspace barrier](workspace-snapshots-and-feedback.md#adaptive-workspace-policy): a freed slot is not filled until the current batch drains and hands off its results. Legacy Runs keep their recorded scheduling contract.
 
 There is no global pool limiting nodes across Runs, and no shared cap for Planner/Serial sessions. Choose concurrency with provider quotas and machine resources in mind. Creating or switching conversations does not stop background Runs.
 
 Failure blocks dependent branches; unrelated work continues. The topology's
 Pause control stops new dispatches **and interrupts active node process trees**
-for that Run, without stopping its Planner or another Run. The browser shows
-`pausing` until those writers drain and disables Continue during that interval.
+for that Run, without stopping its Planner or another Run. The topology's
+Pause/Continue control is disabled while the Planner is active; its conversation's
+Stop remains the control for that turn. The browser shows `pausing` until node
+writers drain and disables Continue during that interval.
 Continue requeues the interrupted nodes using their own Pi sessions and retained
 workspaces. If an initial preparation was paused before Pi launched and no
 conversation exists, Continue dispatches the initial task instead of attempting
@@ -169,7 +171,13 @@ never-started nodes are not retargeted. Conversations that never changed models
 continue with the settings composition used when they were created, while new
 conversations use the saved global defaults. `config.json` remains the defaults
 document for new Runs; the Run projection carries `modelConfig` for its own
-conversation.
+conversation. A Settings refresh belongs to its modal opening and foreground
+identity. Closing/reopening Settings or starting a save invalidates older reads,
+so delayed snapshots cannot replace an accepted selection or refresh a newer
+opening with stale role models. An untouched draft may adopt only its current
+opening's refresh; an edited draft retains the user's changes. The
+[settings browser tests](../../scripts/bootstrap-settings-ui.test.mjs) cover
+late pre-save reads, out-of-order reopen responses and save retry behavior.
 
 Dispatch must honor [physical workspace ownership](workspace-snapshots-and-feedback.md#physical-workspaces-and-ownership) and the [Planner follow-up dispatch/publication barrier](execution-model.md#planner-follow-up-workspaces).
 
@@ -183,7 +191,7 @@ A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `
 - `<FEEDBACK>` queues a versioned request for the graph's one explicit target. Current requests reviewing the same target execution/revision are applied together as one repair once affected running work has been stopped and its failures settled. Only senders of applicable `<FEEDBACK>` contribute project-file results and instructions; `<ACCEPT>`, exhausted and superseded requests contribute neither. The batch invalidates the target and its ordinary dependency descendants once; other branches remain valid. The target continues its own history with the combined project results and each sender's explicit instructions, never the senders' conversations. Feedback budgets are still consumed once per applied source/target edge, not once per batch. Recomputed descendants start from zero: when an invalidated descendant re-dispatches without a session continuation, its launch supersedes the node's prior attempts, so its conversation renders only the live lineage instead of history recorded against the old workspace.
 - A malformed verdict is a protocol error, not a node failure: the worker synchronously pushes a bounded repair turn into the node's own session (at most two, before completion commits) asking it to restate the verdict without repeating work. The pushed turn streams into the same execution transcript, and the first readable verdict is the one committed. If the verdict is still malformed after the repair budget, the execution fails with the protocol error; a provider or execution error inside a repair turn fails normally.
 - Once `maxFeedback` is exhausted, another `<FEEDBACK>` records `FeedbackExhausted` rather than acceptance or failure. The source remains completed; no instruction is sent to the feedback target, no result is invalidated, and the counter does not increase. Downstream nodes continue with their original tasks and inherited workspace state; the skipped feedback text is not injected into their prompts. Graph cards show the exhausted budget and explain that feedback was not applied. An `<ACCEPT>` at the limit remains ordinary acceptance, without an exhaustion warning.
-- The default and hard cap are 8 feedback applications per source/target edge. Lower configured limits remain valid; a limit of 0 records the first `<FEEDBACK>` as exhausted. Execution errors still fail normally.
+- The default is 4 feedback applications per source/target edge (range 2–40 in Settings), with a hard cap of 40. Lower configured limits remain valid; a limit of 0 records the first `<FEEDBACK>` as exhausted. Execution errors still fail normally.
 
 While feedback budget remains, a pending verdict that will apply makes every running execution in its scope doomed: the runtime stops them immediately instead of letting them finish into a discarded result, and their recorded failures settle before the batch invalidates the scope and dispatches the repair. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable. Once a review's verdict is resolved, its feedback edge no longer blocks ready descendants just because an accepted sibling is still running. Scheduling that review again reactivates the barrier; queued unresolved verdicts retain their drain-before-handoff checks.
 
@@ -420,7 +428,8 @@ After interruption:
   protocol and unknown failures. Graph surfaces run-wide Continue in its topology.
   The Node and Serial composers also expose the backend's per-node `canResume`
   hint and issue `resume_node` without creating a user message. A targeted retry
-  can run alongside independent workers, queues only the selected failed root
+  queues only the selected failed root (adaptive Runs wait for the current batch
+  to drain; legacy Runs may retry alongside independent workers)
   and its dependency-blocked descendants, and leaves other failures untouched.
   Its dependencies must be complete. A globally paused multi-node Graph remains
   paused: its nodes cannot be resumed individually without also scheduling other

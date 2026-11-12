@@ -3,7 +3,95 @@
 > **Scope:** Git-backed project inheritance, physical ownership, shadow repositories, feedback handoff and private publication composition/files-only delivery.
 > **Maintained with:** [workspace.rs](../../backend/src/workspace.rs), [native_copy.rs](../../backend/src/native_copy.rs), [runtime.rs](../../backend/src/runtime.rs), [graph_merge.rs](../../backend/src/graph_merge.rs), and the workspace/runtime tests.
 
-Grapher has one project-file version channel: **Git**. The host prepares snapshots and transfers commits; agents do not exchange commits or use Git as a conversation protocol. Collection rules below define which paths enter this channel; [managed environment evidence](native-environments.md) is separate.
+Private workspaces have one project-file version channel: **Git**. The host prepares snapshots and transfers commits; agents do not exchange commits or use Git as a conversation protocol. Shared-source execution uses live files instead. Collection rules below apply to private execution; [managed environment evidence](native-environments.md) is separate.
+
+## Adaptive workspace policy
+
+New Graph Runs select workspaces from **each actual dispatch batch**.
+`isolateParallelNodes` (Settings, default `true`, captured for new Runs) enables
+private workspaces only when that batch contains more than two nodes. A batch of
+one or two nodes shares the user's source directory. `false` makes every batch
+source-native. Neither total graph size, graph width, Planner Review, follow-up
+flags nor a prior batch's choice selects isolation.
+
+The scheduler forms a batch from currently ready nodes after dependency,
+feedback and worker-limit filtering. It does not fill a freed slot while another
+writer in that batch is active. After all writers drain, successful private
+results are composed and delivered through the existing recoverable publication
+path before dispatching another batch. This is a barrier even between two private
+batches. Intermediate delivery returns to scheduling, not graph completion or
+Planner review; conflicts block the next batch for Merger/retry. Only once all
+current work and feedback settle does the graph complete and claim its review.
+If a retained private Planner later records new files, the handoff reopens even
+without a graph edit; a completed phase must not strand undelivered changes.
+Successful managed result executions also deliver their newly sealed code through
+this barrier, without rewriting historical node executions or claiming another
+node review. Other business entries retain their verified previous publication
+until the refreshed descriptor installs the newly composed code.
+
+`ExecutionBatchStarted` records the selected nodes and choice. There is no sticky
+promotion: a `1 → 3 → 1` sequence runs source → private → source. Approval does not
+allocate environments or collect Git snapshots. A private batch initializes
+native admission lazily, then its first worker captures the latest source under
+the source lock, outside the Run mutex. Shared results have empty Git heads and
+no E/L evidence. Dormant private environment evidence stays Run-owned, but shared
+jobs never load that binding or require its completion seals. Each new private
+batch starts from the latest delivered/shared source files, not a pre-switch
+baseline; source itself can never be borrowed as a private slot. A retained
+managed result descriptor is historical after any new batch starts; querying or
+launching a current managed result requires a new `ResultPublished` after that
+batch. Checking the old publication head or merely returning to a private batch
+cannot prove current code/E/L: source edits never advance the publication head.
+
+A failed private attempt is not published as a completed result. An explicit
+retry first captures its retained project files (including uncommitted work),
+records the recovery heads and delivers them through the same handoff barrier.
+Failure/missing/corrupt/conflicted evidence stays explicit and retains the slot;
+retrying publication cannot treat an uncaptured recovery as already delivered.
+Capture/delivery survive restart, and neither event manufactures node completion.
+Manual `resolved` acknowledgement likewise delivers its already-recorded input
+head before the next attempt can switch to source. It remains a resolved
+preparation, not a completed task; superseded or invalidated inputs are not revived.
+If preparation stopped before `Prepared` recorded a base, resolution validates the
+owned private slot's pinned `refs/grapher/base` commit and ancestry. Missing,
+invalid or discarded history remains an error before any repair is staged; a
+nonempty recorded preparation head always takes precedence over that local ref.
+The next attempt continues only its own Pi history, forking it if cwd changes.
+Complete attachment-delivery receipts from that exact failed workspace follow
+its proven handoff, preserving edited/deleted inputs; unreceipted partial copies
+still fail rather than being accepted as complete. Recovery reconstructs accepted
+input claims across the node's own failed session forks; another source retry
+must not resurrect a proven deleted input. Private environment state is retained
+privately, not installed into source.
+Invalidated descendants recompute instead of reviving doomed partial attempts.
+Legacy Runs without a workspace-policy selection retain their old contract.
+
+For a shared batch:
+
+- Agents may write concurrently to source with separate identities, attempts and
+  Pi histories. Files are visible immediately; overlapping edits can overwrite
+  each other, and source writes are not isolated from Planner or the user.
+  External source-file edits before or during execution are accepted as live
+  changes; they do not fail a node's workspace-integrity check. Private result
+  seals and recoverable Git delivery keep their own consistency checks.
+- No node directory, managed environment, parent composition or Git result commit
+  is created. There is no file rollback. A preceding private/recovery handoff may
+  still need Git delivery before this batch starts.
+- Feedback keeps its atomic verdict/budget/invalidation rules and target history;
+  batch delivery replaces physical sender-to-target workspace transfers.
+- Planner stays in source with no workspace targets, so `switch_workspace` is not
+  registered. A failed Planner turn pinned to an earlier private batch cannot
+  bypass this policy through continuation: it is rejected before launch, retaining
+  its workspace, draft and history. A new Planner message uses source instead;
+  an unfinished private turn is never silently relocated. Existing prompt text is
+  unchanged.
+- A durable completion review claim prevents duplicate reviews. Human-only node
+  follow-ups do not trigger review; mixed follow-up/new-work batches still do.
+
+Evidence: [workspace policy](../../backend/src/workspace_policy.rs),
+[policy/replay tests](../../backend/src/workspace_policy_tests.rs),
+[driver/environment/recovery tests](../../backend/src/batch_workspace_tests.rs),
+and [review tests](../../backend/src/planner_review_tests.rs).
 
 ## Agent project views
 
@@ -174,7 +262,7 @@ index. Identical source trees with the same parents reuse an immutable snapshot.
 
 For an ordinary folder (no `.git`), detection, initial planning, approval and
 pre-dispatch Planner revisions remain pure filesystem operations. Its database
-is materialized lazily by the first dispatched node worker, which force-collects
+is materialized lazily by the first private node worker, which force-collects
 the current source files and records `SourceSnapshotted` plus cleanup ownership.
 Serial does not create this database. Standard Git databases retain internal
 history for continuation and conversation-owned cleanup; the ordinary-folder
@@ -327,7 +415,8 @@ Publication is Git-only, with internal composition separated from delivery:
    collection rules, but their snapshot is internal. Staged changes under an
    excluded scope remain staged and unpublished; they are not silently
    unstaged or removed.
-2. Compose valid terminal heads and that source snapshot in the private,
+2. Compose the selected private heads (batch outputs or legacy terminal results)
+   and that source snapshot in the private,
    Run-owned host database. A clean composition merges trees and records the
    composed project view without checking the project out when its metadata can
    be established from the recorded views. A conflict, nested repository,

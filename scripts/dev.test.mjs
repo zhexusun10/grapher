@@ -47,6 +47,10 @@ if (phase === 'setup' || phase === 'build') {
     phases.push(phase);
     assert.equal(options.cwd, root);
     assert.equal(options.env.GRAPHER_PORT, env.GRAPHER_PORT);
+    if (phase === 'build' || phase === 'run') {
+      assert.ok(args.includes('--quiet'), 'Cargo progress must not show an internal crate version');
+      assert.equal(options.stdio, 'inherit', 'Cargo warnings and errors must remain visible');
+    }
     if (phase === 'frontend') assert.equal(args.at(-1), env.GRAPHER_FRONTEND_PORT);
     const child = spawn(process.execPath, [script, phase], { ...options, stdio: 'ignore' });
     children.push(child);
