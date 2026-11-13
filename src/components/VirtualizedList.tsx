@@ -251,7 +251,7 @@ export function VirtualizedList<T extends { id: string }>({ items, renderRow, ga
       if (!parent || isNestedScrollGesture(event, parent)) return;
       cancelRestore();
       releaseAnchor();
-      const width = parent.offsetWidth - parent.clientWidth;
+      const width = parent.offsetWidth - parent.clientWidth - parent.clientLeft;
       const bounds = parent.getBoundingClientRect();
       const onScrollbar = width > 0 ? event.clientX >= bounds.right - width :
         event.target === parent && event.clientX >= bounds.right - 14;

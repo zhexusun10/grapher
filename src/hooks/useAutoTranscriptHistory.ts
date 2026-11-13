@@ -42,7 +42,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
       }
       if (event.type === "pointerdown") {
         const pointer = event as PointerEvent, bounds = parent.getBoundingClientRect();
-        const width = parent.offsetWidth - parent.clientWidth;
+        const width = parent.offsetWidth - parent.clientWidth - parent.clientLeft;
         if (pointer.clientX < bounds.right - (width || 14)) return;
       }
       if (isNestedScrollGesture(event, parent)) return;

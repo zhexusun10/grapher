@@ -167,6 +167,17 @@ try {
     await page.waitForTimeout(200);
     assert.equal(await page.locator('.initial-query-scroll').evaluate(scroll => scroll.scrollTop), 0);
     assert.equal(await page.locator('.react-flow__node').count(), 21);
+    const centerOffsets = await page.evaluate(() => {
+      const center = selector => {
+        const rect = document.querySelector(selector).getBoundingClientRect();
+        return (rect.left + rect.right) / 2;
+      };
+      const axis = center('.initial-query-scroll');
+      return ['.tool-call-card', '.plan-summary-card', '.pane-bottom-chat .prompt-box-container']
+        .map(selector => ({ selector, offset: center(selector) - axis }));
+    });
+    assert.ok(centerOffsets.every(({ offset }) => Math.abs(offset) < 0.75),
+      `cards and composer share a centerline: ${JSON.stringify(centerOffsets)}`);
     assert.equal(await page.getByText('Non-contiguous transcript append').count(), 0);
     assert.deepEqual(errors, []);
     await page.screenshot({ path: `assets/readme-graph${zh ? '-zh' : ''}.png`, animations: 'disabled' });

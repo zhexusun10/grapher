@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import { createServer } from "vite";
+
+async function expectConversationCentered(page, layout) {
+  await expect.poll(() => page.evaluate(() => {
+    const center = element => {
+      const rect = element.getBoundingClientRect();
+      return (rect.left + rect.right) / 2;
+    };
+    const scroller = document.querySelector(".initial-query-scroll");
+    const axis = center(scroller);
+    return Math.max(...[".chat-messages-stream", ".plan-summary-card", ".pane-bottom-chat .prompt-box-container"]
+      .map(selector => Math.abs(center(document.querySelector(selector)) - axis)));
+  }), { message: `${layout}: transcript, overview and composer share the pane's centerline` }).toBeLessThan(0.75);
+}
 
 // Mocked APIs exercise the real app while keeping the workspace untouched.
 for (const reducedMotion of ["reduce", "no-preference"]) {
@@ -139,6 +152,7 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     assert.ok((await page.locator(".conversation-pane").boundingBox()).width >= 279, "a stored small split does not crush the conversation");
     assert.ok((await page.locator(".graph-pane").boundingBox()).width >= 319, "the graph retains its minimum width");
     await page.locator(".plan-summary-stats").waitFor();
+    await expectConversationCentered(page, "narrow desktop split");
     const stats = await page.locator(".plan-summary-stats").evaluate(row => {
       const bounds = row.getBoundingClientRect();
       const cells = [...row.children].map(child => child.getBoundingClientRect());
@@ -248,6 +262,7 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     assert.equal(await page.locator(".graph-canvas .react-flow__node").first().isVisible(), false,
       "React Flow's inline node visibility cannot expose the hidden graph");
     assert.ok((await page.locator(".conversation-pane").boundingBox()).width > 600);
+    await expectConversationCentered(page, "single-pane layout");
     // Latest explicitly sets visibility and pointer events when active.
     await page.locator(".scroll-to-bottom-btn").evaluate(button => button.classList.add("visible"));
     await graphButton.click();
@@ -277,6 +292,17 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     await page.getByRole("separator", { name: "Resize execution graph" }).press("Enter");
     await page.getByRole("button", { name: "Expand execution graph" }).waitFor();
     await page.locator(".graph-pane").waitFor({ state: "detached" });
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await expectConversationCentered(page, "full-width conversation");
+    const scroller = page.locator(".initial-query-scroll");
+    assert.equal(await scroller.evaluate(element => element.scrollHeight > element.clientHeight), false,
+      "short history fits without a scrollbar");
+    await page.locator(".chat-messages-stream").evaluate(element => { element.style.minHeight = "1400px"; });
+    assert.equal(await scroller.evaluate(element => element.scrollHeight > element.clientHeight), true,
+      "long history requires a scrollbar");
+    await expectConversationCentered(page, "full-width conversation with overflow");
+    await page.locator(".chat-messages-stream").evaluate(element => element.style.removeProperty("min-height"));
+    await page.setViewportSize({ width: 900, height: 700 });
     await page.getByRole("button", { name: "Expand sidebar" }).click();
     await switcher.waitFor({ state: "visible" });
     assert.equal(await conversation.getAttribute("aria-pressed"), "true");
@@ -318,6 +344,7 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     await page.setViewportSize({ width: 640, height: 700 });
     await page.waitForFunction(() => document.querySelector(".sidebar")?.classList.contains("is-collapsed"));
     await conversation.click();
+    await expectConversationCentered(page, "narrow window");
     const composerFit = await page.evaluate(() => {
       const box = document.querySelector(".conversation-pane .prompt-box-container");
       const row = document.querySelector(".conversation-pane .prompt-box-actions-row");

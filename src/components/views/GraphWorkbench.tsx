@@ -1684,7 +1684,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       stopLatestForReader();
       pointerHeldRef.current = true;
       if (isNestedScrollGesture(event, el) || scrollbarGestureRef.current) return;
-      const scrollbarWidth = el.offsetWidth - el.clientWidth;
+      // clientLeft includes the mirrored gutter from stable both-edges.
+      const scrollbarWidth = el.offsetWidth - el.clientWidth - el.clientLeft;
       const bounds = el.getBoundingClientRect();
       // Overlay scrollbars have no layout width; only count that narrow band
       // when the scroller itself is the event target, not a right-edge button.

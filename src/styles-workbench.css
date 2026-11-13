@@ -296,7 +296,8 @@
   overflow-x: hidden;
   overscroll-behavior-y: contain;
   overflow-anchor: none;
-  scrollbar-gutter: stable;
+  /* Match the overlaid composer's centerline, even with classic scrollbars. */
+  scrollbar-gutter: stable both-edges;
   padding: 16px 18px calc(var(--composer-height, 100px) + 16px);
   display: flex;
   flex-direction: column;

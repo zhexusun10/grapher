@@ -2120,6 +2120,42 @@ test("an upward gesture with no conversation scroll range keeps following", { ti
   }
 });
 
+test("symmetric scrollbar gutters do not turn adjacent content into a scrollbar hit", { timeout: 30_000 }, async () => {
+  const scrollbarBrowser = await chromium.launch({
+    channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"),
+    headless: true, ignoreDefaultArgs: ["--hide-scrollbars"],
+  });
+  let context;
+  try {
+    const view = await fixture("latestScroll&layout=live-tool&view=node", undefined, "reduce", undefined, undefined, scrollbarBrowser);
+    context = view.context;
+    const { page, errors } = view;
+    await page.getByText("Virtualized message 79", { exact: true }).waitFor();
+    const scroller = page.locator(".initial-query-scroll");
+    await page.waitForFunction(() => document.querySelector(".initial-query-scroll").dataset.transcriptFollowing === "true");
+    const geometry = await scroller.evaluate(el => {
+      const rect = el.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, top: rect.top,
+        leftGutter: el.clientLeft, rightGutter: el.offsetWidth - el.clientWidth - el.clientLeft };
+    });
+    assert.ok(geometry.leftGutter > 0 && geometry.rightGutter > 0, "exercise classic symmetric gutters");
+    for (const [area, x, following] of [
+      ["mirrored left gutter", geometry.left + geometry.leftGutter / 2, true],
+      ["content beside the right gutter", geometry.right - geometry.rightGutter - 1, true],
+      ["actual scrollbar", geometry.right - geometry.rightGutter / 2, false],
+    ]) {
+      await scroller.evaluate((el, { x, y }) => {
+        el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 12, clientX: x, clientY: y }));
+      }, { x, y: geometry.top + 40 });
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+      assert.equal(await scroller.getAttribute("data-transcript-following") === "true", following, area);
+      await page.evaluate(() => window.dispatchEvent(new PointerEvent("pointerup", { pointerId: 12 })));
+      await page.waitForFunction(() => document.querySelector(".initial-query-scroll").dataset.transcriptFollowing === "true");
+    }
+    assert.deepEqual(errors, []);
+  } finally { await context?.close(); await scrollbarBrowser.close(); }
+});
+
 test("a scrollbar-edge click without movement does not disable following", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("latestScroll&layout=live-tool&view=node");
   try {

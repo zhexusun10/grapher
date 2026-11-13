@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resuming nodes and other generic workspace-preparation stages no longer claim files are being copied. Only an explicit backend `copy` phase displays the copying label; unknown or mixed stages display preparation.
 - Appending a Planner follow-up or review preserves mounted history, expanded rows and reading position even after global transcript-cache eviction. The live turn stays visible until its durable log is ready.
 - Continuing explicitly user-paused work now keeps its logical attempt number across restarts, while retaining a separate execution record for every dispatch. Graph attempt badges use those recorded numbers; genuine failure retries, new user turns and recomputation still advance the attempt.
+- Conversation cards, graph overview and composer stay horizontally centered in split/full-width layouts with or without scrollbar overflow. Scrollbar gesture detection excludes the mirrored gutter.
 - Updated regression fixtures to explicitly select manual approval and exercise private workspaces with three-node batches. Legacy scheduler tests retain their original persisted-event contract instead of accidentally testing new batch defaults.
 
 ## [1.7.1] - 2026-11-11
