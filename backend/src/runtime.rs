@@ -1123,7 +1123,7 @@ impl Runtime {
         }
         let mut config = config;
         config.max_feedback = config.max_feedback.min(MAX_FEEDBACK);
-        // max_parallel = 0 uses the default node worker limit (8); positive values are capped at MAX_GRAPH_NODE_WORKERS (40).
+        // max_parallel = 0 uses DEFAULT_MAX_PARALLEL; positive values are capped at MAX_GRAPH_NODE_WORKERS.
         config.max_parallel = config.max_parallel.min(MAX_GRAPH_NODE_WORKERS);
         #[cfg(feature = "fixture")]
         if config.engine == "pi" && config.pi_command.trim().is_empty() {
@@ -1959,7 +1959,7 @@ impl Runtime {
             return Err("Unknown test actuator".into());
         }
         config.max_feedback = config.max_feedback.min(MAX_FEEDBACK);
-        // max_parallel = 0 uses the default node worker limit (8); positive values are capped at MAX_GRAPH_NODE_WORKERS (40).
+        // max_parallel = 0 uses DEFAULT_MAX_PARALLEL; positive values are capped at MAX_GRAPH_NODE_WORKERS.
         config.max_parallel = config.max_parallel.min(MAX_GRAPH_NODE_WORKERS);
         #[cfg(not(feature = "fixture"))]
         if self.state.isolated_workspaces.is_none() {
@@ -3567,8 +3567,16 @@ impl Runtime {
         if ready.iter().any(|node| self.paused_private_continuation(&node.name).is_some()) {
             ready.retain(|node| self.paused_private_continuation(&node.name).is_some());
         }
+        // A slot cap must not let newly unlocked descendants jump ahead of
+        // ready peers left behind by the previous dispatch. Layers are a stable
+        // priority, not a barrier: unrelated ready work can still fill slots.
+        if let Some(plan) = &self.state.plan {
+            ready.sort_by_key(|node| plan.execution_batches.iter()
+                .position(|layer| layer.contains(&node.name)).unwrap_or(usize::MAX));
+        }
+        let all_ready = ready.clone();
         ready.truncate(available);
-        if !self.prepare_execution_batch(&ready, allow_publication && pending_sources.is_empty())? {
+        if !self.prepare_execution_batch(&ready, &all_ready, allow_publication && pending_sources.is_empty())? {
             return Ok(Vec::new());
         }
         let shared_source = self.shared_source_workspace();

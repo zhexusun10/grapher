@@ -94,6 +94,25 @@ test("role selectors offer only available models and their providers, without fr
   assert.ok(!markup.includes("<datalist"));
 });
 
+test("model selectors order version numbers descending within alphabetical families", () => {
+  const names = ["GPT-5.2", "GPT-4", "GPT-5.10", "Claude 3", "GPT-10", "GPT-5.3", "Claude 10", "GPT-6", "GPT-6.1", "GPT-5.1"];
+  const versions: ProviderCatalog = {
+    ...catalog,
+    models: names.map(name => ({ provider: "example", id: name, name, api: "test", contextWindow: 1000, available: true })),
+  };
+  const markup = renderToStaticMarkup(React.createElement(RoleModelSettings, {
+    config: defaultConfig, setConfig: () => {}, catalog: versions, busy: false,
+  }));
+  const sections = [...markup.matchAll(/<section\b[^>]*>[\s\S]*?<\/section>/g)];
+  for (const [section] of sections) {
+    const select = section.match(/<select\b[\s\S]*?<\/select>/)?.[0] ?? "";
+    const values = [...select.matchAll(/<option[^>]*value="example\/([^"]*)"/g)].map(match => match[1]);
+    assert.deepEqual(values, ["Claude 10", "Claude 3", "GPT-10", "GPT-6.1", "GPT-6", "GPT-5.10", "GPT-5.3", "GPT-5.2", "GPT-5.1", "GPT-4"]);
+  }
+  assert.equal(sections.length, 3);
+  assert.deepEqual(versions.models.map(model => model.name), names, "sorting must not mutate the catalog");
+});
+
 test("hiding Partitioner omits only its controls and preserves its saved model settings", () => {
   const config = updateRoleModelConfig(legacy, "partitioner", { model: "example/restricted", thinkingLevel: "max" });
   const original = JSON.stringify(config);
@@ -354,15 +373,20 @@ test('all Harness settings default on and preserve explicit opt-outs', async () 
   assert.equal(defaultConfig.postTaskReview, true);
   assert.equal(defaultConfig.plannerWriteTools, true);
   assert.equal(defaultConfig.isolateParallelNodes, true);
-  assert.equal(defaultConfig.maxParallel, 8);
+  assert.equal(defaultConfig.maxParallel, 20);
   assert.equal(defaultConfig.maxFeedback, 4);
-  assert.equal(normalizeMaxParallel(0), 8);
+  assert.equal(normalizeMaxParallel(0), 20);
   assert.equal(normalizeMaxParallel(1), 2);
   assert.equal(normalizeMaxParallel(2), 2);
+  assert.equal(normalizeMaxParallel(8), 8);
+  assert.equal(normalizeMaxParallel(20), 20);
   assert.equal(normalizeMaxParallel(24), 24);
   assert.equal(normalizeMaxParallel(40), 40);
   assert.equal(normalizeMaxParallel(99), 40);
-  assert.equal(normalizeMaxParallel(""), 8);
+  assert.equal(normalizeMaxParallel(""), 20);
+  assert.equal(normalizeMaxParallel(undefined), 20);
+  assert.equal(normalizeMaxParallel(null), 20);
+  assert.equal(normalizeMaxParallel("invalid"), 20);
   assert.equal(normalizeMaxFeedback(0), 4);
   assert.equal(normalizeMaxFeedback(1), 2);
   assert.equal(normalizeMaxFeedback(2), 2);
@@ -441,8 +465,9 @@ test('all Harness settings default on and preserve explicit opt-outs', async () 
     assert.match(defaultParallelInput, /type="number"/);
     assert.match(defaultParallelInput, /min="2"/);
     assert.match(defaultParallelInput, /max="40"/);
-    assert.match(defaultParallelInput, /value="8"/);
-    assert.match(maxParallelMarkup({ ...defaultConfig, maxParallel: 0 }) ?? '', /value="8"/);
+    assert.match(defaultParallelInput, /value="20"/);
+    assert.match(maxParallelMarkup({ ...defaultConfig, maxParallel: 0 }) ?? '', /value="20"/);
+    assert.match(maxParallelMarkup({ ...defaultConfig, maxParallel: 8 }) ?? '', /value="8"/);
     assert.match(maxParallelMarkup({ ...defaultConfig, maxParallel: 24 }) ?? '', /value="24"/);
     assert.match(maxParallelMarkup({ ...defaultConfig, maxParallel: 99 }) ?? '', /value="40"/);
     assert.match(maxParallelMarkup({ ...defaultConfig, maxParallel: 1 }) ?? '', /value="2"/);
@@ -475,6 +500,28 @@ test('all Harness settings default on and preserve explicit opt-outs', async () 
       assert.doesNotMatch(disabledToggle ?? '', /checked=""/, 'the toggle reflects the stored preference on open');
     } finally {
       prefs.setAutoExpandCot(true);
+    }
+    const uiCard = markup.match(/<section\b[^>]*aria-labelledby="ui-settings-title"[^>]*>([\s\S]*?)<\/section>/)?.[1];
+    assert.ok(uiCard, 'the UI settings card is present');
+    const overviewToggle = uiCard.match(/<input\b[^>]*>/g)
+      ?.find(input => input.includes(`aria-label="${t('显示执行拓扑概览')}"`));
+    assert.ok(overviewToggle, 'execution graph overview checkbox is inside UI settings');
+    assert.doesNotMatch(overviewToggle ?? '', /checked=""/, 'execution graph overview is off by default');
+    const uiOrder = [t('执行时自动展开思维链'), t('显示执行拓扑概览'), t('首页背景')]
+      .map(label => uiCard.indexOf(label));
+    assert.ok(uiOrder.every(index => index >= 0), 'all UI settings items are present');
+    assert.deepEqual([...uiOrder].sort((a, b) => a - b), uiOrder,
+      'execution graph overview sits between reasoning auto-expand and home background');
+    try {
+      prefs.setExecutionOverview(true);
+      const enabled = renderToStaticMarkup(React.createElement(SettingsModal, {
+        isOpen: true, onClose() {}, config: defaultConfig, dataPath: '', onSaveConfig() {},
+      }));
+      const enabledToggle = enabled.match(/<input\b[^>]*>/g)
+        ?.find(input => input.includes(`aria-label="${t('显示执行拓扑概览')}"`));
+      assert.match(enabledToggle ?? '', /checked=""/, 'the overview toggle reflects the stored preference on open');
+    } finally {
+      prefs.setExecutionOverview(false);
     }
   } finally { await vite.close(); }
 });

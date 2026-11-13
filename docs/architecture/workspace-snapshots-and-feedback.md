@@ -14,6 +14,14 @@ nodes. One or two nodes share the user's source directory. `false` always uses
 source. Total graph size, graph width, Planner Review and follow-up flags do not
 select isolation.
 
+The overview groups nodes into topological **batches**, not dispatch/publication
+groups. Readiness is determined by actual edges, not an all-nodes-in-batch
+barrier. After dependency and feedback filtering, earlier batches have stable
+priority before the worker cap is applied, so ready peers left behind by a cap
+are not displaced by newly unlocked descendants. Remaining capacity may still
+run ready nodes from later batches. A private dispatch may deliver while other
+nodes in its displayed batch have not yet run.
+
 The scheduler filters ready nodes by dependencies, feedback and available worker
 slots. While shared-source node writers remain active, newly ready nodes may
 fill free slots immediately without waiting for unrelated siblings. Replenishment
@@ -480,10 +488,18 @@ Publication is Git-only, with internal composition separated from delivery:
    branch, or replace the user's index. The source's real index bytes and
    staged entries remain exactly as captured.
 4. The source must still match its captured branch, HEAD, index and project
-   tree before checkout. Apply the final tree under the source `index.lock`
-   lease, but use only a private checkout index; the user's index is never
-   rewritten. There is no ordinary-file copy-back pass or ignore-based delivery
-   filter.
+   tree before delivery. Under the source `index.lock` lease (or the plain-folder
+   publication lease), Git checks only changed result paths out into private
+   staging, using only a private index. Changed regular files are fully copied
+   and synced into adjacent, journal-owned `.grapher-publish-<id>.tmp` files
+   before atomic rename. Untracked reserved temporaries are excluded from
+   collection; explicitly tracked project files still win over the naming
+   convention. Existing unowned temporaries are never deleted or adopted.
+   Each target is rechecked before replacement/deletion so edits made during
+   staging or copying fail closed. Stopped staging/copies never truncate the target. Deletions remain individually
+   recoverable; directory transitions remove only empty directories. The final
+   collected tree is verified before recording installation. The user's Git
+   index is never rewritten, and ignore rules do not filter delivered results.
 
 Immutable attempt journals beside the publication workspace retain inputs,
 branch identity, original index and the composed result across restarts. A
@@ -497,7 +513,15 @@ selected branch. Foreign Git locks and unrelated source merges are not adopted
 or removed. Changed source files/index/HEAD fail closed; before checkout begins,
 a retry can merge a fresh source baseline into the retained composition without
 rerunning nodes. A partially applied checkout requires recovery rather than
-blindly absorbing source changes.
+blindly absorbing source changes. Atomic retries clean only temporaries with
+recorded ownership in their journal, under the publication lease; foreign locks and unrelated
+files remain protected. Older in-place checkouts can leave a truncated file
+matching neither input nor result. Such bytes are not automatically assumed to
+be Grapher's work: errors name the mismatching paths, and the explicit
+[offline single-file reconciliation](../development/conversation-logs.md#reconcile-a-legacy-partial-publication-file)
+requires the observed blob identity and preserves both current and result bytes
+outside the project before an atomic replacement. It does not mark publication
+complete or launch nodes.
 
 Completion verifies internal input ancestry and delivery evidence, not node
 ancestry in the user's branch. Private bridge snapshots retain delivered node

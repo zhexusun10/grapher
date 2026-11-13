@@ -5607,7 +5607,7 @@ fn save_config_updates_bootstrap_and_persists() {
 
     // 5. Verify bounds (min 2, max 40) and distinct defaults for 0.
     for (input, expected_parallel, expected_feedback) in
-        [(0, 8, 4), (1, 2, 2), (24, 24, 24), (40, 40, 40), (100, 40, 40)]
+        [(0, 20, 4), (1, 2, 2), (8, 8, 8), (20, 20, 20), (24, 24, 24), (40, 40, 40), (100, 40, 40)]
     {
         let mut bounded = new_config.clone();
         bounded.max_parallel = input;

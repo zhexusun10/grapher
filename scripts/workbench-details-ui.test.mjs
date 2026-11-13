@@ -56,6 +56,7 @@ for (const [language, reducedMotion] of [["en", "no-preference"], ["zh-CN", "red
       const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: language, reducedMotion });
       await context.addInitScript(({ repository, config, language }) => {
         localStorage.setItem("grapher_language_v1", language);
+        localStorage.setItem("grapher_execution_overview_v1", "1");
         localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Project", lastOpened: 1 }]));
         localStorage.setItem("grapher_config", JSON.stringify(config));
         localStorage.setItem("grapher_workbench_split_ratio", "0.15");
@@ -85,6 +86,10 @@ for (const [language, reducedMotion] of [["en", "no-preference"], ["zh-CN", "red
       await page.locator('[data-run-id="details-completed"]').click();
       const chip = page.getByRole("button", { name: longName, exact: true });
       await chip.waitFor();
+      assert.deepEqual(await page.locator(".plan-batch-label").allTextContents(),
+        language === "en" ? ["Batch 1", "Batch 2"] : ["批次 1", "批次 2"]);
+      assert.match(await page.locator(".plan-summary-stats").textContent(),
+        language === "en" ? /2 batches/ : /2 批次/);
       await assertOverviewVerticalSpacing(page);
       await chip.hover();
       assert.equal(await chip.getAttribute("title"), null, "overview nodes do not show native hover tags");

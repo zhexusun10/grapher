@@ -12,6 +12,7 @@ use uuid::Uuid;
 mod publication;
 mod validation;
 pub use publication::publication_workspace;
+pub(crate) use publication::repair_legacy_file;
 pub(crate) use validation::ResolutionError;
 use validation::{persist_output, run_validated_merger};
 

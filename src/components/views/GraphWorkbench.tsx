@@ -56,6 +56,7 @@ import { AnimatedUserTurn } from "../AnimatedUserTurn";
 import { useWorkspaceChanges } from "../../hooks/useWorkspaceChanges";
 import { WorkspaceChangesPanel, WorkspaceChangesTrigger } from "../changes/WorkspaceChangesPanel";
 import { AnimatedDisclosure, getConversationViewport } from "../AnimatedDisclosure";
+import { useExecutionOverview } from "../../services/displayPreferences";
 
 /** Stable default so an omitted rollback set never invalidates the memos. */
 const EMPTY_ID_SET: ReadonlySet<string> = new Set();
@@ -469,6 +470,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   tokens,
 }) => {
   const [attemptId, setAttemptId] = useState("");
+  const showExecutionOverview = useExecutionOverview();
   const [collapsedAttemptIds, setCollapsedAttemptIds] = useState<Set<string>>(new Set());
   // A pause/resume request can wait for the runtime lock. Reflect the click
   // immediately instead of leaving the footer silent until the snapshot lands.
@@ -2120,10 +2122,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     execution?.output,
     state.publication?.status,
     state.phase,
+    showExecutionOverview,
   ]);
 
   const summaryBatches = useMemo(() => {
-    if (!state.graph.nodes.length) return [];
+    if (!showExecutionOverview || !state.graph.nodes.length) return [];
     const nodeMap = new Map(state.graph.nodes.map((node) => [node.name, node]));
     const layers = computeExecutionLayers(state.graph, state.plan);
     const seen = new Set<string>();
@@ -2142,7 +2145,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const remaining = state.graph.nodes.filter((node) => !seen.has(node.name));
     if (remaining.length > 0) batches.push(remaining);
     return batches;
-  }, [state.graph, state.plan]);
+  }, [showExecutionOverview, state.graph, state.plan]);
 
   const serialNode = routeType === "serial" && state.graph.nodes.length > 0 ? state.graph.nodes[0] : undefined;
   const serialNodeState = serialNode ? state.nodes[serialNode.name] : undefined;
@@ -2695,8 +2698,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     );
   };
 
-  const plannerResultCards = <>
-    {routeType === "graph" && (totalGraphNodes > 0 || hasCompletedPublication) && (
+  const plannerResultCards = showExecutionOverview && routeType === "graph" && (totalGraphNodes > 0 || hasCompletedPublication) ? (
       <motion.div
         className="plan-summary-card"
         initial={false}
@@ -2709,7 +2711,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             <span className="plan-summary-stats">
               <span>{t("{0} 节点", totalGraphNodes)}</span>
               <span className="plan-summary-sep" aria-hidden="true">·</span>
-              <span>{t("{0} 批次", summaryBatchCount)}</span>
+              <span title={t("批次按拓扑关系分组，不代表同时派发或统一回写。")}>{t("{0} 批次", summaryBatchCount)}</span>
               <span className="plan-summary-sep" aria-hidden="true">·</span>
               <span>{t("{0} 拓扑边", state.graph.edges.length)}</span>
               <span className="plan-summary-sep" aria-hidden="true">·</span>
@@ -2746,8 +2748,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           />
         )}
       </motion.div>
-    )}
-  </>;
+  ) : null;
 
   return (
     <section
@@ -3456,7 +3457,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 </div>
               )}
 
-              {routeType === "graph" && (state.graph.nodes.length > 0 || hasCompletedPublication) && (
+              {showExecutionOverview && routeType === "graph" && (state.graph.nodes.length > 0 || hasCompletedPublication) && (
                 <div className={`planner-result-cards${hidePlannerResultCards ? " is-hidden" : ""}`}
                   aria-hidden={hidePlannerResultCards || undefined}
                   inert={hidePlannerResultCards ? true : undefined}>

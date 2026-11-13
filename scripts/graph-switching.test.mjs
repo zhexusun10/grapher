@@ -109,6 +109,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       const context = await browser.newContext({ viewport: { width: 1280, height: 768 }, reducedMotion });
       await context.addInitScript(({ repository, config }) => {
         localStorage.setItem("grapher_language_v1", "en");
+        localStorage.setItem("grapher_execution_overview_v1", "1");
         localStorage.setItem("grapher_workbench_split_ratio", "0.55");
         localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Project", lastOpened: 1 }]));
         localStorage.setItem("grapher_config", JSON.stringify(config));

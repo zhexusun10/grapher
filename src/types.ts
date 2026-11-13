@@ -97,7 +97,7 @@ export interface OpenWorkspaceFileRequest {
 }
 
 export interface Execution { id: string; node: string; revision: number; attempt: number; sessionId: string; worktree: string; before: string; after: string | null; status: string; output: string; outputBytes?: number; pid?: number | null; startedAt: number; completedAt: number | null; metrics?: ExecutionMetrics | null; fileChanges?: FileChangeSummary | null }
-export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Pick<Execution, "id" | "node">; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; requested_node?: string; actual_node?: string; reason?: string; message_sequences?: number[]; from_execution_id?: string; from_event_sequence?: number; from_output_offset?: number; old_instruction?: string; first_turn?: boolean; fresh_restart?: boolean; selected_version?: number; human?: boolean; planning_id?: string; request_id?: string; status?: string; planning?: PlanningSummary; plan_type?: string; planType?: string }
+export interface GraphEvent { sequence: number; timestamp: number; type: string; node?: string; nodes?: string[]; heads?: string[]; from?: string; to?: string; accepted?: boolean; count?: number; limit?: number; error?: string; execution?: Pick<Execution, "id" | "node">; instruction?: string; images?: ImageAttachment[]; target?: string; execution_id?: string; requested_node?: string; actual_node?: string; reason?: string; message_sequences?: number[]; from_execution_id?: string; from_event_sequence?: number; from_output_offset?: number; old_instruction?: string; first_turn?: boolean; fresh_restart?: boolean; selected_version?: number; human?: boolean; planning_id?: string; request_id?: string; status?: string; planning?: PlanningSummary; plan_type?: string; planType?: string }
 export interface Publication { repository: string; heads: string[]; status: "publishing" | "merging" | "completed" | "failed"; head: string | null; error: string | null; startedAt: number; completedAt: number | null }
 export interface TokenUsage {
   input: number;
@@ -233,7 +233,7 @@ export interface Bootstrap {
 }
 
 export const MIN_MAX_PARALLEL = 2;
-export const DEFAULT_MAX_PARALLEL = 8;
+export const DEFAULT_MAX_PARALLEL = 20;
 export const MAX_MAX_PARALLEL = 40;
 
 export const MIN_MAX_FEEDBACK = 2;

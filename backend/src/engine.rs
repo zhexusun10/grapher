@@ -860,31 +860,58 @@ pub fn clean_model_error(error: &str) -> String {
     trimmed.to_string()
 }
 
-fn session_dir_contains_session(session_dir: &Path, session_id: &str) -> bool {
+fn matching_session_files(
+    session_dir: &Path,
+    session_id: &str,
+) -> std::collections::BTreeSet<PathBuf> {
     let Ok(entries) = fs::read_dir(session_dir) else {
-        return false;
+        return Default::default();
     };
-    entries.filter_map(Result::ok).any(|entry| {
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "jsonl") || !path.is_file() {
-            return false;
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "jsonl") || !path.is_file() {
+                return None;
+            }
+            let file = fs::File::open(&path).ok()?;
+            let mut header = String::new();
+            BufReader::new(file)
+                .take(65536)
+                .read_line(&mut header)
+                .ok()?;
+            let value: Value = serde_json::from_str(&header).ok()?;
+            (value.get("type").and_then(Value::as_str) == Some("session")
+                && value.get("id").and_then(Value::as_str) == Some(session_id))
+            .then_some(path)
+        })
+        .collect()
+}
+
+fn remove_stray_blank_sessions(
+    session_dir: &Path,
+    session_id: &str,
+    existing: &std::collections::BTreeSet<PathBuf>,
+) {
+    for path in matching_session_files(session_dir, session_id) {
+        if existing.contains(&path) {
+            continue;
         }
         let Ok(file) = fs::File::open(&path) else {
-            return false;
+            continue;
         };
-        let mut header = String::new();
-        if BufReader::new(file)
-            .take(65536)
-            .read_line(&mut header)
-            .is_err()
-        {
-            return false;
-        }
-        serde_json::from_str::<Value>(&header).is_ok_and(|value| {
+        let mut lines = BufReader::new(file).lines();
+        let Some(Ok(first)) = lines.next() else {
+            continue;
+        };
+        let is_header = serde_json::from_str::<Value>(&first).is_ok_and(|value| {
             value.get("type").and_then(Value::as_str) == Some("session")
                 && value.get("id").and_then(Value::as_str) == Some(session_id)
-        })
-    })
+        });
+        if is_header && lines.all(|line| line.is_ok_and(|text| text.trim().is_empty())) {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 pub fn run_pi(request: PiRequest<'_>, on_output: impl FnMut(String)) -> Result<String, String> {
@@ -902,9 +929,11 @@ fn run_pi_with_timeout(
     #[cfg(not(feature = "fixture"))]
     crate::workspace::validate_binding(Path::new(&config.repository))?;
     fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
-    let resuming_existing_session = request
+    let existing_sessions = request
         .session_id
-        .is_some_and(|id| session_dir_contains_session(request.session_dir, id));
+        .map(|id| matching_session_files(request.session_dir, id))
+        .unwrap_or_default();
+    let resuming_existing_session = !existing_sessions.is_empty();
     // Source-native conversations stay resident: reuse a parked shell for this
     // session before any cold launch. Graph node agents are never parked, so
     // this is a miss for them.
@@ -1485,7 +1514,7 @@ fn run_pi_with_timeout(
         &mut channels,
         &mut on_output,
     )?;
-    finish_turn(
+    let result = finish_turn(
         &request,
         &mut on_output,
         timeout,
@@ -1497,7 +1526,13 @@ fn run_pi_with_timeout(
         outcome,
         managed,
         source_role,
-    )
+    );
+    if let (Some(session_id), Err(error)) = (request.session_id, &result) {
+        if resuming_existing_session && error.contains("failed to resume the existing session") {
+            remove_stray_blank_sessions(request.session_dir, session_id, &existing_sessions);
+        }
+    }
+    result
 }
 
 struct SessionChannels {

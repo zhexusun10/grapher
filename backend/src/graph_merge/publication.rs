@@ -1,5 +1,9 @@
 //! Git is an internal composition channel. Publication delivers files only:
 //! never import an object, move a ref, or replace the user's Git index.
+mod atomic_files;
+mod repair;
+pub(crate) use repair::repair_legacy_file;
+
 use super::compose_graph_scoped;
 use crate::workspace::{self, git, repository_git};
 use serde::{Deserialize, Serialize};
@@ -531,6 +535,10 @@ fn select_attempt(
 }
 
 fn private_index_git(repository: &Path, index: &Path, args: &[&str]) -> Result<String, String> {
+    private_index_git_input(repository, index, args, None)
+}
+
+fn private_index_git_input(repository: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
     // Do not run source clean/smudge/EOL filters while delivering recorded
     // physical bytes, and do not mutate the shared snapshot repo's attributes.
     let metadata = index
@@ -575,7 +583,7 @@ fn private_index_git(repository: &Path, index: &Path, args: &[&str]) -> Result<S
     }
     let mut command = vec!["--git-dir", metadata_text, "--work-tree", worktree];
     command.extend_from_slice(args);
-    let bytes = workspace::git_bytes(repository, &command, Some(index), None)?;
+    let bytes = workspace::git_bytes(repository, &command, Some(index), input)?;
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
@@ -616,6 +624,32 @@ fn valid_partial_checkout(
     Ok(from_input.is_disjoint(&from_result))
 }
 
+fn with_source_lease<T>(
+    repository: &Path,
+    journal: &Path,
+    standard: bool,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let lock_path = if standard {
+        source_index(repository)?.with_extension("lock")
+    } else {
+        workspace::shadow_repo_dir(repository)?.join("publication.lock")
+    };
+    let marker = format!("Grapher publication {}\n", journal.display());
+    // Only this interrupted attempt's marker may be reclaimed.
+    release_owned_lock(&lock_path, marker.as_bytes())?;
+    let mut lease = OpenOptions::new().write(true).create_new(true).open(&lock_path)
+        .map_err(|e| format!("Cannot acquire source Git index lease: {e}"))?;
+    lease.write_all(marker.as_bytes()).and_then(|_| lease.sync_all()).map_err(|e| e.to_string())?;
+    drop(lease);
+    let outcome = operation();
+    let released = release_owned_lock(&lock_path, marker.as_bytes());
+    match outcome {
+        Ok(result) => { released?; Ok(result) }
+        Err(error) => Err(error),
+    }
+}
+
 fn deliver(
     repository: &Path,
     path: &Path,
@@ -639,99 +673,26 @@ fn deliver(
     if standard {
         verify_source(repository, journal, prepared)?;
     }
-    let live = workspace::live_tree_scoped(repository, exclusions)?;
-    let live_tree = live.clone();
-    let input_tree = tree(repository, &prepared.input)?;
-    let final_tree = tree(repository, &prepared.result)?;
-    let applying = journal.join("applying");
-    if live_tree != input_tree
-        && !(applying.exists()
-            && valid_partial_checkout(repository, &prepared.input, &prepared.result, &live)?)
-    {
-        return Err("Source files changed during publication; private results are preserved. Retry before checkout, or reconcile unrecorded edits with the retained recovery state".into());
-    }
-    // A matching marker belongs to this interrupted attempt. Runtime's data
-    // lease and single-driver rule ensure another active worker cannot own it.
-    release_owned_lock(&lock_path, marker.as_bytes())?;
-    let mut lease = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-        .map_err(|e| format!("Cannot acquire source Git index lease: {e}"))?;
-    lease
-        .write_all(marker.as_bytes())
-        .and_then(|_| lease.sync_all())
-        .map_err(|e| e.to_string())?;
-    drop(lease);
-    let outcome = (|| -> Result<String, String> {
+    with_source_lease(repository, journal, standard, || {
         if standard {
             verify_source(repository, journal, prepared)?;
         }
-        let next_index = journal.join("checkout-index");
-        if live_tree != final_tree {
-            private_index_git(repository, &next_index, &["read-tree", &live])?;
-            if let Err(error) =
-                private_index_git(repository, &next_index, &["update-index", "--refresh"])
-            {
-                let dirty = private_index_git(
-                    repository,
-                    &next_index,
-                    &[
-                        "diff",
-                        "--name-only",
-                        "--no-ext-diff",
-                        "--no-textconv",
-                        "-z",
-                    ],
-                )?;
-                if dirty
-                    .split('\0')
-                    .filter(|path| !path.is_empty())
-                    .any(|path| !workspace::collection_path_excluded(repository, path, exclusions))
-                {
-                    return Err(error);
-                }
-            }
-            if !applying.exists() {
-                save_once(&applying, b"checkout\n")?;
-            }
-            private_index_git(
-                repository,
-                &next_index,
-                &["read-tree", "-m", "-u", &live, &prepared.result],
-            )?;
+        atomic_files::cleanup_temporaries(repository, journal, &prepared.input, &prepared.result)?;
+        let live = workspace::live_tree_scoped(repository, exclusions)?;
+        let live_tree = live.clone();
+        let input_tree = tree(repository, &prepared.input)?;
+        let final_tree = tree(repository, &prepared.result)?;
+        if live_tree != input_tree
+            && !(journal.join("applying").exists()
+                && valid_partial_checkout(repository, &prepared.input, &prepared.result, &live)?) {
+            let from_input = diff_paths(repository, &prepared.input, &live)?;
+            let from_result = diff_paths(repository, &prepared.result, &live)?;
+            let paths = from_input.intersection(&from_result).take(8).cloned().collect::<Vec<_>>().join(", ");
+            return Err(format!("Source files changed during publication; private results are preserved. These paths match neither the original nor the result: {paths}. This may be an interrupted legacy file write, not a user edit. Preserve the current files and reconcile them with the retained publication before retrying."));
         }
-        if standard {
-            verify_source(repository, journal, prepared)?;
-        }
-        // Confirm the delivered working tree is exactly the composed result
-        // without a second full metadata scan of every delivered file. A
-        // checkout leaves the private index describing `result`, so its tree
-        // plus a stat-cache diff (only files whose stat moved are re-hashed)
-        // verifies the same content the full snapshot did. When nothing was
-        // written, the already-captured `live` snapshot is the result; the
-        // source is under the publication lease, so no write can race it.
         if live_tree != final_tree {
-            let _ = private_index_git(repository, &next_index, &["update-index", "--refresh"]);
-            let index_tree = private_index_git(repository, &next_index, &["write-tree"])?
-                .trim()
-                .to_string();
-            let dirty = private_index_git(
-                repository,
-                &next_index,
-                &[
-                    "diff",
-                    "--name-only",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "-z",
-                ],
-            )?;
-            let dirty = dirty
-                .split('\0')
-                .filter(|path| !path.is_empty())
-                .any(|path| !workspace::collection_path_excluded(repository, path, exclusions));
-            if dirty || index_tree != final_tree {
+            atomic_files::install(repository, journal, &prepared.input, &prepared.result)?;
+            if workspace::live_tree_scoped(repository, exclusions)? != final_tree {
                 return Err("Source files changed while applying publication; retained checkout requires explicit recovery".into());
             }
         }
@@ -741,18 +702,7 @@ fn deliver(
         save_once(&journal.join("installed"), prepared.result.as_bytes())?;
         record_delivery(repository, prepared, standard, &pin)?;
         Ok(prepared.result.clone())
-    })();
-    let released = release_owned_lock(&lock_path, marker.as_bytes());
-    match outcome {
-        Ok(result) => {
-            released?;
-            Ok(result)
-        }
-        Err(error) => {
-            let _ = released;
-            Err(error)
-        }
-    }
+    })
 }
 
 fn release_owned_lock(path: &Path, marker: &[u8]) -> Result<(), String> {

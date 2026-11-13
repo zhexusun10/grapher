@@ -67,7 +67,7 @@ test("all Harness settings start checked and saved opt-outs survive reload", { t
     assert.deepEqual(await modes.allTextContents(), ["Serial", "Graph"]);
     await openSettings(page);
     assert.deepEqual(await checkboxes.evaluateAll(inputs => inputs.map(input => input.checked)), Array(5).fill(true));
-    assert.equal(await maxParallelInput.inputValue(), "8", "legacy maxParallel=0 defaults to 8");
+    assert.equal(await maxParallelInput.inputValue(), "20", "legacy maxParallel=0 defaults to 20");
     assert.equal(await maxParallelInput.getAttribute("min"), "2");
     assert.equal(await maxParallelInput.getAttribute("max"), "40");
     assert.equal(await maxFeedbackInput.inputValue(), "4", "legacy maxFeedback=0 defaults to 4");
@@ -79,7 +79,7 @@ test("all Harness settings start checked and saved opt-outs survive reload", { t
     for (const key of ["autoApprove", "postTaskReview", "plannerWriteTools", "isolateParallelNodes"]) {
       assert.equal(saves[0][key], true, `${key} saves the enabled default`);
     }
-    assert.equal(saves[0].maxParallel, 8);
+    assert.equal(saves[0].maxParallel, 20);
     assert.equal(saves[0].maxFeedback, 4);
     assert.equal(await page.evaluate(() => localStorage.getItem("grapher_hide_auto_mode_v1")), "1");
 
@@ -166,8 +166,7 @@ test("hiding Auto stages with Settings, preserves Partitioner and submits only v
     ], "planning, approval, workspace and Planner file-tool options share one card");
     assert.equal(await planningCard.locator(".role-model-settings").count(), 0, "execution settings remain separate from model settings");
     assert.equal(await planningCard.getByRole("checkbox", { name: "Isolate parallel node workspaces", exact: true })
-      .evaluate(input => input.closest("label").querySelector("small").textContent),
-      "Each dispatch batch shares source with up to 2 nodes and uses private workspaces with more than 2. Turn off to share source in every batch. Concurrent edits may overwrite each other.");
+      .isChecked(), true, "workspace isolation remains enabled while editing Auto visibility");
     assert.equal(await partitionerSettings.locator("select").first().inputValue(), partitioner.model);
     await toggle.check();
     assert.equal(await partitionerSettings.count(), 0, "the Settings draft previews hiding Partitioner");
@@ -342,6 +341,111 @@ test("home background saves only after acceptance, persists, and preserves the a
     await paths(page).first().waitFor();
     assert.equal(await page.evaluate(() => localStorage.getItem("grapher_landing_background_v1")), "paths");
 
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("execution graph overview defaults off, sits between UI sections, and commits only on save", { timeout: 90_000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+  const graphSnapshot = {
+    ...conversation,
+    runId: "graph-overview",
+    planType: "graph",
+    graph: {
+      originalGoal: "Graph overview test",
+      nodes: [{ name: "step_one", task: "Do step one" }],
+      edges: [],
+    },
+    nodes: { step_one: { status: "completed", revision: 1, instruction: "", error: null } },
+    plan: { executionBatches: [["step_one"]], rootNodes: ["step_one"], terminals: ["step_one"], warnings: [] },
+    publication: { repository, heads: ["step_one"], status: "completed", head: null, error: null, startedAt: 1, completedAt: 2 },
+  };
+  let failSave = true;
+  const errors = [], saves = [];
+  await context.addInitScript(({ repository, config }) => {
+    localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Overview", lastOpened: 1 }]));
+    localStorage.setItem("grapher_config", JSON.stringify(config));
+  }, { repository, config });
+  await context.route("**/api/*", async route => {
+    const command = new URL(route.request().url()).pathname.slice(5);
+    const body = route.request().postDataJSON();
+    if (command === "save_config") {
+      saves.push(body.config);
+      if (failSave) return route.fulfill({ status: 500, json: { error: "Mock save failed" } });
+      return route.fulfill({ json: { result: { ...bootstrap, config: body.config } } });
+    }
+    const defaults = {
+      bootstrap: { ...bootstrap, runs: [graphSnapshot.runId] },
+      history: body?.runId === graphSnapshot.runId ? graphSnapshot : empty,
+      snapshot: body?.runId === graphSnapshot.runId ? graphSnapshot : empty,
+      snapshot_if_changed: { version: "fixed", snapshot: null },
+      repository_status: { repository, valid: true, error: null },
+      list_plannings: [], list_files: { files: [] }, list_skills: { skills: [] }, provider_auth: catalog,
+      pi_extensions: { globalDirectory: "mock", extensions: [] },
+      environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true },
+    };
+    if (!(command in defaults)) errors.push(`Unexpected API: ${command}`);
+    return route.fulfill({ json: { result: defaults[command] ?? null } });
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(10_000);
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.locator(`[data-run-id="${graphSnapshot.runId}"]`).click();
+    await page.locator(".react-flow__node").first().waitFor();
+    assert.equal(await page.locator(".plan-summary-card").count(), 0, "execution graph overview is hidden by default");
+
+    await openSettings(page);
+    const uiCard = page.getByRole("region", { name: "UI settings", exact: true });
+    const cotToggle = uiCard.getByRole("checkbox", { name: "Auto-expand chain of thought while running", exact: true });
+    const overviewToggle = uiCard.getByRole("checkbox", { name: "Show execution graph overview", exact: true });
+    const backgroundGroup = uiCard.getByRole("group", { name: "Home background", exact: true });
+    assert.equal(await overviewToggle.isChecked(), false, "the overview toggle defaults off");
+    const [cotBox, overviewBox, backgroundBox] = await Promise.all([
+      cotToggle.boundingBox(),
+      overviewToggle.boundingBox(),
+      backgroundGroup.boundingBox(),
+    ]);
+    assert.ok(cotBox && overviewBox && backgroundBox, "all UI settings sections render with bounds");
+    assert.ok(cotBox.y < overviewBox.y && overviewBox.y < backgroundBox.y,
+      "the overview toggle sits between reasoning auto-expand and home background");
+
+    await overviewToggle.check();
+    assert.equal(await page.locator(".plan-summary-card").count(), 0, "staging the toggle does not show the overview before save");
+    assert.equal(await page.evaluate(() => localStorage.getItem("grapher_execution_overview_v1")), null);
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    await openSettings(page);
+    assert.equal(await overviewToggle.isChecked(), false, "Cancel discards the overview draft");
+
+    await overviewToggle.check();
+    await page.locator(".save-config-btn").click();
+    await page.getByRole("alert").filter({ hasText: "Mock save failed" }).waitFor();
+    assert.equal(await overviewToggle.isChecked(), true, "a failed save keeps the draft for retry");
+    assert.equal(await page.locator(".plan-summary-card").count(), 0);
+    assert.equal(await page.evaluate(() => localStorage.getItem("grapher_execution_overview_v1")), null);
+
+    failSave = false;
+    await page.locator(".save-config-btn").click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    await page.locator(".plan-summary-card").waitFor();
+    assert.equal(await page.evaluate(() => localStorage.getItem("grapher_execution_overview_v1")), "1");
+    assert.ok(saves.every(saved => !("executionOverview" in saved)), "display preferences stay out of backend configuration");
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator(`[data-run-id="${graphSnapshot.runId}"]`).click();
+    await page.locator(".plan-summary-card").waitFor();
+    await openSettings(page);
+    assert.equal(await overviewToggle.isChecked(), true, "the enabled preference survives reload");
+    await overviewToggle.uncheck();
+    await page.locator(".save-config-btn").click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    await page.locator(".plan-summary-card").waitFor({ state: "detached" });
+    assert.equal(await page.evaluate(() => localStorage.getItem("grapher_execution_overview_v1")), "0");
     assert.deepEqual(errors, []);
   } finally {
     await context.close();

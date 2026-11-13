@@ -560,6 +560,7 @@ test("completed write-back details live inside the topology overview with copy a
     outputBytes: Buffer.byteLength(assistant(`PUBLICATION_LOG_publication-${attempt}`)),
     startedAt: completedAt - 1000, completedAt }));
   try {
+    await context.addInitScript(() => localStorage.setItem("grapher_execution_overview_v1", "1"));
     await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
     await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !!window.audit?.setPublicationResult);
@@ -1112,6 +1113,7 @@ data: ${JSON.stringify({ runId: running.runId })}
     return route.fulfill({ json: { result } });
   });
   try {
+    await context.addInitScript(() => localStorage.setItem("grapher_execution_overview_v1", "1"));
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.locator('[data-run-id="stalled-run"]').click();
     await page.locator(".pane-bottom-chat").first().waitFor();
@@ -1223,6 +1225,7 @@ test("actual App re-attaches a running revision plan without locking or stale ro
     return route.fulfill({ json: { result } });
   });
   try {
+    await context.addInitScript(() => localStorage.setItem("grapher_execution_overview_v1", "1"));
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.locator('[data-run-id="recovered-run"]').click();
     const input = page.locator(".pane-bottom-chat textarea");
@@ -2961,7 +2964,7 @@ test("actual App preserves scrollback and releases RAM on Node/Conversation navi
     await page.evaluate(async () => { window.reviewCaches = await import("/src/services/transcriptCache.ts"); });
     const plannerReads = () => requests.filter(item => item.command === "get_planning_output" && item.planningId === "plan-run-a").length;
     const count = plannerReads();
-    await page.locator(".node-chip").click();
+    await page.locator('.react-flow__node[data-id="worker"]').click();
     await page.waitForFunction(() => !!window.reviewCaches.executionTranscriptCache.get("run-a:exec-run-a"));
     await page.waitForFunction(() => document.querySelector(".chat-messages-stream").style.opacity === "1");
     const scroller = page.locator(".initial-query-scroll");
@@ -3012,7 +3015,7 @@ test("actual App preserves scrollback and releases RAM on Node/Conversation navi
     await page.waitForFunction(() => !window.reviewCaches.executionTranscriptCache.has("run-a:exec-run-a"));
     assert.ok(await page.evaluate(() => window.reviewCaches.planningTranscriptCache.has("run-a:plan-run-a")));
     assert.equal(plannerReads(), count);
-    await page.locator(".node-chip").click();
+    await page.locator('.react-flow__node[data-id="worker"]').click();
     await page.waitForFunction(() => !!window.reviewCaches.executionTranscriptCache.get("run-a:exec-run-a"));
     await page.waitForFunction(() => {
       const scroll = document.querySelector(".initial-query-scroll");

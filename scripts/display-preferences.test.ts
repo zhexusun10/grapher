@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   LANDING_BACKGROUND_KEY,
+  EXECUTION_OVERVIEW_KEY,
   HIDE_AUTO_MODE_KEY,
+  executionOverviewEnabled,
+  readExecutionOverview,
+  setExecutionOverview,
   hideAutoModeEnabled,
   readHideAutoMode,
   setHideAutoMode,
@@ -10,6 +14,34 @@ import {
   readLandingBackground,
   setLandingBackground,
 } from "../src/services/displayPreferences.ts";
+
+test("Execution graph overview is hidden by default and explicit opt-ins enable it", () => {
+  for (const value of [null, "0", "false", "unknown", ""]) {
+    assert.equal(readExecutionOverview({ getItem: key => key === EXECUTION_OVERVIEW_KEY ? value : null }), false);
+  }
+  for (const value of ["1", "true"]) {
+    assert.equal(readExecutionOverview({ getItem: key => key === EXECUTION_OVERVIEW_KEY ? value : null }), true);
+  }
+  assert.equal(readExecutionOverview(), false, "unavailable storage uses the default");
+  assert.equal(readExecutionOverview({ getItem: () => { throw new Error("blocked"); } }), false);
+});
+
+test("Execution graph overview persists locally and remains usable when storage writes fail", () => {
+  const original = executionOverviewEnabled();
+  const writes: string[][] = [];
+  const storage = { setItem: (key: string, value: string) => { writes.push([key, value]); }, removeItem: () => {} };
+  try {
+    setExecutionOverview(true, storage);
+    assert.equal(executionOverviewEnabled(), true);
+    setExecutionOverview(false, storage);
+    assert.equal(executionOverviewEnabled(), false);
+    assert.deepEqual(writes, [[EXECUTION_OVERVIEW_KEY, "1"], [EXECUTION_OVERVIEW_KEY, "0"]]);
+    setExecutionOverview(true, { setItem: () => { throw new Error("blocked"); }, removeItem: () => {} });
+    assert.equal(executionOverviewEnabled(), true);
+  } finally {
+    setExecutionOverview(original, storage);
+  }
+});
 
 test("Auto mode is hidden by default and explicit opt-outs keep it visible", () => {
   for (const value of [null, "1", "true", "unknown", ""]) {

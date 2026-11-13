@@ -57,6 +57,41 @@ The [workspace policy](../architecture/workspace-snapshots-and-feedback.md#adapt
 owns subsequent continuation behavior. Regression coverage is in
 [workspace_policy_tests.rs](../../backend/src/workspace_policy_tests.rs).
 
+## Reconcile a legacy partial publication file
+
+New publication copies stage complete files and atomically replace targets.
+Older in-place checkouts may have left an empty or truncated target after a
+process interruption. Normal retry still refuses bytes matching neither input
+nor result, because those bytes could also be a user edit.
+
+Stop the backend/workers and confirm `GRAPHER_DATA_DIR`. With the updated
+backend, inspect **one named project-relative regular file**:
+
+```sh
+node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher -- --repair-publication-file RUN_ID relative/path
+```
+
+The preview prints the current event sequence, current Git blob hash and saved
+publication result. Inspect the file and retained result before authorizing its
+replacement. Apply with the exact observed sequence/hash and an external backup
+directory whose repair filenames do not already exist:
+
+```sh
+node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher -- --repair-publication-file RUN_ID relative/path --apply --expect-sequence N --expected-blob HASH --backup /absolute/recovery-directory
+```
+
+The command acquires the runtime lease and requires a failed, paused publication,
+its unfinished legacy `applying` journal and safe path/branch/index evidence.
+Applying also acquires the normal source publication lease and refuses foreign
+Git locks; an earlier completion receipt prevents reuse of a backup directory.
+It preserves the current bytes and the recorded result plus a repair receipt,
+rechecks the current hash immediately before atomic replacement, and records a
+separate completion receipt afterward. It never deletes unknown files or locks,
+rewrites Run history, marks publication complete, or starts agents. The Run stays
+paused in `publication_failed`; restarting the updated backend and explicitly
+retrying publication remains a separate operation. Do not use paused-batch
+restoration once source delivery has begun.
+
 ## Diagnosing database size
 
 Inspect the database read-only before treating it as a disposable cache. Retained conversations own their `execution_logs`; completed publication removes private project worktrees, not conversation history. Compare log byte totals and row counts with `PRAGMA page_count`, `page_size`, and `freelist_count`. Older small output packets can leave many rows and index entries, and unused space inside live B-tree pages is distinct from whole pages on the freelist. New writes fill bounded chunks across batches; normal reads/startup do not repack old transcripts.

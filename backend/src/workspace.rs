@@ -3237,6 +3237,16 @@ pub(crate) fn collection_excluded(
     tracked: &std::collections::BTreeSet<String>,
     exclusions: &[String],
 ) -> bool {
+    // Other Runs may capture the source while an adjacent copy is in flight.
+    // As with generated artifacts, an explicitly tracked project file wins
+    // over the reserved-name convention.
+    if !tracked.contains(&relative.to_string_lossy().replace('\\', "/"))
+        && relative.file_name().and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".grapher-publish-"))
+        .and_then(|name| name.strip_suffix(".tmp"))
+        .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return true;
+    }
     if exclusions
         .iter()
         .any(|scope| scope_contains(relative, Path::new(scope)))
@@ -3755,15 +3765,6 @@ fn tracked_paths(repository: &Path) -> Result<std::collections::BTreeSet<String>
             }
         })
         .collect())
-}
-
-/// Match the collection boundary when validating a private checkout index.
-/// Dirty excluded paths must remain untouched, including their user index state.
-pub(crate) fn collection_path_excluded(path: &Path, name: &str, exclusions: &[String]) -> bool {
-    let root = path.canonicalize().ok();
-    let data = data_root().canonicalize().ok();
-    let tracked = project_tracked_paths(path);
-    status_path_excluded(name, root.as_deref(), data.as_deref(), exclusions, &tracked)
 }
 
 /// A private Planner/node slot owns its own Git database (visible or hidden).

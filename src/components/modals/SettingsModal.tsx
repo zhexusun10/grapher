@@ -9,7 +9,7 @@ import { ProviderSettings } from "../ProviderSettings";
 import { RoleModelSettings } from "../RoleModelSettings";
 import { ExtensionSettings } from "../ExtensionSettings";
 import { normalizeWorkspacePath } from "../../services/workspaceConversations";
-import { autoExpandCotEnabled, setAutoExpandCot, currentLandingBackground, setLandingBackground, hideAutoModeEnabled, setHideAutoMode } from "../../services/displayPreferences";
+import { autoExpandCotEnabled, setAutoExpandCot, executionOverviewEnabled, setExecutionOverview, currentLandingBackground, setLandingBackground, hideAutoModeEnabled, setHideAutoMode } from "../../services/displayPreferences";
 import { DotPattern } from "../ui/dot-pattern";
 import { ConfirmModal } from "./ConfirmModal";
 import { dialogVeilMotion, largeDialogMotion } from "./dialogMotion";
@@ -46,6 +46,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   // Display-only preference, but it follows the same contract as the other
   // toggles: staged here, committed only when the settings save is accepted.
   const [autoExpandCot, setAutoExpandCotDraft] = useState(() => autoExpandCotEnabled());
+  const [executionOverview, setExecutionOverviewDraft] = useState(() => executionOverviewEnabled());
   const [landingBackground, setLandingBackgroundDraft] = useState(() => currentLandingBackground());
   const [hideAutoMode, setHideAutoModeDraft] = useState(() => hideAutoModeEnabled());
   const [saving, setSaving] = useState(false);
@@ -92,6 +93,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
       // The backend accepted the save, so the browser draft may commit too:
       // cancelling or failing the save leaves the stored preference untouched.
       setAutoExpandCot(autoExpandCot);
+      setExecutionOverview(executionOverview);
       setLandingBackground(landingBackground);
       setHideAutoMode(hideAutoMode);
     } catch (error) {
@@ -246,7 +248,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <label className="settings-number-row">
                 <span>
                   <strong>{t("可并行 Agent 数量")}</strong>
-                  <small>{t("可并行 Agent 数量（范围 2–40，默认 8）。对新创建的运行生效。")}</small>
+                  <small>{t("可并行 Agent 数量（范围 2–40，默认 20）。对新创建的运行生效。")}</small>
                 </span>
                 <input
                   type="number"
@@ -307,6 +309,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   disabled={saving}
                   onChange={(event) => setAutoExpandCotDraft(event.target.checked)}
                   aria-label={t("执行时自动展开思维链")}
+                />
+              </label>
+              <label className="settings-toggle-row">
+                <span>
+                  <strong>{t("显示执行拓扑概览")}</strong>
+                  <small>{t("在 Graph 规划对话底部显示执行拓扑概览与写回详情。保存后在此浏览器中生效。")}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={executionOverview}
+                  disabled={saving}
+                  onChange={(event) => setExecutionOverviewDraft(event.target.checked)}
+                  aria-label={t("显示执行拓扑概览")}
                 />
               </label>
               <h5 className="settings-ui-group-title">{t("首页背景")}</h5>

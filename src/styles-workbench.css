@@ -3057,6 +3057,12 @@ button.session-label-toggle:focus-visible {
   font-weight: 600;
 }
 
+.settings-toggle-row+.settings-ui-group-title {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
 .settings-toggle-row {
   display: flex;
   align-items: flex-start;

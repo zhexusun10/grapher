@@ -105,7 +105,7 @@ Nodes remain stable across recorded execution attempts. Historical output and ba
 
 ## Scheduling and concurrency
 
-Only ready nodes dispatch, subject to the **per-Graph-Run** limit. `maxParallel=0` defaults to 8; positive values configure the limit (range 2–40 in Settings, default 8), with a hard maximum of 40. New Runs use the [adaptive workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy): shared-source workers may refill free slots as dependencies resolve, while private handoff and workspace switching retain their drain barriers. Legacy Runs keep their recorded scheduling contract.
+Only ready nodes dispatch, subject to the **per-Graph-Run** limit. `maxParallel=0` defaults to 20; positive values configure the limit (range 2–40 in Settings, default 20), with a hard maximum of 40. New Runs use the [adaptive workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy): shared-source workers may refill free slots as dependencies resolve, while private handoff and workspace switching retain their drain barriers. Legacy Runs keep their recorded scheduling contract.
 
 There is no global pool limiting nodes across Runs, and no shared cap for Planner/Serial sessions. Choose concurrency with provider quotas and machine resources in mind. Creating or switching conversations does not stop background Runs.
 

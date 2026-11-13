@@ -536,7 +536,9 @@ fn node_workers_respect_per_run_limit_and_keep_scheduling_as_slots_open() {
             .collect(),
         edges: vec![],
     };
-    for (max_parallel, limit) in [(0, 8), (1, 1), (2, 2), (8, 8), (24, 24), (40, 40), (100, 40)] {
+    for (max_parallel, limit) in [
+        (0, 20), (1, 1), (2, 2), (8, 8), (20, 20), (24, 24), (40, 40), (100, 40),
+    ] {
         let (_temp, _source, mut runtime) = setup(true, graph.clone());
         let mut config = runtime.state.config.clone().unwrap();
         config.max_parallel = max_parallel;

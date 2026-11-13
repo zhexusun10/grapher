@@ -158,25 +158,49 @@ pub(crate) fn rebind_session_cwd_by_header(
     id: &str,
     cwd: &Path,
 ) -> Result<(), String> {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     if !directory.is_dir() {
         return Ok(());
     }
     let actual = session_cwd(cwd)?;
+    let mut matched = None;
     for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
         let path = entry.map_err(|error| error.to_string())?.path();
-        if path.extension().is_none_or(|ext| ext != "jsonl") {
+        if path.extension().is_none_or(|ext| ext != "jsonl") || !path.is_file() {
             continue;
         }
-        let mut input = BufReader::new(fs::File::open(&path).map_err(|error| error.to_string())?);
+        let mut file = fs::File::open(&path).map_err(|error| error.to_string())?;
+        if file.metadata().map_err(|error| error.to_string())?.len() == 0 {
+            continue;
+        }
+        file.seek(SeekFrom::End(-1))
+            .map_err(|error| error.to_string())?;
+        let mut last = [0];
+        file.read_exact(&mut last)
+            .map_err(|error| error.to_string())?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| error.to_string())?;
+        let mut input = BufReader::new(file);
         let mut line = String::new();
         input
             .read_line(&mut line)
             .map_err(|error| error.to_string())?;
         let header: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        if header.get("id").and_then(Value::as_str) != Some(id) {
+        if header.get("type").and_then(Value::as_str) != Some("session")
+            || header.get("id").and_then(Value::as_str) != Some(id)
+        {
             continue;
         }
+        if last != *b"\n" {
+            return Err("Planner session has an incomplete last entry".into());
+        }
+        if matched.replace((path, input, header)).is_some() {
+            return Err(
+                "Multiple Planner conversations found for one run; cannot select one safely".into(),
+            );
+        }
+    }
+    if let Some((path, input, header)) = matched {
         if header.get("cwd").and_then(Value::as_str) == Some(actual.to_string_lossy().as_ref()) {
             return Ok(());
         }

@@ -158,6 +158,77 @@ fn partial_checkout_recovers_additions_deletions_and_modified_files_without_a_co
 }
 
 #[test]
+fn interrupted_atomic_copy_retries_large_addition_without_installing_partial_bytes() {
+    use std::hash::{Hash, Hasher};
+    let (temp, source, base) = source(false);
+    let before_index = fs::read(index(&source)).unwrap();
+    let before_objects = objects(&source);
+    let path = temp.path().join("node");
+    workspace::prepare(&source, &path, &base, &[]).unwrap();
+    let bytes = vec![91u8; 2 * 1024 * 1024];
+    fs::write(path.join("large.exe"), &bytes).unwrap();
+    let heads = [workspace::snapshot_node(&path, &source, "worker").unwrap()];
+    let result = publish(&source, &heads, |_| panic!()).unwrap();
+    let journal = interrupt(&source, &heads);
+    // A stopped adjacent copy cannot leave a truncated target: it remains
+    // absent (or at its full previous content), and only the owned temp is short.
+    fs::remove_file(source.join("large.exe")).unwrap();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    journal.canonicalize().unwrap().hash(&mut hash);
+    "large.exe".hash(&mut hash);
+    let temporary = source.join(format!(".grapher-publish-{:016x}.tmp", hash.finish()));
+    fs::write(&temporary, &bytes[..4096]).unwrap();
+    fs::write(journal.join("staging-index.lock"), []).unwrap();
+    assert_eq!(publish(&source, &heads, |_| panic!()).unwrap(), result);
+    assert_eq!(fs::read(source.join("large.exe")).unwrap(), bytes);
+    assert!(!temporary.exists());
+    assert!(!journal.join("staging-index.lock").exists());
+    assert_private(&source, &base, &result, &before_index, &before_objects);
+}
+
+#[test]
+fn legacy_truncated_addition_is_reported_without_overwriting_unrecorded_work() {
+    let (temp, source, base) = source(false);
+    let path = temp.path().join("node");
+    workspace::prepare(&source, &path, &base, &[]).unwrap();
+    fs::write(path.join("large.exe"), vec![21u8; 1024 * 1024]).unwrap();
+    let heads = [workspace::snapshot_node(&path, &source, "worker").unwrap()];
+    publish(&source, &heads, |_| panic!()).unwrap();
+    let journal = interrupt(&source, &heads);
+    fs::write(journal.join("applying"), "checkout\n").unwrap();
+    fs::write(source.join("large.exe"), []).unwrap();
+    let error = publish(&source, &heads, |_| panic!()).unwrap_err();
+    assert!(error.contains("large.exe") && error.contains("interrupted legacy file write"), "{error}");
+    assert_eq!(fs::metadata(source.join("large.exe")).unwrap().len(), 0);
+}
+
+#[test]
+fn atomic_delivery_recovers_mixed_file_directory_transitions() {
+    let (temp, source, _) = source(false);
+    fs::write(source.join("was_file"), "old file").unwrap();
+    fs::create_dir(source.join("was_dir")).unwrap();
+    fs::write(source.join("was_dir/child"), "old child").unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = temp.path().join("node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::remove_file(node.join("was_file")).unwrap();
+    fs::create_dir(node.join("was_file")).unwrap();
+    fs::write(node.join("was_file/child"), "new child").unwrap();
+    fs::remove_file(node.join("was_dir/child")).unwrap();
+    fs::remove_dir(node.join("was_dir")).unwrap();
+    fs::write(node.join("was_dir"), "new file").unwrap();
+    let heads = [workspace::snapshot_node(&node, &source, "worker").unwrap()];
+    let result = publish(&source, &heads, |_| panic!()).unwrap();
+    interrupt(&source, &heads);
+    fs::remove_file(source.join("was_file/child")).unwrap();
+    fs::remove_dir(source.join("was_file")).unwrap();
+    fs::write(source.join("was_file"), "old file").unwrap();
+    assert_eq!(publish(&source, &heads, |_| panic!()).unwrap(), result);
+    assert_eq!(fs::read_to_string(source.join("was_dir")).unwrap(), "new file");
+    assert_eq!(fs::read_to_string(source.join("was_file/child")).unwrap(), "new child");
+}
+
+#[test]
 fn recovery_never_absorbs_a_user_edit_that_matches_neither_input_nor_result() {
     let (temp, source, base) = source(false);
     let heads = [node(&source, &base, &temp.path().join("node"), "result\n")];

@@ -4,6 +4,33 @@ import type { Config, ThinkingLevel } from "../types";
 import type { ProviderCatalog } from "../services/providerAuth";
 import { modelRoles, normalizeModelThinkingLevels, roleModelConfig, updateRoleModelConfig } from "../modelConfig";
 
+// Keep model families alphabetical while ordering each numeric version segment newest first.
+const modelNameParts = /\d+|\D+/g;
+const modelTextCollator = new Intl.Collator(undefined, { sensitivity: "base" });
+
+function compareModelNames(left: string, right: string): number {
+  const leftParts = left.match(modelNameParts) ?? [];
+  const rightParts = right.match(modelNameParts) ?? [];
+  for (let i = 0; i < Math.min(leftParts.length, rightParts.length); i++) {
+    const a = leftParts[i];
+    const b = rightParts[i];
+    const numeric = /^\d+$/.test(a) && /^\d+$/.test(b);
+    const normalizedA = numeric ? a.replace(/^0+/, "") || "0" : a;
+    const normalizedB = numeric ? b.replace(/^0+/, "") || "0" : b;
+    const comparison = numeric
+      ? normalizedB.length - normalizedA.length || modelTextCollator.compare(normalizedB, normalizedA)
+      : modelTextCollator.compare(a, b);
+    if (comparison) return comparison;
+  }
+  // A version with an additional numeric segment (6.1) precedes its
+  // shorter base version (6); ordinary name suffixes keep alphabetical order.
+  const rest = leftParts.length > rightParts.length
+    ? leftParts.slice(rightParts.length)
+    : rightParts.slice(leftParts.length);
+  const versionSuffix = rest.length >= 2 && /^[.\-_]$/.test(rest[0]) && /^\d+$/.test(rest[1]);
+  return versionSuffix ? rightParts.length - leftParts.length : leftParts.length - rightParts.length;
+}
+
 const thinkingLabels: Record<ThinkingLevel, string> = {
   off: t("关闭"), minimal: t("最少 (minimal)"), low: t("低 (low)"),
   medium: t("中 (medium)"), high: t("高 (high)"), xhigh: t("极高 (xhigh)"), max: t("最大 (max)"),
@@ -19,7 +46,9 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
 }) {
   const [providerFilter, setProviderFilter] = useState("");
   const draft = normalizeModelThinkingLevels(config, catalog);
-  const availableModels = catalog?.models.filter(model => model.available) ?? [];
+  const availableModels = catalog?.models.filter(model => model.available).sort((a, b) =>
+    compareModelNames(a.name || a.id, b.name || b.id) || modelTextCollator.compare(`${a.provider}/${a.id}`, `${b.provider}/${b.id}`)
+  ) ?? [];
   const availableProviders = catalog?.providers.filter(provider => availableModels.some(model => model.provider === provider.id)) ?? [];
   // A provider may disappear after logout. Don't leave a stale filter hiding
   // the remaining available models, or reset any role's persisted selection.

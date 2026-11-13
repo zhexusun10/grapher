@@ -117,6 +117,7 @@ pub(crate) fn restoration(root: &Path, state: &Snapshot) -> Result<EventKind, St
         if crate::path_safety::real_child_path(&run_root, &journal, false)?.is_none() {
             continue; // Capture can replace the initial heads before publication starts.
         }
+        let mut attempts = 0usize;
         for entry in fs::read_dir(&journal).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let attempt = entry.path();
@@ -125,6 +126,7 @@ pub(crate) fn restoration(root: &Path, state: &Snapshot) -> Result<EventKind, St
                 || !attempt.is_dir() {
                 return Err("Unrecognized publication journal layout".into());
             }
+            attempts += 1;
             // Fail closed even if a prepared result has not yet been installed.
             // Only the pre-delivery composition phase is eligible for this repair.
             for record in fs::read_dir(&attempt).map_err(|e| e.to_string())? {
@@ -136,6 +138,9 @@ pub(crate) fn restoration(root: &Path, state: &Snapshot) -> Result<EventKind, St
             let _: (String, String) = serde_json::from_slice(&fs::read(attempt.join("input.json")).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
         }
+        if attempts == 0 {
+            return Err("Publication journal has no attempt records".into());
+        }
     }
     Ok(EventKind::PausedBatchRestored {
         handoff_sequence: state.events[handoff_index].sequence,
@@ -144,7 +149,7 @@ pub(crate) fn restoration(root: &Path, state: &Snapshot) -> Result<EventKind, St
     })
 }
 
-fn prepare_backup_directory(backup: &Path, root: &Path, source: &Path) -> Result<PathBuf, String> {
+pub(super) fn prepare_backup_directory(backup: &Path, root: &Path, source: &Path) -> Result<PathBuf, String> {
     if !backup.is_absolute() || backup.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
         return Err("Backup directory must be absolute, without traversal, and outside runtime/project workspaces".into());
     }
@@ -168,7 +173,9 @@ fn prepare_backup_directory(backup: &Path, root: &Path, source: &Path) -> Result
     let candidate = existing.canonicalize().map_err(|e| e.to_string())?
         .join(backup.strip_prefix(existing).map_err(|e| e.to_string())?);
     let validate = |path: &Path| {
-        if protected.iter().any(|scope| workspace::scope_contains(path, scope)) {
+        if protected.iter().any(|scope| {
+            workspace::scope_contains(path, scope) || workspace::scope_contains(scope, path)
+        }) {
             Err("Backup must be outside runtime, source and private workspaces".to_string())
         } else {
             Ok(())

@@ -32,13 +32,29 @@ impl Runtime {
     }
 
     pub(super) fn batch_recovery_was_delivered(&self, execution: &Execution) -> bool {
+        let mut skip_above = None;
         self.state
             .events
             .iter()
             .rev()
-            .find_map(|event| match &event.kind {
-                EventKind::BatchRecoveryCaptured { heads } => heads.get(&execution.id),
-                _ => None,
+            .find_map(|event| {
+                if let EventKind::PausedBatchRestored {
+                    handoff_sequence, ..
+                } = &event.kind
+                {
+                    skip_above = Some(
+                        skip_above
+                            .map_or(*handoff_sequence, |low: i64| low.min(*handoff_sequence)),
+                    );
+                    return None;
+                }
+                if skip_above.is_some_and(|low| event.sequence > low) {
+                    return None;
+                }
+                match &event.kind {
+                    EventKind::BatchRecoveryCaptured { heads } => heads.get(&execution.id),
+                    _ => None,
+                }
             })
             .is_some_and(|head| self.state.published_heads.contains(head))
     }
@@ -74,6 +90,7 @@ impl Runtime {
     pub(super) fn prepare_execution_batch(
         &mut self,
         ready: &[Node],
+        all_ready: &[Node],
         allow_delivery: bool,
     ) -> Result<bool, String> {
         if !self.batch_workspaces() {
@@ -163,7 +180,7 @@ impl Runtime {
             }
         }
         let mut recoveries = Vec::new();
-        for node in ready {
+        for node in all_ready {
             let node_state = &self.state.nodes[&node.name];
             let Some(previous) = self.state.executions.iter().rev().find(|execution| {
                 execution.node == node.name

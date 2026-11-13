@@ -34,8 +34,12 @@ conversations. When no nodes are running, dispatching up to two ready nodes
 shares your source directory; larger groups use independent workspaces. While
 source-native nodes run, newly ready work fills free slots without waiting for
 unrelated siblings and keeps sharing source, even above two concurrent nodes.
-Private workspaces still drain and hand off results before another group starts;
-then a smaller group can return to source. Planner review follows the same rule.
+The overview's **batches** (when **Settings → UI settings → Show execution graph overview** is enabled; off by default) describe the graph topology, not dispatch groups:
+ready nodes in earlier batches get priority, but a batch is not a barrier for
+unrelated ready work. Private workspaces still drain and hand off the dispatched
+results before another group starts—even if the concurrency cap left peers in
+the same batch waiting. Those peers remain queued; then a smaller group can
+return to source. Planner review follows the same rule.
 A failed handoff blocks dispatch for repair/retry rather than losing files or
 claiming completion. Manually
 resolved private inputs are delivered before a retry moves to source; successful
@@ -106,7 +110,7 @@ After fixing the cause, use the play button in an empty Node, Serial Agent or Pl
 | Provider connection failure (`Connection error.`, connection reset/refused) | Check your network or proxy if it persists, then use **Continue** for the affected conversation. It resumes the unfinished turn in the same session. |
 | Other task/provider failure, including an unrecognized error | Inspect and fix the cause, then use **Continue** to retry the failed tasks. You can also intervene on a node or change its Node Agent model/thinking settings first. |
 | Conflict while combining parent results | Merger checks its resolution with Git; if backend validation finds a remaining issue, it automatically receives bounded repair follow-ups in the same conversation. If repair still fails, inspect that conversation and retained workspace, then retry the node; publication retry does not fix this conflict. |
-| Final publication failed | Inspect the publication panel and any publication Merger, then retry publication. It reuses retained results rather than rerunning the graph. A changed branch is not silently written; interrupted-checkout recovery may require restoring the captured branch. Staged changes in excluded environment/runtime scopes stay staged and are not published; commit or unstage them explicitly. |
+| Final publication failed | Inspect the publication panel and any publication Merger, then retry publication. A “Source files changed” error is not proof of a manual edit: interrupted older versions can leave partial files. Preserve those files and use the documented [offline reconciliation](development/conversation-logs.md#reconcile-a-legacy-partial-publication-file) if normal retry refuses them. It reuses retained results rather than rerunning the graph. A changed branch is not silently written; interrupted-checkout recovery may require restoring the captured branch. Staged changes in excluded environment/runtime scopes stay staged and are not published; commit or unstage them explicitly. |
 
 Changing the Node Agent model or reasoning level in a conversation applies to all its future node attempts, including retries, feedback repairs, rerun descendants and follow-ups to completed nodes. A running attempt keeps its current model and is not restarted; its recorded model remains in the history. Session details show a retry selection separately from the previous model. Other conversations keep their own settings, and environment overrides take precedence. After saving, reopening Settings shows that conversation's saved selection. Saving from the home screen instead changes the defaults for new conversations.
 

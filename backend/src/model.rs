@@ -357,7 +357,7 @@ impl Config {
 }
 
 pub const MIN_MAX_PARALLEL: usize = 2;
-pub const DEFAULT_MAX_PARALLEL: usize = 8;
+pub const DEFAULT_MAX_PARALLEL: usize = 20;
 pub const MAX_GRAPH_NODE_WORKERS: usize = 40;
 pub const MIN_MAX_FEEDBACK: usize = 2;
 pub const DEFAULT_MAX_FEEDBACK: usize = 4;
@@ -3656,10 +3656,11 @@ mod metrics_tests {
         .unwrap();
         assert_eq!(missing_defaults.max_parallel, DEFAULT_MAX_PARALLEL);
         assert_eq!(missing_defaults.max_feedback, DEFAULT_MAX_FEEDBACK);
-        assert_eq!(normalize_max_parallel(0), 8);
+        assert_eq!(normalize_max_parallel(0), 20);
         assert_eq!(normalize_max_parallel(1), 2);
         assert_eq!(normalize_max_parallel(2), 2);
         assert_eq!(normalize_max_parallel(8), 8);
+        assert_eq!(normalize_max_parallel(20), 20);
         assert_eq!(normalize_max_parallel(24), 24);
         assert_eq!(normalize_max_parallel(40), 40);
         assert_eq!(normalize_max_parallel(99), 40);

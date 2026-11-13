@@ -174,6 +174,7 @@ try {
       };
       const axis = center('.initial-query-scroll');
       return ['.tool-call-card', '.plan-summary-card', '.pane-bottom-chat .prompt-box-container']
+        .filter(selector => document.querySelector(selector))
         .map(selector => ({ selector, offset: center(selector) - axis }));
     });
     assert.ok(centerOffsets.every(({ offset }) => Math.abs(offset) < 0.75),

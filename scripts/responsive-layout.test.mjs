@@ -48,6 +48,7 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US", reducedMotion });
     await context.addInitScript(({ config, projects }) => {
       localStorage.setItem("grapher_language_v1", "en");
+      localStorage.setItem("grapher_execution_overview_v1", "1");
       localStorage.setItem("grapher_projects", JSON.stringify(projects));
       localStorage.setItem("grapher_config", JSON.stringify(config));
       localStorage.setItem("grapher_workbench_split_ratio", "0.15");

@@ -137,6 +137,42 @@ fn deliver_batch(runtime: &mut Runtime) {
     );
 }
 
+#[test]
+fn capped_dispatch_prioritizes_waiting_peers_without_blocking_ready_descendants() {
+    // Deliberately put the child first: planner insertion order is not priority.
+    let (_temp, _source, mut runtime) = adaptive(false,
+        graph(&["child", "a", "b", "overflow"], &[("a", "child")]), false, 2);
+    let first = runtime.jobs().unwrap();
+    assert_eq!(first.iter().map(|j| j.execution.node.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+    finish_shared(&mut runtime, &first[0], "done");
+    let refill = runtime.jobs().unwrap();
+    assert_eq!(refill.len(), 1);
+    assert_eq!(refill[0].execution.node, "overflow", "already-ready peer must not be displaced by the child");
+    finish_shared(&mut runtime, &first[1], "done");
+    let child = runtime.jobs().unwrap();
+    assert_eq!(child.len(), 1);
+    assert_eq!(child[0].execution.node, "child", "layers must not block independent ready work");
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn private_handoff_keeps_overflow_nodes_ahead_of_newly_ready_children() {
+    let (_temp, _source, mut runtime) = adaptive(false,
+        graph(&["child", "a", "b", "c", "overflow1", "overflow2"], &[("a", "child")]), true, 3);
+    for mut job in runtime.jobs().unwrap() {
+        prepare_private(&mut runtime, &mut job);
+        finish_private(&mut runtime, &job, &format!("{}.txt", job.execution.node), "done");
+    }
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "publishing", "successful dispatch may deliver before overflow runs");
+    deliver_batch(&mut runtime);
+    runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+    let next = runtime.jobs().unwrap();
+    assert_eq!(next.iter().map(|j| j.execution.node.as_str()).collect::<Vec<_>>(),
+        ["overflow1", "overflow2", "child"]);
+    assert!(next.iter().all(|j| !j.source_direct));
+}
+
 #[cfg(feature = "fixture")]
 #[test]
 fn resolved_private_inputs_are_delivered_before_source_retry_across_restart() {
@@ -392,11 +428,14 @@ fn shared_source_dispatches_ready_children_while_unrelated_sibling_runs() {
 #[test]
 fn shared_replenishment_pins_source_and_respects_available_worker_slots() {
     for limit in [0, 2, 3] {
+        // Keep at least one queued child beyond the available slots regardless
+        // of the configured default; the assertion tests capacity, not 8 names.
+        let children: Vec<_> = (0..DEFAULT_MAX_PARALLEL.max(limit)).map(|i| format!("child-{i}")).collect();
+        let names: Vec<_> = ["slow", "fast"].into_iter().chain(children.iter().map(String::as_str)).collect();
+        let edges: Vec<_> = children.iter().map(|name| ("fast", name.as_str())).collect();
         let (_temp, source, mut runtime) = adaptive(
             false,
-            graph(&["slow", "fast", "c", "d", "e", "f", "g", "h", "i", "j"],
-                &[("fast", "c"), ("fast", "d"), ("fast", "e"), ("fast", "f"),
-                  ("fast", "g"), ("fast", "h"), ("fast", "i"), ("fast", "j")]),
+            graph(&names, &edges),
             true,
             limit,
         );

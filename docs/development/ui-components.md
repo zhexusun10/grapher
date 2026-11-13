@@ -66,7 +66,7 @@ Reuse `largeDialogMotion` and `dialogVeilMotion` from `src/components/modals/dia
 
 ## Home background and icon
 
-The **UI settings** card groups reasoning auto-expansion and the home background under the Wallpaper icon. The home background is a browser-local preference applied on successful Settings save, not Run/backend state. Static dots are the default; animated paths are optional. The decorative dots are hidden from assistive technology, follow the responsive title, and extend behind the sidebar without changing workbench clipping.
+The **UI settings** card groups reasoning auto-expansion, **Show execution graph overview**, and the home background under the Wallpaper icon. All three are browser-local preferences in [displayPreferences.ts](../../src/services/displayPreferences.ts), staged in Settings and applied only after a successful Settings save, not Run/backend state. **Show execution graph overview** defaults off; enabling it displays the topology overview and write-back card at the bottom of the Graph Planner conversation. Static dots are the default home background; animated paths are optional. The decorative dots are hidden from assistive technology, follow the responsive title, and extend behind the sidebar without changing workbench clipping.
 
 `assets/icon-dots.svg` uses a transparent, color-scheme-aware 4×4 grid with the corners omitted. Keep dots aligned at 16 and 32 px and avoid a background tile. Browsers cache favicons by URL, so bump the `?v=` query in `index.html` when changing it; Vite hashes production assets.
 

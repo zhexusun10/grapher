@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 
 /** Browser-local UI preferences: never part of the Run snapshot or backend config. */
 export const AUTO_EXPAND_COT_KEY = "grapher_auto_expand_cot_v1";
+export const EXECUTION_OVERVIEW_KEY = "grapher_execution_overview_v1";
 export const HIDE_AUTO_MODE_KEY = "grapher_hide_auto_mode_v1";
 export const LANDING_BACKGROUND_KEY = "grapher_landing_background_v1";
 export type LandingBackground = "paths" | "dots";
@@ -65,6 +66,42 @@ function subscribe(listener: () => void): () => void {
 /** Re-renders the mounted cards when the Settings toggle changes. */
 export function useAutoExpandCot(): boolean {
   return useSyncExternalStore(subscribe, autoExpandCotEnabled, autoExpandCotEnabled);
+}
+
+/** Execution graph overview is hidden by default; an explicit opt-in enables it in Settings. */
+export function readExecutionOverview(storage?: ReadableStorage): boolean {
+  try {
+    const value = readableStorage(storage)?.getItem(EXECUTION_OVERVIEW_KEY);
+    return value === "1" || value === "true";
+  } catch {
+    return false;
+  }
+}
+
+let executionOverview = readExecutionOverview();
+const executionOverviewListeners = new Set<() => void>();
+
+export function executionOverviewEnabled(): boolean {
+  return executionOverview;
+}
+
+export function setExecutionOverview(enabled: boolean, storage?: WritableStorage): void {
+  executionOverview = enabled;
+  try {
+    writableStorage(storage)?.setItem(EXECUTION_OVERVIEW_KEY, enabled ? "1" : "0");
+  } catch {
+    // Keep the choice for this session even if browser storage is blocked.
+  }
+  for (const listener of executionOverviewListeners) listener();
+}
+
+function subscribeToExecutionOverview(listener: () => void): () => void {
+  executionOverviewListeners.add(listener);
+  return () => { executionOverviewListeners.delete(listener); };
+}
+
+export function useExecutionOverview(): boolean {
+  return useSyncExternalStore(subscribeToExecutionOverview, executionOverviewEnabled, executionOverviewEnabled);
 }
 
 /** Auto is hidden by default; an explicit opt-out restores it in Settings. */

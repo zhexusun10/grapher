@@ -6,6 +6,7 @@ import type { Node, ReactFlowInstance } from "@xyflow/react";
 import { computeExecutionLayers, graphEdgeId, indexFeedbackExhaustion, indexGraphInputs, useGraphElements } from "../src/hooks/useGraphElements.ts";
 import { runningGraphFitViewport, runningViewportForGraph } from "../src/lib/graphFit.ts";
 import { emptySnapshot, type Execution, type Graph, type Plan, type RuntimeActivity, type Snapshot } from "../src/types.ts";
+import { t } from "../src/i18n/index.ts";
 
 const graph: Graph = {
   originalGoal: "Test graph projection",
@@ -238,6 +239,38 @@ test("a batch handoff merger connects delivered producers, not unstarted graph t
   const projected = projectGraph(state, '');
   const edges = projected.edges.filter(edge => edge.target === 'merger:publication');
   assert.deepEqual(edges.map(edge => edge.source), ['a']);
+  assert.equal(projected.nodes.find(node => node.id === 'b')!.data.hasBottom, false);
+  const card = projected.nodes.find(node => node.id === 'merger:publication')!;
+  assert.equal(card.data.name, t('批次回写 merger'));
+  assert.equal(card.position.y, projected.nodes.find(node => node.id === 'a')!.position.y);
+  assert.equal(edges[0].sourceHandle, 'right-source');
+  assert.equal(edges[0].targetHandle, 'left-target');
+});
+
+test('historical batch merger stays attached to its producers after publication clears and nodes advance', () => {
+  const state = publicationMergerState();
+  state.phase = 'running';
+  state.publication = null;
+  state.batchHandoff = null;
+  state.nodes.a.head = 'new-head';
+  state.nodes.b.status = 'waiting';
+  state.executions = [{ ...state.mergers![0], id: 'old-producer', node: 'a', after: 'ha' }];
+  state.events = [
+    { sequence: 1, timestamp: 1, type: 'batch_handoff_requested' },
+    { sequence: 2, timestamp: 2, type: 'publication_started', heads: ['ha'] },
+    { sequence: 3, timestamp: 3, type: 'merger_started', execution: { id: 'publish-merger', node: 'merger' } },
+    { sequence: 4, timestamp: 4, type: 'merger_finished', execution_id: 'publish-merger' },
+    { sequence: 5, timestamp: 5, type: 'publication_completed' },
+    { sequence: 6, timestamp: 6, type: 'execution_batch_started', nodes: ['b'] },
+  ];
+  const projected = projectGraph(state, '');
+  const card = projected.nodes.find(node => node.id === 'merger:publication')!;
+  assert.equal(card.data.status, 'completed');
+  assert.equal(card.data.name, t('批次回写 merger'));
+  assert.equal(card.data.hint, t('批次回写记录，不属于任务依赖'));
+  assert.equal(card.position.y, projected.nodes.find(node => node.id === 'a')!.position.y);
+  assert.ok(card.position.y < projected.nodes.find(node => node.id === 'b')!.position.y);
+  assert.deepEqual(projected.edges.filter(edge => edge.target === card.id).map(edge => edge.source), ['a']);
   assert.equal(projected.nodes.find(node => node.id === 'b')!.data.hasBottom, false);
 });
 
