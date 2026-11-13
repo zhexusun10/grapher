@@ -42,7 +42,9 @@ node review. Other business entries retain their verified previous publication
 until the refreshed descriptor installs the newly composed code.
 
 `ExecutionBatchStarted` records each dispatch group and choice, including
-source-native replenishment; no event schema or historical record is rewritten.
+source-native replenishment. Its optional `resumed` flag distinguishes a suspended
+private batch from a new batch; absent flags retain the historical new-batch
+semantics without rewriting records.
 There is no sticky promotion across idle boundaries: a `1 → 3 → 1` sequence runs
 source → private → source when each preceding group has drained. Approval does not
 allocate environments or collect Git snapshots. A private batch initializes
@@ -57,8 +59,34 @@ launching a current managed result requires a new `ResultPublished` after that
 batch. Checking the old publication head or merely returning to a private batch
 cannot prove current code/E/L: source edits never advance the publication head.
 
+An explicitly user-paused private batch resumes before delivery or new ready
+work, even when only one or two paused nodes remain. Continue retains each
+node's private directory, Pi session, logical attempt and original source
+baseline; it does not capture or publish unfinished files, reselect isolation,
+or recollect source edits made during the pause. Those edits stay in source and
+are composed at delivery, then become inputs to a genuinely new batch. Completed
+siblings wait at the same delivery barrier until the resumed work drains. This
+distinction survives restart; already-delivered recovery heads retain their
+recorded handoff semantics rather than reviving an old directory.
+
+Stopping only one node does not pause unrelated branches: they may publish and
+advance the Run's source baseline before that node continues. Its continuation
+pins the retained prepared input from the same session and workspace, including
+when a later stopped attempt never reached `Prepared`. This pin applies only to
+the resumed Job; it neither recollects source nor rewinds the Run baseline used
+by future batches. Ownership, parent-input and prepared-ancestry checks still
+apply, and later source work is combined at delivery, not injected into the
+unfinished private view.
+
+For older schedulers that already misrouted a pause into an undelivered handoff, the guarded
+[offline restoration](../development/conversation-logs.md#restore-an-undelivered-paused-batch)
+records `PausedBatchRestored` without rewriting history or changing project files.
+It restores the pre-continuation paused nodes, clears the pending handoff and
+publication, and keeps dispatch paused; delivered/possibly-installed results are
+not eligible.
+
 A failed private attempt is not published as a completed result. An explicit
-retry first captures its retained project files (including uncommitted work),
+failure retry first captures its retained project files (including uncommitted work),
 records the recovery heads and delivers them through the same handoff barrier.
 Failure/missing/corrupt/conflicted evidence stays explicit and retains the slot;
 retrying publication cannot treat an uncaptured recovery as already delivered.

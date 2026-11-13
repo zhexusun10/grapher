@@ -74,6 +74,14 @@ if (name === 'b' && fs.existsSync(path.join(control, 'hold-b'))) {
 }
 if (name === 'a' && fs.existsSync(path.join(control, 'fail-a'))) {
   fs.writeFileSync('partial-a.txt', 'unfinished work');
+  if (fs.existsSync(path.join(control, 'hold-a'))) {
+    fs.writeFileSync(path.join(control, 'active-a'), 'ready');
+    const deadline = Date.now() + 120_000;
+    while (!fs.existsSync(path.join(control, 'release-a'))) {
+      if (Date.now() > deadline) throw Error('pause test timed out');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
   throw Error('deliberate provider failure');
 }
 if (name === 'join') {
@@ -81,7 +89,7 @@ if (name === 'join') {
 }
 if (['a','b','c'].includes(name) && fs.existsSync(path.join(control, 'chain')) && fs.readFileSync('root.txt','utf8') !== 'root') throw Error('private batch missed shared input');
 fs.writeFileSync(`${name}.txt`, name);
-fs.writeFileSync(path.join(control, `audit-${name}.json`), JSON.stringify({cwd:process.cwd(), managed, continuation}));
+fs.writeFileSync(path.join(control, `audit-${name}.json`), JSON.stringify({cwd:process.cwd(), managed, continuation, externalFilePresent:fs.existsSync('external.txt')}));
 console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}));
 "#).unwrap();
     let names = if fail {
@@ -344,6 +352,85 @@ fn driver_drains_active_workers_before_reporting_invalid_source_binding() {
     let completed = wait_for_idle(&service);
     assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
     assert_eq!(completed.executions.len(), 5, "repair never reruns completed workers");
+}
+
+#[test]
+fn driver_resumes_paused_private_node_without_recovery_publication() {
+    assert_driver_resumes_private_node(true);
+}
+
+#[test]
+fn driver_resumes_stopped_private_node_after_siblings_publish() {
+    assert_driver_resumes_private_node(false);
+}
+
+fn assert_driver_resumes_private_node(pause_run: bool) {
+    for managed in [false, true] {
+        let (temp, repo, service) = setup(managed, true, true);
+        fs::write(temp.path().join("hold-a"), "hold").unwrap();
+        drive(service.clone());
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let state = service.runtime.lock().unwrap().state.clone();
+            if temp.path().join("active-a").exists()
+                && ["b", "c"].iter().all(|node| state.nodes[*node].status == "completed") {
+                break;
+            }
+            assert!(Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
+                "private workers did not reach pause boundary: {:?}", state.nodes);
+            thread::sleep(Duration::from_millis(20));
+        }
+        {
+            let mut runtime = service.runtime.lock().unwrap();
+            if pause_run {
+                runtime.pause(true).unwrap();
+            }
+            stop_node_executions(&mut runtime, Some("a")).unwrap();
+        }
+        let paused = wait_for_idle(&service);
+        let original = paused.executions.iter().find(|e| e.node == "a").unwrap();
+        assert!(paused.execution_stop_requests.contains(&original.id));
+        assert_eq!(original.status, "failed");
+        assert!(paused.publication.is_none());
+        assert_eq!(paused.paused, pause_run);
+        for name in ["b.txt", "c.txt"] {
+            assert_eq!(repo.join(name).exists(), !pause_run, "a node stop must let sibling results publish");
+        }
+        assert!(!repo.join("partial-a.txt").exists());
+        fs::write(repo.join("external.txt"), "edited while paused").unwrap();
+        fs::remove_file(temp.path().join("fail-a")).unwrap();
+        {
+            let mut runtime = service.runtime.lock().unwrap();
+            if pause_run {
+                runtime.pause(false).unwrap();
+            } else {
+                runtime.resume_node("a").unwrap();
+            }
+        }
+        drive(service.clone());
+        let completed = wait_for_idle(&service);
+        assert_eq!(completed.phase, "completed", "{:?} {:?}", completed.nodes, completed.publication);
+        let resumed = completed.executions.last().unwrap();
+        assert_eq!(resumed.node, "a");
+        assert_eq!(resumed.worktree, original.worktree);
+        assert_eq!(resumed.session_id, original.session_id);
+        assert_eq!(resumed.attempt, original.attempt);
+        assert_eq!(fs::read_to_string(repo.join("partial-a.txt")).unwrap(), "recovered");
+        assert_eq!(fs::read_to_string(repo.join("external.txt")).unwrap(), "edited while paused");
+        assert_eq!(completed.events.iter().filter(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. })).count(),
+            paused.events.iter().filter(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. })).count(),
+            "resuming the private batch must not refresh its source baseline");
+        let audit: serde_json::Value = serde_json::from_slice(
+            &fs::read(temp.path().join("audit-a.json")).unwrap(),
+        ).unwrap();
+        assert_eq!(audit["continuation"], true);
+        assert_eq!(audit["managed"], managed);
+        assert_eq!(audit["externalFilePresent"], false, "the resumed agent must keep its original project view");
+        assert!(!completed.events.iter().any(|event| matches!(event.kind, EventKind::BatchRecoveryCaptured { .. })));
+        assert_eq!(completed.executions.len(), 4, "resume must succeed without another failed attempt");
+        assert_eq!(completed.events.iter().filter(|event| matches!(event.kind, EventKind::PublicationCompleted { .. })).count(),
+            if pause_run { 1 } else { 2 }, "only finished results should be published");
+    }
 }
 
 #[test]

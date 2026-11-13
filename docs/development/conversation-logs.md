@@ -23,6 +23,40 @@ npm run migrate
 
 Do not delete the database to resolve a format issue or run migration against a live backend. Keep sensitive backups outside the public repository.
 
+## Restore an undelivered paused batch
+
+Older adaptive-workspace schedulers could send user-paused private nodes into
+recovery publication instead of resuming them in place. The offline repair is
+narrowly scoped to that case, not a general publication rollback.
+
+Stop the backend and its workers, confirm `GRAPHER_DATA_DIR`, and back up the
+Run's workspaces, private Git metadata and sessions outside the project. Use the
+updated backend for both repair and subsequent startup:
+
+```sh
+node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher -- --restore-paused-batch RUN_ID
+node scripts/cargo.mjs run --manifest-path backend/Cargo.toml --bin grapher -- --restore-paused-batch RUN_ID --apply --expect-sequence N --backup /absolute/recovery-directory
+```
+
+The first command previews the nodes and current event sequence `N`. Apply
+requires the exclusive runtime lease, the unchanged sequence and unused backup
+filenames. It saves a consistent `events.sqlite` copy and before/after projections
+in the backup directory. Backup paths inside runtime, source or private
+workspaces—including aliases and traversal—are rejected before directories are
+created. Workspace/session backups are a separate prerequisite; the command does
+not copy or modify project files. It refuses missing/reassigned
+workspaces, invalid sessions, later user/graph/execution changes, active writers,
+and any journal evidence that publication advanced beyond composition. Missing
+Merger journals are not proof that source was untouched.
+
+One append-only `PausedBatchRestored` event restores the nodes' pre-continuation
+pause state and exits the handoff. It retains all attempts, transcripts, completed
+results and private merge evidence, and leaves the Run paused; it does not start
+an Agent. Do not reopen the repaired database with a backend predating this event.
+The [workspace policy](../architecture/workspace-snapshots-and-feedback.md#adaptive-workspace-policy)
+owns subsequent continuation behavior. Regression coverage is in
+[workspace_policy_tests.rs](../../backend/src/workspace_policy_tests.rs).
+
 ## Diagnosing database size
 
 Inspect the database read-only before treating it as a disposable cache. Retained conversations own their `execution_logs`; completed publication removes private project worktrees, not conversation history. Compare log byte totals and row counts with `PRAGMA page_count`, `page_size`, and `freelist_count`. Older small output packets can leave many rows and index entries, and unused space inside live B-tree pages is distinct from whole pages on the freelist. New writes fill bounded chunks across batches; normal reads/startup do not repack old transcripts.

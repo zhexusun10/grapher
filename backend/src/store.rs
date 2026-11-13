@@ -51,6 +51,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::ExecutionBatchStarted { .. } => "execution_batch_started",
         EventKind::BatchHandoffRequested { .. } => "batch_handoff_requested",
         EventKind::BatchRecoveryCaptured { .. } => "batch_recovery_captured",
+        EventKind::PausedBatchRestored { .. } => "paused_batch_restored",
         EventKind::SharedWorkspaceReviewRequested { .. } => "shared_workspace_review_requested",
         EventKind::SourceSnapshotted { .. } => "source_snapshotted",
         EventKind::SourceFilesRecorded { .. } => "source_files_recorded",

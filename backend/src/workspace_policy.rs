@@ -43,6 +43,30 @@ impl Runtime {
             .is_some_and(|head| self.state.published_heads.contains(head))
     }
 
+    /// A user pause suspends the current private batch; it is not a failed-work
+    /// handoff or a new isolation decision. Already delivered recoveries still
+    /// follow their durable publication evidence rather than reviving an old cwd.
+    pub(super) fn paused_private_continuation(&self, node: &str) -> Option<&Execution> {
+        if !self.batch_workspaces() {
+            return None;
+        }
+        let state = self.state.nodes.get(node)?;
+        if !state.continuation || !state.pending_messages.is_empty() {
+            return None;
+        }
+        let previous = self.state.executions.iter().rev().find(|execution| {
+            execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)
+        })?;
+        (previous.status == "failed"
+            && self.state.execution_stop_requests.contains(&previous.id)
+            && !Self::same_workspace_path(
+                Path::new(&previous.worktree),
+                Path::new(&self.state.config.as_ref()?.repository),
+            )
+            && !self.batch_recovery_was_delivered(previous))
+            .then_some(previous)
+    }
+
     /// Shared source workers may refill free slots without draining siblings.
     /// Private writers and pending deliveries must drain before dispatch can
     /// switch workspaces. Explicit retries also deliver retained partial work,
@@ -81,6 +105,29 @@ impl Runtime {
                 && !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
         }) {
             return Ok(false);
+        }
+        // Resume the suspended private batch before delivering even completed
+        // siblings. New ready work is deferred by jobs_with_pending_feedback.
+        // This also keeps a one-node remainder private instead of moving its
+        // unfinished files/session to source because the group is now small.
+        if !ready.is_empty()
+            && ready.iter().all(|node| self.paused_private_continuation(&node.name).is_some())
+        {
+            if active {
+                return Ok(false);
+            }
+            for node in ready {
+                let previous = self.paused_private_continuation(&node.name).unwrap();
+                if self.planner_workspace_owner(previous).is_none_or(|owner| owner.id != previous.id) {
+                    return Err("Retained paused workspace was reassigned; refusing to resume another execution's files".into());
+                }
+            }
+            self.emit(EventKind::ExecutionBatchStarted {
+                nodes: ready.iter().map(|node| node.name.clone()).collect(),
+                isolated: true,
+                resumed: true,
+            })?;
+            return Ok(true);
         }
         let mut heads = BTreeSet::new();
         for execution in &self.state.executions {
@@ -243,6 +290,7 @@ impl Runtime {
         events.push(EventKind::ExecutionBatchStarted {
             nodes: ready.iter().map(|node| node.name.clone()).collect(),
             isolated,
+            resumed: false,
         });
         self.emit_outputs(events)?;
         Ok(true)

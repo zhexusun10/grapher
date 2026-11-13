@@ -79,6 +79,8 @@ pub struct Job {
     /// Explicit source-native ownership: adaptive shared Graph work or a
     /// post-publication follow-up. No worktree, composition or result commit.
     pub source_direct: bool,
+    /// Source input for new work, or the retained prepared input when resuming
+    /// a paused private writer after other branches advanced the Run baseline.
     pub expected_source_head: String,
     pub environment_input: Option<crate::environment::CompositeResult>,
     pub environment_sources: Vec<crate::environment::CompositeResult>,
@@ -1247,9 +1249,10 @@ impl Runtime {
                 }
                 | EventKind::SourceSnapshotted { head }
                 | EventKind::PublicationCompleted { head } => Some(head.as_str()),
-                // Each private batch captures the current source after the prior
-                // batch's handoff. Never reuse a baseline predating shared edits.
-                EventKind::ExecutionBatchStarted { isolated: true, .. } => Some(""),
+                // New private batches capture current source after the prior
+                // handoff. A suspended batch retains its original baseline:
+                // source edits during a pause must not change prepared inputs.
+                EventKind::ExecutionBatchStarted { isolated: true, resumed: false, .. } => Some(""),
                 EventKind::Approved { base } => Some(base.as_str()),
                 _ => None,
             })
@@ -3533,7 +3536,7 @@ impl Runtime {
                 })?;
             }
         }
-        let ready: Vec<_> = self
+        let mut ready: Vec<_> = self
             .state
             .graph
             .nodes
@@ -3555,9 +3558,16 @@ impl Runtime {
                         .filter(|edge| !edge.feedback && edge.to == node.name)
                         .all(|edge| self.state.nodes[&edge.from].status == "completed")
             })
-            .take(available)
             .cloned()
             .collect();
+        // A suspended private batch resumes in place before a new dispatch
+        // group can publish its partial work or choose a different workspace.
+        // Select continuations before the slot cap so earlier new nodes cannot
+        // displace a paused node in graph order.
+        if ready.iter().any(|node| self.paused_private_continuation(&node.name).is_some()) {
+            ready.retain(|node| self.paused_private_continuation(&node.name).is_some());
+        }
+        ready.truncate(available);
         if !self.prepare_execution_batch(&ready, allow_publication && pending_sources.is_empty())? {
             return Ok(Vec::new());
         }
@@ -3583,7 +3593,7 @@ impl Runtime {
                     && self.state.nodes[&node.name].source_direct_recovery);
             let id = Uuid::new_v4().to_string();
             // Dependency nodes normally take over their parent's physical workspace.
-            let source_head = if self.is_serial() || shared_source {
+            let mut source_head = if self.is_serial() || shared_source {
                 String::new()
             } else {
                 self.latest_source_head().to_owned()
@@ -3873,8 +3883,19 @@ impl Runtime {
                         )))
                         .cloned()
                 });
+            let mut materialize_source = materialize_source;
             if let Some(previous) = &preserved_workspace {
                 before = previous.before.clone();
+                if self.paused_private_continuation(&node.name).is_some() {
+                    // A node-only stop lets siblings publish and newer batches
+                    // advance the Run baseline. This writer still owns its
+                    // prepared inputs, including across retries before Prepared.
+                    // Pin only this Job; never rewind the Run's latest source or
+                    // recollect it over retained partial work. Parent/ownership
+                    // and prepared-ancestry checks still run in perform().
+                    source_head = before.clone();
+                    materialize_source = false;
+                }
             }
             let recovered_workspace = resume
                 .filter(|previous| batch_workspaces && self.batch_recovery_was_delivered(previous))

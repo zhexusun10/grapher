@@ -996,6 +996,10 @@ pub enum EventKind {
     ExecutionBatchStarted {
         nodes: Vec<String>,
         isolated: bool,
+        /// Resume the existing private batch without collecting a new source
+        /// baseline. Historical events always started a new dispatch group.
+        #[serde(default)]
+        resumed: bool,
     },
     /// Delivery between batches uses normal recoverable Git publication.
     BatchHandoffRequested {
@@ -1005,6 +1009,13 @@ pub enum EventKind {
     /// before the failed nodes can continue in a different physical directory.
     BatchRecoveryCaptured {
         heads: BTreeMap<String, String>,
+    },
+    /// Offline compensation for an undelivered handoff of explicitly paused
+    /// nodes. Historical attempts and publication evidence remain append-only.
+    PausedBatchRestored {
+        handoff_sequence: i64,
+        restored_nodes: BTreeMap<String, NodeState>,
+        reason: String,
     },
     SharedWorkspaceReviewRequested {
         execution_id: String,
@@ -2463,6 +2474,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     }
                 }
             }
+        }
+        EventKind::PausedBatchRestored { restored_nodes, .. } => {
+            for (name, node) in restored_nodes {
+                state.nodes.insert(name.clone(), node.clone());
+            }
+            state.batch_handoff = None;
+            state.publication = None;
+            state.isolated_workspaces = Some(true);
+            state.paused = true;
+            state.phase = "paused".into();
         }
         EventKind::Approved { base } => {
             state.approved = true;
