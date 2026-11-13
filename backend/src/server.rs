@@ -2206,6 +2206,8 @@ fn plan_goal_internal_with_options(
                     if !has_session {
                         return Err(("Cannot continue: the Planner session is missing".into(), None));
                     }
+                    validate_planner_continuation_history(&session_dir, &session_id)
+                        .map_err(|error| (format!("Cannot continue Planner session: {error}"), None))?;
                     rebind_planner_session(&session_dir, &session_id, &workspace)
                         .map_err(|error| (format!("Cannot rebind Planner session: {error}"), None))?;
                     if stored_planner_session_id(&session_dir, &repository, &workspace, &session_id)
@@ -2214,8 +2216,6 @@ fn plan_goal_internal_with_options(
                     {
                         return Err(("Cannot continue: the Planner session is missing".into(), None));
                     }
-                    validate_planner_continuation_history(&session_dir, &session_id)
-                        .map_err(|error| (format!("Cannot continue Planner session: {error}"), None))?;
                     let graph = fs::read(session_dir.join(format!("graph-{previous_id}.json")))
                         .map_err(|error| (format!("Cannot read retained Planner draft: {error}"), None))?;
                     serde_json::from_slice::<Graph>(&graph)
@@ -2620,27 +2620,28 @@ fn plan_goal_internal_with_options(
                                     original_graph.as_ref().map(|_| &runtime.state),
                                 )?
                             };
-                            rebind_planner_session(
-                                &planner_session_dir,
-                                &planner_session_id,
-                                &planner_workspace,
-                            )?;
                             // Pi accepts a header-only file without a resume warning.
                             // An existing review conversation must retain its original
                             // user turn; manual graphs may have no Planner session yet.
-                            if background_review
-                                && stored_planner_session_id(
-                                    &planner_session_dir,
-                                    &repository,
-                                    &planner_workspace,
-                                    &planner_session_id,
-                                )?.is_some()
-                            {
+                            let has_session = planner_session_dir.is_dir()
+                                && fs::read_dir(&planner_session_dir)
+                                    .map_err(|error| error.to_string())?
+                                    .filter_map(Result::ok)
+                                    .any(|entry| {
+                                        entry.path().extension().is_some_and(|ext| ext == "jsonl")
+                                            && entry.file_type().is_ok_and(|kind| kind.is_file())
+                                    });
+                            if background_review && has_session {
                                 validate_planner_continuation_history(
                                     &planner_session_dir,
                                     &planner_session_id,
                                 ).map_err(|error| format!("Cannot review Planner session: {error}"))?;
                             }
+                            rebind_planner_session(
+                                &planner_session_dir,
+                                &planner_session_id,
+                                &planner_workspace,
+                            )?;
                             // Keep Graph IR and conversation logs out of project snapshots.
                             fs::create_dir_all(&planner_session_dir).map_err(|e| e.to_string())?;
                             let graph_path =

@@ -637,10 +637,18 @@ fn post_task_review_rejects_header_only_history_and_preserves_failure_after_rest
         "type": "session", "version": 3, "id": planning_id,
         "cwd": crate::native::host_path(&repo)
     }));
-    let history = format!("{header}{}\n", serde_json::json!({
+    let turn = format!("{}\n", serde_json::json!({
         "type": "message", "id": "original", "parentId": null,
         "message": { "role": "user", "content": "Original user goal" }
     }));
+    let history = format!("{header}{turn}");
+    let expected_history = format!(
+        "{}\n{turn}",
+        serde_json::json!({
+            "type": "session", "version": 3, "id": planning_id,
+            "cwd": crate::session_branch::session_cwd(&repo).unwrap()
+        })
+    );
     fs::write(&session_file, &header).unwrap();
 
     drive(service.clone());
@@ -694,7 +702,7 @@ fn post_task_review_rejects_header_only_history_and_preserves_failure_after_rest
     assert_eq!(reviewed.graph, graph);
     assert_eq!(reviewed.executions.len(), 1);
     assert_eq!(planner_tasks(&temp), vec![POST_TASK_REVIEW_PROMPT.to_string()]);
-    assert_eq!(fs::read_to_string(&session_file).unwrap(), history);
+    assert_eq!(fs::read_to_string(&session_file).unwrap(), expected_history);
 }
 
 #[test]

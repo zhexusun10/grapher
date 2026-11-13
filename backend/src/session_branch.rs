@@ -90,7 +90,7 @@ fn open_session(
 /// The spelling Pi will report from `process.cwd()`. Windows preserves the
 /// launched spelling (including 8.3 aliases), while Unix resolves symlinks and
 /// reports the filesystem spelling.
-fn session_cwd(cwd: &Path) -> Result<PathBuf, String> {
+pub(crate) fn session_cwd(cwd: &Path) -> Result<PathBuf, String> {
     #[cfg(windows)]
     {
         Ok(crate::native::host_path(cwd))
