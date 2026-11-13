@@ -2,7 +2,7 @@
 export const en: Record<string, string> = {
   "节点工作区": "Node workspaces",
   "并行节点独立工作区": "Isolate parallel node workspaces",
-  "不超过 2 个节点共用源目录，超过 2 个启用独立工作区。关闭后所有批次共用源目录，并发修改可能互相覆盖。": "Each dispatch batch shares source with up to 2 nodes and uses private workspaces with more than 2. Turn off to share source in every batch. Concurrent edits may overwrite each other.",
+  "空闲时派发不超过 2 个节点共用源目录，超过 2 个启用独立工作区。共享执行中按依赖补位，不等待无关节点。关闭后始终共享源码，并发修改可能互相覆盖。": "When idle, dispatching up to 2 nodes shares source; larger groups use private workspaces. Shared work refills free slots as dependencies resolve, without waiting for unrelated nodes. Turn off to always share source. Concurrent edits may overwrite each other.",
   "继续当前 Agent（不会追加消息）": "Continue this agent (without adding a message)",
   "Planner 待处理消息": "Pending Planner messages",
   "正在提交消息…": "Submitting message…",

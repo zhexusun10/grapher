@@ -60,9 +60,8 @@ test('production Planner writes source directly; legacy private Runs retain node
       const userInstruction = typeof userTurn.content === 'string' ? userTurn.content
         : userTurn.content.map((part: any) => part.text ?? '').join('');
       const continuation = userInstruction.includes('CONTINUE_PUBLICATION');
-      const merger = prompt.includes('Resolve the current Git merge conflicts.')
-        || prompt.includes('Resolve the conflicting project files in this workspace.')
-        || continuation;
+      const validationFeedback = userInstruction.startsWith('Merge validation failed:');
+      const merger = prompt.includes('<workspace_objective>') || continuation;
       const results = messages.filter((message: any) => message.role === 'tool');
       assert.ok(results.every((result: any) => !JSON.stringify(result.content).includes('exited with code')),
         `Tool failed for ${label}: ${JSON.stringify(results)}`);
@@ -105,10 +104,12 @@ test('production Planner writes source directly; legacy private Runs retain node
           assert.equal(userInstruction, `${label} CONTINUE_PUBLICATION`, 'send the user instruction unchanged');
         } else {
           assert.ok(system.includes('git add -f -- <paths>'), 'initial repair must stage resolved project paths');
-          assert.ok(system.includes('internal composition commits are not part of it'), 'project Git must not expose graph history');
-          assert.ok(system.includes('Do not invent a merge or snapshot commit.'));
-          assert.ok(system.includes('If the source has no .git, resolve the files directly without initializing Git.'));
-          assert.ok(system.includes(`preserves the composition parents.\\n${pathGuideline}`), 'path convention must directly follow the initial addendum without a blank line');
+          assert.ok(system.includes('not a task to execute'), 'the objective is context only');
+          assert.ok(system.includes('initialize a repository or create commits'));
+          assert.ok(system.includes('GIT_DIR and GIT_WORK_TREE'));
+          assert.ok(system.includes('even if .git is absent'));
+          assert.ok(system.includes('git ls-files -u'));
+          assert.ok(system.includes('git diff --cached --check'));
         }
         // A continued session carries the original turn's tool results, so
         // count results after the latest user message for this turn.
@@ -119,17 +120,27 @@ test('production Planner writes source directly; legacy private Runs retain node
           // After delivery the same conversation edits source directly, without
           // manufacturing another visible commit or re-entering publication.
           tool = { name: 'bash', arguments: { command: "printf 'continued\\n' > continued.txt" } };
-        } else if (!scenario.fail && results.length === 0) {
+        } else if (!scenario.fail && turnResults.length === 0 && (validationFeedback || !scenario.plain)) {
+          // Plain-folder cases deliberately leave the first turn unresolved.
+          // A real second Pi turn must retain history and receive the backend's
+          // concrete validation error, without allocating another Merger.
+          if (scenario.plain) {
+            assert.ok(validationFeedback);
+            assert.ok(userInstruction.includes('shared.txt'));
+            assert.ok(userInstruction.endsWith('Fix the remaining issue and rerun the Git checks.'));
+            assert.ok(!userInstruction.includes('git ls-files -u'), 'feedback does not duplicate the system checklist');
+            assert.ok(messages.filter((message: any) => message.role === 'user').length >= 2);
+            assert.ok(messages.some((message: any) => message.role === 'assistant'
+              && JSON.stringify(message.content).includes('Completed')), 'repair retains the first turn');
+          }
           // Absolute source aliases select the conflicted private file for both
           // node and publication Mergers, never the user's source file. The
           // Merger's Git targets the graph metadata, which carries the pending
           // merge (MERGE_HEAD) and the unmerged index; the visible project Git
           // is only a mirror of that conflicted index.
-          const visible = scenario.plain
-            ? 'test ! -e .git && '
-            : 'test -n "$(git diff --name-only --diff-filter=U)" && test -n "$(git rev-parse --verify -q MERGE_HEAD)" && ';
+          const visible = `${scenario.plain ? 'test ! -e .git && ' : ''}test -n "$(git ls-files -u)" && test -n "$(git rev-parse --verify -q MERGE_HEAD)" && `;
           tool = { name: 'bash', arguments: { command:
-            `${visible}printf 'resolved\\n' > ${quote(join(scenario.repository, 'shared.txt'))}${scenario.plain ? '' : ' && git add -f shared.txt'}`,
+            `${visible}printf 'resolved\\n' > ${quote(join(scenario.repository, 'shared.txt'))} && git add -f -- shared.txt && test -z "$(git ls-files -u)" && git diff --cached --check`,
           } };
         }
       } else if (results.length === 0) {
@@ -293,6 +304,11 @@ test('production Planner writes source directly; legacy private Runs retain node
         assert.notEqual(normalize(merger.worktree), normalize(repository), 'all conflict repair stays private');
         const log = await api('get_execution_output', { runId: state.runId, executionId: merger.id, full: true });
         assert.ok(log.content.includes('Completed'));
+        if (plain && !fail) {
+          assert.ok(log.content.includes('Merger validation failed; requesting repair 1/3'));
+          assert.ok(!log.content.includes('requesting repair 2/3'), 'one feedback turn repairs the plain-folder conflict');
+        }
+        if (fail) assert.ok(log.content.includes('after 3 repair turns'));
       }
       if (fail) {
         assert.equal((await readFile(join(repository, 'shared.txt'), 'utf8')).trim(), 'base');

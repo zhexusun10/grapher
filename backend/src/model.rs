@@ -285,8 +285,9 @@ pub struct Config {
     pub role_models: BTreeMap<String, RoleModelConfig>,
     #[serde(default = "default_max_parallel")]
     pub max_parallel: usize,
-    /// Each dispatch batch shares source unless it contains more than two nodes.
-    /// False keeps every batch source-native regardless of its size.
+    /// At idle boundaries, dispatch groups above two nodes use private workspaces.
+    /// Shared-source replenishment never changes a live writer's workspace.
+    /// False keeps all dispatches source-native regardless of group size.
     #[serde(default = "default_isolate_parallel_nodes")]
     pub isolate_parallel_nodes: bool,
     #[serde(default = "default_max_feedback")]
@@ -991,7 +992,7 @@ pub enum EventKind {
         isolated: bool,
     },
     WorkspaceIsolationRequested,
-    /// The scheduler freezes the actual ready group, after applying worker limits.
+    /// Records a slot-capped ready group, including shared-source replenishment.
     ExecutionBatchStarted {
         nodes: Vec<String>,
         isolated: bool,

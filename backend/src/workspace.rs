@@ -1757,6 +1757,26 @@ pub(crate) fn git_bytes(
     run_git_bytes(cwd, args, index, input, false)
 }
 
+/// Git reports patch-check diagnostics with exit 2; all other failures remain
+/// infrastructure errors, rather than instructions for an agent to bypass Git.
+pub(crate) fn check_staged_patch(cwd: &Path, paths: &[String]) -> Result<Option<String>, String> {
+    let mut args = vec![
+        "--literal-pathspecs", "diff", "--cached", "--check", "--no-ext-diff",
+        "--no-textconv", "--",
+    ];
+    args.extend(paths.iter().map(String::as_str));
+    let (output, code) = run_git_bytes_allowing(cwd, &args, None, None, false, &[2])?;
+    if code == Some(2) {
+        let diagnostic = String::from_utf8_lossy(&output).trim().to_string();
+        if diagnostic.is_empty() {
+            return Err("Git patch check failed without diagnostics".into());
+        }
+        Ok(Some(diagnostic))
+    } else {
+        Ok(None)
+    }
+}
+
 fn run_git_bytes(
     cwd: &Path,
     args: &[&str],
@@ -1764,6 +1784,17 @@ fn run_git_bytes(
     input: Option<&[u8]>,
     project_view: bool,
 ) -> Result<Vec<u8>, String> {
+    run_git_bytes_allowing(cwd, args, index, input, project_view, &[]).map(|(bytes, _)| bytes)
+}
+
+fn run_git_bytes_allowing(
+    cwd: &Path,
+    args: &[&str],
+    index: Option<&Path>,
+    input: Option<&[u8]>,
+    project_view: bool,
+    allowed_failures: &[i32],
+) -> Result<(Vec<u8>, Option<i32>), String> {
     let _lease = SlotGitGuard::acquire(cwd)?;
     let metadata = if project_view {
         None
@@ -1886,11 +1917,16 @@ fn run_git_bytes(
         };
         Ok::<_, String>((output, input_result))
     })?;
-    if !output.status.success() {
+    if !output.status.success()
+        && !output
+            .status
+            .code()
+            .is_some_and(|code| allowed_failures.contains(&code))
+    {
         return Err(git_command_failure(cwd, args, &output));
     }
     input_result.map_err(|e| format!("Cannot write Git input: {e}"))?;
-    Ok(output.stdout)
+    Ok((output.stdout, output.status.code()))
 }
 
 /// Confirm a recorded source snapshot is still part of the shadow repository's

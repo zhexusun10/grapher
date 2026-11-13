@@ -105,7 +105,7 @@ Nodes remain stable across recorded execution attempts. Historical output and ba
 
 ## Scheduling and concurrency
 
-Only ready nodes dispatch, subject to the **per-Graph-Run** limit. `maxParallel=0` defaults to 8; positive values configure the limit (range 2–40 in Settings, default 8), with a hard maximum of 40. New Runs dispatch through the [batch workspace barrier](workspace-snapshots-and-feedback.md#adaptive-workspace-policy): a freed slot is not filled until the current batch drains and hands off its results. Legacy Runs keep their recorded scheduling contract.
+Only ready nodes dispatch, subject to the **per-Graph-Run** limit. `maxParallel=0` defaults to 8; positive values configure the limit (range 2–40 in Settings, default 8), with a hard maximum of 40. New Runs use the [adaptive workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy): shared-source workers may refill free slots as dependencies resolve, while private handoff and workspace switching retain their drain barriers. Legacy Runs keep their recorded scheduling contract.
 
 There is no global pool limiting nodes across Runs, and no shared cap for Planner/Serial sessions. Choose concurrency with provider quotas and machine resources in mind. Creating or switching conversations does not stop background Runs.
 
@@ -437,9 +437,11 @@ After interruption:
   protocol and unknown failures. Graph surfaces run-wide Continue in its topology.
   The Node and Serial composers also expose the backend's per-node `canResume`
   hint and issue `resume_node` without creating a user message. A targeted retry
-  queues only the selected failed root (adaptive Runs wait for the current batch
-  to drain; legacy Runs may retry alongside independent workers)
-  and its dependency-blocked descendants, and leaves other failures untouched.
+  queues only the selected failed root and its dependency-blocked descendants,
+  and leaves other failures untouched. Adaptive Runs may retry alongside
+  independent shared-source workers; private handoff and workspace switching
+  retain the [adaptive policy's drain barriers](workspace-snapshots-and-feedback.md#adaptive-workspace-policy).
+  Legacy Runs keep their recorded scheduling contract.
   Its dependencies must be complete. A globally paused multi-node Graph remains
   paused: its nodes cannot be resumed individually without also scheduling other
   queued work; use the run-wide Continue. A paused single-node Run can safely be

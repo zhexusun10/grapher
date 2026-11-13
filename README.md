@@ -86,12 +86,12 @@ For small, linear, or tightly coupled tasks, use **Serial** instead. Use **Graph
 | Coding agents | One | One or more task nodes |
 | Planning | Direct | Compiled execution graph |
 | Approval | Automatic | Auto Approve by default; manual approval optional |
-| Workspace | Your project | Selected per dispatch batch: shared source for up to two nodes, private workspaces above two |
+| Workspace | Your project | Selected when idle: shared source for up to two ready nodes, private workspaces above two |
 | Scheduling | Sequential | Dependency-aware, bounded parallelism |
 
 All five **Settings → Harness settings** options default on; saved opt-outs are preserved. Turn off **Hide Auto mode** to show Auto and Partitioner model settings.
 
-By default, each dispatch batch of up to two nodes shares source; larger batches use isolation. After the batch drains and delivers its results, the next batch chooses again, including work added during Planner review. **Settings → Harness settings** can disable isolation for new conversations. Sharing reduces setup and merge costs, but overlapping edits may overwrite each other.
+By default, an idle Graph shares source when dispatching up to two ready nodes; larger groups use isolation. Shared-source work fills free slots as dependencies resolve, without waiting for unrelated nodes or switching directories. Private batches drain and deliver results before dispatch continues; workspace choice is reconsidered when idle, including work added during Planner review. **Settings → Harness settings** can disable isolation for new conversations. Sharing reduces setup and merge costs, but overlapping edits may overwrite each other.
 
 See the [user guide](docs/user-guide.md) for planning side effects, controls and recovery. Graph is a route, not a minimum agent count; it can contain a single node.
 

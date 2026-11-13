@@ -124,7 +124,22 @@ A node-composition Merger is a first-class conversation while it runs: the execu
 
 Merger continuation reserves its workspace before preparing inputs. Attachment delivery or other pre-launch failures record a terminal failure and release that reservation even if no process started. A successful node repair atomically records Merger completion and returns a failed/blocked target to `dirty` in the event reducer, only for the target revision captured at reservation; replay preserves the same status/revision and does not unpause the Run.
 
-If a Git Merger fails or leaves an unresolved conflict, the affected node is blocked and its workspace/logs are preserved for inspection; retrying the node re-attempts preparation. Starting any upstream execution returns that node's blocked dependency descendants to `waiting`, so a retried upstream branch re-enters normal scheduling instead of staying blocked. The original task still needs an execution. An environment mismatch alone does not block the node. Retrying final publication does not repair a node's preparation conflict.
+After a successful model turn, repairable backend validation errors (unresolved
+paths, missing plain-folder resolution evidence, lost incoming ancestry, or
+uncommitted changes) are sent back as diagnostic prompts in the same Merger
+session, workspace and execution. This applies to initial node/publication
+repair and repair follow-ups. The execution stays running and its output retains
+each validation failure; only successful validation emits completion. Automatic
+repair is bounded. Run-wide cancellation remains latched for the active Merger
+operation between model processes and through late process registration; it is
+retired when that operation drains, without poisoning an explicit later retry.
+Provider/process errors, cancellation, output persistence failures and
+repository/metadata I/O failures remain terminal, not instructions to bypass
+checks. A session-log write failure still attempts the independent event-log
+write before terminating. Exhausted repair retains the last error and workspace. Restart
+preserves the conversation but does not silently resume model calls.
+
+If a Git Merger fails or exhausts repair with an unresolved conflict, the affected node is blocked and its workspace/logs are preserved for inspection; retrying the node re-attempts preparation. Starting any upstream execution returns that node's blocked dependency descendants to `waiting`, so a retried upstream branch re-enters normal scheduling instead of staying blocked. The original task still needs an execution. An environment mismatch alone does not block the node. Retrying final publication does not repair a node's preparation conflict.
 
 ## Sessions, follow-ups, and history edits
 

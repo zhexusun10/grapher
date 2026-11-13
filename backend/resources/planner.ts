@@ -225,15 +225,106 @@ function editArguments(
   return { [key]: edits };
 }
 
-function applyNode(graph: Graph, edit: NodeEdit) {
+function applyNode(graph: Graph, edit: NodeEdit): Graph["edges"] {
   graph.nodes = graph.nodes.filter(node => node.name !== edit.id);
-  if (edit.delete) graph.edges = graph.edges.filter(edge => edge.from !== edit.id && edge.to !== edit.id);
-  else graph.nodes.push({ name: edit.id, task: edit.task ?? "" });
+  if (edit.delete) {
+    const removed = graph.edges.filter(edge => edge.from === edit.id || edge.to === edit.id);
+    if (removed.length > 0) {
+      graph.edges = graph.edges.filter(edge => edge.from !== edit.id && edge.to !== edit.id);
+    }
+    return removed;
+  }
+  graph.nodes.push({ name: edit.id, task: edit.task ?? "" });
+  return [];
 }
 
-function applyEdge(graph: Graph, edit: EdgeEdit) {
+function applyEdge(graph: Graph, edit: EdgeEdit): boolean {
+  const before = graph.edges.length;
   graph.edges = graph.edges.filter(edge => edge.from !== edit.from || edge.to !== edit.to);
-  if (!edit.delete) graph.edges.push({ from: edit.from, to: edit.to, feedback: edit.feedback ?? false });
+  if (!edit.delete) {
+    graph.edges.push({ from: edit.from, to: edit.to, feedback: edit.feedback ?? false });
+    return true;
+  }
+  return graph.edges.length < before;
+}
+
+function alternateDependencyPath(edges: Graph["edges"], from: string, to: string): string[] | undefined {
+  const queue = [from];
+  const previous = new Map<string, string | undefined>([[from, undefined]]);
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    const neighbors = Array.from(new Set(
+      edges
+        .filter(edge => !edge.feedback && edge.from === name && !(edge.from === from && edge.to === to))
+        .map(edge => edge.to),
+    )).sort();
+    for (const next of neighbors) {
+      if (previous.has(next)) continue;
+      previous.set(next, name);
+      if (next === to) {
+        const path = [next];
+        let current: string | undefined = next;
+        while ((current = previous.get(current)) !== undefined) path.push(current);
+        path.reverse();
+        return path;
+      }
+      queue.push(next);
+    }
+  }
+  return undefined;
+}
+
+function isDependencyDag(graph: Graph): boolean {
+  const names = new Set(graph.nodes.map(node => node.name));
+  if (names.size !== graph.nodes.length) return false;
+  const degrees = new Map<string, number>(graph.nodes.map(node => [node.name, 0]));
+  const outgoing = new Map<string, string[]>(graph.nodes.map(node => [node.name, []]));
+  for (const edge of graph.edges) {
+    if (!names.has(edge.from) || !names.has(edge.to) || edge.from === edge.to) return false;
+    if (edge.feedback) continue;
+    degrees.set(edge.to, (degrees.get(edge.to) ?? 0) + 1);
+    outgoing.get(edge.from)!.push(edge.to);
+  }
+  const ready = Array.from(degrees.entries()).filter(([, degree]) => degree === 0).map(([name]) => name);
+  let visited = 0;
+  while (ready.length > 0) {
+    const name = ready.shift()!;
+    visited++;
+    for (const next of outgoing.get(name) ?? []) {
+      const remaining = degrees.get(next)! - 1;
+      degrees.set(next, remaining);
+      if (remaining === 0) ready.push(next);
+    }
+  }
+  return visited === names.size;
+}
+
+function pruneRedundantEdges(graph: Graph): { from: string; to: string; path: string[] }[] {
+  if (!isDependencyDag(graph)) return [];
+  const removed: { from: string; to: string }[] = [];
+  const kept: Graph["edges"] = [];
+  const candidates = graph.edges.slice();
+  for (let index = 0; index < candidates.length; index++) {
+    const edge = candidates[index];
+    if (edge.feedback) {
+      kept.push(edge);
+      continue;
+    }
+    const remaining = [...kept, ...candidates.slice(index + 1)];
+    if (alternateDependencyPath(remaining, edge.from, edge.to)) {
+      removed.push({ from: edge.from, to: edge.to });
+    } else {
+      kept.push(edge);
+    }
+  }
+  if (removed.length === 0) return [];
+  graph.edges = kept;
+  // Recompute alternate paths against the final reduced graph so every edge
+  // cited in the explanation exists in the returned topology.
+  return removed.map(edge => ({
+    ...edge,
+    path: alternateDependencyPath(kept, edge.from, edge.to) ?? [edge.from, edge.to],
+  }));
 }
 
 export default function grapherPlanner(pi: ExtensionAPI) {
@@ -271,10 +362,13 @@ export default function grapherPlanner(pi: ExtensionAPI) {
             if (!isRecord(value) || (!Object.hasOwn(value, "requestedNode") && !Object.hasOwn(value, "actualNode"))) return part;
             const { requestedNode, actualNode, ...rest } = value;
             edited = true;
-            return { ...part, text: JSON.stringify({ ...rest,
-              ...(requestedNode !== undefined ? { requestedId: requestedNode } : {}),
-              ...(actualNode !== undefined ? { actualId: actualNode } : {}),
-            }) };
+            return {
+              ...part, text: JSON.stringify({
+                ...rest,
+                ...(requestedNode !== undefined ? { requestedId: requestedNode } : {}),
+                ...(actualNode !== undefined ? { actualId: actualNode } : {}),
+              })
+            };
           } catch { return part; }
         });
         if (!edited) return message;
@@ -331,7 +425,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
   }
   // The shared engine policy owns read/bash and their stable path view.
   // Keep this extension limited to graph mutations, regardless of cwd.
-  async function mutate(id: string, signal: AbortSignal | undefined, kind: "node" | "edge", change: (graph: Graph) => Diagnostic[] | void) {
+  async function mutate(id: string, signal: AbortSignal | undefined, kind: "node" | "edge", change: (graph: Graph, editNotes: string[]) => Diagnostic[] | void) {
     const revision = await revisionContext(id, signal);
     const saved: Graph = JSON.parse(readFileSync(graphPath, "utf8"));
     const graph: Graph = structuredClone(saved);
@@ -342,8 +436,10 @@ export default function grapherPlanner(pi: ExtensionAPI) {
         .replace(/^Node names\b/, "Node ids")
         .replace(/^Node name\b/, "Node id")),
     }), diagnostics.map(diagnostic => diagnostic.code));
-    const inputErrors = change(graph);
+    const editNotes: string[] = [];
+    const inputErrors = change(graph, editNotes);
     if (inputErrors?.length) return rejected(inputErrors);
+    const pruned = kind === "edge" ? pruneRedundantEdges(graph) : [];
     const checked = spawnSync(process.env.GRAPHER_COMPILER_PATH!, ["--compile"], { input: JSON.stringify({ graph, finalCheck: false, unremovableNodes, ...(revision ? { revisionContext: revision } : {}) }), encoding: "utf8", timeout: 10000 });
     if (checked.error || checked.status !== 0) return rejected([{ code: "compiler-unavailable", message: checked.error?.message || checked.stderr || `Compiler exited with status ${checked.status}` }]);
     let output;
@@ -354,24 +450,38 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     writeFileSync(graphPath, JSON.stringify(graph));
     // The compiler emits one W303 per feedback edge, in graph order. Pair by
     // position rather than parsing messages: node ids may contain arbitrary text.
-    // Only newly added routes need a scope warning; keep other warnings intact.
+    // Surface newly added feedback-scope descriptions in `notes` while keeping
+    // advisory warnings (W301/W302/W304) in `warnings`.
     const savedFeedback = new Set(saved.edges.filter(edge => edge.feedback)
       .map(edge => JSON.stringify([edge.from, edge.to])));
     const addedFeedback = graph.edges.filter(edge => edge.feedback)
       .map(edge => !savedFeedback.has(JSON.stringify([edge.from, edge.to])));
     let feedbackIndex = 0;
-    const warnings = (output.plan.warnings ?? []).filter((warning: string) =>
-      !warning.startsWith("W303:") || (kind === "edge" && addedFeedback[feedbackIndex++]))
-      .map(stripDiagnosticCode);
+    const warnings: string[] = [];
+    const scopeNotes: string[] = [];
+    for (const rawWarning of (output.plan.warnings ?? []) as string[]) {
+      if (rawWarning.startsWith("W303:")) {
+        if (kind === "edge" && addedFeedback[feedbackIndex++]) {
+          scopeNotes.push(stripDiagnosticCode(rawWarning));
+        }
+      } else {
+        warnings.push(stripDiagnosticCode(rawWarning));
+      }
+    }
     // The first node batch has no edges yet, so its compiler roots merely repeat
     // every node and can be mistaken for the intended final roots. Later edits
     // expose the compiler's sorted list as rootNodes to make extra roots visible.
     const initialNodeBatch = kind === "node" && saved.nodes.length === 0
       && saved.edges.length === 0 && graph.nodes.length > 0;
+    const pruneNotes = pruned.length > 0
+      ? [`Auto-removed redundant direct ${pruned.length === 1 ? "edge" : "edges"} implied by indirect paths (saved, no retry needed): ${pruned.map(item => `${item.from} → ${item.to} (via ${item.path.join(" → ")})`).join("; ")}.`]
+      : [];
+    const notes = [...editNotes, ...pruneNotes, ...scopeNotes];
     return result(JSON.stringify({
       applied: true,
       topology: { ...(initialNodeBatch ? {} : { rootNodes: output.plan.rootNodes ?? output.plan.roots }), ...topology(graph) },
       ...(warnings.length ? { warnings } : {}),
+      ...(notes.length ? { notes } : {}),
     }));
   }
   // Argument errors happen before execute(), so no mutation or graph read has
@@ -399,10 +509,17 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     }, { additionalProperties: false }),
     prepareArguments: raw => prepareWithContext(() => editArguments(raw, "nodes", ["id"], ["id", "task", "delete"], '{"nodes":[{"id":"...","task":"..."}]}')),
     async execute(id, parameters, signal) {
-      return mutate(id, signal, "node", graph => {
+      return mutate(id, signal, "node", (graph, editNotes) => {
         const duplicates = duplicateTargets("nodes", parameters.nodes.map(edit => edit.id));
         if (duplicates.length) return duplicates;
-        for (const edit of parameters.nodes) applyNode(graph, edit);
+        for (const edit of parameters.nodes) {
+          const removedEdges = applyNode(graph, edit);
+          if (removedEdges.length > 0) {
+            editNotes.push(
+              `Deleted node ${edit.id} also removed its incident ${removedEdges.length === 1 ? "edge" : "edges"}: ${removedEdges.map(edge => `${edge.from} → ${edge.to}${edge.feedback ? " (feedback)" : ""}`).join(", ")}.`,
+            );
+          }
+        }
       });
     },
   }));
@@ -421,10 +538,18 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     }, { additionalProperties: false }),
     prepareArguments: raw => prepareWithContext(() => editArguments(raw, "edges", ["from", "to"], ["from", "to", "feedback", "delete"], '{"edges":[{"from":"...","to":"..."}]}')),
     async execute(id, parameters, signal) {
-      return mutate(id, signal, "edge", graph => {
+      return mutate(id, signal, "edge", (graph, editNotes) => {
         const duplicates = duplicateTargets("edges", parameters.edges.map(edit => JSON.stringify([edit.from, edit.to])));
         if (duplicates.length) return duplicates;
-        for (const edit of parameters.edges) applyEdge(graph, edit);
+        const missingDeletes: EdgeEdit[] = [];
+        for (const edit of parameters.edges) {
+          if (!applyEdge(graph, edit)) missingDeletes.push(edit);
+        }
+        if (missingDeletes.length > 0) {
+          editNotes.push(
+            `Ignored delete for non-existent ${missingDeletes.length === 1 ? "edge" : "edges"}: ${missingDeletes.map(edge => `${edge.from} → ${edge.to}`).join(", ")}.`,
+          );
+        }
       });
     },
   }));

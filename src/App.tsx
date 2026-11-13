@@ -702,7 +702,9 @@ export default function App() {
       }
       // Retain the attachment envelope to match the durable event exactly.
       // EditableUserBubble parses it into text and attachment cards.
-      const message = recordMessage(`[@${targetNodeName}] ${text}`, running ? "steered" : undefined, selectedMerger.id);
+      // A continuation starts a new merger execution; attaching the settled id
+      // here would temporarily re-parent the previous output under this turn.
+      const message = recordMessage(`[@${targetNodeName}] ${text}`, running ? "steered" : undefined, running ? selectedMerger.id : undefined);
       // Follow the continuation execution the runtime just created, so the pane
       // and composer address the live Pi session instead of the settled one.
       return submitNodeMessage(running ? "steer" : "continue_merger", message, selectedMerger.id, selectedMerger.node,
@@ -2319,12 +2321,14 @@ export default function App() {
           setError(t("merger 已结束，只能查看执行记录"));
           return false;
         }
-        const selectedMessage = {
+        const selectedMessage = withoutPlannerSteerIdentity({
           ...targetMsg,
           text: selectedText,
           images: selectedVersionData.images,
           currentVersionIndex: selectedVersion,
-        };
+          delivery: running ? targetMsg.delivery : undefined,
+          executionId: running ? targetMerger.id : undefined,
+        });
         try {
           if (!await requireEditRepository()) return false;
           let snapshot = await runtimeService.control(running ? "steer" : "continue_merger", {
@@ -2559,7 +2563,12 @@ export default function App() {
 
       const baseEntries = sessionEntries.length > 0 ? sessionEntries : effectiveMessages;
       const { rolledBackEntries } = branchEditedMessageEntries(
-        baseEntries, targetMsg, cleanExisting, cleanText, parsedExisting.attachments
+        baseEntries, targetMsg, cleanExisting, cleanText, parsedExisting.attachments,
+        msg => withoutPlannerSteerIdentity({
+          ...msg,
+          delivery: running ? msg.delivery : undefined,
+          executionId: running ? targetMerger.id : undefined,
+        })
       );
 
       return run(async () => {

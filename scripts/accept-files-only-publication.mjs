@@ -7,6 +7,7 @@ import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { once } from 'node:events';
+import { legacyGraph } from './fixtures/legacy-run.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), 'grapher-files-only-acceptance-'));
 const agent = join(directory, 'agent');
@@ -28,7 +29,7 @@ const model = createServer(async (request, response) => {
     assert.ok(label, 'provider request must belong to this acceptance');
     const scenario = cases.get(label);
     const planner = body.tools?.some(t => t.function.name === 'node');
-    const merger = !planner && text.includes('Your sole responsibility is Git conflict repair');
+    const merger = !planner && text.includes('<workspace_objective>');
     const lastUser = messages.findLastIndex(m => m.role === 'user');
     const results = messages.slice(lastUser + 1).filter(m => m.role === 'tool');
     assert.ok(results.every(result => !JSON.stringify(result.content).includes('exited with code')), JSON.stringify(results));
@@ -41,9 +42,10 @@ const model = createServer(async (request, response) => {
       ] } };
       if (results.length === 2) tool = { name: 'edge', arguments: { edges: [{ from: 'alpha', to: 'join' }, { from: 'beta', to: 'join' }] } };
     } else if (merger) {
-      // Fail the first repair without staging anything. A real unresolved Git
-      // merge must become publication_failed, never fabricated completion.
-      if (scenario.failFirst && !scenario.failed) scenario.failed = true;
+      // Refuse every automatic repair turn until the harness explicitly
+      // enables repair after restart. One refused turn now triggers feedback,
+      // not publication_failed.
+      if (!scenario.allowRepair) scenario.failed = true;
       else if (!results.length) tool = { name: 'bash', arguments: { command:
         'test -n "$(git diff --name-only --diff-filter=U)" && printf "left\\nright\\n" > shared.txt && git add -f shared.txt' } };
     } else if (!results.length) {
@@ -101,7 +103,8 @@ const start = async () => {
   await until(async () => { try { return await api('bootstrap'); } catch { return false; } });
 };
 const config = repository => ({ repository, model: 'files-only-acceptance/native', thinkingLevel: 'off',
-  maxParallel: 3, maxFeedback: 1, postTaskReview: false, environment: null });
+  maxParallel: 3, maxFeedback: 1, autoApprove: false, isolateParallelNodes: true,
+  postTaskReview: false, environment: null });
 const waitPhase = (runId, phase) => until(async () => {
   const state = await api('snapshot', { runId });
   if (state.phase === phase) return state;
@@ -111,7 +114,11 @@ const waitPhase = (runId, phase) => until(async () => {
 const verify = (repository, original, state, before) => {
   const head = git(repository, 'rev-parse', 'HEAD');
   assert.equal(head, original, 'publication must not advance source HEAD');
-  assert.equal(state.publication.status, 'completed');
+  // Adaptive runs can publish a private batch and finish downstream work in
+  // source. Require durable delivery evidence when the current panel is cleared.
+  assert.ok(state.publication?.status === 'completed'
+    || (state.isolatedWorkspaces === false && state.events.some(event => event.type === 'publication_completed')),
+  'private results must have a completed publication');
   assert.equal(git(repository, 'for-each-ref', '--format=%(refname)', 'refs/grapher'), '');
   assert.equal(git(repository, 'rev-parse', 'HEAD'), original);
   assert.equal(git(repository, 'diff', '--cached', '--name-only'), before.indexStaged);
@@ -151,7 +158,7 @@ try {
     const original = git(repository, 'rev-parse', 'HEAD');
     const before = { commits: git(repository, 'cat-file', '--batch-all-objects', '--batch-check=%(objectname) %(objecttype)'),
       indexStaged: git(repository, 'diff', '--cached', '--name-only') };
-    cases.set(label, { repository, failFirst: label === 'PUBLICATION_RETRY', failed: false });
+    cases.set(label, { repository, allowRepair: label !== 'PUBLICATION_RETRY', failed: false });
     let initial;
     if (label === 'PLANNED_PARALLEL') {
       await writeFile(join(repository, 'user.txt'), 'staged\n'); git(repository, 'add', 'user.txt');
@@ -165,13 +172,19 @@ try {
     } else {
       const nodes = [{ name: 'left', task: `${label} WRITE_LEFT` }, { name: 'right', task: `${label} WRITE_RIGHT` }];
       if (label === 'NODE_FANIN') nodes.push({ name: 'join', task: `${label} VERIFY_MERGED` });
-      initial = await api('save_graph', { config: config(repository), graph: { originalGoal: label, nodes,
+      // Pin these cases to the retained private contract: a two-node adaptive
+      // batch may run in source and therefore never require a publication Merger.
+      initial = await legacyGraph(api, env.GRAPHER_DATA_DIR, { config: config(repository), graph: { originalGoal: label, nodes,
         edges: label === 'NODE_FANIN' ? [{ from: 'left', to: 'join', feedback: false }, { from: 'right', to: 'join', feedback: false }] : [] } });
     }
     console.log(`[acceptance] ${label}: approving ${initial.runId}`);
     await api('control', { action: 'approve', runId: initial.runId });
     if (label === 'PUBLICATION_RETRY') {
       const failed = await waitPhase(initial.runId, 'publication_failed');
+      assert.ok(cases.get(label).failed, 'the model must have refused repair');
+      assert.equal(failed.mergers.length, 1, 'automatic repairs stay in one execution');
+      const failedLog = await api('get_execution_output', { runId: initial.runId, executionId: failed.mergers[0].id, full: true });
+      assert.ok(failedLog.content.includes('after 3 repair turns'), 'exhaust automatic repair before restart');
       assert.equal(git(repository, 'rev-parse', 'HEAD'), original);
       assert.equal(await readFile(join(repository, 'shared.txt'), 'utf8'), 'base\n');
       assert.throws(() => git(repository, 'rev-parse', '--verify', 'MERGE_HEAD'));
@@ -179,6 +192,7 @@ try {
       await stopOwnedBackend();
       await start();
       assert.equal((await api('snapshot', { runId: initial.runId })).phase, 'publication_failed');
+      cases.get(label).allowRepair = true;
       await api('control', { action: 'retry_publication', runId: initial.runId });
     }
     const state = await waitPhase(initial.runId, 'completed');

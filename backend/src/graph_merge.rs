@@ -1,17 +1,19 @@
 use crate::{
-    engine::{run_pi, PiModelConfig, PiRequest, PiRole},
+    engine::{PiModelConfig, PiRequest, PiRole},
     model::{now, Config, EventKind, Execution, ImageAttachment},
     workspace::{self, repository_git as git},
 };
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
     path::Path,
 };
 use uuid::Uuid;
 
 mod publication;
+mod validation;
 pub use publication::publication_workspace;
+pub(crate) use validation::ResolutionError;
+use validation::{persist_output, run_validated_merger};
 
 /// Git composition is the only Merger responsibility. Environment differences
 /// are handled by Runtime as reuse-or-unbound and never enter this prompt.
@@ -26,13 +28,16 @@ impl MergerConflicts {
 
 pub(crate) fn merger_prompt(query: &str, _conflicts: MergerConflicts) -> String {
     format!(
-        "The Workspace Objective below is ONLY to help you decide how conflicting changes should be integrated.\nDo NOT attempt to execute or fulfill this task in this session. Your sole responsibility is Git conflict repair using the available file and Bash tools.\n\nWorkspace Objective:\n<workspace_objective>\n{query}\n</workspace_objective>\n\n{MERGER_GIT_INSTRUCTIONS}"
+        "Resolve the merge conflicts. The workspace objective is context, not a task to execute.\n\n{MERGER_GIT_INSTRUCTIONS}\n\n{MERGER_SELF_CHECK}\n\n<workspace_objective>\n{query}\n</workspace_objective>"
     )
 }
 
-const MERGER_GIT_INSTRUCTIONS: &str = "Resolve the current Git merge conflicts. Preserve valid changes. Do not modify unrelated files. Stage the resolved files and verify that no unresolved conflicts remain. Do not discard the incoming commit.\nProject snapshots include project files ignored by .gitignore. Stage resolved or changed project paths with git add -f -- <paths>, even when they match .gitignore. Do not stage Git/Grapher internals or managed environment/cache scopes.";
+const MERGER_GIT_INSTRUCTIONS: &str =
+    "Use the existing Git repository. Do not initialize a repository or create commits.";
 
-const PROJECT_MERGER_INSTRUCTIONS: &str = "Resolve the conflicting project files in this workspace. Preserve valid changes and do not modify unrelated files. The project Git view matches the source; internal composition commits are not part of it. If .git is present, stage each resolved path with git add -f -- <paths> and verify there are no unmerged index entries. Do not invent a merge or snapshot commit. If the source has no .git, resolve the files directly without initializing Git. The backend records the resolved project files and preserves the composition parents.";
+const PROJECT_MERGER_INSTRUCTIONS: &str = "Use the supplied GIT_DIR and GIT_WORK_TREE even if .git is absent. Do not override them, initialize a repository or create commits.";
+
+const MERGER_SELF_CHECK: &str = "- Run git ls-files -u to find all conflicts, including binary files and deletions.\n- Inspect both sides and preserve valid changes and merge ancestry. Modify only files needed for resolution.\n- Stage resolved paths with git add -f -- <paths>, or git rm -- <paths> for intentional deletions. Do not stage runtime internals or managed environments/caches.\n- Before finishing, require git ls-files -u to be empty and git diff --cached --check to pass. Review the staged changes.";
 
 fn pending(repository: &Path) -> Option<String> {
     git(repository, &["rev-parse", "--verify", "MERGE_HEAD"]).ok()
@@ -107,15 +112,36 @@ fn finish_merge(
     exclusions: &[String],
     resolved: bool,
 ) -> Result<(), String> {
+    finish_merge_checked(repository, head, exclusions, resolved).map_err(|error| error.to_string())
+}
+
+fn finish_merge_checked(
+    repository: &Path,
+    head: &str,
+    exclusions: &[String],
+    resolved: bool,
+) -> Result<(), ResolutionError> {
     if resolved {
-        if !git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
-            return Err("Merger left unresolved conflicts".into());
+        let unmerged = git(repository, &["diff", "--name-only", "--diff-filter=U"])?;
+        if !unmerged.is_empty() {
+            return Err(ResolutionError::Repair(format!(
+                "Merger left unresolved conflicts: {unmerged}"
+            )));
         }
         if pending(repository).is_some() {
             workspace::stage_scoped_local(repository, exclusions)?;
             // A Merger may have staged a managed environment/cache scope itself;
             // never let a runtime-owned path enter the merge commit.
             workspace::unstage_scoped(repository, exclusions)?;
+            // Revalidate even a retained merge whose index no longer has U
+            // entries. Publication retry must not commit staged conflict markers
+            // left by a failed Merger or an index-only reset.
+            if let Some(diagnostic) = workspace::check_staged_patch(repository, &[])? {
+                return Err(ResolutionError::Repair(format!(
+                    "Merge failed git diff --cached --check:\n{diagnostic}"
+                )));
+            }
+            crate::process_control::check_current_owner_stop()?;
             git(repository, &["commit", "--no-edit"])?;
         } else if git(repository, &["diff", "--cached", "--name-only"])?.is_empty()
             && workspace::has_tracked_scoped(repository, exclusions)?
@@ -126,10 +152,22 @@ fn finish_merge(
             git(repository, &["commit", "--amend", "--no-edit"])?;
         }
     }
-    git(repository, &["merge-base", "--is-ancestor", head, "HEAD"])
-        .map_err(|_| "Merger did not preserve the incoming commit".to_string())?;
+    if git(repository, &["merge-base", "--is-ancestor", head, "HEAD"]).is_err() {
+        // Missing repositories/objects are infrastructure failures, not a
+        // request for the model to improvise a replacement history.
+        git(
+            repository,
+            &["rev-parse", "--verify", &format!("{head}^{{commit}}")],
+        )?;
+        git(repository, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+        return Err(ResolutionError::Repair(format!(
+            "Merger did not preserve the incoming commit {head}"
+        )));
+    }
     if resolved && !workspace::repository_status(repository, exclusions)?.is_empty() {
-        return Err("Merge left uncommitted changes; inspect the affected workspace".into());
+        return Err(ResolutionError::Repair(
+            "Merge left uncommitted changes; inspect the affected workspace".into(),
+        ));
     }
     Ok(())
 }
@@ -301,6 +339,7 @@ pub(crate) fn resolve_with_merger_for_node(
     conflicts: MergerConflicts,
     mut emit: impl FnMut(EventKind) -> Result<(), String>,
 ) -> Result<(), String> {
+    let _operation = crate::process_control::OperationControl::begin()?;
     let canonical = repository.canonicalize().map_err(|e| e.to_string())?;
     let repository = canonical.as_path();
     if !crate::path_identity::same_path(repository, Path::new(&config.repository)) {
@@ -385,7 +424,6 @@ pub(crate) fn resolve_with_merger_for_node(
         } else {
             Vec::new()
         };
-    let mut output_error = None;
     let merger_model_cfg = PiModelConfig::resolve(PiRole::Merger, config);
     let merger_config = merger_model_cfg.effective_config(config);
     let mut extra_args = vec!["--no-context-files"];
@@ -393,7 +431,7 @@ pub(crate) fn resolve_with_merger_for_node(
         extra_args.push("--thinking");
         extra_args.push(thinking.as_str());
     }
-    let result = run_pi(
+    let result = run_validated_merger(
         PiRequest {
             role: PiRole::Merger,
             config: &merger_config,
@@ -409,42 +447,36 @@ pub(crate) fn resolve_with_merger_for_node(
             images: None,
         },
         |text| {
-            if let Err(error) = log.write_all(text.as_bytes()) {
-                output_error = Some(error.to_string());
-            }
-            if let Err(error) = emit(EventKind::Output {
-                execution_id: id.clone(),
-                text,
-            }) {
-                output_error = Some(error);
-            }
+            persist_output(&mut log, text, |text| {
+                emit(EventKind::Output {
+                    execution_id: id.clone(),
+                    text,
+                })
+            })
         },
-    )
-    .and_then(|_| {
-        if let Some(error) = output_error {
-            return Err(format!("Cannot persist merger output: {error}"));
-        }
-        // Node composition must exclude the managed environment/cache scopes
-        // exactly like publication does; otherwise Grapher's own staging would
-        // commit `.agent-home`/`.venv` and the next preparation would reject the
-        // merge as a tracked-file conflict.
-        let exclusions = config
-            .environment
-            .as_ref()
-            .map(|environment| environment.exclusions())
-            .unwrap_or_default();
-        crate::workspace_view::import_resolution(repository)?;
-        finish_merge(repository, &incoming, &exclusions, true)?;
-        if crate::workspace_view::is_bound(repository) {
-            crate::workspace_view::seal_prepared_scoped(
-                repository,
-                Path::new(&config.repository),
-                &exclusions,
-                None,
-            )?;
-        }
-        Ok(())
-    });
+        || {
+            // Node composition must exclude the managed environment/cache scopes
+            // exactly like publication does; otherwise Grapher's own staging would
+            // commit `.agent-home`/`.venv` and the next preparation would reject the
+            // merge as a tracked-file conflict.
+            let exclusions = config
+                .environment
+                .as_ref()
+                .map(|environment| environment.exclusions())
+                .unwrap_or_default();
+            crate::workspace_view::import_resolution(repository)?;
+            finish_merge_checked(repository, &incoming, &exclusions, true)?;
+            if crate::workspace_view::is_bound(repository) {
+                crate::workspace_view::seal_prepared_scoped(
+                    repository,
+                    Path::new(&config.repository),
+                    &exclusions,
+                    None,
+                )?;
+            }
+            Ok(())
+        },
+    );
     match &result {
         Ok(()) => {
             let head = git(repository, &["rev-parse", "HEAD"])?;
@@ -493,6 +525,7 @@ pub fn continue_merger_for_node(
     session_dir: &Path,
     mut emit: impl FnMut(EventKind) -> Result<(), String>,
 ) -> Result<(), String> {
+    let _operation = crate::process_control::OperationControl::begin()?;
     let canonical = Path::new(&execution.worktree)
         .canonicalize()
         .map_err(|e| e.to_string())?;
@@ -553,7 +586,13 @@ pub fn continue_merger_for_node(
         ));
     }
     environment.push(("GRAPHER_NODE_EXECUTION_ID", id.clone()));
-    let mut output_error = None;
+    // Retain this ancestry requirement across validation turns, even when a
+    // model commits/aborts the pending merge during its first turn.
+    let incoming = if git_backed {
+        pending(repository)
+    } else {
+        None
+    };
     let merger_model_cfg = PiModelConfig::resolve(PiRole::Merger, config);
     let merger_config = merger_model_cfg.effective_config(config);
     let mut extra_args = vec!["--no-context-files"];
@@ -561,7 +600,7 @@ pub fn continue_merger_for_node(
         extra_args.push("--thinking");
         extra_args.push(thinking.as_str());
     }
-    let result = run_pi(
+    let result = run_validated_merger(
         PiRequest {
             role: PiRole::Merger,
             config: &merger_config,
@@ -577,48 +616,42 @@ pub fn continue_merger_for_node(
             images,
         },
         |text| {
-            if let Err(error) = emit(EventKind::Output {
+            emit(EventKind::Output {
                 execution_id: id.clone(),
                 text,
-            }) {
-                output_error = Some(error);
+            })
+        },
+        || {
+            if !git_backed {
+                return Ok(());
+            }
+            let exclusions = config
+                .environment
+                .as_ref()
+                .map(|e| e.exclusions())
+                .unwrap_or_default();
+            crate::workspace_view::import_resolution(repository)?;
+            if let Some(head) = &incoming {
+                finish_merge_checked(repository, head, &exclusions, true)
+            } else if crate::workspace_view::is_bound(repository) {
+                workspace::snapshot_node_scoped(
+                    repository,
+                    Path::new(&config.repository),
+                    &execution.node,
+                    None,
+                    &exclusions,
+                )
+                .map(|_| ())
+                .map_err(ResolutionError::from)
+            } else if !workspace::repository_status(repository, &exclusions)?.is_empty() {
+                Err(ResolutionError::Repair(
+                    "Merger left uncommitted changes; commit or discard them".into(),
+                ))
+            } else {
+                Ok(())
             }
         },
-    )
-    .and_then(|_| {
-        if let Some(error) = output_error {
-            return Err(format!("Cannot persist merger output: {error}"));
-        }
-        if !git_backed {
-            return Ok(());
-        }
-        let exclusions = config
-            .environment
-            .as_ref()
-            .map(|e| e.exclusions())
-            .unwrap_or_default();
-        crate::workspace_view::import_resolution(repository)?;
-        if let Some(head) = pending(repository) {
-            // The user asked the Merger to continue an unresolved merge.
-            if !git(repository, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
-                return Err("Merger left unresolved conflicts".into());
-            }
-            finish_merge(repository, &head, &exclusions, true)
-        } else if crate::workspace_view::is_bound(repository) {
-            workspace::snapshot_node_scoped(
-                repository,
-                Path::new(&config.repository),
-                &execution.node,
-                None,
-                &exclusions,
-            )
-            .map(|_| ())
-        } else if !workspace::repository_status(repository, &exclusions)?.is_empty() {
-            Err("Merger left uncommitted changes; commit or discard them".into())
-        } else {
-            Ok(())
-        }
-    });
+    );
     match &result {
         Ok(()) => {
             let head = if git_backed {
@@ -653,33 +686,41 @@ mod tests {
     use super::{merger_prompt, MergerConflicts};
 
     #[test]
-    fn git_merger_prompt_preserves_task_context_without_graph_specific_terminology() {
-        assert_eq!(
-            merger_prompt("Combine results", MergerConflicts::GIT),
-            format!("The Workspace Objective below is ONLY to help you decide how conflicting changes should be integrated.\nDo NOT attempt to execute or fulfill this task in this session. Your sole responsibility is Git conflict repair using the available file and Bash tools.\n\nWorkspace Objective:\n<workspace_objective>\nCombine results\n</workspace_objective>\n\n{}", super::MERGER_GIT_INSTRUCTIONS)
+    fn merger_prompt_keeps_git_checks_and_bound_workspace_guidance_concise() {
+        let prompt = merger_prompt("Combine results", MergerConflicts::GIT);
+        let bound = prompt.replace(
+            super::MERGER_GIT_INSTRUCTIONS,
+            super::PROJECT_MERGER_INSTRUCTIONS,
         );
+        for prompt in [&prompt, &bound] {
+            assert!(prompt.contains("git ls-files -u"));
+            assert!(prompt.contains("including binary files and deletions"));
+            assert!(prompt.contains("git diff --cached --check"));
+            assert!(prompt.contains("preserve valid changes and merge ancestry"));
+            assert!(prompt.contains("initialize a repository or create commits"));
+            assert_eq!(prompt.matches("git add -f -- <paths>").count(), 1);
+            assert!(prompt.split_whitespace().count() < 160);
+        }
+        assert!(bound.contains("GIT_DIR and GIT_WORK_TREE even if .git is absent"));
     }
 
     #[test]
     fn merger_treats_original_planning_request_as_context_not_its_current_task() {
         let query = "Create two nodes with the node tool, then stop planning.";
         let prompt = merger_prompt(query, MergerConflicts::GIT);
-        assert!(prompt.starts_with("The Workspace Objective below is ONLY to help you decide"));
-        assert!(prompt.contains(&format!(
-            "Workspace Objective:\n<workspace_objective>\n{query}\n</workspace_objective>"
+        assert!(prompt.starts_with("Resolve the merge conflicts."));
+        assert!(prompt.contains("The workspace objective is context, not a task to execute."));
+        assert!(prompt.ends_with(&format!(
+            "<workspace_objective>\n{query}\n</workspace_objective>"
         )));
-        assert!(prompt.contains("Do NOT attempt to execute or fulfill this task in this session"));
-        assert!(prompt.contains("Your sole responsibility is Git conflict repair using the available file and Bash tools"));
-        assert!(prompt.ends_with(super::MERGER_GIT_INSTRUCTIONS));
     }
 
     #[test]
     fn merger_prompt_force_stages_ignored_project_paths_without_collecting_internal_scopes() {
         let prompt = merger_prompt("resolve", MergerConflicts::GIT);
-        assert!(prompt.contains("project files ignored by .gitignore"));
         assert!(prompt.contains("git add -f -- <paths>"));
-        assert!(prompt
-            .contains("Do not stage Git/Grapher internals or managed environment/cache scopes"));
+        assert!(prompt.contains("git rm -- <paths> for intentional deletions"));
+        assert!(prompt.contains("Do not stage runtime internals or managed environments/caches"));
         assert!(
             !prompt.contains("git add -f -A"),
             "Merger must stage explicit project paths, not all environment files"

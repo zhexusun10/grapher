@@ -1,7 +1,7 @@
 //! A project Git view is not the graph repository. Immutable view records bind
 //! project metadata and the user's Git state to the same internal code commit.
 //! Project bytes remain Git blobs; no live-source copy is used on a retry/fork.
-use crate::{native_copy, path_safety::real_child_path, workspace};
+use crate::{graph_merge::ResolutionError, native_copy, path_safety::real_child_path, workspace};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -3311,25 +3311,26 @@ fn plain_fingerprint(path: &Path) -> Result<(Option<String>, Option<u128>), Stri
     }
 }
 
-pub(crate) fn import_resolution(path: &Path) -> Result<(), String> {
-    accept_resolution(path, false)
+pub(crate) fn import_resolution(path: &Path) -> Result<(), ResolutionError> {
+    accept_resolution_checked(path, false)
 }
 pub(crate) fn accept_resolution(path: &Path, explicit: bool) -> Result<(), String> {
+    accept_resolution_checked(path, explicit).map_err(|error| error.to_string())
+}
+fn accept_resolution_checked(path: &Path, explicit: bool) -> Result<(), ResolutionError> {
     if !is_bound(path) {
         return Ok(());
     }
-    if path.join(".git").exists() {
-        // The Merger resolves the composition in the graph Git; the visible
-        // project view is a mirror. Inspect the same repository the merge lives
-        // in, not the project view's own index.
-        let unmerged = workspace::git(path, &["diff", "--name-only", "--diff-filter=U"])?;
-        if !unmerged.is_empty() {
-            return Err(format!(
-                "Merger left unresolved project conflicts: {}",
-                unmerged.replace('\n', ", ")
-            ));
-        }
+    // The Merger targets graph Git even for a plain source without .git.
+    // Inspect that index before backend staging could erase unresolved entries.
+    let unmerged = workspace::git(path, &["diff", "--name-only", "--diff-filter=U", "-z"])?;
+    if path.join(".git").exists() && !unmerged.is_empty() {
+        return Err(ResolutionError::Repair(format!(
+            "Merger left unresolved project conflicts: {}",
+            unmerged.trim_end_matches('\0').replace('\0', ", ")
+        )));
     }
+    let mut checked_paths = Vec::new();
     if !path.join(".git").exists()
         && !explicit
         && workspace::git(path, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok()
@@ -3339,6 +3340,12 @@ pub(crate) fn accept_resolution(path: &Path, explicit: bool) -> Result<(), Strin
             &fs::read(proof).map_err(|_| "Missing plain-project conflict evidence")?,
         )
         .map_err(|e| e.to_string())?;
+        checked_paths = before.keys().cloned().collect();
+        let mut args = vec![
+            "--literal-pathspecs", "diff-files", "--name-only", "--no-ext-diff", "-z", "--",
+        ];
+        args.extend(checked_paths.iter().map(String::as_str));
+        let unstaged = workspace::git(path, &args)?;
         for (name, original) in before {
             if Path::new(&name)
                 .components()
@@ -3346,13 +3353,33 @@ pub(crate) fn accept_resolution(path: &Path, explicit: bool) -> Result<(), Strin
             {
                 return Err("Unsafe conflict evidence path".into());
             }
-            if plain_fingerprint(&path.join(&name))? == original {
-                return Err(format!("Plain-project conflict {name} has no explicit resolution write/delete; refusing synthetic completion"));
+            if unmerged.split('\0').any(|entry| entry == name) {
+                if plain_fingerprint(&path.join(&name))? == original {
+                    return Err(ResolutionError::Repair(format!("Plain-project conflict {name} has no explicit resolution write/delete or staging; refusing synthetic completion")));
+                }
+            } else if unstaged.split('\0').any(|entry| entry == name) {
+                // Removing conflict stages (e.g. git reset -- <path>) is not
+                // proof that the remaining working file was resolved. Never
+                // overwrite that index evidence with backend staging first.
+                return Err(ResolutionError::Repair(format!(
+                    "Plain-project conflict {name} does not match its staged resolution; resolve and stage the working file"
+                )));
             }
         }
     }
     let metadata = workspace::private_git_dir(path).ok_or("Missing private graph Git")?;
-    stage_project(path, &metadata)
+    stage_project(path, &metadata)?;
+    // Also reject explicitly staged markers or a mere touch of the original
+    // conflict. Limit this check to the actual conflict paths, not unrelated
+    // inherited files (which may legitimately contain fixture markers).
+    if !checked_paths.is_empty() {
+        if let Some(diagnostic) = workspace::check_staged_patch(path, &checked_paths)? {
+            return Err(ResolutionError::Repair(format!(
+                "Resolved project files failed git diff --cached --check:\n{diagnostic}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn prepare_conflicts(source: &Path, path: &Path) -> Result<(), String> {

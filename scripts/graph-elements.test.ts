@@ -484,3 +484,40 @@ test("fan-in dependency edges only turn dashed once all upstream parents are com
   assert.equal(edgeAC_prepared.animated, false, "edge a -> c must immediately turn solid once workspace transfer completes");
   assert.equal(edgeBC_prepared.animated, false, "edge b -> c must immediately turn solid once workspace transfer completes");
 });
+
+test("a node displays waiting while its node-composition merger is running", () => {
+  const runningMerger: Snapshot = {
+    ...mergerState(),
+    nodes: { join: { status: "running", revision: 1, head: null, instruction: "", error: null } },
+    mergers: [{
+      id: "merger-1", node: "merge:join", revision: 1, attempt: 1, sessionId: "merger-1",
+      worktree: "/worktrees/join", before: "base", after: null, status: "running",
+      output: "", startedAt: 1, completedAt: null,
+    } as Execution],
+  };
+  const projected = projectGraph(runningMerger, "");
+  assert.equal(projected.nodes.find(node => node.id === "merger:join")!.data.status, "running");
+  assert.equal(projected.nodes.find(node => node.id === "join")!.data.status, "waiting");
+
+  const completedMerger: Snapshot = {
+    ...runningMerger,
+    mergers: [{ ...runningMerger.mergers![0], status: "completed", completedAt: 2 }],
+  };
+  const afterMerge = projectGraph(completedMerger, "");
+  assert.equal(afterMerge.nodes.find(node => node.id === "merger:join")!.data.status, "completed");
+  assert.equal(afterMerge.nodes.find(node => node.id === "join")!.data.status, "running");
+
+  // A blocked node whose failed merger is being retried stays blocked.
+  const retryingBlocked: Snapshot = {
+    ...mergerState(),
+    nodes: { join: { status: "blocked", revision: 1, head: null, instruction: "", error: "conflict" } },
+    mergers: [{
+      id: "merger-2", node: "merge:join", revision: 1, attempt: 2, sessionId: "merger-1",
+      worktree: "/worktrees/join", before: "base", after: null, status: "running",
+      output: "", startedAt: 3, completedAt: null,
+    } as Execution],
+  };
+  const duringRetry = projectGraph(retryingBlocked, "");
+  assert.equal(duringRetry.nodes.find(node => node.id === "merger:join")!.data.status, "running");
+  assert.equal(duringRetry.nodes.find(node => node.id === "join")!.data.status, "blocked");
+});

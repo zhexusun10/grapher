@@ -263,6 +263,15 @@ export function useGraphElements(
     for (const merger of state.mergers ?? []) counts.set(merger.node, (counts.get(merger.node) ?? 0) + 1);
     return counts;
   }, [state.mergers]);
+  const runningMergerTargets = useMemo(() => {
+    const targets = new Set<string>();
+    for (const merger of state.mergers ?? []) {
+      if (merger.status === "running" && merger.node.startsWith("merge:")) {
+        targets.add(merger.node.slice(6));
+      }
+    }
+    return targets;
+  }, [state.mergers]);
 
   const nodes = useMemo<WorkNode[]>(() => {
     const taskNodes: WorkNode[] = state.graph.nodes.map((node) => {
@@ -272,6 +281,8 @@ export function useGraphElements(
       const outgoing = indexes.outgoing.get(node.name) ?? [];
       const route = (edge: Graph["edges"][number]) => edgeRouting.get(graphEdgeId(edge));
       const mergerPlacement = graphLayout.mergerPlacements.get(node.name);
+      const rawStatus = state.nodes[node.name]?.status ?? "waiting";
+      const status = rawStatus === "running" && runningMergerTargets.has(node.name) ? "waiting" : rawStatus;
       return {
         id: node.name,
         type: "work",
@@ -284,7 +295,7 @@ export function useGraphElements(
         data: {
           name: node.name,
           task: node.task,
-          status: state.nodes[node.name]?.status ?? "waiting",
+          status,
           // Pause/Continue creates another execution record, not another attempt.
           attempts: nodeAttempts.reduce((latest, execution) => Math.max(latest, execution.attempt), 0),
           hint: (indexes.hints.get(node.name) ?? [])
@@ -343,7 +354,7 @@ export function useGraphElements(
         hasLeftTarget: false, hasLeftSource: false, hasRightTarget: false, hasRightSource: false,
       },
     }];
-  }, [state.graph, state.nodes, indexes, feedbackExhaustion, mergerAttempts, selected, selectedMergerId, graphLayout, edgeRouting, mergeTargets, publicationMerger, publicationAttempts, publicationPosition, publicationTargets, recentlyAddedNodeNames]);
+  }, [state.graph, state.nodes, indexes, feedbackExhaustion, mergerAttempts, runningMergerTargets, selected, selectedMergerId, graphLayout, edgeRouting, mergeTargets, publicationMerger, publicationAttempts, publicationPosition, publicationTargets, recentlyAddedNodeNames]);
 
   const edges = useMemo<Edge[]>(() => {
     const graphEdges = state.graph.edges.map((edge) => {

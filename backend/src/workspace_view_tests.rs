@@ -1024,6 +1024,7 @@ fn plain_conflict_noop_does_not_manufacture_completion_or_a_git_entry() {
     prepare_conflicts(&source, &target).unwrap();
     assert!(import_resolution(&target)
         .unwrap_err()
+        .to_string()
         .contains("refusing synthetic completion"));
     assert!(
         !workspace::git(&target, &["diff", "--name-only", "--diff-filter=U"])

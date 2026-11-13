@@ -1,4 +1,4 @@
-//! Workspace choice belongs to a dispatch batch, never to graph width or phase.
+//! Choose isolation at idle boundaries; active source workers may refill slots.
 use super::*;
 use std::collections::BTreeMap;
 
@@ -43,9 +43,10 @@ impl Runtime {
             .is_some_and(|head| self.state.published_heads.contains(head))
     }
 
-    /// No next batch can start until all previous writers drain and their
-    /// successful private results reach source. Explicit retries additionally
-    /// deliver their retained partial work, without marking it completed.
+    /// Shared source workers may refill free slots without draining siblings.
+    /// Private writers and pending deliveries must drain before dispatch can
+    /// switch workspaces. Explicit retries also deliver retained partial work,
+    /// without marking it completed.
     pub(super) fn prepare_execution_batch(
         &mut self,
         ready: &[Node],
@@ -54,11 +55,33 @@ impl Runtime {
         if !self.batch_workspaces() {
             return Ok(true);
         }
-        if self.active() {
+        let active = self.active();
+        if active
+            && (ready.is_empty()
+                || !self.shared_source_workspace()
+                || matches!(
+                    self.state.phase.as_str(),
+                    "publishing" | "merging" | "launching_result"
+                )
+                || self.state.result_execution.as_ref().is_some_and(|e| e.status == "running")
+                || self.state.mergers.iter().any(|e| e.status == "running"))
+        {
             return Ok(false);
         }
         let config = self.state.config.as_ref().ok_or("Missing config")?;
-        let repository = resolve_repository(&self.root, config)?;
+        let repository = match resolve_repository(&self.root, config) {
+            // An invalid source cannot admit replenishment. Let existing workers
+            // drain before surfacing the admission error, otherwise the driver's
+            // error path would discard their completion channel and log writer.
+            Err(_) if active => return Ok(false),
+            result => result?,
+        };
+        if active && self.state.executions.iter().any(|execution| {
+            execution.status == "running"
+                && !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
+        }) {
+            return Ok(false);
+        }
         let mut heads = BTreeSet::new();
         for execution in &self.state.executions {
             if execution.status == "completed"
@@ -165,7 +188,8 @@ impl Runtime {
             }
         }
         if !heads.is_empty() || !recoveries.is_empty() {
-            if allow_delivery {
+            // Even source-native replenishment cannot publish over live writers.
+            if allow_delivery && !active {
                 self.emit_outputs(vec![
                     EventKind::BatchHandoffRequested {
                         recovery_execution_ids: recoveries,
@@ -182,9 +206,11 @@ impl Runtime {
             return Ok(true);
         }
 
-        // The ready group is already dependency/feedback filtered and capped by
-        // maxParallel. A preparation failure never changes a live batch's cwd.
-        let isolated = config.isolate_parallel_nodes && ready.len() > 2;
+        // Choose isolation only at an idle boundary. Replenishment stays in the
+        // active source workspace even if the ready group or total concurrency
+        // exceeds two; never snapshot or relocate a live writer's directory.
+        // The ready group is already dependency/feedback filtered and slot-capped.
+        let isolated = !active && config.isolate_parallel_nodes && ready.len() > 2;
         let mut events = Vec::new();
         if isolated {
             #[cfg(not(feature = "fixture"))]

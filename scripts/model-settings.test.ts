@@ -429,7 +429,7 @@ test('all Harness settings default on and preserve explicit opt-outs', async () 
     } finally {
       prefs.setHideAutoMode(true);
     }
-    assert.ok(planningCard.includes(t('不超过 2 个节点共用源目录，超过 2 个启用独立工作区。关闭后所有批次共用源目录，并发修改可能互相覆盖。')));
+    assert.ok(planningCard.includes(t('空闲时派发不超过 2 个节点共用源目录，超过 2 个启用独立工作区。共享执行中按依赖补位，不等待无关节点。关闭后始终共享源码，并发修改可能互相覆盖。')));
     const maxParallelMarkup = (config: Config) => {
       const rendered = renderToStaticMarkup(React.createElement(SettingsModal, {
         isOpen: true, onClose() {}, config, dataPath: '', onSaveConfig() {},

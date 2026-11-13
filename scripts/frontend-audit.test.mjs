@@ -5073,3 +5073,163 @@ test("thinking stays folded while watching when disabled, until a click opens it
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+for (const kind of ["publication", "node"]) {
+  test(`appending to a settled ${kind} merger keeps its continuation output below the appended message`, { timeout: 45_000 }, async () => {
+    const config = { repository: "/a", model: "mock/model", thinkingLevel: "low", maxParallel: 2, maxFeedback: 3, autoApprove: true };
+    const output = text => `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } })}\n`;
+    const mergerNode = kind === "publication" ? "merger" : "merge:task";
+    const cardSelector = kind === "publication" ? '[data-node-name="publication merger"]' : '[data-node-name="merger · task"]';
+    const initialStatus = kind === "publication" ? "completed" : "failed";
+    const first = {
+      id: `${kind}-merger-1`, node: mergerNode, revision: 1, attempt: 1, sessionId: `${kind}-session`,
+      worktree: "/a", before: "base", after: initialStatus === "completed" ? "head-1" : null,
+      status: initialStatus, startedAt: 1, completedAt: 2, output: output("Initial merger output"),
+    };
+    const taskExec = {
+      id: "task-exec-1", node: "task", revision: 1, attempt: 1, sessionId: "task-session",
+      worktree: "/a", before: "base", after: "task-head", status: "completed", startedAt: 0, completedAt: 1, output: output("Task done"),
+    };
+    const empty = {
+      runId: "", config, planType: "graph", phase: "idle", approved: false, paused: false, base: "",
+      graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {}, executions: [], mergers: [], events: [], feedbackCounts: {},
+    };
+    let current = {
+      runId: `${kind}-merger-order-run`, config, planType: "graph",
+      phase: kind === "publication" ? "completed" : "needs_attention",
+      approved: true, paused: false, base: "base",
+      graph: { originalGoal: "Resolve conflicts", nodes: [{ name: "task", task: "Do task" }], edges: [] },
+      nodes: { task: { status: kind === "publication" ? "completed" : "blocked", revision: 1, instruction: "", error: null } },
+      executions: [taskExec],
+      mergers: [first],
+      events: [
+        { type: "created", sequence: 1, timestamp: 1, graph: { originalGoal: "Resolve conflicts", nodes: [{ name: "task", task: "Do task" }], edges: [] }, config },
+        { type: "approved", sequence: 2, timestamp: 1, base: "base" },
+        { type: "merger_started", sequence: 3, timestamp: 1, execution: first },
+        initialStatus === "completed"
+          ? { type: "merger_finished", sequence: 4, timestamp: 2, execution_id: first.id, head: "head-1", output_bytes: first.output.length }
+          : { type: "merger_failed", sequence: 4, timestamp: 2, execution_id: first.id, error: "conflict", output_bytes: first.output.length },
+      ],
+      feedbackCounts: {},
+      ...(kind === "publication" ? { publication: { status: "completed", target: "main" } } : {}),
+    };
+    const actions = [], errors = [];
+    const continueGate = deferred();
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
+    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+      let result;
+      switch (command) {
+        case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+        case "history": case "snapshot": result = current; break;
+        case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
+        case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
+        case "list_plannings": result = []; break;
+        case "list_files": result = { files: [] }; break;
+        case "list_skills": result = { skills: [] }; break;
+        case "get_merger_prompt": result = { prompt: "Merge the completed work." }; break;
+        case "provider_auth": result = catalog; break;
+        case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+        case "control": {
+          actions.push({ action: body.action, executionId: body.executionId, node: body.node });
+          const sequence = current.events.length + 1;
+          if (body.action === "continue_merger") {
+            await continueGate.promise;
+            const second = {
+              id: `${kind}-merger-2`, node: mergerNode, revision: 1, attempt: 2, sessionId: first.sessionId,
+              worktree: "/a", before: "head-1", after: null, status: "running", startedAt: 10, completedAt: null,
+              output: output("Continuation merger output"),
+            };
+            current = {
+              ...current, phase: "running",
+              mergers: [...current.mergers, second],
+              events: [
+                ...current.events,
+                { type: "merger_started", sequence, timestamp: 10, execution: second },
+                { type: "steered", sequence: sequence + 1, timestamp: 11, node: mergerNode, execution_id: second.id, instruction: body.instruction },
+              ],
+            };
+          } else {
+            assert.equal(body.action, "steer");
+            assert.equal(body.executionId, `${kind}-merger-2`);
+            current = {
+              ...current,
+              events: [...current.events, { type: "steered", sequence, timestamp: 12, node: mergerNode, execution_id: body.executionId, instruction: body.instruction }],
+            };
+          }
+          result = current;
+          break;
+        }
+        default: errors.push(`Unexpected API: ${command}`); return route.fulfill({ status: 400, json: { error: command } });
+      }
+      await route.fulfill({ json: { result } });
+    });
+    const page = await context.newPage(); page.setDefaultTimeout(10_000);
+    page.on("pageerror", error => errors.push(String(error)));
+    const openMerger = async () => {
+      await page.locator(`[data-run-id="${current.runId}"]`).click();
+      await page.locator(cardSelector).click();
+      await page.getByText("Initial merger output", { exact: true }).waitFor();
+    };
+    const assertOrder = async (texts, message) => {
+      const ordered = await page.evaluate(texts => {
+        const nodes = texts.map(text => [...document.querySelectorAll(".chat-messages-stream *")]
+          .find(el => el.childElementCount === 0 && el.textContent?.trim() === text));
+        if (nodes.some(node => !node)) return { ok: false, found: nodes.map(n => !!n) };
+        for (let i = 0; i < nodes.length - 1; i++) {
+          if (!(nodes[i].compareDocumentPosition(nodes[i + 1]) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+            return { ok: false, failedAt: i };
+          }
+        }
+        return { ok: true };
+      }, texts);
+      assert.ok(ordered.ok, `${message}: ${JSON.stringify(ordered)}`);
+    };
+    try {
+      await page.goto(origin, { waitUntil: "networkidle" });
+      await openMerger();
+      const composer = page.locator(".pane-bottom-chat textarea");
+      await composer.fill("Follow-up merger instruction");
+      await composer.press("Enter");
+      // Optimistic turn must stay below the initial merger output before the RPC resolves.
+      await page.getByText("Follow-up merger instruction", { exact: true }).waitFor();
+      await assertOrder(["Initial merger output", "Follow-up merger instruction"], "optimistic follow-up stays below initial merger output");
+
+      continueGate.resolve();
+      await page.getByText("Continuation merger output", { exact: true }).waitFor();
+      await assertOrder(
+        ["Initial merger output", "Follow-up merger instruction", "Continuation merger output"],
+        "continuation merger output renders below the appended follow-up message",
+      );
+
+      // Steering the running continuation merger appends below its existing output.
+      await composer.fill("Steer running continuation");
+      await composer.press("Enter");
+      await page.getByText("Steer running continuation", { exact: true }).waitFor();
+      await assertOrder(
+        ["Initial merger output", "Follow-up merger instruction", "Continuation merger output", "Steer running continuation"],
+        "live steer on continuation merger sits below its output",
+      );
+
+      assert.deepEqual(actions, [
+        { action: "continue_merger", executionId: first.id, node: mergerNode },
+        { action: "steer", executionId: `${kind}-merger-2`, node: mergerNode },
+      ]);
+
+      // Reloading preserves the exact turn order from durable events.
+      await page.reload({ waitUntil: "networkidle" });
+      await openMerger();
+      await page.getByText("Continuation merger output", { exact: true }).waitFor();
+      await page.getByText("Steer running continuation", { exact: true }).waitFor();
+      await assertOrder(
+        ["Initial merger output", "Follow-up merger instruction", "Continuation merger output", "Steer running continuation"],
+        "reload preserves merger continuation and steer ordering",
+      );
+      assert.deepEqual(errors, []);
+    } finally {
+      continueGate.resolve();
+      await context.close();
+    }
+  });
+}

@@ -88,8 +88,9 @@ try {
       for (const edge of saved.edges) assert.deepEqual(Object.keys(edge), ["from", "to", "feedback"]);
       assert.equal(typeof feedback.applied, "boolean");
       const hasWarnings = Object.hasOwn(feedback, "warnings");
+      const hasNotes = Object.hasOwn(feedback, "notes");
       assert.deepEqual(Object.keys(feedback), feedback.applied
-        ? ["applied", "topology", ...(hasWarnings ? ["warnings"] : [])]
+        ? ["applied", "topology", ...(hasWarnings ? ["warnings"] : []), ...(hasNotes ? ["notes"] : [])]
         : ["applied", "topology", "diagnostics"]);
       const consumed = new Set(saved.edges.filter((edge: { to: string; feedback: boolean }) => !edge.feedback)
         .map((edge: { to: string }) => edge.to));
@@ -109,6 +110,11 @@ try {
         assert.ok(Array.isArray(feedback.warnings));
         assert.ok(feedback.warnings.length > 0, "Empty warnings must be omitted from the result");
         assert.ok(feedback.warnings.every((warning: unknown) => typeof warning === "string"));
+      }
+      if (hasNotes) {
+        assert.ok(Array.isArray(feedback.notes));
+        assert.ok(feedback.notes.length > 0, "Empty notes must be omitted from the result");
+        assert.ok(feedback.notes.every((note: unknown) => typeof note === "string"));
       }
     }
     return response;
@@ -368,8 +374,9 @@ try {
     "from: [to]": { build: ["review"], review: [] },
     feedbackTo: { review: "build" },
   });
-  assert.deepEqual(repairedFeedback.warnings, [feedbackWarning("review", "build", ["build", "review"])], "Adding a feedback route replaces the missing-route warning with its conditional invalidation scope");
-  assert.equal(await toolResultHook({ toolName: "edge", details: repaired.details, isError: false }), undefined, "Feedback scope warnings do not reject mutations");
+  assert.equal(repairedFeedback.warnings, undefined);
+  assert.deepEqual(repairedFeedback.notes, [feedbackWarning("review", "build", ["build", "review"])], "Adding a feedback route replaces the missing-route warning with a rerun-scope note");
+  assert.equal(await toolResultHook({ toolName: "edge", details: repaired.details, isError: false }), undefined, "Feedback scope notes do not reject mutations");
   const portableGraph = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   for (const task of [`Work at ${repository}.`, `Read ${repository}/sample.txt`]) {
     await node({ name: "build", task });
@@ -389,7 +396,14 @@ try {
   const deletedBuild = JSON.parse((await node({ name: "build", delete: true })).content[0].text);
   assert.deepEqual(deletedBuild.topology, { rootNodes: ["review"], "from: [to]": { review: [] }, feedbackTo: {} });
   assert.equal(deletedBuild.warnings.length, 1);
-  assert.match(deletedBuild.warnings[0], /review mentions <FEEDBACK>/, "Deleting the feedback target removes the scope warning and exposes the missing-route warning again");
+  assert.match(deletedBuild.warnings[0], /review mentions <FEEDBACK>/, "Deleting the feedback target removes the scope note and exposes the missing-route warning again");
+  assert.deepEqual(deletedBuild.notes, [
+    "Deleted node build also removed its incident edges: build → review, review → build (feedback).",
+  ]);
+  // Deleting a non-existent edge succeeds as a no-op with an explicit note.
+  const missingDelete = JSON.parse((await edge({ from: "review", to: "build", delete: true })).content[0].text);
+  assert.equal(missingDelete.applied, true);
+  assert.deepEqual(missingDelete.notes, ["Ignored delete for non-existent edge: review → build."]);
   assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8")).edges.length, 0);
   // Runtime-state constraint is read when the extension loads: a node whose
   // result this run already published cannot be deleted, but its task can be
@@ -491,16 +505,19 @@ fn main() {
     { from: "contract", to: "verification" },
   ] });
   const redundantResult = JSON.parse(redundant.content[0].text);
-  assert.equal(redundantResult.applied, false);
-  assert.equal(redundantResult.diagnostics.length, 2);
-  assert.deepEqual(redundant.details.diagnosticCodes, ["E209", "E209"]);
-  assert.match(redundantResult.diagnostics[0], /contract → parser → integration/);
-  assert.equal(redundantResult.retryHint, undefined);
-  assert.deepEqual(Object.keys(redundantResult), ["applied", "topology", "diagnostics"]);
+  assert.equal(redundantResult.applied, true);
+  assert.deepEqual(redundantResult.topology, batchResult.topology);
+  assert.equal(redundantResult.warnings, undefined);
+  assert.equal(redundantResult.notes.length, 1);
+  assert.match(redundantResult.notes[0], /Auto-removed redundant direct edges/);
+  assert.match(redundantResult.notes[0], /contract → integration \(via contract → parser → integration\)/);
+  assert.match(redundantResult.notes[0], /contract → verification \(via contract → parser → integration → verification\)/);
+  assert.deepEqual(Object.keys(redundantResult), ["applied", "topology", "notes"]);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), batchSaved);
-  assert.deepEqual(await toolResultHook({ toolName: "edge", details: redundant.details, isError: false }), { isError: true });
+  assert.equal(await toolResultHook({ toolName: "edge", details: redundant.details, isError: false }), undefined);
+  // Cycles alongside redundant edges are still rejected without pruning.
   for (const [toolName, edits, code] of [
-    ["edge", { edges: [{ from: "verification", to: "contract" }] }, "E101"],
+    ["edge", { edges: [{ from: "contract", to: "integration" }, { from: "verification", to: "contract" }] }, "E101"],
     ["edge", { edges: [{ from: "contract", to: "missing" }] }, "E204"],
     ["edge", { edges: [{ from: "parser", to: "search", feedback: true }] }, "E207"],
     ["edge", { edges: [
@@ -574,6 +591,30 @@ fn main() {
   const single = JSON.parse((await node({ name: "single", task: "Single task" })).content[0].text);
   assert.equal(single.applied, true);
   await node({ name: "single", delete: true });
+  // Inserting intermediate edges across an existing direct edge prunes the
+  // bypassed saved edge automatically and reports the surviving path.
+  await call("node", { nodes: [
+    { id: "bypass_a", task: "Step A" },
+    { id: "bypass_b", task: "Step B" },
+    { id: "bypass_c", task: "Step C" },
+  ] });
+  await call("edge", { edges: [{ from: "bypass_a", to: "bypass_c" }] });
+  const insertedMiddle = JSON.parse((await call("edge", { edges: [
+    { from: "bypass_a", to: "bypass_b" },
+    { from: "bypass_b", to: "bypass_c" },
+  ] })).content[0].text);
+  assert.equal(insertedMiddle.applied, true);
+  assert.deepEqual(insertedMiddle.topology["from: [to]"].bypass_a, ["bypass_b"]);
+  assert.deepEqual(insertedMiddle.topology["from: [to]"].bypass_b, ["bypass_c"]);
+  assert.deepEqual(insertedMiddle.topology["from: [to]"].bypass_c, []);
+  assert.equal(insertedMiddle.warnings, undefined);
+  assert.equal(insertedMiddle.notes.length, 1);
+  assert.match(insertedMiddle.notes[0], /bypass_a → bypass_c \(via bypass_a → bypass_b → bypass_c\)/);
+  await call("node", { nodes: [
+    { id: "bypass_a", delete: true },
+    { id: "bypass_b", delete: true },
+    { id: "bypass_c", delete: true },
+  ] });
   // Reversing an edge creates a temporary cycle; only the final batch must compile.
   const rewired = JSON.parse((await call("edge", { edges: [
     { from: "parser", to: "contract" },
@@ -590,7 +631,8 @@ fn main() {
     },
     feedbackTo: { verification: "parser" },
   });
-  assert.deepEqual(rewired.warnings, [feedbackWarning("verification", "parser", ["contract", "integration", "parser", "search", "verification"])]);
+  assert.equal(rewired.warnings, undefined);
+  assert.deepEqual(rewired.notes, [feedbackWarning("verification", "parser", ["contract", "integration", "parser", "search", "verification"])]);
   // Node deletion removes incident edges; other targets can be replaced atomically.
   assert.equal(JSON.parse((await call("node", { nodes: [
     { name: "contract", delete: true },
@@ -615,9 +657,10 @@ fn main() {
     { from: "check", to: "fix", feedback: true }, { from: "fix", to: "check" },
   ] })).content[0].text);
   assert.equal(addedBranch.applied, true);
-  assert.deepEqual(addedBranch.warnings, [feedbackWarning("check", "fix", ["check", "fix"])], "Existing feedback routes are not repeated when adding another branch");
+  assert.equal(addedBranch.warnings, undefined);
+  assert.deepEqual(addedBranch.notes, [feedbackWarning("check", "fix", ["check", "fix"])], "Existing feedback routes are not repeated when adding another branch");
 
-  // Feedback-scope warnings belong only to routes newly added by this call,
+  // Feedback-scope notes belong only to routes newly added by this call,
   // not to node edits, dependency changes, or idempotent edge replacements.
   const beforeIncrementalWarnings = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({
@@ -631,19 +674,22 @@ fn main() {
     ],
   }));
   const nodeEdit = JSON.parse((await node({ id: "unrelated", task: "Updated unrelated task" })).content[0].text);
-  assert.equal(nodeEdit.warnings, undefined, "Node returns omit existing feedback-scope warnings");
+  assert.equal(nodeEdit.warnings, undefined, "Node returns omit existing feedback-scope notes");
+  assert.equal(nodeEdit.notes, undefined);
   const duplicateTaskWarning = "Nodes base, unrelated have identical task text; they may duplicate work. Confirm that this is intentional.";
   assert.deepEqual(JSON.parse((await node({ id: "unrelated", task: "base" })).content[0].text).warnings, [duplicateTaskWarning]);
   assert.deepEqual(JSON.parse((await edge({ from: "review", to: "base", feedback: true })).content[0].text).warnings, [duplicateTaskWarning], "Non-scope warnings remain on edge results");
   await node({ id: "unrelated", task: "unrelated" });
   const dependencyEdit = JSON.parse((await edge({ from: "ship", to: "unrelated" })).content[0].text);
   assert.equal(dependencyEdit.warnings, undefined, "Even changed scopes of existing feedback edges are not repeated");
+  assert.equal(dependencyEdit.notes, undefined);
   const beforeRejectedFeedback = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   const rejectedFeedback = JSON.parse((await call("edge", { edges: [
     { from: "inspect", to: "base", feedback: true }, { from: "ship", to: "base" },
   ] })).content[0].text);
   assert.equal(rejectedFeedback.applied, false);
   assert.equal(rejectedFeedback.warnings, undefined);
+  assert.equal(rejectedFeedback.notes, undefined);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeRejectedFeedback);
   const allScope = ["base", "inspect", "review", "ship", "unrelated"];
   const mixedFeedback = JSON.parse((await call("edge", { edges: [
@@ -651,18 +697,34 @@ fn main() {
     { from: "review", to: "base", feedback: true },
     { from: "ship", to: "inspect", feedback: true },
   ] })).content[0].text);
-  assert.deepEqual(mixedFeedback.warnings, [
+  assert.equal(mixedFeedback.warnings, undefined);
+  assert.deepEqual(mixedFeedback.notes, [
     feedbackWarning("inspect", "base", allScope),
     feedbackWarning("ship", "inspect", ["inspect", "ship", "unrelated"]),
   ], "Batch results include every new route, but not an existing route interleaved between them");
-  assert.equal(JSON.parse((await edge({ from: "inspect", to: "base", feedback: true })).content[0].text).warnings, undefined, "Reapplying a route does not add it again");
+  const reappliedRoute = JSON.parse((await edge({ from: "inspect", to: "base", feedback: true })).content[0].text);
+  assert.equal(reappliedRoute.warnings, undefined);
+  assert.equal(reappliedRoute.notes, undefined, "Reapplying a route does not add it again");
   const retargetedFeedback = JSON.parse((await call("edge", { edges: [
     { from: "ship", to: "inspect", delete: true }, { from: "ship", to: "base", feedback: true },
   ] })).content[0].text);
-  assert.deepEqual(retargetedFeedback.warnings, [feedbackWarning("ship", "base", allScope)], "Retargeting reports only the new route");
-  assert.equal(JSON.parse((await edge({ from: "inspect", to: "base", delete: true })).content[0].text).warnings, undefined, "Removing a route does not report other routes");
-  assert.deepEqual(JSON.parse((await edge({ from: "inspect", to: "base", feedback: true })).content[0].text).warnings, [feedbackWarning("inspect", "base", allScope)], "Re-adding a removed route reports it again");
-  assert.equal(JSON.parse((await node({ id: "unrelated", delete: true })).content[0].text).warnings, undefined, "Node deletions also omit feedback-scope warnings");
+  assert.equal(retargetedFeedback.warnings, undefined);
+  assert.deepEqual(retargetedFeedback.notes, [feedbackWarning("ship", "base", allScope)], "Retargeting reports only the new route");
+  const removedRoute = JSON.parse((await edge({ from: "inspect", to: "base", delete: true })).content[0].text);
+  assert.equal(removedRoute.warnings, undefined);
+  assert.equal(removedRoute.notes, undefined, "Removing a route does not report other routes");
+  const readdedRoute = JSON.parse((await edge({ from: "inspect", to: "base", feedback: true })).content[0].text);
+  assert.equal(readdedRoute.warnings, undefined);
+  assert.deepEqual(readdedRoute.notes, [feedbackWarning("inspect", "base", allScope)], "Re-adding a removed route reports it again");
+  const deletedUnrelated = JSON.parse((await node({ id: "unrelated", delete: true })).content[0].text);
+  assert.equal(deletedUnrelated.warnings, undefined);
+  assert.deepEqual(deletedUnrelated.notes, [
+    "Deleted node unrelated also removed its incident edge: ship → unrelated.",
+  ], "Node deletions omit feedback-scope notes while reporting removed incident edges");
+  await node({ id: "lonely", task: "Lonely" });
+  const deletedLonely = JSON.parse((await node({ id: "lonely", delete: true })).content[0].text);
+  assert.equal(deletedLonely.warnings, undefined);
+  assert.equal(deletedLonely.notes, undefined, "Deleting an isolated node emits no notes");
   writeFileSync(process.env.GRAPHER_GRAPH_PATH, beforeIncrementalWarnings);
 
   const beforeUnavailable = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
@@ -731,7 +793,8 @@ fn main() {
   assert.deepEqual(unchangedNode.warnings, [rerunWarning], "Impact compares the whole candidate with the committed graph");
   revisionContext();
   const restoreFeedback = JSON.parse((await edge({ from: "review", to: "build", feedback: true })).content[0].text);
-  assert.deepEqual(restoreFeedback.warnings, [feedbackWarning("review", "build", ["build", "consumer", "review"])], "Reverting the edit removes the rerun warning");
+  assert.equal(restoreFeedback.warnings, undefined);
+  assert.deepEqual(restoreFeedback.notes, [feedbackWarning("review", "build", ["build", "consumer", "review"])], "Reverting the edit removes the rerun warning");
   revisionContext();
   const changeTask = JSON.parse((await node({ name: "build", task: "Changed build" })).content[0].text);
   assert.deepEqual(changeTask.warnings, ["Current changes will invalidate and rerun 3 completed nodes: build, consumer, review."], "Node task changes retain cumulative impact without feedback-scope warnings");

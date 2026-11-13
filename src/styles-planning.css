@@ -520,10 +520,6 @@
   transition: border-color 0.25s ease, background-color 0.25s ease, box-shadow 0.25s ease;
 }
 
-.tool-call-card:hover {
-  border-color: var(--border-hover);
-}
-
 @keyframes tool-running-glow {
 
   0%,
@@ -588,11 +584,6 @@
   user-select: none;
   background: transparent;
   font-size: 12.5px;
-  transition: background-color 0.15s ease;
-}
-
-.tool-call-header:hover {
-  background: var(--bg-surface);
 }
 
 .transcript-error-header {

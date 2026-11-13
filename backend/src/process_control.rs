@@ -135,13 +135,74 @@ fn check_owner_stop(owner: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .contains(owner)
     {
-        Err("Execution paused by user".into())
-    } else {
-        Ok(())
+        return Err("Execution paused by user".into());
     }
+    if operations()
+        .lock()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|(active_owner, flag)| {
+            active_owner == owner
+                && flag
+                    .upgrade()
+                    .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        })
+    {
+        return Err("Execution cancelled by user".into());
+    }
+    Ok(())
 }
 pub(crate) fn check_current_owner_stop() -> Result<(), String> {
     OWNER.with(|owner| check_owner_stop(&owner.borrow()))
+}
+
+// Multi-turn operations remain cancellable while no child process exists.
+// Weak, scoped entries retire with the operation, so a later explicit retry
+// under the same Run owner does not inherit its predecessor's cancellation.
+static OPERATIONS: OnceLock<Mutex<Vec<(String, Weak<AtomicBool>)>>> = OnceLock::new();
+fn operations() -> &'static Mutex<Vec<(String, Weak<AtomicBool>)>> {
+    OPERATIONS.get_or_init(Default::default)
+}
+
+pub(crate) struct OperationControl {
+    cancelled: Arc<AtomicBool>,
+}
+impl OperationControl {
+    pub(crate) fn begin() -> Result<Self, String> {
+        let owner = OWNER.with(|owner| owner.borrow().clone());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        {
+            let mut active = operations().lock().map_err(|error| error.to_string())?;
+            active.retain(|(_, flag)| flag.strong_count() > 0);
+            active.push((owner.clone(), Arc::downgrade(&cancelled)));
+        }
+        let control = Self { cancelled };
+        check_owner_stop(&owner)?;
+        Ok(control)
+    }
+}
+impl Drop for OperationControl {
+    fn drop(&mut self) {
+        if let Ok(mut active) = operations().lock() {
+            let mine = Arc::downgrade(&self.cancelled);
+            active.retain(|(_, flag)| flag.strong_count() > 0 && !flag.ptr_eq(&mine));
+        }
+    }
+}
+
+fn cancel_operations(matches: impl Fn(&str) -> bool) {
+    if let Ok(mut active) = operations().lock() {
+        active.retain(|(owner, flag)| {
+            if let Some(flag) = flag.upgrade() {
+                if matches(owner) {
+                    flag.store(true, Ordering::SeqCst);
+                }
+                true
+            } else {
+                false
+            }
+        });
+    }
 }
 
 static RESULTS: OnceLock<Mutex<BTreeMap<String, Arc<AtomicBool>>>> = OnceLock::new();
@@ -518,6 +579,7 @@ impl Drop for ProcessTreeInner {
 }
 
 pub fn terminate_all() {
+    cancel_operations(|_| true);
     let trees = if let Ok(mut processes) = registry().lock() {
         let mut trees = Vec::new();
         processes.retain(|(_, weak)| {
@@ -538,9 +600,10 @@ pub fn terminate_all() {
 }
 
 pub fn terminate_owner(run_id: &str) {
+    let prefix = format!("{run_id}:");
+    cancel_operations(|owner| owner == run_id || owner.starts_with(&prefix));
     let trees = if let Ok(mut processes) = registry().lock() {
         let mut trees = Vec::new();
-        let prefix = format!("{run_id}:");
         processes.retain(|(owner, weak)| {
             if let Some(tree) = weak.upgrade() {
                 if owner == run_id || owner.starts_with(&prefix) {
@@ -563,6 +626,7 @@ pub fn terminate_owner(run_id: &str) {
 pub fn terminate_node(run_id: &str, node: &str) {
     let target = format!("{run_id}:node:{node}");
     let target_prefix = format!("{target}:");
+    cancel_operations(|owner| owner == target || owner.starts_with(&target_prefix));
     let trees = if let Ok(mut processes) = registry().lock() {
         let mut trees = Vec::new();
         processes.retain(|(owner, weak)| {
@@ -894,6 +958,49 @@ mod tests {
         );
         clear_owner_stop(&owner);
         assert!(check_owner_stop(&owner).is_ok());
+    }
+
+    #[test]
+    fn operation_cancel_covers_process_registration_and_retires_with_its_scope() {
+        let run = "multi-turn-stop-test";
+        let owner = execution_owner(run, "join", "attempt");
+        with_owner(&owner, || {
+            let control = OperationControl::begin().unwrap();
+            let other = with_owner("unrelated-multi-turn", || {
+                OperationControl::begin().unwrap()
+            });
+            terminate_owner(run);
+            assert!(check_current_owner_stop().is_err());
+            with_owner("unrelated-multi-turn", || {
+                check_current_owner_stop().unwrap()
+            });
+            assert!(
+                OperationControl::begin().is_err(),
+                "nested launch must inherit cancellation"
+            );
+
+            let mut command = if cfg!(windows) {
+                let mut command = Command::new("cmd");
+                command.args(["/C", "ping 127.0.0.1 -n 10 > NUL"]);
+                command
+            } else {
+                let mut command = Command::new("sh");
+                command.args(["-c", "sleep 10"]);
+                command
+            };
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+            configure_command(&mut command);
+            let mut child = command.spawn().unwrap();
+            assert!(
+                track(&child).is_err(),
+                "cancellation must cover a late child registration"
+            );
+            assert!(!child.wait().unwrap().success());
+            drop(control);
+            let _retry = OperationControl::begin().unwrap();
+            check_current_owner_stop().unwrap();
+            drop(other);
+        });
     }
 
     #[test]

@@ -2238,18 +2238,8 @@ a,
   transform: scale(1.15);
 }
 
-.prompt-box-interrupt-btn {
-  background: var(--status-danger-subtle);
-  color: var(--status-danger);
-  border: 1px solid var(--status-danger-border);
-}
-
 .prompt-box-interrupt-btn:hover:not(:disabled) {
-  background: var(--status-danger);
-  color: #ffffff;
-  border-color: var(--status-danger);
-  transform: scale(1.05);
-  filter: none;
+  background: var(--bg-surface-hover);
 }
 
 /* 右侧操作区：模式选择器与发送按钮水平对齐 */

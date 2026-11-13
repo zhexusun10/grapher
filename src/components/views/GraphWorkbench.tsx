@@ -836,10 +836,19 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       const exact = message.executionId && lastMessageByExecution.get(message.executionId) === message.id
         ? attempts.find(item => item.id === message.executionId && !assigned.has(item.id))
         : undefined;
-      let executions: ConversationExecution[] = exact ? [exact] : [];
-      if (exact) {
-        assigned.add(exact.id);
-        nextAttempt = Math.max(nextAttempt, attempts.findIndex(item => item.id === exact.id) + 1);
+      // Merger continuations (`continue_merger`) create a new execution and
+      // emit a `steered` event pointing to that new execution id. When no
+      // earlier turn owns it yet, this message started that execution and must
+      // sit above its output; later steers on the same execution attach above.
+      const continuedExecution = !exact && message.delivery === "steered" && message.executionId &&
+        !lastMessageByExecution.has(message.executionId)
+        ? attempts.find(item => item.id === message.executionId && !assigned.has(item.id))
+        : undefined;
+      const claimed = exact ?? continuedExecution;
+      let executions: ConversationExecution[] = claimed ? [claimed] : [];
+      if (claimed) {
+        assigned.add(claimed.id);
+        nextAttempt = Math.max(nextAttempt, attempts.findIndex(item => item.id === claimed.id) + 1);
       } else if (!message.delivery && !message.executionId && !message.pendingExecution) {
         // Older snapshots did not persist execution_id on every edit. Keep the
         // historical attempt ordering as a compatibility fallback.
@@ -1512,8 +1521,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     isScrollingToBottomRef.current = true;
     setScrollBottomVisible(false);
     const targetNode = routeType === "serial" ? state.graph.nodes[0]?.name : selectedNode?.name;
-    const targetExecution = selectedMerger?.status === "running" ? selectedMerger :
-      [...state.executions].reverse().find(item => item.node === targetNode && item.status === "running");
+    const targetExecution = selectedMerger
+      ? (selectedMerger.status === "running" ? selectedMerger : undefined)
+      : [...state.executions].reverse().find(item => item.node === targetNode && item.status === "running");
     const text = nodeInstructionText(val);
     let marker: LiveSteerMarker | undefined;
     if (targetExecution && text) {
@@ -2662,7 +2672,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const summaryBatchCount = Math.max(summaryBatches.length, state.plan?.executionBatches.length ?? 0, totalGraphNodes > 0 ? 1 : 0);
 
   const renderSummaryNodeChip = (node: GraphNode) => {
-    const status = state.nodes[node.name]?.status ?? "waiting";
+    const rawStatus = state.nodes[node.name]?.status ?? "waiting";
+    const status = rawStatus === "running" && (state.mergers ?? []).some(
+      (merger) => merger.node === `merge:${node.name}` && merger.status === "running",
+    ) ? "waiting" : rawStatus;
     return (
       <button
         type="button"
@@ -2837,7 +2850,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                             if (accepted !== false) setEditingTaskNode("");
                           });
                         };
-                        if (selectedState?.status === "running") {
+                        if (selectedState?.status === "running" || attempts.some((attempt) => attempt.status === "running")) {
                           onRequestConfirmation({
                             title: t("节点正在执行"),
                             message: t("保存会停止该节点正在执行的进程，并从会话开头以新的任务目标重新运行。"),

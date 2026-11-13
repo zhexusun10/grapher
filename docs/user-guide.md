@@ -30,12 +30,14 @@ At the bottom of **Settings**, choose the static **Dot pattern** (the default) o
 ## Choose node workspace isolation
 
 **Settings → Harness settings → Isolate parallel node workspaces** applies to new
-conversations. Each dispatch batch of up to two nodes shares your source
-directory; a batch with more nodes uses independent workspaces. This is based on
-actual dispatch count, not the whole graph. Every batch drains and hands off its
-results before the next starts, so a later smaller batch returns to source.
-Planner review's new work follows the same rule. A failed handoff blocks the next
-batch for repair/retry rather than losing files or claiming completion. Manually
+conversations. When no nodes are running, dispatching up to two ready nodes
+shares your source directory; larger groups use independent workspaces. While
+source-native nodes run, newly ready work fills free slots without waiting for
+unrelated siblings and keeps sharing source, even above two concurrent nodes.
+Private workspaces still drain and hand off results before another group starts;
+then a smaller group can return to source. Planner review follows the same rule.
+A failed handoff blocks dispatch for repair/retry rather than losing files or
+claiming completion. Manually
 resolved private inputs are delivered before a retry moves to source; successful
 managed result runs also deliver their new files before another result launch.
 
@@ -103,7 +105,7 @@ After fixing the cause, use the play button in an empty Node, Serial Agent or Pl
 | Provider credentials expired | Re-authenticate in Settings, then use **Continue** for the affected conversation. |
 | Provider connection failure (`Connection error.`, connection reset/refused) | Check your network or proxy if it persists, then use **Continue** for the affected conversation. It resumes the unfinished turn in the same session. |
 | Other task/provider failure, including an unrecognized error | Inspect and fix the cause, then use **Continue** to retry the failed tasks. You can also intervene on a node or change its Node Agent model/thinking settings first. |
-| Conflict while combining parent results | Inspect the node's Merger conversation and retained workspace. Retry the node to re-attempt preparation; publication retry does not fix this conflict. |
+| Conflict while combining parent results | Merger checks its resolution with Git; if backend validation finds a remaining issue, it automatically receives bounded repair follow-ups in the same conversation. If repair still fails, inspect that conversation and retained workspace, then retry the node; publication retry does not fix this conflict. |
 | Final publication failed | Inspect the publication panel and any publication Merger, then retry publication. It reuses retained results rather than rerunning the graph. A changed branch is not silently written; interrupted-checkout recovery may require restoring the captured branch. Staged changes in excluded environment/runtime scopes stay staged and are not published; commit or unstage them explicitly. |
 
 Changing the Node Agent model or reasoning level in a conversation applies to all its future node attempts, including retries, feedback repairs, rerun descendants and follow-ups to completed nodes. A running attempt keeps its current model and is not restarted; its recorded model remains in the history. Session details show a retry selection separately from the previous model. Other conversations keep their own settings, and environment overrides take precedence. After saving, reopening Settings shows that conversation's saved selection. Saving from the home screen instead changes the defaults for new conversations.

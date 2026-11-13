@@ -64,6 +64,14 @@ if (['root','join'].includes(name) && fs.existsSync(path.join(control, 'external
   }
   if (fs.readFileSync('base.txt', 'utf8') !== `during ${name}`) throw Error('live source edit was lost');
 }
+if (name === 'b' && fs.existsSync(path.join(control, 'hold-b'))) {
+  fs.writeFileSync(path.join(control, 'active-b'), 'ready');
+  const deadline = Date.now() + 120_000;
+  while (!fs.existsSync(path.join(control, 'release-b'))) {
+    if (Date.now() > deadline) throw Error('shared replenishment test timed out');
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
 if (name === 'a' && fs.existsSync(path.join(control, 'fail-a'))) {
   fs.writeFileSync('partial-a.txt', 'unfinished work');
   throw Error('deliberate provider failure');
@@ -252,6 +260,90 @@ fn source_nodes_accept_external_edits_before_and_during_execution() {
         assert!(!repo.join("removed.txt").exists());
         assert_eq!(fs::read(repo.join(".git/index")).unwrap(), index);
     }
+}
+
+#[test]
+fn driver_dispatches_ready_child_before_unrelated_shared_worker_finishes() {
+    let (temp, repo, service) = setup(false, true, false);
+    fs::write(temp.path().join("hold-b"), "hold").unwrap();
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        let mut graph = runtime.state.graph.clone();
+        graph.edges = [("root", "a"), ("root", "b"), ("a", "c"), ("b", "join"), ("c", "join")]
+            .into_iter()
+            .map(|(from, to)| Edge { from: from.into(), to: to.into(), feedback: false })
+            .collect();
+        runtime.revise_graph(graph, PlanningSummary::default()).unwrap();
+    }
+    drive(service.clone());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !(temp.path().join("audit-c.json").exists() && temp.path().join("active-b").exists())
+        && Instant::now() < deadline && service.driving.load(Ordering::SeqCst)
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let during = service.runtime.lock().unwrap().state.clone();
+    let child_ran = temp.path().join("audit-c.json").exists();
+    // Release even on a regression so no fixture worker survives the assertion.
+    fs::write(temp.path().join("release-b"), "release").unwrap();
+    let completed = wait_for_idle(&service);
+    assert!(child_ran, "ready child stalled behind b: {:?}", during.nodes);
+    assert_eq!(during.nodes["b"].status, "running");
+    assert_eq!(during.nodes["join"].status, "waiting");
+    assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
+    assert_eq!(completed.executions.len(), 5);
+    assert!(completed.executions.iter().all(|execution|
+        execution.status == "completed" && crate::path_identity::same_path(Path::new(&execution.worktree), &repo)));
+    assert!(!completed.events.iter().any(|event|
+        matches!(event.kind, EventKind::PublicationStarted { .. })));
+}
+
+#[test]
+fn driver_drains_active_workers_before_reporting_invalid_source_binding() {
+    let (temp, repo, service) = setup(false, true, false);
+    fs::write(temp.path().join("hold-b"), "hold").unwrap();
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        let mut graph = runtime.state.graph.clone();
+        graph.edges.retain(|edge|
+            !(edge.from == "root" && edge.to == "c" || edge.from == "a" && edge.to == "join"));
+        graph.edges.push(Edge { from: "a".into(), to: "c".into(), feedback: false });
+        runtime.revise_graph(graph, PlanningSummary::default()).unwrap();
+    }
+    drive(service.clone());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !temp.path().join("active-b").exists() && Instant::now() < deadline
+        && service.driving.load(Ordering::SeqCst)
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let active = temp.path().join("active-b").exists();
+    if active {
+        // Simulate binding loss without renaming a live process's cwd (which
+        // Windows forbids). Already-dispatched jobs keep their original cwd.
+        service.runtime.lock().unwrap().state.config.as_mut().unwrap().repository =
+            temp.path().join("missing-source").to_string_lossy().into_owned();
+        drive(service.clone());
+    }
+    fs::write(temp.path().join("release-b"), "release").unwrap();
+    let paused = wait_for_idle(&service);
+    assert!(active, "shared fixture never started: {:?}", paused.nodes);
+    assert!(paused.paused);
+    assert!(paused.executions.iter().all(|execution|
+        execution.status == "completed" && execution.output_bytes > 0),
+        "admission failure must retain worker completion and logs: {:?}", paused.nodes);
+    assert_eq!(paused.nodes["b"].status, "completed");
+    assert!(temp.path().join("audit-b.json").exists());
+    assert_eq!(paused.nodes["join"].status, "waiting");
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        runtime.state.config.as_mut().unwrap().repository = repo.to_string_lossy().into_owned();
+        runtime.resume_scheduling().unwrap();
+    }
+    drive(service.clone());
+    let completed = wait_for_idle(&service);
+    assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
+    assert_eq!(completed.executions.len(), 5, "repair never reruns completed workers");
 }
 
 #[test]

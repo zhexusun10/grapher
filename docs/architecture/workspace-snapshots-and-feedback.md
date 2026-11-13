@@ -7,21 +7,33 @@ Private workspaces have one project-file version channel: **Git**. The host prep
 
 ## Adaptive workspace policy
 
-New Graph Runs select workspaces from **each actual dispatch batch**.
-`isolateParallelNodes` (Settings, default `true`, captured for new Runs) enables
-private workspaces only when that batch contains more than two nodes. A batch of
-one or two nodes shares the user's source directory. `false` makes every batch
-source-native. Neither total graph size, graph width, Planner Review, follow-up
-flags nor a prior batch's choice selects isolation.
+New Graph Runs choose workspaces from **the actual ready dispatch group at an
+idle boundary**. `isolateParallelNodes` (Settings, default `true`, captured for
+new Runs) enables private workspaces when that group contains more than two
+nodes. One or two nodes share the user's source directory. `false` always uses
+source. Total graph size, graph width, Planner Review and follow-up flags do not
+select isolation.
 
-The scheduler forms a batch from currently ready nodes after dependency,
-feedback and worker-limit filtering. It does not fill a freed slot while another
-writer in that batch is active. After all writers drain, successful private
-results are composed and delivered through the existing recoverable publication
-path before dispatching another batch. This is a barrier even between two private
-batches. Intermediate delivery returns to scheduling, not graph completion or
-Planner review; conflicts block the next batch for Merger/retry. Only once all
-current work and feedback settle does the graph complete and claim its review.
+The scheduler filters ready nodes by dependencies, feedback and available worker
+slots. While shared-source node writers remain active, newly ready nodes may
+fill free slots immediately without waiting for unrelated siblings. Replenishment
+stays source-native even if its group or total concurrency exceeds two; it never
+captures a private baseline or changes a live writer's directory. Once idle,
+the next dispatch chooses its workspace policy again. Source admission is not
+revalidated when active writers or unavailable slots already prohibit dispatch.
+An invalid source binding never admits replenishment; existing workers first
+drain so the driver retains their terminal output and completion evidence, then
+the idle scheduling attempt reports the binding error explicitly.
+
+Private batches still drain completely before successful results are composed
+and delivered through the existing recoverable publication path. This barrier
+also applies between private batches. Undelivered private results, explicit
+private recoveries and managed result work cannot bypass it by replenishing
+shared source: delivery waits for all writers to drain, and publication, result
+launches and Mergers exclude replenishment. Intermediate delivery returns to
+scheduling, not graph completion or Planner review; conflicts block dispatch for
+Merger/retry. Only once all current work and feedback settle does the graph
+complete and claim its review.
 If a retained private Planner later records new files, the handoff reopens even
 without a graph edit; a completed phase must not strand undelivered changes.
 Successful managed result executions also deliver their newly sealed code through
@@ -29,8 +41,10 @@ this barrier, without rewriting historical node executions or claiming another
 node review. Other business entries retain their verified previous publication
 until the refreshed descriptor installs the newly composed code.
 
-`ExecutionBatchStarted` records the selected nodes and choice. There is no sticky
-promotion: a `1 → 3 → 1` sequence runs source → private → source. Approval does not
+`ExecutionBatchStarted` records each dispatch group and choice, including
+source-native replenishment; no event schema or historical record is rewritten.
+There is no sticky promotion across idle boundaries: a `1 → 3 → 1` sequence runs
+source → private → source when each preceding group has drained. Approval does not
 allocate environments or collect Git snapshots. A private batch initializes
 native admission lazily, then its first worker captures the latest source under
 the source lock, outside the Run mutex. Shared results have empty Git heads and
@@ -364,13 +378,22 @@ merged using normal Git semantics. A conflict in any tracked path—including a
 path that the source project's `.gitignore` would normally ignore—is a Git
 conflict and follows the existing Merger flow.
 
-A successful Merger stages resolutions in the independent project index; the
-backend imports resolved project bytes and commits the graph merge preserving its
-incoming parents. The visible repository never receives internal `MERGE_HEAD`
-commits or graph refs. For a plain source there is no Git environment override:
-the Merger edits files directly, and unchanged conflicts without explicit
-resolution evidence refuse completion. Manual `resolved` acknowledgement is an
-explicit user decision. A successful graph result must be clean and preserve
+The Merger's Git commands target the private graph index through runtime-supplied
+`GIT_DIR`/`GIT_WORK_TREE`, including for a plain source with no visible `.git`.
+It must enumerate conflicts with `git ls-files -u`, resolve binary files and
+deletions as well as text, stage explicit paths, and finish with an empty
+unmerged index and a successful `git diff --cached --check`. Searching text
+markers alone is not verification. The backend imports resolved project bytes
+and commits the graph merge preserving its incoming parents; the visible
+project repository receives no internal `MERGE_HEAD` commits or graph refs.
+For plain sources, explicit staging can resolve a path without changing its
+bytes (a deliberate keep-ours decision), but the working file must match the
+staged resolution; clearing index conflict entries alone is not evidence.
+Otherwise the existing write/delete evidence check remains, and an untouched,
+unmerged path refuses completion. The backend checks repaired patches before
+committing, including retained merges on publication retry, so staged conflict
+markers cannot be converted into successful completion.
+Manual `resolved` acknowledgement is an explicit user decision. A successful graph result must be clean and preserve
 incoming parents. Composition and publication pass the managed environment/cache scopes as staging exclusions, and merge completion removes any accidentally staged scope from the index, so a Merger cannot commit `.agent-home`, `.venv` or `.environments` into the branch; the live files stay in the workspace for the environment. Conversation controls, blocked-node retry and publication-Merger distinctions belong to [Merger lifecycle](execution-model.md#parent-composition-conflicts).
 
 A completed workspace that is modified after completion fails the feedback

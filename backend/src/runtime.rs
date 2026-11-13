@@ -3454,14 +3454,16 @@ impl Runtime {
         self.require_current_file_contract()?;
         self.drain_feedback()?;
         let batch_workspaces = self.batch_workspaces();
-        // A batch is a barrier, not another opportunity to fill freed slots.
-        if batch_workspaces && self.active() {
-            return Ok(Vec::new());
-        }
+        // Workspace preparation gates private handoff/switching, but shared
+        // source workers may fill free slots as soon as dependencies resolve.
         let config = self.state.effective_config().ok_or("Missing config")?;
-        // Check before emitting Started or allocating workspaces, including jobs
-        // resumed without a UI request. perform() checks again before filesystem work.
-        resolve_repository(&self.root, &config)?;
+        // Adaptive preparation validates source only when dispatch/handoff is
+        // possible. Do not abandon active workers over an idle admission check.
+        // Legacy admission still validates before scheduling; perform() checks
+        // again before filesystem work in either mode.
+        if !batch_workspaces {
+            resolve_repository(&self.root, &config)?;
+        }
         #[cfg(not(feature = "fixture"))]
         if !self.is_serial() && !batch_workspaces {
             crate::native::require_graph_execution()?;

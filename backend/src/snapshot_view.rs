@@ -165,6 +165,16 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         metadata["nodes"][name]["canResume"] = json!(state.can_resume_node(name));
         if node.is_user_paused() {
             metadata["nodes"][name]["status"] = json!("paused");
+        } else if node.status == "running"
+            && state
+                .mergers
+                .iter()
+                .any(|merger| merger.status == "running" && merger.node == format!("merge:{name}"))
+        {
+            // While a node-composition merger is resolving conflicts for `name`,
+            // the node's own execution has not started yet; expose it as waiting
+            // until the merger settles and preparation advances to the node.
+            metadata["nodes"][name]["status"] = json!("waiting");
         }
     }
     let interrupted: std::collections::BTreeSet<_> = state
@@ -520,5 +530,79 @@ mod tests {
             snapshot_metadata(&state).unwrap()["graph"],
             json!(state.graph)
         );
+    }
+
+    #[test]
+    fn running_node_merger_projects_its_target_node_as_waiting() {
+        let mut state = Snapshot::default();
+        state.nodes.insert(
+            "join".into(),
+            crate::model::NodeState {
+                status: "running".into(),
+                revision: 1,
+                ..Default::default()
+            },
+        );
+        state.nodes.insert(
+            "blocked_node".into(),
+            crate::model::NodeState {
+                status: "blocked".into(),
+                revision: 1,
+                ..Default::default()
+            },
+        );
+        state.mergers.push(Execution {
+            id: "merger-running".into(),
+            node: "merge:join".into(),
+            revision: 1,
+            attempt: 1,
+            session_id: "merger-running".into(),
+            worktree: "/worktrees/join".into(),
+            before: "base".into(),
+            workspace_lineage: vec![],
+            after: None,
+            input: None,
+            result: None,
+            status: "running".into(),
+            output: String::new(),
+            output_bytes: 0,
+            pid: None,
+            started_at: 1,
+            completed_at: None,
+            metrics: None,
+        });
+        state.mergers.push(Execution {
+            id: "merger-retry".into(),
+            node: "merge:blocked_node".into(),
+            revision: 1,
+            attempt: 2,
+            session_id: "merger-retry".into(),
+            worktree: "/worktrees/blocked".into(),
+            before: "base".into(),
+            workspace_lineage: vec![],
+            after: None,
+            input: None,
+            result: None,
+            status: "running".into(),
+            output: String::new(),
+            output_bytes: 0,
+            pid: None,
+            started_at: 2,
+            completed_at: None,
+            metrics: None,
+        });
+
+        let metadata = snapshot_metadata(&state).unwrap();
+        assert_eq!(metadata["nodes"]["join"]["status"], json!("waiting"));
+        assert_eq!(
+            metadata["nodes"]["blocked_node"]["status"],
+            json!("blocked")
+        );
+
+        // Once the merger completes, the target node returns to running.
+        state.mergers[0].status = "completed".into();
+        state.mergers[0].completed_at = Some(3);
+        let settled = snapshot_metadata(&state).unwrap();
+        assert_eq!(settled["nodes"]["join"]["status"], json!("running"));
     }
 }
