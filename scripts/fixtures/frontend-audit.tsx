@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { SettingsModal } from "../../src/components/modals/SettingsModal";
 import { EditorModal } from "../../src/components/modals/EditorModal";
 import { EditableUserBubble } from "../../src/components/views/ChatBubbles";
+import { NodeTaskCard } from "../../src/components/views/NodeTaskCard";
 import { PromptBox } from "../../src/components/ui/chatgpt-prompt-input";
 import { LandingView } from "../../src/components/views/LandingView";
 import { useSnapshotPolling } from "../../src/hooks/useSnapshotPolling";
@@ -65,6 +66,21 @@ function BubbleFixture() {
       return new Promise<boolean>(resolve => { audit.resolve = resolve; });
     }} />;
 }
+function NodeTaskFixture() {
+  const [task, setTask] = useState("Original objective");
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  audit.setTask = setTask;
+  audit.saves = audit.saves ?? [];
+  return <div style={{ maxWidth: 720 }}>
+    <NodeTaskCard nodeName="worker" taskText={task} editing={editing} draft={draft}
+      onDraftChange={setDraft}
+      onEdit={() => { setDraft(task); setEditing(true); }}
+      onCancel={() => setEditing(false)}
+      onSave={value => { audit.saves.push(value); setTask(value); setEditing(false); }} />
+  </div>;
+}
+
 function PromptFixture({ compact = false, uncontrolled = false }: { compact?: boolean; uncontrolled?: boolean }) {
   const [repository, setRepository] = useState("/a");
   const [value, setValue] = useState("");
@@ -140,6 +156,8 @@ function TranscriptOutputFixture() {
   const marker = (startOffset: number) => line({ type: "grapher_planning_source", planningId: "planner-live", startOffset });
   const answer = (text: string) => line({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } });
   const [state, setState] = useState(() => ({ offset: 100, text: answer("PLANNER_TAIL"), live: true }));
+  audit.setTranscriptOutput = (text: string, offset = 0) => setState({ text, offset, live: false });
+  audit.prependTranscriptOutput = (prefix: string) => setState(previous => ({ ...previous, offset: 0, text: prefix + previous.text }));
   audit.prependPlannerHistory = () => setState(previous => ({ ...previous, offset: 0, text: answer("PLANNER_PREPENDED") + previous.text }));
   audit.appendPlannerOutput = (finish = false) => setState(previous => ({ ...previous, live: !finish,
     text: previous.text + answer(finish ? "PLANNER_FINAL" : "PLANNER_APPEND") }));
@@ -522,6 +540,7 @@ function TimeTookFixture() {
 
 const cases: Record<string, React.ComponentType> = {
   settings: SettingsFixture, editor: EditorFixture, bubble: BubbleFixture, unchangedBubble: UnchangedBubbleFixture,
+  nodeTask: NodeTaskFixture,
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,

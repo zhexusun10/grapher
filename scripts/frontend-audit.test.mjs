@@ -79,6 +79,37 @@ async function fixture(name, handler = async () => false, reducedMotion = "reduc
   return { context, page, errors };
 }
 
+test("final-response JSON renders once without empty code bars or feedback tags after history prepends", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("transcriptOutput");
+  try {
+    const json = '{"next_state":{"offline_wire_contract_fixed":true,"paper_candidates":[]}}';
+    const answer = `Published receipt and 中文交接.\n\nOffline repair verified. Stopped.\n\n\`\`\`json\n${json}\n\`\`\`\n\n<ACCEPT>`;
+    const prefix = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: answer }] } }) + "\n"
+      + JSON.stringify({ type: "agent_end", messages: [{ padding: "x".repeat(600_000) }] }) + "\n";
+    const output = prefix + "\n── Final response ──\n" + answer + "\n";
+    const assertReply = async () => {
+      await page.waitForFunction(() => document.querySelector(".markdown-content pre code")?.textContent.includes("next_state"));
+      assert.equal(await page.locator(".markdown-content pre").count(), 1, "no empty black bar or marker code block");
+      assert.equal(await page.locator(".markdown-content pre code").textContent(), json + "\n");
+      const text = await page.locator("[data-transcript-events]").innerText();
+      assert.equal((text.match(/Published receipt/g) || []).length, 1, "no repeated fallback reply");
+      assert.doesNotMatch(text, /ACCEPT|FEEDBACK|Final response/);
+    };
+    await page.evaluate(output => window.audit.setTranscriptOutput(output), output);
+    await assertReply();
+    const cut = prefix.length - 64_000;
+    await page.evaluate(({ text, offset }) => window.audit.setTranscriptOutput(text, offset), {
+      text: output.slice(cut), offset: new TextEncoder().encode(output.slice(0, cut)).length,
+    });
+    await page.waitForFunction(() => !document.querySelector('[data-transcript-id="text_planner-live_0_0"]'));
+    await assertReply();
+    await page.evaluate(prefix => window.audit.prependTranscriptOutput(prefix), output.slice(0, cut));
+    await page.locator('[data-transcript-id="text_planner-live_0_0"]').waitFor();
+    await assertReply();
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("Markdown cannot execute HTML handlers or reach local APIs in live or replay views", { timeout: 30_000 }, async () => {
   const apiCalls = [];
   const { context, page, errors } = await fixture("markdownCopy", async (_route, command) => {
@@ -4305,6 +4336,66 @@ for (const planType of ["graph", "serial"]) {
     } finally { await context.close(); }
   });
 }
+
+test("node objective editing preserves the card size and action positions while drafts scroll in place", { timeout: 45_000 }, async () => {
+  const { context, page, errors } = await fixture("nodeTask");
+  const card = page.locator(".node-task-card");
+  const editor = card.getByRole("textbox");
+  const geometry = () => card.evaluate(element => {
+    const card = element.getBoundingClientRect();
+    return {
+      width: card.width, height: card.height,
+      actions: [...element.querySelectorAll(".node-task-card-tools button")].map(button => {
+        const box = button.getBoundingClientRect();
+        return { x: box.x - card.x, y: box.y - card.y, width: box.width, height: box.height };
+      }),
+    };
+  });
+  try {
+    for (const width of [1280, 480]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const task of ["Short objective", "Inspect the workspace.\n\n- Read the source\n- Run the checks\n\n```sh\nnpm run check\n```\n\nReport the results."]) {
+        await page.evaluate(task => window.audit.setTask(task), task);
+        await card.getByText(task.split("\n")[0], { exact: true }).waitFor();
+        const before = await geometry();
+        await card.getByRole("button", { name: "Edit task directive" }).click();
+        assert.equal(await editor.inputValue(), task);
+        assert.equal(await editor.evaluate(element => document.activeElement === element), true);
+        assert.equal(await card.getByRole("button", { name: "Save changes" }).isDisabled(), true);
+        assert.deepEqual(await geometry(), before, "entering edit mode keeps the card and both actions in place");
+        assert.equal(await card.locator(".node-task-content").isVisible(), false);
+        assert.equal(await card.locator(".node-task-content").evaluate(element => element.inert), true,
+          "the size reference cannot expose duplicate links or copy buttons to keyboard users");
+
+        await editor.fill(Array.from({ length: 40 }, (_, index) => `Updated objective line ${index}`).join("\n"));
+        assert.deepEqual(await geometry(), before, "long drafts must not grow the card");
+        assert.ok(await editor.evaluate(element => {
+          element.scrollTop = element.scrollHeight;
+          return element.scrollHeight > element.clientHeight && element.scrollTop > 0;
+        }), "long drafts remain scrollable within the original card");
+        await editor.press("Escape");
+        assert.equal(await editor.count(), 0);
+        assert.deepEqual(await geometry(), before, "cancelling restores the same card geometry");
+
+        await card.getByRole("button", { name: "Edit task directive" }).click();
+        await editor.fill("Discard this draft");
+        await card.getByRole("button", { name: "Cancel edit" }).click();
+        await card.getByRole("button", { name: "Edit task directive" }).click();
+        assert.equal(await editor.inputValue(), task, "the cross discards the draft");
+        await editor.fill("   ");
+        assert.equal(await card.getByRole("button", { name: "Save changes" }).isDisabled(), true);
+        await editor.fill("Saved objective");
+        assert.deepEqual(await geometry(), before, "shorter drafts also preserve the card dimensions until saved");
+        if (width === 1280) await editor.press("Control+Enter");
+        else await card.getByRole("button", { name: "Save changes" }).click();
+        await card.getByText("Saved objective", { exact: true }).waitFor();
+        assert.equal(await editor.count(), 0);
+      }
+    }
+    assert.deepEqual(await page.evaluate(() => window.audit.saves), Array(4).fill("Saved objective"));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 test("editing a node objective replaces the opening turn without creating a chat message", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };

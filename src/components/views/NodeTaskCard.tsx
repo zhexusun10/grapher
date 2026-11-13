@@ -61,14 +61,6 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
 
   useLayoutEffect(() => {
     if (editing && textareaRef.current) {
-      const textarea = textareaRef.current;
-      textarea.style.height = "auto";
-      textarea.style.height = `${Math.max(120, textarea.scrollHeight)}px`;
-    }
-  }, [editing, draft]);
-
-  useLayoutEffect(() => {
-    if (editing && textareaRef.current) {
       textareaRef.current.focus();
       const end = textareaRef.current.value.length;
       textareaRef.current.setSelectionRange(end, end);
@@ -104,58 +96,50 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
   };
 
   return (
-    <div className={`node-task-card${editing ? " editing" : ""}`}>
+    <div className={`node-task-card${!badgeText ? " inline-tools" : ""}${editing ? " editing" : ""}`}>
       <div className="node-task-card-header">
-        <div className="node-task-header-left">
-          <div className="node-task-badge">
-            <span>{badgeText || t("节点任务目标")}</span>
-          </div>
-        </div>
+        {badgeText && <strong className="node-task-title">{badgeText}</strong>}
 
         <div className="node-task-card-tools">
           {editing ? (
             <>
               <button
                 type="button"
-                className="node-task-tool-btn cancel"
+                className="tool-copy-btn node-task-tool-btn cancel"
                 onClick={onCancel}
                 aria-label={t("取消修改")}
               >
-                <X size={13} />
-                <span>{t("取消")}</span>
+                <X size={12} />
               </button>
               <button
                 type="button"
-                className="node-task-tool-btn save"
+                className="tool-copy-btn node-task-tool-btn save"
                 onClick={handleSave}
                 disabled={disabled || !isChanged || !draft.trim()}
                 aria-label={t("保存修改")}
               >
-                <Check size={13} />
-                <span>{t("保存")}</span>
+                <Check size={12} />
               </button>
             </>
           ) : (
             <>
               <button
                 type="button"
-                className={`node-task-tool-btn copy${copied ? " copied" : ""}`}
+                className="tool-copy-btn node-task-tool-btn copy"
                 onClick={handleCopy}
                 aria-label={copied ? t("已复制") : t("复制任务指令")}
               >
-                {copied ? <Check size={13} /> : <Copy size={13} />}
-                <span>{copied ? t("已复制") : t("复制")}</span>
+                {copied ? <Check size={12} className="copy-icon-check" /> : <Copy size={12} className="copy-icon-copy" />}
               </button>
               {onEdit && (
                 <button
                   type="button"
-                  className="node-task-tool-btn edit"
+                  className="tool-copy-btn node-task-tool-btn edit"
                   onClick={onEdit}
                   disabled={disabled}
                   aria-label={t("编辑任务指令")}
                 >
-                  <Pencil size={13} />
-                  <span>{t("编辑")}</span>
+                  <Pencil size={12} />
                 </button>
               )}
             </>
@@ -164,47 +148,43 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
       </div>
 
       <div className="node-task-card-body">
-        {editing ? (
-          <div className="node-task-edit-container">
-            <textarea
-              ref={textareaRef}
-              className="node-task-edit-textarea"
-              value={draft}
-              onChange={(e) => onDraftChange(e.target.value)}
-              onCompositionStart={() => {
-                composingRef.current = true;
-              }}
-              onCompositionEnd={() => {
-                composingRef.current = false;
-                compositionEndedAtRef.current = Date.now();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  e.stopPropagation();
-                  onCancel();
-                } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                  if (
-                    e.nativeEvent.isComposing ||
-                    composingRef.current ||
-                    e.keyCode === 229 ||
-                    Date.now() - compositionEndedAtRef.current < 50
-                  ) {
-                    return;
-                  }
-                  e.preventDefault();
-                  handleSave();
+        {/* Keep the rendered objective as an inert size reference during editing. */}
+        <div className="node-task-content" aria-hidden={editing || undefined} inert={editing}>
+          <MarkdownRenderer content={taskText || t("（未指定节点任务）")} />
+        </div>
+        {editing && (
+          <textarea
+            ref={textareaRef}
+            className="node-task-edit-textarea"
+            value={draft}
+            onChange={(e) => onDraftChange(e.target.value)}
+            onCompositionStart={() => {
+              composingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              composingRef.current = false;
+              compositionEndedAtRef.current = Date.now();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.stopPropagation();
+                onCancel();
+              } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                if (
+                  e.nativeEvent.isComposing ||
+                  composingRef.current ||
+                  e.keyCode === 229 ||
+                  Date.now() - compositionEndedAtRef.current < 50
+                ) {
+                  return;
                 }
-              }}
-              placeholder={t("输入节点任务指令...")}
-            />
-            <div className="node-task-edit-footer">
-              <span className="node-task-edit-hint">{t("按 Esc 取消，Ctrl + Enter 保存")}</span>
-            </div>
-          </div>
-        ) : (
-          <div className="node-task-content">
-            <MarkdownRenderer content={taskText || t("（未指定节点任务）")} />
-          </div>
+                e.preventDefault();
+                handleSave();
+              }
+            }}
+            aria-label={t("输入节点任务指令...")}
+            placeholder={t("输入节点任务指令...")}
+          />
         )}
       </div>
     </div>

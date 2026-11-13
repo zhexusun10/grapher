@@ -199,6 +199,78 @@ const assistantEnd = (text: string) => JSON.stringify({
   type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] },
 }) + "\n";
 
+const finalResponse = (answer: string) => "\n── Final response ──\n" + answer + "\n";
+const releaseAnswer = (marker: string) => [
+  "Published receipt and 中文交接.", "", "Offline repair verified. Stopped.", "",
+  "```json", '{"next_state":{"offline_wire_contract_fixed":true,"paper_candidates":[]}}', "```", "", marker,
+].join("\n");
+
+test("JSON in a final-response copy cannot escape duplicate suppression or expose feedback markers", () => {
+  for (const marker of ["<ACCEPT>", "<FEEDBACK>"]) {
+    const answer = releaseAnswer(marker);
+    const output = assistantEnd(answer) + finalResponse(answer);
+    const items = parseHistory(output);
+    assert.equal(items.length, 1, "the entire runtime copy stays suppressed, including JSON and closing fences");
+    assert.equal(items[0].content, answer);
+    const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output, inline: true }));
+    assert.equal((html.match(/Published receipt/g) || []).length, 1);
+    assert.equal((html.match(/<pre>/g) || []).length, 1, "only the real JSON block renders, never an empty black bar");
+    assert.match(html, /next_state/);
+    assert.doesNotMatch(html, /ACCEPT|FEEDBACK|Final response/);
+  }
+});
+
+test("cold final-response tails preserve JSON, blank lines and Markdown indentation across incremental reads", () => {
+  const answer = [
+    "First paragraph.  ", "Next line.", "", "- nested list", "  - child", "",
+    "```json", '{"next_state":{"ready":true}}', '[1, 2]', '"value"', '42', 'null', 'true',
+    '{"type":"message_end","message":{"role":"assistant","content":[]}}',
+    "", "  {\"indented\": true}", "```", "", "    indented code", "", "<ACCEPT>",
+  ].join("\n");
+  const output = finalResponse(answer);
+  const expected = parseHistory(assistantEnd(answer));
+  const state: ParseTranscriptChunkState = {
+    source: "output", byteOffset: 0, leadingFragment: false,
+    inTagThinking: false, inFinalResponse: false, finalResponseSuppressed: false,
+    seenFirstUser: false, pendingUserStart: false, assistantStartIndex: 0,
+    userMessageStarts: new Set(), compacting: false,
+  };
+  let incremental: TranscriptItem[] = [];
+  for (const rawLine of output.slice(0, -1).split("\n")) {
+    incremental = parseTranscriptChunkLines([rawLine], incremental, new Map(), state,
+      { showUserTurns: false, skipFirstUser: false }).currentItems;
+  }
+  for (const items of [parseHistory(output), incremental]) {
+    assert.equal(items.length, 1);
+    assert.equal(items[0].content, expected[0].content);
+    assert.ok(items[0].finalResponseCopy);
+    assert.equal(items[0].rawOutput, undefined);
+  }
+  const renderOutput = (output: string) => renderToStaticMarkup(createElement(VirtualizedTranscript, { output, inline: true }))
+    .replace(/data-transcript-id="[^"]*"/g, 'data-transcript-id="row"');
+  assert.equal(renderOutput(output), renderOutput(assistantEnd(answer)), "fallback and structured messages render identical Markdown");
+});
+
+test("planning source boundaries end final-response mode without consuming the next revision", () => {
+  const answer = releaseAnswer("<ACCEPT>");
+  const source = JSON.stringify({ type: "grapher_planning_source", planningId: "next", startOffset: 0 }) + "\n";
+  for (const prefix of ["", assistantEnd(answer)]) {
+    const items = parseHistory(prefix + finalResponse(answer) + source + assistantEnd("Next revision"));
+    assert.equal(items.length, 2);
+    assert.equal(items[0].content, answer);
+    assert.equal(items[1].content, "Next revision");
+    assert.equal(items[1].finalResponseCopy, undefined);
+  }
+});
+
+test("feedback tags intentionally quoted in code remain literal in final-response tails", () => {
+  const answer = "Protocol example:\n\n```text\n<ACCEPT>\n<FEEDBACK>\n```\n\n<ACCEPT>";
+  const html = renderToStaticMarkup(createElement(VirtualizedTranscript, { output: finalResponse(answer), inline: true }));
+  assert.equal((html.match(/&lt;ACCEPT&gt;/g) || []).length, 1);
+  assert.equal((html.match(/&lt;FEEDBACK&gt;/g) || []).length, 1);
+  assert.equal((html.match(/<pre>/g) || []).length, 1);
+});
+
 test("repeated user rows retain distinct absolute UTF-8 cursors in full and paged transcripts", () => {
   const image = { type: "image", mimeType: "image/png", data: "aA==" };
   const start = (text: string) => JSON.stringify({ type: "message_start", message: { role: "user", content: [{ type: "text", text }, image] } }) + "\n";
@@ -245,7 +317,7 @@ test("only requested user turns render inline without replaying the task turn", 
 });
 
 test("prepending across a large agent_end removes only the final-response copy, not real repeated replies", () => {
-  const answer = "集成节点已完成 PASS 🚀\n\n## 验证\n\n| 文件 | 结果 |\n|---|---|\n| a.py | 通过 |\n";
+  const answer = "集成节点已完成 PASS 🚀\n\n## 验证\n\n| 文件 | 结果 |\n|---|---|\n| a.py | 通过 |\n\n" + releaseAnswer("<ACCEPT>");
   // agent_end repeats the session and can exceed both the initial tail and an older page.
   const output = assistantEnd(answer) + assistantEnd(answer)
     + JSON.stringify({ type: "agent_end", messages: [{ padding: "x".repeat(2 * 1024 * 1024) }] }) + "\n"

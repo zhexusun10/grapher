@@ -26,10 +26,10 @@ export interface ParseTranscriptChunkState {
   compacting: boolean;
 }
 
-// Plain final-response lines are trimmed and empty lines skipped by the legacy
-// renderer. Compare that representation, not raw Markdown, when retiring a copy.
+// The runtime adds a trailing newline around its plain-text fallback. Ignore
+// that framing, but preserve Markdown's meaningful internal whitespace.
 function finalResponseText(text: string): string {
-  return text.split("\n").map(line => line.trim()).filter(Boolean).join("\n");
+  return text.replace(/\r\n?/g, "\n").trim();
 }
 
 /** Shared by incremental replay and transcript regression tests. */
@@ -54,6 +54,19 @@ export function parseTranscriptChunkLines(
   let lineOffset = state.byteOffset;
   let localId = 0;
   const rowId = (type: string) => `${type}_${state.source}_${lineOffset}_${localId++}`;
+
+  const appendFinalResponseLine = (line: string) => {
+    if (state.finalResponseSuppressed) return;
+    const lastItem = currentItems[currentItems.length - 1];
+    if (lastItem?.finalResponseCopy?.source === state.source) {
+      lastItem.content = (lastItem.content || "") + "\n" + line;
+    } else {
+      currentItems.push({
+        id: rowId("text"), type: "text", role: "assistant", content: line,
+        finalResponseCopy: { source: state.source, offset: lineOffset }, timestamp: Date.now(),
+      });
+    }
+  };
 
   const retireFinalResponseCopy = (text: string) => {
     if (!tailItems || !text.trim()) return;
@@ -213,18 +226,27 @@ export function parseTranscriptChunkLines(
     state.byteOffset += utf8Bytes(rawLine) + 1;
     localId = 0;
     const line = rawLine.trim();
-    if (!line) continue;
+    if (!line && !state.inFinalResponse) continue;
     const leadingFragment = state.leadingFragment;
     state.leadingFragment = false;
     let parsedJson = false;
     try {
       const event = JSON.parse(line);
+      // Final response is the terminal plain-text suffix of an execution, not
+      // JSONL. Even valid JSON (including event-shaped examples) is Markdown
+      // content here; only an explicit source boundary can resume event parsing.
+      if (state.inFinalResponse && event?.type !== "grapher_planning_source") {
+        appendFinalResponseLine(rawLine);
+        continue;
+      }
       parsedJson = true;
       if (!event || typeof event !== "object") continue;
       if (event.type === "grapher_planning_source") {
         state.source = event.planningId || "planner";
         state.byteOffset = event.startOffset ?? 0;
         state.leadingFragment = state.byteOffset > 0;
+        state.inFinalResponse = false;
+        state.finalResponseSuppressed = false;
         currentItems = closeThinkingItems(currentItems);
         state.assistantStartIndex = currentItems.length;
         continue;
@@ -497,6 +519,10 @@ export function parseTranscriptChunkLines(
       }
     } catch {
       if (parsedJson || leadingFragment) continue;
+      if (state.inFinalResponse) {
+        appendFinalResponseLine(rawLine);
+        continue;
+      }
       const cleanLine = line.replace(/\u001b\[[0-9;]*m/g, "").trim();
       if (cleanLine === "── Final response ──") {
         const lastUserIndex = currentItems.map(item => item.role).lastIndexOf("user");
@@ -506,26 +532,6 @@ export function parseTranscriptChunkLines(
         );
         state.finalResponseSuppressed = hasStreamedAssistant;
         state.inFinalResponse = true;
-        continue;
-      }
-
-      if (state.inFinalResponse) {
-        if (state.finalResponseSuppressed) {
-          continue;
-        }
-        const lastItem = currentItems[currentItems.length - 1];
-        if (lastItem?.finalResponseCopy?.source === state.source) {
-          lastItem.content = (lastItem.content || "") + "\n" + line;
-        } else {
-          currentItems.push({
-            id: rowId("text"),
-            type: "text",
-            role: "assistant",
-            content: line,
-            finalResponseCopy: { source: state.source, offset: lineOffset },
-            timestamp: Date.now(),
-          });
-        }
         continue;
       }
 
