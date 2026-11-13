@@ -144,7 +144,7 @@ const plannerDurationSeconds = (turn: PlanningSummary): number => {
 function plannerSessionAttempts(
   turns: readonly PlanningSummary[],
   latestId?: string | null,
-): { attempts: PlanningSummary[]; anchor?: PlanningSummary } {
+): { attempts: PlanningSummary[]; anchor?: PlanningSummary; sessionId?: string } {
   const anchor = latestId === null ? undefined
     : latestId
       ? turns.find(turn => turn.planningId === latestId)
@@ -155,7 +155,16 @@ function plannerSessionAttempts(
     ? turns.filter(turn => !plannerSessionId(turn) || plannerSessionId(turn) === sessionId)
     : [...turns];
   if (anchor && !attempts.some(turn => turn.planningId === anchor.planningId)) attempts.push(anchor);
-  return { attempts, anchor };
+  return { attempts, anchor, sessionId };
+}
+
+/** Resolve the Pi session ID for the displayed Planner turn, falling back to
+ * earlier turns of the same conversation before the live turn records its own. */
+export function plannerResolvedSessionId(
+  turns: readonly PlanningSummary[],
+  latestId?: string | null,
+): string | undefined {
+  return plannerSessionAttempts(turns, latestId).sessionId;
 }
 
 /** Aggregate the Planner turns that share the displayed turn's Pi session.

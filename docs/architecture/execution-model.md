@@ -87,6 +87,11 @@ review appends it only while that marker is pending and consumes the marker.
 Later reviews or follow-ups do not repeat it, including after reload or a failed
 review.
 
+Before launching a review against an existing Planner session, the backend
+requires retained user history; a header-only session is a review failure, not
+a fresh conversation. This leaves completed work intact and is not retried on
+restart.
+
 The review uses the normal Planner tool policy and may inspect, verify, revise the graph, report or make administrative source edits. It does not receive node conversation histories.
 
 Its output streams through durable planning logs and SSE wake-ups. Successful

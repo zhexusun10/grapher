@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SessionTokenUsage } from "../src/components/SessionTokenUsage.tsx";
-import { addTokenUsage, executionSessionUsageThrough, plannerLegacyUsage, plannerSessionUsageThrough } from "../src/services/sessionMetrics.ts";
+import { addTokenUsage, executionSessionUsageThrough, plannerLegacyUsage, plannerResolvedSessionId, plannerSessionUsageThrough } from "../src/services/sessionMetrics.ts";
 import type { Execution, PlanningSummary, SessionContext, TokenUsage } from "../src/types.ts";
 import { attemptSessionContext, consumedTokenCount, formatCacheHitRate, formatContextUsed, formatContextWindow, formatTokenCount, sessionContext, sessionTokenUsage } from "../src/utils/tokenUsage.ts";
 import { translate } from "../src/i18n/index.ts";
@@ -285,6 +285,17 @@ test("Planner turns recorded before session tracking stay in the newest total", 
   // rather than contributing a partial sum.
   assert.equal(plannerLegacyUsage([current], "current"), undefined);
   assert.equal(plannerLegacyUsage([plannerTurn("bad", "legacy-id"), current], "current"), undefined);
+});
+
+test("pending review/follow-up turn inherits the prior Planner session identity before Pi starts", () => {
+  const first = plannerTurn("turn-1", "planner-a", sessionUsage(40, 4));
+  const pendingReview: PlanningSummary = {
+    planningId: "review-2",
+    roles: { planner: { model: "", durationSeconds: 0, assistantMessages: 0, tools: 0, toolErrors: 0, usage: sessionUsage(0, 0) } },
+  };
+  assert.equal(plannerResolvedSessionId([first, pendingReview], "review-2"), "planner-a");
+  assert.equal(plannerResolvedSessionId([first], "unrecorded-3"), "planner-a");
+  assert.equal(plannerResolvedSessionId([first], "turn-1"), "planner-a");
 });
 
 test("an unknowable usage prefix hides token rows but keeps a known context", () => {

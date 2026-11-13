@@ -16,6 +16,7 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
+.tmp/
 
 # Local notes and generated release artifacts
 MYLOG.md

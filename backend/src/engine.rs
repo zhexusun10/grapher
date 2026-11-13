@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{mpsc, Arc, Mutex, OnceLock},
@@ -860,6 +860,33 @@ pub fn clean_model_error(error: &str) -> String {
     trimmed.to_string()
 }
 
+fn session_dir_contains_session(session_dir: &Path, session_id: &str) -> bool {
+    let Ok(entries) = fs::read_dir(session_dir) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") || !path.is_file() {
+            return false;
+        }
+        let Ok(file) = fs::File::open(&path) else {
+            return false;
+        };
+        let mut header = String::new();
+        if BufReader::new(file)
+            .take(65536)
+            .read_line(&mut header)
+            .is_err()
+        {
+            return false;
+        }
+        serde_json::from_str::<Value>(&header).is_ok_and(|value| {
+            value.get("type").and_then(Value::as_str) == Some("session")
+                && value.get("id").and_then(Value::as_str) == Some(session_id)
+        })
+    })
+}
+
 pub fn run_pi(request: PiRequest<'_>, on_output: impl FnMut(String)) -> Result<String, String> {
     // All roles run until completion or explicit cancellation.
     run_pi_with_timeout(request, on_output, None)
@@ -875,6 +902,9 @@ fn run_pi_with_timeout(
     #[cfg(not(feature = "fixture"))]
     crate::workspace::validate_binding(Path::new(&config.repository))?;
     fs::create_dir_all(request.session_dir).map_err(|error| error.to_string())?;
+    let resuming_existing_session = request
+        .session_id
+        .is_some_and(|id| session_dir_contains_session(request.session_dir, id));
     // Source-native conversations stay resident: reuse a parked shell for this
     // session before any cold launch. Graph node agents are never parked, so
     // this is a miss for them.
@@ -1446,6 +1476,7 @@ fn run_pi_with_timeout(
         request.role,
         rpc_agent,
         rpc_agent && !cfg!(feature = "fixture"),
+        resuming_existing_session,
         &initial_rpc_id,
         timeout,
         started,
@@ -1493,6 +1524,7 @@ fn run_turn(
     role: PiRole,
     rpc_agent: bool,
     report_context: bool,
+    resuming_existing_session: bool,
     initial_rpc_id: &str,
     timeout: Option<Duration>,
     started: Instant,
@@ -1554,6 +1586,21 @@ fn run_turn(
                     if line.contains("No project session found with id")
                         && line.contains("creating a new session with that id")
                     {
+                        if resuming_existing_session {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                stderr_lines.push(trimmed.to_string());
+                            }
+                            stderr_tail = line.clone();
+                            output_buffer.flush(&mut *on_output)?;
+                            on_output(format!("[stderr] {line}\n"));
+                            agent_error = Some(
+                                "Pi failed to resume the existing session and attempted to create a new session without prior context".into(),
+                            );
+                            process_tree.terminate();
+                            let _ = child.kill();
+                            break;
+                        }
                         continue;
                     }
                     let trimmed = line.trim();
@@ -2134,6 +2181,7 @@ fn run_resumed(
     let rpc_guard = Some(NodeRpcGuard(id));
     let outcome = run_turn(
         request.role,
+        true,
         true,
         true,
         &initial_rpc_id,
@@ -4008,5 +4056,95 @@ sys.stdin.read()
             clean_model_error(code_and_plain),
             "401: Unauthorized access"
         );
+    }
+
+    #[cfg(feature = "fixture")]
+    #[test]
+    fn resuming_existing_session_rejects_silent_blank_session_fallback() {
+        let _guard = lock_env();
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("session");
+        fs::create_dir_all(&session_dir).unwrap();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let script = temp.path().join("session_warning.py");
+        fs::write(
+            &script,
+            r#"import json, sys
+print(f"Warning: No project session found with id 'x'; creating a new session with that id.", file=sys.stderr, flush=True)
+sys.stdin.read()
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'SHOULD_SUCCEED_ON_NEW'}]}}), flush=True)
+"#,
+        )
+        .unwrap();
+        let config = Config {
+            environment: None,
+            engine: "pi".into(),
+            pi_command: test_python(),
+            pi_args: vec!["-u".into(), script.to_string_lossy().into_owned()],
+            repository: temp.path().to_string_lossy().into(),
+            model: "mock/model".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 1,
+            max_feedback: 0,
+            auto_approve: false,
+            role_models: Default::default(),
+            post_task_review: false,
+            planner_write_tools: true,
+            isolate_parallel_nodes: true,
+        };
+        let initial = run_pi(
+            PiRequest {
+                role: PiRole::Planner,
+                config: &config,
+                cwd: temp.path(),
+                task: "initial",
+                session_dir: &session_dir,
+                extension: None,
+                tools: None,
+                session_id: Some(&session_id),
+                extra_args: vec![],
+                environment: vec![],
+                system_prompt: None,
+                images: None,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(initial, "SHOULD_SUCCEED_ON_NEW");
+
+        fs::write(
+            session_dir.join(format!("2026-01-01T00-00-00-000Z_{session_id}.jsonl")),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "version": 3,
+                    "id": session_id,
+                    "cwd": temp.path()
+                })
+            ),
+        )
+        .unwrap();
+        let mut output = String::new();
+        let resumed = run_pi(
+            PiRequest {
+                role: PiRole::Planner,
+                config: &config,
+                cwd: temp.path(),
+                task: "review",
+                session_dir: &session_dir,
+                extension: None,
+                tools: None,
+                session_id: Some(&session_id),
+                extra_args: vec![],
+                environment: vec![],
+                system_prompt: None,
+                images: None,
+            },
+            |line| output.push_str(&line),
+        )
+        .unwrap_err();
+        assert!(resumed.contains("failed to resume the existing session"), "{resumed}");
+        assert!(output.contains("No project session found with id"), "{output}");
     }
 }

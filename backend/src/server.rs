@@ -1651,7 +1651,7 @@ fn stored_planner_session_id(
     })()?;
     let workspace = workspace.canonicalize().ok();
     let mut ids = std::collections::BTreeSet::new();
-    let mut found_file = false;
+    let mut file_count = 0usize;
     for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         if entry.path().extension().is_none_or(|ext| ext != "jsonl")
@@ -1662,7 +1662,7 @@ fn stored_planner_session_id(
         {
             continue;
         }
-        found_file = true;
+        file_count += 1;
         // Pi's first JSONL entry is the session header. A corrupt or foreign
         // session must not silently start a second conversation.
         let mut header = String::new();
@@ -1694,8 +1694,11 @@ fn stored_planner_session_id(
         }
         ids.insert(id.to_string());
     }
-    if !found_file {
+    if file_count == 0 {
         return Ok(None);
+    }
+    if file_count > 1 || ids.len() > 1 {
+        return Err("Multiple Planner conversations found for one run; cannot select one safely".into());
     }
     if ids.contains(expected) {
         return Ok(Some(expected.to_string()));
@@ -1866,6 +1869,9 @@ fn planner_session_directory_for_workspace(
             &event.kind,
             EventKind::Created {
                 planning_id: Some(_),
+                ..
+            } | EventKind::Created {
+                planning: Some(_),
                 ..
             } | EventKind::GraphRevised { .. }
         ) {
@@ -2619,6 +2625,22 @@ fn plan_goal_internal_with_options(
                                 &planner_session_id,
                                 &planner_workspace,
                             )?;
+                            // Pi accepts a header-only file without a resume warning.
+                            // An existing review conversation must retain its original
+                            // user turn; manual graphs may have no Planner session yet.
+                            if background_review
+                                && stored_planner_session_id(
+                                    &planner_session_dir,
+                                    &repository,
+                                    &planner_workspace,
+                                    &planner_session_id,
+                                )?.is_some()
+                            {
+                                validate_planner_continuation_history(
+                                    &planner_session_dir,
+                                    &planner_session_id,
+                                ).map_err(|error| format!("Cannot review Planner session: {error}"))?;
+                            }
                             // Keep Graph IR and conversation logs out of project snapshots.
                             fs::create_dir_all(&planner_session_dir).map_err(|e| e.to_string())?;
                             let graph_path =

@@ -610,6 +610,94 @@ fn post_task_review_failure_preserves_published_graph_and_source_writes() {
 }
 
 #[test]
+fn post_task_review_rejects_header_only_history_and_preserves_failure_after_restart() {
+    let (temp, repo, service) = setup(true, true);
+    // Let an incorrectly launched review finish immediately, so the regression
+    // fails on the outcome rather than waiting for the fixture's release gate.
+    fs::write(repo.join("second.txt"), "already complete").unwrap();
+    let planning_id = Uuid::new_v4().to_string();
+    let (root, run_id, graph, config) = {
+        let mut runtime = service.runtime.lock().unwrap();
+        let graph = runtime.state.graph.clone();
+        runtime.revise_graph(graph.clone(), PlanningSummary {
+            planning_id: planning_id.clone(),
+            status: Some("success".into()),
+            plan_type: Some("graph".into()),
+            ..Default::default()
+        }).unwrap();
+        (
+            runtime.root.clone(), runtime.state.run_id.clone(), graph,
+            runtime.state.effective_config().unwrap(),
+        )
+    };
+    let session_dir = root.join("planning").join(&planning_id).join("planner-session");
+    fs::create_dir_all(&session_dir).unwrap();
+    let session_file = session_dir.join(format!("original_{planning_id}.jsonl"));
+    let header = format!("{}\n", serde_json::json!({
+        "type": "session", "version": 3, "id": planning_id,
+        "cwd": crate::native::host_path(&repo)
+    }));
+    let history = format!("{header}{}\n", serde_json::json!({
+        "type": "message", "id": "original", "parentId": null,
+        "message": { "role": "user", "content": "Original user goal" }
+    }));
+    fs::write(&session_file, &header).unwrap();
+
+    drive(service.clone());
+    let failed = wait(&service, |state| state.events.iter().any(|event|
+        matches!(event.kind, EventKind::PlannerReviewFinished { .. })));
+    wait_for_driver_exit(&service);
+    let planning = failed.planning.as_ref().unwrap();
+    assert_eq!(planning.status.as_deref(), Some("failed"));
+    assert!(planning.error.as_deref().unwrap().contains("original user turn"));
+    assert_eq!(failed.phase, "completed");
+    assert_eq!(failed.graph, graph);
+    assert_eq!(failed.nodes["first"].status, "completed");
+    assert_eq!(failed.executions.len(), 1);
+    assert!(failed.review_graph.is_none());
+    assert_eq!(fs::read_to_string(repo.join("first.txt")).unwrap(), "published");
+    assert!(!temp.path().join("planner-tasks.jsonl").exists(), "review must not launch Pi");
+    assert_eq!(fs::read_to_string(&session_file).unwrap(), header);
+    let failed_id = planning.planning_id.clone();
+    drop(service);
+
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open(&root).unwrap().open_run(&run_id).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    drive(service.clone());
+    wait_for_driver_exit(&service);
+    {
+        let runtime = service.runtime.lock().unwrap();
+        let replay = &runtime.state;
+        assert_eq!(replay.phase, "completed");
+        assert_eq!(replay.graph, graph);
+        assert_eq!(replay.executions.len(), 1);
+        assert_eq!(replay.planning.as_ref().unwrap().planning_id, failed_id);
+        assert_eq!(replay.planning.as_ref().unwrap().status.as_deref(), Some("failed"));
+        assert_eq!(replay.events.iter().filter(|event|
+            matches!(event.kind, EventKind::PlannerReviewFinished { .. })).count(), 1);
+    }
+    assert!(!temp.path().join("planner-tasks.jsonl").exists(), "restart must not retry review");
+
+    // A real retained user turn still permits an explicit review of this Run.
+    fs::write(&session_file, &history).unwrap();
+    let reviewed = plan_goal_internal_with_started(
+        POST_TASK_REVIEW_PROMPT.into(), config, Some("graph"), None,
+        Some(run_id), &service, true, |_| {}, |_| {}, |_| {}, |_| {},
+    ).unwrap();
+    wait_for_driver_exit(&service);
+    assert_eq!(reviewed.planning.as_ref().unwrap().status.as_deref(), Some("success"));
+    assert_eq!(reviewed.graph, graph);
+    assert_eq!(reviewed.executions.len(), 1);
+    assert_eq!(planner_tasks(&temp), vec![POST_TASK_REVIEW_PROMPT.to_string()]);
+    assert_eq!(fs::read_to_string(&session_file).unwrap(), history);
+}
+
+#[test]
 fn post_task_review_does_not_trigger_on_failed_execution() {
     let (_temp, repo, service) = setup(true, true);
     fs::write(repo.join("fail-node"), "fail").unwrap();

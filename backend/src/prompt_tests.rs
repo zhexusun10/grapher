@@ -2983,6 +2983,18 @@ fn legacy_planner_session_rebinds_only_its_cwd_and_preserves_history() {
         content,
         "rebinding is idempotent"
     );
+    fs::write(
+        session.join(format!("duplicate_{id}.jsonl")),
+        format!(
+            "{}\n",
+            serde_json::json!({ "type": "session", "id": id, "cwd": repository })
+        ),
+    )
+    .unwrap();
+    assert!(
+        stored_planner_session_id(&session, &repository, &repository, &id).is_err(),
+        "duplicate session files for the same Planner ID must fail loudly"
+    );
 }
 
 #[cfg(feature = "fixture")]

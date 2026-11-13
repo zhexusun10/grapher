@@ -43,7 +43,7 @@ import { HISTORY_PREPEND_EVENT, TRANSCRIPT_CONTENT_GROWTH_EVENT, TRANSCRIPT_FINA
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
 import { firstPlannerUserIsSteer, plannerHistoryMessageSources, plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
 import { plannerSteerRows, planningOutputSteerIds, type PlannerSteerRow } from "../../services/plannerSteers";
-import { executionSessionTiming, executionSessionUsageThrough, mergePlannerTurns, plannerLegacyUsage, plannerSessionTiming, plannerSessionUsageThrough, plannerTurnSummaries, addTokenUsage } from "../../services/sessionMetrics";
+import { executionSessionTiming, executionSessionUsageThrough, mergePlannerTurns, plannerLegacyUsage, plannerResolvedSessionId, plannerSessionTiming, plannerSessionUsageThrough, plannerTurnSummaries, addTokenUsage } from "../../services/sessionMetrics";
 import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
@@ -964,15 +964,21 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       thinkingLevel: configured.thinkingLevel || "low",
     };
   })();
-  // Summaries persisted before contexts were recorded still show their turn.
-  const plannerContext = sessionContext(state.runMetrics?.sessionContext, plannerRole?.sessionId)
-    ?? attemptSessionContext(plannerRole);
   // Keep the session's first start aligned with the accumulated `time took`:
   // Planner follow-ups resume one Pi session instead of starting a new clock.
   const plannerTurnHistory = useMemo(() => mergePlannerTurns(
     plannerTurnSummaries(state.events), [failedPlanning, state.planning]),
     [state.events, failedPlanning, state.planning]);
   const displayedPlannerTurnId = state.planning?.planningId ?? failedPlanning?.planningId;
+  // A freshly started review/follow-up turn initially has no sessionId on its
+  // summary; keep looking up the active session's context/usage until it emits
+  // `grapher_process_started` (or if it fails before Pi launches).
+  const resolvedPlannerSessionId = useMemo(
+    () => plannerRole?.sessionId || plannerResolvedSessionId(plannerTurnHistory, displayedPlannerTurnId),
+    [plannerRole?.sessionId, plannerTurnHistory, displayedPlannerTurnId]);
+  // Summaries persisted before contexts were recorded still show their turn.
+  const plannerContext = sessionContext(state.runMetrics?.sessionContext, resolvedPlannerSessionId)
+    ?? attemptSessionContext(plannerRole);
   const plannerSession = useMemo(() => plannerSessionTiming(plannerTurnHistory, {
     // While a turn streams (owned or recovered), its clock is live and every
     // completed turn is prior; after it settles the displayed turn owns its
@@ -996,7 +1002,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // Turns recorded before session IDs existed cannot appear in the backend's
   // per-session bucket, yet the displayed conversation still contains them.
   const plannerBackendUsage = plannerUsageThrough.latest
-    ? sessionTokenUsage(state.runMetrics?.sessionUsage, plannerRole?.sessionId)
+    ? sessionTokenUsage(state.runMetrics?.sessionUsage, resolvedPlannerSessionId)
     : undefined;
   const plannerLegacy = useMemo(
     () => plannerBackendUsage ? plannerLegacyUsage(plannerTurnHistory, displayedPlannerTurnId) : undefined,
