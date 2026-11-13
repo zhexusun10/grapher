@@ -3681,6 +3681,14 @@ impl Runtime {
             } else {
                 None
             };
+            // A user pause only splits one logical attempt into separate
+            // execution records. Capture this before preparation recovery can
+            // turn continuation into an initial launch without a Pi session.
+            let continued_attempt = resume
+                .filter(|previous| {
+                    continuation && self.state.execution_stop_requests.contains(&previous.id)
+                })
+                .map(|previous| previous.attempt);
             // Session continuation and physical workspace recovery are distinct:
             // a first preparation may have stopped before Pi accepted any task.
             // A human follow-up after an attempt that died during startup (for
@@ -4114,13 +4122,16 @@ impl Runtime {
                 id: id.clone(),
                 node: node.name.clone(),
                 revision: self.state.nodes[&node.name].revision,
-                attempt: self
-                    .state
-                    .executions
-                    .iter()
-                    .filter(|execution| execution.node == node.name)
-                    .count()
-                    + 1,
+                attempt: continued_attempt.unwrap_or_else(|| {
+                    self.state
+                        .executions
+                        .iter()
+                        .filter(|execution| execution.node == node.name)
+                        .map(|execution| execution.attempt)
+                        .max()
+                        .unwrap_or(0)
+                        + 1
+                }),
                 session_id: resume
                     .filter(|_| session_fork.is_none())
                     .map(|previous| previous.session_id.clone())

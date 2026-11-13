@@ -98,6 +98,23 @@ test("graph projections use endpoints and feedback without relation labels", () 
   assert.equal(elements!.edges[2].markerEnd, "workflow-arrow-feedback");
 });
 
+test("node attempt badges use recorded numbers rather than pause/resume execution counts", () => {
+  const state: Snapshot = {
+    ...emptySnapshot,
+    graph,
+    executions: [
+      { id: "a-paused", node: "a", attempt: 1, status: "paused" },
+      { id: "a-resumed", node: "a", attempt: 1, status: "running" },
+      { id: "b-failed", node: "b", attempt: 1, status: "failed" },
+      { id: "b-paused", node: "b", attempt: 2, status: "paused" },
+      { id: "b-resumed", node: "b", attempt: 2, status: "running" },
+    ] as Execution[],
+  };
+  const elements = projectGraph(state, "");
+  assert.deepEqual(elements.nodes.map(node => node.data.attempts), [1, 2, 0]);
+  assert.equal(state.executions.length, 5, "all execution records remain available");
+});
+
 test("dependency layers follow the DAG", () => {
   assert.deepEqual(computeExecutionLayers(graph), [["a"], ["b"], ["c"]]);
 });

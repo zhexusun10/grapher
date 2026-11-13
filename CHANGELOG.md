@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workspace preparation status no longer lists node names, preventing the bottom bar from expanding when many nodes prepare concurrently. Preparation phase labels remain visible without a progress counter (`src/components/views/GraphWorkbench.tsx`).
 - Resuming nodes and other generic workspace-preparation stages no longer claim files are being copied. Only an explicit backend `copy` phase displays the copying label; unknown or mixed stages display preparation.
 - Appending a Planner follow-up or review preserves mounted history, expanded rows and reading position even after global transcript-cache eviction. The live turn stays visible until its durable log is ready.
+- Continuing explicitly user-paused work now keeps its logical attempt number across restarts, while retaining a separate execution record for every dispatch. Graph attempt badges use those recorded numbers; genuine failure retries, new user turns and recomputation still advance the attempt.
 - Updated regression fixtures to explicitly select manual approval and exercise private workspaces with three-node batches. Legacy scheduler tests retain their original persisted-event contract instead of accidentally testing new batch defaults.
 
 ## [1.7.1] - 2026-11-11

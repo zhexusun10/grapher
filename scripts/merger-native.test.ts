@@ -342,11 +342,11 @@ test('production Planner writes source directly; legacy private Runs retain node
         }
       }
       if (kind === 'planner' && !fail) {
-        // A revision the Planner cannot apply keeps both the old graph and its
-        // source writes. Deleting a node whose result this run already published
-        // is refused where the Planner can still react, so the turn ends on the
-        // untouched graph instead of producing an empty one.
-        await revise(`${label} FAILED_REVISION`, state.runId, repository);
+        // Shared-source nodes have no private published-head guard. Removing
+        // the last node can be drafted, but committing an empty graph must fail
+        // and retain the old graph/executions without rolling back source writes.
+        await assert.rejects(revise(`${label} FAILED_REVISION`, state.runId, repository),
+          /Graph must contain at least one node/);
         const failedState = await api('snapshot', { runId: state.runId });
         assert.deepEqual(failedState.graph, state.graph);
         assert.equal(failedState.base, state.base);
@@ -366,10 +366,8 @@ test('production Planner writes source directly; legacy private Runs retain node
           return current.phase === 'completed' && current.nodes.late?.status === 'completed' && current;
         });
         assert.equal(revised.base, state.base, 'approval is immutable');
-        // A plain folder whose successful publication reclaimed its snapshot
-        // records the revision without a source head; the next dispatch
-        // materializes from the current source files. Standard Git keeps
-        // snapshotting its own repository at revision time.
+        // Shared-source revisions retain the graph and read current files at
+        // dispatch; neither Git nor plain sources manufacture snapshot heads.
         assert.ok(revised.events.some((event: any) => event.type === 'graph_revised'));
         assert.ok(revised.events.filter((event: any) => event.type === 'graph_revised')
           .every((event: any) => !event.source_head), 'shared-source revisions do not create snapshots');

@@ -603,6 +603,8 @@ pub struct Execution {
     pub id: String,
     pub node: String,
     pub revision: usize,
+    /// Logical attempt number; explicit pause/continue keeps this number while
+    /// each dispatched execution retains its own ID and terminal evidence.
     pub attempt: usize,
     pub session_id: String,
     pub worktree: String,

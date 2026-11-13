@@ -116,10 +116,16 @@ Pause/Continue control is disabled while the Planner is active; its conversation
 Stop remains the control for that turn. The browser shows `pausing` until node
 writers drain and disables Continue during that interval.
 Continue requeues the interrupted nodes using their own Pi sessions and retained
-workspaces. If an initial preparation was paused before Pi launched and no
-conversation exists, Continue dispatches the initial task instead of attempting
-to resume a nonexistent session; the unstarted attempt remains in history. A
-user follow-up after an attempt died before Pi persisted its conversation (for
+workspaces. Continuing an explicitly user-paused node retains its logical
+`attempt` number, including repeated pauses and preparation stopped before Pi
+launched. Each dispatch still records a fresh Execution ID with its own logs,
+timing and terminal evidence; topology badges use the recorded attempt number,
+not the number of execution records. Failure retries, follow-ups, history edits
+and recomputation still advance the attempt number. If an initial preparation
+was paused before Pi launched and no conversation exists, Continue dispatches
+the initial task instead of attempting to resume a nonexistent session; the
+unstarted execution record remains in history. A user follow-up after an attempt
+died before Pi persisted its conversation (for
 example while loading an extension) recovers the same way: the retained
 workspace and session slot receive the node task and the follow-up turn instead
 of failing with `Cannot resume node session`. Retrying or editing a message from

@@ -285,7 +285,8 @@ export function useGraphElements(
           name: node.name,
           task: node.task,
           status: state.nodes[node.name]?.status ?? "waiting",
-          attempts: nodeAttempts.length,
+          // Pause/Continue creates another execution record, not another attempt.
+          attempts: nodeAttempts.reduce((latest, execution) => Math.max(latest, execution.attempt), 0),
           hint: (indexes.hints.get(node.name) ?? [])
             .map((edge) => `${edge.from} → ${edge.to}${edge.feedback ? " (feedback)" : ""}`)
             .join("\n"),

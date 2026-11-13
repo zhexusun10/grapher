@@ -10,6 +10,123 @@ fn record_session(runtime: &Runtime, execution: &Execution) {
 }
 
 #[test]
+fn user_pause_resume_keeps_attempt_number_across_restarts() {
+    for route in ["graph", "serial"] {
+        for has_session in [false, true] {
+            for run_wide in [false, true] {
+                let (_temp, _source, mut runtime) = setup(true, single());
+                runtime.set_route(route).unwrap();
+                runtime.approve().unwrap();
+                let first = runtime.jobs().unwrap().remove(0);
+                if has_session {
+                    record_session(&runtime, &first.execution);
+                }
+                let mut current = first.execution.clone();
+                for cycle in 0..2 {
+                    if run_wide {
+                        runtime.pause(true).unwrap();
+                    }
+                    runtime
+                        .request_execution_stop(if run_wide { None } else { Some("task") })
+                        .unwrap();
+                    runtime
+                        .finish(&current, Err("Pi exited with exit code: 1".into()))
+                        .unwrap();
+                    let root = runtime.root.clone();
+                    drop(runtime);
+                    runtime = Runtime::open(&root).unwrap();
+                    if run_wide {
+                        runtime.pause(false).unwrap();
+                    } else {
+                        runtime.resume_node("task").unwrap();
+                    }
+                    let next = runtime.jobs().unwrap().remove(0);
+                    assert_eq!(next.execution.attempt, 1, "pause is not a new attempt");
+                    assert_ne!(
+                        next.execution.id, current.id,
+                        "retain separate execution evidence"
+                    );
+                    assert_eq!(next.execution.session_id, first.execution.session_id);
+                    assert_eq!(next.execution.worktree, first.execution.worktree);
+                    assert_eq!(next.continuation, has_session);
+                    assert_eq!(next.initial_recovery, !has_session);
+                    assert_eq!(next.task.is_empty(), has_session);
+                    let replay = runtime.store.load(&runtime.state.run_id).unwrap();
+                    let checkpoint: Snapshot = serde_json::from_value(
+                        crate::snapshot_view::checkpoint_projection(&replay),
+                    )
+                    .unwrap();
+                    for state in [&runtime.state, &replay, &checkpoint] {
+                        assert_eq!(state.executions.len(), cycle + 2);
+                        assert!(state
+                            .executions
+                            .iter()
+                            .all(|execution| execution.attempt == 1));
+                        assert_eq!(state.executions[cycle].status, "failed");
+                        let view = crate::snapshot_view::snapshot_metadata(state).unwrap();
+                        assert_eq!(view["executions"][cycle]["status"], "paused");
+                        assert_eq!(view["executions"][cycle + 1]["attempt"], 1);
+                        assert_eq!(view["executions"][cycle + 1]["status"], "running");
+                    }
+                    current = next.execution;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn user_pause_resume_does_not_inflate_later_retries_or_followups() {
+    let (_temp, _source, mut runtime) = setup(true, single());
+    runtime.approve().unwrap();
+    let first = runtime.jobs().unwrap().remove(0);
+    record_session(&runtime, &first.execution);
+    runtime
+        .finish(&first.execution, Err("Provider failure".into()))
+        .unwrap();
+    runtime.resume_node("task").unwrap();
+    let retry = runtime.jobs().unwrap().remove(0);
+    assert_eq!(
+        retry.execution.attempt, 2,
+        "a genuine failure retry advances the attempt"
+    );
+
+    runtime.request_execution_stop(Some("task")).unwrap();
+    runtime
+        .finish(&retry.execution, Err("stopped".into()))
+        .unwrap();
+    runtime.resume_node("task").unwrap();
+    let resumed = runtime.jobs().unwrap().remove(0);
+    assert_eq!(
+        resumed.execution.attempt, 2,
+        "a paused retry keeps its number"
+    );
+
+    runtime
+        .finish(&resumed.execution, Err("Another provider failure".into()))
+        .unwrap();
+    runtime.resume_node("task").unwrap();
+    let next_retry = runtime.jobs().unwrap().remove(0);
+    assert_eq!(
+        next_retry.execution.attempt, 3,
+        "count attempts, not dispatches"
+    );
+
+    runtime.request_execution_stop(Some("task")).unwrap();
+    runtime
+        .finish(&next_retry.execution, Err("stopped".into()))
+        .unwrap();
+    runtime.intervene("task", "Use a different approach").unwrap();
+    let followup = runtime.jobs().unwrap().remove(0);
+    assert_eq!(
+        followup.execution.attempt, 4,
+        "a new user turn is not a pause continuation"
+    );
+    assert_eq!(followup.task, "Use a different approach");
+    assert!(!followup.continuation);
+}
+
+#[test]
 fn targeted_continue_retries_only_the_selected_failure_even_with_another_writer() {
     let graph = Graph {
         original_goal: "independent failures".into(),
