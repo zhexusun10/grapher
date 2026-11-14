@@ -3,9 +3,9 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Node, ReactFlowInstance } from "@xyflow/react";
-import { computeExecutionLayers, graphEdgeId, indexFeedbackExhaustion, indexGraphInputs, useGraphElements } from "../src/hooks/useGraphElements.ts";
+import { computeExecutionLayers, graphEdgeId, graphFeedbackEnabled, indexFeedbackExhaustion, indexGraphInputs, useGraphElements } from "../src/hooks/useGraphElements.ts";
 import { runningGraphFitViewport, runningViewportForGraph } from "../src/lib/graphFit.ts";
-import { emptySnapshot, type Execution, type Graph, type Plan, type RuntimeActivity, type Snapshot } from "../src/types.ts";
+import { defaultConfig, emptySnapshot, type Execution, type Graph, type Plan, type RuntimeActivity, type Snapshot } from "../src/types.ts";
 import { t } from "../src/i18n/index.ts";
 
 const graph: Graph = {
@@ -83,7 +83,7 @@ test("node indexes match scans and preserve hint and attempt order", () => {
 });
 
 test("graph projections use endpoints and feedback without relation labels", () => {
-  const state = { ...emptySnapshot, graph: { ...graph, edges: [...graph.edges, { from: "c", to: "a", feedback: true }] } };
+  const state = { ...emptySnapshot, config: { ...defaultConfig, feedbackEnabled: true }, graph: { ...graph, edges: [...graph.edges, { from: "c", to: "a", feedback: true }] } };
   let elements: ReturnType<typeof useGraphElements> | undefined;
   function Projection() {
     elements = useGraphElements(state, "", new Set());
@@ -97,6 +97,35 @@ test("graph projections use endpoints and feedback without relation labels", () 
   assert.equal(elements!.edges[0].markerEnd, "workflow-arrow-default");
   assert.equal(elements!.edges[1].markerEnd, "workflow-arrow-default");
   assert.equal(elements!.edges[2].markerEnd, "workflow-arrow-feedback");
+});
+
+test("retained feedback routes, ports and verdict indicators survive settings changes and legacy configs", () => {
+  const state = skippedFeedbackState();
+  const stored = structuredClone(state);
+  for (const feedbackEnabled of [undefined, false, true, false]) {
+    state.config = { ...defaultConfig, feedbackEnabled };
+    const elements = projectGraph(state, "");
+    assert.equal(elements.edges.length, 3);
+    assert.equal(elements.edges[2].markerEnd, "workflow-arrow-feedback");
+    const reviewer = elements.nodes.find(node => node.id === "c")!;
+    assert.equal(reviewer.data.reviewer, true);
+    assert.ok(reviewer.data.hint?.includes("feedback"));
+    assert.ok(reviewer.data.feedbackExhaustion);
+    assert.ok(reviewer.data.hasLeftSource || reviewer.data.hasRightSource || reviewer.data.hasBottom);
+    assert.equal(graphFeedbackEnabled(state, false), true);
+  }
+  assert.deepEqual(state.graph, stored.graph);
+  assert.deepEqual(state.events, stored.events);
+});
+
+test("edge legends follow session capability and retained routes rather than future-run defaults", () => {
+  const state = { ...emptySnapshot, graph, config: { ...defaultConfig, feedbackEnabled: false } };
+  assert.equal(graphFeedbackEnabled(state, false), false);
+  assert.equal(graphFeedbackEnabled(state, true), false, "enabling the default does not rewrite older disabled sessions");
+  state.config.feedbackEnabled = true;
+  assert.equal(graphFeedbackEnabled(state, false), true, "an unaffected opted-in session retains its legend");
+  assert.equal(graphFeedbackEnabled({ ...state, config: null }, false), false);
+  assert.equal(graphFeedbackEnabled({ ...state, config: null }, true), true, "uncommitted planning uses the current default");
 });
 
 test("node attempt badges use recorded numbers rather than pause/resume execution counts", () => {
@@ -133,6 +162,7 @@ test("explicit plan batches include unscheduled nodes", () => {
 function skippedFeedbackState(): Snapshot {
   return {
     ...emptySnapshot,
+    config: { ...defaultConfig, feedbackEnabled: true },
     graph: { ...graph, edges: [...graph.edges, { from: "c", to: "a", feedback: true }] },
     nodes: { c: { status: "completed", revision: 1, head: "head", instruction: "", error: null } },
     executions: [{ node: "c", id: "review-1", status: "completed" } as Execution],

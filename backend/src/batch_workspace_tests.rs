@@ -389,6 +389,61 @@ fn driver_drains_active_workers_before_reporting_invalid_source_binding() {
 }
 
 #[test]
+fn driver_drains_unrelated_worker_before_reporting_missing_feedback_template() {
+    let (temp, _repo, service) = setup(false, false, false);
+    fs::write(temp.path().join("hold-b"), "hold").unwrap();
+    let script = temp.path().join("agent.mjs");
+    let body = fs::read_to_string(&script).unwrap()
+        .replace("const name = continuation ?", "const name = task.startsWith('Feedback:') ? 'root' : continuation ?")
+        .replace("text:'done'", "text:name==='a' ? (fs.existsSync(path.join(control,'allow-accept')) ? '<ACCEPT>' : 'fix root\\n<FEEDBACK>') : 'done'");
+    fs::write(script, body).unwrap();
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        let mut settings = runtime.state.config.clone().unwrap();
+        settings.feedback_enabled = true;
+        runtime.save_default_config(&settings).unwrap();
+        runtime.revise_graph(Graph {
+            original_goal: "feedback admission drain".into(),
+            nodes: ["root", "a", "b"].into_iter().map(|name| Node { name: name.into(), task: name.into() }).collect(),
+            edges: vec![Edge { from: "root".into(), to: "a".into(), feedback: false },
+                Edge { from: "a".into(), to: "root".into(), feedback: true }],
+        }, PlanningSummary::default()).unwrap();
+    }
+    drive(service.clone());
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let reached = loop {
+        let state = service.runtime.lock().unwrap().state.clone();
+        if state.executions.iter().any(|execution|
+            execution.node == "root" && execution.attempt == 2 && execution.status == "completed") {
+            break true;
+        }
+        if Instant::now() > deadline || !service.driving.load(Ordering::SeqCst) { break false; }
+        thread::sleep(Duration::from_millis(20));
+    };
+    // Always release the fixture before assertions, including on regression.
+    fs::write(temp.path().join("release-b"), "release").unwrap();
+    let paused = wait_for_idle(&service);
+    assert!(reached, "repair did not reach admission: {:?}", paused.nodes);
+    assert!(paused.paused);
+    let unrelated = paused.executions.iter().find(|execution| execution.node == "b").unwrap();
+    assert_eq!(unrelated.status, "completed", "driver must retain completion despite the missing template");
+    assert!(unrelated.output_bytes > 0);
+    assert_eq!(paused.nodes["a"].status, "dirty");
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        fs::create_dir_all(runtime.root.join("prompts")).unwrap();
+        fs::write(runtime.root.join("prompts/feedback-returned.md"), "{{node}}").unwrap();
+        fs::write(temp.path().join("allow-accept"), "accept").unwrap();
+        runtime.pause(false).unwrap();
+    }
+    drive(service.clone());
+    let completed = wait_for_idle(&service);
+    assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
+    assert_eq!(completed.executions.len(), 5);
+    assert_eq!(completed.executions.iter().filter(|execution| execution.node == "b").count(), 1);
+}
+
+#[test]
 fn driver_resumes_paused_private_node_without_recovery_publication() {
     assert_driver_resumes_private_node(true, false);
 }

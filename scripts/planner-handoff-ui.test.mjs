@@ -491,7 +491,13 @@ test("Planner shows generated tools immediately and moves a queued steer only wh
       case "snapshot_if_changed": result = { version: String(snapshot.events.length), snapshot }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": case "list_files": case "list_skills": result = command === "list_plannings" ? [] : command === "list_files" ? { files: [] } : { skills: [] }; break;
-      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null }; break;
+      case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }],
+        models: [{ provider: "test", id: "model", name: "Model", available: true, thinkingLevels: ["medium", "high"] }], warning: null }; break;
+      case "composer_models":
+        snapshot = { ...snapshot, modelConfig: { ...config, roleModels: { planner: body.settings } } };
+        result = snapshot; break;
+      case "composer_command":
+        result = body.operation === "withdraw" ? { snapshot, messages: [] } : { instance: "live", commands: [] }; break;
       case "get_planning_output": {
         const text = assistant("OLD ANSWER"), from = body.offset ?? 0;
         result = { planningId: body.planningId, role: "planner", content: text.slice(from), startOffset: from,
@@ -538,6 +544,19 @@ test("Planner shows generated tools immediately and moves a queued steer only wh
     assert.equal(await page.locator(".chat-bubble-user", { hasText: "STEER WHILE TOOL RUNS" }).count(), 1);
     assert.equal(await page.locator(".planner-steer-list").count(), 0);
     assert.equal(await page.getByText(/grapher-steer-id/).count(), 0);
+    // Durable command replies still carry the previous committed graph. They
+    // must not erase nodes previewed by the ongoing Planner SSE stream.
+    emit({ type: "tool_execution_end", toolCallId: "preview-node", toolName: "node",
+      args: { nodes: [{ id: "preview", task: "Live draft task" }] }, result: { content: [] } });
+    const preview = page.locator('.graph-canvas .react-flow__node[data-id="preview"]');
+    await preview.waitFor();
+    await input.fill("/thinking high"); await input.press("Escape"); await input.press("Enter");
+    await page.locator('.prompt-command-popover[role="status"]').waitFor();
+    assert.equal(snapshot.modelConfig.roleModels.planner.thinkingLevel, "high");
+    assert.equal(await preview.count(), 1, "model selection preserves the uncommitted graph");
+    await input.press("Alt+q");
+    await page.waitForFunction(() => !document.querySelector(".pane-bottom-chat textarea").disabled);
+    assert.equal(await preview.count(), 1, "queue withdrawal preserves the uncommitted graph");
     assert.deepEqual(errors, []);
   } finally { stream?.destroy(); onPlanStream = undefined; await context.close(); }
 });

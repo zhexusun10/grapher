@@ -40,6 +40,7 @@ let task = ''; for await (const chunk of process.stdin) task += chunk;
 const emit = event => console.log(JSON.stringify(event));
 const say = text => emit({type:'message_end',message:{role:'assistant',content:[{type:'text',text}]}});
 if (process.env.GRAPHER_MODE === 'planner') {
+  fs.appendFileSync(new URL('./feedback-enabled.jsonl', import.meta.url), JSON.stringify(process.env.GRAPHER_FEEDBACK_ENABLED)+'\n');
   fs.appendFileSync(new URL('./planner-tasks.jsonl', import.meta.url), JSON.stringify(task)+'\n');
   if (task.endsWith('\nFollow up')) { say('Follow-up reply'); process.exit(0); }
   if (!fs.existsSync('first.txt')) throw Error('review ran before publication');
@@ -100,6 +101,28 @@ if (process.env.GRAPHER_MODE === 'planner') {
         extension: temp.path().join("unused.ts"),
     });
     (temp, repo, service)
+}
+
+#[test]
+fn planner_review_binds_latest_feedback_setting_instead_of_stale_run_config() {
+    for enabled in [true, false] {
+        let (temp, repo, service) = setup(true, true);
+        {
+            let mut runtime = service.runtime.lock().unwrap();
+            runtime.state.config.as_mut().unwrap().feedback_enabled = !enabled;
+            let mut saved = runtime.state.config.clone().unwrap();
+            saved.feedback_enabled = enabled;
+            runtime.save_default_config(&saved).unwrap();
+        }
+        fs::write(repo.join("release-review"), "go").unwrap();
+        drive(service.clone());
+        wait(&service, |state| state.phase == "completed" && state.nodes.len() == 2
+            && state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerReviewFinished { .. })).count() == 2);
+        wait_for_driver_exit(&service);
+        let bindings: Vec<String> = fs::read_to_string(temp.path().join("feedback-enabled.jsonl"))
+            .unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(bindings, vec![enabled.to_string(); 2]);
+    }
 }
 
 #[test]

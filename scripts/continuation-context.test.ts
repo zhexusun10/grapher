@@ -56,6 +56,27 @@ test('Planner continuation handles the private marker without adding a user prom
   }
 });
 
+test('feedback delivery identity stays in history but not model context after image normalization', () => {
+  const id = '12345678-1234-4234-8234-123456789abc';
+  const envelope = `\n\n<grapher-feedback-id>${id}</grapher-feedback-id>`;
+  const hint = '\n\n[Image: original 3000x2000, displayed at 2000x1333. Multiply coordinates by 1.50 to map to original image.]';
+  const image = { type: 'image', data: 'normalized-image', mimeType: 'image/png' };
+  const text = `review screenshot${envelope}${hint}`;
+  const stored = [
+    { role: 'user', content: [{ type: 'text', text }, image] },
+    { role: 'user', content: `another turn${envelope}` },
+    { role: 'assistant', stopReason: 'stop', content: text },
+    { role: 'user', content: 'literal\n\n<grapher-feedback-id>not-a-uuid</grapher-feedback-id>' },
+  ];
+  const expected = [
+    { role: 'user', content: [{ type: 'text', text: `review screenshot${hint}` }, image] },
+    { role: 'user', content: 'another turn' },
+    stored[2], stored[3],
+  ];
+  for (const continuation of [false, true]) assert.deepEqual(project(stored, continuation), expected);
+  assert.equal(stored[0].content[0].text, text, 'durable history is never mutated');
+});
+
 test('continuing after a completed model turn preserves the full tool exchange', () => {
   assert.deepEqual(project([user, toolCall, toolResult, final, marker]), [user, toolCall, toolResult, final]);
   assert.deepEqual(project([user, final, marker]), [user, final], 'the private marker is never sent to the provider');

@@ -12,7 +12,7 @@ import { VirtualizedTranscript } from "../src/components/VirtualizedTranscript.t
 import { PlannerTranscript } from "../src/components/PlannerTranscript.tsx";
 import { TranscriptErrorCard } from "../src/components/TranscriptErrorCard.tsx";
 import { closeThinkingItems, finalizeThinkingItems, splitThinkingTagDelta, updateThinkingItems } from "../src/services/thinkingTranscript.ts";
-import { appendPlannerError, applyPartitionerDelta, applyPlannerTextDelta, initialPlannerStream } from "../src/services/plannerStream.ts";
+import { appendPlannerError, applyPartitionerDelta, applyPlannerTextDelta, applyPlannerExtensionError, initialPlannerStream } from "../src/services/plannerStream.ts";
 import { setAutoExpandCot, readAutoExpandCot, autoExpandCotEnabled, AUTO_EXPAND_COT_KEY } from "../src/services/displayPreferences.ts";
 import type { TranscriptItem } from "../src/types.ts";
 import { t } from "../src/i18n/index.ts";
@@ -37,6 +37,30 @@ const withFoldedCot = <T,>(run: () => T): T => {
   setAutoExpandCot(false);
   try { return run(); } finally { setAutoExpandCot(true); }
 };
+
+test("extension diagnostics remain visible in live Planner and replay without exposing dialog inputs", () => {
+  const error = { type: "extension_error", extensionPath: "example-extension", event: "before_agent_start", error: "HOOK_FAILURE_MARKER" };
+  const html = render([
+    error,
+    { type: "extension_ui_request", method: "input", id: "secret", prefill: "PRIVATE_DIALOG_VALUE" },
+    { type: "extension_ui_response", id: "secret", value: "PRIVATE_DIALOG_VALUE" },
+    start(), end([{ type: "text", text: "TASK_COMPLETED_MARKER" }]),
+  ]);
+  assert.match(html, /HOOK_FAILURE_MARKER/);
+  assert.match(html, /example-extension/);
+  assert.match(html, /before_agent_start/);
+  assert.match(html, /TASK_COMPLETED_MARKER/);
+  assert.doesNotMatch(html, /PRIVATE_DIALOG_VALUE/);
+  const live = applyPlannerExtensionError({ ...initialPlannerStream, stage: "planning" }, error);
+  assert.equal(live.stage, "planning", "hook diagnostics must not manufacture a failed turn");
+  assert.equal(live.items.length, 1);
+  assert.equal(live.items[0].isError, true);
+  assert.match(live.items[0].content, /HOOK_FAILURE_MARKER/);
+  const liveHtml = renderToStaticMarkup(createElement(PlannerTranscript, {
+    items: live.items, isPlanning: true, locked: false, draft: "", onDraftChange() {}, onSendMessage: () => {}, onUserResize() {},
+  }));
+  assert.match(liveHtml, /HOOK_FAILURE_MARKER/);
+});
 
 test("tool and reasoning cards never render native browser hover tooltips", () => {
   const tool = renderToStaticMarkup(createElement(ToolCallCard, { item: {

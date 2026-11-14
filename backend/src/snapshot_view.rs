@@ -91,6 +91,11 @@ fn metadata_event(event: &Event) -> Value {
     ] {
         object.remove(key);
     }
+    // Recall receipts are fetched only by their originating request. Repeating
+    // their image payloads in every browser poll would duplicate durable input.
+    if matches!(&event.kind, EventKind::QueueWithdrawalRecorded { .. }) {
+        object.remove("messages");
+    }
     if let Some(execution) = object.get_mut("execution").and_then(Value::as_object_mut) {
         execution.retain(|key, _| matches!(key.as_str(), "id" | "node"));
     }
@@ -104,7 +109,7 @@ pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
         "privateBatch": state.private_batch,
         "isolatedWorkspaces": state.isolated_workspaces,
         "batchHandoff": state.batch_handoff,
-        "runId": state.run_id, "planType": state.plan_type,
+        "runId": state.run_id, "title": state.title, "planType": state.plan_type,
         "planningId": state.planning_id, "planning": state.planning,
         "graph": state.graph, "config": state.config, "modelConfig": state.model_config,
         "plan": state.plan, "nodes": state.nodes,
@@ -148,7 +153,7 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         "privateBatch": state.private_batch,
         "isolatedWorkspaces": state.isolated_workspaces,
         "batchHandoff": state.batch_handoff,
-        "runId": state.run_id, "planningId": state.planning_id, "planning": state.planning,
+        "runId": state.run_id, "title": state.title, "planningId": state.planning_id, "planning": state.planning,
         "graph": state.graph, "config": state.config, "modelConfig": state.model_config,
         "plan": state.plan, "nodes": state.nodes,
         "executions": state.executions.iter().map(execution_metadata).collect::<Vec<_>>(),

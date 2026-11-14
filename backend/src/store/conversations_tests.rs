@@ -56,7 +56,13 @@ impl Fixture {
             .unwrap();
         let loaded = self.store.load(&state.run_id).unwrap();
         assert_eq!(summary.phase, loaded.phase);
-        assert_eq!(summary.title, loaded.graph.original_goal);
+        let expected_title = loaded
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(&loaded.graph.original_goal);
+        assert_eq!(summary.title, expected_title);
         assert_eq!(summary.repository, loaded.config.unwrap().repository);
         let active = loaded
             .executions
@@ -342,4 +348,24 @@ fn sidebar_isolates_corrupt_runs_and_recovers_after_the_bad_row_is_removed() {
             .unavailable_run_ids,
         ["damaged"]
     );
+}
+
+#[test]
+fn sidebar_summary_reflects_conversation_rename_without_changing_original_goal() {
+    let fixture = Fixture::new();
+    let mut state = fixture.create("renamed-run", "/repo", "Original prompt");
+    fixture.check(&state);
+    fixture
+        .store
+        .append(
+            &mut state,
+            EventKind::ConversationRenamed {
+                title: "Sidebar Custom Title".into(),
+            },
+        )
+        .unwrap();
+    fixture.check(&state);
+    let loaded = fixture.store.load("renamed-run").unwrap();
+    assert_eq!(loaded.graph.original_goal, "Original prompt");
+    assert_eq!(loaded.title.as_deref(), Some("Sidebar Custom Title"));
 }

@@ -1,5 +1,6 @@
 import type { ImageAttachment, TranscriptItem } from "../types";
 import { utf8Bytes } from "../lib/BoundedLruCache";
+import { extensionErrorText } from "./extensionErrors";
 import { plannerContentSteerId, plannerContentText, stripPlannerContext } from "./plannerText";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./thinkingTranscript";
 import { toolOutputPreview, truncateToolArgs } from "./toolOutput";
@@ -276,6 +277,12 @@ export function parseTranscriptChunkLines(
           id: steerId ? `msg-${steerId}` : messageId ? `user_${messageId}` : rowId("user"),
           type: "text", role: "user", content: display, userTurnOffset: lineOffset, images: imageContent(content), timestamp: Date.now(),
         });
+        continue;
+      }
+
+      if (event.type === "extension_error") {
+        currentItems.push({ id: rowId("extension_error"), type: "system", role: "assistant",
+          content: extensionErrorText(event), isError: true, timestamp: Date.now() });
         continue;
       }
 

@@ -13,7 +13,7 @@ function stripDiagnosticCode(message: string): string {
   return message.replace(/^(?:\[?[A-Za-z]{1,5}[-_]?\d+\]?[:\-]?\s*)/, "");
 }
 
-function topology(graph: Graph) {
+function topology(graph: Graph, feedbackEnabled: boolean) {
   // Keep ordinary edges in the edge tool's from -> to direction, including
   // every node so an empty list explicitly means no outgoing ordinary edges.
   // Map is safe for arbitrary node names, including __proto__ and constructor.
@@ -21,6 +21,7 @@ function topology(graph: Graph) {
   const feedbackTo = new Map<string, string>();
   const unrepresentedEdges: Graph["edges"] = [];
   for (const edge of graph.edges) {
+    if (edge.feedback && !feedbackEnabled) continue;
     // Valid graphs always have known endpoints and at most one feedback target
     // per source. Preserve anomalous saved/legacy edges rather than hiding them
     // if a rejected edit has to report an invalid pre-existing candidate.
@@ -35,9 +36,25 @@ function topology(graph: Graph) {
   }
   return {
     "from: [to]": Object.fromEntries(ordinaryTo),
-    feedbackTo: Object.fromEntries(feedbackTo),
-    ...(unrepresentedEdges.length ? { unrepresentedEdges } : {}),
+    ...(feedbackEnabled ? { feedbackTo: Object.fromEntries(feedbackTo) } : {}),
+    ...(unrepresentedEdges.length ? { unrepresentedEdges: feedbackEnabled ? unrepresentedEdges
+      : unrepresentedEdges.map(({ from, to }) => ({ from, to })) } : {}),
   };
+}
+
+// Disabled tools still validate the complete saved graph. Preserve the error
+// (and its internal code), but do not reintroduce an unavailable protocol in a
+// repair instruction. Existing routes must never be silently dropped to pass.
+function diagnosticText(diagnostic: Diagnostic, feedbackEnabled: boolean): string {
+  if (!feedbackEnabled && diagnostic.code === "E207") {
+    return "This edit removes a dependency path required by a retained graph constraint. Add replacement dependency paths before removing existing ones, or ask the user to review the graph in the Graph IR editor. The graph is unchanged.";
+  }
+  if (!feedbackEnabled && diagnostic.code === "E208") {
+    return "The saved graph contains incompatible retained routes. Ask the user to repair the graph in the Graph IR editor before continuing. The graph is unchanged.";
+  }
+  return stripDiagnosticCode(diagnostic.message)
+    .replace(/^Node names\b/, "Node ids")
+    .replace(/^Node name\b/, "Node id");
 }
 
 function duplicateTargets(field: "nodes" | "edges", targets: string[]): Diagnostic[] {
@@ -220,7 +237,7 @@ function editArguments(
   if (normalized[key].length === 0) {
     throw new Error(`Invalid ${label} call: ${key} must contain at least one edit. Expected ${example}.`);
   }
-  const booleanFields = key === "nodes" ? ["delete"] : ["feedback", "delete"];
+  const booleanFields = fields.filter(field => field === "feedback" || field === "delete");
   const edits = normalized[key].map(edit => normalizeEdit(key === "nodes" ? nodeIdAlias(edit) : edit, label, required, fields, booleanFields, example));
   return { [key]: edits };
 }
@@ -329,6 +346,7 @@ function pruneRedundantEdges(graph: Graph): { from: string; to: string; path: st
 
 export default function grapherPlanner(pi: ExtensionAPI) {
   const graphPath = process.env.GRAPHER_GRAPH_PATH!;
+  const feedbackEnabled = process.env.GRAPHER_FEEDBACK_ENABLED === "true";
   // Runtime-owned constraint: node names this run may not remove because their
   // results are already published. Graph structure cannot express it, so the
   // server passes it beside the graph and the edit is rejected where the
@@ -431,10 +449,8 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     const graph: Graph = structuredClone(saved);
     const rejected = (diagnostics: Diagnostic[]) => result(JSON.stringify({
       applied: false,
-      topology: topology(saved),
-      diagnostics: diagnostics.map(diagnostic => stripDiagnosticCode(diagnostic.message)
-        .replace(/^Node names\b/, "Node ids")
-        .replace(/^Node name\b/, "Node id")),
+      topology: topology(saved, feedbackEnabled),
+      diagnostics: diagnostics.map(diagnostic => diagnosticText(diagnostic, feedbackEnabled)),
     }), diagnostics.map(diagnostic => diagnostic.code));
     const editNotes: string[] = [];
     const inputErrors = change(graph, editNotes);
@@ -448,26 +464,12 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     if (output.diagnostics?.length) return rejected(output.diagnostics);
     if (!output.plan) return rejected([{ code: "compiler-response", message: "Compiler returned no plan." }]);
     writeFileSync(graphPath, JSON.stringify(graph));
-    // The compiler emits one W303 per feedback edge, in graph order. Pair by
-    // position rather than parsing messages: node ids may contain arbitrary text.
-    // Surface newly added feedback-scope descriptions in `notes` while keeping
-    // advisory warnings (W301/W302/W304) in `warnings`.
-    const savedFeedback = new Set(saved.edges.filter(edge => edge.feedback)
-      .map(edge => JSON.stringify([edge.from, edge.to])));
-    const addedFeedback = graph.edges.filter(edge => edge.feedback)
-      .map(edge => !savedFeedback.has(JSON.stringify([edge.from, edge.to])));
-    let feedbackIndex = 0;
-    const warnings: string[] = [];
-    const scopeNotes: string[] = [];
-    for (const rawWarning of (output.plan.warnings ?? []) as string[]) {
-      if (rawWarning.startsWith("W303:")) {
-        if (kind === "edge" && addedFeedback[feedbackIndex++]) {
-          scopeNotes.push(stripDiagnosticCode(rawWarning));
-        }
-      } else {
-        warnings.push(stripDiagnosticCode(rawWarning));
-      }
-    }
+    // Omit conditional feedback rerun-scope descriptions from both tools.
+    // Keep actionable warnings, including actual graph-revision impact (W304).
+    const warnings = ((output.plan.warnings ?? []) as string[])
+      .filter(warning => !warning.startsWith("W303:")
+        && (feedbackEnabled || !warning.startsWith("W302:")))
+      .map(stripDiagnosticCode);
     // The first node batch has no edges yet, so its compiler roots merely repeat
     // every node and can be mistaken for the intended final roots. Later edits
     // expose the compiler's sorted list as rootNodes to make extra roots visible.
@@ -476,10 +478,10 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     const pruneNotes = pruned.length > 0
       ? [`Auto-removed redundant direct ${pruned.length === 1 ? "edge" : "edges"} implied by indirect paths (saved, no retry needed): ${pruned.map(item => `${item.from} → ${item.to} (via ${item.path.join(" → ")})`).join("; ")}.`]
       : [];
-    const notes = [...editNotes, ...pruneNotes, ...scopeNotes];
+    const notes = [...editNotes, ...pruneNotes];
     return result(JSON.stringify({
       applied: true,
-      topology: { ...(initialNodeBatch ? {} : { rootNodes: output.plan.rootNodes ?? output.plan.roots }), ...topology(graph) },
+      topology: { ...(initialNodeBatch ? {} : { rootNodes: output.plan.rootNodes ?? output.plan.roots }), ...topology(graph, feedbackEnabled) },
       ...(warnings.length ? { warnings } : {}),
       ...(notes.length ? { notes } : {}),
     }));
@@ -513,7 +515,7 @@ export default function grapherPlanner(pi: ExtensionAPI) {
         const duplicates = duplicateTargets("nodes", parameters.nodes.map(edit => edit.id));
         if (duplicates.length) return duplicates;
         for (const edit of parameters.nodes) {
-          const removedEdges = applyNode(graph, edit);
+          const removedEdges = applyNode(graph, edit).filter(edge => feedbackEnabled || !edge.feedback);
           if (removedEdges.length > 0) {
             editNotes.push(
               `Deleted node ${edit.id} also removed its incident ${removedEdges.length === 1 ? "edge" : "edges"}: ${removedEdges.map(edge => `${edge.from} → ${edge.to}${edge.feedback ? " (feedback)" : ""}`).join(", ")}.`,
@@ -527,16 +529,17 @@ export default function grapherPlanner(pi: ExtensionAPI) {
     name: "edge", label: "Graph edge",
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     description:
-      "Create, replace, or delete directed edges between existing nodes. Only one edge per ordered pair. By default, the `to` node depends on the `from` node and waits for it to complete. Multiple dependencies' workspace states are merged before the `to` node runs. With feedback: true, the `from` node can optionally send a feedback message to the `to` node, which must be an ancestor of the `from` node. Each feedback source has at most one target. When feedback is sent, the target receives the source's completed workspace state and feedback, and continues from its own context to improve its previous work. The target's descendants wait and run again using updated workspace state.",
+      "Create, replace, or delete directed edges between existing nodes. Only one edge per ordered pair. By default, the `to` node depends on the `from` node and waits for it to complete. Multiple dependencies' workspace states are merged before the `to` node runs."
+      + (feedbackEnabled ? " With feedback: true, the `from` node can optionally send a feedback message to the `to` node, which must be an ancestor of the `from` node. Each feedback source has at most one target. When feedback is sent, the target receives the source's completed workspace state and feedback, and continues from its own context to improve its previous work. The source and other previously run descendants retain their own context and recheck their tasks using updated workspace state after their dependencies complete." : ""),
     parameters: Type.Object({
       edges: Type.Array(Type.Object({
         from: Type.String({ description: "Source node id" }),
         to: Type.String({ description: "Target node id (differ from source)" }),
-        feedback: Type.Optional(Type.Boolean({ description: "True for a feedback edge (default: false)" })),
+        ...(feedbackEnabled ? { feedback: Type.Optional(Type.Boolean({ description: "True for a feedback edge (default: false)" })) } : {}),
         delete: Type.Optional(Type.Boolean({ description: "Delete the edge (default: false)" })),
       }, { additionalProperties: false }), { minItems: 1, description: "One or more edge edits, applied in order" }),
     }, { additionalProperties: false }),
-    prepareArguments: raw => prepareWithContext(() => editArguments(raw, "edges", ["from", "to"], ["from", "to", "feedback", "delete"], '{"edges":[{"from":"...","to":"..."}]}')),
+    prepareArguments: raw => prepareWithContext(() => editArguments(raw, "edges", ["from", "to"], feedbackEnabled ? ["from", "to", "feedback", "delete"] : ["from", "to", "delete"], '{"edges":[{"from":"...","to":"..."}]}')),
     async execute(id, parameters, signal) {
       return mutate(id, signal, "edge", (graph, editNotes) => {
         const duplicates = duplicateTargets("edges", parameters.edges.map(edit => JSON.stringify([edit.from, edit.to])));

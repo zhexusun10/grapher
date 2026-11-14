@@ -99,6 +99,24 @@ test("the sidebar always opens expanded, even with a stale collapsed preference"
   } finally { await context.close(); }
 });
 
+test("dragging across the sidebar does not select its text", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await openApp(async () => false);
+  try {
+    const project = page.getByRole("button", { name: "Sidebar /mock/sidebar", exact: true });
+    const run = page.locator('.run-item[data-run-id="a"]');
+    assert.equal(await project.evaluate(element => getComputedStyle(element).userSelect), "none");
+    assert.equal(await run.evaluate(element => getComputedStyle(element).userSelect), "none");
+    const start = await project.boundingBox();
+    const end = await run.boundingBox();
+    await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 10 });
+    await page.mouse.up();
+    assert.equal(await page.evaluate(() => window.getSelection().toString()), "");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("sidebar cards and menus support keyboard navigation without opening conversations", { timeout: 30_000 }, async () => {
   const { context, page, calls, errors } = await openApp(async () => false);
   try {
@@ -415,4 +433,88 @@ test("a provisional conversation keeps its prompt when the durable ID arrives", 
     assert.equal(calls.filter(call => call.command === "history").length, 0);
     assert.deepEqual(errors, []);
   } finally { releasePlanning(); await context.close(); }
+});
+
+test("/name renames sidebar conversation cards in main Graph and Serial dialogs, not node agent dialogs", { timeout: 30_000 }, async () => {
+  const renamed = new Map();
+  const buildSnapshot = (runId, goal) => ({
+    ...empty,
+    runId,
+    title: renamed.get(runId) ?? null,
+    config,
+    approved: true,
+    phase: "completed",
+    planType: runId === "a" ? "graph" : "serial",
+    graph: {
+      originalGoal: goal,
+      nodes: [{ name: runId === "a" ? "worker" : "task", task: "Do work" }],
+      edges: [],
+    },
+    plan: { executionBatches: [[runId === "a" ? "worker" : "task"]], rootNodes: [runId === "a" ? "worker" : "task"], terminals: [runId === "a" ? "worker" : "task"], warnings: [] },
+    nodes: { [runId === "a" ? "worker" : "task"]: { status: "completed", revision: 1, head: "h1", instruction: "", error: null } },
+  });
+  const { context, page, calls, errors } = await openApp(async (route, command, body) => {
+    if (command === "load_run" || command === "history" || (command === "snapshot" && body.runId)) {
+      await route.fulfill({ json: { result: buildSnapshot(body.runId, `Prompt ${body.runId}`) } });
+      return true;
+    }
+    if (command === "composer_rename") {
+      renamed.set(body.runId, body.title);
+      await route.fulfill({ json: { result: buildSnapshot(body.runId, `Prompt ${body.runId}`) } });
+      return true;
+    }
+    if (command === "composer_command") {
+      await route.fulfill({ json: { result: { instance: "i", commands: [] } } });
+      return true;
+    }
+    if (command === "get_planning_output" || command === "get_execution_output") {
+      await route.fulfill({ json: { result: { content: "", startOffset: 0, nextOffset: 0, totalBytes: 0, complete: true, running: false } } });
+      return true;
+    }
+    if (command === "get_file_changes") {
+      await route.fulfill({ json: { result: { summary: { files: [], totalFiles: 0, addedCount: 0, modifiedCount: 0, deletedCount: 0, renamedCount: 0, totalAdditions: 0, totalDeletions: 0 } } } });
+      return true;
+    }
+    return false;
+  });
+  try {
+    // 1. Open Graph conversation "a" and rename it from the main Planner box.
+    await page.locator('.run-item[data-run-id="a"]').click();
+    await page.locator('.graph-canvas .react-flow__node[data-id="worker"]').waitFor();
+    const mainInput = page.locator('.conversation-pane textarea').first();
+    await mainInput.fill("/name Renamed Graph Card");
+    await mainInput.press("Escape");
+    await mainInput.press("Enter");
+    await page.locator('.prompt-command-popover[role="status"]').filter({ hasText: "Renamed conversation: Renamed Graph Card" }).waitFor();
+    assert.equal(await page.locator('.run-item[data-run-id="a"] .run-title-text').innerText(), "Renamed Graph Card");
+    // Copy prompt must still copy the original goal, never the custom sidebar title.
+    await copyPrompt(page, "a");
+    await page.waitForFunction(() => window.copiedTexts.length === 1);
+    assert.deepEqual(await page.evaluate(() => window.copiedTexts), ["Prompt a"]);
+
+    // 2. Select Graph node "worker": its Node Agent dialog hides and forbids /name.
+    await page.locator('.graph-canvas .react-flow__node[data-id="worker"]').click();
+    const nodeInput = page.locator('.conversation-pane textarea').first();
+    await nodeInput.fill("/");
+    await page.locator(".prompt-box-suggestions-popover").waitFor();
+    assert.ok(!(await page.locator(".prompt-box-suggestions-list").innerText()).includes("/name"));
+    await nodeInput.press("Escape");
+    await nodeInput.fill("/name Forbidden");
+    await nodeInput.press("Escape");
+    await nodeInput.press("Enter");
+    await page.locator('.prompt-command-popover[role="alert"]').filter({ hasText: "Node agent dialogs cannot use /name" }).waitFor();
+    assert.equal(calls.filter(call => call.command === "composer_rename").length, 1);
+    assert.equal(await page.locator('.run-item[data-run-id="a"] .run-title-text').innerText(), "Renamed Graph Card");
+
+    // 3. Open Serial conversation "b" and rename it from the Serial main dialog.
+    await page.locator('.run-item[data-run-id="b"]').click();
+    const serialInput = page.locator('.conversation-pane textarea').first();
+    await serialInput.fill("/name Renamed Serial Card");
+    await serialInput.press("Escape");
+    await serialInput.press("Enter");
+    await page.locator('.prompt-command-popover[role="status"]').filter({ hasText: "Renamed conversation: Renamed Serial Card" }).waitFor();
+    assert.equal(await page.locator('.run-item[data-run-id="b"] .run-title-text').innerText(), "Renamed Serial Card");
+    assert.equal(calls.filter(call => call.command === "composer_rename").length, 2);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
 });

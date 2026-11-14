@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -684,6 +685,89 @@ export default function (pi) {
       assert.equal(state.tools.includes('web_search'), enabled, 'prepared runtime loads the bundled web search tool');
     }
   } finally { f.close(); }
+});
+
+test('production RPC handles MCP status and extension dialogs without model calls', { timeout: 45000 }, async () => {
+  const f = fixture();
+  let child: ReturnType<typeof spawn> | undefined;
+  let lines: ReturnType<typeof createInterface> | undefined;
+  const pending = new Map<string, { resolve: (event: any) => void; reject: (error: Error) => void }>();
+  try {
+    writeFileSync(join(f.global, 'mcp.json'), JSON.stringify({ mcpServers: { demo: { command: 'must-not-run', enabled: false } } }));
+    writeFileSync(f.extension, `export default function (pi) {
+      pi.registerCommand('probe-dialog', { description:'Probe', handler: async (_args, ctx) => {
+        const choice = await ctx.ui.select('Pick', ['yes', 'no']);
+        const value = await ctx.ui.input('Value');
+        const confirmed = await ctx.ui.confirm('Confirm', value);
+        const edited = await ctx.ui.editor('Edit', value);
+        ctx.ui.notify(JSON.stringify({ choice, value, confirmed, edited }), 'info');
+      }});
+      pi.registerCommand('probe-custom', { description:'Custom', handler: async (_args, ctx) => {
+        await ctx.ui.custom(() => { throw new Error('Terminal factory must not execute'); });
+      }});
+    }`);
+    child = spawn(process.execPath, [join(root, 'engine/entrypoint.mjs'), '--mode', 'rpc', '--no-session', '--no-context-files'], {
+      cwd: f.workspace, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PI_CODING_AGENT_DIR: f.own, GRAPHER_GLOBAL_PI_AGENT_DIR: f.global,
+        GRAPHER_MODE: 'node', GRAPHER_EXECUTION_KIND: 'source', GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1' },
+    });
+    let stderr = '';
+    child.stderr!.on('data', data => { stderr = (stderr + data).slice(-4000); });
+    child.on('error', error => { for (const request of pending.values()) request.reject(error); });
+    const closed = new Promise<void>(resolve => child!.once('close', () => {
+      for (const request of pending.values()) request.reject(new Error(`Pi closed: ${stderr}`));
+      resolve();
+    }));
+    const events: any[] = [];
+    lines = createInterface({ input: child.stdout! });
+    lines.on('line', line => {
+      let event: any;
+      try { event = JSON.parse(line); } catch { return; }
+      events.push(event);
+      if (event.type === 'response') pending.get(event.id)?.resolve(event);
+      if (event.type === 'extension_ui_request' && ['select', 'input', 'confirm', 'editor'].includes(event.method)) {
+        child!.stdin!.write(JSON.stringify({ type:'extension_ui_response', id:event.id,
+          ...(event.method === 'confirm' ? { confirmed:true } : { value:event.method === 'select' ? 'yes' : 'value' }) }) + '\n');
+      }
+    });
+    let sequence = 0;
+    const request = async (command: Record<string, unknown>) => {
+      const id = `probe-${++sequence}`;
+      let timer: ReturnType<typeof setTimeout>;
+      try {
+        const response: any = await new Promise((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(`RPC timeout: ${stderr}`)), 15000);
+          pending.set(id, { resolve, reject });
+          child!.stdin!.write(JSON.stringify({ ...command, id }) + '\n');
+        });
+        assert.equal(response.success, true, JSON.stringify(response));
+        return response.data;
+      } finally { clearTimeout(timer!); pending.delete(id); }
+    };
+    const catalog = await request({ type:'get_commands' });
+    assert.ok(catalog.commands.some((command: any) => command.name === 'mcp'));
+    assert.ok(catalog.commands.some((command: any) => command.name === 'probe-dialog'));
+    assert.ok(catalog.commands.some((command: any) => command.name === 'compact' && command.source === 'extension'));
+    const compact = await request({ type:'prompt', message:'/compact keep tests' });
+    assert.equal(compact.disposition, 'handled');
+    assert.ok(events.some(event => event.type === 'extension_error' && event.extensionPath === 'command:compact'),
+      'an empty-session compaction error must propagate through the SDK callback, not become a model prompt');
+    await request({ type:'prompt', message:'/mcp' });
+    assert.ok(events.some(event => event.method === 'notify' && /demo.*disabled/i.test(event.message)));
+    await request({ type:'prompt', message:'/probe-dialog' });
+    assert.ok(events.some(event => event.method === 'notify' && event.message === JSON.stringify({ choice:'yes', value:'value', confirmed:true, edited:'value' })));
+    await request({ type:'prompt', message:'/probe-custom' });
+    assert.ok(events.some(event => event.method === 'notify' && /terminal-only custom UI/.test(event.message)));
+    assert.ok(!events.some(event => event.type === 'agent_start'), 'commands do not invoke a model');
+    child.stdin!.end();
+    await closed;
+  } finally {
+    lines?.close();
+    if (child && child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>(resolve => { child!.once('close', () => resolve()); child!.kill(); });
+    }
+    f.close();
+  }
 });
 
 test('production launcher loads selected extensions/tools/skills for Planner and Node only', { timeout: 90000 }, async () => {

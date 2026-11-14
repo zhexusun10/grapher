@@ -47,59 +47,61 @@ export const LandingView: React.FC<LandingViewProps> = React.memo(({
       transition={{ duration: 0 }}
     >
       <div className="landing-center-content">
-        <div className="landing-title-container">
-          {background === "dots" && (
-            <div className="landing-title-dot-pattern" aria-hidden="true">
-              {/* Wide spacing keeps the dots as a quiet texture rather than a grid. */}
-              <DotPattern width={24} height={24} cr={1} />
-            </div>
-          )}
-          <motion.div
-            className="landing-title-copy"
-            initial={false}
-            animate={{
-              opacity: isComposerExpanded ? 0 : 1,
-              y: reduceMotion || !isComposerExpanded ? 0 : -14,
-              visibility: isComposerExpanded ? "hidden" : "visible",
-            }}
-            transition={{
-              opacity: { duration: reduceMotion ? 0 : TITLE_EXIT_DURATION },
-              y: { duration: reduceMotion ? 0 : TITLE_EXIT_DURATION },
-              visibility: { duration: 0, delay: !reduceMotion && isComposerExpanded ? TITLE_EXIT_DURATION : 0 },
-            }}
-            exit={{
-              opacity: 0,
-              y: reduceMotion ? 0 : -14,
-              transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] },
-            }}
-          >
-            <motion.p
-              className="landing-title"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: reduceMotion ? 0 : 0.25 }}
+        <div className="landing-title-space">
+          <div className="landing-title-container">
+            {background === "dots" && (
+              <div className="landing-title-dot-pattern" aria-hidden="true">
+                {/* Wide spacing keeps the dots as a quiet texture rather than a grid. */}
+                <DotPattern width={24} height={24} cr={1} />
+              </div>
+            )}
+            <motion.div
+              className="landing-title-copy"
+              initial={false}
+              animate={{
+                opacity: isComposerExpanded ? 0 : 1,
+                y: reduceMotion || !isComposerExpanded ? 0 : -14,
+                visibility: isComposerExpanded ? "hidden" : "visible",
+              }}
+              transition={{
+                opacity: { duration: reduceMotion ? 0 : TITLE_EXIT_DURATION },
+                y: { duration: reduceMotion ? 0 : TITLE_EXIT_DURATION },
+                visibility: { duration: 0, delay: !reduceMotion && isComposerExpanded ? TITLE_EXIT_DURATION : 0 },
+              }}
+              exit={{
+                opacity: 0,
+                y: reduceMotion ? 0 : -14,
+                transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] },
+              }}
             >
-              Build Anything
-            </motion.p>
-            <motion.p
-              className="landing-title"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: reduceMotion ? 0 : 0.25, delay: reduceMotion ? 0 : 0.05 }}
-            >
-              With Grapher.
-            </motion.p>
-            <motion.p
-              className="landing-subtitle"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: reduceMotion ? 0 : 0.25, delay: reduceMotion ? 0 : 0.1 }}
-            >
-              Don't orchestrate agents. Compile work.
-            </motion.p>
-          </motion.div>
+              <motion.p
+                className="landing-title"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: reduceMotion ? 0 : 0.25 }}
+              >
+                Build Anything
+              </motion.p>
+              <motion.p
+                className="landing-title"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: reduceMotion ? 0 : 0.25, delay: reduceMotion ? 0 : 0.05 }}
+              >
+                With Grapher.
+              </motion.p>
+              <motion.p
+                className="landing-subtitle"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: reduceMotion ? 0 : 0.25, delay: reduceMotion ? 0 : 0.1 }}
+              >
+                Don't orchestrate agents. Compile work.
+              </motion.p>
+            </motion.div>
+          </div>
         </div>
-        <div style={{ width: "100%", position: "relative", flexShrink: 0 }}>
+        <div className="landing-composer">
           <PromptBox
             layoutId="conversation-composer"
             expandDelay={TITLE_EXIT_DURATION}

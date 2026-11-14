@@ -257,7 +257,7 @@ fn user_text(value: &Value) -> Option<String> {
     }
     let content = message.get("content")?;
     if let Some(text) = content.as_str() {
-        return Some(text.to_owned());
+        return Some(crate::engine::feedback_input::strip(text));
     }
     content.as_array().map(|parts| {
         parts
@@ -269,7 +269,7 @@ fn user_text(value: &Value) -> Option<String> {
             })
             .collect::<Vec<_>>()
             .join("")
-    })
+    }).map(|text| crate::engine::feedback_input::strip(&text))
 }
 
 pub fn branch_before_user(
@@ -757,6 +757,30 @@ mod tests {
         let marker: Value =
             serde_json::from_str(fs::read_to_string(path).unwrap().lines().last().unwrap())
                 .unwrap();
+        assert_eq!(marker["parentId"], "goal");
+    }
+
+    #[test]
+    fn feedback_delivery_marker_does_not_break_editing_normalized_user_turns() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4().to_string();
+        let delivery = Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("test_{id}.jsonl"));
+        let hint = "\n\n[Image: original 3000x2000, displayed at 2000x1333.]";
+        let marked = format!("{}{hint}", crate::engine::feedback_input::prompt("inspect", Some(&delivery)));
+        let entries = [
+            json!({"type":"session", "id":id, "cwd":temp.path()}),
+            json!({"type":"message", "id":"goal", "parentId":null, "message":{"role":"user","content":"goal","timestamp":1}}),
+            json!({"type":"message", "id":"feedback", "parentId":"goal", "message":{"role":"user",
+                "content":[{"type":"text","text":marked}],"timestamp":2}}),
+        ];
+        let original = entries.iter().map(|entry| format!("{entry}\n")).collect::<String>();
+        fs::write(&path, &original).unwrap();
+        let branch = branch_before_user(temp.path(), &id, temp.path(), &format!("inspect{hint}"), 0, 10).unwrap();
+        assert!(!branch.first_user_turn);
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.starts_with(&original), "branching must not rewrite receipt evidence");
+        let marker: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(marker["parentId"], "goal");
     }
 

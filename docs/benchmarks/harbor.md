@@ -31,7 +31,7 @@ docker build -f benchmark/Dockerfile \
 
 Alternatively, build a pinned recursive checkout during task-image preparation, run `npm run pi:setup`, and build the production Rust binary. Git must support `--path-format=absolute`; a compiler toolchain is needed for building, not necessarily for every timed trial.
 
-Installation verifies bwrap, the Pi entrypoint/tsx runtime files, checkout cleanliness, and binary `--build-identity` matching `git rev-parse HEAD`. It records that commit as the agent version; build the task image from the pinned commit rather than relying on `pi:verify`, which is currently a no-op. Do not download/compile Grapher during the timed trial. A non-root task user needs suitable read/access permissions and a trusted Git checkout.
+Installation verifies bwrap, the Pi entrypoint/tsx runtime files, the [pinned Pi baseline](../development/pi-integration.md#upgrade-procedure), checkout cleanliness, and binary `--build-identity` matching `git rev-parse HEAD`. It records that commit as the agent version. `pi:verify` validates Pi inputs and root dependency pins, not the Grapher binary's build identity; both checks are required. Do not download/compile Grapher during the timed trial. A non-root task user needs suitable read/access permissions and a trusted Git checkout.
 
 ## Run through Harbor
 

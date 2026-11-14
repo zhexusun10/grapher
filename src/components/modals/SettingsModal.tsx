@@ -43,6 +43,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
   const [isolateParallelNodes, setIsolateParallelNodes] = useState(config.isolateParallelNodes ?? true);
   const [maxParallelInput, setMaxParallelInput] = useState(() => String(normalizeMaxParallel(config.maxParallel)));
   const [maxFeedbackInput, setMaxFeedbackInput] = useState(() => String(normalizeMaxFeedback(config.maxFeedback)));
+  const [feedbackEnabled, setFeedbackEnabled] = useState(config.feedbackEnabled ?? false);
   // Display-only preference, but it follows the same contract as the other
   // toggles: staged here, committed only when the settings save is accepted.
   const [autoExpandCot, setAutoExpandCotDraft] = useState(() => autoExpandCotEnabled());
@@ -73,6 +74,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
     setIsolateParallelNodes(config.isolateParallelNodes ?? true);
     setMaxParallelInput(String(normalizeMaxParallel(config.maxParallel)));
     setMaxFeedbackInput(String(normalizeMaxFeedback(config.maxFeedback)));
+    setFeedbackEnabled(config.feedbackEnabled ?? false);
   }, [config]);
   const save = async () => {
     if (savingRef.current) return;
@@ -84,7 +86,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
     setMaxParallelInput(String(maxParallel));
     setMaxFeedbackInput(String(maxFeedback));
     try {
-      const ok = await onSaveConfig({ ...normalizeModelThinkingLevels(draftConfig, catalog), autoApprove, postTaskReview, plannerWriteTools, isolateParallelNodes, maxParallel, maxFeedback });
+      const ok = await onSaveConfig({ ...normalizeModelThinkingLevels(draftConfig, catalog), autoApprove, postTaskReview, plannerWriteTools, isolateParallelNodes, maxParallel, maxFeedback, feedbackEnabled });
       if (ok === false) {
         savingRef.current = false;
         setSaving(false);
@@ -103,6 +105,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
     }
   };
   const [catalog, setCatalog] = useState<ProviderCatalog | undefined>(() => providerAuth.getCachedCatalog() ?? undefined);
+  useEffect(() => providerAuth.subscribeCatalog(() => setCatalog(providerAuth.getCachedCatalog() ?? undefined)), []);
   const [catalogBusy, setCatalogBusy] = useState(() => !providerAuth.getCachedCatalog());
   const [pendingLanguage, setPendingLanguage] = useState<LanguagePreference | null>(null);
   const [languageError, setLanguageError] = useState("");
@@ -245,6 +248,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   aria-label={t("挂载 Planner write 和 edit 工具")}
                 />
               </label>
+              <label className="settings-toggle-row">
+                <span>
+                  <strong>{t("启用 Feedback")}</strong>
+                  <small>{t("允许创建反馈边，默认关闭。对后续规划和图编辑生效；已有会话的反馈边和执行不受影响，未启用 Feedback 的会话不显示边类型图例。")}</small>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={feedbackEnabled}
+                  disabled={saving}
+                  onChange={(event) => { markDirty(); setFeedbackEnabled(event.target.checked); }}
+                  aria-label={t("启用 Feedback")}
+                />
+              </label>
               <label className="settings-number-row">
                 <span>
                   <strong>{t("可并行 Agent 数量")}</strong>
@@ -280,7 +296,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
                   step={1}
                   inputMode="numeric"
                   value={maxFeedbackInput}
-                  disabled={saving}
+                  disabled={saving || !feedbackEnabled}
                   onChange={(event) => {
                     markDirty();
                     setMaxFeedbackInput(event.target.value);

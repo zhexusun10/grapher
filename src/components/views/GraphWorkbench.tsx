@@ -28,7 +28,8 @@ import { activeNodeConversationEvents, nodeConversationExecutions, executionIdFo
 import { captureViewScrollState, resolveViewScroll, calculateExpandedCardScrollDelta, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
 import { isNodeWorking, nodeDependenciesCompleted } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
-import { inlineSteerKey, isUncommittedSteer, liveSteerConsumed, nodeInstructionText, numberSteers, steerFallbackPosition, steerRollbackKey, type InlineUserTurnWindow, type LiveSteerMarker } from "../../lib/pendingSteers";
+import { ComposerDrafts, type RecalledMessage } from "../../services/composerDrafts";
+import { projectLiveSteerWithdrawals, projectWithdrawnSteers, inlineSteerKey, isUncommittedSteer, liveSteerConsumed, nodeInstructionText, numberSteers, steerFallbackPosition, steerRollbackKey, type InlineUserTurnWindow, type LiveSteerMarker } from "../../lib/pendingSteers";
 import { ThinkingCard } from "../ThinkingCard";
 import { ExecutionTiming } from "../ExecutionTiming";
 import { ExecutionTimeTookText, PlannerTimeTookText, formatSessionStartTime } from "../ExecutionTimeTook";
@@ -48,7 +49,7 @@ import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
 import { useWorkbenchResizer } from "../../hooks/useWorkbenchResizer";
-import { computeExecutionLayers } from "../../hooks/useGraphElements";
+import { computeExecutionLayers, graphFeedbackEnabled } from "../../hooks/useGraphElements";
 import { PublicationCompletedDetails } from "../PublicationCompletedDetails";
 import { PlannerTranscript } from "../PlannerTranscript";
 import { resolveExecutionModelAndThinking, resolveRetryModelAndThinking, roleModelConfig } from "../../modelConfig";
@@ -109,7 +110,7 @@ function activityStatusText(activity: RuntimeActivity[]): string | null {
 interface GraphWorkbenchProps {
   state: Snapshot;
   transcriptRunId?: string;
-  composerDrafts?: Map<string, string>;
+  composerDrafts?: ComposerDrafts;
   activity?: RuntimeActivity[];
   routeType: PlanRouteType;
   initialPlanMode?: PlanMode;
@@ -124,6 +125,7 @@ interface GraphWorkbenchProps {
   onEditPrefillTextChange?: (text: string) => void;
   onCancelEditMessage?: () => void;
   onInterrupt?: (targetNode?: string) => void;
+  onWithdrawMessages?: (node: string | undefined, requestId: string) => Promise<RecalledMessage[]>;
   isPlanning: boolean;
   plannerStream: any;
   recoveredPlanningId?: string;
@@ -191,6 +193,9 @@ function steerEventOrdinals(events: readonly GraphEvent[]): Map<number, number> 
  * occurrence must agree with `steerOrdinal`; otherwise an older identical
  * event would swallow a newly queued duplicate and hide its pending card. */
 function matchesRecordedTurn(message: ChatMessage, event: GraphEvent, ordinal: number | undefined): boolean {
+  if (message.steerRequestId && event.request_id && event.type === "steered") {
+    return message.steerRequestId === event.request_id && (!message.executionId || message.executionId === event.execution_id);
+  }
   if (message.text.replace(/^\[@[^\]]+\]\s*/, "").trim() !== (event.instruction ?? "").trim()) return false;
   if (ordinal === undefined || message.delivery !== "steered") return true;
   if (event.execution_id && message.executionId && message.executionId !== event.execution_id) return false;
@@ -417,9 +422,9 @@ const WorkspaceDetailsPanel: React.FC<WorkspaceDetailsPanelProps> = ({
 
 
 export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
-  state,
-  transcriptRunId = state.runId,
-  composerDrafts,
+  state: sourceState,
+  transcriptRunId = sourceState.runId,
+  composerDrafts: suppliedDrafts,
   activity = [],
   routeType,
   initialPlanMode,
@@ -429,13 +434,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   setSelectedMergerId,
   failedPlanning,
   recoveredPlanningId,
-  effectiveMessages,
+  effectiveMessages: sourceMessages,
   onEditMessage,
   editingMessage,
   editPrefillText,
   onEditPrefillTextChange,
   onCancelEditMessage,
   onInterrupt,
+  onWithdrawMessages,
   isPlanning,
   plannerStream,
   onSendMessage,
@@ -469,6 +475,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   edgeTypes,
   tokens,
 }) => {
+  const localDrafts = useMemo(() => new ComposerDrafts(), [sourceState.runId]);
+  const composerDrafts = suppliedDrafts ?? localDrafts;
+  const { state, messages: effectiveMessages } = useMemo(() => projectWithdrawnSteers(sourceState, sourceMessages), [sourceState, sourceMessages]);
   const [attemptId, setAttemptId] = useState("");
   const showExecutionOverview = useExecutionOverview();
   const [collapsedAttemptIds, setCollapsedAttemptIds] = useState<Set<string>>(new Set());
@@ -553,7 +562,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   useEffect(() => {
     if (!locked) setControlPending(null);
   }, [locked, state.paused, state.phase]);
-  useEffect(() => { setLiveSteers([]); }, [state.runId]);
+  const withdrawalCount = sourceState.events.filter(event => event.type === "steers_withdrawn").length;
+  const previousWithdrawals = useRef({ runId: state.runId, removed: new Set<number>() });
+  useEffect(() => {
+    const previous = previousWithdrawals.current;
+    if (previous.runId !== state.runId) setLiveSteers([]);
+    else setLiveSteers(markers => projectLiveSteerWithdrawals(markers, sourceState.events, previous.removed));
+    previousWithdrawals.current = { runId: state.runId, removed: new Set(sourceState.events
+      .filter(event => event.type === "steers_withdrawn").flatMap(event => event.message_sequences ?? [])) };
+  }, [state.runId, withdrawalCount]);
   useEffect(() => {
     setSelectedMergerId("");
   }, [state.runId, setSelectedMergerId]);
@@ -599,10 +616,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     execution.historyEndOffset === undefined ? messages.filter(message => message.executionId === execution.id) :
       state.events.filter(event => event.type === "steered" && event.execution_id === execution.id).map(event => ({
         id: `event-${event.sequence}`, role: "user", text: event.instruction ?? "", node: execution.node,
-        executionId: execution.id, images: event.images, delivery: "steered",
+        executionId: execution.id, images: event.images, delivery: "steered", steerRequestId: event.request_id,
       }));
   const renderSteerBubble = (steer: ChatMessage) => (
-    <div key={steer.id} className="chat-message-row user planner-follow-up">
+    <div key={steer.id} className="chat-message-row user planner-follow-up queued-steer-message">
       <EditableUserBubble
         text={nodeInstructionText(steer.text)}
         images={steer.images}
@@ -624,6 +641,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         currentVersionIndex={steer.currentVersionIndex}
         onSwitchVersion={(idx) => onSwitchMessageVersion?.(steer, idx)}
       />
+      {isUncommittedSteer(steer, inlineUserTurns) && <div className="planner-steer-state">
+        {t("已排队，等待当前步骤结束")} · {t("Alt + Q 撤回排队消息 · Alt + S 打断工具并发送")}
+      </div>}
     </div>
   );
 
@@ -732,7 +752,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       return {
         id: `event-${event.sequence}`, parentId: null, role: "user",
         text: event.instruction || "", images: event.images, files: matchingLocal?.files, node: conversationNode, runId: state.runId,
-        executionId: executionIdForMessage(state, event),
+        executionId: executionIdForMessage(state, event), steerRequestId: event.request_id,
         pendingExecution: state.nodes[conversationNode]?.pendingMessages?.some(message => message.sequence === event.sequence),
         versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : matchingLocal?.versions,
         currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : matchingLocal?.currentVersionIndex,
@@ -1519,7 +1539,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }, [failureNoticeKey, hidePlannerResultCards, shouldFollowOutput]);
 
   const handleSendMessageWithScroll = useCallback(async (val: string, options?: PromptBoxSubmitOptions) => {
-    const submittedDraft = composerDrafts?.get(composerDraftKey);
+    options = { ...options, requestId: options?.requestId ?? crypto.randomUUID() };
+    const submittedDraft = composerDrafts.get(composerDraftKey);
+    const submittedImages = composerDrafts.recall(composerDraftKey).images;
     stopLatestScroll();
     historyReadingRef.current = false;
     if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
@@ -1540,12 +1562,12 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       const ordinal = Math.max(acceptedCount, ...effectiveMessages.filter(message => message.delivery === "steered" &&
         message.executionId === targetExecution.id && nodeInstructionText(message.text) === text)
         .map(message => (message.inlineSteerOrdinal ?? -1) + 1));
-      const key = inlineSteerKey({ id: "", role: "user", text, delivery: "steered", executionId: targetExecution.id, inlineSteerOrdinal: ordinal })!;
+      const key = inlineSteerKey({ id: "", role: "user", text, delivery: "steered", executionId: targetExecution.id, inlineSteerOrdinal: ordinal, steerRequestId: options.requestId })!;
       const window = inlineUserTurns[targetExecution.id];
       const afterOffset = window?.end ?? targetExecution.outputBytes ?? new TextEncoder().encode(targetExecution.output).length;
       const occurrence = 1 + liveSteers.filter(item => item.executionId === targetExecution.id && item.text === text &&
         item.afterOffset <= afterOffset && !liveSteerConsumed(item, window)).length;
-      marker = { key, executionId: targetExecution.id, text, afterOffset, occurrence, images: options?.images,
+      marker = { key, requestId: options.requestId, executionId: targetExecution.id, text, afterOffset, occurrence, images: options?.images,
         files: options?.files?.map(file => ({ name: file.name, size: file.size, type: file.type })) };
       setLiveSteers(previous => [...previous.filter(item => item.key !== key), marker!]);
     }
@@ -1559,8 +1581,10 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (accepted === false && marker) setLiveSteers(previous => previous.filter(item => item.key !== marker!.key));
     // Acceptance may arrive after this view unmounts. Clear only its own draft,
     // and never a newer draft entered after navigating back to this conversation.
-    if (accepted !== false && composerDrafts?.get(composerDraftKey) === submittedDraft) {
-      composerDrafts?.delete(composerDraftKey);
+    if (accepted !== false && composerDrafts.get(composerDraftKey) === submittedDraft &&
+        composerDrafts.recall(composerDraftKey).images === submittedImages) {
+      composerDrafts.delete(composerDraftKey);
+      composerDrafts.setImages(composerDraftKey, []);
     }
     return accepted !== false;
   }, [onSendMessage, stopLatestScroll, setScrollBottomVisible, setUserScrolledUp, composerDrafts, composerDraftKey,
@@ -2242,7 +2266,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       text: event.instruction || "", images: event.images, files: matchedLocals.get(event.sequence)?.files, node: serialNode.name, runId: state.runId,
       versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
       currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : undefined,
-      executionId: executionIdForMessage(state, event),
+      executionId: executionIdForMessage(state, event), steerRequestId: event.request_id,
       pendingExecution: state.nodes[serialNode.name]?.pendingMessages?.some(message => message.sequence === event.sequence),
       delivery: event.type === "node_messaged" || event.type === "steered" ? event.type : undefined,
     }));
@@ -2357,6 +2381,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const nodeComposerDisabled = locked || !!editingMessage || !state.approved ||
     (!!selectedMerger && !selectedMergerRunning && !selectedMergerContinuable);
   const mainComposerDisabled = !!editingMessage || (locked && !isPlanning);
+  const withdrawMessages = onWithdrawMessages ? (requestId: string) =>
+    onWithdrawMessages(selectedNode ? conversationNode : serialNode?.name, requestId) : undefined;
   // Live SSE and the durable-JSONL poller can both observe the Planner's
   // compaction; either source is enough to relabel the working indicator.
   const isMainViewCompacting = isMainViewWorking &&
@@ -2786,7 +2812,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         style={showGraphPane ? undefined : { width: "100%", maxWidth: "100%" }}
       >
         {creatingNode && routeType === "graph" ? (
-          <CreateNodeForm key={state.runId} state={state} busy={locked || isPlanning || publishing || publicationFailed || state.phase === "launching_result"}
+          <CreateNodeForm key={state.runId} state={state} feedbackEnabled={config.feedbackEnabled ?? false} busy={locked || isPlanning || publishing || publicationFailed || state.phase === "launching_result"}
             onCancel={() => { creationRunRef.current = ""; setCreatingNode(false); }}
             onRequestConfirmation={onRequestConfirmation}
             onSave={async (request) => {
@@ -3074,11 +3100,14 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 repository={config?.repository}
                 runId={state.runId}
                 node={conversationNode}
+                draftStore={composerDrafts}
+                draftKey={composerDraftKey}
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={nodeComposerDisabled ? "" : isSelectedNodeWorking || selectedMergerRunning ? t("Steer...") : t("Type...")}
                 isExecuting={isSelectedNodeWorking}
                 isWorking={isSelectedNodeWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(selectedNode?.name); onInterrupt(selectedNode?.name); } : undefined}
+                onWithdraw={withdrawMessages}
                 onContinue={!selectedMerger && selectedNode && canContinueNode(selectedState) ? () => continueNode(selectedNode.name) : undefined}
                 disabled={nodeComposerDisabled}
               />
@@ -3420,7 +3449,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               <EditableUserBubble text={row.message.text.trim()} images={row.message.images} files={row.message.files}
                                 editing={false} draft="" onDraftChange={() => {}} onCancel={() => {}} onSend={() => false} />
                             </div>}
-                          <div className="planner-steer-state">{plannerSteerLabel(row)}</div>
+                          <div className="planner-steer-state"><span>{plannerSteerLabel(row)}</span>
+                            {["submitted", "queued", "accepted"].includes(row.status) && <> · {t("Alt + Q 撤回排队消息 · Alt + S 打断工具并发送")}</>}
+                          </div>
                         </div>;
                       })}
                     </div>}
@@ -3513,11 +3544,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                 repository={config?.repository}
                 runId={state.runId}
                 node={isSerialExecution ? state.graph.nodes[0]?.name : undefined}
+                conversationModel
+                draftStore={composerDrafts}
+                draftKey={composerDraftKey}
                 onSubmit={handleSendMessageWithScroll}
                 placeholder={mainComposerDisabled ? "" : isMainViewWorking ? t("Steer...") : t("Type...")}
                 isExecuting={isMainViewWorking}
                 isWorking={isMainViewWorking}
                 onInterrupt={onInterrupt ? () => { restoreUncommittedSteerDrafts(); onInterrupt(); } : undefined}
+                onWithdraw={withdrawMessages}
                 onContinue={isSerialExecution && serialNode && canContinueNode(serialNodeState) ? () => continueNode(serialNode.name)
                   : routeType === "graph" && !isMainViewWorking && (failedPlanning ?? state.planning)?.status === "failed" &&
                     (failedPlanning ?? state.planning)?.planType === "graph" && (failedPlanning ?? state.planning)?.runId === state.runId
@@ -3621,7 +3656,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                   nodes={animatedNodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} tokens={tokens}
                   onInit={centerGraph} onSelect={selectGraphNode} onLayout={synchronizeGraph} onFitStart={manualGraphFit} onPaneContextMenu={openGraphMenu} />
 
-                {state.graph.nodes.length > 0 && (
+                {state.graph.nodes.length > 0 && graphFeedbackEnabled(state, config.feedbackEnabled ?? false) && (
                   <motion.div
                     className="graph-note"
                     initial={reduceMotion ? false : { opacity: 0, y: 4 }}

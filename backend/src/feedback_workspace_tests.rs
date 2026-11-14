@@ -144,6 +144,7 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
     );
     assert_eq!(runtime.state.nodes["owner"].status, "completed");
     execute(&mut runtime, related);
+    history(&runtime, related, "RELATED PRIVATE HISTORY");
     let repair = runtime.jobs().unwrap().remove(0);
     assert_eq!(repair.execution.node, "owner");
     assert_eq!(repair.execution.worktree, review.execution.worktree);
@@ -178,7 +179,15 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
         } else {
             assert_eq!(job.execution.worktree, repair.execution.worktree);
         }
+        let previous = if job.execution.node == "related" { related } else { review };
+        assert_eq!(job.session_fork.as_ref().unwrap().id, previous.execution.id);
+        assert!(job.preserved_workspace.is_none());
         execute(&mut runtime, job);
+        let retained = fs::read_to_string(runtime.root.join("sessions").join(&job.execution.id)
+            .join(format!("grapher_{}.jsonl", job.execution.session_id))).unwrap();
+        assert!(retained.contains(if job.execution.node == "related" { "RELATED PRIVATE HISTORY" } else { "REVIEW PRIVATE HISTORY" }));
+        assert!(!retained.contains("OWNER PRIVATE HISTORY"));
+        assert!(!runtime.state.superseded_execution_ids.contains(&previous.execution.id));
         assert_eq!(
             fs::read_to_string(Path::new(&job.execution.worktree).join(".cache/owner"))
                 .unwrap()
@@ -333,8 +342,8 @@ fn feedback_redispatch_uses_the_latest_conversation_model() {
             let rerun = runtime.jobs().unwrap().remove(0);
             assert_eq!(rerun.execution.node, "review");
             assert!(
-                rerun.session_fork.is_none(),
-                "invalidated descendants restart from zero"
+                rerun.session_fork.is_some(),
+                "feedback descendants keep their own history on fresh inputs"
             );
             assert_eq!(
                 rerun.config.node_agent_settings(),
@@ -803,14 +812,16 @@ fn terminal_node_followup_uses_the_shared_workspace_and_preserves_its_conversati
         .unwrap();
     let next = runtime.jobs().unwrap().remove(0);
     assert_eq!(next.execution.worktree, repair.execution.worktree);
-    assert!(next.session_fork.is_none());
+    assert_eq!(next.session_fork.as_ref().unwrap().id, review.execution.id);
+    assert!(next.task.contains("fixture: feedback returned"));
+    assert!(next.task.contains("review additional inspection"));
     execute(&mut runtime, &next);
     let text = fs::read_to_string(
         runtime
             .root
             .join("sessions")
-            .join(&review.execution.id)
-            .join(format!("test_{}.jsonl", next.execution.session_id)),
+            .join(&next.execution.id)
+            .join(format!("grapher_{}.jsonl", next.execution.session_id)),
     )
     .unwrap();
     assert!(text.contains("REVIEW HISTORY"));
@@ -1160,10 +1171,8 @@ fn adoption_survives_a_failed_attempt_without_a_persisted_session() {
 
 #[cfg(feature = "fixture")]
 #[test]
-fn recomputed_descendant_supersedes_its_previous_attempts() {
-    // Downstream recomputation starts the node's conversation from zero in the
-    // new workspace: the fresh execution supersedes the node's prior attempts
-    // so the conversation view renders only the live lineage.
+fn feedback_descendant_keeps_its_previous_attempts() {
+    // A new result attempt does not erase the node's conversation lineage.
     let (_temp, _source, mut runtime) = configured(&["owner", "review"], 1);
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
@@ -1175,17 +1184,52 @@ fn recomputed_descendant_supersedes_its_previous_attempts() {
     let recomputed = runtime.jobs().unwrap().remove(0);
     assert_eq!(recomputed.execution.node, "review");
     assert_eq!(recomputed.execution.attempt, 2);
-    assert!(recomputed.session_fork.is_none());
-    assert!(runtime
+    assert_eq!(recomputed.session_fork.as_ref().unwrap().id, review.execution.id);
+    assert!(!runtime
         .state
         .superseded_execution_ids
         .contains(&review.execution.id));
     assert!(runtime.state.events.iter().any(|event| matches!(
         &event.kind,
-        EventKind::Started { execution, fresh_restart: true, .. } if execution.id == recomputed.execution.id
+        EventKind::Started { execution, fresh_restart: false, .. } if execution.id == recomputed.execution.id
     )));
     execute(&mut runtime, &recomputed);
     assert_eq!(runtime.state.nodes["review"].status, "completed");
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn feedback_recheck_retry_retains_prepared_files_when_its_session_fork_failed() {
+    let (_temp, _source, mut runtime) = configured(&["owner", "review"], 1);
+    let owner = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &owner);
+    history(&runtime, &owner, "OWNER HISTORY");
+    let review = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &review);
+    history(&runtime, &review, "REVIEW HISTORY");
+    let repair = runtime.jobs().unwrap().remove(0);
+    execute(&mut runtime, &repair);
+    let recheck = runtime.jobs().unwrap().remove(0);
+    let root = runtime.root.clone();
+    let result = perform(&recheck, &root, &[], |_| {}, |head| {
+        runtime.emit(EventKind::Prepared { execution_id: recheck.execution.id.clone(), head })?;
+        Err("failed before conversation fork".into())
+    });
+    runtime.finish(&recheck.execution, result).unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    // A local repair after the failed preparation must survive rebuilding Pi's
+    // session, too; history and physical ownership are independent identities.
+    fs::write(Path::new(&recheck.execution.worktree).join("retained.txt"), "local repair").unwrap();
+    drop(runtime);
+    let mut runtime = Runtime::open(&root).unwrap();
+    runtime.pause(false).unwrap();
+    let retry = runtime.jobs().unwrap().remove(0);
+    assert!(retry.preserved_workspace.is_some());
+    assert_eq!(retry.session_fork.as_ref().unwrap().id, review.execution.id);
+    assert_eq!(retry.task, recheck.task);
+    assert!(!retry.continuation && !retry.initial_recovery);
+    execute(&mut runtime, &retry);
+    assert_eq!(fs::read_to_string(Path::new(&retry.execution.worktree).join("retained.txt")).unwrap(), "local repair");
 }
 
 #[cfg(feature = "fixture")]
@@ -1479,7 +1523,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     assert_eq!(runtime.state.feedback_counts.get("review->owner"), Some(&1));
     assert_eq!(
         runtime.state.nodes["related"].status, "dirty",
-        "the stopped sibling is invalidated for recomputation, not resumed"
+        "the stopped sibling waits for fresh files, retaining only its conversation"
     );
     assert!(runtime.state.pending_feedback.is_empty());
     assert_eq!(

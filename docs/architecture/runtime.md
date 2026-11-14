@@ -159,10 +159,18 @@ those remain available for a later explicit Continue.
 
 Saving changed Node Agent model/thinking settings records the conversation's
 selection and synchronizes per-node overrides for unstarted and failed nodes.
+Conversation-scoped `/model` and `/thinking` edits to Node Agent also synchronize
+the legacy model/thinking fallback, matching Settings: unspecified role fields
+inherit the new default, while explicit Planner/Partitioner fields stay unchanged.
+Per-node composer overrides never update those conversation defaults.
 Every subsequent dispatch uses the latest conversation selection, including
 feedback targets, invalidated descendants, retries, history edits and follow-ups
-of completed nodes; stale overrides from earlier saves cannot override it. A
-running attempt keeps its original settings, even if the save precedes its
+of completed nodes; stale synchronized overrides from earlier saves cannot override it.
+An explicit `NodeModelOverrideUpdated` selection instead belongs only to its named
+node (`modelOverride`), precedes the conversation profile at dispatch, and is
+excluded from profile synchronization and legacy Run-model hydration. It survives
+failure reconciliation and replay without changing sibling or future nodes.
+A running attempt keeps its original settings, even if the save precedes its
 success or failure, and recorded attempt metrics are not rewritten. Saving does
 not dispatch work, approve a draft, unpause a Run, or rewrite its original
 configuration. The selection survives replay, including for feedback queued
@@ -180,9 +188,16 @@ that conversation's override, including nodes the Planner adds later. Other
 conversations keep their own creation or saved selection, so their running and
 never-started nodes are not retargeted. Conversations that never changed models
 continue with the settings composition used when they were created, while new
-conversations use the saved global defaults. `config.json` remains the defaults
-document for new Runs; the Run projection carries `modelConfig` for its own
-conversation. A Settings refresh belongs to its modal opening and foreground
+conversations initially inherit the saved global defaults. Home-composer model commands
+belong to that unsent conversation draft, not `config.json`; discarding the draft
+restores the defaults. Settings opened outside a Run instead saves global defaults
+for new conversations. `config.json` remains the defaults document for new Runs;
+the Run projection carries `modelConfig` for its own conversation. Settings opened
+inside a Run always edits that Run's role profiles, regardless of the selected
+node; only node-composer commands create individual node overrides. Conversation
+model edits do not replace global defaults. Global model visibility is a separate
+picker preference (see [Composer commands](../development/pi-integration.md#composer-commands)),
+and non-model settings retain their existing global behavior. A Settings refresh belongs to its modal opening and foreground
 identity. Closing/reopening Settings or starting a save invalidates older reads,
 so delayed snapshots cannot replace an accepted selection or refresh a newer
 opening with stale role models. An untouched draft may adopt only its current
@@ -196,21 +211,80 @@ Source locks cover approval and recorded Git snapshots after approved Planner re
 
 ## Bounded feedback
 
+Creating feedback routes is [opt-in through Settings](overview.md#optional-feedback-capability). The rules below still govern previously committed routes and queued verdicts when the capability is later disabled.
+
 A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `<FEEDBACK>`. The node's per-turn system `<rules>` carries this protocol, including resumed and protocol-repair turns; the task and follow-up user messages do not receive a protocol suffix. The dispatch's current feedback-edge state controls the rule, so a later graph revision can remove it. Existing sessions with the older user-message suffix remain editable. Concrete feedback is still sent to the target as a `Feedback:` user instruction.
 
 - `<ACCEPT>` leaves the result accepted without sending an additional instruction.
-- `<FEEDBACK>` queues a versioned request for the graph's one explicit target. Current requests reviewing the same target execution/revision are applied together as one repair once affected running work has been stopped and its failures settled. Only senders of applicable `<FEEDBACK>` contribute project-file results and instructions; `<ACCEPT>`, exhausted and superseded requests contribute neither. The batch invalidates the target and its ordinary dependency descendants once; other branches remain valid. The target continues its own history with the combined project results and each sender's explicit instructions, never the senders' conversations. Feedback budgets are still consumed once per applied source/target edge, not once per batch. Recomputed descendants start from zero: when an invalidated descendant re-dispatches without a session continuation, its launch supersedes the node's prior attempts, so its conversation renders only the live lineage instead of history recorded against the old workspace.
+- `<FEEDBACK>` queues a versioned request for the graph's one explicit target. Current requests reviewing the same target execution/revision are applied together as one repair once affected running work has been stopped and its failures settled. Only senders of applicable `<FEEDBACK>` contribute project-file results and instructions; `<ACCEPT>`, exhausted and superseded requests contribute neither. The batch invalidates the target and its ordinary dependency descendants once; other branches remain valid. The target continues its own history with the combined project results and each sender's explicit instructions, never the senders' conversations. Feedback budgets are still consumed once per applied source/target edge, not once per batch. Previously dispatched descendants, including feedback senders and interrupted in-scope writers, retain their own conversations. Once their dependencies are ready they receive a new turn against the updated workspace; invalidation retires the old result, not the history. Never-started nodes still receive their original tasks.
 - A malformed verdict is a protocol error, not a node failure: the worker synchronously pushes a bounded repair turn into the node's own session (at most two, before completion commits) asking it to restate the verdict without repeating work. The pushed turn streams into the same execution transcript, and the first readable verdict is the one committed. If the verdict is still malformed after the repair budget, the execution fails with the protocol error; a provider or execution error inside a repair turn fails normally.
 - Once `maxFeedback` is exhausted, another `<FEEDBACK>` records `FeedbackExhausted` rather than acceptance or failure. The source remains completed; no instruction is sent to the feedback target, no result is invalidated, and the counter does not increase. Downstream nodes continue with their original tasks and inherited workspace state; the skipped feedback text is not injected into their prompts. Graph cards show the exhausted budget and explain that feedback was not applied. An `<ACCEPT>` at the limit remains ordinary acceptance, without an exhaustion warning.
 - The default is 4 feedback applications per source/target edge (range 2–40 in Settings), with a hard cap of 40. Lower configured limits remain valid; a limit of 0 records the first `<FEEDBACK>` as exhausted. Execution errors still fail normally.
 
 While feedback budget remains, a pending verdict that will apply makes every running execution in its scope doomed: the runtime stops them immediately instead of letting them finish into a discarded result, and their recorded failures settle before the batch invalidates the scope and dispatches the repair. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable. Once a review's verdict is resolved, its feedback edge no longer blocks ready descendants just because an accepted sibling is still running. Scheduling that review again reactivates the barrier; queued unresolved verdicts retain their drain-before-handoff checks.
 
-`Finished` and `FeedbackQueued` commit atomically. Requests pin source execution/head, the reviewed target execution/revision, and the final response's log-byte range before invalidation clears heads. The reviewed execution is taken from dispatch order, not the target's movable head after directory handoff. Legacy requests without that execution identity retain exact-head validation and are not grouped with other requests. Batch resolutions, per-edge counters and the single invalidation commit atomically; restart cannot partially consume a batch. Duplicate deliveries are idempotent, and a superseded review cannot overwrite a newer target result. Acceptance, exhausted budgets and superseded requests never transfer workspace ownership. Batching waits for already-running affected work, not for feedback nodes that have not been dispatched.
+`Finished` and `FeedbackQueued` commit atomically. Requests pin source execution/head, the reviewed target execution/revision, and the final response's log-byte range before invalidation clears heads. The reviewed execution is taken from dispatch order, not the target's movable head after directory handoff. Legacy requests without that execution identity retain exact-head validation and are not grouped with other requests. Batch resolutions, per-edge counters, the single invalidation and descendant `FeedbackContinuationQueued` anchors commit atomically; restart cannot partially consume a batch. Duplicate deliveries are idempotent, and a superseded review cannot overwrite a newer target result. Acceptance, exhausted budgets and superseded requests never transfer workspace ownership. Batching waits for already-running affected work, not for feedback nodes that have not been dispatched.
 
 Cleanliness and physical transfer checks belong to [Feedback workspace handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits); conversation forks belong to [Session continuity](execution-model.md#sessions-follow-ups-and-history-edits).
 
 Live steering does not itself mark a running node dirty. Completed-node follow-ups are new messages, not original-task rewrites; shared-terminal continuations, other changed results and history edits follow the distinct [session/invalidation rules](execution-model.md#sessions-follow-ups-and-history-edits).
+
+### Feedback continuation notices
+
+Each affected node retains its own non-superseded execution anchor, never an
+upstream conversation. Dispatch forks that history while preparing fresh parent
+files and environment inputs; the invalidated attempt's partial tree is not a
+recovery input. Failed rechecks subsequently retain their **newly prepared**
+workspace and session under normal retry rules. A failed fork can be rebuilt
+from its recorded anchor without discarding that prepared workspace. New
+executions retain the visible conversation lineage but must establish a new
+result; they do not automatically accept the repair. Task/graph/history edits
+keep their distinct invalidation behavior. Historical events without continuation
+anchors keep their recorded from-zero semantics.
+
+The independent resource
+[`feedback-returned.md`](../../backend/resources/prompts/feedback-returned.md)
+contains the approved notice for applied senders, without a target identifier.
+[`feedback-updated.md`](../../backend/resources/prompts/feedback-updated.md)
+contains the approved notice for other affected nodes: inspect the updated
+workspace's impact while keeping the original task requirements. Runtime-owned
+`<data-root>/prompts/<filename>` overrides the bundled resource; project files
+are never prompt overrides. Templates support `{{node}}` and `{{target}}`.
+An empty/unreadable template stops new dispatch, preserving history and pending
+work: there is no placeholder message or original-task fallback. Existing node,
+Merger and publication workers drain through the driver's completion channels
+before an idle-boundary error pauses the Run; their outputs/results are not
+abandoned. Fill the template and Continue to proceed.
+
+Text is bound durably when dependencies are ready. The complete turn, including
+FIFO human messages and their ordered image payloads, is then bound atomically
+with `Started`. Changing a template affects only unbound notices. Before
+attachments or Pi launch, the worker atomically records an input boundary in
+`sessions/<execution-id>/feedback-input.json`, after any session fork/cwd rebinding.
+This is a cursor, **not** a consumption receipt. New boundaries also require a
+per-delivery UUID envelope in the first persisted user entry after that cursor.
+The transport adds it without changing the bound instruction; model-context and
+display/history-edit projections remove it without rewriting Pi's saved history.
+Pi's image normalization hints or input transformations that retain the identity
+therefore do not invalidate delivery. Older boundaries without an envelope retain
+the conservative exact-text check. Recovery works after a crash before output was
+flushed; `Started`, `Prepared`, process launch and a copied session are not proof
+of input delivery. Older equal text/identities before the cursor do not count.
+Missing evidence after activity, malformed/truncated sessions, missing/wrong or
+ambiguous identities fail explicitly rather than guessing or resending.
+
+An undelivered turn is resent with all images, even if its fork already exists.
+A human follow-up after a failed fork keeps the original history anchor and
+combines the pending turn with new FIFO text/images exactly once; image labels
+retain their combined ordering. Already-delivered turns continue without another
+notice, or receive only the newly queued human input. Legacy continuations without
+a delivery identity retain their old recovery rules. Only nodes with current
+outgoing feedback edges receive the verdict protocol. Evidence:
+[continuation/replay tests](../../backend/src/feedback_continuation_tests.rs),
+[delivery tests](../../backend/src/feedback_delivery_tests.rs),
+[live-driver drain test](../../backend/src/batch_workspace_tests.rs),
+[workspace tests](../../backend/src/feedback_workspace_tests.rs), and
+[private-batch tests](../../backend/src/workspace_policy_tests.rs).
 
 ### Durable node follow-up delivery
 
@@ -264,6 +338,49 @@ durable log proves was not accepted leaves the pending area and its text returns
 to the composer, while a submission the log records keeps its card and clears
 the composer. The same instruction is therefore never both a card and an
 editable draft, and an uncertain turn is still never resent by itself.
+
+Live queue withdrawal uses Pi's `clear_queue` acknowledgement, never missing
+rows in a partial transcript, as proof of removal. The pinned adapter snapshots
+the actual Agent queues synchronously: Pi's display list can still include a
+turn already drained into asynchronous preparation/compaction, which cannot be
+recalled. Extension-owned non-user queue entries are retained. The Run mutex orders the
+clear command against durable steer acceptance; its result is matched only to
+submissions preceding that pipe boundary. Every live Node/Merger steer records
+a stable `request_id`; the adapter removes its private transport envelope only
+at the RPC boundary, before slash parsing and input hooks, then carries the ID
+through async preprocessing to the actual queued object. Pi's deferred input
+at `agent_settled` retains that identity through private options rather than
+re-parsing cleaned user text; literal marker-shaped extension/user content is
+not another delivery envelope. Planner queue entries retain their existing request
+IDs even if an input hook removes the textual marker. IDs are kept separately
+from mutable text, so equal or rewritten instructions cannot select a different
+message. Nested extension submissions do not inherit the outer user's ID.
+Live Merger edits/version resends use fresh IDs shared by the request and its
+local card; pause rollback also keys identified turns by ID, not a renumbered
+text occurrence. A stale `intervene` routed to a live steer replays the same
+receipt on retry even after that execution settles, instead of dispatching again.
+Withdrawal resolves only those returned IDs in the owning execution/Run and
+returns the original draft/attachments in queue order. Unidentified legacy or
+extension input is returned without suppressing any same-text history card.
+Append-only `withdrawn` Planner statuses and `steers_withdrawn` event sequences
+suppress recalled cards after reload without deleting consumed history. The
+composer restores the removed text and available images, preserving its draft;
+an empty result changes nothing and a failed request does not invent a recall.
+A client request ID binds each recall to its Run and viewed agent. Recalls
+serialize independently of the Run mutex, and `queue_withdrawal_recorded`
+commits the returned draft with its withdrawal events in one SQLite batch.
+Retries replay that receipt before resolving a live process, so a lost HTTP
+response or later process exit does not clear a newer queue. The browser keeps
+that request ID until success, even across view changes. Drafts and restored
+images are Run-owned rather than mounted-composer-owned. Receipt image payloads
+are omitted from metadata polls and returned only to the originating request.
+Interrupt-and-send waits for Pi's abort acknowledgement before the normal durable
+send, keeping the same process/session registered through the handoff and prompt
+acceptance. It does not pause the Run or interrupt unrelated nodes. Evidence:
+[composer RPC tests](../../backend/src/engine/composer.rs),
+[withdrawal/replay tests](../../backend/src/server/composer.rs),
+[production Pi queue identity](../../scripts/prepared-host.test.mjs) and
+[browser shortcuts](../../scripts/steer-order-ui.test.mjs).
 
 A tool card first represents call generation, then a generated call awaiting
 execution, then actual execution and a result. The live stream and replay reconcile these

@@ -77,6 +77,9 @@ impl Runtime {
             return None;
         }
         let state = self.state.nodes.get(node)?;
+        if state.feedback_continuation.as_ref().is_some_and(|input| !input.dispatched) {
+            return None; // old partial files were invalidated, only history survives
+        }
         let previous = self.state.executions.iter().rev().find(|execution| {
             execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)
         })?;
@@ -178,7 +181,8 @@ impl Runtime {
         if !state.continuation && !(state.human_instruction && !state.pending_messages.is_empty()) {
             return false;
         }
-        if state.edit_execution_id.is_some() || state.feedback_workspace.is_some() { return false; }
+        if state.edit_execution_id.is_some() || state.feedback_workspace.is_some()
+            || state.feedback_continuation.as_ref().is_some_and(|input| !input.dispatched) { return false; }
         let Some(previous) = self.state.executions.iter().rev().find(|execution|
             execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)) else { return false; };
         if previous.status != "failed" { return false; }

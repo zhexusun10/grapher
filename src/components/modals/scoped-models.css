@@ -1,0 +1,29 @@
+.modal-backdrop.scoped-models-backdrop { z-index: 1500; }
+.role-model-settings > .scoped-models-button { justify-self: start; margin-top: 8px; }
+.modal.scoped-models-modal { width: min(680px, calc(100vw - 32px)); max-height: min(720px, calc(100dvh - 48px)); display: flex; flex-direction: column; gap: 12px; padding: 22px; }
+.scoped-models-modal header, .scoped-models-modal footer { display: flex; align-items: center; gap: 12px; }
+.scoped-models-modal header { justify-content: space-between; }
+.scoped-models-modal h2, .scoped-models-modal p { margin: 0; }
+.scoped-models-modal p { color: var(--text-secondary); font-size: 12px; }
+.scoped-models-modal footer { justify-content: flex-end; gap: 10px; }
+.scoped-models-modal footer > button { height: 36px; line-height: 1.2; }
+.scoped-models-modal button:not(:disabled):hover { filter: none; }
+.scoped-models-modal .settings-cancel-btn {
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 16px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.scoped-models-modal .settings-cancel-btn:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.scoped-models-modal footer > .primary { padding: 9px 20px; }
+.scoped-model-list { overflow-y: auto; min-height: 80px; max-height: 420px; overscroll-behavior: contain; }
+.scoped-model-row { display: flex; align-items: center; gap: 12px; padding: 8px; border-bottom: 1px solid var(--border-subtle, #e2e8f0); cursor: pointer; }
+.scoped-model-row span { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.scoped-model-row small { color: var(--text-secondary); }
+.scoped-models-modal [role=alert] { color: var(--error, #b91c1c); }

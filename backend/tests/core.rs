@@ -49,6 +49,7 @@ fn config() -> Config {
         auto_approve: false,
         post_task_review: false,
         planner_write_tools: true,
+        feedback_enabled: true,
         isolate_parallel_nodes: true,
         role_models: Default::default(),
     }
@@ -57,6 +58,12 @@ fn config() -> Config {
 // These Git/publication tests exercise the retained legacy private contract.
 // Adaptive source-sharing coverage lives in workspace_policy_tests.rs.
 fn create_private(runtime: &mut Runtime, graph: Graph, config: Config) {
+    // These execution fixtures opt into rechecks without depending on the
+    // intentionally unconfigured production continuation-message wording.
+    fs::create_dir_all(runtime.root.join("prompts")).unwrap();
+    for name in ["feedback-returned.md", "feedback-updated.md"] {
+        fs::write(runtime.root.join("prompts").join(name), "{{node}}\n[fixture: recheck after {{target}}]").unwrap();
+    }
     runtime.state.run_id = uuid::Uuid::new_v4().to_string();
     runtime.emit(EventKind::Created { graph, config, planning_id: None, planning: None }).unwrap();
     runtime.store.select_run(Some(&runtime.state.run_id)).unwrap();
@@ -374,7 +381,7 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
         },
     ]);
     let plan = compile(&candidate, true).unwrap();
-    // Planner results pair W303 warnings with feedback edges in graph order.
+    // Full compiler plans retain scope diagnostics; Planner tools omit them.
     assert_eq!(plan.warnings, vec![
         "W303: If <FEEDBACK> is sent from review to frontend, these nodes will rerun: delivery, frontend, inspect, review.",
         "W303: If <FEEDBACK> is sent from inspect to spec, these nodes will rerun: backend, delivery, frontend, inspect, review, spec.",
@@ -1052,6 +1059,7 @@ fn steer_does_not_invalidate_and_unrelated_running_node_does_not_block_follow_up
             execution_id: spec.execution.id.clone(),
             node: "spec".into(),
             instruction: "clarify".into(),
+            request_id: None,
             images: None,
         })
         .unwrap();
@@ -1103,18 +1111,20 @@ fn steer_attachments_survive_replay_and_legacy_events_remain_readable() {
             execution_id: "execution".into(),
             node: "spec".into(),
             instruction: instruction.into(),
+            request_id: Some("d665367c-b8f2-4e58-8b0a-b5643069a8bf".into()),
             images: Some(vec![image.clone()]),
         })
         .unwrap();
     let replay = runtime.store.load(&runtime.state.run_id).unwrap();
     let event = serde_json::to_value(replay.events.last().unwrap()).unwrap();
     assert_eq!(event["instruction"], instruction);
+    assert_eq!(event["request_id"], "d665367c-b8f2-4e58-8b0a-b5643069a8bf");
     assert_eq!(event["images"][0], serde_json::to_value(image).unwrap());
     let legacy: EventKind = serde_json::from_value(serde_json::json!({
         "type": "steered", "execution_id": "old", "node": "spec", "instruction": "old turn"
     }))
     .unwrap();
-    assert!(matches!(legacy, EventKind::Steered { images: None, .. }));
+    assert!(matches!(legacy, EventKind::Steered { images: None, request_id: None, .. }));
 }
 
 #[test]

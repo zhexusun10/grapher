@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, normalizeMaxFeedback, normalizeMaxParallel, type Config } from "../src/types.ts";
-import { applyModelConfig, defaultRoleThinkingLevel, normalizeModelThinkingLevels, planningModelRoles, providerIdForModel, resolveExecutionModelAndThinking, resolveRetryModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
+import { applyModelConfig, availableCatalogModels, defaultRoleThinkingLevel, normalizeModelThinkingLevels, planningModelRoles, providerIdForModel, resolveExecutionModelAndThinking, resolveRetryModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
 import { providerAuth, hasUnsupportedCredentialCharacters, type ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
@@ -76,6 +76,17 @@ test("thinking-only customization keeps model inheritance; environment has prece
   config = updateRoleModelConfig(config, "partitioner", { thinkingLevel: "high" });
   assert.equal(roleModelConfig(config, "partitioner").thinkingLevel, "high");
   assert.deepEqual(roleModelConfig(config, "planner", { planner: "env/model", plannerThinking: "off" }), { model: "env/model", thinkingLevel: "off" });
+});
+
+test("global visibility hides model choices without erasing saved selections, including when all models are hidden", () => {
+  const hidden = { ...catalog, hiddenModels: ["example/default"] };
+  assert.ok(!availableCatalogModels(hidden).some(model => model.id === "default"));
+  assert.ok(availableCatalogModels(hidden, true).some(model => model.id === "default"), "the visibility manager can restore hidden choices");
+  const markup = renderToStaticMarkup(React.createElement(RoleModelSettings, { config: legacy, setConfig: () => {}, catalog: hidden, busy: false }));
+  assert.ok(!markup.includes("Ready Model (example/default)"));
+  assert.ok(markup.includes(t("当前已选模型已隐藏")));
+  assert.equal(legacy.model, "example/default");
+  assert.deepEqual(availableCatalogModels({ ...catalog, hiddenModels: catalog.models.map(model => `${model.provider}/${model.id}`) }), []);
 });
 
 test("preflight uses only the roles required for the selected mode", () => {
@@ -378,13 +389,14 @@ test('only required pi-trim is locked; bundled continuity and user extensions re
   } finally { await vite.close(); }
 });
 
-test('all Harness settings default on and preserve explicit opt-outs', async () => {
+test('Harness settings preserve defaults and explicit selections, with feedback opt-in', async () => {
   assert.equal(defaultConfig.autoApprove, true);
   assert.equal(defaultConfig.postTaskReview, true);
   assert.equal(defaultConfig.plannerWriteTools, true);
   assert.equal(defaultConfig.isolateParallelNodes, true);
   assert.equal(defaultConfig.maxParallel, 20);
   assert.equal(defaultConfig.maxFeedback, 4);
+  assert.equal(defaultConfig.feedbackEnabled, false);
   assert.equal(normalizeMaxParallel(0), 20);
   assert.equal(normalizeMaxParallel(1), 2);
   assert.equal(normalizeMaxParallel(2), 2);
@@ -432,6 +444,9 @@ test('all Harness settings default on and preserve explicit opt-outs', async () 
       assert.match(checkbox(legacy as Config, label), /checked=""/, `${label} defaults on when absent`);
       assert.doesNotMatch(checkbox({ ...defaultConfig, [key]: false }, label), /checked=""/, `${label} preserves opt-outs`);
     }
+    assert.doesNotMatch(checkbox(defaultConfig, '启用 Feedback'), /checked=""/);
+    assert.doesNotMatch(checkbox({ ...defaultConfig, feedbackEnabled: undefined }, '启用 Feedback'), /checked=""/);
+    assert.match(checkbox({ ...defaultConfig, feedbackEnabled: true }, '启用 Feedback'), /checked=""/);
     // Approval and review remain independent.
     assert.doesNotMatch(checkbox({ ...defaultConfig, autoApprove: true, postTaskReview: false }, '任务后 Planner 复盘'), /checked=""/);
     assert.match(checkbox({ ...defaultConfig, autoApprove: false, postTaskReview: true }, '任务后 Planner 复盘'), /checked=""/);
@@ -452,7 +467,7 @@ test('all Harness settings default on and preserve explicit opt-outs', async () 
       'the Harness settings card sits above UI settings and the language selector');
     const planningCard = markup.match(/<section\b[^>]*aria-labelledby="execution-planning-settings-title"[^>]*>([\s\S]*?)<\/section>/)?.[1];
     assert.ok(planningCard, 'the combined execution planning card is present');
-    assert.equal(planningCard.match(/type="checkbox"/g)?.length, 5);
+    assert.equal(planningCard.match(/type="checkbox"/g)?.length, 6);
     for (const label of ['隐藏 Auto 模式', 'Auto Approve Planner 图纸', '任务后 Planner 复盘', '并行节点独立工作区', '挂载 Planner write 和 edit 工具']) {
       assert.ok(planningCard.includes(`aria-label="${t(label)}"`), `${label} is inside the combined card`);
       assert.match(checkbox(defaultConfig, label), /checked=""/, `${label} is checked by default`);
@@ -493,6 +508,8 @@ test('all Harness settings default on and preserve explicit opt-outs', async () 
     assert.match(defaultFeedbackInput, /min="2"/);
     assert.match(defaultFeedbackInput, /max="40"/);
     assert.match(defaultFeedbackInput, /value="4"/);
+    assert.match(defaultFeedbackInput, /disabled=""/);
+    assert.doesNotMatch(maxFeedbackMarkup({ ...defaultConfig, feedbackEnabled: true }) ?? '', /disabled=""/);
     assert.match(maxFeedbackMarkup({ ...defaultConfig, maxFeedback: 0 }) ?? '', /value="4"/);
     assert.match(maxFeedbackMarkup({ ...defaultConfig, maxFeedback: 24 }) ?? '', /value="24"/);
     assert.match(maxFeedbackMarkup({ ...defaultConfig, maxFeedback: 99 }) ?? '', /value="40"/);
@@ -774,6 +791,26 @@ test("resolveExecutionModelAndThinking falls back to config and role models when
   });
   assert.equal(mergerResult.model, "env/merger-model");
   assert.equal(mergerResult.thinkingLevel, "xhigh");
+});
+
+test("provider catalog subscribers observe replacement and invalidation, but not duplicate snapshots", () => {
+  const original = providerAuth.getCachedCatalog();
+  const snapshots: Array<ProviderCatalog | null> = [];
+  const unsubscribe = providerAuth.subscribeCatalog(() => snapshots.push(providerAuth.getCachedCatalog()));
+  try {
+    providerAuth.setCachedCatalog(catalog);
+    providerAuth.setCachedCatalog(catalog);
+    const refreshed = { ...catalog, models: [] };
+    providerAuth.setCachedCatalog(refreshed);
+    providerAuth.setCachedCatalog(null);
+    assert.deepEqual(snapshots, [catalog, refreshed, null]);
+    unsubscribe();
+    providerAuth.setCachedCatalog(catalog);
+    assert.equal(snapshots.length, 3, "unmounted consumers stop receiving updates");
+  } finally {
+    unsubscribe();
+    providerAuth.setCachedCatalog(original);
+  }
 });
 
 test("providerAuth catalog cache stores and returns synchronously without redundant fetches", async () => {

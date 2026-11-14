@@ -28,6 +28,76 @@ process.chdir(repository);
 
 try {
   const adapterPath = join(source, "engine/prompt-extension.ts");
+  // Opt-in is independent of the retry budget. Recreate the extension in both
+  // directions, as cold and prepared Planner launches do for each turn.
+  for (const enabled of [undefined, "true", "false", "true", undefined]) {
+    if (enabled === undefined) delete process.env.GRAPHER_FEEDBACK_ENABLED;
+    else process.env.GRAPHER_FEEDBACK_ENABLED = enabled;
+    const probe = await loadExtensions([join(source, "backend/resources/planner.ts")], repository);
+    assert.deepEqual(probe.errors, []);
+    const tools = probe.extensions[0].tools;
+    const edgeTool = tools.get("edge")!.definition;
+    const wire = convertResponsesTools([edgeTool])[0] as any;
+    const fields = wire.parameters.properties.edges.items.properties;
+    assert.deepEqual(Object.keys(fields), enabled === "true" ? ["from", "to", "feedback", "delete"] : ["from", "to", "delete"]);
+    if (enabled === "true") {
+      assert.match(edgeTool.description, /feedback/);
+      continue;
+    }
+    assert.doesNotMatch(JSON.stringify([...tools.values()].map(tool => tool.definition)), /feedback/i);
+    for (const args of [{ from: "a", to: "b", feedback: true }, { edges: [{ from: "a", to: "b", feedback: false }] }]) {
+      assert.throws(() => edgeTool.prepareArguments!(args), /unsupported field.*feedback.*graph is unchanged/s);
+    }
+    writeFileSync(process.env.GRAPHER_GRAPH_PATH!, JSON.stringify({ originalGoal: "Test", nodes: [
+      { name: "a", task: "Build" }, { name: "b", task: "Review" },
+    ], edges: [] }));
+    const args = edgeTool.prepareArguments!({ from: "a", to: "b" }) as any;
+    const result = await edgeTool.execute("off", args, undefined, undefined, {} as ExtensionContext);
+    assert.deepEqual(JSON.parse(result.content[0].text).topology, { rootNodes: ["a"], "from: [to]": { a: ["b"], b: [] } });
+    assert.doesNotMatch(result.content[0].text, /feedback/i);
+    assert.equal(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8")).edges[0].feedback, false);
+    const legacy = JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8"));
+    legacy.nodes[1].task = "Review and use <FEEDBACK> if needed";
+    const nodeTool = tools.get("node")!.definition;
+    const edit = nodeTool.prepareArguments!({ id: "a", task: "Build updated" }) as any;
+    for (const withRoute of [false, true]) {
+      legacy.edges = [{ from: "a", to: "b", feedback: false }, ...(withRoute ? [{ from: "b", to: "a", feedback: true }] : [])];
+      writeFileSync(process.env.GRAPHER_GRAPH_PATH!, JSON.stringify(legacy));
+      const edited = await nodeTool.execute("off-node", edit, undefined, undefined, {} as ExtensionContext);
+      assert.equal(JSON.parse(edited.content[0].text).applied, true);
+      assert.doesNotMatch(edited.content[0].text, /feedback/i, "Legacy routes and marker warnings stay out of disabled tool projections");
+      assert.deepEqual(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8")).edges, legacy.edges, "Projection never rewrites committed legacy routes");
+    }
+    const beforeRejected = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
+    const rejected = await edgeTool.execute("off-remove-path", edgeTool.prepareArguments!({ from: "a", to: "b", delete: true }) as any, undefined, undefined, {} as ExtensionContext);
+    const rejectedBody = JSON.parse(rejected.content[0].text);
+    assert.equal(rejectedBody.applied, false);
+    assert.deepEqual(rejected.details.diagnosticCodes, ["E207"]);
+    assert.match(rejectedBody.diagnostics[0], /Add replacement dependency paths/);
+    assert.doesNotMatch(rejected.content[0].text, /feedback|<ACCEPT>/i, "Rejected edits must not reintroduce the disabled protocol");
+    assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8"), beforeRejected);
+    // An ordinary replacement path is still actionable without editing a hidden route.
+    await nodeTool.execute("off-add-node", nodeTool.prepareArguments!({ id: "middle", task: "Intermediate work" }) as any, undefined, undefined, {} as ExtensionContext);
+    const rewired = await edgeTool.execute("off-rewire", edgeTool.prepareArguments!({ edges: [
+      { from: "a", to: "middle" }, { from: "middle", to: "b" }, { from: "a", to: "b", delete: true },
+    ] }) as any, undefined, undefined, {} as ExtensionContext);
+    assert.equal(JSON.parse(rewired.content[0].text).applied, true);
+    assert.doesNotMatch(rewired.content[0].text, /feedback/i);
+    assert.ok(JSON.parse(readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8")).edges.some((edge: any) => edge.feedback && edge.from === "b" && edge.to === "a"));
+    const valid = readFileSync(process.env.GRAPHER_GRAPH_PATH!, "utf8");
+    const invalid = JSON.parse(valid);
+    invalid.edges.push({ from: "b", to: "middle", feedback: true });
+    writeFileSync(process.env.GRAPHER_GRAPH_PATH!, JSON.stringify(invalid));
+    const multiple = await nodeTool.execute("off-multiple", edit, undefined, undefined, {} as ExtensionContext);
+    assert.equal(JSON.parse(multiple.content[0].text).applied, false);
+    assert.ok(multiple.details.diagnosticCodes.includes("E208"));
+    assert.doesNotMatch(multiple.content[0].text, /feedback/i);
+    writeFileSync(process.env.GRAPHER_GRAPH_PATH!, valid);
+    const deleted = await nodeTool.execute("off-delete", nodeTool.prepareArguments!({ id: "a", delete: true }) as any, undefined, undefined, {} as ExtensionContext);
+    assert.doesNotMatch(deleted.content[0].text, /feedback/i);
+  }
+  process.env.GRAPHER_FEEDBACK_ENABLED = "true";
+  writeFileSync(process.env.GRAPHER_GRAPH_PATH!, JSON.stringify({ originalGoal: "Test", nodes: [], edges: [] }));
   const loaded = await loadExtensions([join(source, "backend/resources/planner.ts"), adapterPath], repository);
   assert.deepEqual(loaded.errors, []);
   assert.deepEqual([...loaded.extensions[1].tools.keys()].sort(), ["bash", "edit", "read", "write"], "Planner adapter preserves its tool surface");
@@ -71,6 +141,7 @@ try {
   assert.match(edgeDescription, /the `from` node can optionally send a feedback message to the `to` node, which must be an ancestor of the `from` node/);
   assert.match(edgeDescription, /the target receives the source's completed workspace state and feedback/);
   assert.match(edgeDescription, /feedback source (?:has at most one target|may have only one feedback target)/i);
+  assert.match(edgeDescription, /source and other previously run descendants retain their own context/);
   assert.doesNotMatch(edgeDescription, /->|maxFeedback|retry budget|reviewer|ignored|non-Git|drain|fork/i);
   const context = { cwd: repository, sessionManager: { getSessionId: () => "planner-test", getSessionFile: () => undefined } } as unknown as ExtensionContext;
   async function call(name: string, parameters: Record<string, unknown>) {
@@ -121,8 +192,6 @@ try {
   }
   const node = (edit: Record<string, unknown>) => call("node", { nodes: [edit] });
   const edge = (edit: Record<string, unknown>) => call("edge", { edges: [edit] });
-  const feedbackWarning = (from: string, to: string, nodes: string[]) =>
-    `If <FEEDBACK> is sent from ${from} to ${to}, these nodes will rerun: ${nodes.join(", ")}.`;
   // Verify the actual provider schema, then exercise nullable wire arguments
   // through Pi's validator and the real compiler (not direct execute alone).
   for (const name of ["node", "edge"]) {
@@ -375,8 +444,8 @@ try {
     feedbackTo: { review: "build" },
   });
   assert.equal(repairedFeedback.warnings, undefined);
-  assert.deepEqual(repairedFeedback.notes, [feedbackWarning("review", "build", ["build", "review"])], "Adding a feedback route replaces the missing-route warning with a rerun-scope note");
-  assert.equal(await toolResultHook({ toolName: "edge", details: repaired.details, isError: false }), undefined, "Feedback scope notes do not reject mutations");
+  assert.equal(repairedFeedback.notes, undefined, "Adding a feedback route resolves the missing-route warning without returning a rerun-scope note");
+  assert.equal(await toolResultHook({ toolName: "edge", details: repaired.details, isError: false }), undefined, "A valid feedback route remains accepted");
   const portableGraph = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   for (const task of [`Work at ${repository}.`, `Read ${repository}/sample.txt`]) {
     await node({ name: "build", task });
@@ -396,7 +465,7 @@ try {
   const deletedBuild = JSON.parse((await node({ name: "build", delete: true })).content[0].text);
   assert.deepEqual(deletedBuild.topology, { rootNodes: ["review"], "from: [to]": { review: [] }, feedbackTo: {} });
   assert.equal(deletedBuild.warnings.length, 1);
-  assert.match(deletedBuild.warnings[0], /review mentions <FEEDBACK>/, "Deleting the feedback target removes the scope note and exposes the missing-route warning again");
+  assert.match(deletedBuild.warnings[0], /review mentions <FEEDBACK>/, "Deleting the feedback target exposes the missing-route warning again");
   assert.deepEqual(deletedBuild.notes, [
     "Deleted node build also removed its incident edges: build → review, review → build (feedback).",
   ]);
@@ -632,7 +701,7 @@ fn main() {
     feedbackTo: { verification: "parser" },
   });
   assert.equal(rewired.warnings, undefined);
-  assert.deepEqual(rewired.notes, [feedbackWarning("verification", "parser", ["contract", "integration", "parser", "search", "verification"])]);
+  assert.equal(rewired.notes, undefined, "New feedback routes do not add rerun-scope notes");
   // Node deletion removes incident edges; other targets can be replaced atomically.
   assert.equal(JSON.parse((await call("node", { nodes: [
     { name: "contract", delete: true },
@@ -658,10 +727,10 @@ fn main() {
   ] })).content[0].text);
   assert.equal(addedBranch.applied, true);
   assert.equal(addedBranch.warnings, undefined);
-  assert.deepEqual(addedBranch.notes, [feedbackWarning("check", "fix", ["check", "fix"])], "Existing feedback routes are not repeated when adding another branch");
+  assert.equal(addedBranch.notes, undefined, "Neither new nor existing feedback routes produce rerun-scope notes");
 
-  // Feedback-scope notes belong only to routes newly added by this call,
-  // not to node edits, dependency changes, or idempotent edge replacements.
+  // Neither tool returns feedback-scope descriptions, including route creation,
+  // retargeting and re-addition. Other mutation notes and warnings remain intact.
   const beforeIncrementalWarnings = readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8");
   writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify({
     originalGoal: "Incremental warnings",
@@ -691,17 +760,18 @@ fn main() {
   assert.equal(rejectedFeedback.warnings, undefined);
   assert.equal(rejectedFeedback.notes, undefined);
   assert.equal(readFileSync(process.env.GRAPHER_GRAPH_PATH, "utf8"), beforeRejectedFeedback);
-  const allScope = ["base", "inspect", "review", "ship", "unrelated"];
   const mixedFeedback = JSON.parse((await call("edge", { edges: [
     { from: "inspect", to: "base", feedback: true },
     { from: "review", to: "base", feedback: true },
     { from: "ship", to: "inspect", feedback: true },
   ] })).content[0].text);
   assert.equal(mixedFeedback.warnings, undefined);
-  assert.deepEqual(mixedFeedback.notes, [
-    feedbackWarning("inspect", "base", allScope),
-    feedbackWarning("ship", "inspect", ["inspect", "ship", "unrelated"]),
-  ], "Batch results include every new route, but not an existing route interleaved between them");
+  assert.equal(mixedFeedback.notes, undefined, "Mixed new and existing feedback routes produce no rerun-scope notes");
+  const prunedWithFeedback = JSON.parse((await edge({ from: "base", to: "ship" })).content[0].text);
+  assert.equal(prunedWithFeedback.warnings, undefined);
+  assert.deepEqual(prunedWithFeedback.notes, [
+    "Auto-removed redundant direct edge implied by indirect paths (saved, no retry needed): base → ship (via base → review → inspect → ship).",
+  ], "Pruning notes remain visible even when the compiler also reports feedback scopes");
   const reappliedRoute = JSON.parse((await edge({ from: "inspect", to: "base", feedback: true })).content[0].text);
   assert.equal(reappliedRoute.warnings, undefined);
   assert.equal(reappliedRoute.notes, undefined, "Reapplying a route does not add it again");
@@ -709,13 +779,13 @@ fn main() {
     { from: "ship", to: "inspect", delete: true }, { from: "ship", to: "base", feedback: true },
   ] })).content[0].text);
   assert.equal(retargetedFeedback.warnings, undefined);
-  assert.deepEqual(retargetedFeedback.notes, [feedbackWarning("ship", "base", allScope)], "Retargeting reports only the new route");
+  assert.equal(retargetedFeedback.notes, undefined, "Retargeting a feedback route does not return a rerun-scope note");
   const removedRoute = JSON.parse((await edge({ from: "inspect", to: "base", delete: true })).content[0].text);
   assert.equal(removedRoute.warnings, undefined);
   assert.equal(removedRoute.notes, undefined, "Removing a route does not report other routes");
   const readdedRoute = JSON.parse((await edge({ from: "inspect", to: "base", feedback: true })).content[0].text);
   assert.equal(readdedRoute.warnings, undefined);
-  assert.deepEqual(readdedRoute.notes, [feedbackWarning("inspect", "base", allScope)], "Re-adding a removed route reports it again");
+  assert.equal(readdedRoute.notes, undefined, "Re-adding a feedback route does not return a rerun-scope note");
   const deletedUnrelated = JSON.parse((await node({ id: "unrelated", delete: true })).content[0].text);
   assert.equal(deletedUnrelated.warnings, undefined);
   assert.deepEqual(deletedUnrelated.notes, [
@@ -794,7 +864,7 @@ fn main() {
   revisionContext();
   const restoreFeedback = JSON.parse((await edge({ from: "review", to: "build", feedback: true })).content[0].text);
   assert.equal(restoreFeedback.warnings, undefined);
-  assert.deepEqual(restoreFeedback.notes, [feedbackWarning("review", "build", ["build", "consumer", "review"])], "Reverting the edit removes the rerun warning");
+  assert.equal(restoreFeedback.notes, undefined, "Reverting the edit removes the impact warning without adding a feedback-scope note");
   revisionContext();
   const changeTask = JSON.parse((await node({ name: "build", task: "Changed build" })).content[0].text);
   assert.deepEqual(changeTask.warnings, ["Current changes will invalidate and rerun 3 completed nodes: build, consumer, review."], "Node task changes retain cumulative impact without feedback-scope warnings");

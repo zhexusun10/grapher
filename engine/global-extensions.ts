@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { isCaseInsensitive, pathKey, toHostInput } from './path-identity.mjs';
 import { fileURLToPath } from 'node:url';
-import { DefaultPackageManager, SettingsManager, createMcpExtension, type InlineExtension } from './pi-compat.ts';
+import { DefaultPackageManager, SettingsManager, createMcpExtension, composerCommandsExtension, type InlineExtension } from './pi-compat.ts';
 import { loadGrapherMcpConfig } from './mcp-config.ts';
 import workspacePolicy from './prompt-extension.ts';
 
@@ -159,6 +159,9 @@ export async function setExtensionEnabled(directory: string, id: string, enabled
 export async function executionResources(args: string[], directory: string, role = process.env.GRAPHER_MODE) {
   const state = overrides(directory);
   const extensionFactories: InlineExtension[] = [{ name: workspacePolicyName, factory: workspacePolicy }];
+  if ((role === 'planner' || role === 'node') && args.some((arg, index) => arg === '--mode' && args[index + 1] === 'rpc')) {
+    extensionFactories.push(composerCommandsExtension);
+  }
   const extensions: string[] = [];
   const skills: string[] = [];
   const discoverExtensions = !args.includes('--no-extensions') && !args.includes('-ne');

@@ -11,7 +11,7 @@ const skillsRequests = new Map<string, number>();
 // Share only requests in flight; settled history is never cached as authoritative state.
 const historyRequests = new Map<string, Promise<Snapshot>>();
 const snapshotMutations = new Set([
-  "save_graph", "add_manual_node", "update_unstarted_node_task", "save_config", "plan_goal", "control", "edit_planner", "edit_node",
+  "save_graph", "add_manual_node", "update_unstarted_node_task", "save_config", "composer_models", "composer_rename", "plan_goal", "control", "edit_planner", "edit_node",
   "load_run", "reset_workspace", "clear_history", "delete_run", "delete_workspace",
 ]);
 
@@ -19,7 +19,7 @@ const snapshotMutations = new Set([
 // long-running mutations. A client timeout never claims that a server-side
 // write was rolled back.
 const boundedCommands = new Set([
-  "bootstrap", "history", "snapshot", "snapshot_if_changed", "save_config",
+  "bootstrap", "history", "snapshot", "snapshot_if_changed", "save_config", "composer_models", "composer_rename",
   "detect_repository", "repository_status", "get_planning", "list_plannings",
   "get_planning_snapshot", "get_execution_output", "get_planning_output", "get_file_changes",
   "open_workspace_file",
@@ -71,7 +71,7 @@ function normalizeSnapshotResult<T>(result: T): T {
 
 function request<T>(command: string, body: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
   if (!boundedCommands.has(command)) return requestBody<T>(command, body, signal);
-  const message = command === "save_config"
+  const message = command === "save_config" || command === "composer_models"
     ? t("保存设置请求超时，请刷新确认是否已生效后再重试。")
     : t("后端响应超时，请稍后重试。");
   return withRequestTimeout(deadline => requestBody<T>(command, body, deadline), metadataTimeoutMs, message, signal);
@@ -79,7 +79,8 @@ function request<T>(command: string, body: Record<string, unknown> = {}, signal?
 
 async function requestBody<T>(command: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   // A post-action reader must not join a metadata request begun before the action.
-  if (snapshotMutations.has(command)) historyRequests.clear();
+  const mutatesSnapshot = snapshotMutations.has(command) || (command === "composer_command" && body.operation === "withdraw");
+  if (mutatesSnapshot) historyRequests.clear();
   let response: Response;
   try {
     response = await fetch(`/api/${command}`, {
@@ -89,7 +90,7 @@ async function requestBody<T>(command: string, body: Record<string, unknown>, si
       signal,
     });
   } catch (error) {
-    if (snapshotMutations.has(command)) historyRequests.clear();
+    if (mutatesSnapshot) historyRequests.clear();
     if (signal?.aborted) throw error;
     throw new Error(t("无法连接后端，请在终端运行 npm run backend。"));
   }
@@ -97,10 +98,10 @@ async function requestBody<T>(command: string, body: Record<string, unknown>, si
     enableRuntimeEvents();
   }
   const data = await response.json().catch(() => {
-    if (snapshotMutations.has(command)) historyRequests.clear();
+    if (mutatesSnapshot) historyRequests.clear();
     throw new Error(t("后端未返回有效响应 ({0})，请确认终端中的后端已启动。", response.status));
   });
-  if (snapshotMutations.has(command)) historyRequests.clear();
+  if (mutatesSnapshot) historyRequests.clear();
   if (!response.ok || data.error) throw new Error(data.error || t("后端请求失败 ({0})", response.status));
   return normalizeSnapshotResult(data.result as T);
 }
@@ -159,6 +160,15 @@ export const runtimeService = {
   updateUnstartedNodeTask: (runId: string, node: string, oldTask: string, task: string) =>
     request<Snapshot>("update_unstarted_node_task", { runId, node, oldTask, task }),
   addManualNode: (runId: string, node: ManualNodeRequest) => request<Snapshot>("add_manual_node", { runId, request: node }),
+  withdrawMessages: (runId: string, node: string | undefined, requestId: string) => withRequestTimeout(
+    signal => request<{ snapshot: Snapshot; messages: import("./composerDrafts").RecalledMessage[] }>(
+      "composer_command", { runId, node, requestId, operation: "withdraw" }, signal), metadataTimeoutMs,
+    t("撤回请求超时，请重试以恢复已撤回的消息。")),
+  composerModels: (fields: Record<string, unknown>) => request<Snapshot>("composer_models", fields),
+  composerRename: (fields: { runId: string; title: string }) => request<Snapshot>("composer_rename", fields),
+  composerCommand: <T = unknown>(fields: Record<string, unknown>) => withRequestTimeout(
+    signal => requestBody<T>("composer_command", fields, signal), fields.operation === "execute" ? 310_000 : metadataTimeoutMs,
+    t("Pi 指令请求超时，请确认执行结果后再重试。")),
   saveConfig: (config: Config, runId?: string) => request<Bootstrap>("save_config", { config, ...(runId ? { runId } : {}) }),
   planGoal: (goal: string, config: Config, mode?: string) => request<Snapshot>("plan_goal", { goal, config, mode }),
   async planGoalStream(

@@ -17,6 +17,7 @@ fn execute_script_in_mode(script: &str, mode: Option<&str>) -> (Result<String, S
     let script_path = temp.path().join("fake-pi.sh");
     fs::write(&script_path, script).unwrap();
     let config = Config {
+        feedback_enabled: false,
         environment: None,
         repository: String::new(),
         engine: "pi".into(),
@@ -317,6 +318,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         thinking_level: "medium".into(),
         role_models: Default::default(),
         isolate_parallel_nodes: true, post_task_review: false,
+        feedback_enabled: false,
         planner_write_tools: true,
     };
     for role in [
@@ -360,10 +362,12 @@ fn planner_and_node_allow_resources_while_partitioner_disables_them() {
     let script = r#"cat >/dev/null
 echo "ARGS: $@"
 echo "PLANNER_WRITE_TOOLS: ${GRAPHER_PLANNER_WRITE_TOOLS:-unset}"
+echo "FEEDBACK_ENABLED: ${GRAPHER_FEEDBACK_ENABLED:-unset}"
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"OK"}]}}'
 "#;
     fs::write(&script_path, script).unwrap();
     let config = Config {
+        feedback_enabled: false,
         environment: None,
         repository: String::new(),
         engine: "pi".into(),
@@ -459,10 +463,12 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         planner_out.contains("PLANNER_WRITE_TOOLS: true"),
         "Planner extension must be told to mount its file tools"
     );
+    assert!(planner_out.contains("FEEDBACK_ENABLED: false"));
     // A saved setting can withhold file mutation tools; it must not use a
     // --tools allowlist that would also hide extension-contributed tools. The
     // request keeps the full descriptive list so Config stays authoritative.
     let read_only_config = Config {
+        feedback_enabled: true,
         planner_write_tools: false,
         isolate_parallel_nodes: true,
         ..config.clone()
@@ -485,6 +491,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         },
         |text| read_only_planner_out.push_str(&text),
     );
+    assert!(read_only_planner_out.contains("FEEDBACK_ENABLED: true"));
     assert!(
         read_only_planner_out.contains("--exclude-tools ls,find,grep,write,edit")
             && !read_only_planner_out.contains("--tools"),
@@ -577,6 +584,7 @@ printf 'ROLE=%s\nROOT=%s\nORIGINAL_ROOT=%s\n' "$GRAPHER_MODE" "$GRAPHER_WORKSPAC
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"OK"}]}}'
 "#).unwrap();
     let config = Config {
+        feedback_enabled: false,
         environment: None,
         repository: String::new(),
         engine: "pi".into(),
@@ -655,6 +663,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     )
     .unwrap();
     let config = Config {
+        feedback_enabled: false,
         environment: None,
         repository: repository.to_string_lossy().into(),
         engine: "pi".into(),
@@ -724,6 +733,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     std::env::set_var("PI_SESSION_FILE", "leaked-external-file");
 
     let base_config = Config {
+        feedback_enabled: false,
         environment: None,
         repository: String::new(),
         engine: "pi".into(),

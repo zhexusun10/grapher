@@ -6,16 +6,16 @@
 
 <p align="center">
   <strong>Don't orchestrate agents. Compile work.</strong><br>
-  No more “lost in translation”.
+  Stop losing code in multi-agent chat loops. Turn complex engineering goals into inspectable execution graphs—powered by a deterministic Rust runtime and Git state inheritance.
 </p>
 
 <p align="center">
-  A local coding-agent workbench that turns complex work into inspectable execution graphs.<br>
-  Built on <a href="https://github.com/earendil-works/pi">Pi</a>
+  Local-first coding-agent workbench built on <a href="https://github.com/earendil-works/pi">Pi</a>
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
+  <a href="#why-grapher">Why Grapher</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="docs/user-guide.md">User guide</a> ·
   <a href="README.zh-CN.md">简体中文</a>
@@ -29,105 +29,69 @@
 
 <p align="center">
   <img src="assets/readme-graph.png" width="100%" alt="Current Grapher workbench showing a 21-node example video detection research plan awaiting approval">
-  <br><sub>Current UI with a 21-node example plan: parallel branches, execution batches and bounded feedback. Shown with manual approval enabled; not a completed run.</sub>
+  <br><sub>Grapher Workbench: A 21-node example plan compiled into parallel branches, execution batches, and bounded feedback loops (shown with manual approval enabled; not a completed run).</sub>
 </p>
 
-## Typical multi-agent systems vs Grapher
+---
+
+## Stop Playing Multi-Agent Telephone
+
+Most multi-agent frameworks trap your work inside a fragile conversation loop: a "Supervisor LLM" summarizes instructions, chats with sub-agents, interprets their replies, and decides what to do next. With every handoff, technical constraints degrade, tokens burn, and context gets **lost in translation**.
+
+**Grapher compiles the workflow out of the conversation.**
 
 ```text
-Typical multi-agent systems
+Typical multi-agent systems (Conversational orchestration)
 
 Goal → Supervisor LLM → Agent → Supervisor LLM → Agent → ...
-             ↑ scheduling lives inside the conversation loop
+             ↑ scheduling & state live inside a lossy chat loop
 
 
-Grapher
+Grapher (Compiled execution graph)
 
-Goal → Planner → Compiled Graph → Deterministic Runtime
+Goal → Planner → Compiled Graph → Deterministic Rust Runtime
                                       ├── Agent A ──┐
-                                      ├── Agent B ──┼──→ Agent D
+                                      ├── Agent B ──┼──→ Agent D ──→ Git Publish
                                       └── Agent C ──┘
 ```
 
-**Core differences:**
+1. **Zero "Lost in Translation" (Code over Chat)** — Agents in Grapher never chat with each other. Downstream tasks inherit verifiable **Git commit history and full workspace state** (including `.gitignore` files), not summarized transcripts. Every agent starts with a clean context window and exact code.
+2. **No Supervisor in the Execution Loop** — The LLM plans the graph once, then steps out of the scheduler. Dependencies, concurrency, retries, invalidation, and delivery are deterministic Rust state transitions.
+3. **Autonomous Loop Engineering** — With **Auto Approve** and **Post-task Planner Review** enabled by default, Grapher closes the iteration loop: once a graph delivers its code, the Planner automatically inspects the updated repo and compiles follow-up work or final verification until the goal is met.
+4. **No Hardcoded Role Theater** — Forget artificial "PM / Architect / QA" personas. Every node runs a full-capability coding agent whose specialization comes purely from its task objective and inherited codebase state.
 
-1. **No supervisor in the execution loop** — The LLM plans the graph, then gets out of the scheduler.
-2. **Never lost in translation (Zero conversational message passing)** — Traditional multi-agent systems rely on endless agent-to-agent chatter where requirements and constraints degrade like a game of telephone. In Grapher, nodes never exchange chat messages; parallel tasks inherit verifiable Git code states and history, not conversations.
-3. **The graph is executable state** — Dependencies, retries, feedback, and publication are explicit runtime transitions.
-4. **No predefined agent roles** — All nodes run general-purpose coding agents; specialization comes from task context, not hardcoded roles.
+## Why Grapher
 
-## Why Grapher?
+- **Visual, Steerable Workbench** — Chat with agents, manage provider auth and per-role models, inspect live tool calls, thinking traces, and file diffs, and pause or steer any running node from a single UI.
+- **Smart Workspace Handoffs** — At idle boundaries, small dispatches (≤3 nodes after the worker cap) work directly in your source tree. With isolation enabled, larger waves use private workspaces and publish after the whole batch succeeds, replacing each changed file atomically. Shared-source work refills free worker slots without waiting for unrelated siblings; overlapping edits are not isolated.
+- **Bounded Feedback & Rework** — Connect review or verification nodes back to implementation nodes with explicit retry limits—catching regressions automatically without runaway loops.
+- **Unbiased Models, Deterministic Harness** — Systemic orchestration rules live in the Rust runtime rather than bloated system prompts, keeping models sharp, general-purpose, and free of framework prior bias.
+- **Local-First Control** — Everything executes on your machine and publishes verified results back to your local repository. Want human-in-the-loop control? Turn off **Auto Approve** to inspect and gate every graph before a single node runs.
 
-- **Integrated coding-agent workbench** — Chat with coding agents, manage provider authentication and per-role model settings, inspect tool calls, logs, and file diffs, and intervene from the same UI.
-- **Deterministic orchestration** — Scheduling, dependencies, invalidation, retries, and bounded feedback are explicit Rust state transitions. We don't introduce prior bias to the model; keep it flexible and general-purpose by decoupling model usage from system orchestration: deterministic and systemic rules belong to the runtime/harness, not to prompts that expose system details.
-- **Workspace inheritance (Code, not chat)** — Children inherit parent Git history and its complete project-file state, including files matched by `.gitignore`. Nothing is lost in translation across inter-agent dialogue because agents never chat with each other: conversations stay strictly within their own nodes, while code flows through verified Git snapshots. Small execution batches share source for live file access; larger batches use private workspaces and deliver their results before the next batch starts.
-- **Inspectable execution graph & loop engineering** — See dependencies, parallel branches, and bounded rework in the UI. Auto Approve and post-task Planner review default on for autonomous multi-turn iteration; turn off Auto Approve to review each graph before execution.
-- **Local-first** — Run on your machine and publish valid Graph results back to your codebase before declaring completion. Model requests still go to your configured provider.
-
-## When should I use Grapher?
+## Right-Sized for Every Task: Serial vs. Graph
 
 <p align="center">
   <img src="assets/readme-home.png" width="100%" alt="Current Grapher home screen with a video detection research goal and Serial and Graph mode controls">
-  <br><sub>Start with a goal, then choose Serial or Graph. Auto can be enabled in Harness settings.</sub>
+  <br><sub>Start with a goal and choose Serial or Graph. Auto routing can be enabled in Harness settings.</sub>
 </p>
 
-**More agents are not always better.** Grapher works best when a coding task contains independent workstreams, for example:
+**More agents are not always better.** Grapher gives you a fast single-agent mode for linear work and a compiled task graph when parallelism pays off:
 
-- Frontend + backend changes
-- Implementation + tests
-- Machine-learning and research pipelines with independent feature, training, and evaluation modules
-- Implementation followed by bounded review/rework
-
-For small, linear, or tightly coupled tasks, use **Serial** instead. Use **Graph** when explicit dependencies and independent workstreams justify it; **Auto** lets the Partitioner choose.
+- **Frontend + Backend** changes developed concurrently
+- **Implementation + Tests** written and verified in parallel workstreams
+- **ML & Research Pipelines** with independent feature engineering, training, and evaluation modules
+- **Implementation + Review** with bounded automated rework routes
 
 | | Serial | Graph |
 | --- | --- | --- |
-| Best for | Small / linear tasks | Independent workstreams |
-| Coding agents | One | One or more task nodes |
-| Planning | Direct | Compiled execution graph |
-| Approval | Automatic | Auto Approve by default; manual approval optional |
-| Workspace | Your project | Selected when idle: shared source for up to three ready nodes, private workspaces above three |
-| Scheduling | Sequential | Dependency-aware, bounded parallelism |
+| **Best for** | Small, linear, or tightly coupled tasks | Complex goals with independent workstreams |
+| **Coding agents** | Single agent | One or more task nodes (DAG + optional bounded feedback) |
+| **Planning** | Direct execution | Compiled execution graph + optional post-task review loop |
+| **Approval** | Immediate | Auto Approve by default; manual approval gate optional |
+| **Workspace** | Direct in your project | Adaptive at idle boundaries: shared source for ≤3 dispatched nodes, private workspaces for >3 when isolation is enabled |
+| **Scheduling** | Sequential | Dependency-aware, bounded parallelism in Rust |
 
-All five **Settings → Harness settings** options default on; saved opt-outs are preserved. Turn off **Hide Auto mode** to show Auto and Partitioner model settings.
-
-By default, an idle Graph shares source when dispatching up to three ready nodes; larger groups use isolation. Shared-source work fills free slots as dependencies resolve, without waiting for unrelated nodes or switching directories. Private batches can refill free slots, but deliver only after every member succeeds; a failure or pause keeps the whole batch private. Workspace choice is reconsidered after delivery, including work added during Planner review. **Settings → Harness settings** can disable isolation for new conversations. Sharing reduces setup and merge costs, but overlapping edits may overwrite each other.
-
-See the [user guide](docs/user-guide.md) for planning side effects, controls and recovery. Graph is a route, not a minimum agent count; it can contain a single node.
-
-## Quick start
-
-**Requirements:** Node.js 22.19+, stable Rust, Git, npm, network access, and provider authentication. Windows needs Git for Windows Bash; macOS needs Xcode Command Line Tools for the Rust linker and uses the built-in Seatbelt sandbox for private Graph execution; private Linux Graph execution needs bubblewrap and permitted unprivileged user/mount/PID namespaces.
-
-**No build tools?** Download a ready-to-run [release archive](https://github.com/zhexusun10/grapher/releases/latest) instead: verify its `.sha256` checksum, extract it, and run `start.bat` (Windows) or `./start.sh` (macOS/Linux). Archives still require Node.js 22.19+ and Git at runtime; Rust and npm are not needed.
-
-```sh
-git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
-cd grapher
-npm run dev
-```
-
-`npm run dev` automatically checks prerequisites, initializes submodules, installs locked dependencies, and builds the backend. For manual or step-by-step setup, you can also run `npm ci --ignore-scripts` followed by `npm run pi:setup`.
-
-Open **<http://127.0.0.1:1420>**. The first launch may take time while Cargo compiles. On macOS, the backend keeps the display and system awake while it runs, so long tasks are not interrupted by idle sleep or the screen-saver lock; set `GRAPHER_KEEP_AWAKE=0` to disable this.
-
-1. In **Settings**, select a local project, authenticate a provider, and choose a `provider/model`. You can also sign in through `npm run pi`.
-2. Enter a coding goal. Choose **Serial** for a single Pi agent or **Graph** for a task graph. To let the Partitioner choose, show **Auto** in Harness settings.
-3. Graph starts automatically by default. To inspect and **approve** each plan first, turn off **Auto Approve** before submitting. Follow node logs, pause running nodes and later continue their sessions, or send instructions.
-4. Private Graph work is complete after valid results are published; shared-source work edits your project directly. Publication failures preserve state for inspection or retry.
-
-**Use trusted projects; start with a disposable one.** Planner Bash writes directly to the source before approval, even if planning fails or is cancelled; snapshots force-collect project files into Git except Runtime/managed-environment internals. Reject is not rollback. Windows workspaces are not filesystem sandboxes. Read [Before you approve](docs/user-guide.md#before-you-approve) and the [filesystem boundaries](docs/architecture/filesystem-isolation.md) before important work.
-
-For an existing clone, first run `git submodule update --init --recursive`. Pi is pinned; a global Pi installation is not substituted.
-
-For local production mode:
-
-```sh
-npm run build
-npm start
-```
-
-Open <http://127.0.0.1:1421>.
+> **Tip:** Not sure which mode fits? Enable **Auto** in **Settings → Harness settings** (turn off *Hide Auto mode*) to let the Partitioner route each goal automatically, or toggle **Enable Feedback** to unlock bounded rework edges. See the [User Guide](docs/user-guide.md) for workspace isolation and batch delivery details.
 
 ## How it works
 
@@ -144,51 +108,75 @@ Partitioner
              Planner
                 |
                 v
-       Execution graph --> Compiler --> User approval
-                                           |
-                                           v
-                              Deterministic Rust runtime
-                                  |               |
-                               Agent A         Agent B
-                                  \               /
-                                  Workspace inheritance
-                                           |
-                                           v
-                                        Agent C
-                                           |
-                                           v
-                                  Publish to project
+       Execution graph --> Compiler --> Approval (Auto or Manual)
+                                                  |
+                                                  v
+                                     Deterministic Rust runtime
+                                         |               |
+                                      Agent A         Agent B
+                                         \               /
+                                     Git workspace inheritance
+                                                  |
+                                                  v
+                                               Agent C
+                                                  |
+                                                  v
+                                         Publish to project
+                                                  |
+                                                  v
+                                    Post-task Planner review (Loop)
 ```
 
-Models decide how to split the work and perform each task. The compiler validates the graph. After compilation, the planner can stop: scheduling no longer depends on a coordinator's next message. Ordinary dependencies form a DAG: a child runs after its parents complete and inherits parent Git history plus the complete project-file state, including paths matched by `.gitignore`. Applied feedback sends bounded rework instructions and hands the sender's completed workspace to a fixed target, which continues its own conversation. Private project outputs use Git snapshots; shared-source nodes use live project files instead of snapshot handoffs. Conversations are never exchanged between nodes, ensuring technical intent and codebase reality are never lost in translation.
+1. **Plan & Compile** — The Planner decomposes your goal into a task graph, and the Rust compiler validates topology, dependencies, and feedback bounds. Once compiled, scheduling no longer depends on a coordinator LLM's next message.
+2. **Execute & Inherit via Git** — Ready nodes run in parallel. When a child node starts, it inherits its parents' Git commit history and complete project file state (including `.gitignore` paths). When a feedback edge triggers, the target node receives the sender's completed workspace and bounded rework instructions while continuing its own conversation. Zero chat messages are ever passed between nodes.
+3. **Publish & Loop** — Validated outputs are published back to your project. With **Post-task Planner Review** enabled, the Planner automatically inspects the delivered codebase and decides the next move—auditing results, spawning a follow-up graph, or wrapping up—forming a self-correcting engineering loop.
 
-When enabled, **Post-task Planner review** invokes the Planner once all nodes finish and results are delivered, through publication or direct source edits. The Planner inspects the updated workspace and decides the next step—auditing results, formulating a follow-up plan, reporting to the user, or completing wrap-up work—without violating node isolation (Git workspace inheritance with zero node-to-node messaging). Paired with **Auto Approve**, this supports robust, multi-turn loop engineering.
+## Quick start
 
-## Architecture
+### Option 1: Prebuilt Release (Fastest — No Rust or npm required)
 
-**Models do the coding; the runtime owns the workflow.** Grapher keeps dependencies, bounded rework and delivery explicit instead of delegating scheduling to another conversation. You can inspect the plan, intervene during execution and verify that the result reached your project.
+Download the latest [release archive](https://github.com/zhexusun10/grapher/releases/latest), verify its `.sha256` checksum, extract it, and launch:
 
-For everyday operation, read the [user guide](docs/user-guide.md). Building or changing Grapher? Start with [developer architecture](docs/architecture/overview.md) for component boundaries and canonical contracts.
+- **Windows:** `start.bat`
+- **macOS / Linux:** `./start.sh`
 
-## Development
+*(Requires Node.js 22.19+ and Git at runtime.)*
+
+### Option 2: Run from Source
 
 ```sh
-npm run check
-npm run build
-npm run test:frontend
-npm run test:backend          # Rust fixtures; no paid model
+git clone --recurse-submodules https://github.com/zhexusun10/grapher.git
+cd grapher
+npm run dev
 ```
 
-See [Contributing](CONTRIBUTING.md) and the [testing guide](docs/development/testing.md) for integration/platform checks and log acceptance. Report vulnerabilities through the [security policy](SECURITY.md). Model-free tests do not establish provider quality or every sandbox boundary.
+`npm run dev` checks prerequisites, initializes the pinned `pi/` submodule, installs locked dependencies, and compiles the Rust backend (for manual step-by-step setup, run `npm ci --ignore-scripts` then `npm run pi:setup`). For an existing clone, run `git submodule update --init --recursive` first.
 
-## Documentation
+Open **<http://127.0.0.1:1420>** (first launch compiles the Rust backend). For local production mode, run `npm run build && npm start` and open <http://127.0.0.1:1421>.
 
-**Using Grapher:** [User guide](docs/user-guide.md) · [Security policy](SECURITY.md).
+### Your First Run
 
-**Developing Grapher:** [Architecture contracts](docs/architecture/overview.md) · [Contributing guide](CONTRIBUTING.md) · [Benchmarks](docs/benchmarks/harbor.md).
+1. **Connect a project & model** — In **Settings**, bind a local project directory, authenticate your model provider (or sign in via `npm run pi`), and select a `provider/model`.
+2. **Submit a goal** — Pick **Serial** for a single agent or **Graph** for a compiled task graph.
+3. **Watch or steer** — Graph runs start automatically by default (turn off **Auto Approve** before submitting to review and approve plans manually). Inspect live node logs and diffs, pause/resume nodes, or send mid-flight instructions at any time.
+4. **Verify delivery** — Shared-source runs edit your project live; isolated Graph batches publish verified results back to your codebase upon completion (preserving state for inspection or retry if publication fails).
 
-The [documentation index](docs/index.md) separates user guidance from developer task routes. Coding agents should use [AGENTS.md](AGENTS.md) for repository constraints.
+**System requirements:** Node.js 22.19+, stable Rust (for source builds), Git, npm, network access, and provider authentication. Windows requires Git for Windows Bash; macOS requires Xcode Command Line Tools (for Rust linking), uses the built-in Seatbelt sandbox for private Graph workspaces, and keeps the system awake during active runs (`GRAPHER_KEEP_AWAKE=0` to disable); Linux private Graph workspaces require `bubblewrap` with unprivileged user/mount/PID namespaces enabled.
+
+> [!IMPORTANT]
+> **Security & Project Boundaries — Use trusted projects; start with a disposable one.**
+> Planner Bash commands run directly in your source repository before approval, and rejecting or cancelling a plan does **not** roll back those writes. Git snapshots force-collect project files (including `.gitignore` matches) except Runtime/managed-environment internals. Windows workspaces are not filesystem sandboxes. Read [Before you approve](docs/user-guide.md#before-you-approve) and [Filesystem boundaries](docs/architecture/filesystem-isolation.md) before running on important repositories.
+
+## Documentation & Resources
+
+| Guide | What it covers |
+| --- | --- |
+| **[User Guide](docs/user-guide.md)** | Everyday workflow, steering controls, workspace modes, recovery, and safety |
+| **[Architecture Contracts](docs/architecture/overview.md)** | System boundaries, compiler rules, deterministic runtime, and Git workspace handoffs |
+| **[Benchmarks](docs/benchmarks/harbor.md)** | Harbor evaluation harness and benchmark methodology |
+| **[Contributing Guide](CONTRIBUTING.md)** & **[Testing](docs/development/testing.md)** | Development setup, ownership boundaries, and targeted test suites |
+| **[Documentation Index](docs/index.md)** & **[Security Policy](SECURITY.md)** | Full documentation map, agent rules ([AGENTS.md](AGENTS.md)), and vulnerability reporting |
 
 ## License
 
-Original Grapher code is licensed under the [MIT License](LICENSE), copyright © 2026 Sun Zhe-xu. The upstream `pi/` submodule has its own [MIT license and copyright notice](pi/LICENSE). Third-party dependencies retain their respective licenses.
+Original Grapher code is licensed under the [MIT License](LICENSE), copyright © 2026 Sun Zhe-xu. The upstream `pi/` submodule is governed by its own [MIT license and copyright notice](pi/LICENSE). Third-party dependencies retain their respective licenses.

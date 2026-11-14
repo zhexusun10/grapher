@@ -613,14 +613,14 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
       assert.equal(await composer.inputValue(), "", "an accepted draft does not reappear on return");
       await composer.fill("Unsent shared-node draft");
 
-      const assertHomeVisible = () => page.waitForFunction(() => {
+      const assertHomeVisible = (titleVisible = true) => page.waitForFunction(expectedTitleVisible => {
         const home = document.querySelector(".landing-screen");
         const title = home?.querySelector(".landing-title-copy");
         const input = home?.querySelector("textarea");
-        return home && getComputedStyle(home).opacity === "1" && !home.inert &&
-          title?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+        return home && getComputedStyle(home).opacity === "1" && !home.inert && title &&
+          title.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) === expectedTitleVisible &&
           input?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-      }, undefined, { timeout: 5000 });
+      }, titleVisible, { timeout: 5000 });
       await waitForComposerSettled(page, ".pane-bottom-chat .prompt-box-container");
       const sourceComposer = await page.locator(".pane-bottom-chat .prompt-box-container").boundingBox();
       await page.evaluate(() => {
@@ -787,10 +787,13 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         await page.waitForFunction(() => !document.querySelector(".landing-screen .prompt-box-container").hasAttribute("data-resizing"));
         await assertOpaqueComposerNavigation(page, () => page.locator('[data-run-id="d"]').click());
         await assertOpaqueComposerNavigation(page, () => newConversation.click());
-        await assertHomeVisible();
+        // At 360px the long draft leaves no room for readable welcome copy;
+        // only that copy is hidden, never the restored editor or its controls.
+        await assertHomeVisible(height !== 360);
         assert.equal(await page.locator(".landing-screen textarea").inputValue(), homeDraft);
       }
       await page.setViewportSize({ width: 1280, height: 768 });
+      await assertHomeVisible();
 
       // Superseded initialization callbacks must not restore an older graph.
       for (const id of ["a", "c", "b", "d"]) {

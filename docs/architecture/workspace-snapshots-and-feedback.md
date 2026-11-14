@@ -167,7 +167,9 @@ recoveries are not rolled back or relocated to an obsolete directory. Their own
 Pi session forks and attachment-delivery receipts remain recoverable, including
 edited/deleted inputs; unreceipted partial copies still fail explicitly. Pending
 legacy publication is not silently canceled when source delivery may have begun.
-Invalidated descendants recompute instead of reviving doomed partial attempts.
+Feedback-invalidated descendants prepare fresh parent files instead of reviving
+doomed partial trees, while retaining their own conversation under the
+[feedback continuation contract](runtime.md#feedback-continuation-notices).
 Legacy Runs without a workspace-policy selection retain their old contract.
 
 For a shared batch:

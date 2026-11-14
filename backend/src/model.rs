@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(feature = "acceptance")]
 pub static LOG_TEXT_DESERIALIZED_BYTES: std::sync::atomic::AtomicUsize =
@@ -292,6 +292,9 @@ pub struct Config {
     pub isolate_parallel_nodes: bool,
     #[serde(default = "default_max_feedback")]
     pub max_feedback: usize,
+    /// Opt-in Planner capability; persisted graph routes remain replayable.
+    #[serde(default)]
+    pub feedback_enabled: bool,
     #[serde(default = "default_auto_approve")]
     pub auto_approve: bool,
     #[serde(default = "default_post_task_review")]
@@ -740,6 +743,25 @@ pub struct PendingNodeMessage {
     pub shared_workspace: bool,
 }
 
+/// A feedback-invalidated result keeps its own conversation, not its old files.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackContinuation {
+    pub anchor_execution_id: String,
+    pub target: String,
+    pub sender: bool,
+    /// Bound once, before dispatch; retries/replay never re-render accepted text.
+    pub instruction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<ImageAttachment>>,
+    /// Execution that bound the current turn's Pi delivery boundary. Not a
+    /// receipt of consumption: recovery checks the persisted session after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+    #[serde(default)]
+    pub dispatched: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeState {
@@ -756,11 +778,13 @@ pub struct NodeState {
     pub edit_execution_id: Option<String>,
     #[serde(default)]
     pub human_instruction: bool,
-    /// Model settings synchronized before first dispatch or while failed.
-    /// Running/completed nodes and the Run's original config stay unchanged;
-    /// a later dispatch uses the conversation selection before this override.
+    /// Model settings synchronized before dispatch/retry, or explicitly chosen
+    /// for this node when model_override is true. Live jobs remain immutable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_config: Option<RoleModelConfig>,
+    /// Explicit composer selection; takes precedence over the Run profile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_override: bool,
     /// Legacy record of model changes saved while failed. Explicit Continue
     /// can retry regardless; old snapshots omit this flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -781,6 +805,8 @@ pub struct NodeState {
     pub baseline_head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_workspace: Option<FeedbackWorkspace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_continuation: Option<FeedbackContinuation>,
     #[serde(default, skip_serializing, rename = "filesOverride")]
     pub legacy_files_override: Option<String>,
     #[serde(default, skip_serializing, rename = "filesVersion")]
@@ -818,12 +844,14 @@ impl Default for NodeState {
             edit_execution_id: None,
             human_instruction: false,
             model_config: None,
+            model_override: false,
             model_retry: None,
             continuation: false,
             source_direct_recovery: false,
             shared_workspace: false,
             baseline_head: None,
             feedback_workspace: None,
+            feedback_continuation: None,
             legacy_files_override: None,
             legacy_files_version: None,
             legacy_baseline_files_version: None,
@@ -838,27 +866,31 @@ impl NodeState {
     /// Batch only undispatched turns, preserving message boundaries and the
     /// correspondence between each turn and its ordered image attachments.
     pub fn pending_prompt(&self) -> Option<(String, Option<Vec<ImageAttachment>>)> {
+        self.pending_prompt_after_images(0)
+    }
+
+    pub fn pending_prompt_after_images(&self, image_offset: usize) -> Option<(String, Option<Vec<ImageAttachment>>)> {
         if self.pending_messages.is_empty() {
             return None;
         }
         let mut images = Vec::new();
         let mut parts = Vec::new();
         for (index, message) in self.pending_messages.iter().enumerate() {
-            let first_image = images.len() + 1;
+            let first_image = image_offset + images.len() + 1;
             images.extend(message.images.clone().unwrap_or_default());
-            let label = if images.len() >= first_image {
+            let label = if image_offset + images.len() >= first_image {
                 format!(
                     "[User message {}; attached images {}-{}]",
                     index + 1,
                     first_image,
-                    images.len()
+                    image_offset + images.len()
                 )
             } else {
                 format!("[User message {}]", index + 1)
             };
             parts.push(format!("{label}\n{}", message.instruction));
         }
-        let prompt = if self.pending_messages.len() == 1 {
+        let prompt = if self.pending_messages.len() == 1 && image_offset == 0 {
             self.pending_messages[0].instruction.clone()
         } else {
             format!("Process these user messages in order. Image numbers refer to the attached images in order.\n\n{}", parts.join("\n\n"))
@@ -875,6 +907,7 @@ impl NodeState {
     }
 
     fn clear_turn_directive(&mut self) {
+        self.feedback_continuation = None;
         self.instruction.clear();
         self.instruction_images = None;
         self.edit_execution_id = None;
@@ -1102,6 +1135,10 @@ pub enum EventKind {
         graph: Graph,
         config: Config,
     },
+    /// User-assigned display title for the sidebar conversation card.
+    ConversationRenamed {
+        title: String,
+    },
     Paused {
         paused: bool,
     },
@@ -1112,6 +1149,10 @@ pub enum EventKind {
     },
     NodeModelsUpdated {
         nodes: Vec<String>,
+        settings: RoleModelConfig,
+    },
+    NodeModelOverrideUpdated {
+        node: String,
         settings: RoleModelConfig,
     },
     /// Conversation-scoped settings save. `nodes` receive Node Agent overrides;
@@ -1159,8 +1200,22 @@ pub enum EventKind {
         execution_id: String,
         node: String,
         instruction: String,
+        /// Transport identity survives input rewriting; absent on legacy events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<Vec<ImageAttachment>>,
+    },
+    /// Pi confirmed removal of these unread steers from its live queue.
+    SteersWithdrawn {
+        execution_id: String,
+        message_sequences: Vec<i64>,
+    },
+    /// Retryable acknowledgement: removal and the returned draft commit together.
+    QueueWithdrawalRecorded {
+        request_id: String,
+        node: Option<String>,
+        messages: Vec<RecalledMessage>,
     },
     /// A message addressed to a finished node. It does not start an execution.
     NodeMessaged {
@@ -1212,6 +1267,10 @@ pub enum EventKind {
         nodes: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         files_version: Option<String>,
+    },
+    FeedbackContinuationQueued {
+        node: String,
+        continuation: FeedbackContinuation,
     },
     Invalidated {
         nodes: Vec<String>,
@@ -1382,6 +1441,8 @@ pub struct Snapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_graph: Option<Graph>,
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1659,6 +1720,13 @@ fn merge_recorded_model(metrics: &mut ExecutionMetrics, previous: Option<&Execut
 }
 
 impl Snapshot {
+    pub(crate) fn withdrawn_steer_sequences(&self) -> BTreeSet<i64> {
+        self.events.iter().flat_map(|event| match &event.kind {
+            EventKind::SteersWithdrawn { message_sequences, .. } => message_sequences.iter().copied(),
+            _ => [].iter().copied(),
+        }).collect()
+    }
+
     fn record_planning_turn(&mut self, planning: &PlanningSummary) {
         if !planning.planning_id.is_empty() {
             self.planning_turns
@@ -1722,6 +1790,7 @@ impl Snapshot {
         let Some(settings) = self
             .nodes
             .values()
+            .filter(|node| !node.model_override)
             .find_map(|node| node.model_config.clone())
         else {
             return;
@@ -2603,6 +2672,12 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = "awaiting_approval".into();
             // Planning identity and conversation history stay with this Run.
         }
+        EventKind::ConversationRenamed { title } => {
+            let trimmed = title.trim();
+            if !trimmed.is_empty() {
+                state.title = Some(trimmed.to_string());
+            }
+        }
         EventKind::StopRequested => {
             state.stop_requested = true;
         }
@@ -2669,6 +2744,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 }
             }
         }
+        EventKind::NodeModelOverrideUpdated { node, settings } => {
+            if let Some(node) = state.nodes.get_mut(node) {
+                node.model_config = Some(settings.clone());
+                node.model_override = true;
+                node.model_retry = Some(true);
+            }
+        }
         EventKind::ConversationModelsUpdated { settings, nodes } => {
             state.model_config = Some(settings.clone());
             let node_settings = settings.node_agent_settings();
@@ -2683,9 +2765,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     // preparation, not a dependency blocked by another node.
                     let retry =
                         node.status == "failed" || (node.status == "blocked" && !never_executed);
-                    if retry
-                        || (never_executed
-                            && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty"))
+                    if !node.model_override
+                        && (retry
+                            || (never_executed
+                                && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty")))
                     {
                         node.model_config = Some(node_settings.clone());
                         node.model_retry = Some(retry);
@@ -2778,6 +2861,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.preview_graph = None;
             node.edit_execution_id = None;
             node.continuation = false;
+            if let Some(continuation) = &mut node.feedback_continuation {
+                continuation.dispatched = true;
+            }
             node.status = "running".into();
             node.error = None;
             if *fresh_restart {
@@ -2820,7 +2906,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         | EventKind::SourceSnapshotted { .. }
         | EventKind::SourceFilesRecorded { .. }
         | EventKind::WorkspaceFilesChanged { .. }
-        | EventKind::NodeMessaged { .. } => {}
+        | EventKind::NodeMessaged { .. }
+        | EventKind::SteersWithdrawn { .. }
+        | EventKind::QueueWithdrawalRecorded { .. } => {}
         EventKind::Steered { .. } => {
             if state.phase == "needs_attention" {
                 state.phase = if state.paused { "paused" } else { "running" }.into();
@@ -3017,6 +3105,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         node.baseline_head = None;
                         node.shared_workspace = false;
                         node.feedback_workspace = None;
+                        node.feedback_continuation = None;
                     }
                     // A downstream execution on the inherited workspace advances
                     // the live result for every node represented by that workspace.
@@ -3157,6 +3246,16 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
             state.phase = if state.paused { "paused" } else { "running" }.into();
         }
+        EventKind::FeedbackContinuationQueued { node, continuation } => {
+            let node = state.nodes.get_mut(node).expect("validated feedback descendant");
+            node.feedback_continuation = Some(continuation.clone());
+            node.instruction = continuation.instruction.clone().unwrap_or_default();
+            node.instruction_images = continuation.images.clone();
+            node.human_instruction = true;
+            node.continuation = false;
+            node.source_direct_recovery = false;
+            node.result = None;
+        }
         EventKind::Invalidated {
             nodes,
             target,
@@ -3236,8 +3335,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     node.status == "waiting" || (node.status == "blocked" && never_executed);
                 node.status = if unstarted { "waiting" } else { "dirty" }.into();
                 node.error = None;
-                // Only the target continues from its previous result; every
-                // other affected node is recomputed from its parents.
+                // Descendants always take fresh parent files. New feedback
+                // batches queue their own conversation anchors separately;
+                // legacy invalidations retain their from-zero semantics.
                 if name != target {
                     node.head = None;
                     node.baseline_head = None;
@@ -3252,6 +3352,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             target_node.shared_workspace = false;
             if workspace.is_some() || !*human {
                 target_node.feedback_workspace = workspace.clone();
+                target_node.feedback_continuation = None;
             }
             if let Some(input) = workspace {
                 target_node.head = Some(input.head.clone());
@@ -3327,6 +3428,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 node.error = None;
                 node.revision += 1;
                 node.feedback_workspace = None;
+                node.feedback_continuation = None;
                 if name == target {
                     node.baseline_head = node.head.clone();
                     node.head = Some(anchor.before.clone());
@@ -3561,6 +3663,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecalledMessage {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<ImageAttachment>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageAttachment {
     #[serde(default = "default_image_type")]
     pub r#type: String,
@@ -3688,6 +3797,7 @@ mod metrics_tests {
         assert!(legacy.planner_write_tools);
         assert!(legacy.post_task_review);
         assert!(legacy.isolate_parallel_nodes);
+        assert!(!legacy.feedback_enabled);
         let missing_defaults: Config = serde_json::from_value(serde_json::json!({
             "repository": "repo", "model": "provider/model"
         }))
@@ -3712,7 +3822,7 @@ mod metrics_tests {
         let disabled: Config = serde_json::from_value(serde_json::json!({
             "repository": "repo", "model": "provider/model", "maxParallel": 1,
             "autoApprove": false, "plannerWriteTools": false,
-            "postTaskReview": false, "isolateParallelNodes": false
+            "postTaskReview": false, "isolateParallelNodes": false, "feedbackEnabled": true
         }))
         .unwrap();
         let restored: Config =
@@ -3721,6 +3831,7 @@ mod metrics_tests {
         assert!(!restored.planner_write_tools);
         assert!(!restored.post_task_review);
         assert!(!restored.isolate_parallel_nodes);
+        assert!(restored.feedback_enabled);
     }
 
     #[test]

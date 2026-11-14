@@ -71,9 +71,11 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::ManualGraphRevised { .. } => "manual_graph_revised",
         EventKind::NodeTaskUpdated { .. } => "node_task_updated",
         EventKind::DraftEdited { .. } => "draft_edited",
+        EventKind::ConversationRenamed { .. } => "conversation_renamed",
         EventKind::Paused { .. } => "paused",
         EventKind::FailedNodeModelsUpdated { .. } => "failed_node_models_updated",
         EventKind::NodeModelsUpdated { .. } => "node_models_updated",
+        EventKind::NodeModelOverrideUpdated { .. } => "node_model_override_updated",
         EventKind::ConversationModelsUpdated { .. } => "conversation_models_updated",
         EventKind::RecoveryQueued { .. } => "recovery_queued",
         EventKind::StopRequested => "stop_requested",
@@ -82,6 +84,8 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::Started { .. } => "started",
         EventKind::Prepared { .. } => "prepared",
         EventKind::Steered { .. } => "steered",
+        EventKind::SteersWithdrawn { .. } => "steers_withdrawn",
+        EventKind::QueueWithdrawalRecorded { .. } => "queue_withdrawal_recorded",
         EventKind::NodeMessaged { .. } => "node_messaged",
         EventKind::Output { .. } => "output",
         EventKind::Finished { .. } => "finished",
@@ -89,6 +93,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::Blocked { .. } => "blocked",
         EventKind::WorkspaceResolved { .. } => "workspace_resolved",
         EventKind::Invalidated { .. } => "invalidated",
+        EventKind::FeedbackContinuationQueued { .. } => "feedback_continuation_queued",
         EventKind::ConversationEdited { .. } => "conversation_edited",
         EventKind::PlannerConversationEdited { .. } => "planner_conversation_edited",
         EventKind::FeedbackQueued { .. } => "feedback_queued",
@@ -115,6 +120,7 @@ fn event_execution_id(kind: &EventKind) -> Option<&str> {
         | EventKind::ExecutionResultRecorded { execution_id, .. }
         | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. }
         | EventKind::Steered { execution_id, .. }
+        | EventKind::SteersWithdrawn { execution_id, .. }
         | EventKind::Output { execution_id, .. }
         | EventKind::Finished { execution_id, .. }
         | EventKind::FeedbackExhausted { execution_id, .. }

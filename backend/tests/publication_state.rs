@@ -13,6 +13,7 @@ fn config(source: &Path) -> Config {
         auto_approve: false,
         post_task_review: false,
         planner_write_tools: true,
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         #[cfg(feature = "fixture")]
         engine: "pi".into(),

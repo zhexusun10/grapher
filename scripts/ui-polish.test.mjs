@@ -2,8 +2,35 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import { createServer } from "vite";
+
+async function expectHomeLayout(page, titleVisible = true) {
+  await expect.poll(() => page.evaluate(() => {
+    const title = document.querySelector(".landing-title-copy");
+    const visible = title.checkVisibility({ opacityProperty: true, visibilityProperty: true });
+    const composer = document.querySelector(".landing-screen .prompt-box-container");
+    const box = composer.getBoundingClientRect();
+    // Check the text too: a parent rectangle can fit while its glyphs overflow.
+    const textFits = [...title.children].every(element => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      const rect = range.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom + 16 <= box.top;
+    });
+    const buttons = [...composer.querySelectorAll("button")].filter(button => button.checkVisibility() && !button.closest("[inert]"));
+    return {
+      settled: !composer.hasAttribute("data-resizing"),
+      titleVisible: visible,
+      titleFits: !visible || textFits,
+      composerFits: box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight,
+      controlsFit: buttons.every(button => { const b = button.getBoundingClientRect(); return b.left >= box.left && b.right <= box.right + 1 && b.top >= box.top && b.bottom <= box.bottom; }),
+      noOverflow: composer.scrollWidth <= composer.clientWidth,
+    };
+  }), { message: `home layout at ${JSON.stringify(page.viewportSize())}` }).toEqual({
+    settled: true, titleVisible, titleFits: true, composerFits: true, controlsFit: true, noOverflow: true,
+  });
+}
 
 // Real app, mocked APIs: presentation checks must never start a task or touch a workspace.
 for (const language of ["en", "zh-CN"]) {
@@ -48,30 +75,36 @@ for (const language of ["en", "zh-CN"]) {
       const draft = "Build a thoughtful interface.\nKeep the existing functionality intact.";
       await input.fill(draft);
 
-      for (const [width, height] of [[1440, 900], [1024, 768], [768, 600], [390, 844], [320, 568], [900, 420]]) {
+      for (const [width, height] of [[1440, 900], [1280, 768], [1100, 768], [1024, 768], [961, 768], [960, 768], [768, 600], [390, 844], [320, 568], [900, 420]]) {
         await page.setViewportSize({ width, height });
-        await page.waitForTimeout(450);
+        await expectHomeLayout(page);
         if (process.env.GRAPHER_UI_SCREENSHOTS) {
           await mkdir(process.env.GRAPHER_UI_SCREENSHOTS, { recursive: true });
           await page.screenshot({ path: join(process.env.GRAPHER_UI_SCREENSHOTS, `${language}-home-${width}.png`) });
         }
-        const layout = await page.evaluate(() => {
-          const title = document.querySelector(".landing-title-copy").getBoundingClientRect();
-          const composer = document.querySelector(".landing-screen .prompt-box-container");
-          const box = composer.getBoundingClientRect();
-          const buttons = [...composer.querySelectorAll("button")].filter(button => button.checkVisibility() && !button.closest("[inert]"));
-          return {
-            titleFits: title.left >= 0 && title.right <= innerWidth && title.top >= 0 && title.bottom + 16 <= box.top,
-            composerFits: box.left >= 0 && box.right <= innerWidth && box.bottom <= innerHeight,
-            controlsFit: buttons.every(button => { const b = button.getBoundingClientRect(); return b.left >= box.left && b.right <= box.right + 1 && b.bottom <= box.bottom; }),
-            noOverflow: composer.scrollWidth <= composer.clientWidth,
-          };
-        });
-        assert.deepEqual(layout, { titleFits: true, composerFits: true, controlsFit: true, noOverflow: true }, `${width}×${height}: ${JSON.stringify(layout)}`);
         assert.equal(await input.inputValue(), draft, "resizing preserves the draft");
       }
 
+      // A capped long draft must not collide with welcome copy either. Only
+      // genuinely insufficient free space hides the copy, without losing text.
+      const longDraft = "Keep this long editable draft.\n".repeat(40);
+      await page.setViewportSize({ width: 320, height: 568 });
+      await input.fill(longDraft);
+      await expectHomeLayout(page);
+      const expand = page.locator(".landing-screen .prompt-box-expand-btn");
+      await expand.click();
+      await expectHomeLayout(page, false);
+      assert.equal(await input.inputValue(), longDraft);
+      await expand.click();
+      await expectHomeLayout(page);
+      await page.setViewportSize({ width: 320, height: 420 });
+      await expectHomeLayout(page, false);
+      assert.equal(await input.inputValue(), longDraft);
+      await input.fill("");
+      await expectHomeLayout(page);
+      await input.fill(draft);
       await page.setViewportSize({ width: 390, height: 844 });
+      await expectHomeLayout(page);
       await input.focus();
       await page.keyboard.press("Tab");
       const focus = await page.locator(":focus").evaluate(element => ({

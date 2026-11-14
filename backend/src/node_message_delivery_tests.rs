@@ -13,7 +13,7 @@ print(json.dumps({'type':'tool_execution_start'}), flush=True)
 for index, expected in enumerate(['stale browser message', 'same', 'same']):
     message = json.loads(sys.stdin.readline())
     assert message['streamingBehavior'] == 'steer'
-    assert message['message'] == expected
+    assert message['message'] == expected + '\n\n<grapher-node-steer-id>' + message['id'] + '</grapher-node-steer-id>'
     assert message['images'][0]['data'] == str(index)
     # A long tool turn may not acknowledge promptly. Control must return after
     # delivery instead of blocking the HTTP worker on this response.
@@ -112,8 +112,38 @@ sys.stdin.read()
         );
         assert_eq!(snapshot.executions.len(), 1);
         assert!(snapshot.nodes["task"].pending_messages.is_empty());
+        let request_id = snapshot.events.iter().rev().find_map(|event| match &event.kind {
+            EventKind::Steered { request_id, .. } => request_id.clone(), _ => None,
+        }).unwrap();
+        Uuid::parse_str(&request_id).unwrap();
+        // An HTTP retry of Alt+S must neither abort again nor enqueue twice.
+        let retried = control_with_request_id("interrupt_steer".into(), Some("task".into()), Some(text.into()),
+            Some(run_id.clone()), Some(execution_id.clone()), Some(vec![crate::model::ImageAttachment {
+                r#type: "image".into(), mime_type: "image/png".into(), data: index.to_string(), name: None,
+            }]), Some(request_id), &service).unwrap();
+        assert_eq!(retried.events.iter().filter(|event| matches!(event.kind, EventKind::Steered { .. })).count(), index + 1);
     }
     assert_eq!(worker.join().unwrap().unwrap(), "all received");
+    let (first_request_id, event_count) = {
+        let mut runtime = service.runtime.lock().unwrap();
+        runtime.state.executions[0].status = "completed".into();
+        runtime.state.nodes.get_mut("task").unwrap().status = "completed".into();
+        runtime.state.paused = true;
+        let id = runtime.state.events.iter().find_map(|event| match &event.kind {
+            EventKind::Steered { request_id, .. } => request_id.clone(), _ => None,
+        }).unwrap();
+        (id, runtime.state.events.len())
+    };
+    // The original stale-browser action was intervene. Retrying it after the
+    // writer settles must replay the receipt, not enqueue a new execution.
+    let replay = control_with_request_id("intervene".into(), Some("task".into()), Some("stale browser message".into()),
+        Some(run_id.clone()), None, Some(vec![crate::model::ImageAttachment {
+            r#type: "image".into(), mime_type: "image/png".into(), data: "0".into(), name: None,
+        }]), Some(first_request_id.clone()), &service).unwrap();
+    assert_eq!(replay.events.len(), event_count, "the original action remains idempotent after settlement");
+    assert!(replay.nodes["task"].pending_messages.is_empty());
+    assert!(control_with_request_id("intervene".into(), Some("task".into()), Some("different instruction".into()),
+        Some(run_id.clone()), None, None, Some(first_request_id), &service).is_err());
     let runtime = service.runtime.lock().unwrap();
     let replayed = runtime.store.load(&run_id).unwrap();
     let messages = replayed
@@ -123,9 +153,11 @@ sys.stdin.read()
             EventKind::Steered {
                 execution_id: id,
                 instruction,
+                request_id,
                 ..
             } => {
                 assert_eq!(id, &execution_id);
+                assert!(request_id.is_some());
                 Some(instruction.as_str())
             }
             _ => None,

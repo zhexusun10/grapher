@@ -195,6 +195,7 @@ mod tests {
             auto_approve: false,
             post_task_review: false,
             planner_write_tools: true,
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             environment: None,
             role_models: Default::default(),

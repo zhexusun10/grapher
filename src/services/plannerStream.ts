@@ -4,6 +4,7 @@ import { plannerContentText, stripPlannerContext } from "./plannerText";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "./thinkingTranscript";
 import { upsertToolCall } from "./toolCallUpdates";
 import { appendItemDelta } from "./transcriptUpdates";
+import { extensionErrorText } from "./extensionErrors";
 
 export interface PlannerStreamState {
   runId: string;
@@ -75,6 +76,15 @@ export function appendPlannerError(
     ...(markErrorStage ? { startedAt: undefined, stage: "error" as const } : {}),
     items: nextItems,
   };
+}
+
+export function applyPlannerExtensionError(
+  prev: PlannerStreamState,
+  event: Parameters<typeof extensionErrorText>[0],
+): PlannerStreamState {
+  // A failed extension hook is a visible diagnostic, not proof that Pi's
+  // underlying turn failed or stopped. Keep the current planning stage.
+  return appendPlannerError(prev, extensionErrorText(event));
 }
 
 export function applyPartitionerDelta(

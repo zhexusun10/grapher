@@ -1,5 +1,5 @@
 import { t } from "../../i18n";
-import React, { useState, useRef, useLayoutEffect, useEffect, useId, useCallback, useMemo } from "react";
+import React, { useState, useRef, useLayoutEffect, useEffect, useId, useCallback, useMemo, useSyncExternalStore } from "react";
 import { motion, AnimatePresence, useIsPresent, useReducedMotion } from "motion/react";
 import {
   ArrowUp,
@@ -7,8 +7,6 @@ import {
   X,
   LoaderCircle,
   Square,
-  FileText,
-  Sparkles,
   Maximize2,
   Minimize2,
   ChevronUp,
@@ -17,22 +15,30 @@ import {
   Play,
 } from "lucide-react";
 import { runtimeService } from "../../services/runtime";
+import { ComposerDrafts, type RecalledMessage } from "../../services/composerDrafts";
+import { useComposerCommands } from "../../hooks/useComposerCommands";
+import { parseSlashCommand } from "../../services/composerCommands";
+import { ExtensionCommandUI } from "./ExtensionCommandUI";
+import { ComposerNotice } from "./ComposerNotice";
+import { ScopedModelsModal } from "../modals/ScopedModelsModal";
 import { useHideAutoMode } from "../../services/displayPreferences";
 import { formatFileSize, getFileIcon } from "../../utils/attachmentUtils";
 import type { SkillItem, ImageAttachment } from "../../types";
 
 export interface PromptBoxSubmitOptions {
+  requestId?: string;
   files?: File[];
   images?: ImageAttachment[];
   rawText?: string;
   displayText?: string;
   selectedTool?: string | null;
   mode?: "followUp" | "steer";
+  interrupt?: boolean;
 }
 
 interface SuggestionCandidate {
   id: string;
-  type: "file" | "skill";
+  type: "file" | "skill" | "command";
   title: string;
   subtitle?: string;
   value: string;
@@ -52,6 +58,9 @@ interface PromptBoxProps
   isExecuting?: boolean;
   isWorking?: boolean;
   onInterrupt?: () => void;
+  onWithdraw?: (requestId: string) => Promise<RecalledMessage[]>;
+  draftStore?: ComposerDrafts;
+  draftKey?: string;
   onContinue?: () => boolean | void | Promise<boolean | void>;
   planMode?: "auto" | "serial" | "graph";
   onPlanModeChange?: (mode: "auto" | "serial" | "graph") => void;
@@ -63,6 +72,7 @@ interface PromptBoxProps
   repository?: string;
   runId?: string;
   node?: string;
+  conversationModel?: boolean;
 }
 
 export const PROMPT_BOX_RESIZE_DURATION = 0.3;
@@ -146,11 +156,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       onSubmit,
       placeholder = "",
       disabled = false,
-      isBusy = false,
+      isBusy: busyProp = false,
       compact = false,
       isExecuting = false,
       isWorking = false,
       onInterrupt,
+      onWithdraw,
+      draftStore,
+      draftKey,
       onContinue,
       planMode,
       onPlanModeChange,
@@ -163,10 +176,21 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       repository,
       runId,
       node,
+      conversationModel,
       ...restProps
     },
     forwardedRef
   ) => {
+    const localDrafts = useRef<ComposerDrafts>(null);
+    localDrafts.current ??= new ComposerDrafts();
+    const drafts = draftStore ?? localDrafts.current;
+    const key = draftKey ?? JSON.stringify([repository, runId, node]);
+    const recall = useSyncExternalStore(drafts.subscribe, () => drafts.recall(key), () => drafts.recall(key));
+    const restoredImages = recall.images;
+    const setRestoredImages = (update: ImageAttachment[] | ((images: ImageAttachment[]) => ImageAttachment[])) => {
+      drafts.setImages(key, typeof update === "function" ? update(drafts.recall(key).images) : update);
+    };
+    const isBusy = busyProp || recall.pending;
     const reduceMotion = useReducedMotion();
     const hideAutoMode = useHideAutoMode();
     const visiblePlanMode = hideAutoMode && planMode === "auto" ? "graph" : planMode;
@@ -199,6 +223,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const textareaId = useId();
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
+    const hasAttachment = !!selectedFile || restoredImages.length > 0;
+    const [isWithdrawing, setIsWithdrawing] = useState(false);
     const [isDraggingOver, setIsDraggingOver] = useState(false);
     const dragCounterRef = useRef(0);
     const selectedFileRef = useRef<File | null>(null);
@@ -233,6 +259,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const compositionEndedAtRef = useRef(0);
     const mountedRef = useRef(true);
     const [attachmentError, setAttachmentError] = useState("");
+    const [commandError, setCommandError] = useState("");
     useEffect(() => {
       mountedRef.current = true;
       return () => { mountedRef.current = false; };
@@ -244,7 +271,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       submittingRef.current = false;
       setSelectedFile(null);
       setSelectedImage(null);
+      setIsWithdrawing(false);
       setAttachmentError("");
+      setCommandError("");
       setIsPreparing(false);
       setIsSubmitting(false);
       setIsContinuing(false);
@@ -258,6 +287,18 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         }
       };
     }, [repository, runId, node]);
+
+    // A recall may finish after its original composer unmounts. The Run-owned
+    // draft (including images) updates whichever instance now owns this view.
+    useLayoutEffect(() => {
+      if (!recall.revision) return;
+      const text = drafts.get(key) ?? "";
+      setInternalValue(text);
+      onChange?.({ target: { value: text } } as React.ChangeEvent<HTMLTextAreaElement>);
+      setCursorPos(text.length);
+      const textarea = internalTextareaRef.current;
+      if (textarea && document.activeElement === textarea) textarea.setSelectionRange(text.length, text.length);
+    }, [drafts, key, recall.revision]);
 
     // 智能补全联想状态（@ 文件/智能体，/ Skills）
     const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
@@ -326,10 +367,22 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     // Rejection reveals the exact draft again; identity changes invalidate it.
     const currentText = isAwaitingAcceptance ? "" : (value !== undefined && onChange ? value : internalValue);
     const hasText = currentText.trim().length > 0;
+    const setCommandText = (text: string) => {
+      setInternalValue(text);
+      onChange?.({ target: { value: text } } as React.ChangeEvent<HTMLTextAreaElement>);
+      setCursorPos(text.length);
+      setDismissedTrigger(null);
+      requestAnimationFrame(() => {
+        internalTextareaRef.current?.focus();
+        internalTextareaRef.current?.setSelectionRange(text.length, text.length);
+      });
+    };
+    const commands = useComposerCommands({ text: currentText, runId, node, planMode: visiblePlanMode,
+      conversationModel, setText: setCommandText });
 
     // 分析光标左侧文本中是否存在 @ 或 /
     const textBeforeCursor = currentText.slice(0, cursorPos);
-    const atMatch = textBeforeCursor.match(/(?:^|\s)@([^\s@/]*)$/);
+    const atMatch = textBeforeCursor.match(/(?:^|\s)@([^\s@]*)$/);
     const slashMatch = textBeforeCursor.match(/(?:^|\s)\/([^\s@/]*)$/);
 
     let triggerMode: "@" | "/" | null = null;
@@ -346,11 +399,17 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       triggerStart = slashMatch.index + (slashMatch[0].startsWith("/") ? 0 : 1);
     }
 
+    if (commands.argumentMode) {
+      triggerMode = "/";
+      triggerQuery = currentText.slice(1);
+      triggerStart = 0;
+    }
+
     const isDismissed =
       dismissedTrigger !== null &&
       dismissedTrigger.start === triggerStart &&
       dismissedTrigger.query === triggerQuery;
-    const showSuggestions = triggerMode !== null && !isDismissed && !disabled && !isBusy;
+    const showSuggestions = triggerMode !== null && !isDismissed && !disabled && !isBusy && !commandError && !commands.notice && !commands.ui;
 
     // 当触发词位置变动或查询内容变化时，重置 dismissedTrigger
     useEffect(() => {
@@ -371,6 +430,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     const suggestions = useMemo<SuggestionCandidate[]>(() => {
       if (!triggerMode) return [];
+      const commandItems: SuggestionCandidate[] = triggerStart === 0 ? commands.suggestions.map(item => ({
+        ...item, id: `command-${item.value}`, type: "command", badge: "Pi", _score: item.score,
+      })) : [];
+      if (commands.argumentMode) return commandItems;
 
       if (triggerMode === "@") {
         const q = triggerQuery.toLowerCase();
@@ -393,20 +456,32 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           );
         });
 
+        const hasPathQuery = q.includes("/");
         const scoredFiles = validFiles
           .map((file) => {
             const parts = file.split("/");
             const fileName = parts[parts.length - 1];
+            const dotIndex = fileName.lastIndexOf(".");
             const lowerName = fileName.toLowerCase();
+            const lowerStem = (dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName).toLowerCase();
             const lowerPath = file.toLowerCase();
             let score = 0;
             if (!q) {
               // 浅层根目录文件在无 query 时优先展示（如 package.json, README.md, src/App.tsx）
               score = Math.max(1, 20 - parts.length * 2);
+            } else if (hasPathQuery) {
+              if (lowerPath === q) score = 120;
+              else if (lowerPath.startsWith(q)) score = 90;
+              else if (lowerPath.includes(`/${q}`)) score = 75;
+              else if (lowerPath.includes(q)) score = 50;
             } else if (lowerName === q) {
+              score = 120;
+            } else if (lowerStem === q) {
               score = 100;
             } else if (lowerName.startsWith(q)) {
               score = 80;
+            } else if (lowerName.split(/[-_.\s]/).some((part) => part.startsWith(q))) {
+              score = 65;
             } else if (lowerName.includes(q)) {
               score = 50;
             } else if (lowerPath.includes(q)) {
@@ -419,7 +494,12 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           })
           .filter((item) => item.score > 0);
 
-        scoredFiles.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file));
+        scoredFiles.sort((a, b) =>
+          b.score - a.score ||
+          a.fileName.length - b.fileName.length ||
+          a.fileName.localeCompare(b.fileName) ||
+          a.file.localeCompare(b.file)
+        );
         const topFiles = scoredFiles.slice(0, 30);
 
         for (const f of topFiles) {
@@ -435,8 +515,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           });
         }
 
-        // 综合按评分排序
-        items.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
         return items;
       }
 
@@ -453,6 +531,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               score = 100;
             } else if (lowerName.startsWith(q)) {
               score = 80;
+            } else if (lowerName.split(/[-_:]/).some((part) => part.startsWith(q))) {
+              score = 65;
             } else if (lowerName.includes(q)) {
               score = 50;
             } else if (lowerDesc.includes(q)) {
@@ -462,27 +542,38 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           })
           .filter((item) => item.score > 0);
 
-        scoredSkills.sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name));
+        scoredSkills.sort((a, b) =>
+          b.score - a.score ||
+          a.skill.name.length - b.skill.name.length ||
+          a.skill.name.localeCompare(b.skill.name)
+        );
         const topSkills = scoredSkills.slice(0, 25);
 
-        return topSkills.map((s) => ({
+        const skillItems = topSkills.map((s): SuggestionCandidate => ({
           id: `skill-${s.skill.name}`,
           type: "skill",
           title: `/skill:${s.skill.name}`,
           subtitle: s.skill.description || t("无描述"),
           value: `/skill:${s.skill.name} `,
           badge: s.skill.scope === "workspace" ? t("工作区") : t("全局"),
+          _score: s.score,
         }));
+        const combined = [...commandItems, ...skillItems];
+        if (q) {
+          combined.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
+        }
+        return combined;
       }
 
       return [];
-    }, [triggerMode, triggerQuery, workspaceFiles, workspaceSkills]);
+    }, [triggerMode, triggerQuery, triggerStart, workspaceFiles, workspaceSkills, commands.suggestions, commands.argumentMode]);
 
     useEffect(() => {
       setActiveIndex(0);
-      // A new query reorders the candidates; start the list from the top again.
+      // Queries and refreshed catalogs can replace/reorder the candidates.
+      // Reset the selection so Enter never points beyond a shortened list.
       suggestionsListRef.current?.scrollTo({ top: 0 });
-    }, [triggerMode, triggerQuery]);
+    }, [triggerMode, triggerQuery, suggestions]);
 
     useEffect(() => {
       if (!keyboardNavRef.current) return;
@@ -505,7 +596,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         if (onChange) {
           onChange({ target: { value: nextText } } as any);
         }
-        setDismissedTrigger(triggerStart !== -1 ? { start: triggerStart, query: triggerQuery } : null);
+        setDismissedTrigger(item.type === "command" && commands.argumentMode
+          ? { start: 0, query: nextText.slice(1) }
+          : triggerStart !== -1 ? { start: triggerStart, query: triggerQuery } : null);
 
         requestAnimationFrame(() => {
           const textarea = internalTextareaRef.current;
@@ -516,7 +609,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           }
         });
       },
-      [currentText, triggerStart, cursorPos, onChange]
+      [currentText, triggerStart, triggerQuery, cursorPos, onChange, commands.argumentMode]
     );
 
     // Measure natural textarea heights, then animate the box. Preserve a reader's
@@ -637,13 +730,15 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const nextVal = e.target.value;
+      setCommandError("");
+      commands.clearNotice();
       const nextPos = e.target.selectionStart ?? nextVal.length;
       followInputEndRef.current = nextPos === nextVal.length && e.target.selectionEnd === nextVal.length;
       animateSendArrowRef.current = true;
       setInternalValue(nextVal);
       setCursorPos(nextPos);
       const textBefore = nextVal.slice(0, nextPos);
-      const nextAt = textBefore.match(/(?:^|\s)@([^\s@/]*)$/);
+      const nextAt = textBefore.match(/(?:^|\s)@([^\s@]*)$/);
       const nextSlash = textBefore.match(/(?:^|\s)\/([^\s@/]*)$/);
       const nextTriggerStart = nextAt && nextAt.index !== undefined
         ? nextAt.index + (nextAt[0].startsWith("@") ? 0 : 1)
@@ -763,10 +858,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       // send may already have delivered its uniquely named attachment.
     };
 
-    const handleSubmitAction = async (fromPointer = false) => {
+    const handleSubmitAction = async (fromPointer = false, interrupt = false) => {
       const trimmed = currentText.trim();
       if (disabled || isBusy || isPreparing || submittingRef.current) return;
-      if (!trimmed && !selectedFile) {
+      if (!trimmed && !hasAttachment) {
+        if (interrupt) return;
         if (isWorking || !onContinue) return;
         // Hold the same synchronous lock as a send: repeated Enter/clicks
         // must not queue a second continuation while acceptance is pending.
@@ -806,7 +902,24 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       const generation = attachmentGenerationRef.current;
       const isCurrent = () => mountedRef.current && generation === attachmentGenerationRef.current;
       const currentAttachment = selectedFile;
-      let combinedPrompt = trimmed;
+      const slash = parseSlashCommand(trimmed);
+      if (slash && !slash.name.startsWith("skill:")) {
+        setCommandError("");
+        commands.clearNotice();
+        let promptCommand = false;
+        try {
+          if (hasAttachment) throw new Error(t("Pi 指令不能携带附件，请先移除附件。"));
+          const result = await commands.execute(trimmed);
+          promptCommand = result === "prompt";
+          if (isCurrent() && result === "handled") setCommandText("");
+        } catch (error) {
+          if (isCurrent()) setCommandError(error instanceof Error ? error.message : String(error));
+        } finally {
+          if (!promptCommand && isCurrent()) { submittingRef.current = false; setIsSubmitting(false); endSendGrace(); }
+        }
+        if (!promptCommand || !isCurrent()) return;
+      }
+      let combinedPrompt = trimmed || (restoredImages.length ? t("请查看附图。") : "");
 
       if (currentAttachment) {
         const attachmentId = attachmentIdRef.current ??= crypto.randomUUID();
@@ -884,7 +997,8 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           setIsAwaitingAcceptance(true);
           const accepted = await onSubmit(combinedPrompt, {
             files: currentAttachment ? [currentAttachment] : [],
-            images: structuredImages,
+            images: restoredImages.length ? [...restoredImages, ...(structuredImages ?? [])] : structuredImages,
+            interrupt: interrupt && (isExecuting || isWorking),
             rawText: trimmed,
             displayText,
             mode: (isExecuting || isWorking) ? "steer" : undefined,
@@ -901,6 +1015,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         selectedFileRef.current = null;
         setSelectedImage(null);
         setSelectedFile(null);
+        setRestoredImages([]);
         attachmentIdRef.current = null;
       } catch (error) {
         console.error("Failed to send message:", error);
@@ -917,12 +1032,48 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
     };
 
+    const handleWithdraw = async () => {
+      if (!onWithdraw || disabled || isBusy || isPreparing || submittingRef.current) return;
+      const generation = attachmentGenerationRef.current;
+      const isCurrent = () => mountedRef.current && generation === attachmentGenerationRef.current;
+      submittingRef.current = true;
+      setIsSubmitting(true);
+      setIsWithdrawing(true);
+      setCommandError("");
+      try {
+        drafts.set(key, currentText);
+        await drafts.withdraw(key, onWithdraw);
+      } catch (error) {
+        if (isCurrent()) setCommandError(error instanceof Error ? error.message : String(error));
+      } finally {
+        if (isCurrent()) {
+          submittingRef.current = false;
+          setIsSubmitting(false);
+          setIsWithdrawing(false);
+          requestAnimationFrame(() => internalTextareaRef.current?.focus({ preventScroll: true }));
+        }
+      }
+    };
+
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(e.key)) {
         followInputEndRef.current = false;
       }
       restProps.onKeyDown?.(e);
       if (e.defaultPrevented) return;
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey &&
+          !e.nativeEvent.isComposing && !composingRef.current && e.keyCode !== 229) {
+        const key = e.code || `Key${e.key.toUpperCase()}`;
+        if ((key === "KeyQ" && onWithdraw) || key === "KeyS") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!e.repeat) {
+            if (key === "KeyQ") void handleWithdraw();
+            else if (hasText || hasAttachment) void handleSubmitAction(false, true);
+          }
+          return;
+        }
+      }
       if (showSuggestions) {
         if (e.key === "Escape") {
           if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229) return;
@@ -973,9 +1124,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
     };
 
-    const showContinue = !hasText && !selectedFile && !isWorking && !!onContinue;
-    const canSubmit = (hasText || !!selectedFile || showContinue) && !disabled && !isBusy && !isPreparing && !isSubmitting;
-    const showWorkingStop = isWorking && !hasText && !selectedFile && !sendGrace && !isSubmitting && !isPreparing;
+    const showContinue = !hasText && !hasAttachment && !isWorking && !!onContinue;
+    const canSubmit = (hasText || hasAttachment || showContinue) && !disabled && !isBusy && !isPreparing && !isSubmitting;
+    const showWorkingStop = isWorking && !hasText && !hasAttachment && !sendGrace && !isSubmitting && !isPreparing && !recall.pending;
 
     const prompt = (
       <motion.div
@@ -1009,6 +1160,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             </motion.div>
           )}
         </AnimatePresence>
+        <AnimatePresence>
+          {commands.scopedModelsOpen && <ScopedModelsModal key="scoped-models-modal" onClose={commands.closeScopedModels} />}
+        </AnimatePresence>
+        {(commandError || commands.notice) && <ComposerNotice text={commandError || commands.notice} error={!!commandError}
+          onClose={() => { setCommandError(""); commands.clearNotice(); }} />}
         {/* Floating Suggestion Popover above the PromptBox */}
         <AnimatePresence>
           {showSuggestions && (
@@ -1024,15 +1180,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               <div className="prompt-box-suggestions-header">
                 <span className="suggestions-header-title">
                   {triggerMode === "@" ? (
-                    <>
-                      <FileText size={13} className="header-icon-file" />
-                      <span>{t("提及项目文件")}</span>
-                    </>
+                    <span>{t("提及项目文件")}</span>
                   ) : (
-                    <>
-                      <Sparkles size={13} className="header-icon-skill" />
-                      <span>{t("Pi 技能与指令 (/skill:...)")}</span>
-                    </>
+                    <span>{t("Pi 技能与指令 (/skill:...)")}</span>
                   )}
                 </span>
                 <span className="suggestions-header-actions">
@@ -1164,6 +1314,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
           )}
         </AnimatePresence>
 
+        {restoredImages.length > 0 && <div className="prompt-box-image-preview-wrapper">
+          {restoredImages.map((image, index) => <div className="prompt-box-image-thumb" key={index}>
+            <img src={`data:${image.mimeType};base64,${image.data}`} alt={image.name || t("上传附件预览")} className="prompt-box-preview-img" />
+            <button type="button" className="prompt-box-image-remove-btn" aria-label={t("移除图片")} disabled={isSubmitting}
+              onClick={event => { event.stopPropagation(); setRestoredImages(images => images.filter((_, i) => i !== index)); }}><X size={12} /></button>
+          </div>)}
+        </div>}
+        {commands.ui && <ExtensionCommandUI key={commands.ui.id} request={commands.ui} respond={commands.respond} />}
         {attachmentError && <p role="alert" className="prompt-box-attachment-error">{attachmentError}</p>}
         {/* Textarea Input */}
         <div className="prompt-box-textarea-row">
@@ -1222,6 +1380,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             onPaste={handlePaste}
             placeholder={placeholder}
             aria-label={placeholder || t("消息输入框")}
+            aria-keyshortcuts={onWithdraw ? "Alt+Q Alt+S" : "Alt+S"}
             disabled={disabled || isBusy || isPreparing || isSubmitting}
             className="prompt-box-textarea"
           />
@@ -1290,7 +1449,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
               </div>
             )}
 
-            {isWorking && (hasText || selectedFile) && onInterrupt && (
+            {isWorking && (hasText || hasAttachment) && onInterrupt && (
               <button
                 type="button"
                 className="prompt-box-icon-btn prompt-box-interrupt-btn"
@@ -1298,7 +1457,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                   event.stopPropagation();
                   onInterrupt();
                 }}
-                disabled={isSubmitting || isPreparing}
+                disabled={isSubmitting || isPreparing || recall.pending}
                 aria-label={t("点击打断执行")}
               >
                 <Square size={compact ? 9 : 11} className="prompt-box-stop-icon" />
@@ -1312,7 +1471,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                 // The grace protects the empty send button from turning into
                 // Stop under the pointer. A new or restored draft is a real
                 // send, even if it arrives before that grace expires.
-                if (sendGrace && !hasText && !selectedFile) return;
+                if (sendGrace && !hasText && !hasAttachment) return;
                 if (showWorkingStop) {
                   onInterrupt?.();
                 } else {
@@ -1331,10 +1490,12 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                   ? "active"
                   : ""
               }`}
-              aria-busy={isSubmitting || isPreparing || undefined}
+              aria-busy={isSubmitting || isPreparing || recall.pending || undefined}
               title={showContinue ? t("继续当前 Agent（不会追加消息）") : undefined}
               aria-label={
-                isContinuing
+                isWithdrawing || recall.pending
+                  ? t("正在撤回…")
+                  : isContinuing
                   ? t("正在继续")
                   : isSubmitting || isPreparing
                     ? t("正在发送…")
@@ -1342,14 +1503,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
                     ? t("点击打断执行")
                     : showContinue
                       ? t("继续当前 Agent（不会追加消息）")
-                      : isWorking && (hasText || selectedFile)
+                      : isWorking && (hasText || hasAttachment)
                         ? t("发送以实时调整方向 (Steer)")
                         : t("发送消息")
               }
             >
               {showWorkingStop ? (
                 <Square size={compact ? 8 : 10} className="prompt-box-stop-icon" />
-              ) : isPreparing || isSubmitting ? (
+              ) : isPreparing || isSubmitting || recall.pending ? (
                 <LoaderCircle size={compact ? 14 : 16} className="prompt-box-spin" />
               ) : showContinue ? (
                 <Play size={compact ? 14 : 16} fill="currentColor" />

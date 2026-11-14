@@ -1,4 +1,5 @@
 @import "./tokens.css";
+@import "./components/modals/scoped-models.css";
 
 :root {
   --surface-card-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
@@ -246,6 +247,8 @@ h3 {
   flex-direction: column;
   z-index: 10;
   overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
   will-change: width, max-width;
   animation: sidebarEnter 0.36s cubic-bezier(0.16, 1, 0.3, 1) both;
   transition:
@@ -1624,7 +1627,6 @@ a,
 
 .landing-center-content {
   width: 100%;
-  max-width: 680px;
   min-height: 0;
   max-height: 100%;
   display: flex;
@@ -1633,15 +1635,32 @@ a,
   position: relative;
 }
 
+/* Reserve the composer's measured height before positioning the welcome copy.
+   Draft wrapping, attachments and expansion can all reduce this free space. */
+.landing-title-space {
+  flex: 1;
+  min-height: 0;
+  margin-bottom: 16px;
+  position: relative;
+  container: landing-title / size;
+}
+
+.landing-composer {
+  width: 100%;
+  max-width: 680px;
+  align-self: center;
+  position: relative;
+  flex-shrink: 0;
+}
+
 .landing-title-container {
   position: absolute;
-  top: 38%;
-  right: 0;
+  top: 50%;
+  /* Keep the wide-screen offset, but never spend more than the side gutter. */
+  right: max(0px, calc((100% - 680px) / 2 - 120px));
   translate: 0 -50%;
-  width: -moz-fit-content;
-  width: fit-content;
+  width: max-content;
   max-width: 100%;
-  transform: translateX(clamp(0px, 10vw, 120px));
   transition: transform 0.2s ease;
 }
 
@@ -1677,11 +1696,7 @@ a,
   }
 }
 
-@media (max-height: 560px) {
-  .landing-title-container {
-    top: 28%;
-  }
-
+@container landing-title (max-height: 180px) {
   .landing-screen .landing-title {
     font-size: 28px;
   }
@@ -1689,6 +1704,27 @@ a,
   .landing-screen .landing-subtitle {
     font-size: 12px;
     margin-top: 6px;
+  }
+}
+
+@container landing-title (max-width: 280px) {
+  .landing-screen .landing-title {
+    font-size: clamp(24px, 10cqw, 28px);
+  }
+
+  .landing-screen .landing-subtitle {
+    font-size: 12px;
+    margin-top: 6px;
+  }
+}
+
+/* An extremely short free region cannot fit readable copy. Keep the editor
+   usable and the decorative dots mounted; restore the copy as space returns.
+   This also overrides Motion's inline visibility during an editor collapse. */
+@container landing-title (max-height: 110px) {
+  .landing-title-copy {
+    opacity: 0 !important;
+    visibility: hidden !important;
   }
 }
 
@@ -1824,9 +1860,8 @@ a,
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04) !important;
 }
 
-.prompt-box-container button:focus,
-.prompt-box-container button:focus-visible {
-  outline: none !important;
+.prompt-box-container button:focus:not(:focus-visible) {
+  outline: none;
 }
 
 .prompt-box-container.disabled {

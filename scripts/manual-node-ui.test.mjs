@@ -177,7 +177,7 @@ test("returning from node creation keeps Planner history scrollable and restores
 
 test("graph background menu creates nodes with explicit completed-result confirmation", { timeout: 60_000 }, async () => {
   const repository = "/mock/project";
-  const config = { repository, model: "test/model", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
+  const config = { repository, model: "test/model", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, feedbackEnabled: true, autoApprove: false };
   const nodeState = (status = "completed") => ({ status, revision: 1, head: status === "completed" ? "head" : null, instruction: "", error: null });
   const empty = { runId: "", graph: { originalGoal: "", nodes: [], edges: [] }, config: null, nodes: {}, executions: [], events: [],
     approved: false, paused: false, phase: "draft", plan: null, base: "", feedbackCounts: {} };

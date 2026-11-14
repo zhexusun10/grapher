@@ -82,6 +82,7 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
 }) {
   const settingsPresent = useIsPresent();
   const [catalog, setCatalog] = useState<ProviderCatalog | undefined>(() => providerAuth.getCachedCatalog() ?? undefined);
+  useEffect(() => providerAuth.subscribeCatalog(() => setCatalog(providerAuth.getCachedCatalog() ?? undefined)), []);
   const [activeProvider, setActiveProvider] = useState<ProviderInfo | null>(null);
   const [loginAnchor, setLoginAnchor] = useState<"providers" | "credentials">("providers");
   const openedAuthUrls = useRef(new Set<string>());

@@ -20,6 +20,80 @@ Merger inherits the effective Node Agent model and thinking level. Each field re
 
 Working directories, source-write effects, and platform permissions belong to [Execution model](../architecture/execution-model.md) and [Filesystem isolation](../architecture/filesystem-isolation.md), not this loading table.
 
+## Composer commands
+
+The composer owns `/model` and `/thinking` menus and validates selections against
+Pi's provider catalog/capabilities. `/model` shares Settings' full available-model
+selection and ordering (without a result-count cap); its open menu observes catalog
+refreshes and authentication changes through the shared catalog store. Graph (and Auto) main input targets Planner;
+Serial main input targets the conversation's Node Agent profile; a node input
+targets only that node. Home-screen selections stay in the unsent conversation
+draft. Settings always edits the conversation's role profiles, even while a node
+is selected; outside a conversation it edits defaults for new conversations.
+Persistence, dispatch timing and explicit node precedence belong to [Runtime](../architecture/runtime.md#scheduling-and-concurrency).
+
+`/scoped-models` (also `/scoped model`) opens Grapher's global model visibility
+manager, available before a Pi session starts. The same control sits at the bottom
+of the Settings model card. Its own Save persists only edited hide/show entries in
+`PI_CODING_AGENT_DIR/model-visibility.json`, not role selections or Pi credentials.
+Hidden entries are excluded from `/model` (including manually typed selections)
+and every Settings role picker. Already-selected hidden models keep their stored
+configuration and are represented by a generic hidden-selection label; running
+calls and historical metrics are not rewritten. The manager can restore hidden or
+retired entries. The Provider/Auth bridge serializes updates, merges
+changes with the latest file and fails explicitly on invalid/unwritable data.
+Visibility survives backend/browser restarts, propagates across open same-origin
+tabs and is re-read on picker opening. This is a Grapher-wide visibility rule,
+not Pi's session-local Ctrl+P cycling scope.
+
+`/name` renames the opened conversation card in the sidebar without altering
+its original goal prompt; it works only in the main conversation composer (Graph
+Planner or Serial), not in a Graph node agent dialog. `/compact`, `/session` (`/stats`), `/copy`, `/reload` and registered
+extension commands address only an **active** Pi process. Idle/finished sessions
+and the home screen cannot run extension commands; Grapher reports this in a
+floating card above the input rather than launching an untracked model/tool execution.
+`/mcp` runs Pi's status command; `/mcp login`, `/mcp logout` and `/mcp reconnect`
+retain Pi's server selection and authentication flows (optional server name).
+MCP must be enabled for the active role. Extension command names are discovered
+from that process's `get_commands`, not a fixed Grapher extension allowlist. Skills keep their existing
+prompt-expansion path, and active-session prompt templates use ordinary message
+submission. Unknown commands (including `/help`) and session-management commands (`/quit`, `/exit`,
+`/new`, `/tree`, `/fork`, `/clone`, `/resume`, session switching, auth and Pi
+settings) are rejected, never submitted as an ordinary goal. `/reload` delegates
+to Pi's command-context reload action after the current turn becomes idle; the
+adapter does not implement a second resource loader. `/compact` likewise uses an
+adapter extension command that waits for idle, then awaits the SDK compaction
+callback. It never sends the raw compact RPC, which aborts a streaming turn;
+processes without the adapter command reject it instead of falling back.
+
+[Composer RPC](../../backend/src/engine/composer.rs) resolves a Run-owned active
+execution or Planner and pins each request to a process-instance token. UI reads
+and replies also carry a unique command ID. Because Pi's UI stream is process-wide,
+[command ownership](../../backend/src/engine/composer_ui.rs) admits only one composer
+invocation at a time until Pi acknowledges it; overlapping invocations are rejected
+without sending another command. A late poll/reply/completion cannot drain, cancel
+or release a newer invocation, even in another tab or after returning to the same
+live process. HTTP timeout alone does not release an unacknowledged command.
+Only the server's command allowlist reaches Pi, not arbitrary client RPC. Command pending
+requests hold the normal settle handoff open; catalog/control acknowledgements
+do not manufacture another agent turn. Extension `select`, `confirm`, `input`,
+and `editor` requests use browser controls; notifications and editor replacement
+are supported. TUI-only widgets/status/title/custom rendering are not emulated.
+RPC custom-terminal component factories produce an explicit warning instead of
+Pi's silent no-op; their TUI cannot be rendered in the browser. Notification URLs
+are clickable, and string status/widgets are projected to the floating card.
+Leaving the composer cancels outstanding dialogs. Until that command settles,
+in-flight and subsequent polls still drain/cancel dialogs against the original
+process instance and command ID; late editor updates/notices never reach the newly
+selected scope. A client that stops polling loses its UI lease: outstanding and
+subsequent dialogs are cancelled, while another invocation still waits for Pi's
+acknowledgement. UI requests/responses and command-handler errors (which can echo
+input values) stay in process memory. Ordinary extension lifecycle errors remain
+durable diagnostics, visible in live Planner and replayed execution transcripts;
+they do not by themselves mark the underlying agent turn failed. A timeout reports
+an unknown result, not rollback. See [browser coverage](../../scripts/composer-commands-ui.test.mjs)
+and the engine/server composer tests for scope, filtering and UI round trips.
+
 ## Global extension settings
 
 Settings Add/Remove changes Grapher's selection, not installed global files. Changes apply to new processes and invalidate affected idle prewarmed processes, not running turns. Discovery does not execute extension factories or install missing packages. The Settings card reads a page-session catalog ([piExtensions.ts](../../src/services/piExtensions.ts)) so a reopen paints the rows it last read and refreshes behind them; the card must not fall back to a shorter loading placeholder, because a late height change moves the Settings pane under a reader who already scrolled it. Only the refresh control and a successful Add/Remove bypass that snapshot.

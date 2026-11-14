@@ -82,11 +82,139 @@ test('prepared host loads the latest Pi overlay from the task binding', { timeou
     const state = await value.request({ type: 'get_state' });
     assert.equal(state.success, true, value.diagnostics);
     assert.equal(state.data.model.id, 'latest');
+    // Exercise the installed clear_queue binding through production Pi RPC,
+    // without starting a model call. One-at-a-time mode must still recall all.
+    for (const message of ['same queued text', 'same queued text']) {
+      assert.equal((await value.request({ type: 'steer', message })).success, true);
+    }
+    assert.equal((await value.request({ type: 'follow_up', message: 'later' })).success, true);
+    const cleared = await value.request({ type: 'clear_queue' });
+    assert.equal(cleared.success, true, cleared.error);
+    assert.deepEqual(cleared.data, { steering: ['same queued text', 'same queued text'], followUp: ['later'],
+      messages: ['same queued text', 'same queued text', 'later'].map(text => ({ text, images: [] })) });
+    assert.deepEqual((await value.request({ type: 'clear_queue' })).data, { steering: [], followUp: [], messages: [] });
     const closed = once(value.child, 'close');
     value.child.stdin.end();
     assert.equal((await closed)[0], 0, value.diagnostics);
   } finally {
     await value.stop();
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
+  }
+});
+
+test('prepared queue identities survive async input rewriting without recalling read turns', { timeout: 60000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'grapher-queue-identity-'));
+  const source = join(directory, 'source');
+  const agent = join(directory, 'agent');
+  const sessions = join(directory, 'sessions');
+  const extension = join(directory, 'rewrite.ts');
+  const settleGate = join(directory, 'release-settle');
+  const inputGate = join(directory, 'release-input');
+  const extensionInput = `extension injected\n\n<grapher-node-steer-id>${randomUUID()}</grapher-node-steer-id>`;
+  let release, releaseNext;
+  const hold = new Promise(resolve => { release = resolve; });
+  const nextHold = new Promise(resolve => { releaseNext = resolve; });
+  let requestBody, modelCalls = 0;
+  const server = createServer(async (request, response) => {
+    let raw = '';
+    for await (const chunk of request) raw += chunk;
+    requestBody = JSON.parse(raw);
+    await (++modelCalls === 1 ? hold : nextHold);
+    if (response.destroyed) return;
+    const chunk = (delta, finish_reason) => ({ id: 'queue-test', object: 'chat.completion.chunk', created: 1,
+      model: 'test', choices: [{ index: 0, delta, finish_reason }] });
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify(chunk({ role: 'assistant', content: 'finished' }, null))}\n\ndata: ${JSON.stringify(chunk({}, 'stop'))}\n\ndata: [DONE]\n\n`);
+  });
+  let value;
+  try {
+    for (const path of [source, agent, sessions]) await mkdir(path);
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    await writeFile(join(agent, 'models.json'), JSON.stringify({ providers: { 'queue-test': {
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, api: 'openai-completions', apiKey: 'local-only',
+      models: [{ id: 'test', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 1024,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    } } }));
+    await writeFile(extension, `import { existsSync } from 'node:fs';
+    export default function(pi) {
+      let settling = true;
+      pi.on('agent_settled', async (_event, ctx) => {
+        if (!settling) return;
+        settling = false;
+        ctx.ui.notify('settlement held', 'info');
+        while (!existsSync(${JSON.stringify(settleGate)})) await new Promise(resolve => setTimeout(resolve, 10));
+      });
+      pi.registerCommand('queue-noop', { description: 'No-op', handler: async () => {} });
+      pi.on('input', async (event, ctx) => {
+        if (event.text.startsWith('deferred queued')) {
+          ctx.ui.notify('deferred input:' + event.text, 'info');
+          while (!existsSync(${JSON.stringify(inputGate)})) await new Promise(resolve => setTimeout(resolve, 10));
+          return { action: 'transform', text: 'read first' };
+        }
+        if (event.text === 'first queued') {
+          pi.sendUserMessage(${JSON.stringify(extensionInput)}, { deliverAs: 'steer' });
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (event.text.endsWith('queued')) return { action: 'transform', text: 'read first' };
+        return { action: 'continue' };
+      });
+    }`);
+    const env = { ...process.env, HOME: directory, USERPROFILE: directory, PI_CODING_AGENT_DIR: agent,
+      GRAPHER_ISOLATED_PI_MODELS: '1', PI_OFFLINE: '1' };
+    value = host('node', source, env);
+    assert.equal((await value.request({ type: 'grapher_prepare', role: 'node' })).success, true);
+    const bound = await value.request({ type: 'grapher_bind', role: 'node', cwd: source,
+      args: ['--mode', 'rpc', '--no-tools', '--no-extensions', '--no-skills', '--no-approve', '--extension', extension,
+        '--model', 'queue-test/test', '--session-dir', sessions],
+      environment: { GRAPHER_MODE: 'node', GRAPHER_AGENT_KIND: 'serial', GRAPHER_EXECUTION_KIND: 'source', GRAPHER_SOURCE_ALIAS: source,
+        GRAPHER_WORKSPACE_ROOT: source, GRAPHER_ORIGINAL_ROOT: source, PI_CODING_AGENT_DIR: agent } });
+    assert.equal(bound.success, true, bound.error);
+    const ids = [randomUUID(), randomUUID(), randomUUID()];
+    const marked = (text, id) => `${text}\n\n<grapher-node-steer-id>${id}</grapher-node-steer-id>`;
+    assert.equal((await value.request({ type: 'prompt', message: marked('read first', ids[0]) })).success, true);
+    await value.wait(() => requestBody, 'model began reading the first turn');
+    const replies = await Promise.all([1, 2].map(index => value.request({ type: 'prompt',
+      message: marked(index === 1 ? 'first queued' : 'second queued', ids[index]), streamingBehavior: 'steer' })));
+    for (const reply of replies) assert.equal(reply.data.disposition, 'queued', reply.error);
+    const noop = await value.request({ type: 'prompt', message: marked('/queue-noop', randomUUID()), streamingBehavior: 'steer' });
+    assert.equal(noop.data.disposition, 'handled', 'identity must not break slash-command dispatch');
+    const cleared = await value.request({ type: 'clear_queue' });
+    assert.equal(cleared.success, true, cleared.error);
+    const owned = cleared.data.messages.filter(message => message.requestId);
+    assert.deepEqual(owned, [ids[2], ids[1]].map(requestId => ({ requestId, text: 'read first', images: [] })),
+      'identity follows the async submission, not text equality or completion order');
+    assert.deepEqual(cleared.data.messages.filter(message => !message.requestId), [{ text: extensionInput, images: [] }],
+      'nested extension input must not inherit an ID or interpret literal marker-shaped content');
+    assert.ok(!JSON.stringify(requestBody).includes('grapher-node-steer-id'), 'private identity never enters model context');
+    assert.deepEqual((await value.request({ type: 'clear_queue' })).data.messages, []);
+    release();
+    await value.wait(() => value.events.find(event => event.type === 'extension_ui_request' && event.message === 'settlement held'));
+    const deferredId = randomUUID();
+    const literal = marked('deferred queued', randomUUID()); // literal user text, not this send's envelope
+    const deferredReply = value.request({ type: 'prompt', message: marked(literal, deferredId), streamingBehavior: 'steer' })
+      .catch(error => ({ success: false, error: String(error) }));
+    await value.request({ type: 'get_state' }); // ordered after Pi has deferred the prompt
+    await writeFile(settleGate, 'release');
+    const observedInput = await value.wait(() => value.events.find(event => event.type === 'extension_ui_request' && event.message?.startsWith('deferred input:')));
+    assert.equal(observedInput.message, `deferred input:${literal}`, 'deferred dispatch must not strip a second envelope from literal user text');
+    assert.equal((await value.request({ type: 'prompt', message: 'next active turn' })).success, true);
+    await value.wait(() => modelCalls === 2);
+    await writeFile(inputGate, 'release');
+    const deferredResult = await deferredReply;
+    assert.equal(deferredResult.data?.disposition, 'queued', deferredResult.error);
+    assert.deepEqual((await value.request({ type: 'clear_queue' })).data.messages,
+      [{ requestId: deferredId, text: 'read first', images: [] }], 'deferred input keeps its original identity after another turn starts');
+    releaseNext();
+    await value.wait(() => value.events.filter(event => event.type === 'agent_settled').length === 2, 'both read turns completed');
+    const users = value.events.filter(event => event.type === 'message_start' && event.message?.role === 'user');
+    assert.deepEqual(users.map(event => event.message.content[0].text), ['read first', 'next active turn'],
+      'read turns stay; recalled turns never enter the transcript');
+  } finally {
+    release();
+    releaseNext();
+    await value?.stop();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
   }
 });
@@ -135,6 +263,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
       GRAPHER_AGENT_KIND: 'outer-agent-kind-must-not-leak',
       GRAPHER_GRAPH_PATH: join(other, 'outer-graph.json'), GRAPHER_NODE_NAME: 'outer-node-must-not-leak',
       GRAPHER_CONTINUE_INTERRUPTED: 'outer-continuation-must-not-leak', GRAPHER_FEEDBACK_SOURCE: 'outer-feedback-must-not-leak',
+      GRAPHER_FEEDBACK_ENABLED: 'true',
       GRAPHER_UNREMOVABLE_NODES: JSON.stringify(['outer-node-must-not-leak']) };
     const roles = ['partition', 'planner', 'node'];
     const started = performance.now();
@@ -173,6 +302,7 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         GRAPHER_ACTIVE_RUN_ID: `run-${role}`, GRAPHER_NODE_EXECUTION_ID: `execution-${role}`,
         ...(role === 'planner' ? { GRAPHER_UNREMOVABLE_NODES: JSON.stringify(['published']), GRAPHER_PLANNER_WRITE_TOOLS: 'true' } : {}),
         GRAPHER_FEEDBACK_SOURCE: role === 'node' ? 'true' : null,
+        GRAPHER_FEEDBACK_ENABLED: role === 'planner' ? 'false' : null,
         ...(role === 'node' ? { GRAPHER_NODE_NAME: null, GRAPHER_CONTINUE_INTERRUPTED: 'false' } : {}),
         GRAPHER_COMPILER_PATH: join(target, `debug/grapher${process.platform === 'win32' ? '.exe' : ''}`),
         GRAPHER_TRUSTED_GIT: process.env.GRAPHER_TRUSTED_GIT ?? 'git',
@@ -217,16 +347,18 @@ test('three prepared roles bind real isolated sessions; Planner paths, extension
         assert.ok(['node', 'edge', 'read', 'bash', 'write', 'edit'].every(tool => tools.includes(tool)));
         assert.ok(['ls', 'find', 'grep'].every(tool => !tools.includes(tool)));
         const edgeDescription = body.tools.find(tool => tool.function.name === 'edge').function.description;
-        assert.doesNotMatch(edgeDescription, /ignored|non-Git|drain|fork/i);
+        assert.doesNotMatch(edgeDescription, /feedback|ignored|non-Git|drain|fork/i);
+        const edgeSchema = body.tools.find(tool => tool.function.name === 'edge').function.parameters;
+        assert.deepEqual(Object.keys(edgeSchema.properties.edges.items.properties), ['from', 'to', 'delete']);
         const rejected = JSON.parse(requests[before + 1].messages.find(message => message.role === 'tool').content);
         assert.equal(rejected.applied, false, 'the bound published-node constraint must reach the Planner compiler');
-        assert.deepEqual(rejected.topology, { "from: [to]": { published: [] }, feedbackTo: {} });
+        assert.deepEqual(rejected.topology, { "from: [to]": { published: [] } });
         assert.match(rejected.diagnostics[0], /Cannot remove node 'published'.*already published/);
         const results = requests[before + 2].messages.filter(message => message.role === 'tool');
         const accepted = JSON.parse(results[1].content);
         assert.equal(accepted.applied, true, 'a rejected deletion must not prevent further valid edits');
         assert.deepEqual(accepted.topology, {
-          rootNodes: ["A", "published"], "from: [to]": { published: [], A: [] }, feedbackTo: {},
+          rootNodes: ["A", "published"], "from: [to]": { published: [], A: [] },
         });
         assert.deepEqual(accepted.topology.rootNodes, ["A", "published"], "both nodes inherit nothing and are listed as roots");
         assert.deepEqual(JSON.parse(await readFile(graph, 'utf8')).nodes.map(node => node.name), ['published', 'A']);

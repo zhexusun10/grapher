@@ -10,13 +10,14 @@ import {
   type RuntimeActivity,
   type PlanningSummary, type PlanMode, type ChatMessage,
   type ImageAttachment, type FileAttachment, type ChatMessageVersion,
-  type ConversationModelConfig, type OpenWorkspaceFileRequest
+  type ConversationModelConfig, type OpenWorkspaceFileRequest, type RoleModelConfig
 } from "./types";
 import { parseMessageAttachmentsAndText } from "./utils/attachmentUtils";
 import { tokens } from "./tokens";
 import { runtimeService } from "./services/runtime";
 import { providerAuth } from "./services/providerAuth";
-import { applyModelConfig, modelRoles, planningModelRoles, providerIdForModel, roleModelConfig } from "./modelConfig";
+import { ComposerModels, type ComposerScope } from "./services/composerCommands";
+import { applyModelConfig, modelRoles, planningModelRoles, providerIdForModel, roleModelConfig, updateRoleModelConfig } from "./modelConfig";
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
 import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay, recoveredPlanningForDisplay } from "./services/planningRecovery";
@@ -26,10 +27,10 @@ import {
 } from "./services/conversationBranch";
 import { closeThinkingItems, splitThinkingTagDelta } from "./services/thinkingTranscript";
 import { plannerContentSteerId } from "./services/plannerText";
-import { plannerSteerOwner, withoutPlannerSteerIdentity } from "./services/plannerSteers";
+import { newExecutionSteer, plannerSteerOwner, withoutPlannerSteerIdentity } from "./services/plannerSteers";
 import {
   appendPlannerError, applyPartitionerDelta, applyPartitionerMessageEnd,
-  applyPlannerAssistantMessageEnd, applyPlannerEdgeEditsToState, applyPlannerNodeEditsToState,
+  applyPlannerAssistantMessageEnd, applyPlannerEdgeEditsToState, applyPlannerNodeEditsToState, applyPlannerExtensionError,
   applyPlannerTextDelta, applyPlannerThinkingUpdate, applyPlannerToolCallUpdate,
   applyPlannerToolExecutionEnd, applyPlannerToolExecutionStart, applyPlannerUserMessageStart,
   initialPlannerStream,
@@ -43,6 +44,7 @@ import { resetPresentedCardIds } from "./services/cardAnimations";
 
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
 import { plannerEdgeEdits, plannerNodeEdits } from "./lib/plannerGraphEdits";
+import { ComposerDrafts } from "./services/composerDrafts";
 import { nodeInstructionText, steerRollbackKey } from "./lib/pendingSteers";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
@@ -110,7 +112,7 @@ function snapshotModelConfig(snapshot: Snapshot | null | undefined, repository: 
   if (!config) return null;
   // Older checkpoints may only carry per-node Node Agent overrides.
   const nodeSettings = Object.values(snapshot.nodes ?? {})
-    .find(node => node.modelConfig)?.modelConfig;
+    .find(node => node.modelConfig && !node.modelOverride)?.modelConfig;
   return {
     model: config.model,
     thinkingLevel: config.thinkingLevel,
@@ -196,7 +198,7 @@ export default function App() {
   const foregroundGeneration = useRef(0);
   const workbenchIdentityRef = useRef({ runId: "", key: "initial" });
   // Session-local unsent text outlives a mounted workbench, but never crosses Runs.
-  const composerDraftsRef = useRef(new Map<string, Map<string, string>>());
+  const composerDraftsRef = useRef(new Map<string, ComposerDrafts>());
   const historyPrefetchRef = useRef<AbortController | null>(null);
   useEffect(() => () => historyPrefetchRef.current?.abort(), []);
   const busyOperations = useRef(0);
@@ -254,7 +256,7 @@ export default function App() {
       missing.forEach(id => pendingRunLabelIdsRef.current.add(id));
       mapWithConcurrency(missing, 8, id =>
         runtimeService.history(id)
-          .then(snapshot => [id, snapshot.graph.originalGoal || ""] as const)
+          .then(snapshot => [id, snapshot.title?.trim() || snapshot.graph.originalGoal || ""] as const)
           .catch(() => [id, ""] as const)
       ).then(results => {
         setRunLabels(prev => {
@@ -273,6 +275,21 @@ export default function App() {
     }
   }, [runs, runLabels, runtimeService, isBootstrapReady]);
   const { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot, observeRunSummary } = useRunIndicators(state);
+  const syncRunLabelFromSnapshot = useCallback((snapshot: Snapshot) => {
+    if (!snapshot.runId || snapshot.runId.startsWith("pending-")) return;
+    const label = snapshot.title?.trim() || snapshot.graph.originalGoal || "";
+    if (!label) return;
+    setRunLabels((prev) => {
+      if (prev[snapshot.runId] === label || deletedRunIdsRef.current.has(snapshot.runId)) return prev;
+      const updated = { ...prev, [snapshot.runId]: label };
+      writeStorageJson(STORAGE_KEYS.runLabels, updated);
+      return updated;
+    });
+  }, []);
+  const observePolledSnapshot = useCallback((snapshot: Snapshot) => {
+    observeRunSnapshot(snapshot);
+    syncRunLabelFromSnapshot(snapshot);
+  }, [observeRunSnapshot, syncRunLabelFromSnapshot]);
   const allRunIds = useMemo(() => [...new Set(Object.values(workspaceRuns).flat())], [workspaceRuns]);
   const [activities, setActivities] = useState<Record<string, RuntimeActivity[]>>({});
   const observeActivity = useCallback((runId: string, activity: RuntimeActivity[]) => {
@@ -538,20 +555,31 @@ export default function App() {
   const transcriptRunId = state.runId || plannerStream.runId || recoveredPlanning?.runId || failedPlanning?.runId || state.planning?.runId ||
     (visiblePlanningId ? `planning@${visiblePlanningId}` : "");
   useConversationTranscriptCache(transcriptRunId);
-  const setBackendStatus = useSnapshotPolling(setState, observeRunSnapshot, observeActivity, allRunIds, state.runId, state.phase, hasActiveExecutions,
+  const setBackendStatus = useSnapshotPolling(setState, observePolledSnapshot, observeActivity, allRunIds, state.runId, state.phase, hasActiveExecutions,
     // While a live Planner SSE stream owns this Run's draft topology, durable
     // snapshot polls must not clobber the incrementally assembled graph.
     isPlanning && plannerStream.runId && !plannerStream.runId.startsWith("pending-") ? plannerStream.runId : "",
     isBootstrapReady);
 
-  const applyForegroundSnapshot = (snapshot: Snapshot, generation: number) => {
+  // Composer metadata/queue mutations do not commit the Planner's live draft.
+  // Check the current stream at response time, not the submitting render.
+  const setComposerSnapshot = (snapshot: Snapshot) => {
+    const streaming = !!planningAbortControllerRef.current;
+    setState(previous => streaming && previous.runId === snapshot.runId
+      ? { ...snapshot, graph: previous.graph, plan: previous.plan }
+      : snapshot);
+  };
+
+  const applyForegroundSnapshot = (snapshot: Snapshot, generation: number, composerMutation = false) => {
     if (snapshot.runId && snapshot.config?.repository) {
       recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
       observeRunSnapshot(snapshot);
+      syncRunLabelFromSnapshot(snapshot);
       setBackendStatus(snapshot);
     }
     if (generation !== foregroundGeneration.current || !snapshotBelongsToWorkspace(snapshot, config.repository)) return false;
-    setState(snapshot);
+    if (composerMutation) setComposerSnapshot(snapshot);
+    else setState(snapshot);
     return true;
   };
 
@@ -598,7 +626,7 @@ export default function App() {
 
   const handleSendMessage = (
     val: string,
-    options?: { mode?: "followUp" | "steer"; displayText?: string; rawText?: string; files?: Array<File | FileAttachment>; images?: ImageAttachment[] }
+    options?: { mode?: "followUp" | "steer"; interrupt?: boolean; requestId?: string; displayText?: string; rawText?: string; files?: Array<File | FileAttachment>; images?: ImageAttachment[] }
   ): boolean | Promise<boolean> => {
     const text = val.trim();
     if (!text) return false;
@@ -630,7 +658,7 @@ export default function App() {
       ? options.files.map(f => ({ name: f.name, size: f.size, type: f.type }))
       : undefined;
     const recordMessage = (textToRecord: string, delivery?: ChatMessage["delivery"], executionId?: string, plannerSteer = false) => {
-      const id = crypto.randomUUID();
+      const id = options?.requestId ?? crypto.randomUUID();
       const message: ChatMessage = {
         id: `msg-${id}`, parentId: (sessionEntries.at(-1) || effectiveMessages.at(-1))?.id ?? null,
         role: "user", text: textToRecord, images: options?.images, files: fileAttachments, timestamp: Date.now(),
@@ -640,6 +668,7 @@ export default function App() {
         // pending area and from the Planner history it is sent to.
         node: plannerSteer ? undefined : targetNodeName,
         delivery, executionId, animateAppear: true,
+        ...(!plannerSteer ? { steerRequestId: id } : {}),
         ...(plannerSteer ? { plannerSteerId: id, plannerSteerStatus: "submitting" as const } : {}),
       };
       if (delivery === "steered" && executionId) {
@@ -672,8 +701,9 @@ export default function App() {
       try {
         await requireRepository(state.config?.repository || config.repository);
         if (!isCurrent()) { removeMessage(message); return false; }
-        let snapshot = await runtimeService.control(action, {
+        let snapshot = await runtimeService.control(options?.interrupt && action === "steer" ? "interrupt_steer" : action, {
           runId: state.runId, node: nodeOverride ?? targetNodeName, executionId, instruction: text, images: options?.images,
+          requestId: message.steerRequestId,
         });
         // Once accepted, resuming the originating Run is independent of navigation.
         if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
@@ -766,7 +796,7 @@ export default function App() {
       };
       return run(async () => {
         try {
-          const snapshot = await runtimeService.control("steer_planner", {
+          const snapshot = await runtimeService.control(options?.interrupt ? "interrupt_steer_planner" : "steer_planner", {
             runId: planningRunId, instruction: text, images: options?.images, requestId: message.plannerSteerId,
           });
           const events = snapshot.events ?? [];
@@ -964,9 +994,9 @@ export default function App() {
       setDataPath(cleanDataPath);
       writeStorageString(STORAGE_KEYS.dataPath, cleanDataPath);
     }
-    writeStorageJson(STORAGE_KEYS.config, nextConfigObj);
+    writeStorageJson(STORAGE_KEYS.config, applyModelConfig(nextConfigObj, data.config));
     if (nextConfigObj.repository && workspaceKey(nextConfigObj.repository) !== workspaceKey(data.config.repository)) {
-      void runtimeService.saveConfig(nextConfigObj).catch(() => { });
+      void runtimeService.saveConfig(applyModelConfig(nextConfigObj, data.config)).catch(() => { });
     }
 
     if (!activeRepo && storedProjects === null) {
@@ -1089,7 +1119,7 @@ export default function App() {
         if (!planningRecovery.current(scope) || !snapshot || snapshot.runId !== id) return null;
         setBackendStatus(snapshot);
         setRunLabels(prev => {
-          const label = snapshot.graph.originalGoal || "";
+          const label = snapshot.title?.trim() || snapshot.graph.originalGoal || "";
           const next = label || prev[id] === undefined ? { ...prev, [id]: label } : prev;
           writeStorageJson(STORAGE_KEYS.runLabels, next);
           return next;
@@ -1126,6 +1156,7 @@ export default function App() {
       const deduced = deduceRouteType(data.snapshot);
       setState(data.snapshot);
       markSnapshotRead(data.snapshot);
+      syncRunLabelFromSnapshot(data.snapshot);
       setBackendStatus(data.snapshot);
       setRouteType(deduced);
       setGoal(data.snapshot.graph.originalGoal);
@@ -1531,7 +1562,10 @@ export default function App() {
       maxFeedback: normalizeMaxFeedback(draftConfig.maxFeedback),
       maxParallel: normalizeMaxParallel(draftConfig.maxParallel),
     };
+    let persistedDefaults = defaultSettings;
     try {
+      // Settings always owns the Run profile, regardless of selected node.
+      // Outside a Run it edits the global defaults for new conversations.
       const boot = await runtimeService.saveConfig(nextConfig, state.runId || undefined);
       if (generation !== foregroundGeneration.current) return false;
       if (boot.snapshot?.runId === state.runId && state.runId) {
@@ -1546,11 +1580,12 @@ export default function App() {
         writeStorageString(STORAGE_KEYS.dataPath, cleanDataPath);
       }
       if (boot.envOverrides) setEnvOverrides(boot.envOverrides);
-      setDefaultSettings({
+      persistedDefaults = {
         ...boot.config,
         maxFeedback: normalizeMaxFeedback(boot.config.maxFeedback),
         maxParallel: normalizeMaxParallel(boot.config.maxParallel),
-      });
+      };
+      setDefaultSettings(persistedDefaults);
     } catch (error) {
       throw new Error(t("保存设置失败：{0}", String(error)));
     }
@@ -1560,7 +1595,7 @@ export default function App() {
     setConfig(nextConfig);
     setIsBootstrapReady(true);
     if (info) setRepoInfo({ ...info, path: repoPath });
-    writeStorageJson(STORAGE_KEYS.config, nextConfig);
+    writeStorageJson(STORAGE_KEYS.config, applyModelConfig(nextConfig, persistedDefaults));
     if (info) {
       setProjects((prev) => {
         const item: ProjectItem = { ...info, id: info.path, lastOpened: Date.now() };
@@ -1572,7 +1607,34 @@ export default function App() {
     setModal(null);
     setError("");
     return true;
-  }, [config.repository, repoInfo, state.runId, observeRunSnapshot, setState]);
+  }, [config.repository, repoInfo, state.runId, observeRunSnapshot, setState, defaultSettings]);
+
+  const saveComposerModels = async (scope: ComposerScope, settings: RoleModelConfig) => {
+    if (!isBootstrapReady) throw new Error(t("正在加载后端设置，请稍后重试；若加载失败，请在侧边栏重试。"));
+    const generation = foregroundGeneration.current;
+    if (scope.runId !== (state.runId || undefined) || displayedRunIdRef.current !== state.runId) throw new Error(t("会话已切换，请重试。"));
+    settingsReadGeneration.current += 1;
+    if (!scope.runId) {
+      setConfig(previous => updateRoleModelConfig(previous, scope.role, settings));
+      return;
+    }
+    const snapshot = await runtimeService.composerModels({ ...scope, settings });
+    if (generation !== foregroundGeneration.current || displayedRunIdRef.current !== scope.runId) return;
+    setComposerSnapshot(snapshot);
+    observeRunSnapshot(snapshot);
+    if (!scope.node) setConfig(previous => applyModelConfig(previous, snapshotModelConfig(snapshot, config.repository)));
+  };
+
+  const renameComposerConversation = async (runId: string, title: string) => {
+    if (!isBootstrapReady) throw new Error(t("正在加载后端设置，请稍后重试；若加载失败，请在侧边栏重试。"));
+    const generation = foregroundGeneration.current;
+    if (!runId || runId !== state.runId || displayedRunIdRef.current !== state.runId) throw new Error(t("会话已切换，请重试。"));
+    const snapshot = await runtimeService.composerRename({ runId, title });
+    if (generation !== foregroundGeneration.current || displayedRunIdRef.current !== runId) return;
+    setComposerSnapshot(snapshot);
+    observeRunSnapshot(snapshot);
+    syncRunLabelFromSnapshot(snapshot);
+  };
 
   const save = (graph: Graph) => run(async () => {
     const generation = foregroundGeneration.current;
@@ -1965,7 +2027,9 @@ export default function App() {
             } else if (event.type === "planner") {
               queuePlannerStream((prev) => (prev.stage !== "planning" ? { ...prev, stage: "planning" } : prev));
               const pEvent = event.event;
-              if (pEvent?.type === "message_start" && pEvent.message?.role === "user") {
+              if (pEvent?.type === "extension_error") {
+                setPlannerStream(prev => applyPlannerExtensionError(prev, pEvent));
+              } else if (pEvent?.type === "message_start" && pEvent.message?.role === "user") {
                 const content = pEvent.message.content;
                 const id = plannerContentSteerId(content);
                 if (id) setPlannerStream((prev) => applyPlannerUserMessageStart(prev, content, id));
@@ -2322,14 +2386,15 @@ export default function App() {
           setError(t("merger 已结束，只能查看执行记录"));
           return false;
         }
-        const selectedMessage = withoutPlannerSteerIdentity({
+        let selectedMessage: ChatMessage = withoutPlannerSteerIdentity({
           ...targetMsg,
           text: selectedText,
           images: selectedVersionData.images,
           currentVersionIndex: selectedVersion,
-          delivery: running ? targetMsg.delivery : undefined,
-          executionId: running ? targetMerger.id : undefined,
+          delivery: undefined,
+          executionId: undefined,
         });
+        if (running) selectedMessage = newExecutionSteer(selectedMessage, targetMerger.id);
         try {
           if (!await requireEditRepository()) return false;
           let snapshot = await runtimeService.control(running ? "steer" : "continue_merger", {
@@ -2338,6 +2403,7 @@ export default function App() {
             executionId: targetMerger.id,
             instruction: selectedText,
             images: selectedVersionData.images,
+            requestId: selectedMessage.steerRequestId,
           });
           if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
           if (!applyForegroundSnapshot(snapshot, generation)) return false;
@@ -2563,12 +2629,11 @@ export default function App() {
       }
 
       const baseEntries = sessionEntries.length > 0 ? sessionEntries : effectiveMessages;
+      const requestId = running ? crypto.randomUUID() : undefined;
       const { rolledBackEntries } = branchEditedMessageEntries(
         baseEntries, targetMsg, cleanExisting, cleanText, parsedExisting.attachments,
-        msg => withoutPlannerSteerIdentity({
-          ...msg,
-          delivery: running ? msg.delivery : undefined,
-          executionId: running ? targetMerger.id : undefined,
+        msg => running ? newExecutionSteer(msg, targetMerger.id, requestId) : withoutPlannerSteerIdentity({
+          ...msg, delivery: undefined, executionId: undefined,
         })
       );
 
@@ -2581,6 +2646,7 @@ export default function App() {
             executionId: targetMerger.id,
             instruction: cleanText,
             images: targetMsg.images,
+            requestId,
           });
           if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
           if (!applyForegroundSnapshot(snapshot, generation)) return false;
@@ -2779,6 +2845,7 @@ export default function App() {
               if (abort.signal.aborted || !planningRecovery.current(scope)) return;
               selectRunIfSwitched(snapshot.runId);
               setState(snapshot);
+              syncRunLabelFromSnapshot(snapshot);
               setGoal(snapshot.graph.originalGoal);
               setRouteType(deduceRouteType(snapshot));
               recordRunToWorkspace(snapshot.runId, repository);
@@ -2893,7 +2960,7 @@ export default function App() {
   const draftConversationKey = state.runId || JSON.stringify([workspaceKey(config.repository), "unbound"]);
   let composerDrafts = composerDraftsRef.current.get(draftConversationKey);
   if (!composerDrafts) {
-    composerDrafts = new Map<string, string>();
+    composerDrafts = new ComposerDrafts();
     composerDraftsRef.current.set(draftConversationKey, composerDrafts);
   }
 
@@ -3059,6 +3126,7 @@ export default function App() {
         }
         setState(snapshot);
         markSnapshotRead(snapshot);
+        syncRunLabelFromSnapshot(snapshot);
         setConfig(prev => applyModelConfig(prev, snapshotModelConfig(snapshot, config.repository) ?? defaultSettings));
         setRouteType(deduceRouteType(snapshot));
         setGoal(snapshot.graph.originalGoal || (id ? runLabels[id] : "") || "");
@@ -3078,6 +3146,7 @@ export default function App() {
   });
 
   return (
+    <ComposerModels.Provider value={{ config, snapshot: state, envOverrides, save: saveComposerModels, rename: renameComposerConversation }}>
     <div className={`app-background-root ${showLandingView ? "landing-active" : ""}`}>
       <FloatingPathsBackground
         className="aspect-16/9 flex items-center justify-center"
@@ -3212,6 +3281,12 @@ export default function App() {
                     rolledBackSteerKeys={rolledBackSteerKeys}
                     revertedPlannerSteerIds={revertedPlannerSteers}
                     onRollbackSteers={handleRollbackSteers}
+                    onWithdrawMessages={async (node, requestId) => {
+                      const generation = foregroundGeneration.current;
+                      const result = await runtimeService.withdrawMessages(state.runId, node, requestId);
+                      applyForegroundSnapshot(result.snapshot, generation, true);
+                      return result.messages;
+                    }}
                     onInterrupt={handleInterrupt}
                     isPlanning={isPlanning || backendPlanning || !!recoveredPlanning}
                     plannerStream={plannerStream}
@@ -3296,5 +3371,6 @@ export default function App() {
         </div>
       </FloatingPathsBackground>
     </div>
+    </ComposerModels.Provider>
   );
 }

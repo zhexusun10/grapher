@@ -30,7 +30,7 @@ async function openSettings(page) {
 const paths = page => page.locator(".app-background-root > .relative > .absolute .floating-path");
 const dots = page => page.locator(".landing-title-dot-pattern svg:has(pattern)");
 
-test("all Harness settings start checked and saved opt-outs survive reload", { timeout: 90_000 }, async () => {
+test("Harness defaults keep Feedback opt-in and saved choices survive reload", { timeout: 90_000 }, async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
   let savedConfig = { ...config, maxParallel: 0, maxFeedback: 0 };
   delete savedConfig.autoApprove;
@@ -58,7 +58,10 @@ test("all Harness settings start checked and saved opt-outs survive reload", { t
   page.on("pageerror", error => errors.push(String(error)));
   const modes = page.locator(".landing-screen .prompt-box-mode-btn");
   const harnessCard = page.getByRole("region", { name: "Harness settings", exact: true });
-  const checkboxes = harnessCard.getByRole("checkbox");
+  const defaultOnLabels = ["Hide Auto mode", "Auto approve Planner graphs", "Post-task Planner review",
+    "Isolate parallel node workspaces", "Mount Planner write and edit tools"];
+  const checkbox = name => harnessCard.getByRole("checkbox", { name, exact: true });
+  const feedback = checkbox("Enable Feedback");
   const maxParallelInput = harnessCard.getByRole("spinbutton", { name: "Parallel agents", exact: true });
   const maxFeedbackInput = harnessCard.getByRole("spinbutton", { name: "Feedback budget", exact: true });
   try {
@@ -66,7 +69,9 @@ test("all Harness settings start checked and saved opt-outs survive reload", { t
     await modes.filter({ hasText: "Graph" }).waitFor();
     assert.deepEqual(await modes.allTextContents(), ["Serial", "Graph"]);
     await openSettings(page);
-    assert.deepEqual(await checkboxes.evaluateAll(inputs => inputs.map(input => input.checked)), Array(5).fill(true));
+    for (const label of defaultOnLabels) assert.equal(await checkbox(label).isChecked(), true, label);
+    assert.equal(await feedback.isChecked(), false, "Feedback is opt-in when absent from saved settings");
+    assert.equal(await maxFeedbackInput.isDisabled(), true);
     assert.equal(await maxParallelInput.inputValue(), "20", "legacy maxParallel=0 defaults to 20");
     assert.equal(await maxParallelInput.getAttribute("min"), "2");
     assert.equal(await maxParallelInput.getAttribute("max"), "40");
@@ -81,10 +86,13 @@ test("all Harness settings start checked and saved opt-outs survive reload", { t
     }
     assert.equal(saves[0].maxParallel, 20);
     assert.equal(saves[0].maxFeedback, 4);
+    assert.equal(saves[0].feedbackEnabled, false);
     assert.equal(await page.evaluate(() => localStorage.getItem("grapher_hide_auto_mode_v1")), "1");
 
     await openSettings(page);
-    for (const checkbox of await checkboxes.all()) await checkbox.uncheck();
+    for (const label of defaultOnLabels) await checkbox(label).uncheck();
+    await feedback.check();
+    assert.equal(await maxFeedbackInput.isEnabled(), true);
     await maxParallelInput.fill("1");
     await maxParallelInput.blur();
     assert.equal(await maxParallelInput.inputValue(), "2", "values below 2 clamp to minimum 2");
@@ -106,10 +114,13 @@ test("all Harness settings start checked and saved opt-outs survive reload", { t
     }
     assert.equal(saves[1].maxParallel, 24);
     assert.equal(saves[1].maxFeedback, 16);
+    assert.equal(saves[1].feedbackEnabled, true);
     await page.reload({ waitUntil: "domcontentloaded" });
     await modes.filter({ hasText: "Auto" }).waitFor();
     await openSettings(page);
-    assert.deepEqual(await checkboxes.evaluateAll(inputs => inputs.map(input => input.checked)), Array(5).fill(false));
+    for (const label of defaultOnLabels) assert.equal(await checkbox(label).isChecked(), false, label);
+    assert.equal(await feedback.isChecked(), true);
+    assert.equal(await maxFeedbackInput.isEnabled(), true);
     assert.equal(await maxParallelInput.inputValue(), "24");
     assert.equal(await maxFeedbackInput.inputValue(), "16");
     assert.equal(await page.evaluate(() => localStorage.getItem("grapher_hide_auto_mode_v1")), "0");

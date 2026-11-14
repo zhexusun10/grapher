@@ -107,6 +107,11 @@ export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string
   return batches.length > 0 ? batches : [nodeNames];
 }
 
+/** A saved Run owns its display capability; legacy active routes always win. */
+export function graphFeedbackEnabled(state: Pick<Snapshot, "graph" | "config">, draftEnabled = false): boolean {
+  return state.graph.edges.some(edge => edge.feedback) || (state.config?.feedbackEnabled ?? draftEnabled);
+}
+
 /** Derive topology from the snapshot only when its graph/execution inputs change. */
 export function useGraphElements(
   state: Snapshot,
@@ -116,6 +121,8 @@ export function useGraphElements(
   activity: RuntimeActivity[] = [],
   recentlyAddedNodeNames: Set<string> = new Set(),
 ) {
+  // Saved routes remain executable when the default for future edits changes.
+  // Render the authoritative graph, never hide those routes behind Settings.
   const mergeTargets = useMemo(() => {
     const targets = new Map<string, NonNullable<Snapshot["mergers"]>[number]>();
     const names = new Set(state.graph.nodes.map((node) => node.name));

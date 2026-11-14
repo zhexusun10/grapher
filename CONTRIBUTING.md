@@ -45,11 +45,11 @@ Keep Pi unmodified unless deliberately updating the pinned baseline. Do not patc
 - Do not silently downgrade failed platform preflight, provider errors, or interrupted execution into success.
 - Preserve user data and failed-workspace evidence unless the user explicitly resets/deletes it.
 
-A proposed runtime change should identify affected invariants and include regressions for failure as well as the happy path.
+For runtime changes, identify affected invariants and reuse existing coverage; add a focused regression where the changed behavior is not covered.
 
 ## Before submitting a change
 
-Select relevant checks from [Testing](docs/development/testing.md); include integration/platform checks when the changed behavior needs them. Report actual commands and results, plus relevant validation gaps—not a list of unrelated suites that were not run.
+Use [Testing](docs/development/testing.md) to select a focused check, not a submission checklist. Report what you ran and any relevant gap; do not repeat passing checks without a related change or diagnostic reason.
 
 Describe behavior changes and effects on persisted state or credentials. Keep generated evidence separate from source.
 
@@ -61,7 +61,7 @@ English is canonical under `docs/`; [README.zh-CN.md](README.zh-CN.md) remains t
 
 - **User documentation:** README pages explain the product and the shortest usable startup path. Keep them concise; do not require readers to understand implementation contracts or run contributor tests.
 - **Developer documentation:** Explain the relevant scope, prerequisites, mechanisms, rationale, and verification limits. Distinguish implemented behavior from proposals and design goals; link focused implementation/tests rather than treating intent as proof.
-- **Agent instructions:** Follow the instruction-file constraints in [AGENTS.md](AGENTS.md); keep task-specific rationale and procedures in developer documentation, not automatically loaded instructions.
+- **Agent instructions:** [AGENTS.md](AGENTS.md) points to the documentation entry point; directory-specific instructions define local boundaries. Keep task-specific rationale and procedures in developer documentation, not automatically loaded instructions.
 - Update the single canonical page when behavior changes, and link implementation/tests instead of copying volatile constants or UI details.
 - Do not add a second explanation of an existing contract, a dated verification log, or a local run report.
 - Keep sensitive logs and local reports in ignored runtime/output directories, not public documentation.

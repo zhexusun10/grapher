@@ -1,5 +1,6 @@
 import { createWorkspacePaths } from './workspace-paths.mjs';
 import { plannerSteerContext } from './planner-steer.ts';
+import { feedbackInputContext } from './feedback-input.ts';
 import { registerWorkspaceTools } from './workspace-tools.ts';
 import { configurePlannerWorkspace, onPlannerWorkspaceChanged, plannerWorkspaceState, switchPlannerWorkspace } from './planner-workspace.ts';
 import { managedLaunch, managedBashOptions, managedBashCommand } from './launch-binding.mjs';
@@ -46,7 +47,7 @@ export default function (pi: ExtensionAPI) {
       // its associated tool results from this request, not from saved history.
       // Leave ordinary tool-use turns, including missing results, untouched so
       // Pi's provider adapter performs its own native normalization.
-      const messages = event.messages.filter(message =>
+      const messages = feedbackInputContext(event.messages).filter(message =>
         !(message.role === 'custom' && message.customType === 'grapher-interrupted-continuation'));
       const lastAssistant = messages.findLastIndex(message => message.role === 'assistant');
       const lastUser = messages.findLastIndex(message => message.role === 'user');

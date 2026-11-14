@@ -1197,6 +1197,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
     let config = Config {
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         post_task_review: false,
         planner_write_tools: true,
@@ -1314,6 +1315,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     )
     .unwrap();
     let config = Config {
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         post_task_review: false,
         planner_write_tools: true,
@@ -1578,6 +1580,7 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
                 edges: vec![],
             },
             Config {
+                feedback_enabled: false,
                 environment: None,
                 repository: repo.to_string_lossy().into(),
                 engine: "pi".into(),
@@ -1895,6 +1898,7 @@ fn legacy_planner_session_keeps_its_original_pi_identity() {
                 edges: vec![],
             },
             Config {
+                feedback_enabled: false,
                 environment: None,
                 repository: repo.to_string_lossy().into(),
                 engine: "pi".into(),
@@ -1971,6 +1975,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 "#).unwrap();
     let root = temp.path().join("runtime");
     let config = Config {
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         post_task_review: false,
         planner_write_tools: true,
@@ -2070,6 +2075,7 @@ printf '%s' '{"originalGoal":"test","nodes":[{"name":"keep","task":"keep"},{"nam
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Updated"}]}}'
 "#).unwrap();
     let config = Config {
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
@@ -2194,6 +2200,7 @@ printf '%s' '{"originalGoal":"test","nodes":[{"name":"change","task":"change"},{
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Updated"}]}}'
 "#).unwrap();
     let config = Config {
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         environment: None,
         repository: repo.to_string_lossy().into(),
@@ -2297,6 +2304,7 @@ printf '%s' '{"originalGoal":"test","nodes":[{"name":"work","task":"work"}],"edg
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
 "#).unwrap();
     let config = Config {
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         post_task_review: false,
         planner_write_tools: true,
@@ -2377,6 +2385,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
     let config = Config {
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         post_task_review: false,
         planner_write_tools: true,
@@ -2480,6 +2489,7 @@ fn manual_graph_edits_after_reject_create_approvable_graph_drafts() {
         extension: temp.path().join("unused.ts"),
     });
     let config = Config {
+        feedback_enabled: false,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -2606,6 +2616,7 @@ esac
         role_models: Default::default(),
         thinking_level: "off".into(),
         isolate_parallel_nodes: true, max_parallel: 1,
+        feedback_enabled: false,
         max_feedback: 0,
         auto_approve: false,
         post_task_review: false,
@@ -2666,6 +2677,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         extension: temp.path().join("unused.ts"),
     });
     let config = Config {
+        feedback_enabled: false,
         environment: None,
         repository: repo.to_string_lossy().into(),
         engine: "pi".into(),
@@ -2717,6 +2729,7 @@ fn partitioner_failure_persists_history_without_compiling_or_approving_a_run() {
     let result = plan_goal_internal(
         "Build two modules".into(),
         Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             environment: None,
             repository: repo.to_string_lossy().into(),
@@ -2809,6 +2822,7 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
     )
     .unwrap();
     let config = |script: &std::path::Path| Config {
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         environment: None,
         repository: repository.to_string_lossy().into(),
@@ -3013,6 +3027,7 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
         let script = temp.path().join("failed-revision.sh");
         fs::write(&script, "cat >/dev/null\nprintf 'failed revision source' > tracked.txt\nprintf 'new file' > new.txt\nexit 1\n").unwrap();
         let config = Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             environment: None,
             repository: repository.to_string_lossy().into(),
@@ -3137,6 +3152,7 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display(), if fail { "exit 1" } else { ":" })).unwrap();
             let config = Config {
+                feedback_enabled: false,
                 isolate_parallel_nodes: true,
                 post_task_review: false,
                 planner_write_tools: true,
@@ -3248,6 +3264,7 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display(), label, label)).unwrap();
         let config = Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             post_task_review: false,
             planner_write_tools: true,
@@ -3325,6 +3342,7 @@ printf '%s' '{{"originalGoal":"test","nodes":[{{"name":"worker","task":"test"}}]
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Planned"}}]}}}}'
 "#, started.display(), release.display())).unwrap();
         let config = Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             post_task_review: false,
             planner_write_tools: true,
@@ -3417,6 +3435,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                         edges: vec![],
                     },
                     Config {
+                        feedback_enabled: false,
                         isolate_parallel_nodes: true,
                         post_task_review: false,
                         planner_write_tools: true,
@@ -3639,6 +3658,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 thinking_level: "medium".into(),
                 max_parallel: 4,
                 max_feedback: 2,
+                feedback_enabled: false,
                 isolate_parallel_nodes: true, post_task_review: false,
                 planner_write_tools: true,
                 auto_approve: false,
@@ -3990,6 +4010,10 @@ fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
     let repository = crate::fixture::repository(root).unwrap();
     let release = root.join("release-slow");
     let release_related = root.join("release-related");
+    // Synthetic worker routing only; production notices are user-authored.
+    fs::create_dir_all(root.join("prompts")).unwrap();
+    fs::write(root.join("prompts/feedback-returned.md"), "{{node}}").unwrap();
+    fs::write(root.join("prompts/feedback-updated.md"), "{{node}}").unwrap();
     let slow_started = root.join("slow-started");
     let related_started = root.join("related-started");
 
@@ -4105,6 +4129,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
                 .collect(),
             },
             Config {
+                feedback_enabled: true,
                 environment: None,
                 repository: repository.to_string_lossy().into(),
                 engine: "pi".into(),
@@ -4395,6 +4420,7 @@ fn planning_metrics_parsing_and_persistence() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     let config = Config {
+        feedback_enabled: false,
         environment: None,
         repository: String::new(),
         #[cfg(feature = "fixture")]
@@ -4573,6 +4599,7 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         model: "test-model".into(),
         role_models: Default::default(),
         isolate_parallel_nodes: true, thinking_level: "medium".into(),
+        feedback_enabled: false,
         max_parallel: 2,
         max_feedback: 1,
         auto_approve: false,
@@ -4669,6 +4696,7 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     let config = Config {
+        feedback_enabled: false,
         environment: None,
         isolate_parallel_nodes: true, post_task_review: false,
         planner_write_tools: true,
@@ -4806,6 +4834,7 @@ fn completed_graph_is_published_by_driver() {
     let root = temp.path().to_path_buf();
     let mut runtime = Runtime::open(&root).unwrap();
     let config = Config {
+        feedback_enabled: false,
         environment: None,
         repository: String::new(),
         engine: "fixture".into(),
@@ -5239,6 +5268,7 @@ fn workspace_attachment_dispatch_preserves_originals() {
 #[test]
 fn planning_preflight_checks_model_format() {
     let mut config = Config {
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         environment: None,
         repository: "/tmp/fake".into(),
@@ -5276,6 +5306,7 @@ fn planning_preflight_checks_model_format() {
 #[test]
 fn planning_preflight_fetches_catalog_only_once_for_both_roles() {
     let config = Config {
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
         environment: None,
         repository: "/tmp/fake".into(),
@@ -5497,6 +5528,7 @@ fn save_config_updates_bootstrap_and_persists() {
     assert!(initial.config.auto_approve);
     assert!(initial.config.post_task_review);
     assert!(initial.config.planner_write_tools);
+    assert!(!initial.config.feedback_enabled);
     assert!(initial.config.isolate_parallel_nodes);
     let mut legacy = serde_json::to_value(&initial.config).unwrap();
     legacy.as_object_mut().unwrap().remove("autoApprove");
@@ -5509,6 +5541,7 @@ fn save_config_updates_bootstrap_and_persists() {
 
     // 2. Save new config with valid model
     let new_config = Config {
+        feedback_enabled: true,
         environment: None,
         repository: temp_dir.path().to_string_lossy().into(),
         isolate_parallel_nodes: true, model: "openai/gpt-4o".into(),
@@ -5601,6 +5634,7 @@ fn save_config_updates_bootstrap_and_persists() {
     assert_eq!(reloaded.config.max_feedback, 3);
     assert!(reloaded.config.auto_approve);
     assert!(!reloaded.config.planner_write_tools);
+    assert!(reloaded.config.feedback_enabled);
     assert_eq!(
         reloaded.effective_role_models.get("planner").unwrap(),
         "openai/gpt-4o"

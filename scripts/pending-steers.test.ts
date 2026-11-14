@@ -1,12 +1,128 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { inlineSteerKey, isPendingSteer, isUncommittedSteer, liveSteerConsumed, nodeInstructionText, numberSteers, steerFallbackPosition, steerRollbackKey, type InlineUserTurnWindow, type LiveSteerMarker } from "../src/lib/pendingSteers.ts";
-import type { ChatMessage } from "../src/types.ts";
+import { projectLiveSteerWithdrawals, projectWithdrawnSteers, inlineSteerKey, isPendingSteer, isUncommittedSteer, liveSteerConsumed, nodeInstructionText, numberSteers, steerFallbackPosition, steerRollbackKey, type InlineUserTurnWindow, type LiveSteerMarker } from "../src/lib/pendingSteers.ts";
+import { ComposerDrafts } from "../src/services/composerDrafts.ts";
+import { newExecutionSteer } from "../src/services/plannerSteers.ts";
+import { emptySnapshot, type ChatMessage } from "../src/types.ts";
 
 const steer = (id: string, text: string, executionId: string, extra: Partial<ChatMessage> = {}): ChatMessage => ({
   id, parentId: null, role: "user", text, node: "task", executionId, delivery: "steered", ...extra,
 });
 const window = (texts: string[], complete = true): Record<string, InlineUserTurnWindow> => ({ "exec-1": { texts, complete } });
+
+test("confirmed withdrawals remove only their exact optimistic duplicate and renumber resends", () => {
+  const events = [1, 2, 3].map(sequence => ({ type: "steered", sequence, timestamp: sequence,
+    execution_id: "exec-1", instruction: "again", request_id: `request-${sequence}` }));
+  const source = { ...emptySnapshot, events: [...events,
+    { type: "steers_withdrawn", sequence: 4, timestamp: 4, execution_id: "exec-1", message_sequences: [2] }] };
+  const messages = numberSteers([steer("first", "again", "exec-1", { steerRequestId: "request-1" }),
+    steer("withdrawn", "again", "exec-1", { steerRequestId: "request-2" }),
+    steer("resent", "again", "exec-1", { steerRequestId: "request-3" }), steer("other", "again", "exec-2")]);
+  const projected = projectWithdrawnSteers(source, messages);
+  assert.deepEqual(projected.messages.map(message => [message.id, message.inlineSteerOrdinal]), [["first", 0], ["resent", 1], ["other", 0]]);
+  assert.deepEqual(projected.state.events.map(event => event.sequence), [1, 3, 4]);
+  assert.equal(isUncommittedSteer(projected.messages[1], window(["again"])), true);
+  assert.equal(isUncommittedSteer(projected.messages[1], window(["again", "again"])), false);
+  assert.equal(source.events.length, 4, "projection never rewrites durable history");
+  assert.equal(projectWithdrawnSteers(source, []).state.events.length, 3, "reload hides the withdrawn card without local state");
+});
+
+test("Merger edits and version resends have fresh, withdrawable delivery identities", () => {
+  const original: ChatMessage = { id: "event-1", role: "user", text: "old", node: "merge:join", executionId: "exec-1",
+    delivery: "steered", steerRequestId: "old-request", steerOrdinal: 7, inlineSteerOrdinal: 8,
+    versions: [{ id: "version-1", text: "old", timestamp: 1 }], currentVersionIndex: 0 };
+  const copy = newExecutionSteer({ ...original, text: "edited" }, "exec-1", "new-request");
+  assert.equal(copy.steerRequestId, "new-request");
+  assert.equal(copy.delivery, "steered");
+  assert.equal(copy.steerOrdinal, undefined);
+  assert.equal(copy.inlineSteerOrdinal, undefined);
+  assert.equal(copy.versions, original.versions);
+  const source = { ...emptySnapshot, events: [
+    { type: "steered", sequence: 1, timestamp: 1, execution_id: "exec-1", instruction: "old", request_id: "old-request" },
+    { type: "steered", sequence: 2, timestamp: 2, execution_id: "exec-1", instruction: "edited", request_id: "new-request" },
+    { type: "steers_withdrawn", sequence: 3, timestamp: 3, message_sequences: [1] },
+  ] };
+  assert.equal(projectWithdrawnSteers(source, [copy]).messages.length, 1, "the old event-shaped UI ID cannot override the new request ID");
+  source.events.push({ type: "steers_withdrawn", sequence: 4, timestamp: 4, message_sequences: [2] });
+  assert.deepEqual(projectWithdrawnSteers(source, [copy]).messages, []);
+  assert.notEqual(newExecutionSteer(original, "exec-1").steerRequestId, newExecutionSteer(original, "exec-1").steerRequestId);
+  assert.equal(original.steerRequestId, "old-request", "history must not be mutated");
+});
+
+test("pause rollback keeps the same identity before and after withdrawal renumbers duplicates", () => {
+  const events = [1, 2, 3].map(sequence => ({ type: "steered", sequence, timestamp: sequence,
+    execution_id: "exec-1", instruction: "again", request_id: `request-${sequence}` }));
+  const source = { ...emptySnapshot, events: [...events,
+    { type: "steers_withdrawn", sequence: 4, timestamp: 4, message_sequences: [2] }] };
+  const raw = steer("latest", "again", "exec-1", { steerRequestId: "request-3", steerOrdinal: 2, inlineSteerOrdinal: 2 });
+  const projected = projectWithdrawnSteers(source, [raw]).messages[0];
+  assert.equal(projected.steerOrdinal, 1);
+  assert.equal(steerRollbackKey(raw), steerRollbackKey(projected), "Pause must remove the raw optimistic copy, not a withdrawn predecessor");
+});
+
+test("withdrawal uses IDs even when a local copy has rewritten text or a stale ordinal", () => {
+  const events = [1, 2].map(sequence => ({ type: "steered", sequence, timestamp: sequence,
+    execution_id: "exec-1", instruction: "same", request_id: `request-${sequence}` }));
+  const source = { ...emptySnapshot, events: [...events,
+    { type: "steers_withdrawn", sequence: 3, timestamp: 3, message_sequences: [2] }] };
+  const messages = [steer("read", "same", "exec-1", { steerRequestId: "request-1", inlineSteerOrdinal: 1 }),
+    steer("queued", "rewritten local text", "exec-1", { steerRequestId: "request-2", inlineSteerOrdinal: 0 }),
+    steer("unconfirmed", "same", "exec-1", { inlineSteerOrdinal: 1 })];
+  assert.deepEqual(projectWithdrawnSteers(source, messages).messages.map(message => message.id), ["read", "unconfirmed"]);
+  const markers = messages.slice(0, 2).map(message => ({ key: inlineSteerKey(message)!, requestId: message.steerRequestId,
+    executionId: "exec-1", text: message.text, afterOffset: 100, occurrence: 1 }));
+  assert.deepEqual(projectLiveSteerWithdrawals(markers, source.events, new Set()), [markers[0]]);
+});
+
+test("withdrawal preserves consumed attachment cursors and unrelated node handoffs", () => {
+  const make = (executionId: string, ordinal: number): LiveSteerMarker => ({ executionId, text: "same", key: `${executionId}\u0000same\u0000${ordinal}`, afterOffset: 100, occurrence: ordinal + 1 });
+  const consumed = { ...make("node-a", 0), images: [{ type: "image" as const, data: "image", mimeType: "image/png" }] };
+  const unrelated = make("node-b", 0);
+  const events = [1, 2, 3].map(sequence => ({ sequence, timestamp: sequence, type: "steered", execution_id: "node-a", instruction: "same" }));
+  const projected = projectLiveSteerWithdrawals([consumed, make("node-a", 1), make("node-a", 2), unrelated], [...events,
+    { sequence: 4, timestamp: 4, type: "steers_withdrawn", message_sequences: [2] }], new Set());
+  assert.equal(projected[0], consumed, "its image handoff must not disappear or rebuild a duplicate outer card");
+  assert.equal(projected[2], unrelated);
+  assert.equal(projected[1].key, "node-a\u0000same\u00001");
+  assert.equal(projected[1].occurrence, 2);
+});
+
+test("recall completion belongs to the shared draft, not the original mounted composer", async () => {
+  const drafts = new ComposerDrafts();
+  drafts.set("first", "original");
+  drafts.set("other", "unrelated");
+  const image = { type: "image" as const, data: "image", mimeType: "image/png" };
+  let complete!: (messages: Array<{ text: string; images: typeof image[] }>) => void;
+  const pending = drafts.withdraw("first", () => new Promise(resolve => { complete = resolve; }));
+  assert.equal(drafts.recall("first").pending, true);
+  assert.equal(drafts.recall("other").pending, false);
+  assert.equal(drafts.withdraw("first", async () => { assert.fail("duplicate request"); }), pending);
+  await Promise.resolve();
+  drafts.set("first", "newer draft after switching views");
+  complete([{ text: "recalled", images: [image] }]);
+  await pending;
+  assert.equal(drafts.get("first"), "newer draft after switching views\n\nrecalled");
+  assert.equal(drafts.get("other"), "unrelated");
+  assert.deepEqual(drafts.recall("first").images, [image]);
+  drafts.delete("first");
+  assert.deepEqual(drafts.recall("first").images, [image], "editing text to empty retains image-only input");
+  assert.equal(drafts.recall("first").pending, false);
+});
+
+test("a failed recall retries its request identity and restores its receipt only once", async () => {
+  const drafts = new ComposerDrafts();
+  drafts.set("view", "draft");
+  const ids: string[] = [];
+  await assert.rejects(drafts.withdraw("view", async id => { ids.push(id); throw new Error("response lost"); }), /response lost/);
+  assert.equal(drafts.get("view"), "draft");
+  assert.equal(drafts.recall("view").pending, false);
+  await drafts.withdraw("view", async id => { ids.push(id); return [{ text: "queued" }]; });
+  assert.equal(ids[0], ids[1]);
+  assert.equal(drafts.get("view"), "draft\n\nqueued");
+  await drafts.withdraw("view", async id => { ids.push(id); return []; });
+  assert.notEqual(ids[1], ids[2], "only a successful receipt permits a new recall");
+  assert.equal(drafts.get("view"), "draft\n\nqueued");
+});
 
 test("nodeInstructionText strips the addressing prefix", () => {
   assert.equal(nodeInstructionText("[@task] tighten the guard"), "tighten the guard");

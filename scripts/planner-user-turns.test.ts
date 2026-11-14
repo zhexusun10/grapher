@@ -221,6 +221,9 @@ test("editing or branching a steer starts a new turn without its delivery identi
   assert.equal(steer.plannerSteerId, "12345678-1234-4234-8234-123456789abc", "the pending card is not mutated");
   const plain = { id: "msg-2", role: "user" as const, text: "goal" };
   assert.equal(withoutPlannerSteerIdentity(plain), plain, "a message without identity is reused");
+  const node = { ...plain, steerRequestId: "node-submission" };
+  assert.equal(withoutPlannerSteerIdentity(node).steerRequestId, undefined, "a Node edit must get a new submission ID too");
+  assert.equal(node.steerRequestId, "node-submission");
 });
 
 test("repeated Planner steers hand off by ID, not by equal text", () => {
@@ -241,6 +244,17 @@ test("repeated Planner steers hand off by ID, not by equal text", () => {
   assert.deepEqual(plannerSteerRows(events, messages, { ...options, planning: false, visibleIds: new Set<string>() })
     .map(row => row.status), ["unknown"],
     "a settled turn's consumed handoff card does not outlive a tail window that starts later");
+});
+
+test("confirmed Planner withdrawal hides only its request, including after reload", () => {
+  const events = ["consumed", "withdrawn", "queued"].flatMap((status, index) => [
+    { type: "planner_steer_submitted", sequence: index * 2 + 1, timestamp: 1, planning_id: "turn", request_id: status, instruction: "same" },
+    { type: "planner_steer_status", sequence: index * 2 + 2, timestamp: 2, planning_id: "turn", request_id: status, status },
+  ]);
+  const local = [{ id: "local", role: "user" as const, text: "same", plannerSteerId: "withdrawn" }];
+  for (const messages of [local, []]) {
+    assert.deepEqual(plannerSteerRows(events, messages, { planning: true, visibleIds: new Set(["consumed"]) }).map(row => row.id), ["queued"]);
+  }
 });
 
 test("a rejected Planner steer returns to the composer instead of staying as a card", () => {

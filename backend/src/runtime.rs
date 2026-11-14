@@ -16,6 +16,8 @@ use uuid::Uuid;
 
 #[path = "workspace_policy.rs"]
 mod workspace_policy;
+#[path = "feedback_continuation.rs"]
+mod feedback_continuation;
 
 /// Confirmation is tied to the completed result the user actually reviewed.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -73,6 +75,8 @@ pub struct Job {
     pub copy_from_workspace: Option<String>,
     pub history_edit: bool,
     pub feedback_source: bool,
+    /// Bound user turn whose delivery must be reconciled with Pi's session.
+    pub feedback_delivery_id: Option<String>,
     /// First private batch of a plain-directory Run or promoted shared Run:
     /// capture the source before any preparation/handoff.
     pub materialize_source: bool,
@@ -355,7 +359,57 @@ impl Runtime {
         let mut defaults = config.clone();
         defaults.environment = None;
         let bytes = serde_json::to_vec_pretty(&defaults).map_err(|e| e.to_string())?;
-        fs::write(self.root.join("config.json"), bytes).map_err(|e| e.to_string())
+        // Different Run services share this file but not their mutexes. Publish
+        // a complete replacement so readers never observe a truncated setting.
+        let temporary = self.root.join(format!(".config-{}.tmp", Uuid::new_v4()));
+        let result = (|| -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, self.root.join("config.json"))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result.map_err(|error| format!("Cannot save settings: {error}"))
+    }
+
+    /// Only an absent settings file may use the caller's initial configuration.
+    /// A corrupt/unreadable file must not silently restore a stale opt-in.
+    pub(crate) fn feedback_enabled(&self, fallback: bool) -> Result<bool, String> {
+        let bytes = match fs::read(self.root.join("config.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(fallback),
+            Err(error) => return Err(format!("Cannot read Feedback setting: {error}")),
+        };
+        serde_json::from_slice::<Config>(&bytes)
+            .map(|config| config.feedback_enabled)
+            .map_err(|error| format!("Cannot read Feedback setting: {error}"))
+    }
+
+    /// All graph ingress paths gate new routes, not retained historical work.
+    fn validate_feedback_additions(graph: &Graph, previous: Option<&Graph>, enabled: bool) -> Result<(), String> {
+        if enabled {
+            return Ok(());
+        }
+        let retained: BTreeSet<_> = previous.into_iter()
+            .flat_map(|old| old.edges.iter())
+            .filter(|edge| edge.feedback)
+            .map(|edge| (&edge.from, &edge.to))
+            .collect();
+        if graph.edges.iter().any(|edge| edge.feedback && !retained.contains(&(&edge.from, &edge.to))) {
+            return Err("Enable Feedback in Settings before adding a feedback edge".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_feedback_revision(&self, graph: &Graph) -> Result<(), String> {
+        let enabled = self.feedback_enabled(
+            self.state.config.as_ref().is_some_and(|config| config.feedback_enabled),
+        )?;
+        Self::validate_feedback_additions(graph, Some(&self.state.graph), enabled)
     }
 
     pub fn snapshot_version(&self) -> String {
@@ -1122,13 +1176,15 @@ impl Runtime {
         if self.active() {
             return Err("Pause and wait for the current executions to finish first".into());
         }
+        let mut config = config;
+        config.feedback_enabled = self.feedback_enabled(config.feedback_enabled)?;
+        Self::validate_feedback_additions(&graph, None, config.feedback_enabled)?;
         compile(&graph, true)
             .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
         #[cfg(feature = "fixture")]
         if !known_engine(&config.engine) {
             return Err("Unknown test actuator".into());
         }
-        let mut config = config;
         config.max_feedback = config.max_feedback.min(MAX_FEEDBACK);
         // max_parallel = 0 uses DEFAULT_MAX_PARALLEL; positive values are capped at MAX_GRAPH_NODE_WORKERS.
         config.max_parallel = config.max_parallel.min(MAX_GRAPH_NODE_WORKERS);
@@ -1943,6 +1999,8 @@ impl Runtime {
         {
             return Err("Only an unapproved graph draft can be edited in place".into());
         }
+        config.feedback_enabled = self.feedback_enabled(config.feedback_enabled)?;
+        Self::validate_feedback_additions(&graph, Some(&self.state.graph), config.feedback_enabled)?;
         let previous = self.state.config.as_ref().ok_or("Missing config")?;
         if config.repository != previous.repository {
             return Err("Cannot move a draft to another repository".into());
@@ -1985,6 +2043,7 @@ impl Runtime {
         if self.state.approved {
             return self.revise_graph(graph, planning);
         }
+        self.validate_feedback_revision(&graph)?;
         resolve_repository(
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
@@ -2090,6 +2149,13 @@ impl Runtime {
                 "Wait for publication or the active follow-up to finish before adding a node"
                     .into(),
             );
+        }
+        // Settings gate new routes, not replay or delivery of committed work.
+        let feedback_enabled = self.feedback_enabled(
+            self.state.config.as_ref().is_some_and(|config| config.feedback_enabled),
+        )?;
+        if request.feedback && !feedback_enabled {
+            return Err("Enable Feedback in Settings before adding a feedback edge".into());
         }
         request.node.name = request.node.name.trim().to_string();
         if request.feedback && request.to.as_deref().unwrap_or("").is_empty() {
@@ -2289,6 +2355,7 @@ impl Runtime {
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
         )?;
+        self.validate_feedback_revision(&graph)?;
         compile(&graph, true)
             .map_err(|errors| serde_json::to_string(&errors).unwrap_or_default())?;
         let previous = &self.state.graph;
@@ -2402,7 +2469,8 @@ impl Runtime {
                                     && !self.state.superseded_execution_ids.contains(&execution.id)
                             })
                             .is_some_and(|execution| execution.status == "failed");
-                    ((unstarted || failed || preparation_failures.contains(name))
+                    (!node.model_override
+                        && (unstarted || failed || preparation_failures.contains(name))
                         && node.model_config.as_ref().unwrap_or(&previous_node) != &node_settings)
                         .then(|| name.clone())
                 })
@@ -2432,7 +2500,7 @@ impl Runtime {
             .nodes
             .iter()
             .filter_map(|(name, node)| {
-                if only.is_some_and(|names| !names.contains(name)) {
+                if node.model_override || only.is_some_and(|names| !names.contains(name)) {
                     return None;
                 }
                 let failed = node.status == "failed"
@@ -2970,8 +3038,10 @@ impl Runtime {
             .unwrap_or(self.state.events[start].sequence);
         // Editing a Steer abandons that turn and later turns, not the other
         // user instructions already consumed inside the same execution.
+        let withdrawn = self.state.withdrawn_steer_sequences();
         let from_event_sequence = self.state.events[start..]
             .iter()
+            .filter(|event| !withdrawn.contains(&event.sequence))
             .find_map(|event| match &event.kind {
                 EventKind::Steered {
                     execution_id: owner,
@@ -3178,6 +3248,7 @@ impl Runtime {
             .map(|execution| execution.id.as_str())
             .collect();
         let mut sequences: BTreeSet<i64> = BTreeSet::new();
+        let withdrawn = self.state.withdrawn_steer_sequences();
         let mut parts: Vec<String> = Vec::new();
         if !resent_task.trim().is_empty() {
             parts.push(resent_task.to_string());
@@ -3195,7 +3266,7 @@ impl Runtime {
                     execution_id,
                     instruction,
                     ..
-                } if executions.contains(execution_id.as_str()) => parts.push(instruction.clone()),
+                } if executions.contains(execution_id.as_str()) && !withdrawn.contains(&event.sequence) => parts.push(instruction.clone()),
                 _ => {}
             }
         }
@@ -3606,6 +3677,13 @@ impl Runtime {
             }
         }
         ready.truncate(available);
+        let undelivered_feedback_turns = match self.prepare_feedback_continuations(&ready) {
+            Ok(pending) => pending,
+            // The driver owns live completion channels. Do not unwind it over
+            // an admission error before unrelated workers have been settled.
+            Err(_) if self.active() => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
         if !self.prepare_execution_batch(&ready, allow_publication && pending_sources.is_empty())? {
             return Ok(Vec::new());
         }
@@ -3660,7 +3738,11 @@ impl Runtime {
                         || !self.state.published_heads.contains(head)))
                     .unwrap_or_else(|| source_head.clone())
             };
-            let queued_prompt = self.state.nodes[&node.name].pending_prompt();
+            let feedback_undelivered = undelivered_feedback_turns.contains(&node.name);
+            let retained_images = self.state.nodes[&node.name].feedback_continuation.as_ref()
+                .filter(|_| feedback_undelivered)
+                .and_then(|input| input.images.clone()).unwrap_or_default();
+            let queued_prompt = self.state.nodes[&node.name].pending_prompt_after_images(retained_images.len());
             let message_sequences = self.state.nodes[&node.name]
                 .pending_messages
                 .iter()
@@ -3668,33 +3750,24 @@ impl Runtime {
                 .collect::<Vec<_>>();
             let resolved_private = self.retained_private_continuation(&node.name)
                 .is_some_and(|previous| previous.status == "resolved");
-            let continuation = (self.state.nodes[&node.name].continuation || resolved_private)
+            let feedback_rebase = self.state.nodes[&node.name].feedback_continuation
+                .as_ref().is_some_and(|input| !input.dispatched);
+            let continuation = !feedback_rebase
+                && (self.state.nodes[&node.name].continuation || resolved_private)
                 && queued_prompt.is_none();
             // Pi writes the session file when it creates the conversation, before
             // the first turn. A startup failure (process exit, extension load
             // error, interrupted preparation) leaves the execution's session
             // directory empty, so there is no conversation to resume.
-            let session_missing = |previous: &Execution| {
-                let origin = self
-                    .state
-                    .executions
-                    .iter()
-                    .find(|execution| {
-                        execution.node == previous.node
-                            && execution.session_id == previous.session_id
-                    })
-                    .unwrap_or(previous);
-                let suffix = format!("_{}.jsonl", previous.session_id);
-                match fs::read_dir(self.root.join("sessions").join(&origin.id)) {
-                    Ok(mut entries) => !entries.any(|entry| {
-                        entry.map_or(true, |entry| {
-                            entry.file_name().to_string_lossy().ends_with(&suffix)
-                        })
-                    }),
-                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-                }
-            };
-            let resume = if continuation {
+            let session_missing = |previous: &Execution| self.node_session_missing(previous);
+            let resume = if feedback_rebase {
+                let anchor = &self.state.nodes[&node.name].feedback_continuation
+                    .as_ref().expect("feedback continuation").anchor_execution_id;
+                Some(self.state.executions.iter().find(|execution| {
+                    execution.id == *anchor && execution.node == node.name
+                        && !self.state.superseded_execution_ids.contains(&execution.id)
+                }).ok_or("Feedback continuation history is unavailable")?)
+            } else if continuation {
                 self.state.executions.iter().rev().find(|execution| {
                     execution.node == node.name
                         && (execution.status == "failed" || (resolved_private && execution.status == "resolved"))
@@ -3734,6 +3807,10 @@ impl Runtime {
             } else {
                 None
             };
+            // Feedback keeps memory, not the invalidated tree (including any
+            // partial files of a writer stopped by the feedback). Workspace and
+            // environment selection must follow the fresh parent inputs.
+            let workspace_resume = resume.filter(|_| !feedback_rebase);
             // A user pause only splits one logical attempt into separate
             // execution records. Capture this before preparation recovery can
             // turn continuation into an initial launch without a Pi session.
@@ -3793,19 +3870,27 @@ impl Runtime {
             let has_completed_history = |previous: &Execution| {
                 self.state.executions.iter().any(|execution| {
                     execution.node == previous.node
-                        && execution.status == "completed"
                         && !self.state.superseded_execution_ids.contains(&execution.id)
+                        && (execution.status == "completed"
+                            || self.state.nodes[&node.name].feedback_continuation.as_ref()
+                                .is_some_and(|input| input.anchor_execution_id == execution.id
+                                    && (execution.pid.is_some() || execution.output_bytes > 0
+                                        || !session_missing(execution))))
                 })
             };
             // A feedback or source-direct follow-up can fail before its fork
             // was created. Resume the original completed node session and send
             // the already-recorded follow-up, rather than losing its history.
-            let fallback_anchor = if continuation
+            let fallback_anchor = if (continuation || feedback_undelivered)
                 && resume.is_some_and(|previous| {
                     session_missing(previous) && no_session_activity(previous)
                 }) {
                 let node_state = &self.state.nodes[&node.name];
-                let anchor = if let Some(input) = &node_state.feedback_workspace {
+                let anchor = if let Some(input) = &node_state.feedback_continuation {
+                    self.state.executions.iter().find(|execution| {
+                        execution.id == input.anchor_execution_id && execution.node == node.name
+                    })
+                } else if let Some(input) = &node_state.feedback_workspace {
                     self.state
                         .executions
                         .iter()
@@ -3820,28 +3905,28 @@ impl Runtime {
                     None
                 };
                 anchor.filter(|execution| {
-                    execution.status == "completed"
+                    (execution.status == "completed" || node_state.feedback_continuation.is_some())
                         && !self.state.superseded_execution_ids.contains(&execution.id)
                         && !session_missing(execution)
                 })
             } else {
                 None
             };
-            // A fork can be written before Pi receives its follow-up. In that
-            // case the session exists but the recorded instruction still needs
-            // to be sent, rather than invoking an empty continuation turn. Only
-            // an attempt that never crossed the durable Prepared boundary is
-            // unstarted; an interruption after Prepared must continue without
-            // resending the user prompt.
-            let unstarted_followup = continuation
+            // New feedback turns use the persisted Pi input boundary, not
+            // Prepared, to distinguish an undelivered fork from a consumed turn.
+            // Retain the older preparation-only rule for other continuations.
+            let unstarted_followup = feedback_undelivered || (continuation
+                && self.state.nodes[&node.name].feedback_continuation.as_ref()
+                    .is_none_or(|input| input.delivery_id.is_none())
                 && self.state.nodes[&node.name].human_instruction
                 && !self.state.nodes[&node.name].instruction.is_empty()
                 && resume.is_some_and(|previous| {
                     !session_missing(previous)
                         && self.state.execution_is_preparation_only(previous)
                         && no_unfinished_activity(previous)
-                        && has_completed_history(previous)
-                });
+                        && (has_completed_history(previous)
+                            || self.state.nodes[&node.name].feedback_continuation.is_some())
+                }));
             let failed_before_session = self.state.nodes[&node.name].human_instruction
                 && resume.is_some_and(|previous| {
                     previous.status == "failed"
@@ -3896,7 +3981,7 @@ impl Runtime {
                 && !initial_recovery
                 && fallback_anchor.is_none()
                 && !unstarted_followup;
-            let preserved_workspace = resume
+            let preserved_workspace = workspace_resume
                 .filter(|previous| {
                     matches!(previous.status.as_str(), "failed" | "resolved")
                         && !self.is_serial()
@@ -3951,7 +4036,7 @@ impl Runtime {
                     materialize_source = false;
                 }
             }
-            let recovered_workspace = resume
+            let recovered_workspace = workspace_resume
                 .filter(|previous| batch_workspaces && self.batch_recovery_was_delivered(previous))
                 .map(|previous| previous.worktree.clone());
             let feedback_workspace = if batch_workspaces {
@@ -3967,8 +4052,7 @@ impl Runtime {
                 )
             };
             let busy = |path: &Path| self.allocation_workspace_reserved(path, Some(&node.name));
-            let shared_terminal = self.state.nodes[&node.name]
-                .shared_workspace
+            let shared_terminal = (!feedback_rebase && self.state.nodes[&node.name].shared_workspace)
                 .then(|| self.terminal_workspace_for(&node.name))
                 .flatten()
                 .filter(|execution| !Self::same_workspace_path(Path::new(&execution.worktree), &resolved_repository));
@@ -4026,7 +4110,7 @@ impl Runtime {
                         .map(|path| path.to_string_lossy().into())
                         .unwrap_or_else(fresh_path)
                 }
-            } else if let Some(previous) = resume {
+            } else if let Some(previous) = workspace_resume {
                 let path = Path::new(&previous.worktree);
                 workspace_lineage.extend(previous.workspace_lineage.iter().cloned());
                 if self.retained_private_continuation(&node.name).is_some() {
@@ -4134,7 +4218,7 @@ impl Runtime {
                     !busy(Path::new(&terminal.worktree)) && Path::new(&terminal.worktree).is_dir()
                 }) {
                     Some(terminal.worktree.clone())
-                } else if let Some(previous) = resume.filter(|previous| {
+                } else if let Some(previous) = workspace_resume.filter(|previous| {
                     !busy(Path::new(&previous.worktree)) && Path::new(&previous.worktree).is_dir()
                 }) {
                     Some(previous.worktree.clone())
@@ -4171,7 +4255,8 @@ impl Runtime {
                 .filter(|previous| {
                     fallback_anchor.is_some()
                         || (!initial_recovery
-                            && (Some(previous.worktree.as_str()) != Some(worktree.as_str())
+                            && (feedback_rebase
+                                || Some(previous.worktree.as_str()) != Some(worktree.as_str())
                                 || feedback_workspace.as_ref().is_some_and(|input| {
                                     input.additional_sources.is_empty()
                                         || preserved_workspace.is_none()
@@ -4236,17 +4321,15 @@ impl Runtime {
             // Record the selected Node Agent model before launch so session
             // details can show what this attempt will actually use. Completion
             // replaces this placeholder with parsed live metrics.
-            // The conversation selection governs every new attempt, including
-            // feedback repairs and previously completed or invalidated nodes.
-            // Node overrides may predate a later save, so only use them for
-            // legacy snapshots without a conversation-wide selection. A job
-            // already dispatched keeps its own immutable config and metrics.
-            let node_settings = self
-                .state
-                .model_config
-                .as_ref()
-                .map(RunModelConfig::node_agent_settings)
-                .or_else(|| self.state.nodes[&node.name].model_config.clone())
+            // Explicit per-node selections survive conversation profile saves.
+            // Legacy synchronized overrides are only a fallback when no Run
+            // selection exists. Dispatched jobs keep immutable config/metrics.
+            let node_state = &self.state.nodes[&node.name];
+            let node_settings = node_state.model_config.as_ref()
+                .filter(|_| node_state.model_override)
+                .cloned()
+                .or_else(|| self.state.model_config.as_ref().map(RunModelConfig::node_agent_settings))
+                .or_else(|| node_state.model_config.clone())
                 .or_else(|| self.state.config.as_ref().map(Config::node_agent_settings));
             if let Some(settings) = &node_settings {
                 execution.metrics = Some(ExecutionMetrics {
@@ -4276,7 +4359,26 @@ impl Runtime {
                     })
                     .is_some_and(|first| first.id == anchor.id)
             });
-            let task = if fallback_anchor.is_some() || unstarted_followup {
+            let task = if feedback_rebase || feedback_undelivered {
+                let notice = state.feedback_continuation.as_ref()
+                    .and_then(|input| input.instruction.as_deref())
+                    .ok_or("Feedback continuation message is not configured")?;
+                let prompt = if let Some((prompt, _)) = &queued_prompt {
+                    format!("{notice}\n\n{prompt}")
+                } else {
+                    notice.to_owned()
+                };
+                if initial_recovery && feedback_rebase {
+                    format!("{}\n\n{prompt}", node.task)
+                } else {
+                    prompt
+                }
+            } else if state.feedback_continuation.as_ref().is_some_and(|input| input.delivery_id.is_some())
+                && queued_prompt.is_some() {
+                // The previous bound turn is already in Pi. Only append the
+                // new human turns, not the last feedback notice again.
+                queued_prompt.as_ref().unwrap().0.clone()
+            } else if fallback_anchor.is_some() || unstarted_followup {
                 // The failed follow-up never started; deliver its original
                 // instruction to the node's retained session instead.
                 state.instruction.clone()
@@ -4342,9 +4444,14 @@ impl Runtime {
             } else {
                 task.clone()
             };
-            let images = queued_prompt
-                .map(|(_, images)| images)
-                .unwrap_or_else(|| state.instruction_images.clone());
+            let images = if feedback_undelivered {
+                let mut images = retained_images;
+                images.extend(queued_prompt.as_ref().and_then(|(_, images)| images.clone()).unwrap_or_default());
+                (!images.is_empty()).then_some(images)
+            } else {
+                queued_prompt.map(|(_, images)| images)
+                    .unwrap_or_else(|| state.instruction_images.clone())
+            };
             let feedback_source = self
                 .state
                 .graph
@@ -4387,7 +4494,7 @@ impl Runtime {
             let mut environment_input = None;
             let mut environment_sources = Vec::new();
             let preserve_failed_environment = !history_edit
-                && resume.is_some_and(|previous| {
+                && workspace_resume.is_some_and(|previous| {
                     previous.status == "failed"
                         && Self::same_workspace_path(
                             Path::new(&previous.worktree),
@@ -4404,7 +4511,7 @@ impl Runtime {
                 let selected = (|| -> Result<_, String> {
                     if !history_edit
                         && feedback_workspace.is_none()
-                        && resume.is_some_and(|previous| {
+                        && workspace_resume.is_some_and(|previous| {
                             let path = Path::new(&previous.worktree);
                             let unstarted_slot = self.state.execution_is_preparation_only(previous)
                                 && !path.is_dir()
@@ -4421,7 +4528,7 @@ impl Runtime {
                     {
                         return Err("Failed partial environment view is missing or cannot be reused; refusing to silently restore old input".into());
                     }
-                    let source_resume = resume.is_some_and(|previous|
+                    let source_resume = workspace_resume.is_some_and(|previous|
                         Self::same_workspace_path(Path::new(&previous.worktree), &resolved_repository));
                     let selected = if let Some(input) = &feedback_workspace {
                         store.load_record_metadata(&input.source_execution_id, "after")?
@@ -4437,7 +4544,7 @@ impl Runtime {
                             .result
                             .clone()
                             .ok_or("Current terminal composite result is missing")?
-                    } else if let Some(previous) = resume {
+                    } else if let Some(previous) = workspace_resume {
                         if preserve_failed_environment {
                             previous.input.clone().map(Ok).unwrap_or_else(|| {
                                 store.load_record_metadata(&previous.id, "selected")
@@ -4577,13 +4684,30 @@ impl Runtime {
                         .cloned(),
                 );
             }
-            self.emit(EventKind::Started {
+            let feedback_delivery_id = (state.feedback_continuation.is_some() && !continuation)
+                .then(|| execution.id.clone());
+            let mut started = Vec::new();
+            if feedback_delivery_id.is_some() {
+                let mut input = self.state.nodes[&node.name].feedback_continuation.clone()
+                    .expect("feedback continuation");
+                // Bind the entire accepted text/image turn and its delivery
+                // identity atomically with Started. A failed fork retries that
+                // exact payload, including any newly claimed human messages.
+                input.instruction = Some(task.clone());
+                input.images = images.clone();
+                input.delivery_id = feedback_delivery_id.clone();
+                started.push(EventKind::FeedbackContinuationQueued {
+                    node: node.name.clone(), continuation: input,
+                });
+            }
+            started.push(EventKind::Started {
                 execution: execution.clone(),
                 message_sequences: Some(message_sequences),
                 // A from-zero execution starts a new Pi session: prior attempts
                 // of this node belong to a dead conversation lineage.
                 fresh_restart: session_fork.is_none() && resume_execution_id.is_none(),
-            })?;
+            });
+            self.emit_outputs(started)?;
             if config
                 .environment
                 .as_ref()
@@ -4651,6 +4775,7 @@ impl Runtime {
                 copy_from_workspace,
                 history_edit,
                 feedback_source,
+                feedback_delivery_id,
                 materialize_source: materialize_source && !source_direct_run,
                 source_direct: source_direct_run,
                 expected_source_head: source_head,
@@ -5540,6 +5665,7 @@ impl Runtime {
         let mut events = Vec::new();
         let mut instructions = Vec::new();
         let mut sources = Vec::new();
+        let mut applied_senders = BTreeSet::new();
         for member in &batch {
             let edge = self
                 .state
@@ -5608,6 +5734,7 @@ impl Runtime {
                         .find(|execution| execution.id == member.execution_id)
                         .ok_or("Missing feedback execution")?;
                     instructions.push(format!("Feedback:\n{body}"));
+                    applied_senders.insert(member.from.clone());
                     sources.push(FeedbackSource {
                         source_execution_id: source.id.clone(),
                         worktree: source.worktree.clone(),
@@ -5655,8 +5782,12 @@ impl Runtime {
                 source_direct: false,
             });
         }
-        // Pin all inputs, consume per-edge budgets, remove all requests and
-        // invalidate once in one transaction. Restart cannot split the batch.
+        if !applied_senders.is_empty() {
+            events.extend(self.feedback_continuations(&pending.to, &applied_senders));
+        }
+        // Pin all inputs and conversation anchors, consume per-edge budgets,
+        // remove all requests and invalidate once in one transaction. Restart
+        // cannot split the batch.
         self.emit_outputs(events)
     }
 
@@ -6108,6 +6239,10 @@ impl PublicationJob {
 #[path = "runtime_tests.rs"]
 mod tests;
 
+#[cfg(all(test, feature = "fixture"))]
+#[path = "feedback_settings_tests.rs"]
+mod feedback_settings_tests;
+
 pub fn perform(
     job: &Job,
     root: &Path,
@@ -6396,7 +6531,10 @@ fn perform_with_merger_inner(
                 Path::new(&job.execution.worktree),
             )
             || previous.node != job.execution.node
-            || previous.session_id != job.execution.session_id
+            // A failed preparation may have retained its files before the
+            // conversation fork was written. Rebuilding that own-history fork
+            // is independent of ownership of the prepared workspace.
+            || (previous.session_id != job.execution.session_id && job.session_fork.is_none())
             || job.history_edit
             || job
                 .feedback_workspace
@@ -6833,6 +6971,9 @@ fn perform_with_merger_inner(
             )?;
         }
     }
+    // Capture the exact pre-input session boundary after forking and before
+    // attachments/launch, either of which can fail without delivering the turn.
+    feedback_continuation::record_feedback_input(root, job)?;
     // Uploads for a closed node are staged outside its immutable project
     // view. Deliver accepted inputs only after validation/preparation and the
     // durable Prepared boundary, so failed/interrupted delivery is recoverable.
@@ -6860,10 +7001,11 @@ fn perform_with_merger_inner(
     let mut execution_view = job.execution.clone();
     execution_view.input = environment_input.clone();
     let mut on_output = on_output;
+    let prompt = engine::feedback_input::prompt(&job.task, job.feedback_delivery_id.as_deref());
     let output = engine::execute(
         &job.config,
         &execution_view,
-        &job.task,
+        &prompt,
         job.feedback_source,
         job.agent_kind,
         job.resume_execution_id.as_deref(),

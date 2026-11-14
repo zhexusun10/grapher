@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { before, after } from "node:test";
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import { createServer } from "vite";
 
 let server, browser, origin;
@@ -20,6 +20,152 @@ before(async () => {
 after(async () => { await browser?.close(); await server?.close(); });
 
 for (const mode of ["serial", "graph"]) {
+  test(`${mode}: Alt+Q restores only queued messages and Alt+S sends an interruption`, { timeout: 30_000 }, async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    let withdrawals = 0;
+    let fail = false;
+    let events = [];
+    const withdrawn = { type: "steers_withdrawn", sequence: 3, timestamp: 3, execution_id: "exec", message_sequences: [2] };
+    await context.route("**/api/*", async route => {
+      const body = route.request().postDataJSON();
+      if (body?.operation === "withdraw") {
+        withdrawals++;
+        assert.equal(body.runId, "steer-run");
+        assert.equal(body.node, "task");
+        if (fail) return route.fulfill({ status: 500, json: { error: "Cannot withdraw" } });
+        return route.fulfill({ json: { result: { messages: withdrawals === 1 ? [{ text: "SAME" }] : [],
+          snapshot: { events: [...events, withdrawn] } } } });
+      }
+      return route.fulfill({ json: { result: {} } });
+    });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    try {
+      await page.goto(`${origin}/__steer?mode=${mode}`);
+      await page.getByText("OUTPUT BEFORE STEER", { exact: true }).waitFor();
+      const input = page.locator(".pane-bottom-chat textarea").first();
+      const bubbles = page.locator(".chat-bubble-user", { hasText: "SAME" });
+      for (let i = 0; i < 2; i++) {
+        await input.fill("SAME"); await input.press("Enter");
+        await expect(input).toHaveValue("");
+      }
+      await expect(bubbles).toHaveCount(2);
+      events = await page.evaluate(() => window.steerAudit.events);
+      assert.equal(new Set(events.map(event => event.request_id)).size, 2);
+      await expect(page.getByText(/Alt \+ Q to restore queued messages/).first()).toBeVisible();
+      await page.evaluate(() => window.steerAudit.consume("SAME"));
+      await page.getByText("OUTPUT AFTER STEER", { exact: true }).waitFor();
+      await input.fill("EXISTING DRAFT");
+      await input.press("Alt+q");
+      await expect(input).toHaveValue("EXISTING DRAFT\n\nSAME");
+      await expect(input).toBeFocused();
+      await expect(bubbles).toHaveCount(1);
+      await input.press("Alt+q");
+      await expect(input).toBeEnabled();
+      assert.equal(withdrawals, 2);
+      await expect(input).toHaveValue("EXISTING DRAFT\n\nSAME");
+      fail = true;
+      await input.press("Alt+q");
+      await page.getByText("Cannot withdraw", { exact: true }).waitFor();
+      await expect(input).toHaveValue("EXISTING DRAFT\n\nSAME");
+      await expect(bubbles).toHaveCount(1);
+      await input.fill("");
+      await input.press("Alt+s");
+      assert.equal(await page.evaluate(() => window.steerAudit.submissions.length), 2, "empty interruption does nothing");
+      await input.fill("SAME");
+      await input.press("Alt+s");
+      await expect(input).toHaveValue("");
+      assert.deepEqual(await page.evaluate(() => window.steerAudit.submissions.map(item => item.interrupt)), [false, false, true]);
+      await expect(bubbles).toHaveCount(2);
+      await page.evaluate(() => window.steerAudit.consume("SAME"));
+      await expect(page.getByText("OUTPUT AFTER STEER", { exact: true })).toHaveCount(2);
+      await expect(bubbles).toHaveCount(2, { timeout: 3000 });
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+
+  test(`${mode}: withdrawal preserves image inputs and ignores composing/repeated shortcuts`, { timeout: 30_000 }, async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+    const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", name: "image.png" };
+    let withdrawals = 0;
+    await context.route("**/api/*", route => {
+      const body = route.request().postDataJSON();
+      if (body?.operation === "withdraw") {
+        withdrawals++;
+        return route.fulfill({ json: { result: { messages: [{ text: "inspect queued image", images: [image] }], snapshot: { events: [] } } } });
+      }
+      return route.fulfill({ json: { result: {} } });
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(`${origin}/__steer?mode=${mode}`);
+      const input = page.locator(".pane-bottom-chat textarea").first();
+      await input.fill("draft");
+      for (const extra of [{ isComposing: true }, { repeat: true }, { ctrlKey: true }, { metaKey: true }, { shiftKey: true }]) {
+        for (const code of ["KeyQ", "KeyS"]) await input.dispatchEvent("keydown", { key: code.at(-1).toLowerCase(), code, altKey: true, ...extra });
+      }
+      assert.equal(withdrawals, 0);
+      assert.equal(await page.evaluate(() => window.steerAudit.submissions.length), 0);
+      // macOS Option changes the printable key, but the physical chord remains Alt+Q.
+      await input.dispatchEvent("keydown", { key: "œ", code: "KeyQ", altKey: true });
+      await expect(input).toHaveValue("draft\n\ninspect queued image");
+      await expect(page.locator(".prompt-box-preview-img")).toHaveCount(1);
+      await input.dispatchEvent("keydown", { key: "ß", code: "KeyS", altKey: true });
+      await expect(input).toHaveValue("");
+      assert.deepEqual(await page.evaluate(() => window.steerAudit.submissions[0]), {
+        text: "draft\n\ninspect queued image", interrupt: true, images: [image],
+      });
+      await expect(page.locator(".prompt-box-preview-img")).toHaveCount(0);
+    } finally { await context.close(); }
+  });
+
+  test(`${mode}: in-flight recall survives view changes and image-only resend`, { timeout: 30_000 }, async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
+    await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
+    const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", name: "image.png" };
+    let pending;
+    let requests = 0;
+    await context.route("**/api/*", route => {
+      if (route.request().postDataJSON()?.operation === "withdraw") { pending = route; requests++; return; }
+      return route.fulfill({ json: { result: {} } });
+    });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", error => errors.push(String(error)));
+    try {
+      await page.goto(`${origin}/__steer?mode=${mode}`);
+      const input = page.locator(".pane-bottom-chat textarea").first();
+      await input.fill("existing draft");
+      await input.press("Alt+q");
+      await expect.poll(() => requests).toBe(1);
+      await page.getByRole("button", { name: "Toggle view" }).click();
+      await expect(input).toHaveCount(0);
+      await page.getByRole("button", { name: "Toggle view" }).click();
+      await expect(input).toBeDisabled();
+      await pending.fulfill({ json: { result: { messages: [{ text: "recalled image", images: [image] }], snapshot: { events: [] } } } });
+      await expect(input).toHaveValue("existing draft\n\nrecalled image");
+      await expect(input).toBeEnabled();
+      await expect(page.locator(".prompt-box-preview-img")).toHaveCount(1);
+      // A second navigation must preserve the already-restored attachment too.
+      await page.getByRole("button", { name: "Toggle view" }).click();
+      await page.getByRole("button", { name: "Toggle view" }).click();
+      await expect(input).toHaveValue("existing draft\n\nrecalled image");
+      await expect(page.locator(".prompt-box-preview-img")).toHaveCount(1);
+      await input.fill("");
+      await expect(page.locator(".prompt-box-preview-img")).toHaveCount(1);
+      await input.press("Alt+s");
+      await expect.poll(() => page.evaluate(() => window.steerAudit.submissions.length)).toBe(1);
+      assert.deepEqual(await page.evaluate(() => window.steerAudit.submissions[0]), {
+        text: "Please inspect the attached images.", images: [image], interrupt: true,
+      });
+      await expect(page.locator(".prompt-box-preview-img")).toHaveCount(0);
+      assert.equal(requests, 1);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+
   test(`${mode}: an unread steer follows output, even when execution settles before consumption`, { timeout: 30_000 }, async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
     await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));

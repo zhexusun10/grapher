@@ -15,9 +15,9 @@ export interface Plan { executionBatches: string[][]; rootNodes: string[]; termi
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ModelRole = "partitioner" | "planner" | "nodeAgent";
 export interface RoleModelConfig { model: string; thinkingLevel?: ThinkingLevel }
-export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; isolateParallelNodes?: boolean; maxFeedback: number; autoApprove: boolean; postTaskReview?: boolean; plannerWriteTools?: boolean }
+export interface Config { repository: string; model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>>; maxParallel: number; isolateParallelNodes?: boolean; maxFeedback: number; feedbackEnabled?: boolean; autoApprove: boolean; postTaskReview?: boolean; plannerWriteTools?: boolean }
 export interface ConversationModelConfig { model: string; thinkingLevel: ThinkingLevel; roleModels?: Partial<Record<ModelRole, RoleModelConfig>> }
-export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; canResume?: boolean; modelConfig?: RoleModelConfig; modelRetry?: boolean; pendingMessages?: Array<{ sequence: number; instruction: string; images?: ImageAttachment[] | null }> }
+export interface NodeState { status: Status; revision: number; head: string | null; instruction: string; error: string | null; canResume?: boolean; modelConfig?: RoleModelConfig; modelOverride?: boolean; modelRetry?: boolean; pendingMessages?: Array<{ sequence: number; instruction: string; images?: ImageAttachment[] | null }> }
 export interface FeedbackExhaustion { from: string; to: string; count: number; limit: number }
 interface ExecutionMetrics {
   durationSeconds: number;
@@ -152,6 +152,7 @@ export interface SkillItem {
 
 export interface Snapshot {
   runId: string;
+  title?: string | null;
   isolatedWorkspaces?: boolean | null;
   privateBatch?: string[];
   batchHandoff?: { recoveryExecutionIds: string[] } | null;
@@ -171,7 +172,7 @@ export interface Snapshot {
   events: GraphEvent[];
   approved: boolean;
   paused: boolean;
-  /** Backend hint for interrupted work or failed nodes with explicitly updated models. */
+  /** Backend-owned run-wide recovery hint; does not require a model change. */
   canResume?: boolean;
   stopRequested?: boolean;
   phase: string;
@@ -258,7 +259,7 @@ export function normalizeMaxFeedback(value: unknown): number {
 }
 
 export const emptyGraph: Graph = { originalGoal: "", nodes: [], edges: [] };
-export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: DEFAULT_MAX_PARALLEL, isolateParallelNodes: true, maxFeedback: DEFAULT_MAX_FEEDBACK, autoApprove: true, postTaskReview: true, plannerWriteTools: true };
+export const defaultConfig: Config = { repository: "", model: "", thinkingLevel: "low", maxParallel: DEFAULT_MAX_PARALLEL, isolateParallelNodes: true, maxFeedback: DEFAULT_MAX_FEEDBACK, feedbackEnabled: false, autoApprove: true, postTaskReview: true, plannerWriteTools: true };
 export const emptySnapshot: Snapshot = {
   runId: "", graph: emptyGraph, config: null, plan: null,
   nodes: {}, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {},
@@ -327,12 +328,14 @@ export interface ChatMessage {
   /** A durable turn that has not yet been claimed by an execution. */
   pendingExecution?: boolean;
   delivery?: "node_messaged" | "steered";
+  /** Stable transport identity for Node/Merger steers (legacy turns omit it). */
+  steerRequestId?: string;
   steerOrdinal?: number;
   /** Display identity across attachment and text steers with the same text. */
   inlineSteerOrdinal?: number;
   /** Planner steer identity remains stable from optimistic submission to Pi. */
   plannerSteerId?: string;
-  plannerSteerStatus?: "submitting" | "submitted" | "queued" | "accepted" | "consumed" | "handled" | "failed" | "unknown";
+  plannerSteerStatus?: "submitting" | "submitted" | "queued" | "accepted" | "consumed" | "handled" | "failed" | "unknown" | "withdrawn";
   plannerSteerError?: string;
   versions?: ChatMessageVersion[];
   currentVersionIndex?: number;

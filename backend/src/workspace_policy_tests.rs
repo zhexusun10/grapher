@@ -32,6 +32,7 @@ fn adaptive(git: bool, plan: Graph, isolate: bool, limit: usize) -> (TempDir, Pa
     let mut config = runtime.state.config.clone().unwrap();
     config.isolate_parallel_nodes = isolate;
     config.max_parallel = limit;
+    config.feedback_enabled = plan.edges.iter().any(|edge| edge.feedback);
     runtime.create(plan, config).unwrap();
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
@@ -2035,6 +2036,19 @@ fn private_feedback_is_delivered_before_the_single_source_repair() {
         assert!(source.join(format!("{name}.txt")).exists());
     }
     assert_eq!(runtime.state.feedback_counts["r1->owner"], 1);
+    fs::write(source.join("repair.txt"), "fresh feedback input").unwrap();
+    finish_shared(&mut runtime, &repair, "repaired");
+    let rechecks = runtime.jobs().unwrap();
+    assert_eq!(rechecks.len(), 4);
+    for mut job in rechecks {
+        let anchor = job.session_fork.as_ref().unwrap();
+        assert_eq!(anchor.node, job.execution.node);
+        assert!(!job.preserve_failed_environment && job.preserved_workspace.is_none());
+        assert!(job.task.contains(if job.execution.node == "r1" { "feedback returned" } else { "upstream owner updated" }));
+        prepare_private(&mut runtime, &mut job);
+        assert_eq!(fs::read_to_string(Path::new(&job.execution.worktree).join("repair.txt")).unwrap(), "fresh feedback input");
+        finish_private(&mut runtime, &job, &format!("{}.txt", job.execution.node), "<ACCEPT>");
+    }
 }
 
 #[test]
@@ -2212,6 +2226,7 @@ fn legacy_cwd_changing_recovery_keeps_the_original_sessions_attachment_claims() 
                     execution_id: job.execution.id.clone(),
                     node: "a".into(),
                     instruction: reference.clone(),
+                    request_id: None,
                     images: None,
                 })
                 .unwrap();
@@ -2312,6 +2327,7 @@ fn shared_retry_does_not_recreate_a_proven_deleted_input() {
             execution_id: job.execution.id.clone(),
             node: "a".into(),
             instruction: reference.clone(),
+            request_id: None,
             images: None,
         })
         .unwrap();

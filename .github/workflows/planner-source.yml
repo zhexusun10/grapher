@@ -71,6 +71,9 @@ jobs:
       - name: Install Grapher and pinned Pi
         run: npm ci --ignore-scripts
       - run: npm run pi:setup
+      - name: Verify development scripts and test inventory
+        if: runner.os == 'Linux'
+        run: npm run test:scripts
       # Frontend tests run through tsx, which strips types without checking
       # them; type errors would otherwise surface only in the release build.
       # The check is host-neutral, so Linux covers it.
@@ -90,10 +93,13 @@ jobs:
         if: runner.os != 'Windows'
         timeout-minutes: 6
         run: npm run test:native
-      - name: Verify Windows native launchers and the prewarm contract
+      - name: Verify Windows native launcher scripts
         if: runner.os == 'Windows'
         timeout-minutes: 6
         run: npm run test:native:scripts
+      - name: Verify prewarm and shared native runtime acceptance
+        timeout-minutes: 6
+        run: npm run test:prewarm
       - name: Verify macOS filesystem policy with real child processes
         if: runner.os == 'macOS'
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --test sandbox

@@ -21,6 +21,7 @@ use std::{
 use uuid::Uuid;
 
 mod activity;
+mod composer;
 mod open_file;
 mod project_discovery;
 mod sse;
@@ -711,6 +712,7 @@ fn bootstrap_projection(
             auto_approve: true,
             post_task_review: true,
             planner_write_tools: true,
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             environment: None,
             #[cfg(feature = "fixture")]
@@ -2551,6 +2553,9 @@ fn plan_goal_internal_with_options(
                                 },
                             )?;
                             planner_workspace_selected = true;
+                            config.feedback_enabled = service.runtime.lock()
+                                .map_err(|error| error.to_string())?
+                                .feedback_enabled(config.feedback_enabled)?;
                             let planner_model_cfg =
                                 PiModelConfig::resolve(PiRole::Planner, &config);
                             let planner_config = planner_model_cfg.effective_config(&config);
@@ -2974,6 +2979,9 @@ fn plan_goal_internal_with_options(
                             return Err("Run changed during graph revision".into());
                         }
                         if runtime.state.approved {
+                            // Reject an unauthorized addition before pausing any
+                            // existing workers for the proposed graph revision.
+                            runtime.validate_feedback_revision(&graph)?;
                             compiler::compile(&graph, true).map_err(|errors| {
                                 serde_json::to_string(&errors).unwrap_or_default()
                             })?;
@@ -4031,7 +4039,7 @@ fn observe_planner_steer_line(service: &Arc<Service>, owner: &str, planning_id: 
         return;
     };
     if current == next
-        || (matches!(current.as_str(), "consumed" | "handled" | "failed") && next != "consumed")
+        || (matches!(current.as_str(), "consumed" | "handled" | "failed" | "withdrawn") && next != "consumed")
     {
         return;
     }
@@ -4067,6 +4075,29 @@ fn control(
     )
 }
 
+fn node_steer_recorded(
+    state: &Snapshot,
+    request_id: Option<&str>,
+    node: Option<&str>,
+    execution_id: Option<&str>,
+    instruction: Option<&str>,
+    images: &Option<Vec<crate::model::ImageAttachment>>,
+) -> Result<bool, String> {
+    let Some(id) = request_id else { return Ok(false) };
+    let Some(existing) = state.events.iter().find_map(|event| match &event.kind {
+        EventKind::Steered { request_id: Some(request_id), execution_id, node, instruction, images } if request_id == id =>
+            Some((execution_id, node, instruction, images)),
+        _ => None,
+    }) else { return Ok(false) };
+    let normalized_images = images.as_ref().filter(|items| !items.is_empty());
+    if node != Some(existing.1.as_str()) || instruction.map(str::trim) != Some(existing.2.as_str())
+        || execution_id.is_some_and(|execution_id| execution_id != existing.0)
+        || serde_json::to_value(existing.3.as_ref().filter(|items| !items.is_empty())).ok() != serde_json::to_value(normalized_images).ok() {
+        return Err("Steer request ID was already used for another message".into());
+    }
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn control_with_request_id(
     action: String,
@@ -4085,6 +4116,38 @@ fn control_with_request_id(
         if runtime.state.run_id != *expected {
             return Err("Run changed; reload this conversation before controlling it".into());
         }
+    }
+    if matches!(action.as_str(), "interrupt_steer" | "interrupt_steer_planner") {
+        if instruction.as_deref().is_none_or(|text| text.trim().is_empty()) {
+            return Err("Enter a message before interrupting".into());
+        }
+        let run = run_id.as_deref().ok_or("Missing Run identity")?;
+        let planner = action == "interrupt_steer_planner";
+        if request_id.as_deref().is_some_and(|id|
+            Uuid::parse_str(id).map(|uuid| uuid.to_string() != id).unwrap_or(true)) {
+            return Err("Invalid steer request ID".into());
+        }
+        let (target, already_submitted) = {
+            let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+            let submitted = request_id.as_ref().is_some_and(|id| runtime.state.events.iter().any(|event| match &event.kind {
+                EventKind::PlannerSteerSubmitted { request_id, .. } if planner => request_id == id,
+                EventKind::Steered { request_id: Some(request_id), .. } if !planner => request_id == id,
+                _ => false,
+            }));
+            let target = if submitted { String::new() } else if planner {
+                crate::engine::composer::planner_id(run)?
+            } else {
+                runtime.state.executions.iter().chain(&runtime.state.mergers)
+                    .find(|execution| Some(&execution.id) == execution_id.as_ref()
+                        && Some(&execution.node) == node.as_ref() && execution.status == "running")
+                    .map(|execution| execution.id.clone()).ok_or("Node execution is no longer running")?
+            };
+            (target, submitted)
+        };
+        let send = || control_with_request_id(
+            if planner { "steer_planner" } else { "steer" }.into(), node, instruction,
+            run_id, execution_id, images, request_id, service);
+        return if already_submitted { send() } else { crate::engine::composer::interrupt_then(&target, send) };
     }
     if action == "steer_planner" {
         let instruction = instruction.ok_or("Enter a planning message")?;
@@ -4354,6 +4417,11 @@ fn control_with_request_id(
     // transparently steer that writer instead of rejecting or overwriting it.
     let (action, execution_id) = if action == "intervene" {
         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        // This action may previously have been routed to a live Steer. Replay
+        // its ID before considering the node's new (possibly settled) state.
+        if node_steer_recorded(&runtime.state, request_id.as_deref(), node.as_deref(), execution_id.as_deref(), instruction.as_deref(), &images)? {
+            return Ok(runtime.state.clone());
+        }
         if let Some(running) = runtime.state.executions.iter().rev().find(|execution| {
             execution.node == node.as_deref().unwrap_or_default() && execution.status == "running"
         }) {
@@ -4382,8 +4450,19 @@ fn control_with_request_id(
             return Err("Enter a steering message".into());
         }
         let execution_id = execution_id.ok_or("Missing execution identity")?;
+        let request_id = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        if Uuid::parse_str(&request_id).map(|id| id.to_string() != request_id).unwrap_or(true) {
+            return Err("Invalid steer request ID".into());
+        }
+        let images = images.filter(|items| !items.is_empty());
+        let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
+            return Err("Run changed while steering".into());
+        }
+        if node_steer_recorded(&runtime.state, Some(&request_id), Some(&node), Some(&execution_id), Some(&instruction), &images)? {
+            return Ok(runtime.state.clone());
+        }
         {
-            let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
             // Merger executions are steerable while their native process is
             // alive, exactly like node executions.
             let running = runtime
@@ -4405,15 +4484,13 @@ fn control_with_request_id(
                 std::path::Path::new(&running.unwrap().worktree),
             )?;
         }
-        crate::engine::steer_nowait(&execution_id, instruction.trim(), images.clone())?;
-        let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-        if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
-            return Err("Run changed while steering".into());
-        }
+        // Keep durable acceptance and pipe order atomic with queue withdrawal.
+        crate::engine::steer_node_with_id(&execution_id, instruction.trim(), images.clone(), &request_id)?;
         runtime.emit(EventKind::Steered {
             execution_id,
             node,
             instruction: instruction.trim().into(),
+            request_id: Some(request_id),
             images,
         })?;
         return Ok(runtime.state.clone());
@@ -4560,6 +4637,7 @@ fn control_with_request_id(
                     execution_id: id.clone(),
                     node: previous.node.clone(),
                     instruction: instruction.trim().into(),
+                    request_id: None,
                     images: images.clone(),
                 })?;
             crate::attachment_inputs::deliver_prepared(
@@ -6036,6 +6114,9 @@ pub fn dispatch(
             argument(&body, "request")?,
             service,
         )?),
+        "composer_models" => to_value(composer::models(&body, service)?),
+        "composer_rename" => to_value(composer::rename(&body, service)?),
+        "composer_command" => to_value(composer::command(&body, service)?),
         "save_config" => to_value(save_config_projection(
             argument(&body, "config")?,
             argument(&body, "runId")?,
@@ -6258,6 +6339,9 @@ fn api_service(
         | "add_manual_node"
         | "update_unstarted_node_task"
         | "save_config"
+        | "composer_models"
+        | "composer_rename"
+        | "composer_command"
         | "delete_run"
         | "get_execution_output"
         | "get_file_changes"
@@ -6283,7 +6367,7 @@ fn api_service(
             } else if command == "control"
                 && matches!(
                     body.get("action").and_then(serde_json::Value::as_str),
-                    Some("stop" | "cancel" | "stop_planner" | "steer_planner")
+                    Some("stop" | "cancel" | "stop_planner" | "steer_planner" | "interrupt_steer_planner")
                 )
             {
                 active_planning_service(primary)

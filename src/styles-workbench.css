@@ -24,7 +24,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 7px 12px;
+  padding: 7px 14px;
   border-bottom: 1px solid var(--border-default);
   background: var(--bg-surface);
   font-size: 12px;
@@ -36,6 +36,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 1;
   min-width: 0;
   font-weight: 600;
   color: var(--text-primary);
@@ -47,18 +48,11 @@
   white-space: nowrap;
 }
 
-.header-icon-file {
-  color: var(--brand-default);
-}
-
-.header-icon-skill {
-  color: var(--status-warning);
-}
-
 .suggestions-header-actions {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
   min-width: 0;
 }
 
@@ -74,15 +68,16 @@
 .suggestions-header-hints .key-hint {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 1px;
-  height: 16px;
+  height: 18px;
   padding: 0 5px;
   border: 1px solid var(--border-default);
   border-radius: 4px;
   background: var(--bg-canvas);
   color: var(--text-secondary);
   font-family: inherit;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
   line-height: 1;
 }
@@ -97,7 +92,7 @@
 
 /* Narrow composers keep the title, list and close button; the shortcuts are
    the only part that can go without hiding an action. */
-@container (max-width: 460px) {
+@container (max-width: 500px) {
   .suggestions-header-hints {
     display: none;
   }
@@ -725,6 +720,7 @@
   gap: 4px;
 }
 
+.queued-steer-message { flex-direction: column; align-items: flex-end; gap: 4px; }
 .planner-steer-message { width: 100%; }
 .planner-steer-state { color: var(--text-secondary); font-size: 12px; text-align: right; }
 .planner-steer-entry.failed .planner-steer-state,

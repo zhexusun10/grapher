@@ -1,0 +1,43 @@
+.prompt-command-ui, .prompt-command-notice {
+  margin: 8px 12px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle, #e2e8f0);
+  border-radius: 10px;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  max-height: 280px;
+  overflow: auto;
+}
+.prompt-command-ui p, .prompt-command-notice pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 1px 0; font: inherit; line-height: 1.5; }
+.prompt-command-notice { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.prompt-command-popover {
+  position: absolute; bottom: calc(100% + 10px); left: 0; right: 0; z-index: 60;
+  margin: 0; padding: 10px 12px 10px 14px; max-height: min(280px, 45vh);
+  border: 1px solid var(--border-default, #e2e8f0); border-radius: 12px;
+  background: var(--bg-canvas, #fff); box-shadow: 0 8px 28px rgba(15, 23, 42, 0.12);
+}
+.prompt-command-popover.is-error {
+  color: var(--status-danger, #ef4444);
+  border-color: var(--status-danger-border, #fecaca);
+}
+.prompt-command-popover pre { min-width: 0; }
+.prompt-command-popover > button { flex-shrink: 0; }
+.prompt-command-popover a { color: inherit; text-decoration: underline; }
+.prompt-command-ui button, .prompt-command-notice button {
+  padding: 5px 10px; margin: 4px 4px 0 0; border-radius: 6px;
+  border: 1px solid var(--border-subtle, #e2e8f0); background: var(--bg-canvas); color: inherit; cursor: pointer;
+}
+.prompt-command-notice .prompt-command-notice-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; margin: 0; border: none; border-radius: 50%;
+  background: transparent; color: var(--text-secondary, #64748b); flex-shrink: 0;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.prompt-command-notice .prompt-command-notice-close:hover:not(:disabled) {
+  background: var(--bg-surface-hover, #f1f5f9);
+  color: var(--text-primary, #0f172a);
+  filter: none;
+}
+.prompt-command-ui button:focus-visible { outline: 2px solid var(--text-primary); }
+.prompt-command-ui textarea { width: 100%; min-height: 64px; margin-top: 8px; padding: 6px; }
+.prompt-command-options { display: flex; flex-wrap: wrap; }

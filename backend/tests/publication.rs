@@ -241,6 +241,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
             auto_approve: false,
             post_task_review: false,
             planner_write_tools: true,
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
         };
         let runtime_root = temp.path().join("runtime");
@@ -353,6 +354,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         auto_approve: false,
         post_task_review: false,
         planner_write_tools: true,
+        feedback_enabled: false,
         isolate_parallel_nodes: true,
     };
     let root = temp.path().join("runtime");

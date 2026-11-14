@@ -2,6 +2,41 @@ import { t } from "./i18n";
 import type { Config, ConversationModelConfig, Execution, ModelRole, NodeState, RoleModelConfig, ThinkingLevel } from "./types";
 import type { ProviderCatalog } from "./services/providerAuth";
 
+// Shared by Settings and /model: no result cap, and newer numeric versions
+// precede older ones within alphabetically ordered model families.
+const modelNameParts = /\d+|\D+/g;
+const modelTextCollator = new Intl.Collator(undefined, { sensitivity: "base" });
+
+function compareModelNames(left: string, right: string): number {
+  const leftParts = left.match(modelNameParts) ?? [];
+  const rightParts = right.match(modelNameParts) ?? [];
+  for (let i = 0; i < Math.min(leftParts.length, rightParts.length); i++) {
+    const a = leftParts[i];
+    const b = rightParts[i];
+    const numeric = /^\d+$/.test(a) && /^\d+$/.test(b);
+    const normalizedA = numeric ? a.replace(/^0+/, "") || "0" : a;
+    const normalizedB = numeric ? b.replace(/^0+/, "") || "0" : b;
+    const comparison = numeric
+      ? normalizedB.length - normalizedA.length || modelTextCollator.compare(normalizedB, normalizedA)
+      : modelTextCollator.compare(a, b);
+    if (comparison) return comparison;
+  }
+  // 6.1 precedes 6; ordinary name suffixes keep alphabetical order.
+  const rest = leftParts.length > rightParts.length
+    ? leftParts.slice(rightParts.length)
+    : rightParts.slice(leftParts.length);
+  const versionSuffix = rest.length >= 2 && /^[.\-_]$/.test(rest[0]) && /^\d+$/.test(rest[1]);
+  return versionSuffix ? rightParts.length - leftParts.length : leftParts.length - rightParts.length;
+}
+
+export function availableCatalogModels(catalog: ProviderCatalog | null | undefined, includeHidden = false) {
+  const hidden = catalog?.hiddenModels === undefined ? null : new Set(catalog.hiddenModels);
+  return catalog?.models.filter(model => model.available && (includeHidden || !(hidden
+    ? hidden.has(`${model.provider}/${model.id}`) : model.hidden))).sort((a, b) =>
+    compareModelNames(a.name || a.id, b.name || b.id) || modelTextCollator.compare(`${a.provider}/${a.id}`, `${b.provider}/${b.id}`)
+  ) ?? [];
+}
+
 export const modelRoles: Array<{ id: ModelRole; label: string; description: string }> = [
   { id: "nodeAgent", label: "Node Agent", description: t("负责 Serial 与 Graph 节点的实际执行。其他未单独设置的角色使用此模型作为默认值。") },
   { id: "planner", label: "Planner", description: t("负责分析项目并生成执行拓扑图。推荐选择中大型模型，以获得更可靠的规划能力。") },

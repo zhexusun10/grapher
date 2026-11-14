@@ -23,6 +23,8 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+pub mod composer;
+pub(crate) mod feedback_input;
 mod context_stats;
 mod output_buffer;
 mod tool_output;
@@ -305,7 +307,9 @@ fn claim_warm_node(
 #[derive(Clone)]
 struct NodeRpc {
     sender: mpsc::Sender<String>,
-    pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<(), String>>>>>,
+    pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>,
+    instance: String,
+    ui: Arc<Mutex<composer::CommandUi>>,
     revision_run_id: Option<String>,
     run_id: Option<String>,
 }
@@ -408,6 +412,18 @@ pub fn steer_nowait(
     send_steer(execution_id, instruction, images, false, None)
 }
 
+/// Node/Merger IDs are stripped by the adapter before extension input hooks,
+/// then attached to the actual queued message object, not its mutable text.
+pub fn steer_node_with_id(
+    execution_id: &str,
+    instruction: &str,
+    images: Option<Vec<crate::model::ImageAttachment>>,
+    request_id: &str,
+) -> Result<(), String> {
+    let transport = format!("{instruction}\n\n<grapher-node-steer-id>{request_id}</grapher-node-steer-id>");
+    send_steer(execution_id, &transport, images, false, Some(request_id))
+}
+
 /// The Planner's durable request ID also identifies Pi's asynchronous response.
 pub fn steer_planner_for_run_with_id(
     run_id: &str,
@@ -441,10 +457,10 @@ fn send_steer(
     let id = request_id
         .map(str::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // A tracked asynchronous Planner request must also keep the handoff open
-    // until Pi responds. Otherwise an earlier agent_settled can close the pipe
-    // between acceptance and the next turn_start.
-    let tracked_async = !acknowledge && request_id.is_some();
+    // Every asynchronous send keeps the handoff open until Pi responds. This
+    // also covers abort -> Node/Merger send, where the old turn is already idle
+    // and attachment/extension preflight may outlast the handoff window.
+    let tracked_async = !acknowledge;
     let pending = if acknowledge || tracked_async {
         let (tx, rx) = mpsc::channel();
         rpc.pending
@@ -485,14 +501,20 @@ fn send_steer(
         .recv_timeout(Duration::from_secs(10))
         .map_err(|_| "Node did not acknowledge the steer request".to_string());
     rpc.pending.lock().map_err(|e| e.to_string())?.remove(&id);
-    result?
+    result?.map(|_| ())
 }
 
 struct NodeRpcGuard(String);
 impl Drop for NodeRpcGuard {
     fn drop(&mut self) {
         if let Ok(mut map) = NODE_RPC.get_or_init(Default::default).lock() {
-            map.remove(&self.0);
+            if let Some(rpc) = map.remove(&self.0) {
+                if let Ok(mut pending) = rpc.pending.lock() {
+                    for (_, reply) in pending.drain() {
+                        let _ = reply.send(Err("Pi process ended before acknowledging the request".into()));
+                    }
+                }
+            }
         }
     }
 }
@@ -1143,6 +1165,7 @@ fn run_pi_with_timeout(
     command.env_remove("GRAPHER_AGENT_KIND");
     // Only an explicit per-turn binding may activate the feedback protocol.
     command.env_remove("GRAPHER_FEEDBACK_SOURCE");
+    command.env_remove("GRAPHER_FEEDBACK_ENABLED");
     for (key, value) in &request.environment {
         command.env(key, value);
     }
@@ -1171,6 +1194,7 @@ fn run_pi_with_timeout(
         },
     );
     if request.role == PiRole::Planner {
+        command.env("GRAPHER_FEEDBACK_ENABLED", config.feedback_enabled.to_string());
         // The workspace extension owns its tool registration, so it must see
         // the same decision that produced --exclude-tools above.
         command.env(
@@ -1393,6 +1417,7 @@ fn run_pi_with_timeout(
     let mut rpc_sender = None;
     let mut rpc_guard = None;
     let mut rpc_pending = None;
+    let rpc_ui = Arc::new(Mutex::new(composer::CommandUi::default()));
     let initial_rpc_id = uuid::Uuid::new_v4().to_string();
     if rpc_agent {
         let run_id = if request.role == PiRole::Planner {
@@ -1450,6 +1475,8 @@ fn run_pi_with_timeout(
                 NodeRpc {
                     sender: tx.clone(),
                     pending: pending.clone(),
+                    instance: uuid::Uuid::new_v4().to_string(),
+                    ui: rpc_ui.clone(),
                     revision_run_id,
                     run_id,
                 },
@@ -1511,6 +1538,7 @@ fn run_pi_with_timeout(
         input_receiver,
         rpc_sender,
         rpc_pending,
+        rpc_ui,
     };
     let outcome = run_turn(
         request.role,
@@ -1550,7 +1578,8 @@ struct SessionChannels {
     receiver: mpsc::Receiver<(bool, String)>,
     input_receiver: mpsc::Receiver<Result<(), std::io::Error>>,
     rpc_sender: Option<mpsc::Sender<String>>,
-    rpc_pending: Option<Arc<Mutex<HashMap<String, mpsc::Sender<Result<(), String>>>>>>,
+    rpc_pending: Option<Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>>,
+    rpc_ui: Arc<Mutex<composer::CommandUi>>,
 }
 
 struct TurnOutcome {
@@ -1594,6 +1623,9 @@ fn run_turn(
     let mut context_stats = context_stats::ContextStats::new(report_context);
     context_stats.changed(channels.rpc_sender.as_ref());
     loop {
+        if let Some(sender) = &channels.rpc_sender {
+            if let Ok(mut ui) = channels.rpc_ui.lock() { ui.expire(sender); }
+        }
         output_buffer.flush_due(&mut *on_output)?;
         // Planners/nodes need a steer handoff window. The Partitioner has no
         // follow-up commands, so close RPC stdin as soon as its turn settles.
@@ -1681,7 +1713,20 @@ fn run_turn(
                     match event["type"].as_str().unwrap_or_default() {
                         "agent_start" | "turn_start" if rpc_agent => agent_ended = None,
                         "agent_settled" if rpc_agent => agent_ended = Some(Instant::now()),
+                        "extension_ui_request" | "extension_error" if rpc_agent => {
+                            if let Some(sender) = &channels.rpc_sender {
+                                if let Ok(mut ui) = channels.rpc_ui.lock() { ui.push(event.clone(), sender); }
+                            }
+                            // Dialog inputs and command-handler errors can echo
+                            // secrets. Keep those ephemeral; ordinary lifecycle
+                            // hook errors must reach live/replayed transcripts
+                            // even when no composer command is polling.
+                            if event["type"] == "extension_ui_request" || event["event"] == "command" { continue; }
+                        }
                         "response" if rpc_agent => {
+                            if let Some(id) = event["id"].as_str() {
+                                if let Ok(mut ui) = channels.rpc_ui.lock() { ui.completed(id); }
+                            }
                             if event["id"].as_str() == Some(initial_rpc_id)
                                 && event["success"] == false
                             {
@@ -1699,7 +1744,7 @@ fn run_turn(
                                 if let Ok(mut pending) = pending.lock() {
                                     if let Some(reply) = pending.remove(id) {
                                         let result = if event["success"] == true {
-                                            Ok(())
+                                            Ok(event["data"].clone())
                                         } else {
                                             Err(event["error"]
                                                 .as_str()
@@ -1709,9 +1754,15 @@ fn run_turn(
                                         // Acceptance can precede the next turn_start. Do not
                                         // exit on an earlier agent_settled and drop this turn.
                                         if result.is_ok()
+                                            && (event["command"] == "prompt" || event["command"].is_null())
                                             && event["data"]["disposition"] != "handled"
                                         {
                                             agent_ended = None;
+                                        } else if agent_ended.is_some() {
+                                            // Command-only extensions (notably /mcp) may emit
+                                            // only a notification. Give the browser a fresh
+                                            // handoff window to drain it before unregistering RPC.
+                                            agent_ended = Some(Instant::now());
                                         }
                                         let _ = reply.send(result);
                                     }
@@ -1778,6 +1829,7 @@ fn run_turn(
                 // outbound display log is projected; Pi's session/tool context
                 // is untouched and old persisted byte ranges are not rewritten.
                 if let Some(event) = event.as_mut() {
+                    feedback_input::project_event(event);
                     if !tool_output.project(event) {
                         continue;
                     }
@@ -2042,6 +2094,7 @@ pub(crate) fn park_test_shell(run_id: &str, session_id: &str) {
         input_receiver,
         rpc_sender: Some(rpc_tx),
         rpc_pending: Some(Arc::new(Mutex::new(HashMap::new()))),
+        rpc_ui: Arc::new(Mutex::new(composer::CommandUi::default())),
     };
     lingering_pool().park(
         lingering::SessionKey {
@@ -2165,6 +2218,7 @@ fn begin_resumed_turn(
     request: &PiRequest<'_>,
 ) -> Result<(String, String), String> {
     let id = node_rpc_id(request)?;
+    *host.channels.rpc_ui.lock().map_err(|e| e.to_string())? = composer::CommandUi::default();
     let pending = host
         .channels
         .rpc_pending
@@ -2184,6 +2238,8 @@ fn begin_resumed_turn(
             NodeRpc {
                 sender: sender.clone(),
                 pending,
+                instance: uuid::Uuid::new_v4().to_string(),
+                ui: host.channels.rpc_ui.clone(),
                 revision_run_id: None,
                 run_id: None,
             },
@@ -2505,6 +2561,7 @@ text = sys.stdin.read()
 print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':json.dumps({'task':text,'feedback':os.environ.get('GRAPHER_FEEDBACK_SOURCE')})}]}}), flush=True)
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -2623,6 +2680,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
                 "timestamp":"2026-01-01T00:00:02.000Z", "thinkingLevel":"high"}),
         )).unwrap();
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             repository: repository.to_string_lossy().into(),
             isolate_parallel_nodes: true,
@@ -2733,6 +2791,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -2885,9 +2944,11 @@ sys.stdin.read()
             input_receiver,
             rpc_sender: Some(rpc_tx),
             rpc_pending: Some(Arc::new(Mutex::new(HashMap::new()))),
+            rpc_ui: Arc::new(Mutex::new(composer::CommandUi::default())),
         };
         let session_dir = temp.path().join("session");
         let config = Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             repository: temp.path().to_string_lossy().into(),
             model: "mock/model".into(),
@@ -3010,6 +3071,7 @@ delta('FAILED_SUFFIX')
 sys.exit(2) # No message_end/agent_settled: the partial text must still survive.
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             environment: None,
             engine: "pi".into(),
@@ -3078,6 +3140,7 @@ print(json.dumps({'type':'message_update','assistantMessageEvent':{'type':'text_
 time.sleep(10)
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             environment: None,
             engine: "pi".into(),
@@ -3136,6 +3199,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read() # RPC shutdown is requested by closing stdin.
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             environment: None,
             engine: "pi".into(),
@@ -3187,6 +3251,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.exit(3)  # Windows fail-fast teardown cannot be represented portably; any nonzero code must be tolerated after settle.
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             environment: None,
             engine: "pi".into(),
@@ -3249,6 +3314,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -3324,6 +3390,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -3421,6 +3488,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             post_task_review: false,
             planner_write_tools: true,
@@ -3512,6 +3580,7 @@ print(json.dumps({'type':'agent_settled'}), flush=True)
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             isolate_parallel_nodes: true,
             post_task_review: false,
             planner_write_tools: true,
@@ -3583,6 +3652,7 @@ print(json.dumps({'type':'response','id':prompt['id'],'command':'prompt','succes
 sys.stdin.read()
 "#).unwrap();
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),
@@ -3629,6 +3699,7 @@ sys.stdin.read()
         ] {
             let temp = tempfile::tempdir().unwrap();
             let config = Config {
+                feedback_enabled: false,
                 environment: None,
                 engine: "pi".into(),
                 pi_command: "/bin/sh".into(),
@@ -3685,6 +3756,7 @@ sys.stdin.read()
         std::env::set_var(&variable, "1");
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             engine: "pi".into(),
             pi_command: "/bin/sh".into(),
@@ -3726,6 +3798,7 @@ sys.stdin.read()
         let _guard = lock_env();
         let temp = tempfile::tempdir().unwrap();
         let config = Config {
+            feedback_enabled: false,
             post_task_review: false, planner_write_tools: true,
             isolate_parallel_nodes: true,
             environment: None,
@@ -3774,6 +3847,7 @@ sys.stdin.read()
         let _guard = lock_env();
         let original = std::env::var_os("PLANNER_THINKING");
         let mut config = Config {
+            feedback_enabled: false,
             post_task_review: false,
             planner_write_tools: true,
             environment: None,
@@ -3844,6 +3918,7 @@ sys.stdin.read()
         std::env::remove_var("PARTITIONER_THINKING");
 
         let custom_config = Config {
+            feedback_enabled: false,
             post_task_review: false,
             planner_write_tools: true,
             environment: None,
@@ -3882,6 +3957,7 @@ sys.stdin.read()
         std::env::remove_var("PARTITIONER_THINKING");
 
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             repository: "/tmp/fake".into(),
             post_task_review: false,
@@ -3912,6 +3988,7 @@ sys.stdin.read()
         let _guard = lock_env();
 
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             repository: "/tmp/fake".into(),
             post_task_review: false,
@@ -4073,6 +4150,7 @@ sys.stdin.read()
         let _guard = lock_env();
 
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             repository: "/tmp/fake".into(),
             post_task_review: false,
@@ -4145,6 +4223,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
         )
         .unwrap();
         let config = Config {
+            feedback_enabled: false,
             environment: None,
             engine: "pi".into(),
             pi_command: test_python(),

@@ -198,12 +198,19 @@ fn publish_summary(state: &Snapshot, summaries: &mut HashMap<String, Conversatio
             .result_execution
             .as_ref()
             .is_some_and(|item| item.status == "running");
+    let title = state
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(&state.graph.original_goal)
+        .to_owned();
     summaries.insert(
         state.run_id.clone(),
         ConversationSummary {
             run_id: state.run_id.clone(),
             repository: config.repository.clone(),
-            title: state.graph.original_goal.clone(),
+            title,
             plan_type: state.plan_type.clone(),
             phase: state.phase.clone(),
             has_active_executions,

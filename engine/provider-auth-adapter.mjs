@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { toHostInput } from './path-identity.mjs';
+import { readModelVisibility, saveModelVisibility } from './model-visibility.mjs';
 
 const KNOWN_PROVIDER_ENV_VARS = {
   anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"],
@@ -96,8 +97,11 @@ export class ProviderAuthAdapter {
         authEnvVar: isConfigured && !isStored ? auth?.source : null,
       };
     }));
+    const { hiddenModels } = readModelVisibility();
+    const hidden = new Set(hiddenModels);
     return {
       providers,
+      hiddenModels,
       models: runtime.getModels().map(m => ({
         provider: m.provider,
         id: m.id,
@@ -105,7 +109,8 @@ export class ProviderAuthAdapter {
         api: m.api,
         contextWindow: m.contextWindow,
         ...this.getThinkingCapabilities(m),
-        available: available.has(`${m.provider}/${m.id}`)
+        available: available.has(`${m.provider}/${m.id}`),
+        hidden: hidden.has(`${m.provider}/${m.id}`)
       })),
       warning: runtime.getError() ? "Some provider/model configuration could not be loaded; inspect local configuration." : null,
     };
@@ -243,6 +248,8 @@ export class ProviderAuthAdapter {
     if (request.version !== 1) throw new Error("Unsupported Provider/Auth Adapter protocol version.");
     switch (request.operation) {
       case "catalog": return this.catalog(request.refresh === true);
+      case "model_visibility": return readModelVisibility();
+      case "set_model_visibility": return saveModelVisibility(request.changes, request.reset ?? false);
       case "login": return this.start(request.provider, request.method);
       case "poll": return this.view(this.get(request.id));
       case "respond": return this.respond(request.id, request.promptId, request.value);

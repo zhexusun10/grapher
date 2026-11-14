@@ -346,19 +346,13 @@ test("Codex OAuth presents its method selection, opens the URL once and accepts 
   } finally { await context.close(); }
 });
 
-test("supported providers title has no hover shading and still toggles the list", { timeout: 30_000 }, async () => {
+test("supported providers title toggles the list and exposes its expanded state", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("settings");
   try {
     const title = page.locator(".providers-grid-title");
     const grid = page.locator(".providers-card-grid");
     for (const expanded of [false, true]) {
       assert.equal(await title.getAttribute("aria-expanded"), String(expanded));
-      await title.hover();
-      await page.waitForTimeout(200);
-      assert.deepEqual(await title.evaluate(element => {
-        const style = getComputedStyle(element);
-        return { background: style.backgroundColor, shadow: style.boxShadow, filter: style.filter };
-      }), { background: "rgba(0, 0, 0, 0)", shadow: "none", filter: "none" });
       await title.click();
       await grid.waitFor({ state: expanded ? "detached" : "visible" });
       assert.equal(await title.getAttribute("aria-expanded"), String(!expanded));
@@ -509,22 +503,14 @@ test("provider loading stays in the Refresh icon without a status panel or layou
   });
   const refresh = page.locator(".pi-auth-actions-row .compact-btn");
   const save = page.locator(".save-config-btn");
-  const saveAppearance = () => save.evaluate(element => {
-    const style = getComputedStyle(element);
-    return { opacity: style.opacity, shadow: style.boxShadow, background: style.backgroundColor, border: style.borderColor };
-  });
-  let idleSaveAppearance;
   const assertLoading = async () => {
     await refresh.locator(".spin-icon").waitFor();
     assert.equal(await refresh.isDisabled(), true);
     assert.equal(await refresh.getAttribute("aria-busy"), "true");
-    assert.equal(await refresh.locator("svg").evaluate(element => getComputedStyle(element).animationName), "spin");
     assert.equal(await page.locator(".provider-status-loading").count(), 0);
     assert.equal(await page.getByText("Communicating with Pi and syncing provider status...", { exact: true }).count(), 0);
     assert.equal(await save.isDisabled(), true, "catalog loading still prevents saving");
     assert.equal(await save.getAttribute("aria-busy"), "false", "refresh is not a settings save");
-    assert.equal((await saveAppearance()).opacity, "1");
-    if (idleSaveAppearance) assert.deepEqual(await saveAppearance(), idleSaveAppearance, "refresh must not flash the Save button");
   };
   const assertReady = async () => {
     await page.waitForFunction(() => document.querySelector(".pi-auth-actions-row .compact-btn")?.disabled === false);
@@ -546,7 +532,6 @@ test("provider loading stays in the Refresh icon without a status panel or layou
 
     const providerPanel = page.locator(".provider-settings-container");
     const idleBounds = await providerPanel.boundingBox();
-    idleSaveAppearance = await saveAppearance();
     assert.equal(await save.isDisabled(), false);
     await refresh.click();
     await waitFor(() => requests.length === 2);
@@ -555,7 +540,6 @@ test("provider loading stays in the Refresh icon without a status panel or layou
     await requests[1].fulfill({ json: { result: catalog } });
     await assertReady();
     assert.deepEqual(await providerPanel.boundingBox(), idleBounds);
-    assert.deepEqual(await saveAppearance(), idleSaveAppearance);
 
     await refresh.click();
     await waitFor(() => requests.length === 3);
@@ -563,7 +547,6 @@ test("provider loading stays in the Refresh icon without a status panel or layou
     await requests[2].fulfill({ status: 500, json: { error: "Mock provider refresh failed" } });
     await page.getByText("Error: Mock provider refresh failed", { exact: true }).waitFor();
     await assertReady();
-    assert.deepEqual(await saveAppearance(), idleSaveAppearance);
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -595,50 +578,6 @@ test("catalog refresh errors remain visible after successful login collapses the
   } finally { await context.close(); }
 });
 
-test("bound credentials omit source badges, update hover matches Refresh and delete keeps its danger hover", { timeout: 30_000 }, async () => {
-  const providers = [
-    { id: "stored", name: "Stored key", authType: "api_key", authSource: "stored" },
-    { id: "env", name: "Environment key", authType: "api_key", authSource: "env", authEnvVar: "TEST_API_KEY" },
-    { id: "oauth", name: "OAuth", authType: "oauth", authSource: "stored" },
-  ].map(provider => ({ ...provider, configured: true, methods: [] }));
-  const { context, page, errors } = await fixture("settings", async (route, command) => {
-    if (command !== "provider_auth") return false;
-    await route.fulfill({ json: { result: { ...catalog, providers } } });
-    return true;
-  });
-  try {
-    await page.locator(".configured-card-header").click();
-    assert.deepEqual(await page.locator(".configured-name").allTextContents(), providers.map(provider => provider.name));
-    assert.equal(await page.locator(".configured-type-badge").count(), 0);
-    assert.doesNotMatch(await page.locator(".configured-list").innerText(), /API Key saved|Environment variable|Browser authorization saved|TEST_API_KEY/);
-    const hoverSurface = async button => {
-      await button.hover();
-      await page.waitForTimeout(200);
-      return button.evaluate(element => {
-        const style = getComputedStyle(element);
-        return { background: style.backgroundColor, border: style.borderTopColor,
-          shadow: style.boxShadow, filter: style.filter, transition: style.transition };
-      });
-    };
-    const refreshSurface = await hoverSurface(page.locator(".pi-auth-actions-row .compact-btn"));
-    await page.locator(".providers-grid-title").click();
-    for (const section of [".configured-actions", ".provider-card-actions"]) {
-      const actions = page.locator(`${section} .card-action-btn`);
-      assert.equal(await actions.count(), providers.length * 2);
-      for (const button of await actions.all()) {
-        const textColor = await button.evaluate(element => getComputedStyle(element).color);
-        const isDelete = await button.evaluate(element => element.classList.contains("logout-btn"));
-        const expectedSurface = isDelete
-          ? { ...refreshSurface, background: "rgba(239, 68, 68, 0.1)", border: "rgb(239, 68, 68)" }
-          : refreshSurface;
-        assert.deepEqual(await hoverSurface(button), expectedSurface);
-        assert.equal(await button.evaluate(element => getComputedStyle(element).color), textColor, "hover preserves the action text color");
-      }
-    }
-    assert.deepEqual(errors, []);
-  } finally { await context.close(); }
-});
-
 test("configured-provider login stays below its row and bound credentials do not remember expansion", { timeout: 30_000 }, async () => {
   const provider = { id: "test", name: "Test", configured: true, authType: "api_key", authSource: "stored",
     methods: [{ id: "api_key", name: "API Key" }] };
@@ -655,19 +594,7 @@ test("configured-provider login stays below its row and bound credentials do not
     const credentials = page.locator(".configured-card-header");
     await credentials.waitFor();
     assert.equal(await credentials.getAttribute("aria-expanded"), "false");
-    const credentialColors = element => {
-      const style = getComputedStyle(element);
-      return { background: style.backgroundColor, border: style.borderTopColor };
-    };
-    const neutralColors = { background: "rgb(247, 247, 248)", border: "rgb(226, 232, 240)" };
-    assert.deepEqual(await page.locator(".configured-credentials-card").evaluate(credentialColors), neutralColors);
-    assert.equal(await page.locator(".configured-title-group").evaluate(element => getComputedStyle(element).color), "rgb(15, 23, 42)");
     await credentials.click();
-    assert.equal(await page.locator(".configured-type-badge").count(), 0);
-    assert.deepEqual(await page.locator(".configured-actions .card-action-btn").evaluateAll(buttons => buttons.map(button => {
-      const style = getComputedStyle(button);
-      return { width: style.borderTopWidth, style: style.borderTopStyle };
-    })), Array(2).fill({ width: "1px", style: "solid" }), "modify and delete keep visible button outlines");
     await page.locator(".configured-row .reauth-btn").click();
     await page.locator("#auth-answer").waitFor();
     assert.equal(await page.locator(".configured-row").evaluate(row => row.nextElementSibling?.classList.contains("active-login-reveal")), true);
@@ -3417,6 +3344,8 @@ test("late workspace completions cannot replace current files/skills; controlled
     return true;
   });
   try {
+    // Allow room above the standalone prompt fixture for the 320px command popover.
+    await page.evaluate(() => { document.getElementById("root").style.paddingTop = "360px"; });
     // Completions are lazy: explicitly trigger the old workspace request first.
     await page.locator("textarea").fill("@");
     await waitFor(() => oldRequests === 2);
@@ -3424,11 +3353,14 @@ test("late workspace completions cannot replace current files/skills; controlled
     const input = page.locator("textarea");
     await input.fill("@");
     await page.locator(".suggestion-item-title-row", { hasText: "beta.ts" }).waitFor();
+    assert.equal(await page.locator(".suggestions-header-title svg").count(), 0);
     gate.resolve();
     await waitFor(() => oldReplies === 2);
     assert.ok(!(await page.locator(".prompt-box-suggestions-list").innerText()).includes("alpha.ts"));
     await input.fill("/");
     await page.locator(".suggestion-item-title-row", { hasText: "/skill:beta" }).waitFor();
+    assert.equal(await page.locator(".suggestions-header-title svg").count(), 0);
+    assert.ok(!(await page.locator(".prompt-box-suggestions-list").innerText()).includes("/help"));
     assert.ok(!(await page.locator(".prompt-box-suggestions-list").innerText()).includes("alpha"));
     await input.press("Escape");
     await waitFor(async () => (await page.locator(".prompt-box-suggestions-popover").count()) === 0);
@@ -5134,6 +5066,15 @@ for (const kind of ["publication", "node"]) {
         case "list_files": result = { files: [] }; break;
         case "list_skills": result = { skills: [] }; break;
         case "get_merger_prompt": result = { prompt: "Merge the completed work." }; break;
+        case "composer_command": {
+          assert.equal(body.operation, "withdraw");
+          const queued = current.events.findLast(event => event.type === "steered" && event.instruction === "Edited merger instruction");
+          assert.ok(queued?.request_id);
+          current = { ...current, events: [...current.events, { type: "steers_withdrawn", sequence: current.events.length + 1,
+            timestamp: 13, execution_id: queued.execution_id, message_sequences: [queued.sequence] }] };
+          result = { snapshot: current, messages: [{ text: queued.instruction }] };
+          break;
+        }
         case "provider_auth": result = catalog; break;
         case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
         case "control": {
@@ -5158,9 +5099,14 @@ for (const kind of ["publication", "node"]) {
           } else {
             assert.equal(body.action, "steer");
             assert.equal(body.executionId, `${kind}-merger-2`);
+            assert.match(body.requestId ?? "", /^[0-9a-f-]{36}$/, "every live send, including an edited turn, supplies its own identity");
+            const consumed = `${JSON.stringify({ type: "message_start", message: { role: "user", content: [{ type: "text", text: body.instruction }] } })}\n`;
             current = {
               ...current,
-              events: [...current.events, { type: "steered", sequence, timestamp: 12, node: mergerNode, execution_id: body.executionId, instruction: body.instruction }],
+              mergers: current.mergers.map(merger => merger.id === body.executionId && body.instruction === "Steer running continuation"
+                ? { ...merger, output: merger.output + consumed } : merger),
+              events: [...current.events, { type: "steered", sequence, timestamp: 12, node: mergerNode, execution_id: body.executionId,
+                instruction: body.instruction, request_id: body.requestId }],
             };
           }
           result = current;
@@ -5231,6 +5177,22 @@ for (const kind of ["publication", "node"]) {
         ["Initial merger output", "Follow-up merger instruction", "Continuation merger output", "Steer running continuation"],
         "reload preserves merger continuation and steer ordering",
       );
+      // Editing a consumed turn of a live Merger sends a new steer. Its local
+      // version card must share that fresh ID so Alt+Q removes only the new turn.
+      const consumedRow = page.locator(".chat-message-row.user", { hasText: "Steer running continuation" });
+      await consumedRow.locator(".chat-bubble-user").hover();
+      await consumedRow.locator(".chat-message-edit-btn").click();
+      const editor = page.locator(".chat-bubble-edit-textarea");
+      await editor.fill("Edited merger instruction");
+      await editor.press("Enter");
+      await editor.waitFor({ state: "hidden" });
+      await page.getByText("Edited merger instruction", { exact: true }).waitFor();
+      const sends = current.events.filter(event => event.type === "steered" && event.request_id);
+      assert.equal(new Set(sends.map(event => event.request_id)).size, 2);
+      await composer.press("Alt+q");
+      await page.waitForFunction(() => document.querySelector(".pane-bottom-chat textarea")?.value === "Edited merger instruction");
+      assert.equal(await page.locator(".chat-bubble-user", { hasText: "Edited merger instruction" }).count(), 0);
+      assert.equal(await page.locator(".chat-bubble-user", { hasText: "Steer running continuation" }).count(), 1);
       assert.deepEqual(errors, []);
     } finally {
       continueGate.resolve();

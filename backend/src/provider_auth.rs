@@ -221,7 +221,7 @@ impl Transport {
         if body["version"] != 1
             || !matches!(
                 body["operation"].as_str(),
-                Some("catalog" | "login" | "poll" | "respond" | "cancel" | "logout")
+                Some("catalog" | "model_visibility" | "set_model_visibility" | "login" | "poll" | "respond" | "cancel" | "logout")
             )
         {
             return Err("Invalid Provider/Auth Adapter operation".into());

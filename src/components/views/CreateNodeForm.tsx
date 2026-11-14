@@ -27,8 +27,9 @@ export function completedDownstream(state: Snapshot, target: string): ManualNode
   });
 }
 
-export function CreateNodeForm({ state, busy, onCancel, onSave, onRequestConfirmation }: {
+export function CreateNodeForm({ state, feedbackEnabled = state.config?.feedbackEnabled ?? false, busy, onCancel, onSave, onRequestConfirmation }: {
   state: Snapshot;
+  feedbackEnabled?: boolean;
   busy: boolean;
   onCancel: () => void;
   onSave: (request: ManualNodeRequest) => Promise<boolean>;
@@ -38,7 +39,8 @@ export function CreateNodeForm({ state, busy, onCancel, onSave, onRequestConfirm
   const [task, setTask] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const [feedback, setFeedback] = useState(false);
+  const [feedbackSelected, setFeedback] = useState(false);
+  const feedback = feedbackEnabled && feedbackSelected;
   const [error, setError] = useState("");
 
   const submit = (event: React.FormEvent) => {
@@ -57,7 +59,9 @@ export function CreateNodeForm({ state, busy, onCancel, onSave, onRequestConfirm
       return;
     }
     if (!feedback && from && to && from === to) {
-      setError(t("前驱和目标不能是同一个节点；如需让新节点反馈给该节点，请将 feedback 设为 true。"));
+      setError(feedbackEnabled
+        ? t("前驱和目标不能是同一个节点；如需让新节点反馈给该节点，请将 feedback 设为 true。")
+        : t("前驱和目标不能是同一个节点。"));
       return;
     }
     if (feedback && (!from || !dependencyDescendants(state, to).has(from))) {
@@ -115,14 +119,14 @@ export function CreateNodeForm({ state, busy, onCancel, onSave, onRequestConfirm
           {state.graph.nodes.map(node => <option key={node.name} value={node.name}>{node.name}</option>)}
         </select>
       </label>
-      <div className="form-field-group">
+      {feedbackEnabled && <div className="form-field-group">
         <label className="form-field"><span>feedback</span>
           <select value={String(feedback)} onChange={event => setFeedback(event.target.value === "true")} disabled={busy}>
             <option value="false">false</option><option value="true">true</option>
           </select>
         </label>
         <p className="create-node-hint">{t("from → 新节点为普通依赖；feedback 决定新节点 → to 是否为反馈边。反馈目标必须是新节点的依赖祖先。")}</p>
-      </div>
+      </div>}
       {from && to && !feedback && state.graph.edges.some(edge => !edge.feedback && edge.from === from && edge.to === to) &&
         <p className="create-node-hint">{t("保存后，新节点将插入这两个节点之间，替换原有的直接依赖边。")}</p>}
       {error && <p className="create-node-error" role="alert">{error}</p>}

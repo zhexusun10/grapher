@@ -1,4 +1,77 @@
-import type { ChatMessage, FileAttachment, ImageAttachment } from "../types";
+import type { ChatMessage, FileAttachment, ImageAttachment, Snapshot, GraphEvent } from "../types";
+
+/** Remove only runtime-confirmed withdrawals, including their optimistic twins.
+ * Submission ordinals count all accepted events; transcript ordinals count only
+ * retained turns. Renumber after matching so a withdrawn duplicate can be resent. */
+export function projectWithdrawnSteers(source: Snapshot, messages: readonly ChatMessage[]) {
+  const removed = new Set(source.events.filter(event => event.type === "steers_withdrawn")
+    .flatMap(event => event.message_sequences ?? []));
+  if (!removed.size) return { state: source, messages };
+  const removedIds = new Set<string>();
+  const byId = new Map<string, { ordinal: number; textOrdinal?: number }>();
+  const byText = new Map<string, { ordinal: number; textOrdinal?: number }[]>();
+  const counts = new Map<string, number>();
+  const textCounts = new Map<string, number>();
+  for (const event of source.events) {
+    if (event.type !== "steered" || !event.execution_id) continue;
+    const key = `${event.execution_id}\u0000${nodeInstructionText(event.instruction ?? "")}`;
+    const ordinal = counts.get(key) ?? 0;
+    counts.set(key, ordinal + 1);
+    const textOrdinal = event.images?.length ? undefined : textCounts.get(key) ?? 0;
+    if (textOrdinal !== undefined) textCounts.set(key, textOrdinal + 1);
+    if (event.request_id) {
+      const identity = `${event.execution_id}\u0000${event.request_id}`;
+      byId.set(identity, { ordinal, textOrdinal });
+      if (removed.has(event.sequence)) removedIds.add(identity);
+    }
+    if (removed.has(event.sequence)) {
+      const list = byText.get(key) ?? [];
+      list.push({ ordinal, textOrdinal });
+      byText.set(key, list);
+    }
+  }
+  const retained = numberSteers(messages).flatMap(message => {
+    if (message.delivery !== "steered" || !message.executionId) return [message];
+    const withdrawn = byText.get(`${message.executionId}\u0000${nodeInstructionText(message.text)}`) ?? [];
+    const identity = message.steerRequestId ? `${message.executionId}\u0000${message.steerRequestId}` : undefined;
+    if (identity ? removedIds.has(identity) : message.id.startsWith("event-") && removed.has(Number(message.id.slice(6)))) return [];
+    // Text/ordinal counts remain display positions, never withdrawal identity.
+    // An unacknowledged or legacy local card is retained rather than guessed.
+    const recorded = identity ? byId.get(identity) : undefined;
+    const ordinal = recorded?.ordinal ?? message.inlineSteerOrdinal!;
+    const textOrdinal = recorded?.textOrdinal ?? message.steerOrdinal;
+    return [{ ...message, inlineSteerOrdinal: ordinal - withdrawn.filter(item => item.ordinal < ordinal).length,
+      steerOrdinal: textOrdinal === undefined ? undefined : textOrdinal - withdrawn.filter(item =>
+        item.textOrdinal !== undefined && item.textOrdinal < textOrdinal).length }];
+  });
+  return { state: { ...source, events: source.events.filter(event => !removed.has(event.sequence)) }, messages: retained };
+}
+
+/** Keep live transcript cursors for consumed turns and unrelated nodes. Only
+ * newly recalled occurrences disappear; later keys shift with the projection. */
+export function projectLiveSteerWithdrawals(markers: LiveSteerMarker[], events: readonly GraphEvent[], previousRemoved: ReadonlySet<number>) {
+  const removed = new Set(events.filter(event => event.type === "steers_withdrawn").flatMap(event => event.message_sequences ?? []));
+  const removedIds = new Set(events.filter(event => removed.has(event.sequence) && event.request_id)
+    .map(event => `${event.execution_id}\u0000${event.request_id}`));
+  const counts = new Map<string, number>();
+  const ordinals = new Map<string, number[]>();
+  for (const event of events) {
+    if (event.type !== "steered" || !event.execution_id || previousRemoved.has(event.sequence)) continue;
+    const key = `${event.execution_id}\u0000${nodeInstructionText(event.instruction ?? "")}`;
+    const ordinal = counts.get(key) ?? 0;
+    counts.set(key, ordinal + 1);
+    if (removed.has(event.sequence)) ordinals.set(key, [...(ordinals.get(key) ?? []), ordinal]);
+  }
+  return markers.flatMap(marker => {
+    if (marker.requestId) return removedIds.has(`${marker.executionId}\u0000${marker.requestId}`) ? [] : [marker];
+    const key = `${marker.executionId}\u0000${marker.text}`;
+    const recalled = ordinals.get(key) ?? [];
+    const ordinal = Number(marker.key.slice(marker.key.lastIndexOf("\u0000") + 1));
+    if (recalled.includes(ordinal)) return [];
+    const shift = recalled.filter(value => value < ordinal).length;
+    return [shift ? { ...marker, key: `${key}\u0000${ordinal - shift}`, occurrence: Math.max(1, marker.occurrence - shift) } : marker];
+  });
+}
 
 /** A node instruction without the `[@node]` addressing prefix the bubble adds. */
 export function nodeInstructionText(text: string): string {
@@ -41,6 +114,7 @@ export interface InlineUserTurnWindow {
 /** Presentation-only marker captured when a steer is sent in this view. */
 export interface LiveSteerMarker {
   key: string;
+  requestId?: string;
   executionId: string;
   text: string;
   afterOffset: number;
@@ -132,7 +206,9 @@ export function steerFallbackPosition(
 /** Presentation identity also counts attachment steers, without changing the
  * text-only ordinal used for safe pause recovery. */
 export function inlineSteerKey(message: ChatMessage): string | null {
-  if (message.delivery !== "steered" || !message.executionId || message.inlineSteerOrdinal === undefined) return null;
+  if (message.delivery !== "steered" || !message.executionId) return null;
+  if (message.steerRequestId) return `${message.executionId}\u0000id:${message.steerRequestId}`;
+  if (message.inlineSteerOrdinal === undefined) return null;
   return `${message.executionId}\u0000${nodeInstructionText(message.text)}\u0000${message.inlineSteerOrdinal}`;
 }
 
@@ -142,5 +218,6 @@ export function inlineSteerKey(message: ChatMessage): string | null {
  */
 export function steerRollbackKey(message: ChatMessage): string | null {
   if (message.delivery !== "steered" || !message.executionId) return null;
+  if (message.steerRequestId) return `${message.executionId}\u0000id:${message.steerRequestId}`;
   return `${message.executionId}\u0000${nodeInstructionText(message.text)}${message.steerOrdinal === undefined ? "" : `\u0000${message.steerOrdinal}`}`;
 }

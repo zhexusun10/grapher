@@ -1,16 +1,23 @@
 import type { ChatMessage, GraphEvent } from "../types";
 import { plannerContentSteerId } from "./plannerText";
 
-export type PlannerSteerStatus = "submitting" | "submitted" | "queued" | "accepted" | "consumed" | "handled" | "failed" | "unknown";
+export type PlannerSteerStatus = "submitting" | "submitted" | "queued" | "accepted" | "consumed" | "handled" | "failed" | "unknown" | "withdrawn";
 export interface PlannerSteerRow { id: string; planningId?: string; message: ChatMessage; status: PlannerSteerStatus; error?: string }
 
 /** Steer delivery identity describes one submitted request. A copy that starts
  * a new turn (an edit, an activated version, or a restored branch) must not keep
- * it, or it would stay in the pending area and be hidden from the transcript. */
+ * either Planner or Node identity, or it could alias the old pending/withdrawn turn. */
 export function withoutPlannerSteerIdentity<T extends ChatMessage>(message: T): T {
-  if (!message.plannerSteerId) return message;
-  const { plannerSteerId: _id, plannerSteerStatus: _status, plannerSteerError: _error, ...rest } = message;
+  if (!message.plannerSteerId && !message.steerRequestId) return message;
+  const { plannerSteerId: _id, plannerSteerStatus: _status, plannerSteerError: _error, steerRequestId: _nodeId, ...rest } = message;
   return rest as T;
+}
+
+/** A live execution edit/version resend is a new delivery, not the old turn's
+ * transport identity or its display occurrence. Keep history/version fields. */
+export function newExecutionSteer(message: ChatMessage, executionId: string, requestId = crypto.randomUUID()): ChatMessage {
+  const { steerOrdinal: _ordinal, inlineSteerOrdinal: _inlineOrdinal, ...copy } = withoutPlannerSteerIdentity(message);
+  return { ...copy, delivery: "steered", executionId, steerRequestId: requestId };
 }
 
 /** Who owns the text of a Planner steer send. Exactly one surface may show an
@@ -42,7 +49,7 @@ export function plannerSteerRows(events: readonly GraphEvent[], messages: readon
       rows.set(id, { id, planningId: event.planning_id, message, status: "submitted" });
     } else if (event.type === "planner_steer_status") {
       const row = rows.get(id);
-      if (row && ["queued", "accepted", "consumed", "handled", "failed", "unknown"].includes(event.status || "")) {
+      if (row && ["queued", "accepted", "consumed", "handled", "failed", "unknown", "withdrawn"].includes(event.status || "")) {
         row.status = event.status as PlannerSteerStatus;
         row.error = event.error;
       }
@@ -52,7 +59,7 @@ export function plannerSteerRows(events: readonly GraphEvent[], messages: readon
     if (!rows.has(id)) rows.set(id, { id, message, status: message.plannerSteerStatus ?? "submitting", error: message.plannerSteerError });
   }
   return [...rows.values()].flatMap(row => {
-    if (options.visibleIds.has(row.id)) return [];
+    if (row.status === "withdrawn" || options.visibleIds.has(row.id)) return [];
     // A steer the send returned to the composer left no turn in the
     // conversation, so rebuilding its bubble from the durable submission would
     // show the same instruction in the pending area and in the input.

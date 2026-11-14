@@ -7,6 +7,9 @@ mod workspace_policy;
 #[path = "node_model_tests.rs"]
 mod node_models;
 
+#[path = "composer_model_tests.rs"]
+mod composer_models;
+
 #[path = "manual_node_tests.rs"]
 mod manual_node;
 
@@ -15,6 +18,9 @@ mod failure_recovery;
 
 #[path = "node_message_queue_tests.rs"]
 mod node_message_queue;
+
+#[path = "feedback_continuation_tests.rs"]
+mod feedback_continuation_tests;
 
 #[cfg(feature = "fixture")]
 #[path = "feedback_workspace_tests.rs"]
@@ -46,6 +52,10 @@ fn setup(git: bool, graph: Graph) -> (TempDir, PathBuf, Runtime) {
     }))
     .unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+    // Test-only wording; production feedback notices await user approval.
+    fs::create_dir_all(runtime.root.join("prompts")).unwrap();
+    fs::write(runtime.root.join("prompts/feedback-returned.md"), "{{node}}\n[fixture: feedback returned from {{target}}]").unwrap();
+    fs::write(runtime.root.join("prompts/feedback-updated.md"), "{{node}}\n[fixture: upstream {{target}} updated]").unwrap();
     // These scheduler/replay tests synthesize results without native E/L seals.
     // Seed a legacy Created record instead of admitting a new managed Run.
     runtime.state.run_id = Uuid::new_v4().to_string();
@@ -1592,6 +1602,7 @@ fn editing_a_repeated_steer_uses_its_log_cursor_and_can_reedit_the_retained_pref
                     execution_id: first.execution.id.clone(),
                     node: "task".into(),
                     instruction: "继续 中文🚀".into(),
+                    request_id: None,
                     images: None,
                 })
                 .unwrap();
@@ -1846,6 +1857,7 @@ fn editing_a_consumed_steer_keeps_the_opening_task_and_branches_at_the_steer() {
                         execution_id: first.execution.id.clone(),
                         node: "task".into(),
                         instruction: instruction.into(),
+                        request_id: None,
                         images: None,
                     })
                     .unwrap();
@@ -4283,6 +4295,7 @@ fn failed_node_merger_marks_posterior_node_blocked_and_descendants_recover_on_no
             execution_id: merger_retry_id.clone(),
             node: "merge:join".into(),
             instruction: "please fix conflict".into(),
+            request_id: None,
             images: None,
         })
         .unwrap();
@@ -5397,6 +5410,7 @@ fn failed_node_intervention_resumes_running_phase_and_clears_needs_attention() {
             execution_id: retry_job.execution.id.clone(),
             node: "task".into(),
             instruction: "steer msg".into(),
+            request_id: None,
             images: None,
         })
         .unwrap();

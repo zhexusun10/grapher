@@ -20,7 +20,7 @@ const catalog = { providers: [{ id: "test", name: "Test", methods: [], configure
   ].map(model => ({ provider: "test", name: model.id, api: "mock", contextWindow: 1000, available: true, ...model })) };
 
 before(async () => {
-  server = await createServer({ cacheDir: "node_modules/.vite-bootstrap-settings", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false } });
+  server = await createServer({ cacheDir: "node_modules/.vite-bootstrap-settings", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false, watch: null } });
   await server.listen(); origin = `http://127.0.0.1:${server.httpServer.address().port}`;
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
@@ -81,6 +81,95 @@ async function until(check) {
   const end = Date.now() + 8_000;
   while (!await check()) { assert.ok(Date.now() < end, "expected request/state did not arrive"); await new Promise(completed => setTimeout(completed, 20)); }
 }
+
+test("Feedback defaults off and is staged until saved, then survives reopening and reload", { timeout: 30_000 }, async () => {
+  let saved = { ...config };
+  let saves = 0;
+  const { context, page, errors } = await app(async (route, command, body) => {
+    if (command === "bootstrap" || command === "save_config") {
+      if (command === "save_config") { saved = body.config; saves++; }
+      await route.fulfill({ json: { result: { ...bootstrap, config: saved } } });
+      return true;
+    }
+    return false;
+  });
+  try {
+    await openSettings(page);
+    const feedback = () => page.getByRole("checkbox", { name: "Enable Feedback", exact: true });
+    const budget = () => page.getByRole("spinbutton", { name: "Feedback budget", exact: true });
+    assert.equal(await feedback().isChecked(), false);
+    assert.equal(await budget().isDisabled(), true);
+    await feedback().check();
+    assert.equal(await budget().isEnabled(), true);
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await openSettings(page);
+    assert.equal(await feedback().isChecked(), false);
+    assert.equal(saves, 0);
+    await feedback().check();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await page.locator(".settings-modal").waitFor({ state: "hidden" });
+    assert.equal(saved.feedbackEnabled, true);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await openSettings(page);
+    assert.equal(await feedback().isChecked(), true);
+    await feedback().uncheck();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await page.locator(".settings-modal").waitFor({ state: "hidden" });
+    assert.equal(saved.feedbackEnabled, false);
+    assert.equal(saved.maxFeedback, config.maxFeedback);
+    assert.equal(saves, 2);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("Feedback opt-out preserves old session edges and hides the legend only for disabled sessions", { timeout: 30_000 }, async () => {
+  let saved = { ...config, feedbackEnabled: true };
+  const makeRun = (runId, enabled, legacy = false) => ({
+    ...empty, runId, config: { ...config, ...(legacy ? {} : { feedbackEnabled: enabled }) },
+    planType: "graph", approved: true, paused: true, phase: "paused",
+    graph: { originalGoal: `Goal ${runId}`, nodes: [{ name: "a", task: "Build" }, { name: "b", task: "Review" }],
+      edges: [{ from: "a", to: "b", feedback: false }, ...(enabled ? [{ from: "b", to: "a", feedback: true }] : [])] },
+    nodes: { a: { status: "waiting", revision: 1 }, b: { status: "waiting", revision: 1 } },
+  });
+  const runs = { fast: makeRun("fast", true), disabled: makeRun("disabled", false), legacy: makeRun("legacy", true, true) };
+  const { context, page, errors } = await app(async (route, command, body) => {
+    let result;
+    if (command === "bootstrap") result = { ...bootstrap, config: saved, snapshot: runs.fast, runs: Object.keys(runs) };
+    else if (["history", "snapshot", "load_run"].includes(command)) result = runs[body.runId] ?? runs.fast;
+    else if (command === "save_config") {
+      saved = body.config;
+      result = { ...bootstrap, config: saved, snapshot: runs[body.runId], runs: Object.keys(runs) };
+    } else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  const edges = () => page.locator('.graph-canvas .react-flow__edge');
+  const legend = () => page.locator('.graph-note');
+  try {
+    await page.locator('[data-run-id="fast"]').click();
+    await until(async () => await edges().count() === 2);
+    assert.equal(await legend().count(), 1);
+    await openSettings(page);
+    await page.getByRole("checkbox", { name: "Enable Feedback", exact: true }).uncheck();
+    await page.locator('.save-config-btn').click();
+    await page.locator('.settings-modal').waitFor({ state: "hidden" });
+    assert.equal(saved.feedbackEnabled, false);
+    assert.equal(await edges().count(), 2, "saving opt-out cannot hide a still-active historical route");
+    assert.equal(await legend().count(), 1, "the old session retains its edge explanation");
+    await page.locator('[data-run-id="disabled"]').click();
+    await until(async () => await edges().count() === 1);
+    assert.equal(await legend().count(), 0, "the entire edge-type legend is absent for a disabled session");
+    await page.locator('[data-run-id="legacy"]').click();
+    await until(async () => await edges().count() === 2);
+    assert.equal(await legend().count(), 1, "legacy routes remain visible even without the new setting field");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator('[data-run-id="fast"]').click();
+    await until(async () => await edges().count() === 2);
+    assert.equal(await legend().count(), 1);
+    await openSettings(page);
+    assert.equal(await page.getByRole("checkbox", { name: "Enable Feedback", exact: true }).isChecked(), false);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 test("one stalled history cannot keep validated sidebar cards and saved models loading", { timeout: 30_000 }, async () => {
   let stalled = 0;
@@ -393,6 +482,37 @@ test("conversation settings stay scoped and new conversations use defaults", { t
   } finally { await context.close(); }
 });
 
+test("Settings outside a conversation changes defaults but not existing Runs", { timeout: 30_000 }, async () => {
+  let defaults = config;
+  const { context, page, errors } = await app(async (route, command, body) => {
+    if (command === "bootstrap") {
+      await route.fulfill({ json: { result: { ...bootstrap, config: defaults } } }); return true;
+    }
+    if (command === "save_config") {
+      assert.equal(body.runId, undefined);
+      defaults = body.config;
+      await route.fulfill({ json: { result: { ...bootstrap, config: defaults } } }); return true;
+    }
+    return false;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    await openSettings(page);
+    await nodeModel(page).selectOption("test/new");
+    await page.locator(".save-config-btn").click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    assert.equal(defaults.roleModels.nodeAgent.model, "test/new");
+    await page.locator('[data-run-id="fast"]').click();
+    await openSettings(page);
+    assert.equal(await nodeModel(page).inputValue(), "test/old", "existing conversation retains its own profile");
+    await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+    await page.getByRole("button", { name: "New conversation", exact: true }).click();
+    await openSettings(page);
+    assert.equal(await nodeModel(page).inputValue(), "test/new", "new conversations inherit the saved defaults");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("a closing Settings modal cannot open a late OAuth authorization page", { timeout: 30_000 }, async () => {
   let loginRequest;
   const cancelled = [];
@@ -554,7 +674,9 @@ test("a stalled settings save releases busy state, preserves its draft and can r
     await page.locator(".save-config-btn").click();
     await page.locator(".settings-modal").waitFor({ state: "detached" });
     assert.equal(saves, 2);
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).model), "test/new");
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).model), "test/new", "Settings outside a conversation commits global defaults");
+    await openSettings(page);
+    assert.equal(await nodeModel(page).inputValue(), "test/new", "the accepted draft remains visible in Settings");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -650,14 +772,14 @@ test("serial failure displays the saved retry model without rewriting the failed
 });
 
 for (const planType of ["graph", "serial"]) {
- test(`${planType}: ${planType === "graph" ? "an unrecognized failure offers Continue" : "no Continue button is shown for a failure"}`, { timeout: 30_000 }, async () => {
+ test(`${planType}: an unrecognized failure offers the appropriate continuation control`, { timeout: 30_000 }, async () => {
   const failed = { id: "unknown-attempt", node: "task", revision: 1, attempt: 1, sessionId: "session",
     worktree: "/workspace", before: "base", after: null, status: "failed", output: "", outputBytes: 0,
     startedAt: 1, completedAt: 2 };
   let current = { ...empty, runId: "fast", config, planType, approved: true, phase: "needs_attention", canResume: true,
     graph: { originalGoal: "Recover unknown failure", nodes: [{ name: "task", task: "Finish the task" }], edges: [] },
     plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
-    nodes: { task: { status: "failed", revision: 1, head: null, instruction: "", error: "Unrecognized frobnicator error #843" } },
+    nodes: { task: { status: "failed", canResume: true, revision: 1, head: null, instruction: "", error: "Unrecognized frobnicator error #843" } },
     executions: [failed] };
   let resumes = 0;
   const { context, page, errors } = await app(async (route, command, body) => {
@@ -665,9 +787,12 @@ for (const planType of ["graph", "serial"]) {
     if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
     else if (command === "history" || command === "snapshot" || command === "load_run") result = current;
     else if (command === "control") {
-      assert.equal(body.action, "resume"); assert.equal(body.runId, "fast"); assert.equal(body.node, undefined);
+      assert.equal(body.action, planType === "serial" ? "resume_node" : "resume");
+      assert.equal(body.runId, "fast");
+      assert.equal(body.node, planType === "serial" ? "task" : undefined);
+      assert.equal(body.instruction, undefined, "continuation does not append a user message");
       resumes++;
-      current = { ...current, canResume: false, phase: "running", nodes: { task: { ...current.nodes.task, status: "running", error: null } },
+      current = { ...current, canResume: false, phase: "running", nodes: { task: { ...current.nodes.task, canResume: false, status: "running", error: null } },
         executions: [...current.executions, { ...failed, id: "retry", attempt: 2, status: "running", startedAt: 3, completedAt: null }] };
       result = current;
     } else if (command === "get_execution_output") {
@@ -680,18 +805,23 @@ for (const planType of ["graph", "serial"]) {
     await page.locator('[data-run-id="fast"]').click();
     if (planType === "serial") {
       await page.locator(".pane-bottom-chat textarea").waitFor();
-      assert.equal(await page.getByRole("button", { name: "Resume", exact: true }).count(), 0);
-      assert.equal(resumes, 0);
-      assert.deepEqual(errors, []);
-      return;
+      assert.equal(await page.getByRole("button", { name: "Resume", exact: true }).count(), 0,
+        "Serial has no run-wide topology control");
+    } else {
+      await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Failed" }).waitFor();
     }
-    await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Failed" }).waitFor();
-    const button = page.getByRole("button", { name: "Resume", exact: true });
+    const button = page.getByRole("button", {
+      name: planType === "serial" ? "Continue this agent (without adding a message)" : "Resume", exact: true,
+    });
     assert.equal(await button.isEnabled(), true);
     assert.equal(resumes, 0, "loading a failure never resumes it automatically");
     await button.click();
     await until(() => resumes === 1);
-    await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Running" }).waitFor();
+    if (planType === "graph") {
+      await page.locator('.task-node[data-node-name="task"] .status', { hasText: "Running" }).waitFor();
+    } else {
+      await button.waitFor({ state: "detached" });
+    }
     assert.equal(current.executions[0].status, "failed");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
@@ -758,20 +888,31 @@ test("a resumed failed node keeps virtualized tool cards evenly spaced", { timeo
   } finally { await context.close(); }
 });
 
-test("serial paused execution does not display a Continue button", { timeout: 30_000 }, async () => {
+test("serial continuation waits for writer drain and targets only its agent", { timeout: 30_000 }, async () => {
   const execution = { id: "worker", node: "task", revision: 1, attempt: 1, sessionId: "session", worktree: "/workspace",
     before: "", after: null, status: "running", output: "", outputBytes: 0, startedAt: 1, completedAt: null };
   let current = { ...empty, runId: "fast", config, planType: "serial", approved: true, paused: true, phase: "paused", canResume: false,
     graph: { originalGoal: "Pause safely", nodes: [{ name: "task", task: "Work" }], edges: [] },
     nodes: { task: { status: "running", revision: 1, head: null, instruction: "", error: null } }, executions: [execution] };
-  let polls = 0;
-  const { context, page, errors } = await app(async (route, command) => {
+  let polls = 0, resumes = 0;
+  const { context, page, errors } = await app(async (route, command, body) => {
     let result;
     if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
     else if (command === "history" || command === "snapshot" || command === "load_run") result = current;
     else if (command === "snapshot_if_changed") { polls++; result = { version: JSON.stringify(current), snapshot: current }; }
-    else if (command === "get_execution_output") result = { runId: "fast", executionId: "worker", content: "", startOffset: 0,
-      nextOffset: 0, totalBytes: 0, complete: current.executions[0].status !== "running", status: current.executions[0].status };
+    else if (command === "control") {
+      assert.equal(body.action, "resume_node"); assert.equal(body.node, "task"); assert.equal(body.runId, "fast");
+      assert.equal(body.instruction, undefined);
+      resumes++;
+      current = { ...current, paused: false, canResume: false, phase: "running",
+        nodes: { task: { ...current.nodes.task, canResume: false, status: "running", error: null } },
+        executions: [...current.executions, { ...execution, id: "continued", startedAt: 3 }] };
+      result = current;
+    } else if (command === "get_execution_output") {
+      const status = current.executions.find(execution => execution.id === body.executionId)?.status;
+      result = { runId: "fast", executionId: body.executionId, content: "", startOffset: 0,
+        nextOffset: 0, totalBytes: 0, complete: status !== "running", status };
+    }
     else return false;
     await route.fulfill({ json: { result } }); return true;
   });
@@ -779,11 +920,20 @@ test("serial paused execution does not display a Continue button", { timeout: 30
     await page.locator('[data-run-id="fast"]').click();
     await page.locator(".pane-bottom-chat textarea").waitFor();
     assert.equal(await page.getByRole("button", { name: "Resume", exact: true }).count(), 0);
-    current = { ...current, canResume: true, nodes: { task: { ...current.nodes.task, status: "paused", error: "Execution paused by the user" } },
+    const button = page.getByRole("button", { name: "Continue this agent (without adding a message)", exact: true });
+    assert.equal(await button.count(), 0, "a draining writer cannot be resumed yet");
+    current = { ...current, canResume: true, nodes: { task: { ...current.nodes.task, canResume: true, status: "paused", error: "Execution paused by the user" } },
       executions: [{ ...execution, status: "paused", completedAt: 2 }] };
     await page.clock.runFor(5_000);
     await until(() => polls > 0);
+    await button.waitFor();
+    assert.equal(await button.isEnabled(), true);
+    assert.equal(resumes, 0, "a recoverable snapshot does not resume automatically");
     assert.equal(await page.getByRole("button", { name: "Resume", exact: true }).count(), 0);
+    await button.click();
+    await until(() => resumes === 1);
+    await button.waitFor({ state: "detached" });
+    assert.equal(current.executions[0].status, "paused", "continuation preserves the interrupted attempt");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -832,7 +982,7 @@ test("a paused node intervention does not automatically retry an unrelated unkno
   } finally { await context.close(); }
 });
 
-test("model-specific thinking levels update inherited roles, remain independent and save only supported values", { timeout: 30_000 }, async () => {
+test("model-specific thinking levels update global defaults when Settings is outside a conversation", { timeout: 30_000 }, async () => {
   let saved;
   const otherProvider = { id: "other", name: "Other", methods: [], configured: true };
   const { context, page, errors } = await app(async (route, command, body) => {
@@ -875,11 +1025,15 @@ test("model-specific thinking levels update inherited roles, remain independent 
     assert.equal(saved.model, "test/plain"); assert.equal(saved.thinkingLevel, "off");
     assert.equal(saved.roleModels.planner.model, "test/old"); assert.equal(saved.roleModels.planner.thinkingLevel, "high");
     assert.equal(saved.roleModels.partitioner.thinkingLevel, "off");
+    await openSettings(page);
+    assert.equal(await model(0).inputValue(), "test/plain"); assert.equal(await thinking(0).inputValue(), "off");
+    assert.equal(await model(1).inputValue(), "test/old"); assert.equal(await thinking(1).inputValue(), "high");
+    assert.equal(await thinking(2).inputValue(), "off");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
 
-test("saving an incompatible legacy level persists the Pi-adjusted value displayed in the draft", { timeout: 30_000 }, async () => {
+test("saving an incompatible legacy level updates defaults to the Pi-adjusted value", { timeout: 30_000 }, async () => {
   const old = { ...config, thinkingLevel: "max" };
   let saved;
   const { context, page, errors } = await app(async (route, command, body) => {
@@ -899,6 +1053,231 @@ test("saving an incompatible legacy level persists the Pi-adjusted value display
     await page.locator(".settings-modal").waitFor({ state: "detached" });
     assert.equal(saved.thinkingLevel, "high");
     assert.equal(saved.roleModels.nodeAgent.thinkingLevel, "high");
+    await openSettings(page);
+    assert.equal(await thinking.inputValue(), "high");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("Settings edits the conversation profile even while a node with an override is selected", { timeout: 30_000 }, async () => {
+  const node = { status: "failed", revision: 1, head: null, instruction: "", error: "quota" };
+  let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, phase: "needs_attention",
+    graph: { originalGoal: "Node scope", nodes: [{ name: "a", task: "a" }, { name: "b", task: "b" }], edges: [] },
+    plan: { executionBatches: [["a", "b"]], rootNodes: ["a", "b"], terminals: ["a", "b"], warnings: [] },
+    nodes: { a: { ...node }, b: { ...node } },
+  };
+  const { context, page, errors } = await app(async (route, command, body) => {
+    let result;
+    if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
+    else if (["history", "snapshot", "load_run"].includes(command)) result = current;
+    else if (command === "composer_command") { await route.fulfill({ status: 400, json: { error: "Pi session is not active" } }); return true; }
+    else if (command === "composer_models") {
+      assert.equal(body.runId, "fast"); assert.equal(body.node, "a"); assert.equal(body.role, "nodeAgent");
+      current = { ...current, nodes: { ...current.nodes, a: { ...current.nodes.a, modelConfig: body.settings, modelOverride: true } } };
+      result = current;
+    } else if (command === "save_config") {
+      assert.equal(body.runId, "fast");
+      assert.equal(body.config.model, "test/plain", "Settings changes the Run profile, not the selected node");
+      current = { ...current, modelConfig: { model: body.config.model, thinkingLevel: body.config.thinkingLevel, roleModels: body.config.roleModels } };
+      result = { ...bootstrap, snapshot: current };
+    } else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').click();
+    await page.locator('.graph-canvas .react-flow__node[data-id="a"]').click();
+    const input = page.locator(".pane-bottom-chat textarea");
+    await input.fill("/model test/new"); await input.press("Escape"); await input.press("Enter");
+    await until(() => current.nodes.a.modelConfig?.model === "test/new");
+    await openSettings(page);
+    assert.equal(await nodeModel(page).inputValue(), "test/old", "Settings never displays the selected node override");
+    await nodeModel(page).selectOption("test/plain");
+    await page.locator(".save-config-btn").click();
+    await page.locator(".settings-modal").waitFor({ state: "detached" });
+    assert.equal(current.nodes.a.modelConfig.model, "test/new", "an explicit node override remains independent");
+    assert.equal(current.modelConfig.roleModels.nodeAgent.model, "test/plain");
+    assert.equal(current.config.model, "test/old", "original execution config remains historical");
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).model), "test/old", "conversation edits do not change global defaults");
+    await page.locator('.graph-canvas .react-flow__node[data-id="b"]').click();
+    await openSettings(page);
+    assert.equal(await nodeModel(page).inputValue(), "test/plain", "the same Run profile appears from another node");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("scoped models persist globally, hide Settings choices and reject manual hidden selections", { timeout: 30_000 }, async () => {
+  const hidden = new Set();
+  let failSave = true;
+  const handler = async (route, command, body) => {
+    if (command !== "provider_auth") return false;
+    let result;
+    if (body.operation === "set_model_visibility") {
+      if (failSave) { failSave = false; await route.fulfill({ status: 500, json: { error: "visibility save failed" } }); return true; }
+      if (body.reset) hidden.clear();
+      for (const change of body.changes) { if (change.hidden) hidden.add(change.model); else hidden.delete(change.model); }
+      result = { hiddenModels: [...hidden] };
+    } else if (body.operation === "model_visibility") result = { hiddenModels: [...hidden] };
+    else result = { ...catalog, hiddenModels: [...hidden], models: catalog.models.map(model => ({ ...model, hidden: hidden.has(`${model.provider}/${model.id}`) })) };
+    await route.fulfill({ json: { result } }); return true;
+  };
+  const { context, page, errors, calls } = await app(handler);
+  let second;
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    const input = page.locator("textarea").first();
+    const submit = async text => { await input.fill(text); await input.press("Escape"); await input.press("Enter"); };
+    await submit("/scoped model");
+    const scope = page.getByRole("dialog", { name: "Global model visibility" });
+    assert.equal(await scope.locator(".scoped-model-search, .scoped-model-toolbar, input:not([type='checkbox'])").count(), 0);
+    assert.equal(await scope.getByRole("button", { name: "Show all", exact: true }).count(), 0);
+    assert.doesNotMatch(await scope.innerText(), /Existing selections and running calls|Checked models appear/);
+    const cancelStyle = await scope.getByRole("button", { name: "Cancel", exact: true }).evaluate(button => {
+      const style = getComputedStyle(button);
+      return { background: style.backgroundColor, borderWidth: style.borderTopWidth, height: style.height };
+    });
+    assert.deepEqual(cancelStyle, { background: "rgba(0, 0, 0, 0)", borderWidth: "0px", height: "36px" });
+    const choice = id => scope.locator(".scoped-model-row", { hasText: id }).getByRole("checkbox");
+    await choice("test/new").uncheck();
+    await scope.getByRole("button", { name: "Cancel", exact: true }).click();
+    assert.equal(hidden.size, 0, "cancel does not change global visibility");
+    await submit("/scoped-models");
+    await choice("test/new").uncheck(); await choice("test/old").uncheck();
+    await scope.getByRole("button", { name: "Save", exact: true }).click();
+    await scope.getByRole("alert").waitFor();
+    assert.equal(hidden.size, 0, "failed save keeps the committed catalog unchanged");
+    assert.equal(await choice("test/new").isChecked(), false, "failure retains the user's draft");
+    await scope.getByRole("button", { name: "Save", exact: true }).click();
+    await scope.waitFor({ state: "detached" });
+    await submit("/model test/new");
+    const notice = page.locator('.prompt-command-popover[role="alert"]');
+    await notice.waitFor();
+    assert.match(await notice.innerText(), /unique, available provider\/model/);
+    assert.equal(await input.inputValue(), "/model test/new");
+    assert.equal(await page.locator(".prompt-box-attachment-error").count(), 0);
+    const noticeBox = await notice.boundingBox();
+    const inputBox = await page.locator(".prompt-box-container").boundingBox();
+    assert.ok(noticeBox.y + noticeBox.height <= inputBox.y, "command errors float above the composer");
+    await openSettings(page);
+    const choices = p => nodeModel(p).locator("option").evaluateAll(options => options.filter(o => o.value && !o.disabled).map(o => o.value));
+    assert.deepEqual(await choices(page), ["test/plain"]);
+    assert.equal(await nodeModel(page).inputValue(), "test/old", "hiding never rewrites existing model configuration");
+    assert.ok(!(await page.locator(".role-model-settings").innerText()).includes("test/old"));
+    assert.ok(!(await page.locator(".role-model-settings").innerText()).includes("test/new"));
+    assert.equal(calls.filter(call => call.command === "save_config").length, 0);
+
+    second = await app(handler);
+    await second.page.locator('[data-run-id="fast"]').waitFor();
+    await openSettings(second.page);
+    assert.deepEqual(await choices(second.page), ["test/plain"], "another browser session reads the global backend selection");
+    assert.deepEqual(second.errors, []);
+
+    const manageModels = page.getByRole("button", { name: "Manage visible models", exact: true });
+    await manageModels.scrollIntoViewIfNeeded();
+    const manageBox = await manageModels.boundingBox();
+    const lastRoleBox = await page.locator(".role-model-group").last().boundingBox();
+    assert.ok(manageBox.y >= lastRoleBox.y + lastRoleBox.height, "scoped models control is below all role model settings");
+    await manageModels.click();
+    await choice("test/new").check();
+    await choice("test/old").check();
+    await scope.getByRole("button", { name: "Save", exact: true }).click();
+    await scope.waitFor({ state: "detached" });
+    assert.equal((await choices(page)).length, 3, "restoring updates already-open Settings immediately");
+    assert.equal(hidden.size, 0);
+    assert.deepEqual(errors, []);
+  } finally { await second?.context.close(); await context.close(); }
+});
+
+test("scoped models dialog animates entrance and exit like Settings", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await app(async (route, command) => {
+    if (command !== "provider_auth") return false;
+    await route.fulfill({ json: { result: catalog } });
+    return true;
+  }, undefined, undefined, false, "no-preference");
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    await openSettings(page);
+    const manageModels = page.getByRole("button", { name: "Manage visible models", exact: true });
+    await manageModels.scrollIntoViewIfNeeded();
+    await manageModels.click();
+    const scope = page.getByRole("dialog", { name: "Global model visibility" });
+    await scope.waitFor({ state: "attached" });
+    const startOpacity = parseFloat(await scope.evaluate(el => getComputedStyle(el).opacity));
+    assert.ok(startOpacity < 1, `expected entrance fade-in from low opacity, got ${startOpacity}`);
+    await page.waitForFunction(() => getComputedStyle(document.querySelector(".scoped-models-modal")).opacity === "1");
+    await scope.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.waitForFunction(() => {
+      const el = document.querySelector(".scoped-models-modal");
+      return el && parseFloat(getComputedStyle(el).opacity) < 1;
+    });
+    await scope.waitFor({ state: "detached" });
+    assert.equal(await manageModels.evaluate(el => el === document.activeElement), true);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("slash model menu matches all Settings choices and tracks catalog refresh without retyping", { timeout: 30_000 }, async () => {
+  let models = [...catalog.models, ...Array.from({ length: 65 }, (_, index) => ({
+    ...catalog.models[0], id: `model-${index + 1}`, name: `Model ${index + 1}`,
+  })), { ...catalog.models[0], id: "unavailable", available: false }];
+  const { context, page, errors } = await app(async (route, command) => {
+    if (command !== "provider_auth") return false;
+    await route.fulfill({ json: { result: { ...catalog, models } } });
+    return true;
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    const choices = () => nodeModel(page).locator("option").evaluateAll(options => options
+      .filter(option => option.value && !option.disabled).map(option => option.value));
+    await openSettings(page);
+    const expected = await choices();
+    assert.equal(expected.length, 68);
+    await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+    const input = page.locator("textarea").first();
+    const items = page.locator(".prompt-box-suggestion-item .suggestion-item-title");
+    await input.fill("/model ");
+    await until(async () => await items.count() === expected.length);
+    assert.deepEqual(await items.allTextContents(), expected, "all available models, in the same order as Settings");
+    await input.fill("/model model-65");
+    await until(async () => await items.count() === 1);
+    await items.first().click();
+    await input.press("Escape"); await input.press("Enter");
+    await page.waitForFunction(() => document.querySelector("textarea")?.value === "");
+    await openSettings(page);
+    assert.equal(await page.locator(".role-model-group").nth(1).locator("select").first().inputValue(), "test/model-65");
+    await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+
+    // Leave /model open while Settings refreshes the catalog. The command
+    // trigger and scope don't change, so a one-time local copy would go stale.
+    await input.fill("/model ");
+    await openSettings(page);
+    models = [...catalog.models, { ...catalog.models[0], id: "fresh-only", name: "Fresh" }];
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await until(async () => (await choices()).length === 4);
+    const refreshed = await choices();
+    await page.getByRole("button", { name: "Close dialog", exact: true }).click();
+    assert.equal(await input.inputValue(), "/model ");
+    // Blur dismisses suggestions; Enter reopens the picker without changing
+    // its text or retriggering catalog loading.
+    await input.press("Enter");
+    await until(async () => await items.count() === refreshed.length);
+    assert.deepEqual(await items.allTextContents(), refreshed);
+    assert.ok(refreshed.includes("test/fresh-only"));
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("home slash model changes are reflected in Settings without writing global defaults", { timeout: 30_000 }, async () => {
+  const { context, page, errors, calls } = await app(async () => false);
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    const input = page.locator("textarea").first();
+    await input.fill("/model test/new"); await input.press("Escape"); await input.press("Enter");
+    await page.waitForFunction(() => document.querySelector("textarea")?.value === "");
+    await openSettings(page);
+    assert.equal(await page.locator(".role-model-group").nth(1).locator("select").first().inputValue(), "test/new");
+    assert.equal(await nodeModel(page).inputValue(), "test/old");
+    assert.equal(calls.filter(call => call.command === "save_config").length, 0);
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).model), "test/old");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

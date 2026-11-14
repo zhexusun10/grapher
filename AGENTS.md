@@ -1,1 +1,1 @@
-Use [docs/index.md](docs/index.md) as the documentation index and navigation entry point; keep task maps there and put background and procedures in the relevant linked documents. Do not bulk-scan `docs/`; read only documentation relevant to the current task.
+Use [docs/index.md](docs/index.md) as the documentation entry point. Keep task maps there and background/procedures in linked documents; read only documentation relevant to the current task.

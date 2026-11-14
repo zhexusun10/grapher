@@ -997,8 +997,17 @@ else { const version=fs.readFileSync(process.env.GTEST_STATE+'/.env/version','ut
     assert!(text.contains("OWNER PRIVATE HISTORY"));
     assert!(!text.contains("REVIEW PRIVATE HISTORY"));
     assert_eq!(runtime.state.executions[1].result.as_ref().unwrap(), &b0);
+    fs::create_dir_all(runtime.root.join("prompts")).unwrap();
+    fs::write(runtime.root.join("prompts/feedback-returned.md"), "{{node}}\n[fixture recheck]").unwrap();
+    let repaired_environment = runtime.state.nodes["A"].result.clone().unwrap();
     let verify = runtime.jobs().unwrap().remove(0);
+    assert_eq!(verify.session_fork.as_ref().unwrap().id, b.execution.id);
+    assert_eq!(verify.environment_input.as_ref().unwrap().environment_ref, repaired_environment.environment_ref);
     run(&mut runtime, &verify);
+    let history = fs::read_to_string(runtime.root.join("sessions").join(&verify.execution.id)
+        .join(format!("grapher_{}.jsonl", verify.execution.session_id))).unwrap();
+    assert!(history.contains("REVIEW PRIVATE HISTORY"));
+    assert!(!history.contains("OWNER PRIVATE HISTORY"));
     assert_eq!(runtime.state.feedback_counts["B->A"], 1);
 }
 

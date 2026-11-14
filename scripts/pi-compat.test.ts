@@ -3,15 +3,94 @@ import { test } from 'node:test';
 import { accessSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { Agent } from '../pi/packages/agent/src/index.ts';
 import { InMemoryCredentialStore } from '../pi/packages/ai/src/auth/credential-store.ts';
 import { loadExtensions } from '../pi/packages/coding-agent/src/core/extensions/loader.ts';
 import { bundledTrim, bundledContinuity, bundledWebSearch } from '../engine/global-extensions.ts';
 import { buildSystemPromptState } from '../pi/packages/coding-agent/src/core/system-prompt.ts';
 import {
-  ModelRuntime, SettingsManager, resolveToCwd, getModelThinkingCapabilities,
+  ModelRuntime, SettingsManager, resolveToCwd, getModelThinkingCapabilities, composerCommandsExtension, clearUnreadQueue,
   createBashToolDefinition, createLocalBashOperations,
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
 } from '../engine/pi-compat.ts';
+
+test('queue recall excludes drained-but-not-yet-rendered turns and preserves queue modes', () => {
+  const agent = new Agent({ streamFn: () => { throw new Error('no model calls'); } });
+  const message = (text: string) => ({ role: 'user' as const, content: [{ type: 'text' as const, text }], timestamp: 0 });
+  const clearDisplay = () => {
+    agent.clearAllQueues();
+    // Pi retains this display entry while prepareNextTurn/compaction awaits,
+    // although the Agent already owns it outside the removable queue.
+    return { steering: ['already drained', 'same', 'same'], followUp: ['later'] };
+  };
+  agent.steer(message('same'));
+  agent.steer(message('same'));
+  agent.followUp(message('later'));
+  assert.deepEqual(clearUnreadQueue(agent, clearDisplay), { steering: ['same', 'same'], followUp: ['later'] });
+  assert.equal(agent.steeringMode, 'one-at-a-time');
+  assert.equal(agent.followUpMode, 'one-at-a-time');
+  assert.equal(agent.hasQueuedMessages(), false);
+  assert.deepEqual(clearUnreadQueue(agent, clearDisplay), { steering: [], followUp: [] },
+    'the display list alone is never proof of removal');
+  agent.steeringMode = 'all';
+  agent.followUpMode = 'all';
+  agent.followUp(message('follow-up only'));
+  assert.deepEqual(clearUnreadQueue(agent, clearDisplay), { steering: [], followUp: ['follow-up only'] });
+  assert.equal(agent.steeringMode, 'all');
+  assert.equal(agent.followUpMode, 'all');
+  const control = { role: 'custom' as const, customType: 'extension-control', content: 'keep guidance', display: false, timestamp: 0 };
+  agent.steer(control);
+  agent.steer(message('remove user text'));
+  assert.deepEqual(clearUnreadQueue(agent, clearDisplay), { steering: ['remove user text'], followUp: [] });
+  assert.deepEqual(agent.peekQueuedMessages(), [control], 'extension-owned guidance must not be silently removed');
+});
+
+test('composer reload delegates to Pi command context after the current turn is idle', async () => {
+  let handler: any;
+  let sessionStart: any;
+  await composerCommandsExtension.factory({ on(event: string, callback: any) {
+    assert.equal(event, 'session_start'); sessionStart = callback;
+  }, registerCommand(name: string, command: any) {
+    if (name === 'reload') handler = command.handler;
+  } } as any);
+  const notices: string[] = [];
+  const ctx = { mode: 'rpc', ui: { notify: (message: string) => notices.push(message), custom: async () => undefined } };
+  sessionStart({}, ctx);
+  await ctx.ui.custom();
+  assert.match(notices[0], /terminal-only custom UI/);
+  const calls: string[] = [];
+  await handler('', { waitForIdle: async () => { calls.push('idle'); }, reload: async () => { calls.push('reload'); } });
+  assert.deepEqual(calls, ['idle', 'reload']);
+});
+
+test('composer compact waits for idle and callback completion without aborting the current turn', async () => {
+  let handler: any;
+  await composerCommandsExtension.factory({ on() {}, registerCommand(name: string, command: any) {
+    if (name === 'compact') handler = command.handler;
+  } } as any);
+  let idle!: () => void;
+  const idleBoundary = new Promise<void>(resolve => { idle = resolve; });
+  let options: any;
+  let settled = false;
+  const command = handler(' keep tests\nand failures ', {
+    waitForIdle: () => idleBoundary,
+    compact: (value: any) => { options = value; },
+    abort: () => assert.fail('compaction must not abort the active turn'),
+  }).then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(options, undefined, 'do not call Pi compact until the active turn settles');
+  idle();
+  await Promise.resolve();
+  assert.equal(options.customInstructions, 'keep tests\nand failures');
+  assert.equal(settled, false, 'the callback, not the void SDK return, ends the RPC command');
+  options.onComplete({ summary: 'done' });
+  await command;
+  assert.equal(settled, true);
+  await assert.rejects(handler('', {
+    waitForIdle: async () => {},
+    compact: (value: any) => value.onError(new Error('compaction failed')),
+  }), /compaction failed/);
+});
 
 test('bundled extension peer providers match the reviewed Pi baseline', () => {
   const project = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
