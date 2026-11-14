@@ -395,6 +395,8 @@ fn driver_drains_unrelated_worker_before_reporting_missing_feedback_template() {
     let script = temp.path().join("agent.mjs");
     let body = fs::read_to_string(&script).unwrap()
         .replace("const name = continuation ?", "const name = task.startsWith('Feedback:') ? 'root' : continuation ?")
+        // Keep the durable private delivery envelope in history, not filenames.
+        .replace(": task.trim();", ": task.trim().split('\\n')[0];")
         .replace("text:'done'", "text:name==='a' ? (fs.existsSync(path.join(control,'allow-accept')) ? '<ACCEPT>' : 'fix root\\n<FEEDBACK>') : 'done'");
     fs::write(script, body).unwrap();
     {
@@ -408,6 +410,10 @@ fn driver_drains_unrelated_worker_before_reporting_missing_feedback_template() {
             edges: vec![Edge { from: "root".into(), to: "a".into(), feedback: false },
                 Edge { from: "a".into(), to: "root".into(), feedback: true }],
         }, PlanningSummary::default()).unwrap();
+        // Bundled notices are valid defaults. Explicitly make the override
+        // unusable so the test exercises admission failure, not a recheck turn.
+        fs::create_dir_all(runtime.root.join("prompts")).unwrap();
+        fs::write(runtime.root.join("prompts/feedback-returned.md"), "").unwrap();
     }
     drive(service.clone());
     let deadline = Instant::now() + Duration::from_secs(120);
