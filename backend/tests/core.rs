@@ -1012,15 +1012,24 @@ fn pause_drains_and_intervention_preserves_history() {
         .finish(&job.execution, Ok(("spec-head".into(), "completed".into())))
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
-    assert!(runtime.intervene("frontend", "Use Svelte").is_err()); // No session yet.
+    // A never-started node accepts passive input without a Pi session or a
+    // revision change; it must still wait for both unpause and its dependency.
+    runtime.intervene("frontend", "Use Svelte").unwrap();
+    assert!(runtime.state.paused);
+    assert_eq!(runtime.state.nodes["frontend"].status, "waiting");
+    assert_eq!(runtime.state.nodes["frontend"].revision, 1);
+    assert!(runtime.jobs().unwrap().is_empty());
     runtime.intervene("spec", "Use Svelte").unwrap();
     runtime.intervene("spec", "Switch to React").unwrap();
-    assert_eq!(runtime.state.nodes["spec"].revision, 3);
+    // The first follow-up invalidates spec; the second joins that pending turn.
+    assert_eq!(runtime.state.nodes["spec"].revision, 2);
     assert_eq!(runtime.state.nodes["backend"].revision, 1);
     assert_eq!(runtime.state.nodes["backend"].status, "waiting");
     assert_eq!(runtime.state.executions.len(), 1);
     assert_eq!(runtime.state.nodes["spec"].instruction, "Use Svelte");
     let replay = runtime.store.load(&runtime.state.run_id).unwrap();
+    assert!(replay.paused);
+    assert_eq!(replay.nodes["frontend"].pending_messages[0].instruction, "Use Svelte");
     assert_eq!(
         replay.nodes["spec"]
             .pending_messages
@@ -1042,6 +1051,16 @@ fn pause_drains_and_intervention_preserves_history() {
         follow_up.resume_execution_id.as_deref(),
         Some(job.execution.id.as_str())
     );
+    assert_eq!(runtime.state.nodes["frontend"].pending_messages.len(), 1);
+    assert!(runtime.jobs().unwrap().is_empty(), "frontend cannot bypass the running spec");
+    runtime.finish(&follow_up.execution, Ok(("spec-head".into(), "completed".into()))).unwrap();
+    let frontend = runtime.jobs().unwrap().into_iter()
+        .find(|job| job.execution.node == "frontend").unwrap();
+    assert!(frontend.task.starts_with("Implement frontend"));
+    assert!(frontend.task.contains("Use Svelte"));
+    assert!(!frontend.task.contains("Switch to React"));
+    assert!(frontend.resume_execution_id.is_none());
+    assert!(runtime.state.nodes["frontend"].pending_messages.is_empty());
 }
 
 #[test]
