@@ -15,11 +15,17 @@ pub(crate) fn copy(source: &Path, destination: &Path) -> Result<CopyKind, String
             destination.display()
         ));
     }
-    if !fs::symlink_metadata(source)
-        .map_err(|e| e.to_string())?
-        .is_file()
-    {
+    let metadata = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
+    if !metadata.is_file() {
         return Err("Private copy source must be a regular file".into());
+    }
+    // Windows block cloning needs at least one 64-KiB aligned extent. Most
+    // project/Git files are smaller: do not open, create and delete a failed
+    // clone destination before copying the same bytes again.
+    #[cfg(windows)]
+    if metadata.len() < 65536 {
+        fs::copy(source, destination).map_err(|e| e.to_string())?;
+        return Ok(CopyKind::Bytes);
     }
     match clone(source, destination) {
         Ok(()) => Ok(CopyKind::Clone),
@@ -231,15 +237,15 @@ fn clone(source: &Path, destination: &Path) -> io::Result<()> {
         bytes: i64,
     }
     let mut source = fs::File::open(source)?;
+    let size = source.metadata()?.len();
+    if size > i64::MAX as u64 || size < 65536 {
+        return Err(io::Error::from(io::ErrorKind::Unsupported));
+    }
     let mut destination = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
         .open(destination)?;
-    let size = source.metadata()?.len();
-    if size > i64::MAX as u64 || size < 65536 {
-        return Err(io::Error::from(io::ErrorKind::Unsupported));
-    }
     // A conservative cluster-aligned range; unsupported FS/alignment is an
     // explicit byte-copy outcome, not a claim that NTFS/ReFS clones always work.
     let bytes = size / 65536 * 65536;
@@ -317,6 +323,26 @@ mod tests {
         assert!(copy(&source, &a).is_err());
         assert_eq!(fs::read(&a).unwrap(), b"private replacement");
         eprintln!("Native filesystem private copy outcome: {kind:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn small_files_skip_block_clone_without_leaving_a_partial_destination() {
+        let root = tempfile::tempdir().unwrap();
+        for size in [0, 1, 65535] {
+            let source = root.path().join(format!("source-{size}"));
+            let destination = root.path().join(format!("copy-{size}"));
+            let bytes = vec![7; size];
+            fs::write(&source, &bytes).unwrap();
+            assert!(unsupported(&clone(&source, &destination).unwrap_err()));
+            assert!(!destination.exists());
+            assert_eq!(copy(&source, &destination).unwrap(), CopyKind::Bytes);
+            assert_eq!(fs::read(&destination).unwrap(), bytes);
+            fs::write(&destination, b"private edit").unwrap();
+            assert_eq!(fs::read(&source).unwrap(), bytes);
+            assert!(copy(&source, &destination).is_err());
+            assert_eq!(fs::read(&destination).unwrap(), b"private edit");
+        }
     }
 
     #[cfg(unix)]

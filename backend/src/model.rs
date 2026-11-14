@@ -285,7 +285,7 @@ pub struct Config {
     pub role_models: BTreeMap<String, RoleModelConfig>,
     #[serde(default = "default_max_parallel")]
     pub max_parallel: usize,
-    /// At idle boundaries, dispatch groups above two nodes use private workspaces.
+    /// At idle boundaries, dispatch groups above three nodes use private workspaces.
     /// Shared-source replenishment never changes a live writer's workspace.
     /// False keeps all dispatches source-native regardless of group size.
     #[serde(default = "default_isolate_parallel_nodes")]
@@ -1196,6 +1196,14 @@ pub enum EventKind {
         execution_id: String,
         head: String,
     },
+    /// Complete dispatch input, committed with Started. This is not a receipt
+    /// of Pi consumption; only an unstarted-input recovery may resend it.
+    NodeInputBound {
+        execution_id: String,
+        instruction: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageAttachment>>,
+    },
     Steered {
         execution_id: String,
         node: String,
@@ -1217,12 +1225,17 @@ pub enum EventKind {
         node: Option<String>,
         messages: Vec<RecalledMessage>,
     },
-    /// A message addressed to a finished node. It does not start an execution.
+    /// A message that does not initiate work. Legacy finished-node notes are
+    /// record-only; queued turns accompany the node's next normal dispatch.
     NodeMessaged {
         node: String,
         instruction: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<Vec<ImageAttachment>>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        queued: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     Output {
         execution_id: String,
@@ -1720,6 +1733,15 @@ fn merge_recorded_model(metrics: &mut ExecutionMetrics, previous: Option<&Execut
 }
 
 impl Snapshot {
+    /// Passive additions do not change the recovery mode of their node. Use
+    /// durable event identity so legacy checkpoints need no new queue field.
+    pub(crate) fn node_has_pending_followup(&self, name: &str) -> bool {
+        self.nodes.get(name).is_some_and(|node| node.pending_messages.iter().any(|message| {
+            !self.events.iter().any(|event| event.sequence == message.sequence
+                && matches!(&event.kind, EventKind::NodeMessaged { node, queued: true, .. } if node == name))
+        }))
+    }
+
     pub(crate) fn withdrawn_steer_sequences(&self) -> BTreeSet<i64> {
         self.events.iter().flat_map(|event| match &event.kind {
             EventKind::SteersWithdrawn { message_sequences, .. } => message_sequences.iter().copied(),
@@ -2783,13 +2805,14 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             source_direct_nodes,
         } => {
             for name in nodes {
+                let pending_followup = state.node_has_pending_followup(name);
                 let Some(node) = state.nodes.get_mut(name) else {
                     continue;
                 };
                 if !matches!(node.status.as_str(), "failed" | "blocked") {
                     continue;
                 }
-                let continuation = node.pending_messages.is_empty()
+                let continuation = !pending_followup
                     && continuation_nodes.contains(name)
                     && (*resume_failed
                         || node.model_config.is_some()
@@ -2801,7 +2824,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 // A failed multi-source repair has a queued user continuation
                 // that duplicates the node instruction. Claim it so the retry
                 // keeps the feedback batch input and cannot re-batch the text.
-                if node.pending_messages.len() == 1
+                if pending_followup && node.pending_messages.len() == 1
                     && node.human_instruction
                     && node.pending_messages[0].instruction == node.instruction
                     && node
@@ -2906,9 +2929,23 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         | EventKind::SourceSnapshotted { .. }
         | EventKind::SourceFilesRecorded { .. }
         | EventKind::WorkspaceFilesChanged { .. }
-        | EventKind::NodeMessaged { .. }
+        | EventKind::NodeInputBound { .. }
         | EventKind::SteersWithdrawn { .. }
         | EventKind::QueueWithdrawalRecorded { .. } => {}
+        EventKind::NodeMessaged { node, instruction, images, queued, .. } => {
+            if *queued {
+                // Passive input must not replace feedback/history directives,
+                // bump a revision, revive blocked work, or unpause the Run.
+                let node = state.nodes.get_mut(node).expect("validated message target");
+                node.pending_messages.push(PendingNodeMessage {
+                    sequence: event.sequence,
+                    instruction: instruction.clone(),
+                    images: images.clone(),
+                    source_direct: false,
+                    shared_workspace: false,
+                });
+            }
+        }
         EventKind::Steered { .. } => {
             if state.phase == "needs_attention" {
                 state.phase = if state.paused { "paused" } else { "running" }.into();

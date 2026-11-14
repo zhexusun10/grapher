@@ -17,7 +17,7 @@ Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`:
   partition-workers/     # Legacy Partitioner sessions retained for cleanup/recovery
   mergers/               # Merger sessions/output (including composition attempts)
   environments/          # Managed native-environment snapshots and launch records
-  shadow_repos/          # Temporary external Git metadata for ordinary folders
+  shadow_repos/          # Host-only graph Git databases for Git projects and ordinary folders
 ```
 
 Data-directory writer exclusion and startup recovery are specified in [Recovery and ownership](runtime.md#recovery-and-ownership).
@@ -37,6 +37,44 @@ Run slots live beneath the parent's `.grapher-worktrees/` directory. `GRAPHER_CA
 Successful publication/reset cleans owned workspaces but keeps Pi histories for follow-ups. Git reconstruction and ownership constraints follow [Cleanup and reproducibility](workspace-snapshots-and-feedback.md#cleanup-and-reproducibility); do not infer a node's current workspace from its allocation name.
 
 Conversation deletion/clearing history cleans owned Node/Planner/Merger histories, attachments and all historical planning attempts, preserving shared resources and source projects.
+
+## Detached workspace cleanup
+
+Online publication/completion and workspace-cleanup retries retire disposable
+workspace roots under the owning Run mutex instead of recursively deleting them
+there. The same generation, writer/recovery, sharing, path and source-protection
+checks still apply, including on startup/retry: active Mergers and result
+processes block cleanup, and managed layouts, pending recovery/feedback and
+undelivered private results remain owned until their retention requirements end.
+A retained generation is acknowledged without discarding its ownership records;
+explicit conversation deletion still handles those resources. Each eligible root
+gets an independent SQLite
+`detached_workspaces` receipt before a same-parent rename to a unique
+`.grapher-cleanup-<UUID>` directory. A committed detached marker precedes any
+recursive deletion. The original allocation path can then be reused without an
+old cleanup touching new work; `workspace_cleanup_done` records that the cleanup
+generation was handled (retired or retained by policy), not that all physical
+bytes have already been freed.
+
+The existing maintenance worker is woken to delete detached paths outside Run
+locks, using a separate database connection. Failures retain receipts for retry,
+including after restart or conversation deletion. A crash before rename leaves
+the original generation-scoped task responsible for the old path; recovery never
+renames or deletes that path from a detached receipt. A crash after rename is
+recognized by its unique destination. Per-receipt leases serialize rename/retry
+without holding a Run lock over deletion. Linked/redirected destinations and
+protected source projects are refused; recursive removal still does not follow
+child links. A receipt deletes only its unique detached directory, never even an
+empty parent that a source project or new allocation may now own. Pi histories
+and user source folders are not retirement targets.
+
+Explicit synchronous reset/offline cleanup and legacy per-node slot reclamation
+retain their existing execution paths. This change removes deletion from online
+completion's critical section; it does not promise faster disk deletion or change
+node dependencies, publication ordering, or source-edit permissions. Evidence:
+[receipt/recovery tests](../../backend/src/cleanup/detached_tests.rs),
+[maintenance integration](../../backend/src/detached_cleanup_service_tests.rs),
+and the opt-in [lock probe](../development/testing.md#workspace-cleanup-lock-probe-opt-in).
 
 ## Workspace removal transaction
 

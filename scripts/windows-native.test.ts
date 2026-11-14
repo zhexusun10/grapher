@@ -1,6 +1,8 @@
 // Native Windows acceptance: stock Pi/Planner Bash, then the production HTTP
-// backend + pinned Pi + Git. Only model responses are deterministic/local;
-// there is no fixture engine, sandbox, VM, provider credential, or external API.
+// backend + pinned Pi + Git. These small Graph batches use shared source;
+// this test does not exercise private workspace composition or publication.
+// Only model responses are deterministic/local; there is no fixture engine,
+// sandbox, VM, provider credential, or external API.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
@@ -19,7 +21,7 @@ const safeRm = async (target: string) => {
   await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 250 });
 };
 
-test('production Windows Planner/Graph: concurrent runs, dependencies, publication, cancellation and crash recovery', { skip: !windows, timeout: 240000 }, async t => {
+test('production Windows Planner/Graph: concurrent shared-source runs, dependencies, cancellation and crash recovery', { skip: !windows, timeout: 240000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'grapher-windows-'));
   const agent = join(directory, 'agent');
   const data = join(directory, 'data');
@@ -158,7 +160,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       assert.equal(snapshot.graph.nodes.length, 3);
       assert.equal(snapshot.graph.edges.length, 2);
       assert.equal(await readFile(join(repository, 'planned.txt'), 'utf8'), 'planned');
-      progress(`Planner ${label} published: ${snapshot.runId}`);
+      progress(`Planner ${label} ready for approval: ${snapshot.runId}`);
       return { label, repository, runId: snapshot.runId };
     }));
     assert.notEqual(plans[0].runId, plans[1].runId);
@@ -175,7 +177,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
       assert.equal(await readFile(join(plan.repository, 'a.txt'), 'utf8'), 'alpha');
       assert.equal(await readFile(join(plan.repository, 'b.txt'), 'utf8'), 'beta');
       assert.equal(await readFile(join(plan.repository, 'joined.txt'), 'utf8'), 'alpha-beta');
-      assert.notEqual(git(plan.repository, 'status', '--porcelain'), '', 'files-only delivery leaves delivered files uncommitted');
+      assert.notEqual(git(plan.repository, 'status', '--porcelain'), '', 'shared-source edits remain uncommitted');
       assert.match(git(plan.repository, 'status', '--porcelain'), /planned\.txt/);
       assert.match(git(plan.repository, 'status', '--porcelain'), /a\.txt/);
       assert.match(git(plan.repository, 'status', '--porcelain'), /joined\.txt/);
@@ -194,7 +196,7 @@ test('production Windows Planner/Graph: concurrent runs, dependencies, publicati
         assert.equal(execution.result ?? null, null, 'shared-source jobs do not claim a private E/L result');
       }
     }
-    progress('Both Graph runs completed; inheritance and publication verified');
+    progress('Both shared-source Graph runs completed; dependencies and direct source edits verified');
     const startWriter = async (label: string) => {
       progress(`Starting background writer ${label}`);
       const snapshot = await api('save_graph', { graph: { originalGoal: label, nodes: [{ name: 'worker', task: `${label} LONG_RUNNING` }], edges: [] }, config: config(repositories.get(label)!) });

@@ -982,6 +982,61 @@ test("a paused node intervention does not automatically retry an unrelated unkno
   } finally { await context.close(); }
 });
 
+test("queued input for waiting or feedback-dirty nodes never resumes the Run or steers the Planner", { timeout: 45_000 }, async () => {
+  for (const status of ["waiting", "dirty", "completed"]) {
+    const planning = { planningId: "revision", status: "running", goal: "Revise the graph", planType: "graph",
+      runId: "fast", repository, createdAt: 2, roles: {}, totalPlanningDuration: 0, modelDuration: 0 };
+    // completed is a stale browser: feedback has made it dirty by acceptance.
+    let current = { ...empty, runId: "fast", config, planType: "graph", approved: true, paused: true, phase: "paused",
+      ...(status === "waiting" ? { planningId: planning.planningId, planning } : {}),
+      graph: { originalGoal: "Wait for upstream", nodes: [{ name: "parent", task: "Parent" }, { name: "task", task: "Original task" }],
+        edges: [{ from: "parent", to: "task", feedback: false }] },
+      plan: { executionBatches: [["parent"], ["task"]], roots: ["parent"], terminals: ["task"], warnings: [] },
+      nodes: { parent: { status: "dirty", revision: 2, instruction: "Feedback: repair" },
+        task: { status, revision: 2, head: null, instruction: "", pendingMessages: [], error: null } } };
+    const actions = [];
+    const { context, page, errors } = await app(async (route, command, body) => {
+      let result;
+      if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
+      else if (["history", "snapshot", "load_run"].includes(command)) result = current;
+      else if (command === "snapshot_if_changed") result = { version: JSON.stringify(current), snapshot: current };
+      else if (command === "list_plannings") result = status === "waiting" ? [planning] : [];
+      else if (command === "get_planning") result = planning;
+      else if (command === "get_planning_output") result = { planningId: planning.planningId, role: "planner", content: "",
+        startOffset: 0, nextOffset: 0, totalBytes: 0, complete: false, running: true };
+      else if (command === "control") {
+        actions.push(body.action);
+        assert.equal(body.action, "intervene");
+        assert.equal(body.node, "task");
+        const sequence = current.events.length + 1;
+        current = { ...current, nodes: { ...current.nodes, task: { ...current.nodes.task,
+          status: status === "completed" ? "dirty" : status,
+          pendingMessages: [...current.nodes.task.pendingMessages, { sequence, instruction: body.instruction }] } },
+          events: [...current.events,
+            { type: "node_messaged", sequence, timestamp: Date.now(), node: "task", instruction: body.instruction, queued: true, request_id: body.requestId },
+            // A replayed acknowledgement need not be the latest Run event.
+            { type: "paused", sequence: sequence + 1, timestamp: Date.now(), paused: true }] };
+        result = current;
+      } else return false;
+      await route.fulfill({ json: { result } }); return true;
+    });
+    try {
+      await page.locator('[data-run-id="fast"]').click();
+      await page.locator('.task-node[data-node-name="task"]').click();
+      const composer = page.locator('.pane-bottom-chat textarea');
+      for (const text of ["Additional constraint one", "Additional constraint two"]) {
+        await composer.fill(text); await composer.press("Enter");
+        await until(async () => await composer.inputValue() === "");
+      }
+      assert.deepEqual(actions, ["intervene", "intervene"]);
+      assert.equal(current.paused, true);
+      assert.equal(current.executions.length, 0);
+      assert.equal(current.nodes.task.pendingMessages.length, 2);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  }
+});
+
 test("model-specific thinking levels update global defaults when Settings is outside a conversation", { timeout: 30_000 }, async () => {
   let saved;
   const otherProvider = { id: "other", name: "Other", methods: [], configured: true };

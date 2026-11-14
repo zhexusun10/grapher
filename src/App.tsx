@@ -192,6 +192,13 @@ export default function App() {
   }, [selected]);
   const [modal, setModal] = useState<"settings" | "editor" | "approval" | null>(null);
   const [error, setError] = useState("");
+  // The backend withholds size warnings until every active Run in this
+  // workspace has drained, including background conversations/publication.
+  // Depend on the warning value, not each poll, so dismissing it stays dismissed.
+  const workspaceSizeError = repositoryStatus?.sizeLimitExceeded ? repositoryStatus.error : null;
+  useEffect(() => {
+    if (workspaceSizeError) setError(workspaceSizeError);
+  }, [config.repository, workspaceSizeError]);
   const copyPromptRequestRef = useRef(0);
   const [busy, setBusy] = useState(false);
   const [isOpeningProject, setIsOpeningProject] = useState(false);
@@ -705,8 +712,12 @@ export default function App() {
           runId: state.runId, node: nodeOverride ?? targetNodeName, executionId, instruction: text, images: options?.images,
           requestId: message.steerRequestId,
         });
-        // Once accepted, resuming the originating Run is independent of navigation.
-        if (snapshot.paused) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
+        // Passive input for waiting/dirty nodes must not wake the Run. Use the
+        // backend's disposition, not the browser's potentially stale status.
+        const accepted = [...snapshot.events].reverse().find(event => event.request_id === message.steerRequestId)
+          ?? snapshot.events.at(-1);
+        const queuedOnly = accepted?.type === "node_messaged" && accepted.queued;
+        if (snapshot.paused && !queuedOnly) snapshot = await runtimeService.control("resume_after_intervention", { runId: snapshot.runId });
         const applied = applyForegroundSnapshot(snapshot, generation);
         if (applied) {
           onAccepted?.(snapshot);
@@ -749,9 +760,14 @@ export default function App() {
     }
     const execution = targetNodeName && [...state.executions].reverse()
       .find(item => item.node === targetNodeName && item.status === "running");
-    if ((isPlanning || backendPlanning || recoveredPlanning?.status === "running" || active) && execution) {
+    if (execution) {
       const message = recordMessage(`${targetNodeName !== "task" ? `[@${targetNodeName}] ` : ""}${text}`, "steered", execution.id);
       return submitNodeMessage("steer", message, execution.id);
+    }
+    // A selected waiting node owns its message even while the Planner runs.
+    // Never send that node's queued input to the Planner instead.
+    if (targetNodeName) {
+      return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${text}` : text));
     }
     if (isPlanning || backendPlanning || recoveredPlanning?.status === "running") {
       // The viewed Run owns the Planner. A detached stream from an older
@@ -844,9 +860,6 @@ export default function App() {
           return revertToComposer(t("提交失败：{0}", localizeError(durable.error ?? failure)));
         }
       });
-    }
-    if (targetNodeName) {
-      return submitNodeMessage("intervene", recordMessage(selectedNode ? `[@${targetNodeName}] ${text}` : text));
     }
     // A Run with a persisted Planner identity is still the same conversation,
     // even while its graph is empty or the route decision is undecided.

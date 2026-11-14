@@ -35,6 +35,97 @@ fn bytes(path: &Path) -> Vec<u8> {
 }
 
 #[test]
+fn parallel_project_collection_survives_snapshot_and_fork() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    // Exercise the parallel collector through real snapshot/materialization,
+    // not just through its independent worker tests.
+    for index in 0..300 {
+        fs::write(source.join(format!("file-{index:04}.txt")), "before\n").unwrap();
+    }
+    let user_head = workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap();
+    let user_index = bytes(&source.join(".git/index"));
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "parallel-collection");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(node.join("file-0000.txt"), "after!\n").unwrap();
+    fs::remove_file(node.join("file-0299.txt")).unwrap();
+    fs::write(node.join("- new 中文.txt"), b"raw\0bytes\xff\r\n").unwrap();
+    let head = workspace::snapshot_node(&node, &source, "parallel-collection").unwrap();
+    let child = slot(&temp, "parallel-fork");
+    workspace::prepare(&source, &child, &base, &[head]).unwrap();
+    assert_eq!(bytes(&child.join("file-0000.txt")), b"after!\n");
+    for index in 1..299 {
+        assert_eq!(bytes(&child.join(format!("file-{index:04}.txt"))), b"before\n");
+    }
+    assert!(!child.join("file-0299.txt").exists());
+    assert_eq!(bytes(&child.join("- new 中文.txt")), b"raw\0bytes\xff\r\n");
+    assert_eq!(bytes(&source.join("file-0000.txt")), b"before\n");
+    assert!(source.join("file-0299.txt").is_file());
+    assert!(!source.join("- new 中文.txt").exists());
+    assert_eq!(bytes(&source.join(".git/index")), user_index);
+    assert_eq!(
+        workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+        user_head
+    );
+}
+
+#[test]
+fn source_capture_keeps_identity_checks_and_revalidates_live_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let tree =
+        workspace::repository_git(&source, &["rev-parse", &format!("{base}^{{tree}}")]).unwrap();
+    let head = workspace::repository_git(
+        &source,
+        &["commit-tree", &tree, "-p", &base, "-m", "capture identity"],
+    )
+    .unwrap();
+    let target = record_path(&source, &head).unwrap();
+    let view = inspect_scoped(&source, &source, &[]).unwrap();
+    let identity = view_identity(&view).unwrap();
+    let user_head = workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap();
+    let user_index = bytes(&source.join(".git/index"));
+
+    let error = capture_source(&source, &head, "wrong identity").unwrap_err();
+    assert!(error.contains("Source changed while capturing"), "{error}");
+    assert!(!target.exists());
+    // An unspecified identity accepts a freshly inspected view, while an
+    // explicit matching identity reuses its immutable evidence unchanged.
+    capture_source_scoped(&source, &head, &[]).unwrap();
+    let recorded = bytes(&target.join("view.json"));
+    let checksum = bytes(&target.join("checksum"));
+    capture_source_with_view(&source, &head, &identity, &[], view.clone()).unwrap();
+    assert_eq!(bytes(&target.join("view.json")), recorded);
+    assert_eq!(bytes(&target.join("checksum")), checksum);
+
+    let next = workspace::repository_git(
+        &source,
+        &["commit-tree", &tree, "-p", &head, "-m", "stale capture"],
+    )
+    .unwrap();
+    fs::write(source.join("tracked.txt"), "changed after inspection\n").unwrap();
+    let error = capture_source_with_view(&source, &next, &identity, &[], view).unwrap_err();
+    assert!(
+        error.contains("Source changed while copying project Git"),
+        "{error}"
+    );
+    assert!(!record_path(&source, &next).unwrap().exists());
+    assert_eq!(
+        bytes(&source.join("tracked.txt")),
+        b"changed after inspection\n"
+    );
+    assert_eq!(bytes(&source.join(".git/index")), user_index);
+    assert_eq!(
+        workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+        user_head
+    );
+    assert_eq!(bytes(&target.join("view.json")), recorded);
+    assert_eq!(bytes(&target.join("checksum")), checksum);
+}
+
+#[test]
 fn complete_project_view_keeps_dirty_index_names_bytes_and_native_git() {
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);
@@ -106,6 +197,141 @@ fn complete_project_view_keeps_dirty_index_names_bytes_and_native_git() {
         workspace::project_git(&target, &["rev-parse", "--git-dir"]).unwrap(),
         workspace::git(&target, &["rev-parse", "--git-dir"]).unwrap()
     );
+}
+
+#[test]
+fn node_snapshot_staging_matches_fresh_scan_and_refreshes_between_attempts() {
+    for format in ["plain", "sha1", "sha256"] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("tracked.txt"), "initial\r\n").unwrap();
+        fs::write(source.join("removed.txt"), "remove me").unwrap();
+        fs::write(source.join(".gitignore"), "ignored/\n").unwrap();
+        fs::write(source.join(".gitattributes"), "*.txt text eol=lf\n").unwrap();
+        if format != "plain" {
+            let result = workspace::git(&source, &["init", "-q", &format!("--object-format={format}")]);
+            if format == "sha256" && result.is_err() {
+                continue; // Older system Git lacks SHA-256 support.
+            }
+            result.unwrap();
+            configure_author(&source);
+            workspace::project_git(&source, &["add", "."]).unwrap();
+            workspace::project_git(&source, &["commit", "-qm", "source"]).unwrap();
+        }
+        let base = workspace::snapshot_repository(&source).unwrap();
+        let node = slot(&temp, "node");
+        workspace::prepare(&source, &node, &base, &[]).unwrap();
+        let metadata = workspace::private_git_dir(&node).unwrap();
+        let native_index = fs::read(node.join(".git/index")).ok();
+        fs::write(node.join("tracked.txt"), "first\r\n").unwrap();
+        fs::remove_file(node.join("removed.txt")).unwrap();
+        fs::create_dir_all(node.join("ignored/empty")).unwrap();
+        fs::write(node.join("ignored/raw.bin"), b"\0raw\r\n\xff").unwrap();
+
+        let first_identity = stage_node_snapshot(&node, &source, &[]).unwrap().unwrap();
+        assert_eq!(Some(first_identity.clone()), node_identity_scoped(&node, &source, &[]).unwrap());
+        let first_tree = workspace::git(&node, &["write-tree"]).unwrap();
+        // The independent collector is the reference for the exact graph tree,
+        // including raw bytes, ignored files, deletions and index modes.
+        stage_project(&node, &metadata).unwrap();
+        assert_eq!(workspace::git(&node, &["write-tree"]).unwrap(), first_tree, "{format}");
+        assert_eq!(workspace::git_bytes(&node, &["show", ":tracked.txt"], None, None).unwrap(), b"first\r\n");
+        assert_eq!(workspace::git_bytes(&node, &["show", ":ignored/raw.bin"], None, None).unwrap(), b"\0raw\r\n\xff");
+        assert!(workspace::git(&node, &["show", ":removed.txt"]).is_err());
+
+        // A later capture must read current bytes, even for a same-size edit:
+        // there is no observation cache shared across snapshot attempts.
+        fs::write(node.join("tracked.txt"), "other\r\n").unwrap();
+        let next_identity = stage_node_snapshot(&node, &source, &[]).unwrap().unwrap();
+        assert_ne!(next_identity, first_identity);
+        let next_tree = workspace::git(&node, &["write-tree"]).unwrap();
+        assert_ne!(next_tree, first_tree);
+        stage_project(&node, &metadata).unwrap();
+        assert_eq!(workspace::git(&node, &["write-tree"]).unwrap(), next_tree);
+        assert_eq!(fs::read(node.join(".git/index")).ok(), native_index);
+
+        let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+        verify_result(&node, &source, &head).unwrap();
+        assert!(load(&record_path(&source, &head).unwrap()).unwrap().entries
+            .contains_key("ignored/empty"));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn node_snapshot_staging_keeps_exact_index_executable_bits() {
+    for sha256 in [false, true] {
+        check_node_index_executable_bits(sha256);
+    }
+}
+
+#[cfg(windows)]
+fn check_node_index_executable_bits(sha256: bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("script.sh"), "echo original\n").unwrap();
+    if sha256 {
+        workspace::git(&source, &["init", "-q", "--object-format=sha256"]).unwrap();
+        configure_author(&source);
+        workspace::git(&source, &["add", "script.sh"]).unwrap();
+        workspace::git(&source, &["update-index", "--chmod=+x", "script.sh"]).unwrap();
+        workspace::git(&source, &["commit", "-qm", "executable source script"]).unwrap();
+    }
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    let mode = |name: &str| {
+        let output = workspace::git(&node, &["ls-files", "--stage", "-z"]).unwrap();
+        let header = output.split('\0').filter_map(|entry| entry.split_once('\t'))
+            .find_map(|(header, path)| (path == name).then_some(header)).unwrap();
+        u32::from_str_radix(header.split_whitespace().next().unwrap(), 8).unwrap()
+    };
+    if sha256 {
+        assert_eq!(mode("script.sh"), 0o100755, "source capture must retain its tracked executable bit");
+    }
+    // Windows permissions cannot express this bit. The graph's previous
+    // index, not the default mode of a newly built index, owns it.
+    workspace::git(&node, &["update-index", "--chmod=+x", "script.sh"]).unwrap();
+    fs::write(node.join("script.sh"), "echo changed\n").unwrap();
+    stage_node_snapshot(&node, &source, &[]).unwrap();
+    assert_eq!(mode("script.sh"), 0o100755);
+    // A differently spelled new path must not borrow that executable bit
+    // through libgit2's case-insensitive path lookup.
+    fs::rename(node.join("script.sh"), node.join("temporary-name")).unwrap();
+    fs::rename(node.join("temporary-name"), node.join("Script.sh")).unwrap();
+    stage_node_snapshot(&node, &source, &[]).unwrap();
+    assert_eq!(mode("Script.sh"), 0o100644);
+    let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+    verify_result(&node, &source, &head).unwrap();
+}
+
+#[test]
+fn node_snapshot_staging_keeps_scoped_removal_and_live_environment_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("input.txt"), "input").unwrap();
+    let exclusions = vec![".venv".to_string()];
+    let base = workspace::snapshot_repository_scoped(&source, &exclusions).unwrap();
+    let node = slot(&temp, "node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::create_dir(node.join(".venv")).unwrap();
+    fs::write(node.join(".venv/runtime"), "must remain live, not in Git").unwrap();
+    fs::write(node.join("result.txt"), "result").unwrap();
+    // Simulate an agent accidentally staging its managed environment.
+    workspace::git(&node, &["add", "-f", "--", ".venv/runtime"]).unwrap();
+    assert!(workspace::git(&node, &["show", ":.venv/runtime"]).is_ok());
+    stage_node_snapshot(&node, &source, &exclusions).unwrap().unwrap();
+    let tree = workspace::git(&node, &["write-tree"]).unwrap();
+    workspace::stage_scoped_local(&node, &exclusions).unwrap();
+    assert_eq!(workspace::git(&node, &["write-tree"]).unwrap(), tree);
+    assert!(workspace::git(&node, &["show", ":.venv/runtime"]).is_err());
+    assert_eq!(workspace::git(&node, &["show", ":result.txt"]).unwrap(), "result");
+    assert_eq!(bytes(&node.join(".venv/runtime")), b"must remain live, not in Git");
+    let head = workspace::snapshot_node_scoped(&node, &source, "node", None, &exclusions).unwrap();
+    verify_result_scoped(&node, &source, &head, &exclusions).unwrap();
 }
 
 #[test]
@@ -451,6 +677,62 @@ fn metadata_only_changes_get_an_immutable_reference_and_survive_fork() {
         &workspace::git(&b, &["rev-parse", "HEAD"]).unwrap(),
     )
     .unwrap();
+}
+
+#[test]
+fn git_inspection_keeps_effective_path_scopes_and_git_path_expansion() {
+    fn check(project: &Path, name: &str, key: &str, local: bool) {
+        let file = workspace::project_git(project, &["config", "--path", "--get", key]).unwrap();
+        let scope = workspace::project_git(project, &["config", "--null", "--show-scope", "--get", key]).unwrap();
+        assert_eq!(matches!(scope.split('\0').next(), Some("local" | "worktree")), local);
+        let files = inspect_git(project).unwrap().4;
+        if Path::new(&file).is_absolute() {
+            let expected = crate::native::host_path(Path::new(&file)).to_string_lossy().replace('\\', "/");
+            assert_eq!(files.get(name), Some(&(expected, local)));
+        } else {
+            assert!(!files.contains_key(name));
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let external = crate::native::host_path(&temp.path().join("path with spaces"))
+        .to_string_lossy().replace('\\', "/");
+    workspace::project_git(&source, &["config", "core.excludesfile", &external]).unwrap();
+    workspace::project_git(&source, &["config", "core.attributesfile", "relative attrs"]).unwrap();
+    check(&source, "excludes", "core.excludesfile", true);
+    check(&source, "attributes", "core.attributesfile", true);
+
+    let include = crate::native::host_path(&temp.path().join("paths.inc"))
+        .to_string_lossy().replace('\\', "/");
+    workspace::project_git(&source, &["config", "--file", &include, "core.attributesfile", &external]).unwrap();
+    workspace::project_git(&source, &["config", "--add", "include.path", &include]).unwrap();
+    check(&source, "attributes", "core.attributesfile", true);
+    workspace::project_git(&source, &["config", "extensions.worktreeConfig", "true"]).unwrap();
+    let worktree_path = format!("{external}-worktree");
+    workspace::project_git(&source, &["config", "--worktree", "core.attributesfile", &worktree_path]).unwrap();
+    check(&source, "attributes", "core.attributesfile", true);
+
+    // Use a slot-owned HOME/global config, never mutate the host's settings.
+    let other = tempfile::tempdir().unwrap();
+    let source = self::source(&other);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&other, "config-paths");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    workspace::project_git(&node, &["config", "--global", "core.excludesfile", "~/ignore with spaces"]).unwrap();
+    check(&node, "excludes", "core.excludesfile", false);
+}
+
+#[cfg(unix)]
+#[test]
+fn git_root_discovery_handles_newlines_without_splitting_a_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let multiline = temp.path().join("project\nwith-newline");
+    fs::rename(&source, &multiline).unwrap();
+    let (common, current, git_file, git_link) = git_roots(&multiline).unwrap().unwrap();
+    assert_eq!(current, multiline.join(".git").canonicalize().unwrap());
+    assert_eq!(common, current);
+    assert!(!git_file && !git_link);
 }
 
 #[test]
@@ -917,6 +1199,68 @@ fn reused_slot_keeps_unrecorded_project_content() {
 }
 
 #[test]
+fn git_metadata_scan_keeps_generated_looking_entries_but_not_runtime_locks() {
+    let temp = tempfile::tempdir().unwrap();
+    for file in ["HEAD", "node_modules/pkg/cache.PYC", "index.lock", "refs/heads/topic.lock", "worktrees/other/state"] {
+        let path = temp.path().join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "metadata bytes").unwrap();
+    }
+    let mut entries = BTreeMap::new();
+    scan(temp.path(), Path::new(""), &mut entries, true).unwrap();
+    let blob = git2::Oid::hash_object(git2::ObjectType::Blob, b"metadata bytes").unwrap().to_string();
+    for name in ["HEAD", "node_modules/pkg/cache.PYC"] {
+        assert!(matches!(entries.get(name), Some(Entry::File { blob: actual, .. }) if actual == &blob));
+    }
+    for name in ["index.lock", "refs/heads/topic.lock", "worktrees", "worktrees/other/state"] {
+        assert!(!entries.contains_key(name), "{name}");
+    }
+}
+
+#[test]
+fn in_place_generated_filter_matches_cloning_for_nested_views_and_hardlinks() {
+    fn cloning_reference(view: &View, tracked: &std::collections::BTreeSet<String>) -> View {
+        let keep = |name: &str| !workspace::is_generated_artifact(Path::new(name)) || tracked.contains(name);
+        let mut view = view.clone();
+        view.entries.retain(|name, _| keep(name));
+        view.hardlinks.retain(keep);
+        view.repositories.retain(|name, nested| {
+            *nested = cloning_reference(nested, tracked);
+            keep(name)
+        });
+        view
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let mut view = inspect(temp.path()).unwrap();
+    let entry = Entry::File {
+        mode: 0o644, blob: "a".repeat(40), extra: Default::default(),
+    };
+    for name in ["keep.txt", "alias.txt", "untracked.pyc", "tracked.PYC"] {
+        view.entries.insert(name.into(), entry.clone());
+    }
+    // Git evidence is not project-generated content and must remain untouched.
+    view.git_entries = Some(view.entries.clone());
+    view.hardlinks = serde_json::from_value(serde_json::json!({
+        "aliases": { "alias.txt": "keep.txt", "untracked.pyc": "keep.txt", "tracked.PYC": "keep.txt" },
+        "outside": { "keep.txt": 2, "untracked.pyc": 1 }
+    })).unwrap();
+    let mut nested = view.clone();
+    nested.repositories.insert("child".into(), view.clone());
+    view.repositories.insert("node_modules".into(), nested.clone());
+    view.repositories.insert("nested".into(), nested);
+    for tracked in [
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::from(["tracked.PYC".to_string(), "node_modules".to_string()]),
+    ] {
+        let expected = cloning_reference(&view, &tracked);
+        let mut actual = view.clone();
+        strip_generated(&mut actual, &tracked);
+        // Compare every serialized field, not the weaker normalized equality.
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+}
+
+#[test]
 fn completed_view_check_tolerates_recorded_generated_artifacts() {
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);
@@ -940,8 +1284,13 @@ fn completed_view_check_tolerates_recorded_generated_artifacts() {
     );
     save(&record, &view).unwrap();
 
-    // The completed-view check must not fail on that difference alone.
+    // The completed-view check must not fail on that difference alone, and
+    // in-memory filtering must never rewrite the durable legacy evidence.
+    let recorded_bytes = bytes(&record.join("view.json"));
+    let recorded_checksum = bytes(&record.join("checksum"));
     verify_result(&node, &source, &head).unwrap();
+    assert_eq!(bytes(&record.join("view.json")), recorded_bytes);
+    assert_eq!(bytes(&record.join("checksum")), recorded_checksum);
 
     // A real content change is still detected.
     fs::write(node.join("result.txt"), "changed\n").unwrap();

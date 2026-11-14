@@ -1,7 +1,7 @@
 //! Stage away from source, then install complete files with same-directory
 //! renames. A killed copy can only truncate an owned temporary, never a target.
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Entry {
@@ -26,34 +26,49 @@ pub(super) fn validate_relative(relative: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn entries(repository: &Path, head: &str) -> Result<BTreeMap<String, Entry>, String> {
+fn entries(
+    repository: &Path,
+    head: &str,
+    changed: &BTreeSet<String>,
+) -> Result<BTreeMap<String, Entry>, String> {
     let output = repository_git(repository, &["ls-tree", "-r", "-z", head])?;
-    output
-        .split('\0')
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            let (entry, path) = line
-                .split_once('\t')
-                .ok_or("Invalid publication tree entry")?;
-            let mut fields = entry.split_whitespace();
-            let mode = fields.next().ok_or("Missing publication file mode")?;
-            let _kind = fields.next().ok_or("Missing publication entry type")?;
-            let blob = fields.next().ok_or("Missing publication blob")?;
-            validate_relative(path)?;
-            Ok((
+    let mut entries = BTreeMap::new();
+    for line in output.split('\0').filter(|line| !line.is_empty()) {
+        let (entry, path) = line
+            .split_once('\t')
+            .ok_or("Invalid publication tree entry")?;
+        let mut fields = entry.split_whitespace();
+        let mode = fields.next().ok_or("Missing publication file mode")?;
+        let _kind = fields.next().ok_or("Missing publication entry type")?;
+        let blob = fields.next().ok_or("Missing publication blob")?;
+        // Validate the entire tree, including unchanged paths. Only the delta
+        // needs owned map entries; a small edit must not allocate two complete
+        // project maps. A file/link replacing a deleted path's ancestor is
+        // itself changed, so retry's ancestor lookup retains that entry too.
+        validate_relative(path)?;
+        if changed.contains(path) {
+            entries.insert(
                 path.to_string(),
                 Entry {
                     mode: mode.into(),
                     blob: blob.into(),
                 },
-            ))
-        })
-        .collect()
+            );
+        }
+    }
+    Ok(entries)
 }
 
-// Check again immediately before replacing/removing a path. The source lease
-// excludes other host writers, not editors; staging or copying can take minutes.
-fn matches_entry(repository: &Path, relative: &str, entry: Option<&Entry>) -> Result<bool, String> {
+// One fresh observation can match either the input or the installed result.
+// Do not hash the same file again just because it did not match the first OID.
+// Entries come from the same repository and therefore use one object format.
+// Never reuse this observation across checks: the source lease does not stop
+// editors, so installation still checks separately before and after copying.
+fn matches_entries(
+    repository: &Path,
+    relative: &str,
+    entries: &[Option<&Entry>],
+) -> Result<bool, String> {
     let path = repository.join(relative);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -63,18 +78,34 @@ fn matches_entry(repository: &Path, relative: &str, entry: Option<&Entry>) -> Re
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
             ) =>
         {
-            return Ok(entry.is_none())
+            return Ok(entries.iter().any(Option::is_none))
         }
         Err(e) => return Err(e.to_string()),
     };
-    if metadata.is_dir() && !crate::workspace_symlinks::is_link(&metadata) {
-        return Ok(entry.is_none()); // Git represents directories through their children.
+    let is_link = crate::workspace_symlinks::is_link(&metadata);
+    if metadata.is_dir() && !is_link {
+        // Git represents directories through their children.
+        return Ok(entries.iter().any(Option::is_none));
     }
-    let Some(entry) = entry else { return Ok(false) };
-    let blob = if crate::workspace_symlinks::is_link(&metadata) {
-        if entry.mode != "120000" {
-            return Ok(false);
+    let mut candidates = entries.iter().flatten().copied().filter(|entry| {
+        if is_link {
+            return entry.mode == "120000";
         }
+        if !metadata.is_file() || !matches!(entry.mode.as_str(), "100644" | "100755") {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            (metadata.permissions().mode() & 0o111 != 0) == (entry.mode == "100755")
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    });
+    let Some(entry) = candidates.next() else { return Ok(false) };
+    let blob = if is_link {
         let link = crate::workspace_symlinks::capture(repository, &path, &metadata)?;
         if entry.blob.len() == 40 {
             git2::Oid::hash_object(git2::ObjectType::Blob, link.value.as_bytes())
@@ -99,33 +130,21 @@ fn matches_entry(repository: &Path, relative: &str, entry: Option<&Entry>) -> Re
                 .trim()
                 .to_string()
         }
-    } else {
-        if !metadata.is_file() || !matches!(entry.mode.as_str(), "100644" | "100755") {
-            return Ok(false);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if (metadata.permissions().mode() & 0o111 != 0) != (entry.mode == "100755") {
-                return Ok(false);
-            }
-        }
-        if entry.blob.len() == 40 {
-            let oid = if metadata.len() <= 8 * 1024 * 1024 {
-                git2::Oid::hash_object(
-                    git2::ObjectType::Blob,
-                    &fs::read(&path).map_err(|e| e.to_string())?,
-                )
-            } else {
-                git2::Oid::hash_file(git2::ObjectType::Blob, &path)
-            }
-            .map_err(|e| e.to_string())?;
-            oid.to_string()
+    } else if entry.blob.len() == 40 {
+        let oid = if metadata.len() <= 8 * 1024 * 1024 {
+            git2::Oid::hash_object(
+                git2::ObjectType::Blob,
+                &fs::read(&path).map_err(|e| e.to_string())?,
+            )
         } else {
-            repository_git(repository, &["hash-object", "--no-filters", "--", relative])?
+            git2::Oid::hash_file(git2::ObjectType::Blob, &path)
         }
+        .map_err(|e| e.to_string())?;
+        oid.to_string()
+    } else {
+        repository_git(repository, &["hash-object", "--no-filters", "--", relative])?
     };
-    Ok(blob == entry.blob)
+    Ok(blob == entry.blob || candidates.any(|candidate| blob == candidate.blob))
 }
 
 fn verify_target(
@@ -142,7 +161,7 @@ fn verify_target(
     if parent != repository {
         crate::path_safety::real_child_path(repository, &parent, false)?;
     }
-    if matches_entry(repository, relative, old)? || matches_entry(repository, relative, new)? {
+    if matches_entries(repository, relative, &[old, new])? {
         Ok(())
     } else {
         Err(format!(
@@ -330,9 +349,61 @@ pub(super) fn stage_files(
     result: &str,
     paths: &[&str],
 ) -> Result<PathBuf, String> {
+    // Offline legacy repair still accepts arbitrary paths from a pinned tree.
+    stage_files_with_index(repository, journal, paths, |index| {
+        private_index_git(repository, index, &["read-tree", result]).map(|_| ())
+    })
+}
+
+/// Normal delivery already has validated mode/OID entries for its delta. Build
+/// the disposable checkout index from those entries, not the full result tree.
+/// Git remains responsible for index encoding and raw blob checkout (SHA-1/256).
+fn stage_entries(
+    repository: &Path,
+    journal: &Path,
+    entries: &BTreeMap<String, Entry>,
+) -> Result<PathBuf, String> {
+    let mut index_info = Vec::new();
+    let mut paths = Vec::with_capacity(entries.len());
+    for (path, entry) in entries {
+        validate_relative(path)?;
+        if !matches!(entry.mode.as_str(), "100644" | "100755" | "120000") {
+            return Err(format!("Unsupported publication entry mode: {}", entry.mode));
+        }
+        crate::workspace_git_index::append_index_info(&mut index_info, &entry.mode, &entry.blob, path);
+        paths.push(path.as_str());
+    }
+    stage_files_with_index(repository, journal, &paths, |index| {
+        // The source lease excludes concurrent users of this journal. Discard
+        // only its private staging index: an older/full or interrupted index
+        // must not add unrelated entries to this attempt's delta. A crash here
+        // is recoverable by rebuilding from the same pinned result next time.
+        if crate::path_safety::real_child_path(journal, index, true)?.is_some() {
+            fs::remove_file(index).map_err(|e| e.to_string())?;
+        }
+        private_index_git_input(
+            repository,
+            index,
+            &["update-index", "-z", "--index-info"],
+            Some(&index_info),
+        ).map(|_| ())
+    })
+}
+
+fn stage_files_with_index(
+    repository: &Path,
+    journal: &Path,
+    paths: &[&str],
+    prepare_index: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
     let staged = journal.join("staged-files");
     fs::create_dir_all(&staged).map_err(|e| e.to_string())?;
     crate::path_safety::real_child_path(journal, &staged, false)?;
+    // Deletion-only delivery needs no checkout repository, index or blobs.
+    // Keep path validation above and the normal deletion/recovery checks below.
+    if paths.is_empty() {
+        return Ok(staged);
+    }
     let index = journal.join("staging-index");
     let lock = index.with_extension("lock");
     // Called only under the source lease. This private index is disposable;
@@ -341,7 +412,7 @@ pub(super) fn stage_files(
         crate::path_safety::real_child_path(journal, &lock, true)?;
         fs::remove_file(&lock).map_err(|e| e.to_string())?;
     }
-    private_index_git(repository, &index, &["read-tree", result])?;
+    prepare_index(&index)?;
     let prefix = format!(
         "--prefix={}/",
         crate::native::host_path(&staged)
@@ -392,23 +463,12 @@ fn install_with(
     before_rename: &mut impl FnMut(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let _operation = crate::process_control::OperationControl::begin()?;
-    let old = entries(repository, input)?;
-    let new = entries(repository, result)?;
     let changed = diff_paths(repository, input, result)?;
-    // Do not materialize unchanged project files (potentially gigabytes) just
-    // to deliver a small delta. Explicit paths also avoid checkout of unrelated
-    // native links on hosts where creating them requires privileges.
-    let additions: Vec<_> = changed.iter().filter(|p| new.contains_key(*p)).collect();
-    for relative in &additions {
-        if !matches!(new[*relative].mode.as_str(), "100644" | "100755" | "120000") {
-            return Err(format!(
-                "Unsupported publication entry mode: {}",
-                new[*relative].mode
-            ));
-        }
-    }
-    let paths: Vec<_> = additions.iter().map(|path| path.as_str()).collect();
-    let staged = stage_files(repository, journal, result, &paths)?;
+    let old = entries(repository, input, &changed)?;
+    let new = entries(repository, result, &changed)?;
+    // `new` contains only changed result entries; deleted paths have no entry.
+    // Neither the staging index nor checkout needs unrelated project files.
+    let staged = stage_entries(repository, journal, &new)?;
     if !journal.join("applying").exists() {
         save_once(&journal.join("applying"), b"atomic-files-v1\n")?;
     }
@@ -428,7 +488,7 @@ fn install_with(
         for ancestor in Path::new(relative).ancestors().skip(1) {
             if let Some(name) = ancestor.to_str().filter(|name| !name.is_empty()) {
                 if let Some(entry) = new.get(name) {
-                    if matches_entry(repository, name, Some(entry))? {
+                    if matches_entries(repository, name, &[Some(entry)])? {
                         replaced_ancestor = true;
                         break;
                     }
@@ -480,6 +540,10 @@ fn install_with(
 }
 
 #[cfg(test)]
+#[path = "staging_bench.rs"]
+mod staging_bench;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -498,6 +562,147 @@ mod tests {
         let journal = temp.path().join("journal");
         fs::create_dir(&journal).unwrap();
         (temp, source, node, journal, input)
+    }
+
+    #[test]
+    fn verification_accepts_either_tree_but_rechecks_same_size_edits() {
+        crate::ensure_test_data_root();
+        for format in ["sha1", "sha256"] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source");
+            fs::create_dir(&source).unwrap();
+            git(
+                &source,
+                &["init", "-q", &format!("--object-format={format}")],
+            )
+            .unwrap();
+            let file = source.join("file.txt");
+            fs::write(&file, b"original").unwrap();
+            let input = workspace::snapshot_repository(&source).unwrap();
+            fs::write(&file, b"replaced").unwrap();
+            let result = workspace::snapshot_repository(&source).unwrap();
+            let changed = diff_paths(&source, &input, &result).unwrap();
+            let old = entries(&source, &input, &changed).unwrap();
+            let new = entries(&source, &result, &changed).unwrap();
+            let candidates = [old.get("file.txt"), new.get("file.txt")];
+            for (bytes, accepted) in [
+                (b"original", true),
+                (b"replaced", true),
+                (b"intruder", false),
+            ] {
+                fs::write(&file, bytes).unwrap();
+                assert_eq!(
+                    matches_entries(&source, "file.txt", &candidates).unwrap(),
+                    accepted
+                );
+                assert_eq!(
+                    verify_target(&source, "file.txt", candidates[0], candidates[1]).is_ok(),
+                    accepted
+                );
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::write(&file, b"original").unwrap();
+                fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+                assert!(!matches_entries(&source, "file.txt", &candidates).unwrap());
+                let executable = Entry {
+                    mode: "100755".into(),
+                    blob: old["file.txt"].blob.clone(),
+                };
+                assert!(matches_entries(
+                    &source,
+                    "file.txt",
+                    &[candidates[0], Some(&executable)],
+                )
+                .unwrap());
+            }
+            fs::remove_file(&file).unwrap();
+            assert!(!matches_entries(&source, "file.txt", &candidates).unwrap());
+            assert!(matches_entries(&source, "file.txt", &[candidates[0], None]).unwrap());
+            fs::create_dir(&file).unwrap();
+            assert!(!matches_entries(&source, "file.txt", &candidates).unwrap());
+            assert!(matches_entries(&source, "file.txt", &[None, candidates[1]]).unwrap());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_distinguishes_links_from_files_with_the_same_blob() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path();
+        let blob = git2::Oid::hash_object(git2::ObjectType::Blob, b"target")
+            .unwrap()
+            .to_string();
+        let regular = Entry {
+            mode: "100644".into(),
+            blob: blob.clone(),
+        };
+        let link = Entry {
+            mode: "120000".into(),
+            blob,
+        };
+        std::os::unix::fs::symlink("target", source.join("entry")).unwrap();
+        assert!(!matches_entries(source, "entry", &[Some(&regular)]).unwrap());
+        assert!(matches_entries(source, "entry", &[Some(&regular), Some(&link)]).unwrap());
+        fs::remove_file(source.join("entry")).unwrap();
+        fs::write(source.join("entry"), b"target").unwrap();
+        assert!(!matches_entries(source, "entry", &[Some(&link)]).unwrap());
+        assert!(matches_entries(source, "entry", &[Some(&link), Some(&regular)]).unwrap());
+    }
+
+    #[test]
+    fn delta_entries_still_validate_unchanged_tree_paths() {
+        let (_temp, source, _node, _journal, _) = fixture();
+        let repository =
+            git2::Repository::open(workspace::shadow_repo_dir(&source).unwrap()).unwrap();
+        let blob = repository.blob(b"project bytes").unwrap();
+        let mut builder = repository.treebuilder(None).unwrap();
+        for path in ["unchanged.txt", "changed.txt"] {
+            builder.insert(path, blob, 0o100644).unwrap();
+        }
+        let tree = builder.write().unwrap();
+        let changed = BTreeSet::from(["changed.txt".to_string()]);
+        let selected = entries(&source, &tree.to_string(), &changed).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected["changed.txt"].blob, blob.to_string());
+        assert!(entries(&source, &tree.to_string(), &BTreeSet::new())
+            .unwrap()
+            .is_empty());
+
+        // Even an unselected path must pass the old whole-tree safety gate.
+        // Build the unsafe tree only in disposable host Git, never on disk.
+        let mut raw = b"100644 .git\0".to_vec();
+        raw.extend_from_slice(blob.as_bytes());
+        let unsafe_tree = repository
+            .odb()
+            .unwrap()
+            .write(git2::ObjectType::Tree, &raw)
+            .unwrap();
+        let error = entries(&source, &unsafe_tree.to_string(), &BTreeSet::new()).unwrap_err();
+        assert!(error.contains("protected or unsafe path"), "{error}");
+    }
+
+    #[test]
+    fn deletion_only_delivery_skips_checkout_and_retains_recovery_checks() {
+        let (_temp, source, node, journal, input) = fixture();
+        fs::remove_file(node.join("file.txt")).unwrap();
+        let result = workspace::snapshot_node(&node, &source, "worker").unwrap();
+        let index = fs::read(source.join(".git/index")).unwrap();
+        fs::write(source.join("file.txt"), "user edit").unwrap();
+        assert!(install(&source, &journal, &input, &result)
+            .unwrap_err()
+            .contains("Source files changed"));
+        assert_eq!(fs::read_to_string(source.join("file.txt")).unwrap(), "user edit");
+        fs::write(source.join("file.txt"), "original").unwrap();
+        install(&source, &journal, &input, &result).unwrap();
+        // An interrupted deletion can be replayed without rebuilding an index.
+        install(&source, &journal, &input, &result).unwrap();
+        assert!(!source.join("file.txt").exists());
+        assert!(!journal.join("staging-index").exists());
+        assert!(!journal.join("raw-checkout.git").exists());
+        assert!(journal.join("applying").is_file());
+        assert_eq!(fs::read(source.join(".git/index")).unwrap(), index);
     }
 
     #[test]
@@ -584,6 +789,109 @@ mod tests {
         );
         for path in paths {
             assert_eq!(fs::read_to_string(source.join(path)).unwrap(), "published");
+        }
+        let indexed = private_index_git(&source, &journal.join("staging-index"), &["ls-files", "-z"]).unwrap();
+        let indexed: BTreeSet<_> = indexed.split('\0').filter(|name| !name.is_empty()).collect();
+        assert_eq!(indexed, paths.into_iter().collect());
+    }
+
+    #[test]
+    fn delta_staging_rebuilds_full_or_partial_indices_without_touching_source_evidence() {
+        let (_temp, source, node, journal, _) = fixture();
+        for name in ["a.txt", "b.txt"] {
+            fs::write(node.join(name), name).unwrap();
+        }
+        let result = workspace::snapshot_node(&node, &source, "worker").unwrap();
+        let index = journal.join("staging-index");
+        let original = fs::read(source.join(".git/index")).unwrap();
+        fs::write(journal.join("original-index"), &original).unwrap();
+        let source_lock = source.join(".git/index.lock");
+        fs::write(&source_lock, "source lease").unwrap();
+        // A legacy/repair checkout may have populated a full cached index.
+        stage_files(&source, &journal, &result, &["a.txt"]).unwrap();
+        assert!(private_index_git(&source, &index, &["ls-files", "-z"])
+            .unwrap().split('\0').any(|name| name == "file.txt"));
+        let selected = entries(&source, &result, &BTreeSet::from(["b.txt".into()])).unwrap();
+        for corrupt in [false, true] {
+            if corrupt {
+                fs::write(&index, "partial disposable index").unwrap();
+            }
+            fs::write(index.with_extension("lock"), "stopped index update").unwrap();
+            let staged = stage_entries(&source, &journal, &selected).unwrap();
+            assert_eq!(private_index_git(&source, &index, &["ls-files", "-z"]).unwrap(), "b.txt\0");
+            assert_eq!(fs::read(staged.join("b.txt")).unwrap(), b"b.txt");
+            assert!(!index.with_extension("lock").exists());
+            assert_eq!(fs::read(source.join(".git/index")).unwrap(), original);
+            assert_eq!(fs::read(journal.join("original-index")).unwrap(), original);
+            assert_eq!(fs::read_to_string(&source_lock).unwrap(), "source lease");
+        }
+    }
+
+    #[test]
+    fn delta_staging_refuses_a_redirected_index_without_deleting_foreign_data() {
+        let (temp, source, _node, journal, result) = fixture();
+        let foreign = temp.path().join("foreign");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("marker"), "keep").unwrap();
+        let index = journal.join("staging-index");
+        crate::path_safety::directory_link(&foreign, &index);
+        let selected = entries(&source, &result, &BTreeSet::from(["file.txt".into()])).unwrap();
+        assert!(stage_entries(&source, &journal, &selected).is_err());
+        assert_eq!(fs::read(foreign.join("marker")).unwrap(), b"keep");
+        assert_eq!(fs::read(source.join("file.txt")).unwrap(), b"original");
+        crate::path_safety::remove_directory_link(&index);
+    }
+
+    #[test]
+    fn delta_staging_preserves_raw_bytes_modes_and_both_object_formats() {
+        crate::ensure_test_data_root();
+        for format in ["sha1", "sha256"] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source");
+            let journal = temp.path().join("journal");
+            fs::create_dir_all(source.join("nested")).unwrap();
+            fs::create_dir(&journal).unwrap();
+            git(&source, &["init", "-q", &format!("--object-format={format}")]).unwrap();
+            fs::write(source.join(".gitattributes"), "*.txt text eol=crlf\n").unwrap();
+            fs::write(source.join("unchanged.txt"), "unchanged\n").unwrap();
+            let name = "nested/- [literal] 中文.txt";
+            let bytes = b"first\nsecond\r\n\0binary\xff";
+            fs::write(source.join(name), bytes).unwrap();
+            let paths = BTreeSet::from([name.to_string()]);
+            #[cfg(unix)]
+            let paths = {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(source.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+                std::os::unix::fs::symlink(name, source.join("link")).unwrap();
+                let mut paths = paths;
+                paths.insert("link".into());
+                for special in ["tab\tand\nnewline", "back\\slash"] {
+                    fs::write(source.join(special), bytes).unwrap();
+                    paths.insert(special.into());
+                }
+                paths
+            };
+            let result = workspace::snapshot_repository(&source).unwrap();
+            let selected = entries(&source, &result, &paths).unwrap();
+            assert_eq!(selected[name].blob.len(), if format == "sha1" { 40 } else { 64 });
+            let original_index = fs::read(source.join(".git/index")).ok();
+            let staged = stage_entries(&source, &journal, &selected).unwrap();
+            assert_eq!(fs::read(staged.join(name)).unwrap(), bytes);
+            let indexed = private_index_git(&source, &journal.join("staging-index"), &["ls-files", "-z"]).unwrap();
+            let indexed: BTreeSet<_> = indexed.split('\0').filter(|name| !name.is_empty()).map(str::to_string).collect();
+            assert_eq!(indexed, paths);
+            assert!(!staged.join(".gitattributes").exists());
+            assert!(!staged.join("unchanged.txt").exists());
+            assert_eq!(fs::read(source.join(".git/index")).ok(), original_index);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_ne!(fs::metadata(staged.join(name)).unwrap().permissions().mode() & 0o111, 0);
+                assert_eq!(fs::read_link(staged.join("link")).unwrap(), PathBuf::from(name));
+                for special in ["tab\tand\nnewline", "back\\slash"] {
+                    assert_eq!(fs::read(staged.join(special)).unwrap(), bytes);
+                }
+            }
         }
     }
 

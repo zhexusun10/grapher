@@ -335,7 +335,7 @@ test("pickRepository surfaces rejection errors instead of falling back to window
     return "/some/path";
   };
   try {
-    const sizeLimitError = "工作区体积超过 10GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。";
+    const sizeLimitError = "工作区体积超过 15GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。";
     globalThis.fetch = async () => new Response(JSON.stringify({ error: sizeLimitError }), {
       status: 400,
       headers: { "Content-Type": "application/json" },

@@ -117,6 +117,70 @@ fn workspace_deletion_fixture() -> (tempfile::TempDir, PathBuf, Arc<Service>, Ve
 }
 
 #[test]
+fn workspace_size_warning_waits_for_background_runs_without_stopping_them() {
+    let (_temp, source, primary, ids) = workspace_deletion_fixture();
+    let active = service_for_run(&primary, &ids[1], false).unwrap();
+    let unrelated = service_for_run(&primary, &ids[2], false).unwrap();
+    unrelated.driving.store(true, Ordering::SeqCst);
+    let repository = source.join("child").join("..").to_string_lossy().into_owned();
+    let oversized = |path: &std::path::Path| crate::workspace::check_workspace_size(path, 0);
+
+    // Use a tiny limit rather than allocating a 15GB fixture. A matching
+    // background Planner/driver must not scan, report an error or mutate it.
+    for planning in [false, true] {
+        active.planning.store(planning, Ordering::SeqCst);
+        active.driving.store(!planning, Ordering::SeqCst);
+        let before = serde_json::to_value(&active.runtime.lock().unwrap().state).unwrap();
+        let status = repository_status(&primary, repository.clone(), |_| {
+            panic!("size scanning must wait for the active Run");
+        }).unwrap();
+        assert_eq!(status["valid"], true);
+        assert_eq!(status["sizeLimitExceeded"], false);
+        assert!(status["error"].is_null());
+        assert_eq!(active.planning.load(Ordering::SeqCst), planning);
+        assert_eq!(active.driving.load(Ordering::SeqCst), !planning);
+        assert_eq!(serde_json::to_value(&active.runtime.lock().unwrap().state).unwrap(), before);
+    }
+    active.planning.store(false, Ordering::SeqCst);
+    active.driving.store(false, Ordering::SeqCst);
+    let phase = {
+        let mut runtime = active.runtime.lock().unwrap();
+        std::mem::replace(&mut runtime.state.phase, "publishing".into())
+    };
+    assert_eq!(repository_status(&primary, repository.clone(), |_| {
+        panic!("publication must finish before size validation");
+    }).unwrap()["valid"], true);
+    assert!(detect_repository(Some(repository.clone()), &primary).unwrap().is_some(),
+        "switching to an active workspace still refreshes its metadata");
+    active.runtime.lock().unwrap().state.phase = phase;
+    // An unrelated busy workspace must not suppress this workspace's warning.
+    let status = repository_status(&primary, repository.clone(), oversized).unwrap();
+    assert_eq!(status["valid"], false);
+    assert_eq!(status["sizeLimitExceeded"], true);
+    assert_eq!(status["missing"], false);
+    assert!(status["error"].as_str().unwrap().contains("15GB"));
+
+    // A Run starting during an in-flight scan also defers the warning.
+    let status = repository_status(&primary, repository.clone(), |path| {
+        active.driving.store(true, Ordering::SeqCst);
+        oversized(path)
+    }).unwrap();
+    assert_eq!(status["valid"], true);
+    assert_eq!(status["sizeLimitExceeded"], false);
+
+    // Only size is advisory: a missing binding still reports an explicit error.
+    fs::remove_dir_all(&source).unwrap();
+    let status = repository_status(&primary, repository, |_| panic!("missing binding")).unwrap();
+    assert_eq!(status["valid"], false);
+    assert_eq!(status["missing"], true);
+    assert_eq!(status["sizeLimitExceeded"], false);
+    active.driving.store(false, Ordering::SeqCst);
+    unrelated.driving.store(false, Ordering::SeqCst);
+    let root = primary.runtime.lock().unwrap().root.clone();
+    invalidate_service_cache(&root, None);
+}
+
+#[test]
 fn workspace_deletion_uses_backend_ownership_and_invalidates_every_affected_service() {
     let (_temp, source, primary, ids) = workspace_deletion_fixture();
     let first = service_for_run(&primary, &ids[0], false).unwrap();

@@ -23,6 +23,469 @@ fn host_git_disables_automatic_maintenance() {
 }
 
 #[test]
+fn private_git_queries_use_graph_metadata_and_keep_cli_fallbacks() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("source");
+    fs::create_dir(&repository).unwrap();
+    workspace::git(&repository, &["init", "-q"]).unwrap();
+    fs::write(repository.join("tracked.txt"), "committed").unwrap();
+    workspace::git(&repository, &["add", "tracked.txt"]).unwrap();
+    workspace::git(&repository, &["commit", "-qm", "project"]).unwrap();
+    let user_head = workspace::git(&repository, &["rev-parse", "HEAD"]).unwrap();
+    fs::write(repository.join("tracked.txt"), "uncommitted input").unwrap();
+    let base = workspace::snapshot_repository(&repository).unwrap();
+    let node = temp.path().join(".grapher-worktrees/run/node");
+    workspace::prepare(&repository, &node, &base, &[]).unwrap();
+    assert_ne!(base, user_head);
+    workspace::project_git(&node, &["update-ref", "refs/grapher/base", &user_head]).unwrap();
+    let cli = |args: &[&str]| {
+        String::from_utf8(workspace::git_bytes(&node, args, None, None).unwrap())
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    for args in [
+        vec!["rev-parse", "HEAD"],
+        vec!["rev-parse", "--verify", "HEAD"],
+        vec!["rev-parse", "refs/grapher/base"],
+        vec!["diff", "--name-only", "--diff-filter=U"],
+    ] {
+        assert_eq!(workspace::git_read(&node, &args).unwrap().unwrap(), cli(&args));
+    }
+    assert_eq!(workspace::git(&node, &["rev-parse", "HEAD"]).unwrap(), base);
+    assert_eq!(
+        workspace::project_git(&node, &["rev-parse", "HEAD"]).unwrap(),
+        user_head
+    );
+    assert!(workspace::git_read(&node, &["status", "--porcelain"]).is_none());
+    let ancestry = ["merge-base", "--is-ancestor", user_head.as_str(), base.as_str()];
+    assert!(workspace::git_read(&node, &ancestry).is_none());
+    assert_eq!(workspace::git(&node, &ancestry).unwrap(), cli(&ancestry));
+    for args in [
+        vec!["rev-parse", "refs/grapher/missing"],
+        vec!["merge-base", "--is-ancestor", &base, &user_head],
+    ] {
+        assert!(workspace::git_read(&node, &args).is_none());
+        assert!(workspace::git(&node, &args).is_err());
+    }
+
+    // A graph-only conflict must not consult the project's clean index; quoted
+    // paths retain CLI formatting rather than the fast reader's approximation.
+    let blob = workspace::git(&node, &["rev-parse", "HEAD:tracked.txt"]).unwrap();
+    let conflict = "conflict-é.txt";
+    let entries = format!(
+        "100644 {blob} 1\t{conflict}\0\
+         100644 {blob} 2\t{conflict}\0\
+         100644 {blob} 3\t{conflict}\0"
+    );
+    workspace::git_bytes(
+        &node,
+        &["update-index", "-z", "--index-info"],
+        None,
+        Some(entries.as_bytes()),
+    )
+    .unwrap();
+    let args = ["diff", "--name-only", "--diff-filter=U"];
+    let expected = cli(&args);
+    assert!(!expected.is_empty(), "{}", cli(&["ls-files", "--stage"]));
+    assert!(workspace::git_read(&node, &args).is_none(), "{expected:?}");
+    assert_eq!(workspace::git(&node, &args).unwrap(), expected);
+    assert!(workspace::project_git(&node, &["ls-files", "-u"])
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn explicit_shadow_reads_use_the_selected_database_without_caching_refs() {
+    for standard in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let native_head = if standard {
+            workspace::git(&source, &["init", "-q"]).unwrap();
+            fs::write(source.join("file.txt"), "committed").unwrap();
+            workspace::git(&source, &["add", "file.txt"]).unwrap();
+            workspace::git(&source, &["commit", "-qm", "source"]).unwrap();
+            Some(workspace::git(&source, &["rev-parse", "HEAD"]).unwrap())
+        } else {
+            None
+        };
+        let native_index = fs::read(source.join(".git/index")).ok();
+        fs::write(source.join("file.txt"), "snapshot bytes").unwrap();
+        let head = workspace::snapshot_repository(&source).unwrap();
+        assert_ne!(native_head.as_deref(), Some(head.as_str()));
+        workspace::repository_git(&source, &["update-ref", "refs/grapher/probe", &head]).unwrap();
+        let shadow = workspace::shadow_repo_dir(&source).unwrap();
+        for prefix in [
+            vec!["--git-dir", shadow.to_str().unwrap()],
+            vec!["--git-dir", shadow.to_str().unwrap(), "--work-tree", source.to_str().unwrap()],
+        ] {
+            for query in [
+                vec!["rev-parse", "HEAD"],
+                vec!["rev-parse", "--verify", "HEAD"],
+                vec!["rev-parse", "refs/grapher/probe"],
+                vec!["rev-parse", "--verify", "refs/grapher/probe"],
+            ] {
+                let mut args = prefix.clone();
+                args.extend(query);
+                let cli = workspace::git_bytes(&source, &args, None, None).unwrap();
+                assert_eq!(
+                    workspace::git_read(&source, &args).unwrap().unwrap(),
+                    String::from_utf8(cli).unwrap().trim()
+                );
+            }
+            for query in [
+                vec!["status", "--porcelain"],
+                vec!["diff", "--name-only", "--diff-filter=U"],
+                vec!["merge-base", "--is-ancestor", &head, "HEAD"],
+                vec!["rev-parse", "refs/grapher/probe^{tree}"],
+                vec!["rev-parse", "--verify", "refs/grapher/probe^{tree}"],
+                vec!["rev-parse", "refs/grapher/missing"],
+                vec!["rev-parse", "--verify", "refs/grapher/missing"],
+                vec!["update-ref", "refs/grapher/probe", &head],
+            ] {
+                let mut args = prefix.clone();
+                args.extend(query);
+                assert!(workspace::git_read(&source, &args).is_none());
+            }
+        }
+        assert!(workspace::git_read(&source, &["--git-dir", ".git", "rev-parse", "HEAD"]).is_none());
+        let missing = source.join("missing.git");
+        let args = ["--git-dir", missing.to_str().unwrap(), "rev-parse", "HEAD"];
+        assert!(workspace::git_read(&source, &args).is_none());
+        assert!(workspace::git(&source, &args).is_err());
+        assert_eq!(workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(), head);
+        let next = workspace::repository_git(&source, &[
+            "commit-tree", &format!("{head}^{{tree}}"), "-p", &head, "-m", "next",
+        ]).unwrap();
+        workspace::repository_git(&source, &["update-ref", "HEAD", &next]).unwrap();
+        assert_eq!(workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(), next);
+        if let Some(native_head) = native_head {
+            assert_eq!(workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(), native_head);
+        } else {
+            assert!(!source.join(".git").exists());
+        }
+        assert_eq!(fs::read(source.join(".git/index")).ok(), native_index);
+        assert_eq!(fs::read_to_string(source.join("file.txt")).unwrap(), "snapshot bytes");
+    }
+}
+
+fn private_query_fixture() -> (TempDir, PathBuf, String, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let (source, base) = source(&temp);
+    let node = temp.path().join(".grapher-worktrees/run/query");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(node.join("tracked.txt"), "new task bytes").unwrap();
+    workspace::git(&node, &["add", "tracked.txt"]).unwrap();
+    workspace::git(&node, &["commit", "-qm", "task"]).unwrap();
+    let head = workspace::git(&node, &["rev-parse", "HEAD"]).unwrap();
+    (temp, node, base, head)
+}
+
+#[test]
+fn git_read_private_ancestry_obeys_replacement_refs() {
+    let (_temp, node, base, head) = private_query_fixture();
+    workspace::git(&node, &["replace", &head, &base]).unwrap();
+    let args = ["merge-base", "--is-ancestor", &base, "HEAD"];
+    assert!(workspace::git_bytes(&node, &args, None, None).is_err());
+    assert!(workspace::verify_prepared_ancestor(&node, &base).is_err(),
+        "the optimized reader must not accept ancestry rejected by Git");
+}
+
+#[test]
+fn git_read_private_revision_obeys_replacement_refs() {
+    let (_temp, node, base, head) = private_query_fixture();
+    workspace::git(&node, &["update-ref", "refs/grapher/query", &head]).unwrap();
+    workspace::git(&node, &["replace", &head, &base]).unwrap();
+    let args = ["rev-parse", "refs/grapher/query^{tree}"];
+    let expected = String::from_utf8(workspace::git_bytes(&node, &args, None, None).unwrap()).unwrap();
+    assert_eq!(workspace::git(&node, &args).unwrap(), expected.trim());
+}
+
+#[test]
+fn git_read_private_ancestry_rejects_noncommit_objects() {
+    let (_temp, node, _base, _head) = private_query_fixture();
+    for revision in ["HEAD^{tree}", "HEAD:tracked.txt"] {
+        let object = workspace::git(&node, &["rev-parse", revision]).unwrap();
+        let args = ["merge-base", "--is-ancestor", &object, &object];
+        assert!(workspace::git_bytes(&node, &args, None, None).is_err());
+        assert!(workspace::git(&node, &args).is_err(), "{revision} is not a commit");
+    }
+}
+
+#[test]
+fn git_read_explicit_directory_does_not_discover_dot_git() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path();
+    workspace::git(source, &["init", "-q"]).unwrap();
+    workspace::git(source, &["commit", "--allow-empty", "-qm", "source"]).unwrap();
+    for args in [
+        vec!["--git-dir", source.to_str().unwrap(), "rev-parse", "HEAD"],
+        vec!["--git-dir", source.to_str().unwrap(), "--work-tree", source.to_str().unwrap(), "rev-parse", "HEAD"],
+    ] {
+        assert!(workspace::git_bytes(source, &args, None, None).is_err());
+        assert!(workspace::git(source, &args).is_err(),
+            "an invalid explicit Git directory must not discover its nested .git");
+    }
+}
+
+#[test]
+fn node_snapshot_stages_independent_slots_before_waiting_for_host_refs() {
+    use std::time::{Duration, Instant};
+
+    for standard in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("input.txt"), "input").unwrap();
+        if standard {
+            workspace::git(&source, &["init", "-q"]).unwrap();
+            workspace::git(&source, &["add", "."]).unwrap();
+            workspace::git(&source, &["commit", "-qm", "source"]).unwrap();
+        }
+        let base = workspace::snapshot_repository(&source).unwrap();
+        let slots: Vec<_> = ["a", "b"].into_iter().map(|name| {
+            let slot = temp.path().join(".grapher-worktrees/run").join(name);
+            workspace::prepare(&source, &slot, &base, &[]).unwrap();
+            fs::write(slot.join("result.txt"), name).unwrap();
+            slot
+        }).collect();
+        let metadata: Vec<_> = slots.iter()
+            .map(|slot| workspace::private_git_dir(slot).unwrap()).collect();
+        let local_heads: Vec<_> = metadata.iter().map(|dir| {
+            git2::Repository::open(dir).unwrap()
+                .find_reference("refs/heads/grapher-node").unwrap().target().unwrap()
+        }).collect();
+        let lock = workspace::host_ref_lock(&source).unwrap();
+        let guard = lock.lock().unwrap();
+        let workers: Vec<_> = slots.iter().cloned().map(|slot| {
+            let source = source.clone();
+            std::thread::spawn(move || {
+                let name = slot.file_name().unwrap().to_str().unwrap();
+                workspace::snapshot_node(&slot, &source, name)
+            })
+        }).collect();
+
+        // Observe private refs without acquiring the slot leases the workers
+        // retain while waiting for import. This is a lock-order assertion, not
+        // a performance threshold: the held host lock cannot be released until
+        // both local commits exist. The deadline only bounds a broken test.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let staged = loop {
+            let ready = metadata.iter().zip(&local_heads).all(|(dir, previous)| {
+                git2::Repository::open(dir).ok().and_then(|repo| {
+                    repo.find_reference("refs/heads/grapher-node").ok()
+                        .and_then(|reference| reference.target())
+                }).is_some_and(|head| head != *previous)
+            });
+            if ready || Instant::now() >= deadline {
+                break ready;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Cleanup may run while local snapshots wait to import. The active
+        // inputs must remain pinned in the shared alternate even after a GC;
+        // the workers' new objects belong to their own private repositories.
+        let collected = staged.then(|| workspace::repository_git(
+            &source, &["gc", "--prune=now", "--quiet"],
+        ));
+        drop(guard); // Release before asserting/joining, including regressions.
+        let heads: Vec<_> = workers.into_iter()
+            .map(|worker| worker.join().unwrap().unwrap()).collect();
+        assert!(staged, "private snapshots waited for the repository ref lock");
+        collected.unwrap().unwrap();
+        assert_ne!(heads[0], heads[1]);
+        for ((slot, head), name) in slots.iter().zip(&heads).zip(["a", "b"]) {
+            assert_eq!(workspace::repository_git(&source, &[
+                "rev-parse", &format!("refs/grapher/heads/{head}"),
+            ]).unwrap(), *head);
+            assert_eq!(workspace::repository_git(&source, &[
+                "rev-parse", &format!("refs/grapher/nodes/{}", crate::compiler::node_id(name)),
+            ]).unwrap(), *head);
+            assert_eq!(workspace::repository_git(&source, &[
+                "show", &format!("{head}:result.txt"),
+            ]).unwrap(), name);
+            crate::workspace_view::verify_result(slot, &source, head).unwrap();
+            let downstream = temp.path().join(".grapher-worktrees/run").join(format!("child-{name}"));
+            workspace::prepare(&source, &downstream, &base, std::slice::from_ref(head)).unwrap();
+            assert_eq!(fs::read_to_string(downstream.join("result.txt")).unwrap(), name);
+        }
+        assert!(!source.join("result.txt").exists());
+    }
+}
+
+#[test]
+fn node_snapshot_refuses_changes_between_staging_and_capture() {
+    use std::time::{Duration, Instant};
+
+    for metadata_only in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("input.txt"), "input").unwrap();
+        let base = workspace::snapshot_repository(&source).unwrap();
+        let slot = temp.path().join(".grapher-worktrees/run/node");
+        workspace::prepare(&source, &slot, &base, &[]).unwrap();
+        fs::write(slot.join("result.txt"), "first").unwrap();
+        let metadata = workspace::private_git_dir(&slot).unwrap();
+        let previous = workspace::git(&slot, &["rev-parse", "HEAD"]).unwrap();
+        let lock = workspace::host_ref_lock(&source).unwrap();
+        let guard = lock.lock().unwrap();
+        let worker_source = source.clone();
+        let worker_slot = slot.clone();
+        let worker = std::thread::spawn(move || {
+            workspace::snapshot_node(&worker_slot, &worker_source, "node")
+        });
+        // The held host lock separates local staging/commit from import and
+        // final capture, without a production test hook or a timing race.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let staged = loop {
+            let head = git2::Repository::open(&metadata).ok().and_then(|repo| {
+                repo.find_reference("refs/heads/grapher-node").ok()
+                    .and_then(|reference| reference.target())
+            }).filter(|head| head.to_string() != previous);
+            if head.is_some() || Instant::now() >= deadline {
+                break head;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if staged.is_some() {
+            if metadata_only {
+                fs::create_dir(slot.join("late-empty-directory")).unwrap();
+            } else {
+                // Same-size external edits must not pass the blob-size check
+                // and bind fresh view metadata to stale staged project bytes.
+                fs::write(slot.join("result.txt"), "other").unwrap();
+            }
+        }
+        drop(guard);
+        let result = worker.join().unwrap();
+        let head = staged.expect("node did not reach the import boundary").to_string();
+        let error = result.expect_err("a changed workspace must not produce a completed snapshot");
+        assert!(error.contains("changed between staging and capture"), "{error}");
+        assert!(!crate::workspace_view::has_record(&source, &head),
+            "failed capture must not publish mixed code/view evidence");
+        // A fresh attempt observes the actual new state and remains usable.
+        let retried = workspace::snapshot_node(&slot, &source, "node").unwrap();
+        crate::workspace_view::verify_result(&slot, &source, &retried).unwrap();
+    }
+}
+
+#[test]
+fn node_snapshot_allows_source_edits_between_staging_and_capture() {
+    use std::time::{Duration, Instant};
+
+    for standard in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("input.txt"), "recorded input").unwrap();
+        fs::write(source.join("removed.txt"), "recorded file").unwrap();
+        if standard {
+            workspace::git(&source, &["init", "-q"]).unwrap();
+            workspace::git(&source, &["config", "user.name", "Project Author"]).unwrap();
+            workspace::git(&source, &["config", "user.email", "project@example.invalid"]).unwrap();
+            workspace::project_git(&source, &["add", "."]).unwrap();
+            workspace::project_git(&source, &["commit", "-qm", "source"]).unwrap();
+        }
+        let base = workspace::snapshot_repository(&source).unwrap();
+        let node = temp.path().join(".grapher-worktrees/run/node");
+        workspace::prepare(&source, &node, &base, &[]).unwrap();
+        let original_project_head = standard.then(|| {
+            workspace::project_git(&node, &["rev-parse", "HEAD"]).unwrap()
+        });
+        fs::write(node.join("result.txt"), "node result").unwrap();
+        let metadata = workspace::private_git_dir(&node).unwrap();
+        let previous = workspace::git(&node, &["rev-parse", "HEAD"]).unwrap();
+        let lock = workspace::host_ref_lock(&source).unwrap();
+        let guard = lock.lock().unwrap();
+        let worker_node = node.clone();
+        let worker_source = source.clone();
+        let worker = std::thread::spawn(move || {
+            workspace::snapshot_node(&worker_node, &worker_source, "node")
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let staged = loop {
+            let ready = git2::Repository::open(&metadata).ok().and_then(|repo| {
+                repo.find_reference("refs/heads/grapher-node").ok()
+                    .and_then(|reference| reference.target())
+            }).is_some_and(|head| head.to_string() != previous);
+            if ready || Instant::now() >= deadline { break ready; }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Only the node slot is frozen. The user's live source, including its
+        // own HEAD/index, can change after staging and before result capture.
+        fs::write(source.join("input.txt"), "live source edit").unwrap();
+        fs::write(source.join("source-only.txt"), "new source file").unwrap();
+        fs::remove_file(source.join("removed.txt")).unwrap();
+        fs::create_dir(source.join("source-only-directory")).unwrap();
+        let live_head = standard.then(|| {
+            workspace::project_git(&source, &["add", "-A"]).unwrap();
+            workspace::project_git(&source, &["commit", "-qm", "concurrent source edit"]).unwrap();
+            fs::write(source.join("input.txt"), "staged source edit").unwrap();
+            workspace::project_git(&source, &["add", "input.txt"]).unwrap();
+            fs::write(source.join("input.txt"), "unstaged source edit").unwrap();
+            workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap()
+        });
+        let live_index = fs::read(source.join(".git/index")).ok();
+        drop(guard);
+        let result = worker.join().unwrap();
+        assert!(staged, "node did not reach the import boundary");
+        let head = result.expect("live source edits must not reject a private node result");
+        crate::workspace_view::verify_result(&node, &source, &head).unwrap();
+        assert_eq!(fs::read(source.join(".git/index")).ok(), live_index);
+        if let Some(live_head) = live_head {
+            assert_eq!(workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(), live_head);
+        }
+        assert_eq!(fs::read_to_string(source.join("input.txt")).unwrap(),
+            if standard { "unstaged source edit" } else { "live source edit" });
+        assert!(source.join("source-only.txt").is_file());
+        assert!(!source.join("removed.txt").exists());
+        assert!(!source.join("result.txt").exists());
+
+        let child = temp.path().join(".grapher-worktrees/run/child");
+        workspace::prepare(&source, &child, &base, &[head]).unwrap();
+        assert_eq!(fs::read_to_string(child.join("input.txt")).unwrap(), "recorded input");
+        assert_eq!(fs::read_to_string(child.join("removed.txt")).unwrap(), "recorded file");
+        assert_eq!(fs::read_to_string(child.join("result.txt")).unwrap(), "node result");
+        assert!(!child.join("source-only.txt").exists());
+        assert!(!child.join("source-only-directory").exists());
+        if let Some(original) = original_project_head {
+            assert_eq!(workspace::project_git(&child, &["rev-parse", "HEAD"]).unwrap(), original);
+        }
+    }
+}
+
+#[test]
+fn node_snapshot_rejects_conflicts_without_waiting_for_host_refs() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("input.txt"), "input").unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let slot = temp.path().join(".grapher-worktrees/run/node");
+    workspace::prepare(&source, &slot, &base, &[]).unwrap();
+    let blob = workspace::git(&slot, &["rev-parse", "HEAD:input.txt"]).unwrap();
+    workspace::git_bytes(&slot, &["update-index", "--index-info"], None, Some(
+        format!("100644 {blob} 1\tconflict.txt\n100644 {blob} 2\tconflict.txt\n").as_bytes(),
+    )).unwrap();
+    let lock = workspace::host_ref_lock(&source).unwrap();
+    let guard = lock.lock().unwrap();
+    let (send, receive) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        send.send(workspace::snapshot_node(&slot, &source, "node")).unwrap();
+    });
+    let result = receive.recv_timeout(Duration::from_secs(30));
+    drop(guard);
+    worker.join().unwrap();
+    assert!(result.expect("conflict validation waited for the host ref lock")
+        .unwrap_err().contains("Unresolved merge conflicts remain"));
+}
+
+#[test]
 fn snapshot_commits_use_neutral_subject() {
     let temp = tempfile::tempdir().unwrap();
     let repository = temp.path();
@@ -343,6 +806,60 @@ fn ordinary_copy_rejects_unsupported_special_files_explicitly() {
         workspace::copy_ordinary_files(&source, &destination, &[], &temp.path().join("runtime"))
             .unwrap_err();
     assert!(error.contains("Unsupported special workspace file"));
+}
+
+#[test]
+fn collection_predicates_keep_case_unicode_and_tracked_override_rules() {
+    use std::collections::BTreeSet;
+    let cases = [
+        ("src/file.ts", false, false, false),
+        ("src/你好.PyC", true, false, false),
+        ("é", false, false, false),
+        ("代码", false, false, false),
+        (".pYc", true, false, false),
+        ("pyc", false, false, false),
+        ("nested/cache.PYO", true, false, false),
+        ("file.TsBuIlDiNfO", true, false, false),
+        ("NODE_MODULES/pkg/file.js", true, false, false),
+        ("src/__PyCache__/module", true, false, false),
+        (".Next/build-id", true, false, false),
+        ("not_node_modules/file.js", false, false, false),
+        ("dist/build/out/target/authored", false, false, false),
+        ("x/.grapher-publish-0123456789abcdef.tmp", false, true, false),
+        ("x/.grapher-publish-0123456789abcdeG.tmp", false, false, false),
+        ("x/.grapher-publish-01234.tmp", false, false, false),
+        ("managed/normal.txt", false, false, true),
+        ("managed/tracked.pyc", true, false, true),
+        ("managed/.grapher-publish-0123456789abcdef.tmp", false, true, true),
+    ];
+    for (name, generated, reserved, managed) in cases {
+        assert_eq!(workspace::is_generated_artifact(Path::new(name)), generated, "{name}");
+        for tracked in [false, true] {
+            let paths = if tracked { BTreeSet::from([name.to_string()]) } else { BTreeSet::new() };
+            for exclude_managed in [false, true] {
+                let exclusions = if exclude_managed { vec!["managed".into()] } else { vec![] };
+                assert_eq!(
+                    workspace::collection_excluded(Path::new(name), &paths, &exclusions),
+                    (managed && exclude_managed) || (!tracked && (generated || reserved)),
+                    "{name}, tracked={tracked}, managed={exclude_managed}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_suffix_checks_keep_non_utf8_name_behavior() {
+    use std::os::unix::ffi::OsStrExt;
+    for (bytes, generated) in [
+        (b"cache/\xff.PyC".as_slice(), true),
+        (b"src/\xff.rs".as_slice(), false),
+        (b"\xff".as_slice(), false),
+    ] {
+        let path = Path::new(std::ffi::OsStr::from_bytes(bytes));
+        assert_eq!(workspace::is_generated_artifact(path), generated);
+    }
 }
 
 #[test]

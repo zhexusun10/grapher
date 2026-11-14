@@ -52,6 +52,125 @@ node scripts/temporary-target.mjs -- node scripts/cargo.mjs <original-arguments>
 
 The wrapper cleans only its own temporary target; an existing `CARGO_TARGET_DIR` is reused and never deleted. A fresh target may require a cold build. Do not stop the backend or clean its cache. For an npm suite use `npm run test:temporary -- <script>`; `test:isolated` means the full Rust fixture suite, not a single-test workaround. Release builds and [packaging](../../scripts/package-release.mjs) must share the same target directory.
 
+## Workspace staging microbenchmark (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib staging_bench::delta_index_staging -- --ignored --nocapture --test-threads=1
+```
+
+[The probe](../../backend/src/graph_merge/publication/staging_bench.rs) creates disposable
+repositories with 64 and 50,000 result paths, then compares warm full-index and
+delta-index staging for a small delta, plus an all-files-changed case on the small
+repository. It checks staged bytes and index entries, and reports time and index
+size without timing thresholds. This does **not** measure
+source collection, composition, atomic delivery or end-to-end Run latency.
+
+## Workspace view equality microbenchmark (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib view_equality_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+[The comparison probe](../../backend/src/workspace_view/equality_tests.rs) measures
+legacy normalized-JSON equality against borrowed-field equality on 5,000 project
+and 1,000 Git metadata entries, including a late difference. It excludes filesystem
+scanning and checksum computation. The adjacent differential tests compare the new
+projection with the unchanged serializer and pin a legacy fixture checksum.
+
+## Workspace view normalization probe (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib view_normalization_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+[The probe](../../backend/src/workspace_view/equality_tests.rs) compares the
+legacy full-JSON construction with the borrowed checksum projection. Cases
+include empty, ordinary and large security descriptors; every output must match
+byte-for-byte. Five warm samples alternate order and report medians in Cargo's
+test profile. The adjacent differential tests cover serialized scalars, variants,
+optional fields, nested repositories and legacy owners, and pin the historical
+checksum and full stored JSON. This measures in-memory normalization only, not
+filesystem scans, object staging or end-to-end task latency.
+
+## Workspace scan and staging phase probes (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib scan_bench::file_scanning_benchmark -- --ignored --nocapture --test-threads=1
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib scan_bench::snapshot_staging_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+[The disposable-fixture probes](../../backend/src/workspace_view/scan_bench.rs)
+compare the former fixed file-count partitions with the production collector.
+The scan cases cover below-threshold projects, uniform small files, clustered
+or scattered large files, and one dominant large file. Each strategy performs
+fresh content/metadata reads; full serialized entries must match. Five warm
+samples alternate strategy order and report median file-resolution time, with
+walk/enumeration time reported separately. The staging probe reports fresh-scan
+and warm object/index-staging times separately for 64 files in SHA-1 and SHA-256
+repositories, checking that each repeat produces the same tree.
+
+These are local component measurements in Cargo's test profile, not cold-cache
+or end-to-end preparation/handoff/publication speedups. Below-threshold scans
+use the same sequential code in both strategies, so small differences there
+are measurement noise. There are no timing assertions or production diagnostics.
+
+## SHA-256 blob batching probe (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib sha256_blob_batching_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+[The probe](../../backend/src/workspace_view/sha256_stage_bench.rs) retains the
+former per-file implementation as a test-only reference. Separate disposable
+SHA-256 object stores compare a singleton, 64/256 small files, and mixed small
+files with larger streaming inputs. It checks identical result trees after each
+operation, reports empty-object-store timings and three alternating warm samples
+per strategy, and excludes fixture creation and the independent initial scan.
+File caches are already warm even for the empty-store measurements. This is a
+staging-component measurement in Cargo's test profile, not an end-to-end speedup.
+
+[Focused regressions](../../backend/src/workspace_view/sha256_stage_tests.rs)
+cover raw binary/protocol-looking bytes, path/mode preservation, batch limits,
+pre/post-import changes, malformed/failed/null-OID imports, unchanged Git evidence,
+Windows byte-exact executable-bit inheritance, and retry. `publication_recovery` also covers SHA-256 packed-object delivery without
+source-Git leakage and SHA-1/SHA-256 partial-checkout recovery.
+
+## Workspace cleanup lock probe (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib workspace_cleanup_lock_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+[The probe](../../backend/src/cleanup_bench.rs) creates disposable completed Runs
+with 64, 5,000 and 20,000 small files. It compares synchronous cleanup under the
+Run mutex with durable directory retirement followed by out-of-lock deletion.
+Three fresh fixtures per strategy alternate order and report medians for Run-lock
+hold time, a concurrent metadata reader's wait, and cleanup total time (including
+deletion for both strategies). Source sentinels and session history must survive,
+and all detached receipts must be drained. It performs no model calls and touches
+no retained user workspace. This is a local test-profile filesystem/lock probe,
+not an HTTP, provider or end-to-end task benchmark. Lower lock/read latency does
+not imply faster physical deletion; there are no timing assertions.
+
+## File-change persistence lock probe (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib file_summary_persistence_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+[The probe](../../backend/src/file_changes/persistence_bench.rs) seeds temporary
+sidecars and cache entries for 4×20, 20×500 and 40×1,250 execution/path pairs,
+with overlapping log/Git summaries and an unloaded historical execution. Three
+samples alternate the former locked-merge algorithm and the production snapshot/
+merge helpers, resetting the prior sidecar each time. It reports cache-copy time,
+global cache-lock hold time, an unrelated cache reader's wait, and processing
+through sidecar publication. All serialized results must match byte-for-byte,
+including the actual `persist_run` entry point. This local test-profile probe
+makes no model calls and changes no retained user data. It does not measure
+HTTP latency or end-to-end node completion; lower global lock contention does
+not imply that full-sidecar read/serialization/write costs disappeared. There
+are no timing assertions.
+
 ## Broader suites (on demand)
 
 [test-suites.mjs](../../scripts/test-suites.mjs) owns the exact composition; `npm run test:<suite> -- --list` previews it. These are available tools, not completion requirements.

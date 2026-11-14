@@ -123,7 +123,7 @@ export const runtimeService = {
     return request<Bootstrap>("bootstrap");
   },
   repositoryStatus: (repository: string, signal?: AbortSignal) =>
-    request<{ repository: string; valid: boolean; error: string | null; missing?: boolean }>("repository_status", { repository }, signal),
+    request<{ repository: string; valid: boolean; error: string | null; missing?: boolean; sizeLimitExceeded?: boolean }>("repository_status", { repository }, signal),
   snapshot: (signal?: AbortSignal) => request<Snapshot>("snapshot", {}, signal),
   snapshotForRun: async (runId: string, signal?: AbortSignal) => {
     const snapshot = await request<Snapshot>("snapshot", { runId }, signal);

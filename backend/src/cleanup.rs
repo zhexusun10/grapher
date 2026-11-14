@@ -13,6 +13,8 @@ use std::{
 };
 use uuid::Uuid;
 
+pub(crate) mod detached;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Target {
@@ -73,8 +75,8 @@ impl Target {
         }
     }
 
-    pub(crate) fn resolve(&self, data: &Path, run_id: &str) -> Result<Option<PathBuf>, String> {
-        let (root, child) = match self {
+    fn location(&self, data: &Path, run_id: &str) -> Result<(PathBuf, PathBuf), String> {
+        let location = match self {
             Self::Data { bucket, id } => {
                 if !matches!(
                     bucket.as_str(),
@@ -133,6 +135,11 @@ impl Target {
                 (root.clone(), root.join("shadow_repos").join(name))
             }
         };
+        Ok(location)
+    }
+
+    pub(crate) fn resolve(&self, data: &Path, run_id: &str) -> Result<Option<PathBuf>, String> {
+        let (root, child) = self.location(data, run_id)?;
         if !root.exists() {
             match fs::symlink_metadata(&root) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -530,9 +537,52 @@ fn protected_shadow_objects(store: &Store, excluded: &str) -> Result<BTreeSet<St
     }
     Ok(protected)
 }
+/// Lifetime checks shared by normal completion and durable cleanup retries.
+/// A matching event sequence proves freshness, not that recovery/result files
+/// are disposable. Retrying an older queued task must honor today's policy.
+pub(crate) fn retains_workspaces(state: &Snapshot) -> bool {
+    if state.config.as_ref().and_then(|config| config.environment.as_ref()).is_some() {
+        return true;
+    }
+    // Preserve Runtime's recorded route and legacy single-task fallback.
+    let serial = match state.plan_type.as_deref() {
+        Some(mode) => mode == "serial",
+        None => state.graph.nodes.len() == 1 && state.graph.nodes[0].name == "task",
+    };
+    !serial && state.isolated_workspaces.is_some()
+        && (!state.pending_feedback.is_empty()
+            || state.nodes.values().any(|node| node.status != "completed")
+            || state.executions.iter().any(|execution| {
+                execution.status == "completed"
+                    && state.nodes.contains_key(&execution.node)
+                    && !state.superseded_execution_ids.contains(&execution.id)
+                    && execution.after.as_ref().is_some_and(|head|
+                        !head.is_empty() && !state.published_heads.contains(head))
+            }))
+}
+
 /// Caller must hold the Run's runtime mutex for workspace-only tasks. The
 /// sequence check cancels stale cleanup once a follow-up/revision changes it.
 pub(crate) fn execute(root: &Path, store: &Store, task: &Task) -> Result<(), String> {
+    execute_inner(root, store, task, false)
+}
+
+/// Under the owning Run lock, retire workspace paths without recursively
+/// deleting them. Independent durable receipts own the detached directories.
+pub(crate) fn retire_workspaces(root: &Path, store: &Store, task: &Task) -> Result<(), String> {
+    if task.manifest.sequence.is_none() {
+        return Err("Only workspace-only cleanup can be detached".into());
+    }
+    match execute_inner(root, store, task, true) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            store.fail_cleanup(&task.run_id, &error)?;
+            Err(error)
+        }
+    }
+}
+
+fn execute_inner(root: &Path, store: &Store, task: &Task, detach: bool) -> Result<(), String> {
     let mut manifest = task.manifest.clone();
     if let Some(sequence) = task.manifest.sequence {
         if store.contains_run(&task.run_id)? {
@@ -540,10 +590,18 @@ pub(crate) fn execute(root: &Path, store: &Store, task: &Task) -> Result<(), Str
             if state.events.last().map_or(0, |event| event.sequence) != sequence {
                 return store.finish_cleanup(&task.run_id);
             }
-            if matches!(state.phase.as_str(), "planning" | "publishing" | "merging")
+            if matches!(state.phase.as_str(), "planning" | "publishing" | "merging" | "launching_result")
                 || state.nodes.values().any(|node| node.status == "running")
+                || state.executions.iter().chain(&state.mergers).any(|execution| execution.status == "running")
+                || state.result_execution.as_ref().is_some_and(|execution| execution.status == "running")
             {
                 return Err("Run is active; workspace cleanup is deferred".into());
+            }
+            if retains_workspaces(&state) {
+                // Handle/cancel this cleanup generation without dropping its
+                // ownership records. Explicit conversation deletion still owns
+                // eventual removal; a later publication can queue a new task.
+                return store.finish_cleanup(&task.run_id);
             }
             // Retry collecting legacy markers too, if the first attempt could
             // not read them. The Run's event generation is still unchanged.
@@ -584,6 +642,7 @@ pub(crate) fn execute(root: &Path, store: &Store, task: &Task) -> Result<(), Str
         BTreeSet::new()
     };
     let mut paths = Vec::new();
+    let mut detached_targets = Vec::new();
     for target in &manifest.targets {
         let shared = store.cleanup_target_is_shared(&task.run_id, target)?;
         if shared && deleting {
@@ -620,11 +679,28 @@ pub(crate) fn execute(root: &Path, store: &Store, task: &Task) -> Result<(), Str
                 .iter()
                 .any(|source| source.starts_with(&path))
             {
+                if detach {
+                    if !matches!(target, Target::Workspace { .. }) {
+                        return Err("Detached cleanup cannot remove non-workspace resources".into());
+                    }
+                    detached_targets.push((target.clone(), path.clone()));
+                }
                 paths.push(path);
             }
         }
     }
-    crate::workspace_cleanup::remove_paths(paths)?;
+    if detach {
+        // Retire only the top-level targets; a parent's receipt owns its entire
+        // tree, including any legacy Planner checkout listed separately.
+        for (target, path) in &detached_targets {
+            if paths.iter().any(|parent| parent != path && path.starts_with(parent)) {
+                continue;
+            }
+            detached::retire(root, store, &task.run_id, target)?;
+        }
+    } else {
+        crate::workspace_cleanup::remove_paths(paths)?;
+    }
     if let Some(repository) = &manifest.unresolved_repository {
         return Err(format!("Workspace ownership predates this version and the binding is missing: {repository}. Restore it or explicitly inspect its project parent with cleanup:workspaces."));
     }

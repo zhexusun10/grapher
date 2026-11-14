@@ -32,7 +32,36 @@ impl PartialEq for Extra {
 }
 impl Eq for Extra {}
 
+/// Borrowed checksum projection only. Raw persisted metadata still includes
+/// `security`; legacy owner values must survive until checksum validation.
+pub(crate) struct WithoutSecurity<'a>(pub(crate) &'a Extra);
+impl Serialize for WithoutSecurity<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let Extra { attributes, security: _, protected, flags, owner, efs } = self.0;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("attributes", attributes)?;
+        map.serialize_entry("protected", protected)?;
+        map.serialize_entry("flags", flags)?;
+        map.serialize_entry("owner", owner)?;
+        map.serialize_entry("efs", efs)?;
+        map.end()
+    }
+}
+
 impl Extra {
+    /// Exact equality of serialized view evidence with `security` omitted.
+    /// Unlike portable metadata equality, legacy owner fields still count on
+    /// Unix: load validates their checksum before stripping host-managed data.
+    pub(crate) fn eq_for_view_identity(&self, other: &Self) -> bool {
+        let Self { attributes, security: _, protected, flags, owner, efs } = self;
+        attributes == &other.attributes
+            && *protected == other.protected
+            && *flags == other.flags
+            && *owner == other.owner
+            && *efs == other.efs
+    }
+
     /// Full equality, including the recorded Windows security descriptor.
     /// The derived `PartialEq` deliberately ignores `security` so two
     /// source-equivalent views compare equal; materialization uses this

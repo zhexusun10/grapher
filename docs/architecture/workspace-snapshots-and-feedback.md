@@ -284,6 +284,23 @@ clean/smudge/EOL filters. Native `.gitignore` is not a collection boundary, and
 user's staged/unstaged distinctions. Publication uses a private raw-checkout
 repository so conversion cannot silently change the delivered bytes.
 
+SHA-256 staging batches small blobs through Git's `fast-import` instead of
+starting `hash-object` for every file. Input contains only blobs, numeric marks
+and length-delimited data, never filenames or commit/ref commands; names still
+use NUL-delimited index records. Each batch holds at most 128 blobs and 8 MiB of
+payload, with a 1 MiB per-blob buffering limit. Singleton scopes and larger
+inputs keep the original streaming path; a growing file cannot cause an
+unbounded buffered read. Buffered file bytes must match the fresh scan identity
+before import, and the original independent post-write content reread remains.
+Size selects a read strategy, not freshness. Only after all batches and rereads
+succeed is the private index replaced. A failed import may leave unreferenced
+private objects, but cannot update source Git, publish a result, or bypass
+publication revalidation, synchronization and recovery journals. Null object IDs
+are rejected with malformed responses before index replacement. On Windows,
+SHA-256 staging retains executable bits from stage-zero entries of the previous
+private index, using byte-exact paths; a differently cased spelling cannot borrow
+another path's executable bit. Unix still uses the observed filesystem mode.
+
 The retained legacy/scoped collector uses a forced Git add equivalent to:
 
 ```text
@@ -301,6 +318,17 @@ with pathspec exclusions for:
   Windows and Linux retain their previous collection strategy.
 
 The collector does not query ignore status: additions, modifications and deletions enter source/node snapshot commits even under ignored directories. `.gitignore` is an ordinary tracked project file, not a collection boundary. No `before-*`/`after-*` project-file manifests, content hashes or Run blob stores are created.
+
+Regular-file scans keep the existing parallel threshold (256 files) and cap of
+four workers per scan, limited by available parallelism. Workers claim the next
+file on demand rather than owning fixed file-count partitions, so neighboring
+large files do not all serialize on one worker. Directories, links and special
+entries remain on the walking thread. Every scan still reads file contents and
+metadata; size/mtime are not freshness cache keys. Results live only for that
+scan and retain the original walk's insertion/error order. All workers join
+before returning, and a failed parallel pass inserts no partial regular-file
+results. This does not change job admission, repository/slot lock scopes or the
+independent revalidation passes around snapshot capture and publication.
 
 ### Generated artifacts
 
@@ -353,10 +381,15 @@ There is no automatic per-file size guard: Git reads/hashes large project files 
 The user's desktop folder is not an accepted binding: [detection and
 binding validation](../../backend/src/workspace.rs) refuse it before a shadow
 repository is created, so forced collection cannot walk unrelated personal
-data. Bind an actual project directory instead. Workspaces exceeding 10GB are
-also rejected by validation to prevent out-of-memory or system stalls from
-unmanaged large datasets or build caches; large files must be kept outside the
-workspace or a deeper subfolder selected.
+data. Bind an actual project directory instead. Workspaces exceeding 15GB are
+rejected when binding or admitting a new Run; large files must be kept outside
+the workspace or a deeper subfolder selected. Size is not a live binding failure:
+an admitted Run may finish scheduling, snapshotting and publication even if its
+workspace grows past the limit. The read-only workspace status check defers size
+validation and its UI warning until all active conversations in that workspace
+have drained (including Planner and publication work). Missing/inaccessible
+paths and the desktop guard remain errors during execution. Size scans retain
+their 30-second cache and exclude `.git`/internal `.grapher*` directories.
 
 ## Shadow repository lifecycle
 
@@ -461,7 +494,37 @@ Source snapshots and node results are pinned in the host-only database:
 
 These refs are host storage, not an agent messaging protocol. Runtime imports
 node snapshots only into that database, without touching the user's working
-tree, index, branch, refs or commit objects.
+tree, index, branch, refs or commit objects. Node completion holds its private
+slot lease across scanning, staging, commit, import and project-view capture.
+The shared host-ref lock covers only the import/pinning operation, not local
+snapshot work or the final view scan/copy, so independent slots can finalize
+concurrently. The lock order is node slot then host refs; host-ref owners must
+not acquire node-slot leases. Imported heads are pinned before that shared lock
+is released, and completion still requires successful immutable view capture.
+Unscoped node snapshots use one fresh project observation for view identity and
+raw Git staging within that slot lease. The staging input is consumed, not
+cached across attempts; the post-import view capture still re-inspects the
+private node workspace independently and must match its staged view identity
+before a result record is published. A same-size external edit or metadata-only
+change **inside that private slot** during handoff fails explicitly, retaining
+it for a fresh snapshot. This gate never compares the user's live source files:
+source additions, edits, deletions and native Git HEAD/index changes remain
+allowed during node completion. Downstream private nodes inherit recorded
+inputs/results, not those concurrent source edits; publication keeps its existing
+source reconciliation rules. Source-direct/shared-source execution does not
+enter this private-snapshot gate. The normalized checksum belongs to an immutable
+in-memory view and is reused for
+validation and persistence; it is distinct from the raw source-snapshot identity.
+Managed-scope staging retains its exclusion/removal checks, and special-entry
+validation is unchanged.
+
+Checksum normalization retains its historical JSON bytes. A borrowed serialization
+projection avoids allocating values known to be discarded: metadata `security`,
+entry/repository-map members named `security`, and each view's Git `index` entry. The existing
+recursive cleanup and JSON encoder remain authoritative; legacy owner fields stay
+until load validates the original checksum. This is not a collection exclusion or
+a file-observation cache. Full `view.json` evidence and raw source identities still
+use the complete serializer, including security history, without a schema change.
 
 ## Composition and conflicts
 
@@ -546,7 +609,10 @@ Publication is Git-only, with internal composition separated from delivery:
 4. The source must still match its captured branch, HEAD, index and project
    tree before delivery. Under the source `index.lock` lease (or the plain-folder
    publication lease), Git checks only changed result paths out into private
-   staging, using only a private index. Changed regular files are fully copied
+   staging. Normal delivery builds a private index from just those changed
+   result entries, while still validating every path in both recorded trees.
+   This disposable index can be rebuilt on retry; it is never the source index
+   or the journal's original-index evidence. Changed regular files are fully copied
    and synced into adjacent, journal-owned `.grapher-publish-<id>.tmp` files
    before atomic rename. Untracked reserved temporaries are excluded from
    collection; explicitly tracked project files still win over the naming

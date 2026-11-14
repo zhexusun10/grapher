@@ -16,6 +16,17 @@ struct Item {
     flags: u32,
 }
 
+/// Append Git's NUL-delimited `update-index --index-info` record without a
+/// temporary formatted String. Callers still own path/mode/OID validation.
+pub(crate) fn append_index_info(input: &mut Vec<u8>, mode: &str, oid: &str, path: &str) {
+    input.extend_from_slice(mode.as_bytes());
+    input.push(b' ');
+    input.extend_from_slice(oid.as_bytes());
+    input.push(b'\t');
+    input.extend_from_slice(path.as_bytes());
+    input.push(0);
+}
+
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let mut command = vec![
         "--git-dir",
@@ -255,9 +266,8 @@ pub(crate) fn compose(
             _ => return Err("Incompatible project HEAD/index inputs".into()),
         }
     }
-    let head = tree(&metadata)?;
+    let mut wanted = tree(&metadata)?;
     let current = index(&metadata)?;
-    let mut wanted = head.clone();
     for (name, value) in &desired {
         match value {
             Some(value) => {
@@ -268,21 +278,23 @@ pub(crate) fn compose(
             }
         }
     }
-    let names: BTreeSet<_> = current.keys().chain(wanted.keys()).cloned().collect();
+    // Both maps stay immutable below; keep borrowed paths through the flag
+    // updates instead of cloning every path, including unchanged entries.
+    let names: BTreeSet<_> = current.keys().chain(wanted.keys()).collect();
     let format = workspace::project_git(path, &["rev-parse", "--show-object-format=storage"])?;
     let zero = "0".repeat(if format == "sha256" { 64 } else { 40 });
     let mut updates = Vec::new();
     let mut changed = Vec::new();
     for name in names {
-        if current.get(&name) == wanted.get(&name) {
+        if current.get(name) == wanted.get(name) {
             continue;
         }
-        updates.extend_from_slice(format!("0 {zero}\t{name}\0").as_bytes());
-        if let Some(item) = wanted.get(&name) {
+        append_index_info(&mut updates, "0", &zero, name);
+        if let Some(item) = wanted.get(name) {
             if item.mode != "160000"
                 && workspace::project_git(path, &["cat-file", "-e", &item.oid]).is_err()
             {
-                let origin = origins.get(&name).copied().unwrap_or(selected);
+                let origin = origins.get(name).copied().unwrap_or(selected);
                 let bytes = workspace::project_git_bytes(
                     origin,
                     &[
@@ -302,7 +314,7 @@ pub(crate) fn compose(
                     Some(&bytes),
                 )?;
             }
-            updates.extend_from_slice(format!("{} {}\t{name}\0", item.mode, item.oid).as_bytes());
+            append_index_info(&mut updates, &item.mode, &item.oid, name);
         }
         changed.push(name);
     }
@@ -312,7 +324,7 @@ pub(crate) fn compose(
         Some(&updates),
     )?;
     for name in changed {
-        if let Some(item) = wanted.get(&name) {
+        if let Some(item) = wanted.get(name) {
             if item.flags & 0x2000_0000 != 0 {
                 workspace::project_git(
                     path,
@@ -329,7 +341,7 @@ pub(crate) fn compose(
                         "--no-assume-unchanged"
                     },
                     "--",
-                    &name,
+                    name,
                 ],
             )?;
             workspace::project_git(
@@ -342,7 +354,7 @@ pub(crate) fn compose(
                         "--no-skip-worktree"
                     },
                     "--",
-                    &name,
+                    name,
                 ],
             )?;
         }
@@ -367,6 +379,29 @@ mod tests {
         workspace::git(&root, &["add", "tracked.txt"]).unwrap();
         workspace::git(&root, &["commit", "-qm", "base"]).unwrap();
         root
+    }
+
+    #[test]
+    fn index_info_encoding_matches_legacy_bytes_for_modes_hashes_and_special_paths() {
+        let mut actual = b"existing\0".to_vec();
+        let mut expected = actual.clone();
+        for size in [40, 64] {
+            for mode in ["0", "100644", "100755", "120000", "160000"] {
+                let oid = if mode == "0" { "0" } else { "a" }.repeat(size);
+                for path in [
+                    "file",
+                    "- leading",
+                    "tab\tand\nnewline",
+                    "back\\slash",
+                    "quote\"",
+                    "résumé/中文",
+                ] {
+                    append_index_info(&mut actual, mode, &oid, path);
+                    expected.extend_from_slice(format!("{mode} {oid}\t{path}\0").as_bytes());
+                }
+            }
+        }
+        assert_eq!(actual, expected);
     }
 
     #[test]

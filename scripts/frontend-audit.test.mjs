@@ -138,6 +138,59 @@ test("Markdown cannot execute HTML handlers or reach local APIs in live or repla
   } finally { await context.close(); }
 });
 
+test("Markdown tables keep inline code unboxed without changing prose or fenced code", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("markdownCopy");
+  try {
+    const markdown = [
+      "Outside table: `P6_006_v1`.", "",
+      "| `Profile` | Net (USDT) | 核心失败原因 |",
+      "| --- | --- | --- |",
+      "| `P6_006_v1` | `-22.338` | 三组均亏（**`long -6.029`**）；[`h03`](https://example.com) `8` 条硬风险 |",
+      "", "```text", "P6_006_v1", "```",
+    ].join("\n");
+    await page.evaluate(markdown => window.audit.setMarkdown(markdown), markdown);
+    await page.locator(".markdown-content table").waitFor();
+
+    for (const shell of ["", "chat-message-assistant", "transcript-message-bubble", "thinking-card-body"]) {
+      await page.evaluate(shell => {
+        document.querySelector("#root").className = shell;
+        document.querySelector(".markdown-content").classList.toggle("thinking-markdown", shell === "thinking-card-body");
+      }, shell);
+      const appearance = await page.locator(".markdown-content").evaluate(markdown => {
+        const style = element => {
+          const css = getComputedStyle(element);
+          return {
+            background: css.backgroundColor, border: css.borderTopWidth,
+            radius: css.borderTopLeftRadius, padding: css.padding,
+            font: css.fontFamily, color: css.color,
+          };
+        };
+        return {
+          cells: [...markdown.querySelectorAll("table code")].map(code => ({
+            ...style(code), surroundingColor: getComputedStyle(code.parentElement).color,
+          })),
+          prose: style(markdown.querySelector("p code")),
+          blockText: markdown.querySelector("pre code").textContent,
+        };
+      });
+      assert.equal(appearance.cells.length, 6);
+      for (const cell of appearance.cells) {
+        assert.equal(cell.background, "rgba(0, 0, 0, 0)", `${shell}: no inline card background`);
+        assert.equal(cell.border, "0px", `${shell}: no inline card border`);
+        assert.equal(cell.radius, "0px");
+        assert.equal(cell.padding, "0px", `${shell}: no extra inset around table values`);
+        assert.equal(cell.color, cell.surroundingColor);
+        assert.equal(cell.font, appearance.prose.font, "keep code in the shared monospace font");
+      }
+      assert.notEqual(appearance.prose.background, "rgba(0, 0, 0, 0)", "prose inline code keeps its styling");
+      assert.notEqual(appearance.prose.border, "0px");
+      assert.equal(appearance.blockText, "P6_006_v1\n");
+      assert.equal(await page.locator(".code-copy-btn").count(), 1, "fenced code keeps its copy control");
+    }
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("Markdown block copy controls copy only their current code and recover from clipboard denial", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("markdownCopy");
   try {

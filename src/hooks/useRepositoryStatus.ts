@@ -6,7 +6,7 @@ import { shareJson } from "../services/structuralSharing";
 // This checks only the selected binding. Viewing another project must never
 // change the repository stored in a running backend execution.
 export function useRepositoryStatus(repository: string) {
-  const [status, setStatus] = useState<{ repository: string; valid: boolean; error: string | null; missing?: boolean }>();
+  const [status, setStatus] = useState<Awaited<ReturnType<typeof runtimeService.repositoryStatus>>>();
   useEffect(() => {
     if (!repository) return;
     const controller = new AbortController();

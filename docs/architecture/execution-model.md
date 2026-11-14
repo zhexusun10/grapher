@@ -12,7 +12,7 @@ This page defines lifecycle operations, not their underlying storage algorithms.
 | Planning | A single `task` node; automatically approved | Planner, compiler, and graph approval |
 | Agent directory | The user's project | Source or private Run repositories under the [adaptive workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy) |
 | Dependency inputs | One agent works directly on the project | Children inherit completed parents' workspace state |
-| Completion | Task completion and snapshot | Valid results successfully published to the project |
+| Completion | Task completion in source; no Git snapshot or publication | Shared-source work settles directly; private results require successful publication |
 
 The Partitioner is a tool-free classifier; its `parallel` response maps to the internal `graph` route. Provider failure is an error, not an auto-approved Serial fallback. The route is persisted separately from graph shape: a Planner-generated graph with one node called `task` is still Graph. Older events without a route retain a compatibility heuristic.
 
@@ -181,6 +181,18 @@ running -> publishing -> completed
 `PublicationStarted` is durable before final source changes. Publication selects valid terminal heads; already-integrated commits are skipped, and so are heads a completed publication already delivered — their files are part of the source snapshot while their internal objects may already be reclaimed (a plain folder drops its snapshot database at completion). Delivered heads are durable: they are projected into checkpoints and re-derived from the event log when a checkpoint predates them. A composition can merge trees in the host-only Git database and record the composed project view without materializing a private checkout; unsupported or unverifiable project metadata falls back to a materialized workspace, and only a real Git conflict invokes the Merger. Failed or invalidated attempts are not delivered as current results. The publication merge algorithm belongs to [Git publication](workspace-snapshots-and-feedback.md#publication).
 
 Only a real Git conflict invokes a dedicated Merger in the private publication workspace. A missing/inaccessible repository or permission error is a publication failure, not a request for the model to improvise a workaround. Node preparation never inspects the live source working tree; source changes are incorporated at publication.
+
+The source-publication Merger's workspace objective keeps `graph.original_goal`
+and appends recorded user steers inside `<user further request>` when present.
+Requests contain only the user's original text in event order, separated by
+blank lines, without Planner/node/Merger source labels. Withdrawn requests,
+failed or extension-handled Planner sends, and steers from superseded node
+executions are omitted. This is additional conflict-resolution
+context, not a new task or an import of agent conversation histories. Node-input
+composition still receives the target's `job.task` unchanged; Merger follow-ups
+still continue their own session. Publication retries rebuild the context from
+persisted Run events, while a saved Merger prompt remains the authority for that
+execution's prompt inspection.
 
 `retry_publication` reuses retained Git heads, private merge state and durable delivery evidence without rerunning the graph. Internal composition must preserve input ancestry, but delivery never creates a commit or advances the user's branch/index. Recovery and concurrent-source handling follow [Git publication](workspace-snapshots-and-feedback.md#publication). For private execution, only `PublicationCompleted` establishes delivery; shared-source Graphs settle directly under the [workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy).
 

@@ -1034,7 +1034,10 @@ pub fn parse_jsonl_file_changes(
     accumulator_summary(&acc)
 }
 
-/// Parse `git diff --name-status` and `git diff --numstat` between two commits or working tree.
+mod git_diff;
+
+/// Read status and line counts from one Git diff between commits or a working
+/// tree, so completion does not run comparison/rename detection twice.
 pub fn compute_git_changes(
     repo_or_worktree: &Path,
     before: &str,
@@ -1051,91 +1054,23 @@ pub fn compute_git_changes(
             .or_else(|_| crate::workspace::git(repo_or_worktree, args))
     };
 
-    let status_args: Vec<&str> = match after {
-        Some(after_sha) if !after_sha.is_empty() => {
-            if before == after_sha {
-                return Some(FileChangeSummary::default());
-            }
-            vec!["diff", "--name-status", "-M", before, after_sha]
+    let mut diff_args = vec!["diff", "--raw", "--numstat", "-z", "-M", before];
+    if let Some(after_sha) = after.filter(|head| !head.is_empty()) {
+        if before == after_sha {
+            return Some(FileChangeSummary::default());
         }
-        _ => vec!["diff", "--name-status", "-M", before],
-    };
-    let numstat_args: Vec<&str> = match after {
-        Some(after_sha) if !after_sha.is_empty() => {
-            vec!["diff", "--numstat", "-M", before, after_sha]
-        }
-        _ => vec!["diff", "--numstat", "-M", before],
-    };
-
-    let status_out = run_git(&status_args).ok()?;
-    let numstat_out = run_git(&numstat_args).unwrap_or_default();
-
-    let mut numstats: HashMap<String, (usize, usize)> = HashMap::new();
-    for line in numstat_out.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 3 {
-            let add = parts[0].parse::<usize>().unwrap_or(0);
-            let del = parts[1].parse::<usize>().unwrap_or(0);
-            let raw_path = parts.last().copied().unwrap_or_default();
-            // Handle rename numstat format if any
-            let clean_path = normalize_slashes(raw_path);
-            numstats.insert(clean_path, (add, del));
-        }
+        diff_args.push(after_sha);
     }
-
-    let mut items_map: BTreeMap<String, FileChangeItem> = BTreeMap::new();
-    for line in status_out.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let code = parts[0].trim();
-        let (status, path, old_path) = if code.starts_with('R') && parts.len() >= 3 {
-            (
-                "renamed",
-                normalize_slashes(parts[2]),
-                Some(normalize_slashes(parts[1])),
-            )
-        } else if code.starts_with('A') {
-            ("added", normalize_slashes(parts[1]), None)
-        } else if code.starts_with('D') {
-            ("deleted", normalize_slashes(parts[1]), None)
-        } else {
-            ("modified", normalize_slashes(parts[1]), None)
-        };
-
-        if crate::path_identity::is_runtime_metadata_path(Path::new(&path))
-            || path == ".git"
-            || path.starts_with(".git/")
-            || path.ends_with("/.DS_Store")
-            || path == ".DS_Store"
-        {
-            continue;
-        }
-        let (additions, deletions) = numstats.get(&path).copied().unwrap_or((0, 0));
-        items_map.insert(
-            path.clone(),
-            FileChangeItem {
-                path,
-                old_path,
-                status: status.into(),
-                additions,
-                deletions,
-                is_running: false,
-                nodes: if node.is_empty() {
-                    vec![]
-                } else {
-                    vec![node.into()]
-                },
-                execution_ids: if execution_id.is_empty() {
-                    vec![]
-                } else {
-                    vec![execution_id.into()]
-                },
-                source: Some("git".into()),
-            },
-        );
-    }
+    diff_args.push("--");
+    let diff = run_git(&diff_args).ok()?;
+    let mut items_map = git_diff::parse(&diff, node, execution_id)?;
+    items_map.retain(|path, _| {
+        !crate::path_identity::is_runtime_metadata_path(Path::new(path))
+            && path != ".git"
+            && !path.starts_with(".git/")
+            && !path.ends_with("/.DS_Store")
+            && path != ".DS_Store"
+    });
 
     // If comparing against live working tree (`after` is None), also collect untracked files.
     // Ignored ordinary project files are force-added to graph snapshots, so they are
@@ -1166,7 +1101,10 @@ pub fn compute_git_changes(
             if raw.is_empty() {
                 continue;
             }
-            let path = normalize_slashes(raw);
+            // `ls-files -z` already returns literal, slash-separated Git paths.
+            // Keep spaces and Unix backslashes just as the raw diff parser does;
+            // transcript/tool-path cleanup would rename these files on display.
+            let path = raw.to_string();
             if crate::workspace::is_generated_artifact(Path::new(&path))
                 || crate::path_identity::is_runtime_metadata_path(Path::new(&path))
                 || path == ".git"
@@ -1549,14 +1487,15 @@ pub fn get_cached_execution_changes(
 ) -> Option<FileChangeSummary> {
     let guard = cache().lock().ok()?;
     let key = (run_id.to_string(), execution.id.clone());
-    let log_part = guard.log_changes.get(&key);
-    let git_part = guard.git_changes.get(&key);
+    let log_part = guard.log_changes.get(&key).cloned();
+    let git_part = guard.git_changes.get(&key).cloned();
+    drop(guard);
     let is_running = execution.status == "running";
 
     let mut combined = match (log_part, git_part) {
-        (Some(l), Some(g)) => merge_summaries(&[l.clone(), g.clone()], is_running),
-        (Some(l), None) => l.clone(),
-        (None, Some(g)) => g.clone(),
+        (Some(l), Some(g)) => merge_summaries(&[l, g], is_running),
+        (Some(l), None) => l,
+        (None, Some(g)) => g,
         (None, None) => return None,
     };
 
@@ -1602,6 +1541,9 @@ pub fn get_cached_run_changes(state: &Snapshot) -> Option<FileChangeSummary> {
     if let Some(pub_changes) = guard.publication_changes.get(&state.run_id) {
         parts.push(pub_changes.clone());
     }
+    // Everything below operates on one owned snapshot. Large Run unions must
+    // not keep other Runs' streaming writers behind the global display cache.
+    drop(guard);
 
     if parts.is_empty() {
         return None;
@@ -1683,58 +1625,13 @@ fn merge_persisted_executions(
     persisted
 }
 
-/// Counts are tiny (paths, status and two integers), so a sidecar per Run
-/// removes the cold-start log replay without touching the event schema.
+mod persistence;
+
+/// Persist the per-Run sidecar without holding the global display cache over
+/// merging or I/O. Callers still retain their Run lifecycle lock: this remains
+/// synchronous with terminal settlement, not an asynchronously queued save.
 pub fn persist_run(root: &Path, run_id: &str) -> Result<(), String> {
-    let Some(path) = persisted_path(root, run_id) else {
-        return Ok(());
-    };
-    // Seed from the durable sidecar before overlaying this session's cache. A
-    // restarted process only replays the executions the live view happens to
-    // warm, so writing the in-memory cache alone would silently drop every
-    // earlier terminal summary that was never re-derived in this session.
-    let mut persisted = read_persisted(&path);
-    persisted.version = PERSISTED_CHANGES_VERSION;
-    {
-        let Ok(guard) = cache().lock() else {
-            return Ok(());
-        };
-        let mut per_execution: BTreeMap<String, Vec<FileChangeSummary>> = BTreeMap::new();
-        for ((run, execution_id), summary) in
-            guard.log_changes.iter().chain(guard.git_changes.iter())
-        {
-            if run == run_id {
-                per_execution
-                    .entry(execution_id.clone())
-                    .or_default()
-                    .push(summary.clone());
-            }
-        }
-        persisted = merge_persisted_executions(persisted, per_execution);
-        for ((run, planning_id), summary) in &guard.planning_changes {
-            if run == run_id {
-                persisted
-                    .planning
-                    .insert(planning_id.clone(), summary.clone());
-            }
-        }
-        if let Some(publication) = guard.publication_changes.get(run_id) {
-            persisted.publication = Some(publication.clone());
-        }
-    }
-    if persisted.executions.is_empty()
-        && persisted.planning.is_empty()
-        && persisted.publication.is_none()
-    {
-        return Ok(());
-    }
-    let bytes = serde_json::to_vec(&persisted).map_err(|error| error.to_string())?;
-    let directory = path.parent().ok_or("Invalid file-change path")?;
-    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
-    let temporary = path.with_file_name("changes.json.tmp");
-    fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-    fs::rename(&temporary, &path).map_err(|error| error.to_string())?;
-    Ok(())
+    persistence::persist(root, run_id)
 }
 
 /// Restore a persisted Run before any log replay, so loading a conversation
@@ -2038,6 +1935,10 @@ pub(crate) fn warm_scoped_changes(
 #[cfg(test)]
 #[path = "file_changes_cache_tests.rs"]
 mod cache_tests;
+
+#[cfg(test)]
+#[path = "file_changes/persistence_bench.rs"]
+mod persistence_bench;
 
 #[cfg(test)]
 mod tests {

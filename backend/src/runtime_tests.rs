@@ -1143,7 +1143,7 @@ fn messaging_completed_node_preserves_its_result_and_running_downstream() {
     let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
     assert!(
         matches!(replayed.events.last().unwrap().kind, EventKind::NodeMessaged {
-        ref node, ref instruction, images: ref saved,
+        ref node, ref instruction, images: ref saved, queued: false, ..
     } if node == "parent" && instruction == "new instruction" &&
         serde_json::to_value(saved).unwrap() == serde_json::to_value(&images).unwrap())
     );
@@ -2946,13 +2946,21 @@ fn resolved_preparation_is_not_a_completed_node_execution() {
     assert_eq!(runtime.state.executions[0].status, "resolved");
     assert_eq!(runtime.state.executions[0].after, None);
     assert_eq!(runtime.state.nodes["task"].status, "dirty");
-    // Resolving workspace preparation does not create a Pi conversation.
-    assert!(runtime.intervene("task", "continue").is_err());
+    // Resolving preparation does not create a Pi conversation. Passive input
+    // joins the original task without converting it into a stale continuation.
+    runtime.intervene("task", "continue").unwrap();
+    assert_eq!(runtime.state.executions.len(), 1);
+    assert_eq!(runtime.state.nodes["task"].pending_messages.len(), 1);
     let head = runtime.state.nodes["task"].head.clone().unwrap();
     let replayed = runtime.store.load(&runtime.state.run_id).unwrap();
     assert_eq!(replayed.executions[0].status, "resolved");
     assert_eq!(replayed.nodes["task"].status, "dirty");
-    assert_eq!(runtime.jobs().unwrap().remove(0).execution.before, head);
+    assert_eq!(replayed.nodes["task"].pending_messages.len(), 1);
+    let retry = runtime.jobs().unwrap().remove(0);
+    assert_eq!(retry.execution.before, head);
+    assert!(retry.task.starts_with("self-contained task"));
+    assert!(retry.task.contains("continue"));
+    assert!(!retry.continuation);
 }
 
 #[test]

@@ -60,7 +60,7 @@ assigning overlapping edits. Each node still has its own conversation.
 
 - Initial Planner commands run in your source project and can change files before approval. Rejecting a plan, stopping it or encountering a failure does **not** roll those writes back.
 - Git snapshots collect project files even when `.gitignore` matches them. Graph snapshots/history stay private and leave your branch and staging area unchanged. Final publication writes files only and creates no commit. Runtime internals and managed environment scopes are excluded; `.gitignore` is not a secret or artifact filter.
-- Bind an actual project directory, not your desktop. Keep large datasets and external resources outside the workspace; project bindings over 10 GB are rejected.
+- Bind an actual project directory, not your desktop. Keep large datasets and external resources outside the workspace; new project bindings and Runs over 15 GB are rejected. If an existing Run grows beyond the limit, it continues normally; the size warning appears after active Runs in that workspace finish.
 - Use trusted projects, extensions and tools. Private workspaces are not credential vaults. **Windows has no per-node filesystem sandbox**; macOS/Linux have private-execution access restrictions, but these are not a general malicious-code guarantee.
 
 Start with a disposable project and keep an independent backup of important work. Detailed access limits are in [Filesystem isolation](architecture/filesystem-isolation.md#platform-boundaries).
@@ -72,6 +72,7 @@ For Graph with **Auto Approve** off, inspect tasks and dependencies, then choose
 | What you want | Action and effect |
 | --- | --- |
 | Guide a running task | Send an instruction to that node's live conversation. |
+| Add input to a node that has not started or is waiting after feedback | Send a message to queue it. It accompanies the task/feedback turn when dependencies and scheduling allow; it does not start the node early or resume a paused Run. |
 | Add work to a completed node | Send a follow-up; it starts another execution using that node's own conversation. After publication, it edits the source directly. |
 | Change the overall plan | Send a Graph follow-up without selecting a node; the Planner revises the graph. |
 | Add a Graph node yourself | Right-click empty graph space and choose **New node**. Enter a name and task, optionally connecting a predecessor (`from`) and target (`to`), with feedback on the outgoing edge if enabled in Settings and needed. Saving validates the graph. Connecting to completed work requires confirmation and may rerun downstream results; feedback triggers rework only if applied. Pause or wait for affected running nodes first. An approved, unpaused Run starts new work when ready; a paused Run waits for **Continue**. |

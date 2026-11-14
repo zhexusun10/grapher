@@ -626,7 +626,7 @@ export const en: Record<string, string> = {
   "介入指令:": "Intervention instructions:",
   "用户已停止本次执行；可以修改消息或重新运行。": "Execution was stopped by the user. You can edit the message or rerun the task.",
   "所选目录「{0}」无法初始化为有效工作区。": "The selected directory \"{0}\" could not be initialized as a valid workspace.",
-  "工作区体积超过 10GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。": "The workspace size exceeds the 10GB limit. Move large files (such as datasets, model weights, or build caches) outside the directory, or select a deeper subfolder as the workspace.",
+  "工作区体积超过 15GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。": "The workspace size exceeds the 15GB limit. Move large files (such as datasets, model weights, or build caches) outside the directory, or select a deeper subfolder as the workspace.",
   "不能选择系统桌面作为项目工作区：Grapher 会强制把工作区内所有文件收录进 Git 快照（无视 .gitignore），而桌面通常包含大量无关个人数据，会让运行长时间卡住。请选择具体的项目或代码仓库目录。": "The system desktop cannot be selected as a project workspace. Grapher force-collects all workspace files into Git snapshots (ignoring .gitignore), and desktop folders typically contain personal data that causes runs to stall. Select a specific project or code repository directory instead.",
   "项目绑定已失效：{0}。原目录不存在、不可访问或不是绝对目录；请重新选择目录建立新绑定。": "The project binding is invalid: {0}. The original directory is missing, inaccessible, or not an absolute path. Select a directory again to create a new binding.",
   "项目绑定不可访问：{0}：{1}。请重新选择目录建立新绑定。": "The project binding is inaccessible: {0}: {1}. Select a directory again to create a new binding.",

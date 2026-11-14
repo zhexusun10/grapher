@@ -60,8 +60,12 @@ fn branch(source: &Path, base: &str, path: &Path, file: &str, content: &str) -> 
     .unwrap()
 }
 
+// The next five tests cover legacy private-Planner helpers, not production
+// Planner turns, which use source or an existing node workspace without a
+// separate Planner publication. Current lifecycle coverage lives in
+// backend/src/planner_workspace_tests.rs and backend/src/planner_review_tests.rs.
 #[test]
-fn private_planner_copies_dirty_and_ignored_files_without_modifying_source() {
+fn legacy_planner_helper_copies_dirty_and_ignored_files_without_modifying_source() {
     let temp = TempDir::new().unwrap();
     let (source, _) = repository(temp.path());
     fs::write(source.join("shared"), "dirty\n").unwrap();
@@ -90,7 +94,7 @@ fn private_planner_copies_dirty_and_ignored_files_without_modifying_source() {
 }
 
 #[test]
-fn private_planner_accepts_checked_out_gitlink_directories() {
+fn legacy_planner_helper_accepts_checked_out_gitlink_directories() {
     let temp = TempDir::new().unwrap();
     let (source, _) = repository(temp.path());
 
@@ -124,7 +128,7 @@ fn private_planner_accepts_checked_out_gitlink_directories() {
 }
 
 #[test]
-fn concurrent_planner_merges_preserve_source_on_conflict() {
+fn legacy_planner_helper_concurrent_merges_preserve_source_on_conflict() {
     let temp = TempDir::new().unwrap();
     let (source, initial) = repository(temp.path());
     let root = temp.path().join(".grapher-workspaces");
@@ -189,7 +193,7 @@ fn concurrent_planner_merges_preserve_source_on_conflict() {
 }
 
 #[test]
-fn planner_merger_repairs_preview_and_any_late_source_conflict() {
+fn legacy_planner_helper_repairs_preview_and_late_source_conflicts_privately() {
     for late_conflict in [false, true] {
         let temp = TempDir::new().unwrap();
         let (source, initial) = repository(temp.path());
@@ -246,7 +250,7 @@ fn planner_merger_repairs_preview_and_any_late_source_conflict() {
 }
 
 #[test]
-fn failed_planner_merger_preserves_preview_without_dirtying_source() {
+fn legacy_planner_helper_failed_merger_preserves_preview_without_dirtying_source() {
     let temp = TempDir::new().unwrap();
     let (source, _) = repository(temp.path());
     let run = "b44201e4-2c8b-4c80-b1a1-3e660a83c7b1";

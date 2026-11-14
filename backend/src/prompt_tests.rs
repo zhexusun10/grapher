@@ -6139,7 +6139,15 @@ fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
             task: "Feature QA verification task".into(),
         });
 
-    // Fallback computes from graph task
+    service.runtime.lock().unwrap().emit(EventKind::Steered {
+        execution_id: "feat-qa-execution".into(),
+        node: "feat_qa".into(),
+        instruction: "Keep the public API compatible".into(),
+        request_id: None,
+        images: None,
+    }).unwrap();
+
+    // Node fallback still computes from the target task, not publication steers.
     let fallback = get_merger_prompt(
         &serde_json::json!({"runId": run_id, "executionId": merger_id}),
         &service,
@@ -6149,6 +6157,20 @@ fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
         .as_str()
         .unwrap()
         .contains("Feature QA verification task"));
+    assert!(!fallback["prompt"].as_str().unwrap().contains("<user further request>"));
+
+    // Only a source-publication Merger receives the extra user requests.
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        runtime.state.mergers[0].node = "merger".into();
+        runtime.state.graph.original_goal = "Original goal".into();
+    }
+    let publication = get_merger_prompt(
+        &serde_json::json!({"runId": run_id, "executionId": merger_id}), &service,
+    ).unwrap();
+    let prompt = publication["prompt"].as_str().unwrap();
+    assert!(prompt.contains("Original goal\n\n<user further request>"));
+    assert!(prompt.contains("<user further request>\nKeep the public API compatible\n</user further request>"));
 
     // 3. When system-prompt.md is written to disk, it reads the disk file directly
     let session_dir = temp.path().join("mergers").join(merger_id);

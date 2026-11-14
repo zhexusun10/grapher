@@ -74,6 +74,14 @@ enum EventMetadata<'a> {
 /// response, so keep event identity, the Planner summary and the started
 /// Execution's identity, and drop the rest.
 fn metadata_event(event: &Event) -> Value {
+    // Recovery owns the full bound turn. Browser polls need only its identity,
+    // not another copy of the task, feedback notices and base64 image payloads.
+    if let EventKind::NodeInputBound { execution_id, .. } = &event.kind {
+        return json!({
+            "type": "node_input_bound", "execution_id": execution_id,
+            "sequence": event.sequence, "timestamp": event.timestamp,
+        });
+    }
     let Ok(mut value) = serde_json::to_value(event) else {
         return Value::Null;
     };
@@ -428,6 +436,29 @@ mod tests {
         assert!(events[1].get("config").is_none());
         assert_eq!(events[1]["planning_id"], "plan");
         assert!(events[1]["planning"].is_object());
+    }
+
+    #[test]
+    fn metadata_omits_recovery_input_without_mutating_durable_events() {
+        let event = Event {
+            sequence: 1, timestamp: 42,
+            kind: EventKind::NodeInputBound {
+                execution_id: "worker".into(), instruction: "complete recovery input".into(),
+                images: Some(vec![crate::model::ImageAttachment {
+                    r#type: "image".into(), mime_type: "image/png".into(),
+                    data: "a".repeat(8192), name: None,
+                }]),
+            },
+        };
+        let durable = serde_json::to_value(&event).unwrap();
+        let state = Snapshot { events: vec![event], ..Default::default() };
+        let metadata = snapshot_metadata(&state).unwrap();
+        assert_eq!(metadata["events"], json!([{
+            "type": "node_input_bound", "execution_id": "worker", "sequence": 1, "timestamp": 42,
+        }]));
+        assert_eq!(serde_json::to_value(&state.events[0]).unwrap(), durable);
+        assert_eq!(durable["instruction"], "complete recovery input");
+        assert_eq!(durable["images"][0]["data"].as_str().unwrap().len(), 8192);
     }
 
     #[test]

@@ -137,6 +137,37 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn save_detached_workspace(&self, record: &crate::cleanup::detached::Record) -> Result<(), String> {
+        let payload = serde_json::to_string(record).map_err(|e| e.to_string())?;
+        let _guard = store_write_guard()?;
+        self.connection.execute(
+            "INSERT INTO detached_workspaces(id,payload) VALUES(?1,?2)
+             ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+            params![record.id, payload],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub(crate) fn detached_workspaces(&self) -> Result<Vec<crate::cleanup::detached::Record>, String> {
+        let mut query = self.connection.prepare("SELECT id,payload FROM detached_workspaces ORDER BY id")
+            .map_err(|e| e.to_string())?;
+        let rows = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.map(|row| {
+            let (id, payload) = row.map_err(|e| e.to_string())?;
+            let record: crate::cleanup::detached::Record = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+            if record.id != id { return Err("Detached workspace identity mismatch".into()); }
+            Ok(record)
+        }).collect()
+    }
+
+    pub(crate) fn forget_detached_workspace(&self, id: &str) -> Result<(), String> {
+        let _guard = store_write_guard()?;
+        self.connection.execute("DELETE FROM detached_workspaces WHERE id=?1", [id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn pending_cleanups(&self) -> Result<Vec<Task>, String> {
         let mut statement = self
             .connection

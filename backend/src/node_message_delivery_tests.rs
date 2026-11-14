@@ -1,6 +1,76 @@
 use super::*;
 
 #[test]
+fn node_message_delivery_waiting_input_only_queues_even_during_planning() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = crate::fixture::repository(temp.path()).unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository": repository, "model": "mock/model", "engine": "pi", "postTaskReview": false,
+    })).unwrap();
+    let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+    runtime.state.run_id = Uuid::new_v4().to_string();
+    runtime.emit(EventKind::Created {
+        graph: Graph { original_goal: "original".into(), nodes: vec![Node { name: "task".into(), task: "original".into() }], edges: vec![] },
+        config, planning_id: None, planning: None,
+    }).unwrap();
+    runtime.approve().unwrap();
+    runtime.pause(true).unwrap();
+    let run_id = runtime.state.run_id.clone();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
+        planning: AtomicBool::new(true), extension: temp.path().join("unused.ts"),
+    });
+    assert!(control("intervene".into(), Some("task".into()), Some("wrong Run".into()),
+        Some("stale".into()), None, None, &service).is_err());
+    for planning in [true, false] {
+        service.planning.store(planning, Ordering::SeqCst);
+        let snapshot = control("intervene".into(), Some("task".into()), Some("extra input".into()),
+            Some(run_id.clone()), None, None, &service).unwrap();
+        assert!(snapshot.paused && snapshot.executions.is_empty());
+        assert_eq!(snapshot.nodes["task"].status, "waiting");
+        assert_eq!(snapshot.nodes["task"].instruction, "");
+        assert!(matches!(snapshot.events.last().unwrap().kind, EventKind::NodeMessaged { queued: true, .. }));
+        assert!(!service.driving.load(Ordering::SeqCst));
+        assert_eq!(*service.drive_signal.0.lock().unwrap(), 0);
+    }
+    assert_eq!(service.runtime.lock().unwrap().state.nodes["task"].pending_messages.len(), 2);
+
+    // A lost HTTP response may be retried before or after dispatch/restart.
+    // Request identity, not equal text, distinguishes a retry from a new turn.
+    let id = Uuid::new_v4().to_string();
+    let send = |id: &str, text: &str, images| control_with_request_id(
+        "intervene".into(), Some("task".into()), Some(text.into()),
+        Some(run_id.clone()), None, images, Some(id.into()), &service,
+    );
+    assert!(send("invalid-id", "extra input", None).is_err());
+    let accepted = send(&id, "extra input", Some(vec![])).unwrap();
+    let replay = send(&id, "extra input", None).unwrap();
+    assert_eq!(replay.events.len(), accepted.events.len());
+    assert_eq!(replay.nodes["task"].pending_messages.len(), 3);
+    assert!(send(&id, "changed payload", None).is_err());
+    let distinct = send(&Uuid::new_v4().to_string(), "extra input", None).unwrap();
+    assert_eq!(distinct.nodes["task"].pending_messages.len(), 4);
+    let dispatched_count = {
+        let mut runtime = service.runtime.lock().unwrap();
+        runtime.pause(false).unwrap();
+        let job = runtime.jobs().unwrap().remove(0);
+        assert_eq!(job.task.matches("extra input").count(), 4);
+        runtime.pause(true).unwrap();
+        runtime.state = runtime.store.load(&run_id).unwrap();
+        runtime.state.events.len()
+    };
+    // No live Pi is registered: a duplicate must return the durable receipt,
+    // not attempt an RPC or wake this paused Run after another event was added.
+    let replay = send(&id, "extra input", None).unwrap();
+    assert_eq!(replay.events.len(), dispatched_count);
+    assert!(replay.paused);
+    assert!(replay.nodes["task"].pending_messages.is_empty());
+    assert!(!service.driving.load(Ordering::SeqCst));
+    assert_eq!(*service.drive_signal.0.lock().unwrap(), 0);
+}
+
+#[test]
 fn node_message_delivery_stale_intervene_and_consecutive_steers_use_one_live_writer() {
     let temp = tempfile::tempdir().unwrap();
     let repository = crate::fixture::repository(temp.path()).unwrap();

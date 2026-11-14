@@ -161,7 +161,7 @@ Open **<http://127.0.0.1:1420>** (first launch compiles the Rust backend). For l
 3. **Watch or steer** — Graph runs start automatically by default (turn off **Auto Approve** before submitting to review and approve plans manually). Inspect live node logs and diffs, pause/resume nodes, or send mid-flight instructions at any time.
 4. **Verify delivery** — Shared-source runs edit your project live; isolated Graph batches publish verified results back to your codebase upon completion (preserving state for inspection or retry if publication fails).
 
-**System requirements:** Node.js 22.19+, stable Rust (for source builds), Git, npm, network access, and provider authentication. Windows requires Git for Windows Bash; macOS requires Xcode Command Line Tools (for Rust linking), uses the built-in Seatbelt sandbox for private Graph workspaces, and keeps the system awake during active runs (`GRAPHER_KEEP_AWAKE=0` to disable); Linux private Graph workspaces require `bubblewrap` with unprivileged user/mount/PID namespaces enabled.
+**System requirements:** Node.js 22.19+, stable Rust (for source builds), Git, npm, network access, and provider authentication. Windows requires Git for Windows Bash; macOS requires Xcode Command Line Tools (for Rust linking), uses the built-in Seatbelt sandbox for private Graph workspaces, and keeps the system awake while the backend runs, including when idle (`GRAPHER_KEEP_AWAKE=0` to disable); Linux private Graph workspaces require `bubblewrap` with unprivileged user/mount/PID namespaces enabled.
 
 > [!IMPORTANT]
 > **Security & Project Boundaries — Use trusted projects; start with a disposable one.**

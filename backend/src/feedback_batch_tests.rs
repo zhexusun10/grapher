@@ -262,6 +262,9 @@ fi
             "Retry the feedback batch after fixing the evidence Merger",
         )
         .unwrap();
+    assert_eq!(runtime.state.nodes["owner"].status, "blocked");
+    assert!(runtime.jobs().unwrap().is_empty(), "passive input must not unblock failed composition");
+    runtime.resume_node("owner").unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
     run(&mut runtime, &retry).unwrap();
     assert!(Path::new(&retry.execution.worktree)

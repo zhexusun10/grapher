@@ -587,6 +587,9 @@ mod prompt_tests;
 #[path = "service_cache_tests.rs"]
 mod service_cache_tests;
 #[cfg(test)]
+#[path = "detached_cleanup_service_tests.rs"]
+mod detached_cleanup_service_tests;
+#[cfg(test)]
 #[path = "service_responsiveness_tests.rs"]
 mod service_responsiveness_tests;
 #[cfg(test)]
@@ -856,6 +859,9 @@ fn save_graph(
 ) -> Result<Snapshot, String> {
     if service.driving.load(Ordering::SeqCst) || service.planning.load(Ordering::SeqCst) {
         return Err("Wait for the current operation to finish".into());
+    }
+    if run_id.is_none() {
+        crate::workspace::validate_admission(std::path::Path::new(&config.repository))?;
     }
     let mut runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     if let Some(expected) = run_id {
@@ -2170,7 +2176,11 @@ fn plan_goal_internal_with_options(
                     .clone();
                 let repository = PathBuf::from(&config.repository);
                 let repo_str = repository.to_string_lossy().to_string();
-                crate::workspace::validate_binding(&repository).map_err(|e| (e, None))?;
+                if revision_run_id.is_none() {
+                    crate::workspace::validate_admission(&repository).map_err(|e| (e, None))?;
+                } else {
+                    crate::workspace::validate_binding(&repository).map_err(|e| (e, None))?;
+                }
                 let lock = source_lock(&repository).map_err(|e| (e, None))?;
                 {
                     let _source_guard = lock.lock().map_err(|e| (e.to_string(), None))?;
@@ -3645,7 +3655,7 @@ fn drive(service: Arc<Service>) {
                                 // Like node dispatch and Merger continuations,
                                 // publication captures this Run's latest model selection.
                                 runtime.state.effective_config().ok_or("Missing config")?,
-                                runtime.state.graph.original_goal.clone(),
+                                publication_driver::merger_query(&runtime.state),
                                 runtime
                                     .state
                                     .publication
@@ -3691,8 +3701,8 @@ fn drive(service: Arc<Service>) {
                     {
                         let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
                         if runtime.batch_workspaces() && runtime.state.phase == "completed" {
-                            if let Err(error) = runtime.cleanup_worktrees() {
-                                eprintln!("Cannot clean completed batch workspaces: {error}");
+                            if let Err(error) = runtime.defer_cleanup_worktrees() {
+                                eprintln!("Cannot retire completed batch workspaces: {error}");
                             }
                         }
                     }
@@ -4086,12 +4096,14 @@ fn node_steer_recorded(
     let Some(id) = request_id else { return Ok(false) };
     let Some(existing) = state.events.iter().find_map(|event| match &event.kind {
         EventKind::Steered { request_id: Some(request_id), execution_id, node, instruction, images } if request_id == id =>
-            Some((execution_id, node, instruction, images)),
+            Some((Some(execution_id), node, instruction, images)),
+        EventKind::NodeMessaged { request_id: Some(request_id), node, instruction, images, queued: true } if request_id == id =>
+            Some((None, node, instruction, images)),
         _ => None,
     }) else { return Ok(false) };
     let normalized_images = images.as_ref().filter(|items| !items.is_empty());
     if node != Some(existing.1.as_str()) || instruction.map(str::trim) != Some(existing.2.as_str())
-        || execution_id.is_some_and(|execution_id| execution_id != existing.0)
+        || execution_id.is_some_and(|execution_id| existing.0.is_some_and(|bound| execution_id != bound))
         || serde_json::to_value(existing.3.as_ref().filter(|items| !items.is_empty())).ok() != serde_json::to_value(normalized_images).ok() {
         return Err("Steer request ID was already used for another message".into());
     }
@@ -4417,8 +4429,17 @@ fn control_with_request_id(
     // transparently steer that writer instead of rejecting or overwriting it.
     let (action, execution_id) = if action == "intervene" {
         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-        // This action may previously have been routed to a live Steer. Replay
-        // its ID before considering the node's new (possibly settled) state.
+        // Preserve the existing selected-Run API when no identity was supplied,
+        // but recheck an explicit identity atomically with queue acceptance.
+        if run_id.as_deref().is_some_and(|id| id != runtime.state.run_id) {
+            return Err("Run changed while messaging node".into());
+        }
+        if request_id.as_deref().is_some_and(|id|
+            Uuid::parse_str(id).map(|uuid| uuid.to_string() != id).unwrap_or(true)) {
+            return Err("Invalid steer request ID".into());
+        }
+        // Replay passive acceptance or a live Steer before consulting the
+        // node's new state: a lost response cannot dispatch the same turn twice.
         if node_steer_recorded(&runtime.state, request_id.as_deref(), node.as_deref(), execution_id.as_deref(), instruction.as_deref(), &images)? {
             return Ok(runtime.state.clone());
         }
@@ -4427,6 +4448,16 @@ fn control_with_request_id(
         }) {
             ("steer".to_string(), Some(running.id.clone()))
         } else {
+            if runtime.queue_waiting_node_message(
+                node.as_deref().unwrap_or_default(),
+                instruction.as_deref().unwrap_or_default(),
+                images.clone(),
+                request_id.clone(),
+            )? {
+                // No drive/unpause: this input belongs to the next normal
+                // dispatch, including while a Planner revision holds the Run.
+                return Ok(runtime.state.clone());
+            }
             if service.planning.load(Ordering::SeqCst) {
                 return Err("Wait for planning to finish".into());
             }
@@ -5018,8 +5049,14 @@ fn edit_node(
 
 fn detect_repository(
     path: Option<String>,
+    service: &Arc<Service>,
 ) -> Result<Option<crate::workspace::RepositoryInfo>, String> {
-    crate::workspace::detect(path.as_deref().map(std::path::Path::new))
+    crate::workspace::detect_with_size_check(path.as_deref().map(std::path::Path::new), |path| {
+        match idle_workspace_size_error(service, path, crate::workspace::cached_check_workspace_size)? {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    })
 }
 
 fn reset_workspace(service: &Arc<Service>) -> Result<Snapshot, String> {
@@ -5167,20 +5204,25 @@ fn delete_workspace(repository: String, service: &Arc<Service>) -> Result<Vec<St
 }
 
 fn retry_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
-    let tasks = service
-        .runtime
-        .lock()
-        .map_err(|error| error.to_string())?
-        .store
-        .pending_cleanups()?;
+    let (root, tasks) = {
+        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+        (runtime.root.clone(), runtime.store.pending_cleanups()?)
+    };
+    // Deleted Run IDs cannot be reused; detached receipts can only remove their
+    // unique retired paths. Neither needs to hold a live Run's mutex during I/O.
+    let store = crate::store::Store::open(&root.join("events.sqlite"))?;
     for task in tasks {
-        let target = if task.manifest.sequence.is_some() {
-            match service_for_run(service, &task.run_id, false) {
-                Ok(target) => target,
-                Err(_) => service.clone(),
+        if task.manifest.sequence.is_none() || store.run_was_deleted(&task.run_id)? {
+            if let Err(error) = crate::cleanup::attempt(&root, &store, &task) {
+                eprintln!("[Grapher] Pending cleanup {}: {error}", task.run_id);
             }
-        } else {
-            service.clone()
+            continue;
+        }
+        let target = match service_for_run(service, &task.run_id, false) {
+            Ok(target) => target,
+            // Never substitute a different Run's mutex for ownership. A busy
+            // or temporarily unavailable service retains its task for retry.
+            Err(_) => continue,
         };
         if task.manifest.sequence.is_some()
             && (target.driving.load(Ordering::SeqCst) || target.planning.load(Ordering::SeqCst))
@@ -5193,11 +5235,11 @@ fn retry_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
         {
             continue;
         }
-        if let Err(error) = runtime.retry_cleanup(&task.run_id) {
+        if let Err(error) = runtime.retry_cleanup_deferred(&task.run_id) {
             eprintln!("[Grapher] Pending cleanup {}: {error}", task.run_id);
         }
     }
-    Ok(())
+    crate::cleanup::detached::drain(&root, &store)
 }
 
 fn recover_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
@@ -5838,8 +5880,8 @@ fn get_merger_prompt(
     }
     if let Some(merger) = runtime.state.mergers.iter().find(|m| m.id == execution_id) {
         let target_node_name = merger.node.strip_prefix("merge:").unwrap_or(&merger.node);
-        let target_task = if target_node_name == "merger" {
-            runtime.state.graph.original_goal.clone()
+        let target_task = if merger.node == "merger" {
+            publication_driver::merger_query(&runtime.state)
         } else {
             runtime
                 .state
@@ -6211,22 +6253,12 @@ pub fn dispatch(
                 .transpose()?,
             service,
         )?),
-        "repository_status" => {
-            let repository: String = argument(&body, "repository")?;
-            let path = std::path::Path::new(&repository);
-            let error = crate::workspace::validate_binding(path).err();
-            // Only a binding whose directory no longer exists is safe to forget
-            // automatically. Permission/read failures and non-directories keep
-            // their explicit error and stay visible for the user to repair.
-            let missing = path.is_absolute()
-                && path
-                    .metadata()
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-            Ok(
-                serde_json::json!({ "repository": repository, "valid": error.is_none(), "missing": missing, "error": error }),
-            )
-        }
-        "detect_repository" => to_value(detect_repository(argument(&body, "path")?)?),
+        "repository_status" => Ok(repository_status(
+            service,
+            argument(&body, "repository")?,
+            crate::workspace::cached_check_workspace_size,
+        )?),
+        "detect_repository" => to_value(detect_repository(argument(&body, "path")?, service)?),
         "pick_repository" => to_value(crate::workspace::pick_repository()?),
         "list_files" => to_value(list_files(service, argument(&body, "repository").ok())?),
         // Versioned command names deliberately have no legacy fallback: older
@@ -6281,6 +6313,80 @@ pub fn dispatch(
         }
     }
     Ok(value)
+}
+
+/// Include background conversations and the entire driver (preparation through
+/// publication), not just whichever Run the browser currently displays.
+fn workspace_has_active_run(primary: &Arc<Service>, repository: &str) -> Result<bool, String> {
+    let root = primary.runtime.lock().map_err(|e| e.to_string())?.root.clone();
+    let mut services: Vec<_> = RUN_SERVICES
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&root)
+        .into_iter()
+        .flat_map(|runs| runs.values())
+        .filter_map(Weak::upgrade)
+        .collect();
+    services.push(primary.clone());
+    // Never retain the registry lock while inspecting a Run. A busy projection
+    // conservatively defers this advisory check until the next status poll.
+    for service in services {
+        let runtime = match service.runtime.try_lock() {
+            Ok(runtime) => runtime,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(true),
+            Err(error) => return Err(error.to_string()),
+        };
+        if runtime.state.config.as_ref().is_some_and(|config|
+            same_repository_binding(&config.repository, repository))
+            && (service.driving.load(Ordering::SeqCst)
+                || service.planning.load(Ordering::SeqCst)
+                || runtime.active()
+                || runtime.state.phase == "planning")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Re-check activity after a slow scan: a Run could start while it was in flight.
+fn idle_workspace_size_error(
+    service: &Arc<Service>,
+    path: &std::path::Path,
+    check_size: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<Option<String>, String> {
+    let repository = path.to_string_lossy();
+    if workspace_has_active_run(service, &repository)? {
+        return Ok(None);
+    }
+    let error = check_size(path).err();
+    if error.is_some() && workspace_has_active_run(service, &repository)? {
+        return Ok(None);
+    }
+    Ok(error)
+}
+
+fn repository_status(
+    service: &Arc<Service>,
+    repository: String,
+    check_size: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<serde_json::Value, String> {
+    let path = std::path::Path::new(&repository);
+    let mut error = crate::workspace::validate_binding(path).err();
+    let mut size_limit_exceeded = false;
+    if error.is_none() {
+        error = idle_workspace_size_error(service, path, check_size)?;
+        size_limit_exceeded = error.is_some();
+    }
+    // Only missing directories may be forgotten automatically; size and
+    // permission errors retain the binding and its conversations.
+    let missing = path.is_absolute()
+        && path.metadata().is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+    Ok(serde_json::json!({
+        "repository": repository, "valid": error.is_none(), "missing": missing,
+        "error": error, "sizeLimitExceeded": size_limit_exceeded,
+    }))
 }
 
 fn active_planning_service(primary: &Arc<Service>) -> Result<Arc<Service>, String> {
@@ -6542,6 +6648,7 @@ pub fn run() -> Result<(), String> {
                 if cleanup_stop.load(Ordering::SeqCst) {
                     return;
                 }
+                if crate::cleanup::detached::take_wakeup() { break; }
                 thread::sleep(std::time::Duration::from_millis(100));
             }
             if let Some(service) = cleanup_service.upgrade() {

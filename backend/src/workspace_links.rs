@@ -16,6 +16,17 @@ pub(crate) struct Topology {
 }
 
 impl Topology {
+    /// Match the legacy view JSON normalization, which removes every object
+    /// member named `security`, even in path-keyed maps. This is only identity
+    /// comparison; ordinary topology equality and materialization stay strict.
+    pub(crate) fn eq_for_view_identity(&self, other: &Self) -> bool {
+        let Self { aliases, outside } = self;
+        aliases.iter().filter(|(name, _)| name.as_str() != "security")
+            .eq(other.aliases.iter().filter(|(name, _)| name.as_str() != "security"))
+            && outside.iter().filter(|(name, _)| name.as_str() != "security")
+                .eq(other.outside.iter().filter(|(name, _)| name.as_str() != "security"))
+    }
+
     /// A nonempty topology needs physical reconstruction and verification.
     pub(crate) fn is_empty(&self) -> bool {
         self.aliases.is_empty() && self.outside.is_empty()

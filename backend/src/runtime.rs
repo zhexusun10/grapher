@@ -442,7 +442,7 @@ impl Runtime {
             .and_then(|execution| execution.metrics.clone())
     }
 
-    /// Persist the tiny per-Run file-change summary after durable terminal
+    /// Persist the per-Run file-change summary after durable terminal
     /// events, so reopening a conversation never replays its logs for counts.
     fn persist_file_changes_if(&self, terminal: bool) {
         if !terminal {
@@ -837,29 +837,21 @@ impl Runtime {
     /// Keep sessions for follow-ups, but persist workspace cleanup before any
     /// removal. Failed cleanup is retried without relying on a source binding.
     pub fn cleanup_worktrees(&self) -> Result<(), String> {
+        self.cleanup_worktrees_inner(false)
+    }
+
+    /// Completion retires paths under the Run lock; recursive deletion belongs
+    /// to the background cleanup worker, with independent durable receipts.
+    pub(crate) fn defer_cleanup_worktrees(&self) -> Result<(), String> {
+        self.cleanup_worktrees_inner(true)
+    }
+
+    fn cleanup_worktrees_inner(&self, defer: bool) -> Result<(), String> {
         if self.state.run_id.is_empty() {
             return Ok(());
         }
-        if self.batch_workspaces()
-            && (self.active() || !self.state.pending_feedback.is_empty()
-                || self.state.nodes.values().any(|node| node.status != "completed")
-                || self.state.executions.iter().any(|execution| {
-                    execution.status == "completed"
-                        && self.state.nodes.contains_key(&execution.node)
-                        && !self.state.superseded_execution_ids.contains(&execution.id)
-                        && execution.after.as_ref().is_some_and(|head|
-                            !head.is_empty() && !self.state.published_heads.contains(head))
-                })) {
-            return Ok(());
-        }
-        // Managed launchable results retain their fixed layout, resources and
-        // immutable evidence until explicit conversation deletion.
-        if self
-            .state
-            .config
-            .as_ref()
-            .and_then(|c| c.environment.as_ref())
-            .is_some()
+        if (self.batch_workspaces() && self.active())
+            || crate::cleanup::retains_workspaces(&self.state)
         {
             return Ok(());
         }
@@ -873,7 +865,18 @@ impl Runtime {
             ..Default::default()
         };
         self.store.enqueue_cleanup(&self.state.run_id, &manifest)?;
-        self.retry_cleanup(&self.state.run_id)
+        if defer {
+            self.retry_cleanup_deferred(&self.state.run_id)
+        } else {
+            self.retry_cleanup(&self.state.run_id)
+        }
+    }
+
+    pub(crate) fn retry_cleanup_deferred(&self, run_id: &str) -> Result<(), String> {
+        if let Some(task) = self.store.cleanup_task(run_id)? {
+            crate::cleanup::retire_workspaces(&self.root, &self.store, &task)?;
+        }
+        Ok(())
     }
 
     pub fn retry_cleanup(&self, run_id: &str) -> Result<(), String> {
@@ -2795,7 +2798,38 @@ impl Runtime {
             node: node.into(),
             instruction: instruction.trim().into(),
             images,
+            queued: false,
+            request_id: None,
         })
+    }
+
+    /// Waiting/invalidated nodes already have scheduled work. Add input without
+    /// turning it into a continuation of stale files or waking a paused Run.
+    pub(crate) fn queue_waiting_node_message(
+        &mut self,
+        node: &str,
+        instruction: &str,
+        images: Option<Vec<ImageAttachment>>,
+        request_id: Option<String>,
+    ) -> Result<bool, String> {
+        let state = self.state.nodes.get(node).ok_or("Select a node")?;
+        if !matches!(state.status.as_str(), "waiting" | "dirty" | "blocked") {
+            return Ok(false);
+        }
+        if !self.state.approved {
+            return Err("Approve the graph before updating a node".into());
+        }
+        if instruction.trim().is_empty() {
+            return Err("Enter an instruction for the node".into());
+        }
+        self.emit(EventKind::NodeMessaged {
+            node: node.into(),
+            instruction: instruction.trim().into(),
+            images,
+            queued: true,
+            request_id,
+        })?;
+        Ok(true)
     }
 
     pub fn intervene(&mut self, node: &str, instruction: &str) -> Result<(), String> {
@@ -2810,6 +2844,9 @@ impl Runtime {
     ) -> Result<(), String> {
         if instruction.trim().is_empty() {
             return Err("Enter an instruction for the node".into());
+        }
+        if self.queue_waiting_node_message(node, instruction, images.clone(), None)? {
+            return Ok(());
         }
         if !self.state.executions.iter().any(|execution| {
             execution.node == node && (execution.after.is_some() || execution.status == "failed")
@@ -3271,18 +3308,62 @@ impl Runtime {
             }
         }
         for event in &self.state.events {
-            if let EventKind::Invalidated {
-                target,
-                instruction,
-                ..
-            } = &event.kind
-            {
-                if target == node && sequences.contains(&event.sequence) {
-                    parts.push(instruction.clone());
-                }
+            match &event.kind {
+                EventKind::Invalidated { target, instruction, .. }
+                | EventKind::NodeMessaged { node: target, instruction, queued: true, .. }
+                    if target == node && sequences.contains(&event.sequence) => {
+                        parts.push(instruction.clone());
+                    }
+                _ => {}
             }
         }
         parts.join("\n")
+    }
+
+    /// Only callers that proved the previous input was unstarted may use this
+    /// binding. Started/Prepared by themselves are not consumption receipts.
+    fn bound_node_input(&self, previous: &Execution) -> Option<(String, Option<Vec<ImageAttachment>>)> {
+        self.state.events.iter().rev().find_map(|event| match &event.kind {
+            EventKind::NodeInputBound { execution_id, instruction, images }
+                if execution_id == &previous.id => Some((instruction.clone(), images.clone())),
+            _ => None,
+        })
+    }
+
+    /// Legacy dispatches have no complete input binding. Rebuild both active
+    /// follow-ups and passive additions by claim identity, never by equal text.
+    fn claimed_node_messages(&self, previous: &Execution) -> Vec<PendingNodeMessage> {
+        let attempts: BTreeSet<_> = self.state.executions.iter().rev()
+            .filter(|execution| execution.node == previous.node
+                && !self.state.superseded_execution_ids.contains(&execution.id))
+            .skip_while(|execution| execution.id != previous.id)
+            .take_while(|execution| matches!(execution.status.as_str(), "failed" | "resolved")
+                && execution.pid.is_none() && execution.output_bytes == 0)
+            .map(|execution| execution.id.as_str()).collect();
+        let sequences: BTreeSet<_> = self.state.events.iter().filter_map(|event| match &event.kind {
+            EventKind::Started { execution, message_sequences, .. }
+                if attempts.contains(execution.id.as_str()) => message_sequences.as_ref(),
+            _ => None,
+        }).flatten().copied().collect();
+        self.state.events.iter().filter_map(|event| match &event.kind {
+            EventKind::NodeMessaged { node, instruction, images, queued: true, .. }
+            | EventKind::Invalidated { target: node, instruction, images, human: true, .. }
+                if node == &previous.node && sequences.contains(&event.sequence) => Some(PendingNodeMessage {
+                    sequence: event.sequence, instruction: instruction.clone(), images: images.clone(),
+                    source_direct: false, shared_workspace: false,
+                }),
+            _ => None,
+        }).collect()
+    }
+
+    fn instruction_is_queued(&self, node: &str, messages: &[PendingNodeMessage]) -> bool {
+        let directive = self.state.events.iter().rev().find(|event| match &event.kind {
+            EventKind::Invalidated { target, instruction, .. } => target == node && !instruction.is_empty(),
+            EventKind::ConversationEdited { target, .. } => target == node,
+            EventKind::FeedbackContinuationQueued { node: target, .. } => target == node,
+            _ => false,
+        });
+        directive.is_some_and(|event| messages.iter().any(|message| message.sequence == event.sequence))
     }
 
     /// Post-publication conversations with a completed node edit the user's source
@@ -3739,13 +3820,8 @@ impl Runtime {
                     .unwrap_or_else(|| source_head.clone())
             };
             let feedback_undelivered = undelivered_feedback_turns.contains(&node.name);
-            let retained_images = self.state.nodes[&node.name].feedback_continuation.as_ref()
-                .filter(|_| feedback_undelivered)
-                .and_then(|input| input.images.clone()).unwrap_or_default();
-            let queued_prompt = self.state.nodes[&node.name].pending_prompt_after_images(retained_images.len());
-            let message_sequences = self.state.nodes[&node.name]
-                .pending_messages
-                .iter()
+            let mut queued_messages = self.state.nodes[&node.name].pending_messages.clone();
+            let message_sequences = queued_messages.iter()
                 .map(|message| message.sequence)
                 .collect::<Vec<_>>();
             let resolved_private = self.retained_private_continuation(&node.name)
@@ -3754,7 +3830,7 @@ impl Runtime {
                 .as_ref().is_some_and(|input| !input.dispatched);
             let continuation = !feedback_rebase
                 && (self.state.nodes[&node.name].continuation || resolved_private)
-                && queued_prompt.is_none();
+                && !self.state.node_has_pending_followup(&node.name);
             // Pi writes the session file when it creates the conversation, before
             // the first turn. A startup failure (process exit, extension load
             // error, interrupted preparation) leaves the execution's session
@@ -3977,10 +4053,29 @@ impl Runtime {
                 || failed_before_session
                 || preparation_recovery
                 || missing_initial_session;
+            // Feedback descendants have their own Pi delivery boundary. Other
+            // unstarted turns recover the complete dispatch, including feedback
+            // target instructions, edits and every already-claimed user input.
+            let recover_input = (initial_recovery || fallback_anchor.is_some() || unstarted_followup)
+                && !feedback_rebase
+                && self.state.nodes[&node.name].feedback_continuation.is_none()
+                && self.state.nodes[&node.name].edit_execution_id.is_none();
+            let input_previous = recover_input.then(|| self.state.executions.iter().rev().find(|execution| {
+                execution.node == node.name && !self.state.superseded_execution_ids.contains(&execution.id)
+            })).flatten().filter(|execution| matches!(execution.status.as_str(), "failed" | "resolved"));
+            let retry_input = input_previous.and_then(|previous| self.bound_node_input(previous));
+            if retry_input.is_none() {
+                if let Some(previous) = input_previous {
+                    queued_messages.extend(self.claimed_node_messages(previous));
+                    queued_messages.sort_by_key(|message| message.sequence);
+                    queued_messages.dedup_by_key(|message| message.sequence);
+                }
+            }
             let continuation = continuation
                 && !initial_recovery
                 && fallback_anchor.is_none()
-                && !unstarted_followup;
+                && !unstarted_followup
+                && queued_messages.is_empty();
             let preserved_workspace = workspace_resume
                 .filter(|previous| {
                     matches!(previous.status.as_str(), "failed" | "resolved")
@@ -4359,7 +4454,35 @@ impl Runtime {
                     })
                     .is_some_and(|first| first.id == anchor.id)
             });
-            let task = if feedback_rebase || feedback_undelivered {
+            let instruction_queued = self.instruction_is_queued(&node.name, &queued_messages);
+            let delivered_feedback = state.feedback_continuation.as_ref()
+                .is_some_and(|input| input.delivery_id.is_some()) && !feedback_undelivered && !feedback_rebase;
+            let retained_images = if let Some((_, images)) = &retry_input {
+                images.clone()
+            } else if feedback_rebase || feedback_undelivered {
+                state.feedback_continuation.as_ref().and_then(|input| input.images.clone())
+            } else if !instruction_queued && !delivered_feedback {
+                state.instruction_images.clone()
+            } else {
+                None
+            }.unwrap_or_default();
+            let queued_prompt = NodeState { pending_messages: queued_messages, ..Default::default() }
+                .pending_prompt_after_images(retained_images.len());
+            let instruction_with_queue = || match &queued_prompt {
+                Some((prompt, _)) if !state.instruction.is_empty() && !instruction_queued =>
+                    format!("{}\n\n{prompt}", state.instruction),
+                Some((prompt, _)) => prompt.clone(),
+                None => state.instruction.clone(),
+            };
+            let task = if let Some((instruction, _)) = &retry_input {
+                match &queued_prompt {
+                    // Preserve the initial-task/follow-up layout used before
+                    // complete input bindings were recorded.
+                    Some((prompt, _)) if failed_before_session => format!("{instruction}\n{prompt}"),
+                    Some((prompt, _)) => format!("{instruction}\n\n{prompt}"),
+                    None => instruction.clone(),
+                }
+            } else if feedback_rebase || feedback_undelivered {
                 let notice = state.feedback_continuation.as_ref()
                     .and_then(|input| input.instruction.as_deref())
                     .ok_or("Feedback continuation message is not configured")?;
@@ -4381,24 +4504,12 @@ impl Runtime {
             } else if fallback_anchor.is_some() || unstarted_followup {
                 // The failed follow-up never started; deliver its original
                 // instruction to the node's retained session instead.
-                state.instruction.clone()
+                instruction_with_queue()
             } else if failed_before_session {
                 // The failed attempt never sent anything to Pi, so the retained
                 // session slot starts with the node task, followed by the
                 // accepted human turn(s).
-                let followup = match &queued_prompt {
-                    Some((prompt, _))
-                        if !state.instruction.is_empty()
-                            && !state
-                                .pending_messages
-                                .iter()
-                                .any(|message| message.instruction == state.instruction) =>
-                    {
-                        format!("{}\n\n{prompt}", state.instruction)
-                    }
-                    Some((prompt, _)) => prompt.clone(),
-                    None => state.instruction.clone(),
-                };
+                let followup = instruction_with_queue();
                 if followup.is_empty() {
                     node.task.clone()
                 } else if edited_opening_turn {
@@ -4407,21 +4518,14 @@ impl Runtime {
                     format!("{}\n{}", node.task, followup)
                 }
             } else if let Some((prompt, _)) = &queued_prompt {
-                if resume.is_none() {
+                if resume.is_none() || initial_recovery {
                     // A Planner revision may have replaced the original task
                     // and session while these accepted turns were waiting.
                     format!("{}\n\n{prompt}", node.task)
-                } else if !state.instruction.is_empty()
-                    && !state
-                        .pending_messages
-                        .iter()
-                        .any(|message| message.instruction == state.instruction)
-                {
-                    // Pending feedback/history work is not replaced by the
-                    // human-message batch either.
-                    format!("{}\n\n{prompt}", state.instruction)
                 } else {
-                    prompt.clone()
+                    // Pending feedback/history work is not replaced by the
+                    // human-message batch either, including its image payload.
+                    instruction_with_queue()
                 }
             } else if continuation {
                 // The Pi continuation boundary restores the unfinished turn
@@ -4444,14 +4548,9 @@ impl Runtime {
             } else {
                 task.clone()
             };
-            let images = if feedback_undelivered {
-                let mut images = retained_images;
-                images.extend(queued_prompt.as_ref().and_then(|(_, images)| images.clone()).unwrap_or_default());
-                (!images.is_empty()).then_some(images)
-            } else {
-                queued_prompt.map(|(_, images)| images)
-                    .unwrap_or_else(|| state.instruction_images.clone())
-            };
+            let mut images = retained_images;
+            images.extend(queued_prompt.and_then(|(_, images)| images).unwrap_or_default());
+            let images = (!images.is_empty()).then_some(images);
             let feedback_source = self
                 .state
                 .graph
@@ -4687,6 +4786,11 @@ impl Runtime {
             let feedback_delivery_id = (state.feedback_continuation.is_some() && !continuation)
                 .then(|| execution.id.clone());
             let mut started = Vec::new();
+            if !continuation {
+                started.push(EventKind::NodeInputBound {
+                    execution_id: execution.id.clone(), instruction: task.clone(), images: images.clone(),
+                });
+            }
             if feedback_delivery_id.is_some() {
                 let mut input = self.state.nodes[&node.name].feedback_continuation.clone()
                     .expect("feedback continuation");

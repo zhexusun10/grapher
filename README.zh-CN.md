@@ -161,7 +161,7 @@ npm run dev
 3. **观察与实时干预** — Graph 默认自动批准并启动执行（如需先审阅计划，请在提交前关闭 **Auto Approve**）。执行中可随时查看节点日志与文件变更、暂停/继续节点，或直接向节点发送引导指令。
 4. **确认结果写回** — 共享源目录模式直接修改源项目；独立工作区批次在全部成功后自动将有效结果发布回代码库（若发布冲突或失败，会完整保留状态供检查与重试）。
 
-**环境依赖：** Node.js 22.19+、稳定版 Rust（仅源码构建需要）、Git、npm、网络与模型服务商认证。Windows 需安装 Git for Windows Bash；macOS 需安装 Xcode Command Line Tools（用于 Rust 链接），其 Graph 独立工作区使用系统内置 Seatbelt 沙箱，且运行期间默认保持系统唤醒（可通过 `GRAPHER_KEEP_AWAKE=0` 关闭）；Linux Graph 独立工作区需安装 `bubblewrap` 并开启非特权 user/mount/PID namespace。
+**环境依赖：** Node.js 22.19+、稳定版 Rust（仅源码构建需要）、Git、npm、网络与模型服务商认证。Windows 需安装 Git for Windows Bash；macOS 需安装 Xcode Command Line Tools（用于 Rust 链接），其 Graph 独立工作区使用系统内置 Seatbelt 沙箱，且后端运行期间（包括空闲时）默认保持系统唤醒（可通过 `GRAPHER_KEEP_AWAKE=0` 关闭）；Linux Graph 独立工作区需安装 `bubblewrap` 并开启非特权 user/mount/PID namespace。
 
 > [!IMPORTANT]
 > **安全与项目边界 — 请在可信项目上使用，首次体验建议先用可丢弃的测试项目。**

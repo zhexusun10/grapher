@@ -37,6 +37,8 @@ The **Harness settings** card groups **Hide Auto mode**, plan approval, post-tas
 
 The runtime's terminal `Final response` suffix is Markdown, not JSONL: preserve JSON code, blank lines and indentation until the next explicit transcript source boundary. Suppress the entire fallback when the structured assistant reply is loaded; when older pages recover that reply, retire only its matching fallback copy, not genuine repeated messages. [Transcript regressions](../../scripts/transcript-cache.test.ts) cover full, incremental and paged replay, including fenced JSON followed by feedback control markers.
 
+Markdown tables render inline code as unboxed monospace text, without a background, border, rounded corners or extra padding inside cells. This applies to both answers and reasoning; prose inline code and fenced code blocks retain their existing styling and copy behavior.
+
 Tool cards and their headers do not change appearance on hover; click-to-expand, keyboard focus and copy-button feedback remain enabled.
 
 A reasoning card opens at its newest line. Scrolling stays inside a reasoning or tool card while it has room, then chains vertically to the conversation at the edge; only the latter stops outer bottom-following. Reopening reasoning resets to the newest line. Expansion keeps composer focus and does not move a reader who has scrolled away.

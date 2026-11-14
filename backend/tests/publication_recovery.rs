@@ -128,7 +128,13 @@ fn crash_after_checkout_before_completion_reuses_the_internal_result_and_preserv
 
 #[test]
 fn partial_checkout_recovers_additions_deletions_and_modified_files_without_a_commit() {
-    let (temp, source, base) = source(false);
+    for sha256 in [false, true] {
+        check_partial_checkout_recovery(sha256);
+    }
+}
+
+fn check_partial_checkout_recovery(sha256: bool) {
+    let (temp, source, base) = source(sha256);
     let before_index = fs::read(index(&source)).unwrap();
     let before_objects = objects(&source);
     let path = temp.path().join("node");
@@ -473,9 +479,28 @@ fn sha256_delivery_keeps_all_new_objects_private() {
     let (temp, source, base) = source(true);
     let before_index = fs::read(index(&source)).unwrap();
     let before_objects = objects(&source);
-    let heads = [node(&source, &base, &temp.path().join("node"), "sha256\n")];
+    let path = temp.path().join("node");
+    workspace::prepare(&source, &path, &base, &[]).unwrap();
+    git(&path, &["config", "fastimport.unpackLimit", "0"]);
+    fs::write(path.join("file.txt"), "sha256\n").unwrap();
+    // Cross the small-blob batch boundary and force packed private objects,
+    // independently of the host's global Git unpack-limit configuration.
+    for index in 0..130 {
+        fs::write(path.join(format!("batch-{index:04}.bin")), format!("unique bytes {index}\0\r\n")).unwrap();
+    }
+    let heads = [workspace::snapshot_node(&path, &source, "worker").unwrap()];
+    let metadata = PathBuf::from(git(&path, &["rev-parse", "--absolute-git-dir"]));
+    assert!(fs::read_dir(metadata.join("objects/pack")).unwrap().any(|entry| {
+        entry.unwrap().path().extension().is_some_and(|extension| extension == "pack")
+    }));
     let result = publish(&source, &heads, |_| panic!()).unwrap();
     assert_eq!(result.len(), 64);
+    for index in 0..130 {
+        assert_eq!(
+            fs::read(source.join(format!("batch-{index:04}.bin"))).unwrap(),
+            format!("unique bytes {index}\0\r\n").as_bytes()
+        );
+    }
     assert_private(&source, &base, &result, &before_index, &before_objects);
 }
 

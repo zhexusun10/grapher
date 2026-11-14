@@ -1177,6 +1177,16 @@ button.transcript-error-toggle {
   font-weight: 600;
 }
 
+/* The table grid already groups values; inline code needs no nested chip. */
+.markdown-content table code:not(pre code),
+.thinking-card-body .thinking-markdown table code:not(pre code) {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+}
+
 /* ==========================================================================
    Virtualized Transcript Component
    ========================================================================== */

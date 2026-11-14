@@ -326,7 +326,12 @@ mod workspace_guard_tests {
 
         // Over limit (150 bytes) fails with actionable message
         let err = check_workspace_size(&project, 150).unwrap_err();
-        assert!(err.contains("10GB"));
+        assert!(err.contains("15GB"));
+        assert_eq!(MAX_WORKSPACE_BYTES, 15 * 1024 * 1024 * 1024);
+        assert!(check_workspace_size(&project, 200).is_ok());
+        assert!(check_workspace_size(&project, 199).is_err());
+        // Size is admission policy, not a reason to invalidate a live binding.
+        assert!(validate_binding(&project).is_ok());
         assert!(err.contains("数据集"));
 
         // Files in .git and .grapher* are excluded from project size
@@ -384,7 +389,7 @@ fn is_desktop_workspace(
     roots.iter().any(|root| normalize(root) == target)
 }
 
-pub const MAX_WORKSPACE_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GB
+pub const MAX_WORKSPACE_BYTES: u64 = 15 * 1024 * 1024 * 1024; // 15 GB
 
 pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
     let mut total_bytes: u64 = 0;
@@ -416,7 +421,7 @@ pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
                 total_bytes = total_bytes.saturating_add(metadata.len());
                 if total_bytes > max_bytes {
                     return Err(
-                        "工作区体积超过 10GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。"
+                        "工作区体积超过 15GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。"
                             .to_string(),
                     );
                 }
@@ -426,20 +431,21 @@ pub fn check_workspace_size(root: &Path, max_bytes: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn cached_check_workspace_size(canonical_root: &Path) -> Result<(), String> {
+pub(crate) fn cached_check_workspace_size(root: &Path) -> Result<(), String> {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     static CACHE: Mutex<Option<HashMap<PathBuf, (Instant, Result<(), String>)>>> = Mutex::new(None);
 
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let now = Instant::now();
     let ttl = Duration::from_secs(30);
 
     {
         if let Ok(mut lock) = CACHE.lock() {
             let map = lock.get_or_insert_with(HashMap::new);
-            if let Some((timestamp, cached_res)) = map.get(canonical_root) {
+            if let Some((timestamp, cached_res)) = map.get(&canonical_root) {
                 if now.duration_since(*timestamp) < ttl {
                     return cached_res.clone();
                 }
@@ -447,7 +453,7 @@ fn cached_check_workspace_size(canonical_root: &Path) -> Result<(), String> {
         }
     }
 
-    let result = check_workspace_size(canonical_root, MAX_WORKSPACE_BYTES);
+    let result = check_workspace_size(&canonical_root, MAX_WORKSPACE_BYTES);
 
     if let Ok(mut lock) = CACHE.lock() {
         let map = lock.get_or_insert_with(HashMap::new);
@@ -472,9 +478,6 @@ fn prohibited_workspace_reason(candidate: &Path) -> Option<String> {
              而桌面通常包含大量无关个人数据，会让运行长时间卡住。请选择具体的项目或代码仓库目录。"
                 .to_string(),
         );
-    }
-    if let Err(reason) = cached_check_workspace_size(&probe) {
-        return Some(reason);
     }
     None
 }
@@ -1470,6 +1473,15 @@ pub fn pick_repository() -> Result<PickResult, String> {
 }
 
 pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
+    detect_with_size_check(target, cached_check_workspace_size)
+}
+
+/// Metadata refreshes for an already-running workspace may defer size policy;
+/// picker/new-binding callers use `detect` and always enforce admission.
+pub(crate) fn detect_with_size_check(
+    target: Option<&Path>,
+    check_size: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<Option<RepositoryInfo>, String> {
     let candidate = match target {
         Some(path) => {
             if !path.exists() {
@@ -1485,6 +1497,7 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
     if let Some(reason) = prohibited_workspace_reason(&candidate) {
         return Err(reason);
     }
+    check_size(&candidate)?;
 
     if is_standard_git(&candidate) {
         let top_level = match git(&candidate, &["rev-parse", "--show-toplevel"]) {
@@ -1537,6 +1550,19 @@ pub fn detect(target: Option<&Path>) -> Result<Option<RepositoryInfo>, String> {
 // Read-only hot paths use libgit2 rather than spawning Git for every node
 // state check. Leave mutations and uncommon porcelain states to Git CLI.
 fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
+    // Source/parent queries explicitly select the host-only shadow database.
+    // Recognize only these simple absolute bindings; relative paths, extra
+    // options and mutations keep their exact CLI behavior. Never discover the
+    // source's visible .git in place of the explicitly requested database.
+    let (explicit, args) = match args {
+        ["--git-dir", dir, "--work-tree", _, rest @ ..] if Path::new(dir).is_absolute() => {
+            (Some(*dir), rest)
+        }
+        ["--git-dir", dir, rest @ ..] if Path::new(dir).is_absolute() => {
+            (Some(*dir), rest)
+        }
+        _ => (None, args),
+    };
     let supported = matches!(
         args,
         ["rev-parse", "HEAD"]
@@ -1544,40 +1570,70 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
             | ["status", "--porcelain"]
             | ["diff", "--name-only", "--diff-filter=U"]
             | ["merge-base", "--is-ancestor", _, _]
-    ) || matches!(args, ["rev-parse", spec] if spec.starts_with("refs/grapher/"));
+    ) || matches!(args, ["rev-parse", spec] if spec.starts_with("refs/grapher/"))
+        || matches!(args, ["rev-parse", "--verify", spec]
+            if explicit.is_some() && spec.starts_with("refs/grapher/"));
     if !supported {
         return None;
     }
-    // A visible project .git and the backend graph repository are independent.
-    // Never let this optimization accidentally inspect the agent's HEAD/index.
-    if private_git_dir(cwd).is_some() {
-        return None;
+    let private = explicit.map(PathBuf::from).or_else(|| private_git_dir(cwd));
+    if private.is_some() {
+        // libgit2 does not implement Git's replacement/graft semantics. Only
+        // direct HEAD/ref reads are equivalent here, not ancestry or revision
+        // expressions. A slot's empty conflict index is also safe to inspect;
+        // arbitrary explicit repositories keep CLI's worktree/index checks.
+        let direct_ref = match args {
+            ["rev-parse", spec] | ["rev-parse", "--verify", spec] => {
+                *spec == "HEAD" || git2::Reference::is_valid_name(spec)
+            }
+            _ => false,
+        };
+        let slot_conflicts = explicit.is_none()
+            && args == ["diff", "--name-only", "--diff-filter=U"];
+        if !direct_ref && !slot_conflicts {
+            return None;
+        }
     }
-    let repo = git2::Repository::open(cwd).ok()?;
+    let repo = match &private {
+        Some(metadata) => git2::Repository::open_ext(
+            metadata,
+            // --git-dir must identify this database, never a nested .git or
+            // an ancestor checkout discovered from a malformed metadata path.
+            git2::RepositoryOpenFlags::NO_SEARCH | git2::RepositoryOpenFlags::NO_DOTGIT,
+            &[] as &[&std::ffi::OsStr],
+        ),
+        None => git2::Repository::open(cwd),
+    }.ok()?;
     // Git status/diff invoked from a subdirectory are scoped to that path;
     // libgit2 reports repository-wide results unless a pathspec is supplied.
     if matches!(
         args,
         ["status", "--porcelain"] | ["diff", "--name-only", "--diff-filter=U"]
-    ) && !repo
-        .workdir()
-        .and_then(|dir| dir.canonicalize().ok())
-        .is_some_and(|workdir| crate::path_identity::same_path(&workdir, cwd))
+    ) && private.is_none()
+        && !repo
+            .workdir()
+            .and_then(|dir| dir.canonicalize().ok())
+            .is_some_and(|workdir| crate::path_identity::same_path(&workdir, cwd))
     {
         return None;
     }
     if args[0] == "rev-parse" {
         let (verify, spec) = match args {
             ["rev-parse", "HEAD"] | ["rev-parse", "--verify", "HEAD"] => (true, "HEAD"),
-            ["rev-parse", spec] if spec.starts_with("refs/grapher/") => (true, *spec),
+            ["rev-parse", spec] | ["rev-parse", "--verify", spec]
+                if spec.starts_with("refs/grapher/") => (true, *spec),
             _ => (false, ""),
         };
         if verify {
-            return Some(
-                repo.revparse_single(spec)
-                    .map(|object| object.id().to_string())
-                    .map_err(|e| e.to_string()),
-            );
+            let result = repo
+                .revparse_single(spec)
+                .map(|object| object.id().to_string())
+                .map_err(|e| e.to_string());
+            // Preserve CLI diagnostics and unsupported repository states.
+            if private.is_some() && result.is_err() {
+                return None;
+            }
+            return Some(result);
         }
     }
     if let ["merge-base", "--is-ancestor", ancestor, descendant] = args {
@@ -1675,6 +1731,11 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
             }
             Ok(paths.join("\n"))
         })();
+        // Nonempty conflicts need Git's path quoting and ordering. The common
+        // empty case is index-only, even with an independent visible .git.
+        if private.is_some() && !matches!(&result, Ok(paths) if paths.is_empty()) {
+            return None;
+        }
         return Some(result);
     }
     None
@@ -2042,8 +2103,16 @@ pub(crate) fn working_tree_git(repository: &Path, args: &[&str]) -> Result<Strin
     }
 }
 
+/// Admission for a new Run. Existing Runs use `validate_binding` so growth
+/// cannot interrupt scheduling, snapshotting, native tools or publication.
+pub fn validate_admission(repository: &Path) -> Result<(), String> {
+    validate_binding(repository)?;
+    cached_check_workspace_size(repository)
+}
+
 /// Read-only validation of the original binding. Never search, rebind, create a
 /// shadow repository, or resolve a missing path relative to the backend cwd.
+/// Size is deliberately excluded: it is not a live execution failure.
 pub fn validate_binding(repository: &Path) -> Result<(), String> {
     if !repository.is_absolute() || !repository.is_dir() {
         return Err(format!(
@@ -2364,11 +2433,11 @@ mod planner_symlink_tests {
     }
 }
 
-/// Snapshot the source into a private Planner checkout. The source lock is held
-/// only while taking this copy, never while Pi is running. Include ordinary
-/// project files, but never Git internals or Grapher data.
+/// Legacy private-Planner copy helper, retained for direct helper tests.
+/// Production Planner turns use source or an existing node workspace instead.
+/// Callers own source locking; this helper does not launch Pi.
 pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
-    // The Planner copies the live project, including dirty and ignored files.
+    // This helper copies the live project, including dirty and ignored files.
     // Capture that complete source explicitly instead of passing a raw user
     // HEAD that a dirty working tree could silently replace.
     let base = snapshot_repository(repository)?;
@@ -2453,8 +2522,9 @@ pub fn prepare_planner(repository: &Path, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Merge one Planner's private changes under the project's short publication
-/// lock. Without a resolver, preview conflicts fail without dirtying the source.
+/// Legacy private-Planner publication helper; not used by production planning.
+/// Callers own source locking. Without a resolver, preview conflicts fail
+/// without dirtying the source.
 pub fn publish_planner(
     repository: &Path,
     planner: &Path,
@@ -2467,8 +2537,9 @@ pub fn publish_planner(
     })
 }
 
-/// Resolve Planner conflicts in a private preview first, then publish the
-/// resolved snapshot. A late source conflict is repaired in the source itself.
+/// Legacy private-Planner repair helper; not used by production planning.
+/// Resolve conflicts in private composition workspaces before files-only delivery,
+/// including late source conflicts; never repair directly in the source.
 pub fn publish_planner_with_merger(
     repository: &Path,
     planner: &Path,
@@ -3090,30 +3161,19 @@ fn snapshot_slot_to_ref_scoped(
     {
         return Err("Node snapshot requires a non-overlapping isolated workspace".into());
     }
-    // Keep one lock order for source/host refs and slot Git metadata. Node
-    // staging is part of the same host operation as its ref import.
-    let lock = host_ref_lock(&canonical_repo)?;
-    let _guard = lock.lock().map_err(|error| error.to_string())?;
+    // Scanning/staging/committing only changes this private slot. Do not hold
+    // the repository's ref lock while doing that work (or waiting for this
+    // slot): independent nodes must be able to finish their own snapshots.
+    // Keep the slot lease through import and view capture so its local ref,
+    // bytes and metadata cannot be rebound halfway through the handoff.
+    // Lock order is node slot -> host refs; host-ref owners must not enter a
+    // node slot. Preparation releases the host lock before acquiring its slot.
     let _lease = SlotGitGuard::acquire(&canonical_path)?;
     if !git(&canonical_path, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
         return Err("Unresolved merge conflicts remain".into());
     }
     let view_identity =
-        crate::workspace_view::node_identity_scoped(&canonical_path, &canonical_repo, exclusions)?;
-    if view_identity.is_some() {
-        crate::workspace_view::reject_undeliverable_special_changes(
-            &canonical_path,
-            &canonical_repo,
-        )?;
-    }
-    if exclusions.is_empty() && view_identity.is_some() {
-        crate::workspace_view::stage_project(
-            &canonical_path,
-            &private_git_dir(&canonical_path).unwrap_or_else(|| canonical_path.join(".git")),
-        )?;
-    } else {
-        stage_scoped_local(&canonical_path, exclusions)?;
-    }
+        crate::workspace_view::stage_node_snapshot(&canonical_path, &canonical_repo, exclusions)?;
     let current = git(&canonical_path, &["rev-parse", "HEAD"])?;
     let changed_view = view_identity.as_ref().is_some_and(|identity| {
         !crate::workspace_view::record_matches(&canonical_repo, &current, identity)
@@ -3148,6 +3208,11 @@ fn snapshot_slot_to_ref_scoped(
     let head_ref = format!("refs/grapher/heads/{head}");
     let head_refspec = format!("+refs/heads/grapher-node:{head_ref}");
     let node_refspec = format!("+refs/heads/grapher-node:{target_ref}");
+    // Only host-object/ref writes need to serialize with other imports and GC.
+    // The prepared inputs are already pinned; local staging above writes to
+    // the slot's own object database, never the shared alternate.
+    let lock = host_ref_lock(&canonical_repo)?;
+    let guard = lock.lock().map_err(|error| error.to_string())?;
     let shadow = if is_standard_git(&canonical_repo) {
         Some(ensure_graph_metadata(&canonical_repo)?)
     } else {
@@ -3188,11 +3253,17 @@ fn snapshot_slot_to_ref_scoped(
         args.push(&node_refspec);
         match git(&canonical_repo, &args) {
             Ok(_) => {
+                // The imported head is pinned before releasing GC protection.
+                // View capture publishes its own immutable record atomically;
+                // its full scan/copy must not serialize unrelated node imports.
+                // Completion still waits for capture to succeed.
+                drop(guard);
                 crate::workspace_view::capture_node_scoped(
                     &canonical_path,
                     &canonical_repo,
                     &head,
                     exclusions,
+                    view_identity.as_deref(),
                 )?;
                 return Ok(head);
             }
@@ -3272,10 +3343,11 @@ pub(crate) fn is_generated_artifact(relative: &Path) -> bool {
         return true;
     }
     relative.file_name().is_some_and(|name| {
-        let name = name.to_string_lossy().to_ascii_lowercase();
-        GENERATED_ARTIFACT_SUFFIXES
-            .iter()
-            .any(|suffix| name.ends_with(suffix))
+        let name = name.to_string_lossy();
+        GENERATED_ARTIFACT_SUFFIXES.iter().any(|suffix| {
+            name.get(name.len().saturating_sub(suffix.len())..)
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+        })
     })
 }
 
@@ -3305,11 +3377,14 @@ pub(crate) fn collection_excluded(
     // Other Runs may capture the source while an adjacent copy is in flight.
     // As with generated artifacts, an explicitly tracked project file wins
     // over the reserved-name convention.
-    if !tracked.contains(&relative.to_string_lossy().replace('\\', "/"))
-        && relative.file_name().and_then(|name| name.to_str())
+    // Most entries are ordinary project files. Check the cheap name predicate
+    // before allocating a normalized path and searching the tracked set.
+    if relative.file_name().and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix(".grapher-publish-"))
         .and_then(|name| name.strip_suffix(".tmp"))
-        .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit())) {
+        .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        && !tracked.contains(&relative.to_string_lossy().replace('\\', "/"))
+    {
         return true;
     }
     if exclusions

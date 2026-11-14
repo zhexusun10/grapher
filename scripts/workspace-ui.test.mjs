@@ -489,6 +489,80 @@ test("workspace removal commits backend deletion before pruning indexes and surv
   }
 });
 
+test("workspace size warning appears after background Run completion and stays dismissed", { timeout: 30_000 }, async () => {
+  const repository = "C:\\Projects\\Alpha";
+  const config = { repository, model: "test/model", maxParallel: 1, maxFeedback: 3 };
+  const sizeError = "工作区体积超过 15GB 限制。请将大型文件（例如数据集、模型权重或构建缓存）移至目录外，或进入更里层的子文件夹建立工作区。";
+  const state = {
+    runId: "background-run", config, planType: "graph", phase: "running",
+    graph: { originalGoal: "Background work", nodes: [], edges: [] }, nodes: {}, plan: null,
+    executions: [], mergers: [], events: [], approved: true, paused: false, base: "", feedbackCounts: {},
+  };
+  const info = { path: repository, name: "Alpha", branch: "main", head: "", clean: true };
+  const errors = [];
+  const controls = [];
+  const server = await createServer({ cacheDir: "node_modules/.vite-workspace-size-ui", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
+  let browser;
+  try {
+    await server.listen();
+    browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
+    const context = await browser.newContext({ locale: "en-US", reducedMotion: "reduce" });
+    await context.addInitScript(({ repository, config }) => {
+      localStorage.setItem("grapher_language_v1", "en");
+      localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Alpha", lastOpened: 1 }]));
+      localStorage.setItem("grapher_config", JSON.stringify(config));
+    }, { repository, config });
+    await context.route("**/api/*", async route => {
+      const command = new URL(route.request().url()).pathname.slice(5);
+      const body = route.request().postDataJSON();
+      const finished = state.phase === "completed";
+      let result;
+      switch (command) {
+        case "bootstrap": result = { config, snapshot: state, runs: [state.runId], repositoryInfo: info, dataPath: "/mock/.grapher" }; break;
+        case "snapshot": case "history": result = state; break;
+        case "snapshot_if_changed": result = { version: state.phase, snapshot: state }; break;
+        case "repository_status": result = { repository: body.repository, valid: !finished, error: finished ? sizeError : null, sizeLimitExceeded: finished }; break;
+        case "detect_repository": result = info; break;
+        case "list_plannings": result = []; break;
+        case "list_files": result = { files: [] }; break;
+        case "list_skills": result = { skills: [] }; break;
+        case "provider_auth": result = { providers: [], models: [], warning: null }; break;
+        case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+        case "environment_capabilities": result = { platform: "windows", arch: "x86_64", nativeWorkspace: true }; break;
+        case "control": controls.push(body); result = state; break;
+        default: errors.push(`Unexpected API: ${command}`); result = null;
+      }
+      await route.fulfill({ json: { result } });
+    });
+    const page = await context.newPage();
+    page.on("pageerror", error => errors.push(String(error)));
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}`, { waitUntil: "networkidle" });
+    const alert = page.locator(".floating-error-banner");
+    assert.equal(await alert.count(), 0);
+    const refreshStatus = async () => {
+      const response = page.waitForResponse("**/api/repository_status");
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await response;
+    };
+    state.phase = "publishing";
+    await refreshStatus();
+    assert.equal(await alert.count(), 0, "publication still belongs to the active Run");
+    state.phase = "completed";
+    await refreshStatus();
+    await alert.waitFor();
+    assert.match(await alert.textContent(), /15GB/);
+    await page.getByRole("button", { name: "Dismiss error", exact: true }).click();
+    await alert.waitFor({ state: "detached" });
+    await refreshStatus();
+    assert.equal(await alert.count(), 0, "unchanged polls must not reopen a dismissed warning");
+    assert.deepEqual(controls, [], "size status must never stop, cancel or pause a Run");
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser?.close();
+    await server.close();
+  }
+});
+
 test("removing active workspace returns to home landing page instead of switching to remaining workspace conversation", { timeout: 90_000 }, async () => {
   const repositoryA = "C:\\Projects\\Alpha";
   const repositoryB = "C:\\Projects\\Beta";

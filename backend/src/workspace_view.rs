@@ -9,6 +9,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod equality;
+mod file_scan;
+mod normalization;
+
+mod sha256_stage;
+
+#[cfg(test)]
+#[path = "workspace_view/scan_bench.rs"]
+mod scan_bench;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Entry {
@@ -59,7 +69,7 @@ pub(crate) struct View {
 // excluded, so two otherwise-equal project views compare equal.
 impl PartialEq for View {
     fn eq(&self, other: &Self) -> bool {
-        normalized_bytes(self).ok() == normalized_bytes(other).ok()
+        equality::equal(self, other)
     }
 }
 impl Eq for View {}
@@ -168,7 +178,13 @@ fn scan(
     entries: &mut BTreeMap<String, Entry>,
     git: bool,
 ) -> Result<(), String> {
-    let tracked = workspace::project_tracked_paths(root);
+    // Git metadata is scanned verbatim (apart from volatile lock files), not
+    // through project collection rules. Its walk never consults tracked paths.
+    let tracked = if git {
+        Default::default()
+    } else {
+        workspace::project_tracked_paths(root)
+    };
     scan_scoped(root, relative, entries, git, root, &[], &tracked)
 }
 /// A regular file observed by the directory walk whose content identity is
@@ -226,39 +242,7 @@ fn fill_file_entries(
         }
         return Ok(());
     }
-    let chunk = files.len().div_ceil(threads);
-    let resolved = std::thread::scope(|scope| {
-        let handles: Vec<_> = files
-            .chunks(chunk)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|file| {
-                            Ok((
-                                file.name.clone(),
-                                file_entry(&file.absolute, &file.metadata)?,
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, String>>()
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .map_err(|_| "Project scan worker failed".to_string())?
-            })
-            .collect::<Result<Vec<_>, String>>()
-    })?;
-    for chunk in resolved {
-        for (name, entry) in chunk {
-            entries.insert(name, entry);
-        }
-    }
-    Ok(())
+    file_scan::fill(entries, files, threads)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -574,18 +558,36 @@ fn git_roots(project: &Path) -> Result<Option<(PathBuf, PathBuf, bool, bool)>, S
             "Workspace capability gap: symbolic .git must resolve to a repository directory".into(),
         );
     }
-    let current = PathBuf::from(workspace::project_git(
+    // Both paths come from one repository discovery. Newlines are valid in
+    // Unix paths, so ambiguous output must use the original separate queries.
+    let combined = workspace::project_git(
         project,
-        &["rev-parse", "--absolute-git-dir"],
-    )?)
-    .canonicalize()
-    .map_err(|e| e.to_string())?;
-    let common = PathBuf::from(workspace::project_git(
-        project,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?)
-    .canonicalize()
-    .map_err(|e| e.to_string())?;
+        &[
+            "rev-parse", "--path-format=absolute", "--absolute-git-dir", "--git-common-dir",
+        ],
+    )
+    .ok()
+    .and_then(|output| {
+        let mut lines = output.split('\n');
+        let current = lines.next()?.trim_end_matches('\r');
+        let common = lines.next()?.trim_end_matches('\r');
+        (lines.next().is_none() && !current.is_empty() && !common.is_empty())
+            .then(|| (current.to_string(), common.to_string()))
+    });
+    let (current, common) = match combined {
+        Some(paths) => paths,
+        None => (
+            workspace::project_git(project, &["rev-parse", "--absolute-git-dir"])?,
+            workspace::project_git(
+                project,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )?,
+        ),
+    };
+    let current = PathBuf::from(current)
+        .canonicalize().map_err(|e| e.to_string())?;
+    let common = PathBuf::from(common)
+        .canonicalize().map_err(|e| e.to_string())?;
     Ok(Some((common, current, metadata.is_file(), link)))
 }
 fn inspect_git(
@@ -626,19 +628,23 @@ fn inspect_git(
     // guaranteed to resolve inside the private copy.
     let effective = workspace::project_git(
         project,
-        &["config", "--null", "--show-origin", "--list", "--includes"],
+        &[
+            "config", "--null", "--show-scope", "--show-origin", "--list", "--includes",
+        ],
     )?;
     let mut records = Vec::new();
     let mut fields = effective.split('\0');
-    while let Some(origin) = fields.next() {
-        if origin.is_empty() {
+    while let Some(scope) = fields.next() {
+        if scope.is_empty() {
             continue;
         }
-        let Some(record) = fields.next() else {
+        let (Some(origin), Some(record)) = (fields.next(), fields.next()) else {
             break;
         };
         let (key, value) = record.split_once('\n').unwrap_or((record, ""));
-        records.push((origin.to_string(), key.to_string(), value.to_string()));
+        records.push((
+            scope.to_string(), origin.to_string(), key.to_string(), value.to_string(),
+        ));
     }
     let origin_path = |origin: &str| -> Option<PathBuf> {
         let file = origin.strip_prefix("file:")?;
@@ -650,7 +656,7 @@ fn inspect_git(
         })
     };
     let directive = |key: &str| key == "include.path" || key.starts_with("includeif.");
-    for (origin, key, value) in &records {
+    for (_, origin, key, value) in &records {
         if !directive(key) {
             continue;
         }
@@ -680,7 +686,7 @@ fn inspect_git(
             continue;
         };
         let resolved = resolved.canonicalize().unwrap_or(resolved);
-        let matched = records.iter().any(|(input_origin, input_key, _)| {
+        let matched = records.iter().any(|(_, input_origin, input_key, _)| {
             !directive(input_key)
                 && origin_path(input_origin)
                     .map(|path| path.canonicalize().unwrap_or(path))
@@ -748,10 +754,14 @@ fn inspect_git(
                 .to_string_lossy()
                 .replace('\\', "/")
         };
-        let scope =
-            workspace::project_git(project, &["config", "--null", "--show-scope", "--get", key])
-                .unwrap_or_default();
-        let local = matches!(scope.split('\0').next(), Some("local" | "worktree"));
+        // `config --get` uses the last effective value. The includes-aware
+        // listing already records its scope, so do not spawn Git again just
+        // for local/worktree classification. Keep Git's --path query above:
+        // HOME/prefix expansion is Git's job, not a string substitution here.
+        let local = records
+            .iter().rev()
+            .find(|(_, _, input_key, _)| input_key == key)
+            .is_some_and(|(scope, _, _, _)| matches!(scope.as_str(), "local" | "worktree"));
         git_files.insert(name.into(), (reference, local));
     }
     let git_global = if is_bound(project) {
@@ -1059,6 +1069,15 @@ fn record_path(repository: &Path, head: &str) -> Result<PathBuf, String> {
 /// Windows re-derives on restore, so it must not distinguish otherwise-equal
 /// project views (for example the independent entries of one publication).
 fn normalized_bytes(view: &View) -> Result<Vec<u8>, String> {
+    normalization::bytes(view)
+}
+
+#[cfg(test)]
+fn legacy_normalized_bytes(view: &View) -> Result<Vec<u8>, String> {
+    encode_normalized_value(serde_json::to_value(view).map_err(|e| e.to_string())?)
+}
+
+fn encode_normalized_value(mut value: serde_json::Value) -> Result<Vec<u8>, String> {
     fn strip(value: &mut serde_json::Value) {
         match value {
             serde_json::Value::Object(map) => {
@@ -1087,19 +1106,30 @@ fn normalized_bytes(view: &View) -> Result<Vec<u8>, String> {
             }
         }
     }
-    let mut value = serde_json::to_value(view).map_err(|e| e.to_string())?;
     remove_git_index(&mut value);
     strip(&mut value);
     serde_json::to_vec(&value).map_err(|e| e.to_string())
 }
 
+/// Bind the checksum to this immutable borrow, not to a path or cached scan.
+/// Validation and persistence can share it without normalizing a large view
+/// twice; the borrow prevents the evidence from changing before it is saved.
+struct ViewRecord<'a> {
+    view: &'a View,
+    identity: String,
+}
+impl<'a> ViewRecord<'a> {
+    fn new(view: &'a View) -> Result<Self, String> {
+        Ok(Self { view, identity: node_view_identity(view)? })
+    }
+    fn save(&self, path: &Path) -> Result<(), String> {
+        let bytes = serde_json::to_vec(self.view).map_err(|e| e.to_string())?;
+        fs::write(path.join("view.json"), bytes).map_err(|e| e.to_string())?;
+        fs::write(path.join("checksum"), &self.identity).map_err(|e| e.to_string())
+    }
+}
 fn save(path: &Path, view: &View) -> Result<(), String> {
-    let bytes = serde_json::to_vec(view).map_err(|e| e.to_string())?;
-    let checksum = git2::Oid::hash_object(git2::ObjectType::Blob, &normalized_bytes(view)?)
-        .map_err(|e| e.to_string())?
-        .to_string();
-    fs::write(path.join("view.json"), bytes).map_err(|e| e.to_string())?;
-    fs::write(path.join("checksum"), checksum).map_err(|e| e.to_string())
+    ViewRecord::new(view)?.save(path)
 }
 fn load(path: &Path) -> Result<View, String> {
     let bytes = fs::read(path.join("view.json")).map_err(|e| format!("Missing complete project-view evidence: {e}; start a new Run (existing workspace retained)"))?;
@@ -1156,6 +1186,17 @@ fn copy_git(source: &Path, target: &Path) -> Result<(), String> {
 pub(crate) fn stage_project(path: &Path, metadata: &Path) -> Result<(), String> {
     let mut entries = BTreeMap::new();
     scan(path, Path::new(""), &mut entries, false)?;
+    stage_project_entries(path, metadata, entries)
+}
+
+/// Consume a fresh observation of this single-writer workspace. This is not a
+/// cache: the caller discards it after staging, and node completion still makes
+/// its independent post-import inspection before recording the result view.
+fn stage_project_entries(
+    path: &Path,
+    metadata: &Path,
+    mut entries: BTreeMap<String, Entry>,
+) -> Result<(), String> {
     let format = workspace::git(
         path,
         &[
@@ -1191,13 +1232,16 @@ pub(crate) fn stage_project(path: &Path, metadata: &Path) -> Result<(), String> 
         return stage_sha256(path, metadata, entries);
     }
     let repository = git2::Repository::open(metadata).map_err(|e| e.to_string())?;
-    let old_modes: BTreeMap<Vec<u8>, u32> = repository
-        .index()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(|entry| (entry.path, entry.mode))
-        .collect();
+    // Keep Git's index instead of duplicating every path/mode in another tree.
+    // Only Windows needs an old mode (its filesystem has no executable bit).
+    // Still open the index on every platform so unreadable evidence fails as
+    // before, rather than silently replacing a damaged index.
+    let old_index = repository.index().map_err(|e| e.to_string())?;
     let mut index = git2::Index::new().map_err(|e| e.to_string())?;
+    // Reuse the database handle throughout this staging pass. Entries came
+    // from this capture's fresh byte scan, never a prior execution's cache;
+    // stored objects still have their type and size checked below.
+    let odb = repository.odb().map_err(|e| e.to_string())?;
     for (name, entry) in entries {
         let (oid, mode) = match entry {
             Entry::Directory { .. } => continue,
@@ -1210,7 +1254,6 @@ pub(crate) fn stage_project(path: &Path, metadata: &Path) -> Result<(), String> 
                 // or grown file is still refused; the slot is single-writer, so a
                 // same-size rewrite cannot race the binding scan.
                 let oid = git2::Oid::from_str(&blob).map_err(|e| e.to_string())?;
-                let odb = repository.odb().map_err(|e| e.to_string())?;
                 let file = path.join(&name);
                 if odb.exists(oid) {
                     let (size, kind) = odb.read_header(oid).map_err(|e| e.to_string())?;
@@ -1255,7 +1298,16 @@ pub(crate) fn stage_project(path: &Path, metadata: &Path) -> Result<(), String> 
                 let executable = if cfg!(unix) {
                     mode & 0o111 != 0
                 } else {
-                    old_modes.get(name.as_bytes()) == Some(&0o100755)
+                    old_index.get_path(Path::new(&name), 0).and_then(|entry| {
+                        // Preserve the old byte-exact lookup even if libgit2's
+                        // ignore-case index finds a differently spelled entry.
+                        // Only that uncommon collision needs a linear search.
+                        if entry.path == name.as_bytes() {
+                            Some(entry)
+                        } else {
+                            old_index.iter().find(|entry| entry.path == name.as_bytes())
+                        }
+                    }).is_some_and(|entry| entry.mode == 0o100755)
                 };
                 (oid, if executable { 0o100755 } else { 0o100644 })
             }
@@ -1305,66 +1357,7 @@ fn stage_sha256(
     metadata: &Path,
     entries: BTreeMap<String, Entry>,
 ) -> Result<(), String> {
-    let mut input = Vec::new();
-    let prefix = [
-        "--git-dir",
-        metadata.to_str().ok_or("Invalid graph Git")?,
-        "--work-tree",
-        path.to_str().ok_or("Invalid project path")?,
-    ];
-    for (name, entry) in entries {
-        let (oid, mode) = match entry {
-            Entry::Directory { .. } => continue,
-            Entry::Special { .. } => continue,
-            Entry::File { mode, blob, .. } => {
-                let file = crate::native::host_path(&path.join(&name));
-                let mut args = prefix.to_vec();
-                args.extend([
-                    "hash-object",
-                    "-w",
-                    "--no-filters",
-                    "--",
-                    file.to_str().ok_or("Invalid file path")?,
-                ]);
-                let oid = workspace::git(path, &args)?;
-                if git2::Oid::hash_file(git2::ObjectType::Blob, &file)
-                    .map_err(|e| e.to_string())?
-                    .to_string()
-                    != blob
-                {
-                    return Err("Project changed while capturing SHA-256 bytes".into());
-                }
-                (
-                    oid,
-                    if cfg!(unix) && mode & 0o111 != 0 {
-                        "100755"
-                    } else {
-                        "100644"
-                    },
-                )
-            }
-            Entry::Link { target, .. } => {
-                let mut args = prefix.to_vec();
-                args.extend(["hash-object", "-w", "--no-filters", "--stdin"]);
-                let oid = workspace::git_bytes(path, &args, None, Some(target.value.as_bytes()))?;
-                (
-                    String::from_utf8(oid)
-                        .map_err(|e| e.to_string())?
-                        .trim()
-                        .into(),
-                    "120000",
-                )
-            }
-        };
-        input.extend_from_slice(format!("{mode} {oid}\t{name}\0").as_bytes());
-    }
-    let mut args = prefix.to_vec();
-    args.extend(["read-tree", "--empty"]);
-    workspace::git(path, &args)?;
-    let mut args = prefix.to_vec();
-    args.extend(["update-index", "-z", "--index-info"]);
-    workspace::git_bytes(path, &args, None, Some(&input))?;
-    Ok(())
+    sha256_stage::stage(path, metadata, entries)
 }
 
 pub(crate) fn has_record(source: &Path, head: &str) -> bool {
@@ -1386,7 +1379,7 @@ pub(crate) fn source_record_changed(
     if !has_record(source, head) {
         return Ok(false);
     }
-    Ok(normalized_bytes(&load(&record_path(source, head)?)?)? != normalized_bytes(view)?)
+    Ok(load(&record_path(source, head)?)? != *view)
 }
 
 /// Source edits and terminal heads can diverge after a node forks. Compare their
@@ -1460,12 +1453,10 @@ fn capture_source_view(
         Some(view) => view,
         None => inspect_scoped(source, source, exclusions)?,
     };
-    let identity = if identity.is_empty() {
-        view_identity(&view)?
-    } else {
-        identity.to_string()
-    };
-    if view_identity(&view)? != identity {
+    // Source snapshot identity uses raw bytes, not the normalized checksum of
+    // a saved view. Keep those contracts separate (including legacy records).
+    let observed_identity = view_identity(&view)?;
+    if !identity.is_empty() && observed_identity != identity {
         return Err("Source changed while capturing its workspace; retry preparation".into());
     }
     let target = record_path(source, head)?;
@@ -2807,8 +2798,8 @@ pub(crate) fn seal_prepared_scoped(
     let Some((view, inherited)) = observed else {
         return Ok(head);
     };
-    let identity = node_view_identity(&view)?;
-    if record_matches(source, &head, &identity) {
+    let record = ViewRecord::new(&view)?;
+    if record_matches(source, &head, &record.identity) {
         // Normalized identity intentionally ignores host-specific Git index
         // stat caches and security inheritance. Do not require byte-identical
         // evidence for an already recorded, equivalent view.
@@ -2819,7 +2810,7 @@ pub(crate) fn seal_prepared_scoped(
         // current view for that head instead of manufacturing a per-entry
         // commit, so every entry of one publication keeps the same code
         // reference (`code_ref == head == workspace HEAD`).
-        capture_node_view(path, source, &head, &view, inherited.as_deref(), true)?;
+        capture_node_view(path, source, &head, record, inherited.as_deref(), true)?;
         return Ok(head);
     }
     workspace::git(
@@ -2828,13 +2819,13 @@ pub(crate) fn seal_prepared_scoped(
             "commit",
             "--allow-empty",
             "-m",
-            &format!("snapshot\n\nworkspace-view:{identity}"),
+            &format!("snapshot\n\nworkspace-view:{}", record.identity),
         ],
     )?;
     // The binding commit moved HEAD and a recorded view embeds the project Git
     // metadata, so inspect the new head instead of reusing the earlier view.
     let head = workspace::git(path, &["rev-parse", "HEAD"])?;
-    capture_node_scoped(path, source, &head, exclusions)?;
+    capture_node_scoped(path, source, &head, exclusions, None)?;
     Ok(head)
 }
 
@@ -3131,7 +3122,7 @@ pub(crate) fn seal_composed_view(
         git_global,
     };
     set_source_keys(&mut composed, source);
-    capture_node_view(path, source, head, &composed, None, false)?;
+    capture_node_view(path, source, head, ViewRecord::new(&composed)?, None, false)?;
     Ok(Some(composed))
 }
 
@@ -3140,22 +3131,24 @@ pub(crate) fn verify_result(path: &Path, source: &Path, head: &str) -> Result<()
     verify_result_scoped(path, source, head, &[])
 }
 
-/// A view with untracked generated artifacts removed, so a comparison ignores
-/// the difference between a recorded view created before the generated-artifact
-/// policy existed and the current policy-filtered view. Tracked artifacts are
-/// authored content and stay in the comparison.
-fn without_generated(view: &View, tracked: &std::collections::BTreeSet<String>) -> View {
+/// Remove untracked generated artifacts from the caller-owned comparison view.
+/// Older records may include them; tracked artifacts remain authored content.
+/// Both verification views are freshly read and disposable, so filter in place
+/// rather than deep-cloning the whole tree again at every nested repository.
+/// No persisted evidence or shared/cached view is modified.
+fn strip_generated(view: &mut View, tracked: &std::collections::BTreeSet<String>) {
     let keep = |name: &str| {
         !(crate::workspace::is_generated_artifact(Path::new(name)) && !tracked.contains(name))
     };
-    let mut view = view.clone();
     view.entries.retain(|name, _| keep(name));
     view.hardlinks.retain(keep);
     view.repositories.retain(|name, nested| {
-        *nested = without_generated(nested, tracked);
-        keep(name)
+        if !keep(name) {
+            return false;
+        }
+        strip_generated(nested, tracked);
+        true
     });
-    view
 }
 
 pub(crate) fn verify_result_scoped(
@@ -3169,11 +3162,13 @@ pub(crate) fn verify_result_scoped(
         // stale or reclaimed head must not block a rebaseline.
         return Ok(());
     }
-    let (current, _) =
+    let (mut current, _) =
         node_view(path, source, exclusions)?.ok_or("Missing current project view")?;
-    let recorded = load(&record_path(source, head)?)?;
+    let mut recorded = load(&record_path(source, head)?)?;
     let tracked = workspace::project_tracked_paths(path);
-    if without_generated(&current, &tracked) != without_generated(&recorded, &tracked) {
+    strip_generated(&mut current, &tracked);
+    strip_generated(&mut recorded, &tracked);
+    if current != recorded {
         return Err("Completed project/Git metadata changed outside its recorded execution".into());
     }
     Ok(())
@@ -3186,6 +3181,41 @@ pub(crate) fn preparation_guard(path: &Path) -> Result<String, String> {
         .to_string())
 }
 
+/// Inspect and stage one node snapshot while the caller holds its slot lease.
+/// Unscoped staging uses the exact project entries just inspected for identity,
+/// rather than reading/hashing the whole tree again. Managed scopes retain the
+/// scoped Git collector (including removal of accidentally staged scope files).
+/// The final capture after import remains a separate fresh inspection.
+pub(crate) fn stage_node_snapshot(
+    path: &Path,
+    source: &Path,
+    exclusions: &[String],
+) -> Result<Option<String>, String> {
+    let observed = match node_view(path, source, exclusions)? {
+        Some((view, _)) => {
+            let identity = node_view_identity(&view)?;
+            reject_undeliverable_special_changes(path, source)?;
+            // Only project entries become staging inputs. Drop native Git
+            // metadata and topology here, before building the graph index.
+            Some((identity, view.entries))
+        }
+        None => None,
+    };
+    let Some((identity, entries)) = observed else {
+        workspace::stage_scoped_local(path, exclusions)?;
+        return Ok(None);
+    };
+    if exclusions.is_empty() {
+        let metadata = workspace::private_git_dir(path).unwrap_or_else(|| path.join(".git"));
+        stage_project_entries(path, &metadata, entries)?;
+    } else {
+        drop(entries);
+        workspace::stage_scoped_local(path, exclusions)?;
+    }
+    Ok(Some(identity))
+}
+
+#[cfg(test)]
 pub(crate) fn node_identity_scoped(
     path: &Path,
     source: &Path,
@@ -3226,16 +3256,30 @@ pub(crate) fn record_matches(source: &Path, head: &str, identity: &str) -> bool 
     })
 }
 
+/// Recheck the private node slot (`path`), not the live source directory.
+/// `source` identifies the binding and immutable evidence store; edits to its
+/// working files or native Git state must not invalidate a node's handoff.
 pub(crate) fn capture_node_scoped(
     path: &Path,
     source: &Path,
     head: &str,
     exclusions: &[String],
+    staged_identity: Option<&str>,
 ) -> Result<(), String> {
     let Some((view, inherited)) = node_view(path, source, exclusions)? else {
-        return Ok(());
+        return if staged_identity.is_some() {
+            Err("Node workspace view disappeared between staging and capture; retry snapshot".into())
+        } else {
+            Ok(())
+        };
     };
-    capture_node_view(path, source, head, &view, inherited.as_deref(), true)
+    let record = ViewRecord::new(&view)?;
+    // A fresh scan alone is not verification: a new record could otherwise
+    // bind changed bytes/metadata to the already-staged (older) Git tree.
+    if staged_identity.is_some_and(|identity| identity != record.identity) {
+        return Err("Node workspace changed between staging and capture; retry snapshot".into());
+    }
+    capture_node_view(path, source, head, record, inherited.as_deref(), true)
 }
 
 /// Record an immutable project view that the caller already inspected, avoiding
@@ -3246,10 +3290,11 @@ fn capture_node_view(
     path: &Path,
     source: &Path,
     head: &str,
-    view: &View,
+    record: ViewRecord<'_>,
     inherited: Option<&Path>,
     launchable: bool,
 ) -> Result<(), String> {
+    let view = record.view;
     let target = record_path(source, head)?;
     if target.exists() {
         if load(&target)? != *view {
@@ -3268,7 +3313,7 @@ fn capture_node_view(
     } else {
         copy_project_repositories(path, &pending, view)?;
     }
-    save(&pending, view)?;
+    record.save(&pending)?;
     if let Err(error) = fs::rename(&pending, &target) {
         // A concurrent writer may have published the same immutable record first.
         if target.exists() && load(&target).ok().as_ref() == Some(view) {
@@ -3429,7 +3474,12 @@ pub(crate) fn prepare_conflicts(source: &Path, path: &Path) -> Result<(), String
             Some(&bytes),
         )?;
         if removed.insert(name) {
-            input.extend_from_slice(format!("0 {}\t{name}\0", "0".repeat(oid.len())).as_bytes());
+            crate::workspace_git_index::append_index_info(
+                &mut input,
+                "0",
+                &"0".repeat(oid.len()),
+                name,
+            );
         }
         input.extend_from_slice(item.as_bytes());
         input.push(0);

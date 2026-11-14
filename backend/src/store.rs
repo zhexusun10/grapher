@@ -83,6 +83,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::Rejected => "rejected",
         EventKind::Started { .. } => "started",
         EventKind::Prepared { .. } => "prepared",
+        EventKind::NodeInputBound { .. } => "node_input_bound",
         EventKind::Steered { .. } => "steered",
         EventKind::SteersWithdrawn { .. } => "steers_withdrawn",
         EventKind::QueueWithdrawalRecorded { .. } => "queue_withdrawal_recorded",
@@ -116,6 +117,7 @@ fn event_execution_id(kind: &EventKind) -> Option<&str> {
             Some(&execution.id)
         }
         EventKind::Prepared { execution_id, .. }
+        | EventKind::NodeInputBound { execution_id, .. }
         | EventKind::ExecutionInputRecorded { execution_id, .. }
         | EventKind::ExecutionResultRecorded { execution_id, .. }
         | EventKind::PlannerWorkspaceSnapshotted { execution_id, .. }
@@ -187,6 +189,7 @@ impl Store {
             CREATE INDEX IF NOT EXISTS run_owned_target ON run_owned_directories(target,run_id);
             CREATE TABLE IF NOT EXISTS cleanup_tasks (run_id TEXT PRIMARY KEY, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT);
             CREATE TABLE IF NOT EXISTS workspace_cleanup_done (run_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS detached_workspaces (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS cleanup_sources (path TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS cleanup_state (key TEXT PRIMARY KEY);")
             .map_err(|error| error.to_string())?;
@@ -423,13 +426,14 @@ impl Store {
         {
             return self.append_logs(state, kinds);
         }
+        // Normal starts have no transcript to import and must stay in the
+        // transaction with their input bindings and message claims. Only the
+        // legacy nonempty-output forms need the single-event log path.
         if kinds.iter().any(|kind| {
-            matches!(
-                kind,
-                EventKind::Output { .. }
-                    | EventKind::Started { .. }
-                    | EventKind::MergerStarted { .. }
-            ) || matches!(kind, EventKind::Finished { output, .. } if !output.is_empty())
+            matches!(kind, EventKind::Output { .. })
+                || matches!(kind, EventKind::Started { execution, .. }
+                    | EventKind::MergerStarted { execution } if !execution.output.is_empty())
+                || matches!(kind, EventKind::Finished { output, .. } if !output.is_empty())
         }) {
             for kind in kinds {
                 self.append(state, kind)?;

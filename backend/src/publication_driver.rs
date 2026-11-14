@@ -2,6 +2,42 @@
 use super::*;
 use std::path::Path;
 
+/// Extra user context belongs only to source publication. Node preparation still
+/// passes its Job.task unchanged, and Merger continuations retain their own chat.
+pub(super) fn merger_query(state: &Snapshot) -> String {
+    let withdrawn = state.withdrawn_steer_sequences();
+    let planner_statuses: std::collections::BTreeMap<_, _> = state.events.iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::PlannerSteerStatus { planning_id, request_id, status, .. } =>
+                Some(((planning_id.as_str(), request_id.as_str()), status.as_str())),
+            _ => None,
+        }).collect();
+    let requests: Vec<String> = state.events.iter()
+        .filter(|event| !withdrawn.contains(&event.sequence))
+        .filter_map(|event| match &event.kind {
+            EventKind::Steered { execution_id, instruction, .. }
+                if !state.superseded_execution_ids.contains(execution_id)
+                    && !instruction.trim().is_empty() =>
+            {
+                Some(instruction.clone())
+            }
+            EventKind::PlannerSteerSubmitted { planning_id, request_id, instruction, .. }
+                if !instruction.trim().is_empty()
+                    && !matches!(planner_statuses.get(&(planning_id.as_str(), request_id.as_str())),
+                        Some(&"failed" | &"withdrawn" | &"handled")) =>
+            {
+                Some(instruction.clone())
+            }
+            _ => None,
+        }).collect();
+    if requests.is_empty() {
+        state.graph.original_goal.clone()
+    } else {
+        format!("{}\n\n<user further request>\n{}\n</user further request>",
+            state.graph.original_goal, requests.join("\n\n"))
+    }
+}
+
 pub(super) fn publish_batch(
     service: &Arc<Service>,
     root: &Path,
@@ -95,8 +131,8 @@ pub(super) fn publish_batch(
     events.push(EventKind::PublicationCompleted { head });
     runtime.emit_outputs(events)?;
     let batch_workspaces = runtime.batch_workspaces();
-    if let Err(error) = runtime.cleanup_worktrees() {
-        eprintln!("Cannot clean completed run worktrees: {error}");
+    if let Err(error) = runtime.defer_cleanup_worktrees() {
+        eprintln!("Cannot retire completed run worktrees: {error}");
     }
     drop(runtime);
     crate::file_changes::record_publication_git_changes(
@@ -121,4 +157,104 @@ pub(super) fn publish_batch(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Event, Graph};
+
+    fn steer(execution: &str, node: &str, instruction: &str) -> EventKind {
+        EventKind::Steered {
+            execution_id: execution.into(), node: node.into(), instruction: instruction.into(),
+            request_id: None, images: None,
+        }
+    }
+
+    fn planner_steer(id: &str, instruction: &str) -> EventKind {
+        EventKind::PlannerSteerSubmitted {
+            planning_id: "plan".into(), request_id: id.into(), instruction: instruction.into(), images: None,
+        }
+    }
+
+    fn planner_status(id: &str, status: &str) -> EventKind {
+        EventKind::PlannerSteerStatus {
+            planning_id: "plan".into(), request_id: id.into(), status: status.into(), error: None,
+        }
+    }
+
+    fn state(events: Vec<EventKind>) -> Snapshot {
+        Snapshot {
+            graph: Graph { original_goal: "Refactor login".into(), ..Default::default() },
+            events: events.into_iter().enumerate().map(|(index, kind)| Event {
+                sequence: index as i64 + 1, timestamp: 0, kind,
+            }).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn publication_steer_context_keeps_original_goal_and_ordered_request_text() {
+        let mut state = state(vec![]);
+        assert_eq!(merger_query(&state), "Refactor login");
+        state = self::state(vec![
+            planner_steer("first", "Keep the old API"),
+            steer("a-1", "a", "不要修改数据库 schema"),
+            planner_status("first", "consumed"),
+            steer("merge-1", "merger", "Preserve the source-side validation"),
+        ]);
+        let query = merger_query(&state);
+        assert_eq!(query, "Refactor login\n\n<user further request>\nKeep the old API\n\n不要修改数据库 schema\n\nPreserve the source-side validation\n</user further request>");
+        assert_eq!(state.graph.original_goal, "Refactor login");
+        let prompt = crate::graph_merge::merger_prompt(&query, crate::graph_merge::MergerConflicts::GIT);
+        assert!(prompt.contains(&query));
+        assert!(prompt.contains("context, not a task to execute"));
+        // Node preparation still gets only its own Job.task, even in a Run with steers.
+        let node_prompt = crate::graph_merge::merger_prompt("Prepare node C", crate::graph_merge::MergerConflicts::GIT);
+        assert!(!node_prompt.contains("<user further request>"));
+        assert!(node_prompt.contains("<workspace_objective>\nPrepare node C\n</workspace_objective>"));
+    }
+
+    #[test]
+    fn publication_steer_context_excludes_withdrawn_failed_and_superseded_requests() {
+        let mut state = state(vec![
+            steer("a-1", "a", "withdrawn node request"),
+            EventKind::SteersWithdrawn { execution_id: "a-1".into(), message_sequences: vec![1] },
+            steer("old-a", "a", "superseded node request"),
+            planner_steer("failed", "failed Planner request"),
+            planner_status("failed", "failed"),
+            planner_steer("withdrawn", "withdrawn Planner request"),
+            planner_status("withdrawn", "queued"),
+            planner_status("withdrawn", "withdrawn"),
+            planner_steer("handled", "extension command"),
+            planner_status("handled", "handled"),
+            steer("a-1", "a", "  "),
+            EventKind::Output { execution_id: "a-1".into(), text: "assistant output".into() },
+        ]);
+        state.superseded_execution_ids.push("old-a".into());
+        assert_eq!(merger_query(&state), state.graph.original_goal);
+        state.events.push(Event { sequence: 13, timestamp: 0, kind: steer("a-2", "a", "Keep this request") });
+        assert!(merger_query(&state).ends_with("<user further request>\nKeep this request\n</user further request>"));
+    }
+
+    #[test]
+    fn publication_steer_context_survives_replay_without_duplicate_requests() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut runtime = Runtime::open(temp.path()).unwrap();
+        runtime.emit(EventKind::Created {
+            graph: Graph { original_goal: "Refactor login".into(), ..Default::default() },
+            config: serde_json::from_value(serde_json::json!({
+                "repository": temp.path(), "model": "fixture",
+            })).unwrap(),
+            planning_id: None, planning: None,
+        }).unwrap();
+        runtime.emit(planner_steer("first", "Keep the old API")).unwrap();
+        runtime.emit(planner_status("first", "consumed")).unwrap();
+        runtime.emit(steer("a-1", "a", "Keep the schema")).unwrap();
+        let before = merger_query(&runtime.state);
+        let restored = runtime.store.load(&runtime.state.run_id).unwrap();
+        assert_eq!(merger_query(&restored), before);
+        assert_eq!(before.matches("Keep the old API").count(), 1);
+        assert_eq!(before.matches("Keep the schema").count(), 1);
+    }
 }

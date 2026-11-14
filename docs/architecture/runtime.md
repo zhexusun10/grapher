@@ -288,6 +288,23 @@ outgoing feedback edges receive the verdict protocol. Evidence:
 
 ### Durable node follow-up delivery
 
+Messages addressed to `waiting`, `dirty` or `blocked` nodes are passive queued
+input, including never-started nodes and feedback-invalidated descendants. The
+acceptance event does not change status, revision, workspace, feedback/history
+directives or pause state, and does not wake the driver. A selected node remains
+the message target even while the Planner is running. At the next normal dispatch,
+these inputs accompany the original task or feedback continuation in FIFO order;
+they never replace that work or bypass dependencies, approval or capacity. This
+is pre-start steering carried in the dispatch prompt, not a live RPC to a node
+that has no process yet. Passive additions do not disable recovery of a blocked
+preparation or an already-queued continuation, including a missing session fork.
+Queued `NodeMessaged` events retain the client's request ID: retries return the
+same durable acceptance even after dispatch or replay, while another ID with equal
+text is a distinct turn. Reusing an ID with a different payload is rejected.
+The browser uses that acceptance, not the latest unrelated event, to avoid
+unpausing a Run on a repeated acknowledgement. Legacy `NodeMessaged` events
+without `queued: true` remain record-only notes.
+
 Accepted human follow-ups are a per-node FIFO in the event-sourced projection,
 identified by event sequence rather than text. Equal messages are separate turns.
 The legacy `instruction` field is not the queue and later sends cannot overwrite
@@ -304,6 +321,19 @@ and its attached image range. The same durable `Started` event records the exact
 write removes nothing. Later messages cannot be consumed by an earlier claim.
 The browser uses this binding after reload and displays the shared response after
 all user turns in that batch, not between them.
+
+`NodeInputBound` commits the complete dispatch text and ordered images atomically
+with `Started`. When recovery proves that input never started, it resends that
+exact turn before any newer queued messages, without losing the task, feedback
+target instruction, historical edit or attachments. Pending directives keep their
+own images before queued images, whose labels use the combined image order.
+Browser metadata polls retain only the binding's event/execution identity, not
+a redundant copy of its prompt and image payload; durable events keep the complete
+input. A bound input is **not** proof of consumption or permission to replay an active
+turn; existing launch/session checks still gate recovery, and feedback descendants
+retain their stricter Pi delivery-boundary checks. Older dispatches without this
+binding reconstruct both active and passive messages from their event-sequence
+claims, never by text equality. Equal messages remain distinct ordered inputs.
 
 Pending turns survive checkpoints and restart; legacy checkpoints without queue
 metadata rebuild from business events without rewriting stored data. Startup
@@ -459,8 +489,25 @@ read is skipped when the cache cannot be sampled without waiting. The summary
 endpoint uses a separate read-only database connection and performs cold log
 parsing and Git diffs outside the Run mutex. Advancing a known empty parse over
 tool-free text is a non-blocking hint, so a busy display cache never stalls a
-text stream or another Run's event commit. Empty Git/Planner results are cache
-hits too, rather than reasons to repeat cold work on every poll.
+text stream or another Run's event commit. Git status and line counts come from
+one NUL-delimited `--raw --numstat` diff, so completion does not run comparison
+and rename detection twice; literal paths and rename destinations retain their
+matching counts. Untracked/ignored listings preserve the same literal spelling
+(including leading spaces and Unix backslashes), so staging a file does not
+change its displayed path or line counts. A failed or malformed diff is
+unavailable data, not an empty diff. Empty Git/Planner results are cache hits too, rather than reasons to
+repeat cold work on every poll.
+
+Sidecar persistence and display unions capture an owned cache snapshot, then
+release the process-wide display-cache mutex before merging large path sets.
+Sidecar JSON serialization and filesystem I/O also run without that cache lock.
+A per-canonical-data-root/Run gate serializes the complete sidecar read/merge/write
+so concurrent saves (including root aliases) cannot overwrite one another's
+history or race the shared temporary filename. Unloaded executions remain in the
+existing versioned `changes.json` format. Saves are still synchronous under the
+caller's Run lifecycle lock, not deferred work that can outlive Run deletion;
+this optimization does not move completion, feedback or cleanup boundaries.
+
 The visible conversation revalidates during live work and on durable snapshot
 changes with bounded, non-overlapping reads; scope changes cancel old readers and
 failed reads retain the last display projection rather than implying no changes.

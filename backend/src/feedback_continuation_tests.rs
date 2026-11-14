@@ -305,6 +305,81 @@ fn feedback_continuation_unset_wording_never_sends_a_placeholder_or_restarts_tas
 }
 
 #[test]
+fn feedback_continuation_queued_input_does_not_wake_or_reconfigure_dirty_nodes() {
+    for shared in [false, true] {
+        let (_temp, _source, mut runtime) = configured(shared);
+        let (_, review, _) = invalidate(&mut runtime, true);
+        runtime.pause(true).unwrap();
+        for name in ["owner", "review", "related", "later"] {
+            let mut expected = runtime.state.nodes[name].clone();
+            runtime.intervene_with_images(name, &format!("extra {name}"), Some(vec![ImageAttachment {
+                r#type: "image".into(), mime_type: "image/png".into(), data: name.into(), name: None,
+            }])).unwrap();
+            expected.pending_messages = runtime.state.nodes[name].pending_messages.clone();
+            assert_eq!(serde_json::to_value(&runtime.state.nodes[name]).unwrap(), serde_json::to_value(expected).unwrap(), "queue must preserve feedback/workspace/revision for {name}");
+        }
+        assert!(runtime.state.paused);
+        assert!(runtime.jobs().unwrap().is_empty());
+        let root = runtime.root.clone();
+        drop(runtime);
+        let mut runtime = Runtime::open(&root).unwrap();
+        runtime.pause(false).unwrap();
+        let repair = runtime.jobs().unwrap().remove(0);
+        assert_eq!(repair.execution.node, "owner");
+        assert!(repair.task.starts_with("Feedback:\nfix the issue"));
+        assert!(repair.task.contains("extra owner"));
+        assert!(runtime.jobs().unwrap().is_empty(), "dirty descendants must still wait for the repair");
+        assert_eq!(runtime.state.nodes["review"].pending_messages.len(), 1);
+        finish(&mut runtime, &repair, "repaired");
+        let rechecks = runtime.jobs().unwrap();
+        assert_eq!(rechecks.len(), 2);
+        for job in &rechecks {
+            assert!(job.task.contains("fixture:"));
+            assert!(job.task.contains(&format!("extra {}", job.execution.node)));
+            assert_eq!(job.images.as_ref().unwrap()[0].data, job.execution.node);
+            assert!(job.preserved_workspace.is_none());
+            if job.execution.node == "review" {
+                assert_eq!(job.session_fork.as_ref().unwrap().id, review.execution.id);
+            }
+            finish(&mut runtime, job, if job.feedback_source { "<ACCEPT>" } else { "done" });
+        }
+        let later = runtime.jobs().unwrap().remove(0);
+        assert_eq!(later.execution.node, "later");
+        assert!(later.task.starts_with("ORIGINAL later") && later.task.contains("extra later"));
+        assert!(later.resume_execution_id.is_none() && later.session_fork.is_none());
+    }
+}
+
+#[test]
+fn node_input_recovery_feedback_target_retains_queued_turn_across_restart() {
+    for shared in [false, true] {
+        let (_temp, _source, mut runtime) = configured(shared);
+        invalidate(&mut runtime, false);
+        runtime.intervene_with_images("owner", "extra repair constraint", Some(vec![ImageAttachment {
+            r#type: "image".into(), mime_type: "image/png".into(), data: "repair".into(), name: None,
+        }])).unwrap();
+        let repair = runtime.jobs().unwrap().remove(0);
+        assert_eq!(repair.execution.node, "owner");
+        assert!(repair.task.contains("extra repair constraint"));
+        let mut current = repair;
+        for _ in 0..2 {
+            runtime.finish(&current.execution, Err("failed before Pi accepted repair".into())).unwrap();
+            let root = runtime.root.clone();
+            drop(runtime);
+            runtime = Runtime::open(&root).unwrap();
+            runtime.resume_scheduling().unwrap();
+            runtime.resume_node("owner").unwrap();
+            let retry = runtime.jobs().unwrap().remove(0);
+            assert_eq!(retry.task, current.task);
+            assert_eq!(retry.images.as_ref().unwrap()[0].data, "repair");
+            assert_eq!(runtime.state.nodes["review"].status, "dirty", "retry cannot wake feedback descendants");
+            assert!(runtime.jobs().unwrap().is_empty());
+            current = retry;
+        }
+    }
+}
+
+#[test]
 fn feedback_continuation_keeps_queued_human_messages_even_after_wording_was_bound() {
     let (_temp, _source, mut runtime) = configured(true);
     invalidate(&mut runtime, false);
