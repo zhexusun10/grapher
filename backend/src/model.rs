@@ -3198,7 +3198,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 state.run_metrics = Some(state.compute_run_metrics());
                 return;
             }
-            state.publication = None;
+            // Runtime admits only a disjoint retained private writer during
+            // publication. Its message must not cancel the in-flight handoff
+            // or replace the publication generation/phase.
+            let publishing = matches!(state.phase.as_str(), "publishing" | "merging");
+            if !publishing {
+                state.publication = None;
+            }
             for name in nodes {
                 let never_executed = !state
                     .executions
@@ -3251,7 +3257,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 target_node.baseline_head = None;
                 target_node.shared_workspace = false;
             }
-            state.phase = if state.paused { "paused" } else { "running" }.into();
+            if !publishing {
+                state.phase = if state.paused { "paused" } else { "running" }.into();
+            }
         }
         EventKind::ConversationEdited {
             nodes,
@@ -3382,13 +3390,20 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             // A handoff delivers files, never claims unfinished nodes completed.
             state.phase = if state.batch_handoff.take().is_some() {
                 if !state.pending_feedback.is_empty()
-                    || state.nodes.values().any(|node| node.status != "completed") {
+                    || state.nodes.values().any(|node| {
+                        node.status != "completed"
+                            || node.head.as_ref().is_some_and(|head| {
+                                !head.is_empty() && !state.published_heads.contains(head)
+                            })
+                    })
+                {
                     state.publication = None;
                 }
                 "running"
             } else {
                 "completed"
-            }.into();
+            }
+            .into();
             state.paused = false;
         }
         EventKind::PublicationFailed { error } => {

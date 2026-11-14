@@ -799,3 +799,63 @@ fn tracked_managed_scope_is_detected_and_removed_from_the_index() {
     assert!(!workspace::has_tracked_scoped(&repository, &exclusions).unwrap());
     assert!(repository.join(".agent-home/AppData/config.json").is_file());
 }
+
+#[test]
+fn prepare_recovers_from_incomplete_or_unborn_private_git_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    workspace::git(&source, &["init", "-q"]).unwrap();
+    fs::write(source.join("keep.txt"), "base").unwrap();
+    workspace::git(&source, &["add", "-A"]).unwrap();
+    workspace::git(&source, &["commit", "-qm", "base"]).unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+
+    // 1. Interrupted right after allocate_private_git: only workspace-layout-v4 exists.
+    let allocated_only = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join("run")
+        .join("allocated-only");
+    fs::create_dir_all(&allocated_only).unwrap();
+    super::allocate_private_git(&allocated_only).unwrap();
+    assert!(workspace::private_git_dir(&allocated_only).is_some());
+    assert!(!workspace::has_private_git(&allocated_only));
+    workspace::prepare(&source, &allocated_only, &base, &[]).unwrap();
+    assert!(workspace::has_private_git(&allocated_only));
+    assert_eq!(
+        fs::read_to_string(allocated_only.join("keep.txt")).unwrap(),
+        "base"
+    );
+
+    // 2. Interrupted right after git init: HEAD exists as an unborn branch without a commit.
+    let unborn = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join("run")
+        .join("unborn");
+    fs::create_dir_all(&unborn).unwrap();
+    super::allocate_private_git(&unborn).unwrap();
+    workspace::git(&unborn, &["init", "-q"]).unwrap();
+    assert!(!workspace::has_private_git(&unborn));
+    workspace::prepare(&source, &unborn, &base, &[]).unwrap();
+    assert!(workspace::has_private_git(&unborn));
+    assert_eq!(fs::read_to_string(unborn.join("keep.txt")).unwrap(), "base");
+
+    // 3. Unsupported legacy metadata (HEAD without workspace-layout-v4) is still refused.
+    let legacy = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join("run")
+        .join("legacy");
+    fs::create_dir_all(&legacy).unwrap();
+    let metadata = legacy
+        .parent()
+        .unwrap()
+        .join(".grapher-git")
+        .join(super::graph_metadata_name("legacy").unwrap());
+    fs::create_dir_all(&metadata).unwrap();
+    fs::write(metadata.join("HEAD"), "ref: refs/heads/master\n").unwrap();
+    let error = workspace::prepare(&source, &legacy, &base, &[]).unwrap_err();
+    assert!(error.contains("Unsupported slot metadata"), "{error}");
+}

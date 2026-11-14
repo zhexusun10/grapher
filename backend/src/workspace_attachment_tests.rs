@@ -233,6 +233,33 @@ fn uploads_are_staged_per_run_and_delivered_only_to_their_owning_workspace() {
 }
 
 #[test]
+fn publication_allows_staged_private_attachments_but_not_source_uploads() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
+    let repo = temp.path().join("repo");
+    for private in [true, false] {
+        let (child, id) = run(&primary, &repo);
+        let tree = if private { temp.path().join("private") } else { repo.clone() };
+        start(&child, &tree);
+        child.runtime.lock().unwrap().emit(EventKind::WorkspaceIsolationSelected { isolated: private }).unwrap();
+        child.runtime.lock().unwrap().emit(EventKind::PublicationStarted {
+            repository: repo.to_string_lossy().into(), heads: vec!["other-node".into()],
+        }).unwrap();
+        let result = request(&primary, UPLOAD, upload(&repo, &id, Some("worker")));
+        if private {
+            let result = result.unwrap();
+            assert_eq!(result["staged"], true);
+            let path = result["path"].as_str().unwrap();
+            assert!(!tree.join(path).exists() && !repo.join(path).exists());
+        } else {
+            assert!(result.unwrap_err().contains("Wait for publication"));
+        }
+        assert!(request(&primary, UPLOAD, upload(&repo, &id, None)).is_err());
+        assert_eq!(child.runtime.lock().unwrap().state.phase, "publishing");
+    }
+}
+
+#[test]
 fn legacy_commands_are_rejected_without_writing_or_deleting_project_basenames() {
     let temp = tempfile::tempdir().unwrap();
     let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());

@@ -511,16 +511,67 @@ pub(crate) fn private_git_dir(path: &Path) -> Option<PathBuf> {
     Some(metadata)
 }
 
+fn git_dir_has_head_commit(cwd: &Path, git_dir: &Path) -> bool {
+    if !git_dir.join("HEAD").is_file() {
+        return false;
+    }
+    if let Ok(repo) = git2::Repository::open(git_dir) {
+        match repo.head() {
+            Ok(head) => {
+                if head.peel_to_commit().is_ok() {
+                    return true;
+                }
+            }
+            Err(error) if error.code() == git2::ErrorCode::UnbornBranch => return false,
+            Err(_) => {}
+        }
+    }
+    let Some(git_dir_str) = git_dir.to_str() else {
+        return false;
+    };
+    let Some(work_tree_str) = cwd.to_str() else {
+        return false;
+    };
+    run_git_bytes_allowing(
+        cwd,
+        &[
+            "--git-dir",
+            git_dir_str,
+            "--work-tree",
+            work_tree_str,
+            "rev-parse",
+            "--verify",
+            "-q",
+            "HEAD^{commit}",
+        ],
+        None,
+        None,
+        false,
+        &[],
+    )
+    .is_ok()
+}
+
 pub(crate) fn has_private_git(path: &Path) -> bool {
     let Ok(_lease) = SlotGitGuard::acquire(path) else {
         return false;
     };
     // Hidden slot metadata can outlive the slot directory when the physical
     // workspace is removed (a reclaim that missed it, or a caller deleting the
-    // slot directly). A missing slot has no index or working tree to run Git
-    // against, so it must not report private Git: callers would otherwise spawn
-    // Git in a non-existent directory instead of rebuilding the slot.
-    path.is_dir() && (path.join(".git").is_dir() || private_git_dir(path).is_some())
+    // slot directly), and interrupted allocation/init can leave a metadata
+    // directory or unborn `git init` repo without a checked-out commit. Only a
+    // real directory with an initialized repository whose HEAD resolves to a
+    // commit is usable without re-preparation.
+    if !path.is_dir() {
+        return false;
+    }
+    if let Some(metadata) = private_git_dir(path) {
+        return git_dir_has_head_commit(path, &metadata);
+    }
+    if !crate::workspace_view::is_bound(path) && path.join(".git").is_dir() {
+        return git_dir_has_head_commit(path, &path.join(".git"));
+    }
+    false
 }
 
 pub(crate) fn hide_private_git(path: &Path) -> Result<(), String> {
@@ -2682,6 +2733,20 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
     // Never revive that stale index/HEAD for a newly materialized slot.
     if !destination_exists && !path.is_symlink() {
         remove_private_git(path)?;
+    } else if private_slot_layout(path) && !has_private_git(path) {
+        // An interrupted allocation or `git init` can leave incomplete hidden
+        // Git metadata (for example only `workspace-layout-v4` or an unborn
+        // repository) beside an existing slot directory. Preserve the v4 layout
+        // guard, then clear the incomplete metadata before re-initializing.
+        if let Some(metadata) = private_git_dir(path) {
+            if metadata.join("HEAD").exists() && !metadata.join("workspace-layout-v4").is_file() {
+                return Err(
+                    "Unsupported slot metadata; create a new Run (existing workspace retained)"
+                        .into(),
+                );
+            }
+            remove_private_git(path)?;
+        }
     }
     fs::create_dir_all(path).map_err(|error| error.to_string())?;
     canonical_workspace_path(path)?;

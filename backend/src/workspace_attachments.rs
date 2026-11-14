@@ -60,7 +60,12 @@ fn destination(
             .iter()
             .any(|execution| execution.node == name && execution.status == "running")
     });
-    if matches!(runtime.state.phase.as_str(), "publishing" | "merging") && !live_merger {
+    // Private attachments are staged outside the project and only delivered
+    // after writer admission (or to an already-admitted live node). Uploading
+    // them cannot race publication; source/Planner uploads still must wait.
+    let staged_node = node.is_some_and(|name|
+        runtime.state.nodes.contains_key(name) && !runtime.node_attachment_is_source_direct(name));
+    if matches!(runtime.state.phase.as_str(), "publishing" | "merging") && !live_merger && !staged_node {
         return Err("Wait for publication before uploading attachments".into());
     }
     let workspace = match node {

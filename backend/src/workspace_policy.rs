@@ -59,22 +59,31 @@ impl Runtime {
             .is_some_and(|head| self.state.published_heads.contains(head))
     }
 
-    /// A user pause suspends the current private batch; it is not a failed-work
-    /// handoff or a new isolation decision. Already delivered recoveries still
-    /// follow their durable publication evidence rather than reviving an old cwd.
-    pub(super) fn paused_private_continuation(&self, node: &str) -> Option<&Execution> {
+    /// Every unfinished private member holds the batch's delivery barrier.
+    /// Failure, interruption and manual input resolution are not task results.
+    /// Historical delivered recoveries keep their recorded ownership semantics.
+    fn unfinished_private_execution(&self, node: &str) -> Option<&Execution> {
         if !self.batch_workspaces() {
             return None;
         }
         let state = self.state.nodes.get(node)?;
-        if !state.continuation || !state.pending_messages.is_empty() {
-            return None;
-        }
         let previous = self.state.executions.iter().rev().find(|execution| {
             execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)
         })?;
-        (previous.status == "failed"
-            && self.state.execution_stop_requests.contains(&previous.id)
+        let queued = state.continuation
+            || (state.human_instruction && !state.pending_messages.is_empty());
+        let failed = previous.status == "failed"
+            && (queued || state.status == "failed"
+                || (state.status == "blocked" && self.state.node_has_own_blocked_failure(node)));
+        let resolved = previous.status == "resolved"
+            && self.state.events.iter().rev().find_map(|event| match &event.kind {
+                EventKind::WorkspaceResolved { execution_id, head, .. }
+                    if execution_id == &previous.id => Some(head),
+                _ => None,
+            }).is_some_and(|head| state.head.as_ref() == Some(head)
+                && !self.state.published_heads.contains(head));
+        (state.edit_execution_id.is_none()
+            && (failed || resolved)
             && !Self::same_workspace_path(
                 Path::new(&previous.worktree),
                 Path::new(&self.state.config.as_ref()?.repository),
@@ -83,18 +92,58 @@ impl Runtime {
             .then_some(previous)
     }
 
+    /// Recovery and new human turns stay private, even with only one member
+    /// left. A resolved input also needs its node task to finish before delivery.
+    pub(super) fn retained_private_continuation(&self, node: &str) -> Option<&Execution> {
+        let previous = self.unfinished_private_execution(node)?;
+        let state = self.state.nodes.get(node)?;
+        (state.continuation || (state.human_instruction && !state.pending_messages.is_empty())
+            || previous.status == "resolved").then_some(previous)
+    }
+
+    /// A retained unfinished writer may run beside an already-started handoff
+    /// only when neither its directory nor its execution is a publication input.
+    /// Completed inputs, recovery capture, history edits and source writers stay
+    /// behind the publication barrier. No isolation decision is made here.
+    pub(super) fn private_continuation_during_publication(&self, node: &str) -> bool {
+        if !matches!(self.state.phase.as_str(), "publishing" | "merging")
+            || self.state.isolated_workspaces != Some(true)
+        {
+            return false;
+        }
+        let (Some(publication), Some(handoff), Some(previous), Some(state)) = (
+            self.state.publication.as_ref(), self.state.batch_handoff.as_ref(),
+            self.unfinished_private_execution(node), self.state.nodes.get(node),
+        ) else { return false; };
+        state.head.is_none()
+            && state.feedback_workspace.is_none()
+            && Path::new(&previous.worktree).is_dir()
+            && !self.path_is_running(Path::new(&previous.worktree))
+            && self.planner_workspace_owner(previous).is_some_and(|owner| owner.id == previous.id)
+            && !self.state.executions.iter().any(|execution| {
+                Self::same_workspace_path(Path::new(&execution.worktree), Path::new(&previous.worktree))
+                    && (execution.status == "running"
+                        || handoff.recovery_execution_ids.contains(&execution.id)
+                        || execution.after.as_ref().is_some_and(|head| publication.heads.contains(head)))
+            })
+            && self.state.events.iter().any(|event| matches!(&event.kind,
+                EventKind::Prepared { execution_id, .. } if execution_id == &previous.id))
+    }
+
     /// Shared source workers may refill free slots without draining siblings.
-    /// Private writers and pending deliveries must drain before dispatch can
-    /// switch workspaces. Explicit retries also deliver retained partial work,
-    /// without marking it completed.
+    /// Private writers must all succeed before delivery or workspace switching.
+    /// Explicit retries preserve unfinished work privately, never publish it.
     pub(super) fn prepare_execution_batch(
         &mut self,
         ready: &[Node],
-        all_ready: &[Node],
         allow_delivery: bool,
     ) -> Result<bool, String> {
         if !self.batch_workspaces() {
             return Ok(true);
+        }
+        if matches!(self.state.phase.as_str(), "publishing" | "merging") {
+            return Ok(!ready.is_empty() && ready.iter().all(|node|
+                self.private_continuation_during_publication(&node.name)));
         }
         let active = self.active();
         if active
@@ -123,20 +172,19 @@ impl Runtime {
         }) {
             return Ok(false);
         }
-        // Resume the suspended private batch before delivering even completed
-        // siblings. New ready work is deferred by jobs_with_pending_feedback.
-        // This also keeps a one-node remainder private instead of moving its
-        // unfinished files/session to source because the group is now small.
+        // Retry unfinished members before delivering even completed siblings.
+        // A smaller retry group is still the same private batch, not a new
+        // isolation decision. Newly ready descendants must wait for delivery.
         if !ready.is_empty()
-            && ready.iter().all(|node| self.paused_private_continuation(&node.name).is_some())
+            && ready.iter().all(|node| self.retained_private_continuation(&node.name).is_some())
         {
             if active {
                 return Ok(false);
             }
             for node in ready {
-                let previous = self.paused_private_continuation(&node.name).unwrap();
+                let previous = self.retained_private_continuation(&node.name).unwrap();
                 if self.planner_workspace_owner(previous).is_none_or(|owner| owner.id != previous.id) {
-                    return Err("Retained paused workspace was reassigned; refusing to resume another execution's files".into());
+                    return Err("Retained unfinished workspace was reassigned; refusing to resume another execution's files".into());
                 }
             }
             self.emit(EventKind::ExecutionBatchStarted {
@@ -145,6 +193,14 @@ impl Runtime {
                 resumed: true,
             })?;
             return Ok(true);
+        }
+        // Idle is not successful: one failure or pause keeps every completed
+        // sibling private until the unfinished member succeeds as well.
+        if self.state.nodes.keys().any(|node| self.unfinished_private_execution(node).is_some()) {
+            if !active && allow_delivery && self.state.phase != "needs_attention" {
+                self.emit(EventKind::Settled)?;
+            }
+            return Ok(false);
         }
         let mut heads = BTreeSet::new();
         for execution in &self.state.executions {
@@ -179,84 +235,14 @@ impl Runtime {
                 heads.insert(head.clone());
             }
         }
-        let mut recoveries = Vec::new();
-        for node in all_ready {
-            let node_state = &self.state.nodes[&node.name];
-            let Some(previous) = self.state.executions.iter().rev().find(|execution| {
-                execution.node == node.name
-                    && !self.state.superseded_execution_ids.contains(&execution.id)
-            }) else {
-                continue;
-            };
-            if previous.status == "resolved" {
-                // Manual resolution already captured immutable inputs, not a
-                // completed task. Deliver only the still-selected resolution;
-                // an invalidated descendant must not revive its abandoned input.
-                if let Some(head) = self
-                    .state
-                    .events
-                    .iter()
-                    .rev()
-                    .find_map(|event| match &event.kind {
-                        EventKind::WorkspaceResolved { execution_id, head, .. }
-                            if execution_id == &previous.id => Some(head),
-                        _ => None,
-                    })
-                    .filter(|head| {
-                        node_state.head.as_ref() == Some(*head)
-                            && !head.is_empty()
-                            && !self.state.published_heads.contains(head)
-                    })
-                {
-                    heads.insert(head.clone());
-                }
-                continue;
-            }
-            if !node_state.continuation && !node_state.human_instruction {
-                continue; // invalidated descendants recompute, not resume doomed work
-            }
-            if previous.status != "failed"
-                || Self::same_workspace_path(Path::new(&previous.worktree), &repository)
-                || self.batch_recovery_was_delivered(previous)
-            {
-                continue;
-            }
-            if self
-                .state
-                .executions
-                .iter()
-                .rev()
-                .find(|execution| {
-                    Self::same_workspace_path(
-                        Path::new(&execution.worktree),
-                        Path::new(&previous.worktree),
-                    )
-                })
-                .is_some_and(|owner| owner.id != previous.id)
-            {
-                return Err("Retained private recovery workspace was reassigned; refusing to capture another execution".into());
-            }
-            // A failure before allocating a slot has no project work to move.
-            // Missing prepared/observed work, however, must fail explicitly in
-            // the handoff worker instead of silently restarting in source.
-            let prepared = self.state.events.iter().any(|event| {
-                matches!(&event.kind,
-                EventKind::Prepared { execution_id, .. } if execution_id == &previous.id)
-            });
-            if prepared
-                || previous.pid.is_some()
-                || previous.output_bytes > 0
-                || Path::new(&previous.worktree).exists()
-            {
-                recoveries.push(previous.id.clone());
-            }
-        }
-        if !heads.is_empty() || !recoveries.is_empty() {
+        // Never create new recovery-capture handoffs. The worker can still
+        // replay an old durable handoff, but new delivery contains results only.
+        if !heads.is_empty() {
             // Even source-native replenishment cannot publish over live writers.
             if allow_delivery && !active {
                 self.emit_outputs(vec![
                     EventKind::BatchHandoffRequested {
-                        recovery_execution_ids: recoveries,
+                        recovery_execution_ids: vec![],
                     },
                     EventKind::PublicationStarted {
                         repository: repository.to_string_lossy().into_owned(),
@@ -313,8 +299,9 @@ impl Runtime {
         Ok(true)
     }
 
-    /// Runs outside the Run mutex, after the whole prior batch has drained.
-    /// Capture only project bytes; private environments stay in their own slot.
+    /// Replay-only compatibility for a previously recorded recovery handoff.
+    /// New retries never request capture. Runs outside the Run mutex; capture
+    /// only project bytes, keeping private environments in their own slot.
     pub(crate) fn capture_batch_recovery(
         root: &Path,
         run_id: &str,

@@ -616,9 +616,10 @@ export default function App() {
       ? ((state.mergers ?? []).find(item => item.id === selectedMergerId && item.node === mergerNodeName)
           ?? (state.mergers ?? []).filter(item => item.node === mergerNodeName).at(-1))
       : undefined;
-    // A publication Merger stays addressable through its lifecycle; other node
-    // messages remain blocked while publication is in progress.
-    if ((publishing || publicationFailed) && selectedMerger?.node !== "merger" && selectedMerger?.status !== "running") {
+    // The backend checks the selected node's physical workspace against the
+    // pinned publication inputs. A disjoint private node can keep working;
+    // publication is not a conversation-wide message lock.
+    if ((publishing || publicationFailed) && !selectedNode && selectedMerger?.node !== "merger" && selectedMerger?.status !== "running") {
       setError(t("发布期间不能介入节点，请等待发布结束或处理发布失败。"));
       return false;
     }

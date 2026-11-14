@@ -863,4 +863,71 @@ mod tests {
             .unwrap()
             .contains("managed/user.txt"));
     }
+
+    #[test]
+    fn publication_recovers_when_previous_attempt_left_uninitialized_private_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("shared.txt"), "base\n").unwrap();
+        let base = workspace::materialize_shadow_repo(&source, &[]).unwrap();
+
+        let node_a = temp.path().join("node-a");
+        workspace::prepare(&source, &node_a, &base, &[]).unwrap();
+        fs::write(node_a.join("shared.txt"), "from a\n").unwrap();
+        let head_a = workspace::snapshot_node(&node_a, &source, "node-a").unwrap();
+
+        let node_b = temp.path().join("node-b");
+        workspace::prepare(&source, &node_b, &base, &[]).unwrap();
+        fs::write(node_b.join("shared.txt"), "from b\n").unwrap();
+        let head_b = workspace::snapshot_node(&node_b, &source, "node-b").unwrap();
+
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let path = temp
+            .path()
+            .join(".grapher-worktrees")
+            .join(&run_id)
+            .join("publication-files-test");
+
+        // Simulate an interrupted first attempt after creating the empty
+        // publication workspace and its v4 metadata directory, before `git init`.
+        fs::create_dir_all(&path).unwrap();
+        let slot_digest = git2::Oid::hash_object(
+            git2::ObjectType::Blob,
+            path.file_name().unwrap().to_str().unwrap().as_bytes(),
+        )
+        .unwrap()
+        .to_string();
+        let metadata = path
+            .parent()
+            .unwrap()
+            .join(".grapher-git")
+            .join(format!("{}.git", &slot_digest[..16]));
+        fs::create_dir_all(&metadata).unwrap();
+        fs::write(
+            metadata.join("workspace-layout-v4"),
+            b"project-git-separated-v4\n",
+        )
+        .unwrap();
+        assert!(!workspace::has_private_git(&path));
+
+        let mut resolved = false;
+        let delivered = publish(
+            &source,
+            &[head_a, head_b],
+            &[],
+            Some(&path),
+            |workspace| {
+                resolved = true;
+                fs::write(workspace.join("shared.txt"), "merged\n").map_err(|e| e.to_string())?;
+                git(workspace, &["add", "-f", "--", "shared.txt"])?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(resolved);
+        assert!(workspace::has_private_git(&path));
+        assert_eq!(fs::read_to_string(source.join("shared.txt")).unwrap(), "merged\n");
+        assert!(!delivered.is_empty());
+    }
 }

@@ -4225,14 +4225,15 @@ test("node follow-ups keep records expanded and completed nodes continue instead
   } finally { gates.forEach(gate => gate.resolve()); await context.close(); }
 });
 
-for (const planType of ["graph", "serial"]) {
-  test(`${planType}: queued messages batch in order and consecutive Steers stay on the live execution`, { timeout: 45_000 }, async () => {
+for (const [planType, publicationPhase] of [["graph", null], ["serial", null], ["graph", "publishing"], ["graph", "merging"]]) {
+  test(`${planType}${publicationPhase ? ` ${publicationPhase}` : ""}: queued messages batch in order and consecutive Steers stay on the live execution`, { timeout: 45_000 }, async () => {
     const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 1, maxFeedback: 0, autoApprove: false };
     const output = text => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
-    const first = { id: "queue-first", node: "task", status: "completed", revision: 1, attempt: 1, sessionId: "same-session", worktree: "/a", before: "", after: "", startedAt: 1, completedAt: 2, output: output("Initial queue result") };
-    let current = { runId: "queue-run", config, planType, approved: true, paused: false, phase: "completed",
+    const first = { id: "queue-first", node: "task", status: publicationPhase ? "paused" : "completed", revision: 1, attempt: 1, sessionId: "same-session", worktree: publicationPhase ? "/private/task" : "/a", before: "", after: "", startedAt: 1, completedAt: 2, output: output("Initial queue result") };
+    let current = { runId: "queue-run", config, planType, approved: true, paused: false, phase: publicationPhase ?? "completed",
+      ...(publicationPhase ? { publication: { repository: "/a", heads: ["other-node-head"], status: publicationPhase, startedAt: 3 } } : {}),
       graph: { originalGoal: "Queue goal", nodes: [{ name: "task", task: "Queue task" }], edges: [] },
-      nodes: { task: { status: "completed", revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
+      nodes: { task: { status: first.status, revision: 1, head: "", instruction: "", error: null, pendingMessages: [] } },
       executions: [first], plan: null,
       events: [{ type: "started", sequence: 1, timestamp: 1, execution: first, message_sequences: [] }],
       base: "", feedbackCounts: {} };
@@ -4258,7 +4259,7 @@ for (const planType of ["graph", "serial"]) {
           const sequence = current.events.length + 1;
           if (body.action === "intervene") {
             const event = { type: "invalidated", sequence, timestamp: sequence + 2, target: "task", nodes: ["task"], human: true, instruction: body.instruction };
-            current = { ...current, phase: "running", events: [...current.events, event],
+            current = { ...current, phase: publicationPhase ?? "running", events: [...current.events, event],
               nodes: { task: { ...current.nodes.task, status: "dirty", pendingMessages: [...current.nodes.task.pendingMessages, { sequence, instruction: body.instruction }] } } };
           } else {
             assert.equal(body.action, "steer");
@@ -4314,6 +4315,10 @@ for (const planType of ["graph", "serial"]) {
       await send("Second live Steer");
       assert.deepEqual(actions, ["intervene", "intervene", "steer", "steer"]);
       assert.equal(current.executions.length, 2, "Steers do not create another execution");
+      if (publicationPhase) {
+        assert.equal(current.phase, publicationPhase, "node messaging does not require publication to finish");
+        assert.deepEqual(current.publication.heads, ["other-node-head"]);
+      }
       assert.equal(current.nodes.task.pendingMessages.length, 0);
       await page.getByText("First live Steer", { exact: true }).waitFor();
       await page.getByText("Second live Steer", { exact: true }).waitFor();

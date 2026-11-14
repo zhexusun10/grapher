@@ -3564,6 +3564,14 @@ fn reclaim_source_snapshot(service: &Arc<Service>, repository: &std::path::Path)
     }
 }
 
+#[path = "publication_driver.rs"]
+mod publication_driver;
+
+enum DriverCompletion {
+    Node(Execution, Result<(String, String), String>),
+    Publication(Result<(), String>),
+}
+
 fn drive(service: Arc<Service>) {
     if service.driving.swap(true, Ordering::SeqCst) {
         // Wake the active driver even if its current workers are long-running.
@@ -3597,6 +3605,7 @@ fn drive(service: Arc<Service>) {
         let result = (|| -> Result<(), String> {
             let (completed_tx, completed_rx) = std::sync::mpsc::channel();
             let mut in_flight = 0usize;
+            let mut publication_in_flight = false;
             loop {
                 let observed = *service.drive_signal.0.lock().map_err(|e| e.to_string())?;
                 // Pending verdicts are durable. The scheduler applies them
@@ -3619,6 +3628,49 @@ fn drive(service: Arc<Service>) {
                         .collect();
                     (jobs, runtime.root.clone(), parents)
                 };
+                if !publication_in_flight && in_flight == 0 && !service.planning.load(Ordering::SeqCst) {
+                    // PublicationStarted is durable before any user files change.
+                    let publication = {
+                        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                        if runtime.state.phase == "publishing" {
+                            Some((
+                                runtime.state.config.clone().ok_or("Missing config")?,
+                                runtime.state.graph.original_goal.clone(),
+                                runtime
+                                    .state
+                                    .publication
+                                    .clone()
+                                    .ok_or("Missing publication state")?,
+                            ))
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some((config, query, publication)) = publication {
+                        let service = service.clone();
+                        let run_id = run_id.clone();
+                        let root = root.clone();
+                        let completed_tx = completed_tx.clone();
+                        thread::Builder::new().name("grapher-publication".into()).spawn(move || {
+                            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                                publication_driver::publish_batch(&service, &root, &run_id, config, query, publication)
+                            )).unwrap_or_else(|_| Err("Publication worker panicked".into()));
+                            let _ = completed_tx.send(DriverCompletion::Publication(result));
+                            if let Ok(mut generation) = service.drive_signal.0.lock() {
+                                *generation += 1;
+                                service.drive_signal.1.notify_one();
+                            }
+                        }).map_err(|error| format!("Cannot start publication worker: {error}"))?;
+                        // Keep the same driver and completion/output channels
+                        // alive; disjoint private continuations can now dispatch
+                        // while this worker delivers its immutable input set.
+                        publication_in_flight = true;
+                        in_flight += 1;
+                        if jobs.is_empty() {
+                            continue;
+                        }
+                    }
+                }
                 if jobs.is_empty() && in_flight == 0 {
                     if service.planning.load(Ordering::SeqCst) {
                         thread::sleep(std::time::Duration::from_millis(50));
@@ -3644,178 +3696,6 @@ fn drive(service: Arc<Service>) {
                             eprintln!("Post-task Planner review failed: {error}");
                         }
                         continue;
-                    }
-                    // PublicationStarted is durable before any user files change.
-                    let publication = {
-                        let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                        if runtime.state.phase == "publishing" {
-                            Some((
-                                runtime.state.config.clone().ok_or("Missing config")?,
-                                runtime.state.graph.original_goal.clone(),
-                                runtime
-                                    .state
-                                    .publication
-                                    .clone()
-                                    .ok_or("Missing publication state")?,
-                            ))
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some((config, query, mut publication)) = publication {
-                        let repository = PathBuf::from(&publication.repository);
-                        // Preserve failed private work before a retry can move
-                        // to source. Snapshot I/O runs outside the Run mutex.
-                        let captured = crate::process_control::with_owner(&run_id, || -> Result<(), String> {
-                            let recoveries = {
-                                let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                                runtime.state.batch_handoff.as_ref().into_iter()
-                                    .flat_map(|handoff| &handoff.recovery_execution_ids)
-                                    .map(|id| runtime.state.executions.iter().find(|execution| execution.id == *id)
-                                        .cloned().ok_or_else(|| "Missing batch recovery execution".to_string()))
-                                    .collect::<Result<Vec<_>, _>>()?
-                            };
-                            if !recoveries.is_empty() {
-                                let heads = recoveries.iter().map(|execution| {
-                                    Runtime::capture_batch_recovery(&root, &run_id, &config, execution)
-                                        .map(|head| (execution.id.clone(), head))
-                                }).collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
-                                let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                                if runtime.state.run_id != run_id {
-                                    return Err("Run changed during batch recovery capture".into());
-                                }
-                                publication = runtime.record_batch_recoveries(heads)?;
-                            }
-                            Ok(())
-                        });
-                        if let Err(error) = captured {
-                            service.runtime.lock().map_err(|e| e.to_string())?
-                                .emit(EventKind::PublicationFailed { error })?;
-                            break;
-                        }
-                        // Publication/model sessions are deliberately not guarded by
-                        // a per-project lock. Concurrent Runs are allowed to reach
-                        // Git publication; any resulting repository conflict is left
-                        // for the existing publication state to expose.
-                        let preflight = {
-                            let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                            runtime.publication_environment_input()
-                        };
-                        {
-                            let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
-                            if let Some(layout) = runtime.publication_live_writer()? {
-                                return Err(format!("Cannot publish over a live writer: {layout}"));
-                            }
-                        }
-                        let result = crate::process_control::with_owner(&run_id, || {
-                            let exclusions = service.runtime.lock().map_err(|e| e.to_string())?.exclusions()?;
-                            let publication_path = crate::workspace::workspaces_parent(&root)
-                                .join(".grapher-worktrees").join(&run_id).join(
-                                    crate::graph_merge::publication_workspace(&repository, &publication.heads)?
-                                        .file_name().ok_or("Invalid publication workspace")?);
-                            let head = crate::graph_merge::merge_graph_scoped_at(&repository, &publication.heads, &exclusions, &publication_path, |publication_workspace| {
-                                let attempt = service
-                                    .runtime
-                                    .lock()
-                                    .map_err(|e| e.to_string())?
-                                    .state
-                                    .mergers
-                                    .len()
-                                    + 1;
-                                crate::graph_merge::resolve_with_merger(
-                                    publication_workspace,
-                                    &query,
-                                    &config,
-                                    &root,
-                                    attempt,
-                                    |event| {
-                                        service
-                                            .runtime
-                                            .lock()
-                                            .map_err(|e| e.to_string())?
-                                            .emit(event)
-                                    },
-                                )
-                            })?;
-                            let descriptor = match preflight {
-                                Ok(Some(job)) => match job.validate().and_then(|_| job.descriptor(&head)) {
-                                    Ok(descriptor) => Some(descriptor),
-                                    Err(error) => {
-                                        eprintln!("[Grapher] Result descriptor unavailable; publishing code without it: {error}");
-                                        None
-                                    }
-                                },
-                                Ok(None) => None,
-                                Err(error) => {
-                                    eprintln!("[Grapher] Environment preflight unavailable; publishing code without it: {error}");
-                                    None
-                                }
-                            };
-                            Ok((head, descriptor))
-                        });
-                        let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                        match result {
-                            Ok((head, descriptor)) => {
-                                eprintln!(
-                                    "[Grapher] [Publication] Files delivered; internal result: {head}"
-                                );
-                                if runtime.state.run_id != run_id
-                                    || !matches!(runtime.state.phase.as_str(), "publishing" | "merging")
-                                    || runtime.state.publication.as_ref().is_none_or(|current|
-                                        current.heads != publication.heads || current.repository != publication.repository)
-                                {
-                                    return Err("Stale publication worker cannot commit to this Run".into());
-                                }
-                                let base_commit = runtime.state.base.clone();
-                                let published_commit = head.clone();
-                                let mut events = Vec::new();
-                                if let Some(descriptor) = descriptor { events.push(EventKind::ResultPublished { descriptor }); }
-                                events.push(EventKind::PublicationCompleted { head });
-                                runtime.emit_outputs(events)?;
-                                let batch_workspaces = runtime.batch_workspaces();
-                                if let Err(error) = runtime.cleanup_worktrees() {
-                                    eprintln!("Cannot clean completed run worktrees: {error}");
-                                }
-                                // Publication succeeded, so the user's source now
-                                // contains the merged result.
-                                let repository = PathBuf::from(&publication.repository);
-                                drop(runtime);
-                                crate::file_changes::record_publication_git_changes(
-                                    &run_id,
-                                    &repository,
-                                    &base_commit,
-                                    &published_commit,
-                                );
-                                reclaim_source_snapshot(&service, &repository);
-                                if batch_workspaces {
-                                    // Publication delivered a batch, not the graph.
-                                    // Recompute readiness and concurrency next.
-                                    continue;
-                                }
-                                let review = {
-                                    let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                                    runtime.state.effective_config().filter(|config| config.post_task_review)
-                                        .filter(|_| runtime.state.plan_type.as_deref() == Some("graph")
-                                            && runtime.state.phase == "completed" && !runtime.state.stop_requested
-                                            && runtime.state.nodes.values().all(|node| node.status == "completed"))
-                                };
-                                if let Some(config) = review {
-                                    if let Err((error, _)) = plan_goal_internal_with_started(
-                                        POST_TASK_REVIEW_PROMPT.into(), config, Some("graph"), None,
-                                        Some(run_id.clone()), &service, true, |_| {}, |_| {}, |_| {}, |_| {},
-                                    ) {
-                                        eprintln!("Post-task Planner review failed: {error}");
-                                    }
-                                    // The same driver owns continuation execution. No new
-                                    // jobs can dispatch until the entire turn has settled.
-                                    continue;
-                                }
-                            }
-                            Err(error) => {
-                                eprintln!("[Grapher] [Publication] Failed: {error}");
-                                runtime.emit(EventKind::PublicationFailed { error })?;
-                            }
-                        }
                     }
                     // Retry Graph snapshot cleanup if publication's first pass
                     // was interrupted. Serial never participates in the shadow
@@ -3922,7 +3802,7 @@ fn drive(service: Arc<Service>) {
                         // Finish in the driver: the review's Finished event and
                         // its pending feedback barrier must be observed together
                         // before the next scheduler pass.
-                        let _ = completed_tx.send((job.execution, result));
+                        let _ = completed_tx.send(DriverCompletion::Node(job.execution, result));
                         if let Ok(mut generation) = service.drive_signal.0.lock() {
                             *generation += 1;
                             service.drive_signal.1.notify_one();
@@ -3944,10 +3824,23 @@ fn drive(service: Arc<Service>) {
                     // a completion nor a control event can be lost before wait.
                     let generation = service.drive_signal.0.lock().map_err(|e| e.to_string())?;
                     match completed_rx.try_recv() {
-                        Ok((execution, result)) => {
+                        Ok(completion) => {
                             drop(generation);
                             in_flight -= 1;
-                            service.runtime.lock().map_err(|e| e.to_string())?.finish(&execution, result)?;
+                            match completion {
+                                DriverCompletion::Node(execution, result) => {
+                                    service.runtime.lock().map_err(|e| e.to_string())?.finish(&execution, result)?;
+                                }
+                                DriverCompletion::Publication(Err(error)) => {
+                                    publication_in_flight = false;
+                                    eprintln!("[Grapher] [Publication] Failed: {error}");
+                                    service.runtime.lock().map_err(|e| e.to_string())?
+                                        .emit(EventKind::PublicationFailed { error })?;
+                                }
+                                DriverCompletion::Publication(Ok(())) => {
+                                    publication_in_flight = false;
+                                }
+                            }
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => {
                             if *generation != observed {

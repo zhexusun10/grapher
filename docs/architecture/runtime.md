@@ -212,8 +212,10 @@ Live steering does not itself mark a running node dirty. Completed-node follow-u
 Accepted human follow-ups are a per-node FIFO in the event-sourced projection,
 identified by event sequence rather than text. Equal messages are separate turns.
 The legacy `instruction` field is not the queue and later sends cannot overwrite
-an accepted pending turn. Existing approval, publication, dependency and writer
-ownership checks still apply; queueing does not bypass them.
+an accepted pending turn. Existing approval, dependency and writer ownership checks still apply;
+queueing does not bypass them. Publication admission is workspace-scoped:
+[disjoint retained private writers](workspace-snapshots-and-feedback.md#adaptive-workspace-policy)
+can continue during an existing handoff without changing its inputs.
 
 When a node can dispatch, Runtime batches its currently pending turns into one
 Execution, preserving message boundaries, file-attachment text and image order.

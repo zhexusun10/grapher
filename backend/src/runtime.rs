@@ -788,7 +788,14 @@ impl Runtime {
         }
         if self.batch_workspaces()
             && (self.active() || !self.state.pending_feedback.is_empty()
-                || self.state.nodes.values().any(|node| node.status != "completed")) {
+                || self.state.nodes.values().any(|node| node.status != "completed")
+                || self.state.executions.iter().any(|execution| {
+                    execution.status == "completed"
+                        && self.state.nodes.contains_key(&execution.node)
+                        && !self.state.superseded_execution_ids.contains(&execution.id)
+                        && execution.after.as_ref().is_some_and(|head|
+                            !head.is_empty() && !self.state.published_heads.contains(head))
+                })) {
             return Ok(());
         }
         // Managed launchable results retain their fixed layout, resources and
@@ -2747,7 +2754,7 @@ impl Runtime {
         if source_direct {
             self.require_current_file_contract()?;
         } else {
-            self.validate_invalidation(node)?;
+            self.validate_invalidation(node, true)?;
         }
         // Failed executions also retain a session, even without a result head.
         // Replies on a node's unique terminal workspace update that shared tree
@@ -2828,7 +2835,7 @@ impl Runtime {
                 source_direct: true,
             });
         }
-        self.validate_invalidation(node)?;
+        self.validate_invalidation(node, false)?;
         let anchor = self
             .state
             .executions
@@ -3239,7 +3246,7 @@ impl Runtime {
     /// Refuses an update while a downstream node is still running, because a
     /// changed result would make that run stale. The result comparison itself
     /// happens when the target finishes.
-    fn validate_invalidation(&self, node: &str) -> Result<(), String> {
+    fn validate_invalidation(&self, node: &str, allow_disjoint_publication: bool) -> Result<(), String> {
         if self
             .state
             .result_execution
@@ -3252,7 +3259,9 @@ impl Runtime {
             self.state.phase.as_str(),
             "publishing" | "merging" | "publication_failed"
         ) {
-            return Err("Resolve or retry publication before changing node results".into());
+            if !allow_disjoint_publication || !self.private_continuation_during_publication(node) {
+                return Err("This node shares publication inputs or has no retained private workspace; wait for delivery or retry failed publication".into());
+            }
         }
         if !self.state.approved {
             return Err("Approve the graph before updating a node".into());
@@ -3444,18 +3453,17 @@ impl Runtime {
         allow_publication: bool,
         pending_sources: &[&str],
     ) -> Result<Vec<Job>, String> {
+        let publishing = matches!(self.state.phase.as_str(), "publishing" | "merging");
         if !self.state.approved
             || self.state.paused
-            || matches!(
-                self.state.phase.as_str(),
-                "publishing" | "merging" | "publication_failed"
-            )
-            || self.state.phase == "completed"
+            || matches!(self.state.phase.as_str(), "publication_failed" | "completed")
         {
             return Ok(Vec::new());
         }
         self.require_current_file_contract()?;
-        self.drain_feedback()?;
+        if !publishing {
+            self.drain_feedback()?;
+        }
         let batch_workspaces = self.batch_workspaces();
         // Workspace preparation gates private handoff/switching, but shared
         // source workers may fill free slots as soon as dependencies resolve.
@@ -3560,12 +3568,14 @@ impl Runtime {
             })
             .cloned()
             .collect();
-        // A suspended private batch resumes in place before a new dispatch
-        // group can publish its partial work or choose a different workspace.
-        // Select continuations before the slot cap so earlier new nodes cannot
-        // displace a paused node in graph order.
-        if ready.iter().any(|node| self.paused_private_continuation(&node.name).is_some()) {
-            ready.retain(|node| self.paused_private_continuation(&node.name).is_some());
+        if publishing {
+            ready.retain(|node| self.private_continuation_during_publication(&node.name));
+        }
+        // Unfinished private members retry before delivery or new dispatch.
+        // Select retries before the slot cap so newly ready nodes cannot
+        // displace a failed or paused member of the retained batch.
+        if ready.iter().any(|node| self.retained_private_continuation(&node.name).is_some()) {
+            ready.retain(|node| self.retained_private_continuation(&node.name).is_some());
         }
         // A slot cap must not let newly unlocked descendants jump ahead of
         // ready peers left behind by the previous dispatch. Layers are a stable
@@ -3574,12 +3584,11 @@ impl Runtime {
             ready.sort_by_key(|node| plan.execution_batches.iter()
                 .position(|layer| layer.contains(&node.name)).unwrap_or(usize::MAX));
         }
-        let all_ready = ready.clone();
         ready.truncate(available);
-        if !self.prepare_execution_batch(&ready, &all_ready, allow_publication && pending_sources.is_empty())? {
+        if !self.prepare_execution_batch(&ready, allow_publication && pending_sources.is_empty())? {
             return Ok(Vec::new());
         }
-        let shared_source = self.shared_source_workspace();
+        let shared_source = !publishing && self.shared_source_workspace();
         let mut config = self.state.effective_config().ok_or("Missing config")?;
         if shared_source {
             // Retain private E/L evidence in the Run, but never bind it to source.
@@ -3636,7 +3645,10 @@ impl Runtime {
                 .iter()
                 .map(|message| message.sequence)
                 .collect::<Vec<_>>();
-            let continuation = self.state.nodes[&node.name].continuation && queued_prompt.is_none();
+            let resolved_private = self.retained_private_continuation(&node.name)
+                .is_some_and(|previous| previous.status == "resolved");
+            let continuation = (self.state.nodes[&node.name].continuation || resolved_private)
+                && queued_prompt.is_none();
             // Pi writes the session file when it creates the conversation, before
             // the first turn. A startup failure (process exit, extension load
             // error, interrupted preparation) leaves the execution's session
@@ -3664,7 +3676,7 @@ impl Runtime {
             let resume = if continuation {
                 self.state.executions.iter().rev().find(|execution| {
                     execution.node == node.name
-                        && execution.status == "failed"
+                        && (execution.status == "failed" || (resolved_private && execution.status == "resolved"))
                         && execution.completed_at.is_some()
                         && !self.state.superseded_execution_ids.contains(&execution.id)
                 })
@@ -3865,7 +3877,7 @@ impl Runtime {
                 && !unstarted_followup;
             let preserved_workspace = resume
                 .filter(|previous| {
-                    previous.status == "failed"
+                    matches!(previous.status.as_str(), "failed" | "resolved")
                         && !self.is_serial()
                         && !source_direct_run
                         && !self.batch_recovery_was_delivered(previous)
@@ -3885,19 +3897,32 @@ impl Runtime {
                                 && Self::same_workspace_path(Path::new(&execution.worktree), Path::new(&previous.worktree))
                                 && !self.state.superseded_execution_ids.contains(&execution.id)
                         })
-                        .take_while(|execution| execution.status == "failed")
+                        .take_while(|execution| matches!(execution.status.as_str(), "failed" | "resolved"))
                         .find(|execution| self.state.events.iter().any(|event| matches!(
-                            &event.kind, EventKind::Prepared { execution_id, .. } if execution_id == &execution.id
+                            &event.kind, EventKind::Prepared { execution_id, .. }
+                                | EventKind::WorkspaceResolved { execution_id, .. } if execution_id == &execution.id
                         )))
                         .cloned()
+                        .map(|mut execution| {
+                            // Manual composition repair is a retained input,
+                            // not a publishable result or a reason to reset cwd.
+                            if let Some(head) = self.state.events.iter().rev().find_map(|event| match &event.kind {
+                                EventKind::WorkspaceResolved { execution_id, head, .. }
+                                    if execution_id == &execution.id => Some(head),
+                                _ => None,
+                            }) {
+                                execution.before = head.clone();
+                            }
+                            execution
+                        })
                 });
             let mut materialize_source = materialize_source;
             if let Some(previous) = &preserved_workspace {
                 before = previous.before.clone();
-                if self.paused_private_continuation(&node.name).is_some() {
-                    // A node-only stop lets siblings publish and newer batches
-                    // advance the Run baseline. This writer still owns its
-                    // prepared inputs, including across retries before Prepared.
+                if self.retained_private_continuation(&node.name).is_some() {
+                    // An already-started handoff (including older schedulers'
+                    // sibling delivery) can advance the Run baseline. This
+                    // writer still owns its prepared inputs, including across retries before Prepared.
                     // Pin only this Job; never rewind the Run's latest source or
                     // recollect it over retained partial work. Parent/ownership
                     // and prepared-ancestry checks still run in perform().
@@ -3983,7 +4008,13 @@ impl Runtime {
             } else if let Some(previous) = resume {
                 let path = Path::new(&previous.worktree);
                 workspace_lineage.extend(previous.workspace_lineage.iter().cloned());
-                if Self::same_workspace_path(path, &resolved_repository) {
+                if self.retained_private_continuation(&node.name).is_some() {
+                    // Missing or damaged retained work must fail in preparation,
+                    // not silently adopt an idle sibling's directory. This also
+                    // keeps repeated failed preparations on the original slot.
+                    inherit_workspace = path.is_dir() && self.workspace_has_head(path, &before);
+                    previous.worktree.clone()
+                } else if Self::same_workspace_path(path, &resolved_repository) {
                     // Promotion forks this node's own conversation, never the
                     // source directory or another node's session.
                     fresh_path()
@@ -4612,6 +4643,7 @@ impl Runtime {
             });
         }
         if allow_publication
+            && !publishing
             && pending_sources.is_empty()
             && self.state.pending_feedback.is_empty()
             && jobs.is_empty()
@@ -5633,7 +5665,13 @@ impl Runtime {
         self.require_current_file_contract()?;
         if self.state.batch_handoff.is_some()
             && (!self.state.pending_feedback.is_empty()
-                || self.state.nodes.values().any(|node| node.status != "completed")) {
+                || self.state.nodes.values().any(|node| {
+                    node.status != "completed" || node.head.as_ref().is_some_and(|head|
+                        !head.is_empty() && !self.state.published_heads.contains(head)
+                            && self.state.publication.as_ref().is_none_or(|p| !p.heads.contains(head)))
+                })) {
+            // A disjoint writer may have finished after this handoff pinned
+            // its heads. Its result belongs to a later delivery, not this seal.
             return Ok(None);
         }
         let Some(store) = self.environments()? else {
@@ -6383,8 +6421,10 @@ fn perform_with_merger_inner(
         && preserved_head.is_none()
         && !job.history_edit
         && !job.feedback_repair_retry
-        && crate::workspace_view::is_bound(path)
-        && (pending_merge || crate::workspace_view::validate_ready(path, &repository).is_err());
+        && (!workspace::has_private_git(path)
+            || (crate::workspace_view::is_bound(path)
+                && (pending_merge
+                    || crate::workspace_view::validate_ready(path, &repository).is_err())));
     let preserve_failed_environment = job.preserve_failed_environment && !incomplete_preparation;
     // Source-native jobs use live files: user/Planner/other-node edits are
     // allowed, not a violation of a private workspace's completion seal.

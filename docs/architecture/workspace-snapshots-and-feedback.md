@@ -33,12 +33,14 @@ An invalid source binding never admits replenishment; existing workers first
 drain so the driver retains their terminal output and completion evidence, then
 the idle scheduling attempt reports the binding error explicitly.
 
-Private batches still drain completely before successful results are composed
-and delivered through the existing recoverable publication path. This barrier
-also applies between private batches. Undelivered private results, explicit
-private recoveries and managed result work cannot bypass it by replenishing
-shared source: delivery waits for all writers to drain, and publication, result
-launches and Mergers exclude replenishment. Intermediate delivery returns to
+Private batches deliver only after every retained member succeeds, not merely
+when their processes stop. A failed, interrupted or manually resolved-but-unfinished
+member keeps successful siblings private and holds new dispatch/workspace switching.
+Retries belong to that same batch even when only one node remains. Once all members
+succeed, their results are composed and delivered together through the recoverable
+publication path. Undelivered private results and managed result work cannot bypass
+this barrier by replenishing shared source; result launches and Mergers also exclude
+source replenishment. Intermediate delivery returns to
 scheduling, not graph completion or Planner review; conflicts block dispatch for
 Merger/retry. Only once all current work and feedback settle does the graph
 complete and claim its review.
@@ -73,18 +75,39 @@ node's private directory, Pi session, logical attempt and original source
 baseline; it does not capture or publish unfinished files, reselect isolation,
 or recollect source edits made during the pause. Those edits stay in source and
 are composed at delivery, then become inputs to a genuinely new batch. Completed
-siblings wait at the same delivery barrier until the resumed work drains. This
+siblings wait at the same delivery barrier until the resumed work succeeds. This
 distinction survives restart; already-delivered recovery heads retain their
 recorded handoff semantics rather than reviving an old directory.
 
-Stopping only one node does not pause unrelated branches: they may publish and
-advance the Run's source baseline before that node continues. Its continuation
-pins the retained prepared input from the same session and workspace, including
-when a later stopped attempt never reached `Prepared`. This pin applies only to
-the resumed Job; it neither recollects source nor rewinds the Run baseline used
-by future batches. Ownership, parent-input and prepared-ancestry checks still
-apply, and later source work is combined at delivery, not injected into the
-unfinished private view.
+Stopping only one private node does not interrupt its running siblings, but
+it suspends the batch's delivery and workspace switching even before Continue
+or a message is queued. When those writers drain, the Run needs attention;
+merely stopping its last writer is not permission to publish completed siblings.
+A new human message also resumes in the retained workspace before delivery,
+with the normal FIFO claim and new-turn attempt number. History edits and
+already-delivered recoveries keep their distinct semantics.
+
+An already-started handoff does not lock every node conversation. A failed or
+user-stopped, prepared private writer with no completed result may accept follow-ups and run
+beside publication or its Merger if it still owns its directory and neither that
+directory's recorded heads nor its executions are handoff/capture inputs.
+Source writers, completed inputs, history edits, feedback workspace transfers and
+missing/reassigned workspaces remain excluded. Admission keeps the publication's
+pinned heads and phase unchanged; it does not select a new batch or collect source.
+The driver tracks publication as a worker alongside node workers, so accepting a
+message does not secretly wait for delivery to finish. Live Steers remain on the
+admitted node writer; private file attachments are staged outside the project.
+New results wait for a subsequent delivery and cannot be reclaimed by the first
+publication. Publication failure preserves those results; restart interrupts both
+unfinished activities for explicit recovery rather than claiming either succeeded.
+
+Continuation pins the retained prepared input from the same session and
+workspace, including when a later stopped attempt never reached `Prepared`.
+This also covers older schedulers that already delivered sibling results.
+The pin applies only to the resumed Job; it neither recollects source nor rewinds
+the Run baseline used by future batches. Ownership, parent-input and
+prepared-ancestry checks still apply, and later source work is combined at
+delivery, not injected into the unfinished private view.
 
 For older schedulers that already misrouted a pause into an undelivered handoff, the guarded
 [offline restoration](../development/conversation-logs.md#restore-an-undelivered-paused-batch)
@@ -93,26 +116,31 @@ It restores the pre-continuation paused nodes, clears the pending handoff and
 publication, and keeps dispatch paused; delivered/possibly-installed results are
 not eligible.
 
-A failed private attempt is not published as a completed result. An explicit
-failure retry first captures its retained project files (including uncommitted work),
-records the recovery heads and delivers them through the same handoff barrier.
-Failure/missing/corrupt/conflicted evidence stays explicit and retains the slot;
-retrying publication cannot treat an uncaptured recovery as already delivered.
-Capture/delivery survive restart, and neither event manufactures node completion.
-Manual `resolved` acknowledgement likewise delivers its already-recorded input
-head before the next attempt can switch to source. It remains a resolved
-preparation, not a completed task; superseded or invalidated inputs are not revived.
+A failed private attempt never triggers a new partial-file handoff. Explicit
+Continue, targeted retries and human follow-ups retain its own directory, Pi
+session, prepared inputs, agent commits and staged/untracked/ignored work. Successful
+siblings are neither rerun nor delivered early. Normal failure retries still advance
+the logical attempt; user-pause continuation keeps its existing attempt rule. Missing,
+reassigned or rewritten workspace evidence fails explicitly, including repeated
+preparation failures: recovery cannot borrow an idle sibling's directory. An attempt
+that never prepared a workspace/session starts its task in its own private slot.
+
+Manual `resolved` acknowledgement is also only a prepared input. The node retries
+in that retained directory, and its repaired files wait for task success and the
+whole batch's delivery. Superseded or invalidated inputs are not revived.
 If preparation stopped before `Prepared` recorded a base, resolution validates the
 owned private slot's pinned `refs/grapher/base` commit and ancestry. Missing,
 invalid or discarded history remains an error before any repair is staged; a
 nonempty recorded preparation head always takes precedence over that local ref.
-The next attempt continues only its own Pi history, forking it if cwd changes.
-Complete attachment-delivery receipts from that exact failed workspace follow
-its proven handoff, preserving edited/deleted inputs; unreceipted partial copies
-still fail rather than being accepted as complete. Recovery reconstructs accepted
-input claims across the node's own failed session forks; another source retry
-must not resurrect a proven deleted input. Private environment state is retained
-privately, not installed into source.
+Restart preserves this delivery barrier and the retained work; it does not restart
+model calls or manufacture completion. Private environment state remains private.
+
+Legacy already-recorded recovery handoffs/captures keep their durable replay and
+publication-retry semantics; new retries never generate them. Already-delivered
+recoveries are not rolled back or relocated to an obsolete directory. Their own
+Pi session forks and attachment-delivery receipts remain recoverable, including
+edited/deleted inputs; unreceipted partial copies still fail explicitly. Pending
+legacy publication is not silently canceled when source delivery may have begun.
 Invalidated descendants recompute instead of reviving doomed partial attempts.
 Legacy Runs without a workspace-policy selection retain their old contract.
 

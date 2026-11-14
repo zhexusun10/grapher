@@ -168,7 +168,7 @@ An execution record is not identical to a new model conversation. This distincti
 For adaptive Runs, each private batch uses this delivery path as a handoff and
 returns to `running`; only subsequent scheduler settlement establishes graph
 completion. The [batch policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy)
-owns this barrier and partial-retry delivery. The terminal-publication lifecycle
+owns this whole-batch success barrier and in-place failure recovery. The terminal-publication lifecycle
 below also remains the contract for legacy private Runs.
 
 ```text
