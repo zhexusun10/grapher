@@ -222,7 +222,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = React.memo(({
               <label className="settings-toggle-row">
                 <span>
                   <strong>{t("并行节点独立工作区")}</strong>
-                  <small>{t("空闲时派发不超过 2 个节点共用源目录，超过 2 个启用独立工作区。共享执行中按依赖补位，不等待无关节点。关闭后始终共享源码，并发修改可能互相覆盖。")}</small>
+                  <small>{t("空闲时派发不超过 3 个节点共用源目录，超过 3 个启用独立工作区。共享执行中按依赖补位，不等待无关节点。关闭后始终共享源码，并发修改可能互相覆盖。")}</small>
                 </span>
                 <input
                   type="checkbox"

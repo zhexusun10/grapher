@@ -86,12 +86,12 @@ For small, linear, or tightly coupled tasks, use **Serial** instead. Use **Graph
 | Coding agents | One | One or more task nodes |
 | Planning | Direct | Compiled execution graph |
 | Approval | Automatic | Auto Approve by default; manual approval optional |
-| Workspace | Your project | Selected when idle: shared source for up to two ready nodes, private workspaces above two |
+| Workspace | Your project | Selected when idle: shared source for up to three ready nodes, private workspaces above three |
 | Scheduling | Sequential | Dependency-aware, bounded parallelism |
 
 All five **Settings → Harness settings** options default on; saved opt-outs are preserved. Turn off **Hide Auto mode** to show Auto and Partitioner model settings.
 
-By default, an idle Graph shares source when dispatching up to two ready nodes; larger groups use isolation. Shared-source work fills free slots as dependencies resolve, without waiting for unrelated nodes or switching directories. Private batches drain and deliver results before dispatch continues; workspace choice is reconsidered when idle, including work added during Planner review. **Settings → Harness settings** can disable isolation for new conversations. Sharing reduces setup and merge costs, but overlapping edits may overwrite each other.
+By default, an idle Graph shares source when dispatching up to three ready nodes; larger groups use isolation. Shared-source work fills free slots as dependencies resolve, without waiting for unrelated nodes or switching directories. Private batches can refill free slots, but deliver only after every member succeeds; a failure or pause keeps the whole batch private. Workspace choice is reconsidered after delivery, including work added during Planner review. **Settings → Harness settings** can disable isolation for new conversations. Sharing reduces setup and merge costs, but overlapping edits may overwrite each other.
 
 See the [user guide](docs/user-guide.md) for planning side effects, controls and recovery. Graph is a route, not a minimum agent count; it can contain a single node.
 

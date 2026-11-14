@@ -3463,6 +3463,7 @@ impl Runtime {
         self.require_current_file_contract()?;
         if !publishing {
             self.drain_feedback()?;
+            self.restore_private_batch()?;
         }
         let batch_workspaces = self.batch_workspaces();
         // Workspace preparation gates private handoff/switching, but shared
@@ -3577,12 +3578,32 @@ impl Runtime {
         if ready.iter().any(|node| self.retained_private_continuation(&node.name).is_some()) {
             ready.retain(|node| self.retained_private_continuation(&node.name).is_some());
         }
-        // A slot cap must not let newly unlocked descendants jump ahead of
-        // ready peers left behind by the previous dispatch. Layers are a stable
-        // priority, not a barrier: unrelated ready work can still fill slots.
+        // Shared mode keeps dependency-driven refill. Private mode binds a
+        // whole visible topology batch before applying the worker cap.
         if let Some(plan) = &self.state.plan {
             ready.sort_by_key(|node| plan.execution_batches.iter()
                 .position(|layer| layer.contains(&node.name)).unwrap_or(usize::MAX));
+        }
+        if !publishing && batch_workspaces {
+            if !self.state.private_batch.is_empty() {
+                ready.retain(|node| self.state.private_batch.contains(&node.name)
+                    || self.retained_private_continuation(&node.name).is_some());
+                // A held batch may need an earlier source-native parent to
+                // recover. Never mix its source dispatch with private peers.
+                if ready.iter().any(|node| self.source_batch_recovery(&node.name)) {
+                    ready.retain(|node| self.source_batch_recovery(&node.name));
+                }
+            } else if self.starts_private_batch(ready.len().min(available))
+                && !ready.iter().any(|node| self.retained_private_continuation(&node.name).is_some())
+            {
+                let batch = self.topology_batch(&[ready[0].name.clone()]);
+                let count = ready.iter().filter(|node| batch.contains(&node.name)).count().min(available);
+                // Do not turn a mixed ready group into a smaller shared group
+                // by applying a private-only restriction before mode selection.
+                if self.starts_private_batch(count) {
+                    ready.retain(|node| batch.contains(&node.name));
+                }
+            }
         }
         ready.truncate(available);
         if !self.prepare_execution_batch(&ready, allow_publication && pending_sources.is_empty())? {

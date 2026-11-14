@@ -52,6 +52,8 @@ function WorkspaceFooterFixture() {
   const [mergerId, setMergerId] = useState("");
   const [publication, setPublication] = useState<Snapshot["publication"]>();
   const [publicationMergers, setPublicationMergers] = useState<Execution[]>([]);
+  const [batchSnapshot, setBatchSnapshot] = useState<Partial<Snapshot>>({});
+  audit.setBatchSnapshot = setBatchSnapshot;
   audit.setPublicationResult = (result: Snapshot["publication"], attempts: Execution[] = []) => {
     setPublication(result);
     setPublicationMergers(attempts);
@@ -110,6 +112,7 @@ function WorkspaceFooterFixture() {
     publication,
     planning: plannerTurns.at(-1),
     events: plannerTurns.map((planning, index) => ({ type: "planner_workspace_selected", sequence: index + 1, timestamp: index + 1, planning })),
+    ...batchSnapshot,
   };
   audit.confirmRun = () => setHasRunId(true);
   audit.createNode = () => { setHasNode(true); setPlanning(false); };

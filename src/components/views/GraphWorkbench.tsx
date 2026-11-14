@@ -2679,6 +2679,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   const totalGraphNodes = state.graph.nodes.length;
   const summaryBatchCount = Math.max(summaryBatches.length, state.plan?.executionBatches.length ?? 0, totalGraphNodes > 0 ? 1 : 0);
+  const privateBatch = state.privateBatch ?? [];
+  const privateBatchCompleted = privateBatch.filter(name => state.nodes[name]?.status === "completed").length;
 
   const renderSummaryNodeChip = (node: GraphNode) => {
     const rawStatus = state.nodes[node.name]?.status ?? "waiting";
@@ -2711,11 +2713,18 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             <span className="plan-summary-stats">
               <span>{t("{0} 节点", totalGraphNodes)}</span>
               <span className="plan-summary-sep" aria-hidden="true">·</span>
-              <span title={t("批次按拓扑关系分组，不代表同时派发或统一回写。")}>{t("{0} 批次", summaryBatchCount)}</span>
+              <span title={t("私有批次全部成功后统一回写，并发上限只限制同时运行数量；共享模式直接修改项目目录。")}>{t("{0} 批次", summaryBatchCount)}</span>
               <span className="plan-summary-sep" aria-hidden="true">·</span>
               <span>{t("{0} 拓扑边", state.graph.edges.length)}</span>
               <span className="plan-summary-sep" aria-hidden="true">·</span>
               <span className="plan-summary-completed">{t("已完成 {0}/{1}", completed, totalGraphNodes)}</span>
+            </span>
+          )}
+          {privateBatch.length > 0 && (
+            <span className="plan-private-batch-status" role="status">
+              {publicationWorking
+                ? t("当前私有批次：已完成 {0}/{1}，正在统一回写。", privateBatchCompleted, privateBatch.length)
+                : t("当前私有批次：已完成 {0}/{1}，全部成功后统一回写。", privateBatchCompleted, privateBatch.length)}
             </span>
           )}
         </div>

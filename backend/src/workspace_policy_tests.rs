@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "workspace_batch_regression_tests.rs"]
+mod batch_regressions;
+
 fn graph(names: &[&str], edges: &[(&str, &str)]) -> Graph {
     Graph {
         original_goal: "batch workspaces".into(),
@@ -170,23 +173,104 @@ fn capped_dispatch_prioritizes_waiting_peers_without_blocking_ready_descendants(
     assert_eq!(child[0].execution.node, "child", "layers must not block independent ready work");
 }
 
+#[test]
+fn adopting_a_legacy_multilayer_private_batch_keeps_intervening_dependencies() {
+    let (_temp, _source, runtime) = adaptive(false,
+        graph(&["a", "b", "middle", "deep"], &[("a", "middle"), ("middle", "deep")]), true, 3);
+    assert_eq!(runtime.topology_batch(&["b".into(), "deep".into()]), ["a", "b", "middle", "deep"]);
+}
+
 #[cfg(feature = "fixture")]
 #[test]
-fn private_handoff_keeps_overflow_nodes_ahead_of_newly_ready_children() {
-    let (_temp, _source, mut runtime) = adaptive(false,
-        graph(&["child", "a", "b", "c", "overflow1", "overflow2"], &[("a", "child")]), true, 3);
-    for mut job in runtime.jobs().unwrap() {
-        prepare_private(&mut runtime, &mut job);
-        finish_private(&mut runtime, &job, &format!("{}.txt", job.execution.node), "done");
+fn private_topology_batch_refills_slots_and_delivers_all_peers_together_across_restart() {
+    for restart in [false, true] {
+        let (_temp, source, mut runtime) = adaptive(false,
+            graph(&["child", "a", "b", "c", "d", "overflow1", "overflow2"], &[("a", "child")]), true, 4);
+        let mut first = runtime.jobs().unwrap();
+        assert_eq!(first.len(), 4);
+        let members = runtime.state.plan.as_ref().unwrap().execution_batches[0].clone();
+        assert_eq!(runtime.state.private_batch, members);
+        assert_eq!(crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["privateBatch"], serde_json::json!(members));
+        for job in &mut first { prepare_private(&mut runtime, job); }
+        for job in &first[..3] { finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done"); }
+        let baseline = runtime.latest_source_head().to_owned();
+        if restart {
+            finish_private(&mut runtime, &first[3], "d.txt", "done");
+            let root = runtime.root.clone();
+            drop(runtime);
+            runtime = Runtime::open(&root).unwrap();
+            assert_eq!(runtime.state.private_batch, members);
+            runtime.resume_scheduling().unwrap();
+        }
+        fs::write(source.join("external.txt"), "source edit during private batch").unwrap();
+        let mut next = runtime.jobs().unwrap();
+        assert_eq!(next.iter().map(|j| j.execution.node.as_str()).collect::<Vec<_>>(), ["overflow1", "overflow2"]);
+        assert!(runtime.state.publication.is_none());
+        assert_eq!(runtime.state.nodes["child"].status, "waiting");
+        for job in &mut next {
+            assert!(!job.source_direct && !job.materialize_source);
+            assert_eq!(job.expected_source_head, baseline);
+            assert!(first.iter().all(|old| old.execution.worktree != job.execution.worktree), "unpublished sibling slots are not recyclable");
+            prepare_private(&mut runtime, job);
+            assert!(!Path::new(&job.execution.worktree).join("external.txt").exists());
+            finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+        }
+        if !restart {
+            assert!(runtime.jobs().unwrap().is_empty());
+            assert!(runtime.state.publication.is_none());
+            finish_private(&mut runtime, &first[3], "d.txt", "done");
+        }
+        assert!(runtime.jobs().unwrap().is_empty());
+        assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 6);
+        for name in &members { assert!(!source.join(format!("{name}.txt")).exists()); }
+        deliver_batch(&mut runtime);
+        assert!(runtime.state.private_batch.is_empty());
+        for name in &members { assert!(source.join(format!("{name}.txt")).is_file()); }
+        assert_eq!(runtime.state.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 1);
+        let child = runtime.jobs().unwrap().remove(0);
+        assert_eq!(child.execution.node, "child");
+        assert!(child.source_direct, "shared/private selection for a new small group remains unchanged");
     }
-    assert!(runtime.jobs().unwrap().is_empty());
-    assert_eq!(runtime.state.phase, "publishing", "successful dispatch may deliver before overflow runs");
-    deliver_batch(&mut runtime);
-    runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
-    let next = runtime.jobs().unwrap();
-    assert_eq!(next.iter().map(|j| j.execution.node.as_str()).collect::<Vec<_>>(),
-        ["overflow1", "overflow2", "child"]);
-    assert!(next.iter().all(|j| !j.source_direct));
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn independent_private_retry_does_not_wait_for_running_siblings() {
+    for stopped in [false, true] {
+        let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 4);
+        let mut first = runtime.jobs().unwrap();
+        for job in &mut first { prepare_private(&mut runtime, job); }
+        let original = first[0].execution.clone();
+        fs::write(Path::new(&original.worktree).join("partial.txt"), "retained").unwrap();
+        if stopped { runtime.request_execution_stop(Some("a")).unwrap(); }
+        runtime.finish(&original, Err("provider failed or user stopped".into())).unwrap();
+        for job in &first[2..] {
+            finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+        }
+        let merger = Execution { id: Uuid::new_v4().to_string(), node: "merge:b".into(), ..first[1].execution.clone() };
+        let mut alias = runtime.state.clone();
+        alias.mergers.push(Execution { worktree: original.worktree.clone(), ..merger.clone() });
+        assert!(!alias.can_resume_node("a"), "even a differently named Merger cannot overlap the retained directory");
+        runtime.emit(EventKind::MergerStarted { execution: merger.clone() }).unwrap();
+        assert!(runtime.state.can_resume_node("a"), "an unrelated private Merger must not disable Continue");
+        runtime.resume_node("a").unwrap();
+        let mut retry = runtime.jobs().unwrap().remove(0);
+        assert_eq!(runtime.state.nodes["b"].status, "running");
+        assert_eq!(retry.execution.worktree, original.worktree);
+        assert_eq!(retry.execution.session_id, original.session_id);
+        assert_eq!(retry.execution.attempt, original.attempt + usize::from(!stopped));
+        prepare_private(&mut runtime, &mut retry);
+        assert_eq!(fs::read_to_string(Path::new(&retry.execution.worktree).join("partial.txt")).unwrap(), "retained");
+        finish_private(&mut runtime, &retry, "a.txt", "done");
+        assert!(runtime.jobs().unwrap().is_empty());
+        assert!(runtime.state.publication.is_none());
+        assert!(!source.join("a.txt").exists() && !source.join("c.txt").exists());
+        runtime.emit(EventKind::MergerFinished { execution_id: merger.id, head: merger.before, output_bytes: 0, metrics: None }).unwrap();
+        finish_private(&mut runtime, &first[1], "b.txt", "done");
+        runtime.jobs().unwrap();
+        assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 4);
+        deliver_batch(&mut runtime);
+    }
 }
 
 #[cfg(feature = "fixture")]
@@ -194,7 +278,7 @@ fn private_handoff_keeps_overflow_nodes_ahead_of_newly_ready_children() {
 fn resolved_private_inputs_wait_for_task_success_before_batch_delivery_across_restart() {
     for (git, prepared) in [(false, false), (false, true), (true, false), (true, true)] {
         let (_temp, source, mut runtime) =
-            adaptive(git, graph(&["a", "b", "c"], &[]), true, 0);
+            adaptive(git, graph(&["a", "b", "c", "d"], &[]), true, 0);
         let mut resolved_id = String::new();
         for mut job in runtime.jobs().unwrap() {
             if job.execution.node == "a" && !prepared {
@@ -249,7 +333,7 @@ fn resolved_private_inputs_wait_for_task_success_before_batch_delivery_across_re
         assert_eq!(fs::read_to_string(Path::new(&retry.execution.worktree).join("resolved-input.txt")).unwrap(), "manual resolution");
         finish_private(&mut runtime, &retry, "a.txt", "done");
         runtime.jobs().unwrap();
-        assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 3);
+        assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 4);
         deliver_batch(&mut runtime);
         assert_eq!(fs::read_to_string(source.join("resolved-input.txt")).unwrap(), "manual resolution");
         runtime.jobs().unwrap();
@@ -264,7 +348,7 @@ fn resolved_private_inputs_wait_for_task_success_before_batch_delivery_across_re
 fn resolved_rejects_missing_or_rewritten_preparation_evidence() {
     for damage in ["missing", "non-commit", "rewritten", "recorded"] {
         let (_temp, source, mut runtime) =
-            adaptive(true, graph(&["a", "b", "c"], &[]), true, 0);
+            adaptive(true, graph(&["a", "b", "c", "d"], &[]), true, 0);
         let mut target = None;
         for mut job in runtime.jobs().unwrap() {
             if damage == "recorded" && job.execution.node == "a" {
@@ -321,11 +405,11 @@ fn resolved_rejects_missing_or_rewritten_preparation_evidence() {
 }
 
 #[test]
-fn one_and_two_nodes_share_source_without_snapshots_or_environment() {
+fn up_to_three_nodes_share_source_without_snapshots_or_environment() {
     for git in [false, true] {
-        for count in [1, 2] {
+        for count in [1, 2, 3] {
             let (_temp, source, mut runtime) =
-                adaptive(git, graph(&["a", "b"][..count], &[]), true, 0);
+                adaptive(git, graph(&["a", "b", "c"][..count], &[]), true, 0);
             assert!(runtime.state.base.is_empty());
             assert!(runtime.state.environment_baseline.is_none());
             let jobs = runtime.jobs().unwrap();
@@ -337,7 +421,7 @@ fn one_and_two_nodes_share_source_without_snapshots_or_environment() {
                 assert!(job.config.environment.is_none());
                 assert!(job.environment_input.is_none());
             }
-            if count == 2 {
+            if count >= 2 {
                 assert_ne!(jobs[0].execution.session_id, jobs[1].execution.session_id);
                 fs::write(source.join("intermediate.txt"), "live").unwrap();
                 assert_eq!(
@@ -435,7 +519,7 @@ fn shared_source_dispatches_ready_children_while_unrelated_sibling_runs() {
 
 #[test]
 fn shared_replenishment_pins_source_and_respects_available_worker_slots() {
-    for limit in [0, 2, 3] {
+    for limit in [0, 2, 3, 4] {
         // Keep at least one queued child beyond the available slots regardless
         // of the configured default; the assertion tests capacity, not 8 names.
         let children: Vec<_> = (0..DEFAULT_MAX_PARALLEL.max(limit)).map(|i| format!("child-{i}")).collect();
@@ -456,7 +540,7 @@ fn shared_replenishment_pins_source_and_respects_available_worker_slots() {
         assert!(next.iter().all(|job| job.source_direct
             && Path::new(&job.execution.worktree) == source && !job.materialize_source));
         assert_eq!(runtime.state.isolated_workspaces, Some(false),
-            "even a replenishment larger than two cannot switch live source writers to private");
+            "even a replenishment larger than three cannot switch live source writers to private");
         assert!(runtime.state.environment_baseline.is_none());
         assert!(runtime.jobs().unwrap().is_empty());
         finish_shared(&mut runtime, first.iter().find(|job| job.execution.node == "slow").unwrap(), "done");
@@ -619,7 +703,7 @@ fn shared_failure_retry_and_feedback_repair_can_refill_beside_unrelated_work() {
 #[test]
 fn active_private_batches_do_not_validate_source_before_the_drain_barrier() {
     let (_temp, source, mut runtime) = adaptive(false,
-        graph(&["a", "b", "c", "child"], &[("a", "child")]), true, 0);
+        graph(&["a", "b", "c", "d", "child"], &[("a", "child")]), true, 0);
     let mut first = runtime.jobs().unwrap();
     prepare_private(&mut runtime, &mut first[0]);
     finish_private(&mut runtime, &first[0], "a.txt", "done");
@@ -692,9 +776,9 @@ fn shared_replenishment_respects_pause_and_restart_recovery() {
 #[test]
 fn private_writers_drain_before_delivering_to_ready_descendants() {
     let (_temp, source, mut runtime) = adaptive(false,
-        graph(&["fast", "slow", "other", "child"], &[("fast", "child")]), true, 0);
+        graph(&["fast", "slow", "other", "fourth", "child"], &[("fast", "child")]), true, 0);
     let mut first = runtime.jobs().unwrap();
-    assert_eq!(first.len(), 3);
+    assert_eq!(first.len(), 4);
     for job in &mut first {
         prepare_private(&mut runtime, job);
     }
@@ -719,7 +803,7 @@ fn private_writers_drain_before_delivering_to_ready_descendants() {
 #[test]
 fn legacy_private_recovery_waits_for_live_source_writers_before_resuming_in_place() {
     let (_temp, source, mut runtime) = adaptive(false,
-        graph(&["a", "b", "c", "slow"], &[("b", "slow"), ("c", "slow")]), true, 0);
+        graph(&["a", "b", "c", "d", "slow"], &[("b", "slow"), ("c", "slow")]), true, 0);
     let mut first = runtime.jobs().unwrap();
     for job in &mut first {
         prepare_private(&mut runtime, job);
@@ -764,7 +848,7 @@ fn legacy_private_recovery_waits_for_live_source_writers_before_resuming_in_plac
 
 #[test]
 fn disabled_isolation_and_worker_limit_apply_to_every_batch_including_revisions() {
-    for (isolate, limit, expected) in [(false, 0, 4), (true, 2, 2), (true, 1, 1)] {
+    for (isolate, limit, expected) in [(false, 0, 4), (true, 3, 3), (true, 2, 2), (true, 1, 1)] {
         let (_temp, source, mut runtime) = adaptive(false, graph(&["root"], &[]), isolate, limit);
         let root = runtime.jobs().unwrap().remove(0);
         finish_shared(&mut runtime, &root, "done");
@@ -798,17 +882,20 @@ fn batches_switch_shared_private_shared_private_and_deliver_before_dependents_ru
         let (_temp, source, mut runtime) = adaptive(
             git,
             graph(
-                &["root", "a", "b", "c", "join", "x", "y", "z"],
+                &["root", "a", "b", "c", "d", "join", "x", "y", "z", "w"],
                 &[
                     ("root", "a"),
                     ("root", "b"),
                     ("root", "c"),
+                    ("root", "d"),
                     ("a", "join"),
                     ("b", "join"),
                     ("c", "join"),
+                    ("d", "join"),
                     ("join", "x"),
                     ("join", "y"),
                     ("join", "z"),
+                    ("join", "w"),
                 ],
             ),
             true,
@@ -818,7 +905,7 @@ fn batches_switch_shared_private_shared_private_and_deliver_before_dependents_ru
         fs::write(source.join("root.txt"), "shared root").unwrap();
         finish_shared(&mut runtime, &root, "done");
         let mut branches = runtime.jobs().unwrap();
-        assert_eq!(branches.len(), 3);
+        assert_eq!(branches.len(), 4);
         assert_eq!(runtime.state.isolated_workspaces, Some(true));
         assert_eq!(
             branches
@@ -826,7 +913,7 @@ fn batches_switch_shared_private_shared_private_and_deliver_before_dependents_ru
                 .map(|job| &job.execution.worktree)
                 .collect::<BTreeSet<_>>()
                 .len(),
-            3
+            4
         );
         for (index, job) in branches.iter_mut().enumerate() {
             prepare_private(&mut runtime, job);
@@ -840,7 +927,7 @@ fn batches_switch_shared_private_shared_private_and_deliver_before_dependents_ru
                 &format!("{}.txt", job.execution.node),
                 "done",
             );
-            if index < 2 {
+            if index < 3 {
                 assert!(runtime.jobs().unwrap().is_empty());
             }
         }
@@ -856,13 +943,13 @@ fn batches_switch_shared_private_shared_private_and_deliver_before_dependents_ru
         );
         let join = runtime.jobs().unwrap().remove(0);
         assert!(join.source_direct);
-        for name in ["a", "b", "c"] {
+        for name in ["a", "b", "c", "d"] {
             assert!(source.join(format!("{name}.txt")).is_file());
         }
         fs::write(source.join("join.txt"), "fresh shared result").unwrap();
         finish_shared(&mut runtime, &join, "done");
         let mut final_batch = runtime.jobs().unwrap();
-        assert_eq!(final_batch.len(), 3);
+        assert_eq!(final_batch.len(), 4);
         for job in &mut final_batch {
             prepare_private(&mut runtime, job);
             assert_eq!(
@@ -893,7 +980,7 @@ fn batches_switch_shared_private_shared_private_and_deliver_before_dependents_ru
                 _ => None,
             })
             .collect();
-        assert_eq!(batches, [(1, false), (3, true), (1, false), (3, true)]);
+        assert_eq!(batches, [(1, false), (4, true), (1, false), (4, true)]);
         assert_eq!(
             runtime
                 .state
@@ -1057,7 +1144,7 @@ fn paused_private_nodes_resume_in_place_before_delivery_or_new_work() {
 fn paused_private_node_stop_holds_delivery_until_followup_finishes() {
     for (git, has_session, restart) in [(true, true, false), (false, true, true), (false, false, true)] {
         let (_temp, source, mut runtime) = adaptive(git,
-            graph(&["a", "b", "c", "later"], &[("b", "later")]), true, 0);
+            graph(&["a", "b", "c", "d", "later"], &[("b", "later")]), true, 0);
         let mut jobs = runtime.jobs().unwrap();
         for job in &mut jobs {
             prepare_private(&mut runtime, job);
@@ -1144,7 +1231,7 @@ fn paused_private_node_stop_holds_delivery_until_followup_finishes() {
 #[test]
 fn private_followup_runs_beside_disjoint_publication_without_changing_its_inputs() {
     for (finish_first, restart) in [(false, false), (true, false), (false, true)] {
-        let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c"], &[]), true, 0);
+        let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
         let mut jobs = runtime.jobs().unwrap();
         for job in &mut jobs {
             prepare_private(&mut runtime, job);
@@ -1224,9 +1311,9 @@ fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_re
         let (_temp, source, mut runtime) = adaptive(
             git,
             graph(
-                &["a", "b", "c", "later", "x", "y", "z"],
-                &[("b", "later"), ("c", "later"), ("a", "x"), ("a", "y"), ("a", "z"),
-                    ("later", "x"), ("later", "y"), ("later", "z")],
+                &["a", "b", "c", "d", "later", "x", "y", "z", "w"],
+                &[("b", "later"), ("c", "later"), ("a", "x"), ("a", "y"), ("a", "z"), ("a", "w"),
+                    ("later", "x"), ("later", "y"), ("later", "z"), ("later", "w")],
             ),
             true,
             0,
@@ -1319,7 +1406,7 @@ fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_re
         assert!(runtime.jobs().unwrap().is_empty());
         deliver_batch(&mut runtime);
         let mut next = runtime.jobs().unwrap();
-        assert_eq!(next.len(), 3);
+        assert_eq!(next.len(), 4);
         prepare_private(&mut runtime, &mut next[0]);
         for name in ["a.txt", "b.txt", "c.txt", "later.txt", "partial.txt"] {
             assert!(Path::new(&next[0].execution.worktree).join(name).is_file(),
@@ -1333,7 +1420,7 @@ fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_re
 #[test]
 fn offline_paused_batch_restoration_is_guarded_replayable_and_stays_paused() {
     use crate::maintenance::paused_batch::{restoration, restore_paused_batch_at};
-    let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c"], &[]), true, 0);
+    let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
     let mut jobs = runtime.jobs().unwrap();
     for job in &mut jobs {
         prepare_private(&mut runtime, job);
@@ -1441,7 +1528,7 @@ fn offline_paused_batch_restoration_is_guarded_replayable_and_stays_paused() {
 fn failed_private_retries_keep_partial_work_and_successful_siblings_private_across_restart() {
     for (git, has_session, recovery) in [(true, true, "node"), (false, true, "run"), (false, false, "message")] {
         let (_temp, source, mut runtime) = adaptive(git,
-            graph(&["a", "b", "c", "child"], &[("b", "child")]), true, 0);
+            graph(&["a", "b", "c", "d", "child"], &[("b", "child")]), true, 0);
         let mut jobs = runtime.jobs().unwrap();
         for job in &mut jobs {
             prepare_private(&mut runtime, job);
@@ -1521,7 +1608,7 @@ fn failed_private_retries_keep_partial_work_and_successful_siblings_private_acro
             }
         }
         assert!(runtime.jobs().unwrap().is_empty());
-        assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 3);
+        assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 4);
         assert!(runtime.state.batch_handoff.as_ref().unwrap().recovery_execution_ids.is_empty());
         deliver_batch(&mut runtime);
         for file in ["a.txt", "b.txt", "c.txt", "partial.txt", "committed.txt", "ignored.txt", "external.txt"] {
@@ -1539,7 +1626,7 @@ fn failed_private_retries_keep_partial_work_and_successful_siblings_private_acro
 #[test]
 fn failed_private_retry_rejects_missing_or_rewritten_work_without_borrowing_sibling_slots() {
     for missing in [true, false] {
-        let (temp, source, mut runtime) = adaptive(true, graph(&["a", "b", "c"], &[]), true, 0);
+        let (temp, source, mut runtime) = adaptive(true, graph(&["a", "b", "c", "d"], &[]), true, 0);
         let mut jobs = runtime.jobs().unwrap();
         for job in &mut jobs {
             prepare_private(&mut runtime, job);
@@ -1593,7 +1680,7 @@ fn failed_private_retry_rejects_missing_or_rewritten_work_without_borrowing_sibl
 #[cfg(feature = "fixture")]
 #[test]
 fn crash_before_private_preparation_holds_successful_siblings_and_retries_in_the_same_slot() {
-    let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c"], &[]), true, 0);
+    let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
     let mut jobs = runtime.jobs().unwrap();
     let original = jobs[0].execution.clone();
     assert_eq!(original.node, "a");
@@ -1615,7 +1702,7 @@ fn crash_before_private_preparation_holds_successful_siblings_and_retries_in_the
     prepare_private(&mut runtime, &mut retry);
     finish_private(&mut runtime, &retry, "a.txt", "done");
     runtime.jobs().unwrap();
-    assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 3);
+    assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 4);
     deliver_batch(&mut runtime);
     assert!(source.join("a.txt").exists() && source.join("b.txt").exists());
 }
@@ -1626,7 +1713,7 @@ fn failed_private_batch_holds_ready_children_until_every_retry_succeeds() {
     let (_temp, source, mut runtime) = adaptive(
         false,
         graph(
-            &["a", "b", "c", "x", "y", "z"],
+            &["a", "b", "c", "d", "x", "y", "z"],
             &[("b", "x"), ("b", "y"), ("c", "z")],
         ),
         true,
@@ -1665,7 +1752,7 @@ fn failed_private_batch_holds_ready_children_until_every_retry_succeeds() {
         finish_private(&mut runtime, &retry, &format!("{}.txt", previous.node), "done");
     }
     assert!(runtime.jobs().unwrap().is_empty());
-    assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 3);
+    assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 4);
     deliver_batch(&mut runtime);
     let next = runtime.jobs().unwrap();
     assert_eq!(next.len(), 3);
@@ -1682,14 +1769,14 @@ fn retry_of_a_private_standalone_followup_does_not_trigger_graph_review() {
     finish_shared(&mut runtime, &root, "done");
     runtime.jobs().unwrap();
     runtime
-        .revise_graph(graph(&["root", "a", "b"], &[]), PlanningSummary::default())
+        .revise_graph(graph(&["root", "a", "b", "c"], &[]), PlanningSummary::default())
         .unwrap();
     for job in runtime.jobs().unwrap() {
         finish_shared(&mut runtime, &job, "done");
     }
     runtime.jobs().unwrap();
     assert!(runtime.take_shared_workspace_review().unwrap().is_some());
-    for name in ["root", "a", "b"] {
+    for name in ["root", "a", "b", "c"] {
         runtime.intervene(name, "standalone follow-up").unwrap();
     }
     for mut job in runtime.jobs().unwrap() {
@@ -1729,7 +1816,7 @@ fn retry_of_a_private_standalone_followup_does_not_trigger_graph_review() {
 #[cfg(feature = "fixture")]
 #[test]
 fn legacy_recovery_capture_stays_retryable_even_after_an_earlier_batch_published() {
-    let (temp, _source, mut runtime) = adaptive(false, graph(&["a", "b", "c"], &[]), true, 0);
+    let (temp, _source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
     let mut jobs = runtime.jobs().unwrap();
     for job in &mut jobs {
         prepare_private(&mut runtime, job);
@@ -1791,7 +1878,7 @@ fn legacy_recovery_capture_stays_retryable_even_after_an_earlier_batch_published
 #[cfg(feature = "fixture")]
 #[test]
 fn legacy_captured_unchanged_recovery_can_finish_without_republishing_an_empty_head_set() {
-    let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c"], &[]), true, 0);
+    let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
     for mut job in runtime.jobs().unwrap() {
         prepare_private(&mut runtime, &mut job);
         if job.execution.node == "a" {
@@ -1851,8 +1938,8 @@ fn batch_conflict_blocks_next_batch_until_publication_retry_resolves_it() {
     let (_temp, source, mut runtime) = adaptive(
         false,
         graph(
-            &["a", "b", "c", "join"],
-            &[("a", "join"), ("b", "join"), ("c", "join")],
+            &["a", "b", "c", "d", "join"],
+            &[("a", "join"), ("b", "join"), ("c", "join"), ("d", "join")],
         ),
         true,
         0,
@@ -1862,10 +1949,10 @@ fn batch_conflict_blocks_next_batch_until_publication_retry_resolves_it() {
         finish_private(
             &mut runtime,
             &job,
-            if job.execution.node == "c" {
-                "c.txt"
-            } else {
-                "conflict.txt"
+            match job.execution.node.as_str() {
+                "c" => "c.txt",
+                "d" => "d.txt",
+                _ => "conflict.txt",
             },
             "done",
         );
@@ -1910,10 +1997,10 @@ fn batch_conflict_blocks_next_batch_until_publication_retry_resolves_it() {
 #[test]
 fn private_feedback_is_delivered_before_the_single_source_repair() {
     let mut plan = graph(
-        &["owner", "r1", "r2", "r3"],
-        &[("owner", "r1"), ("owner", "r2"), ("owner", "r3")],
+        &["owner", "r1", "r2", "r3", "r4"],
+        &[("owner", "r1"), ("owner", "r2"), ("owner", "r3"), ("owner", "r4")],
     );
-    for name in ["r1", "r2", "r3"] {
+    for name in ["r1", "r2", "r3", "r4"] {
         plan.edges.push(Edge {
             from: name.into(),
             to: "owner".into(),
@@ -1944,7 +2031,7 @@ fn private_feedback_is_delivered_before_the_single_source_repair() {
     assert!(repair.source_direct);
     assert_eq!(repair.execution.session_id, owner.execution.session_id);
     assert!(repair.task.contains("Feedback:\nfix it"));
-    for name in ["r1", "r2", "r3"] {
+    for name in ["r1", "r2", "r3", "r4"] {
         assert!(source.join(format!("{name}.txt")).exists());
     }
     assert_eq!(runtime.state.feedback_counts["r1->owner"], 1);
@@ -2064,7 +2151,7 @@ fn recovered_attachment_receipts_preserve_edits_and_deletions_but_not_incomplete
 #[cfg(feature = "fixture")]
 #[test]
 fn retained_planner_edits_after_completion_reopen_the_batch_handoff() {
-    let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c"], &[]), true, 0);
+    let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
     let mut jobs = runtime.jobs().unwrap();
     for job in &mut jobs {
         prepare_private(&mut runtime, job);
@@ -2104,7 +2191,7 @@ fn retained_planner_edits_after_completion_reopen_the_batch_handoff() {
 #[cfg(feature = "fixture")]
 #[test]
 fn legacy_cwd_changing_recovery_keeps_the_original_sessions_attachment_claims() {
-    let (_temp, source, mut runtime) = adaptive(true, graph(&["a", "b", "c"], &[]), true, 0);
+    let (_temp, source, mut runtime) = adaptive(true, graph(&["a", "b", "c", "d"], &[]), true, 0);
     let mut jobs = runtime.jobs().unwrap();
     let input_id = Uuid::new_v4().to_string();
     let reference = format!("grapher-attachments/{input_id}/input.txt");
@@ -2269,8 +2356,8 @@ fn approval_is_filesystem_only_and_native_admission_waits_for_a_private_batch() 
     let (_temp, _source, mut runtime) = adaptive(
         true,
         graph(
-            &["root", "a", "b", "c"],
-            &[("root", "a"), ("root", "b"), ("root", "c")],
+            &["root", "a", "b", "c", "d"],
+            &[("root", "a"), ("root", "b"), ("root", "c"), ("root", "d")],
         ),
         true,
         0,
@@ -2281,7 +2368,7 @@ fn approval_is_filesystem_only_and_native_admission_waits_for_a_private_batch() 
     assert!(root.config.environment.is_none());
     finish_shared(&mut runtime, &root, "done");
     let jobs = runtime.jobs().unwrap();
-    assert_eq!(jobs.len(), 3);
+    assert_eq!(jobs.len(), 4);
     assert!(runtime.state.environment_baseline.is_some());
     assert!(jobs
         .iter()

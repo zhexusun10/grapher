@@ -38,9 +38,10 @@ const model = createServer(async (request, response) => {
       if (!results.length) tool = { name: 'bash', arguments: { command: 'printf planned > planner.txt' } };
       if (results.length === 1) tool = { name: 'node', arguments: { nodes: [
         { name: 'alpha', task: `${label} WRITE_ALPHA` }, { name: 'beta', task: `${label} WRITE_BETA` },
+        { name: 'gamma', task: `${label} WRITE_GAMMA` },
         { name: 'join', task: `${label} JOIN_BRANCHES` }, { name: 'tail', task: `${label} WRITE_TAIL` },
       ] } };
-      if (results.length === 2) tool = { name: 'edge', arguments: { edges: [{ from: 'alpha', to: 'join' }, { from: 'beta', to: 'join' }] } };
+      if (results.length === 2) tool = { name: 'edge', arguments: { edges: [{ from: 'alpha', to: 'join' }, { from: 'beta', to: 'join' }, { from: 'gamma', to: 'join' }] } };
     } else if (merger) {
       // Refuse every automatic repair turn until the harness explicitly
       // enables repair after restart. One refused turn now triggers feedback,
@@ -52,8 +53,9 @@ const model = createServer(async (request, response) => {
       const projectView = 'test -d .git && test -z "$(git for-each-ref --format="%(refname)" refs/grapher/)" && test "$(git branch --show-current)" != grapher-node && ';
       const command = text.includes('WRITE_ALPHA') ? 'printf alpha > alpha.txt'
         : text.includes('WRITE_BETA') ? 'printf beta > beta.txt'
+        : text.includes('WRITE_GAMMA') ? 'printf gamma > gamma.txt'
         : text.includes('WRITE_TAIL') ? 'printf tail > tail.txt'
-        : text.includes('JOIN_BRANCHES') ? 'test "$(cat alpha.txt)" = alpha && test "$(cat beta.txt)" = beta && printf joined > joined.txt'
+        : text.includes('JOIN_BRANCHES') ? 'test "$(cat alpha.txt)" = alpha && test "$(cat beta.txt)" = beta && test "$(cat gamma.txt)" = gamma && printf joined > joined.txt'
         : text.includes('WRITE_LEFT') ? 'printf "left\\n" > shared.txt'
         : text.includes('WRITE_RIGHT') ? 'printf "right\\n" > shared.txt'
         // BSD wc pads its output on macOS, so compare the line count numerically.
@@ -103,7 +105,7 @@ const start = async () => {
   await until(async () => { try { return await api('bootstrap'); } catch { return false; } });
 };
 const config = repository => ({ repository, model: 'files-only-acceptance/native', thinkingLevel: 'off',
-  maxParallel: 3, maxFeedback: 1, autoApprove: false, isolateParallelNodes: true,
+  maxParallel: 4, maxFeedback: 1, autoApprove: false, isolateParallelNodes: true,
   postTaskReview: false, environment: null });
 const waitPhase = (runId, phase) => until(async () => {
   const state = await api('snapshot', { runId });

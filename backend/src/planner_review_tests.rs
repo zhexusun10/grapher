@@ -49,7 +49,7 @@ if (process.env.GRAPHER_MODE === 'planner') {
   fs.writeFileSync('review.txt', 'fresh source');
   const graph = JSON.parse(fs.readFileSync(process.env.GRAPHER_GRAPH_PATH));
   graph.nodes.push({name:'second',task:'second'});
-  if (fs.existsSync('parallel-review')) graph.nodes.push({name:'third',task:'second'}, {name:'fourth',task:'second'});
+  if (fs.existsSync('parallel-review')) graph.nodes.push({name:'third',task:'second'}, {name:'fourth',task:'second'}, {name:'fifth',task:'second'});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
   emit({type:'tool_execution_end',toolName:'node',isError:false});
   if (fs.existsSync('fail-review')) throw Error('review failed deliberately');
@@ -106,15 +106,15 @@ if (process.env.GRAPHER_MODE === 'planner') {
 fn shared_review_promotes_new_parallel_nodes_only_when_isolation_is_enabled() {
     for isolate in [true, false] {
         let (_temp, repo, service) = setup_with_isolation(true, true, isolate);
-        fs::write(repo.join("parallel-review"), "three new branches").unwrap();
+        fs::write(repo.join("parallel-review"), "four new branches").unwrap();
         fs::write(repo.join("release-review"), "go").unwrap();
         drive(service.clone());
         let completed = wait(&service, |state| {
-            state.phase == "completed" && state.nodes.len() == 4
+            state.phase == "completed" && state.nodes.len() == 5
                 && state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerReviewFinished { .. })).count() == 2
         });
         wait_for_driver_exit(&service);
-        assert_eq!(completed.executions.len(), 4);
+        assert_eq!(completed.executions.len(), 5);
         assert!(crate::path_identity::same_path(Path::new(&completed.executions[0].worktree), &repo));
         assert_eq!(completed.isolated_workspaces, Some(isolate));
         for execution in &completed.executions[1..] {

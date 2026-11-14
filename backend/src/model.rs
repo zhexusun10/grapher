@@ -992,12 +992,17 @@ pub enum EventKind {
         isolated: bool,
     },
     WorkspaceIsolationRequested,
+    /// Whole topology layer retained across slot-capped private dispatches.
+    /// Empty nodes retire a delivered or explicitly superseded batch.
+    PrivateBatchSelected { nodes: Vec<String> },
     /// Records a slot-capped ready group, including shared-source replenishment.
     ExecutionBatchStarted {
         nodes: Vec<String>,
         isolated: bool,
-        /// Resume the existing private batch without collecting a new source
-        /// baseline. Historical events always started a new dispatch group.
+        /// Continue a batch without resetting its source baseline. On a source
+        /// dispatch, retain a held private batch during prerequisite recovery;
+        /// returning to private execution refreshes inputs for unstarted peers.
+        /// Historical events always started a new dispatch group.
         #[serde(default)]
         resumed: bool,
     },
@@ -1393,6 +1398,8 @@ pub struct Snapshot {
     pub config: Option<Config>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolated_workspaces: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_batch: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_handoff: Option<BatchHandoff>,
     /// Model/thinking selection saved for this conversation. Missing on Runs
@@ -1937,7 +1944,12 @@ impl Snapshot {
             && !matches!(self.phase.as_str(), "completed" | "publishing" | "merging" | "publication_failed")
             && (!self.paused || self.graph.nodes.len() == 1)
             && !self.executions.iter().any(|execution| execution.node == name && execution.status == "running")
-            && !self.mergers.iter().any(|merger| merger.status == "running")
+            && !self.mergers.iter().any(|merger| merger.status == "running"
+                && (self.isolated_workspaces != Some(true)
+                    || merger.node == format!("merge:{name}")
+                    || self.executions.iter().rev().find(|execution| execution.node == name)
+                        .is_some_and(|execution| crate::path_identity::same_path(
+                            std::path::Path::new(&execution.worktree), std::path::Path::new(&merger.worktree)))))
             && self.graph.edges.iter().filter(|edge| !edge.feedback && edge.to == name)
                 .all(|edge| self.nodes.get(&edge.from).is_some_and(|parent| parent.status == "completed"))
             && (self.failed_retry_nodes().iter().any(|node| node == name)
@@ -2453,6 +2465,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::WorkspaceIsolationSelected { isolated } => {
             state.isolated_workspaces = Some(*isolated);
         }
+        EventKind::PrivateBatchSelected { nodes } => {
+            state.private_batch = nodes.clone();
+        }
         EventKind::ExecutionBatchStarted { isolated, .. } => {
             state.isolated_workspaces = Some(*isolated);
             state.publication = None;
@@ -2507,6 +2522,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 state.planning = Some(planning.clone());
             }
             let changed = state.graph != *graph;
+            // Undelivered batch membership is not a disposable graph preview.
+            // Keep the barrier across edits; Runtime reconciles surviving
+            // members, new peers and prerequisites against the revised graph.
             state.graph = graph.clone();
             state.preview_graph = None;
             state.plan = crate::compiler::compile_legacy(graph, true).ok();
@@ -3150,6 +3168,9 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             source_direct,
         } => {
             state.stop_requested = false;
+            if !*human {
+                state.private_batch.clear();
+            }
             if *human && !instruction.is_empty() {
                 let node = state.nodes.get_mut(target).unwrap();
                 node.pending_messages.push(PendingNodeMessage {
@@ -3277,6 +3298,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 .find(|execution| execution.id == *from_execution_id)
                 .expect("validated edit anchor")
                 .clone();
+            state.private_batch.clear();
             for execution in &state.executions {
                 if nodes.contains(&execution.node)
                     && execution.started_at >= anchor.started_at
@@ -3368,6 +3390,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = "publishing".into();
         }
         EventKind::PublicationCompleted { head } => {
+            state.private_batch.clear();
             state.published_head = Some(head.clone());
             // Accumulate instead of replacing: a post-review publication must
             // not re-request earlier heads whose objects were reclaimed.

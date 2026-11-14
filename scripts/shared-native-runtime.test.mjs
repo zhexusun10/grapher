@@ -89,9 +89,9 @@ test('Windows projects/backends share a persistent engine and default workspaces
         return payload.result;
       };
       await until(backend, async () => { try { await backend.api('snapshot'); return true; } catch { return false; } }, 'Backend not ready');
-      // Three concurrent nodes exercise private workspace placement under the
+      // Four concurrent nodes exercise private workspace placement under the
       // adaptive batch policy. The post-task review must not consume this model.
-      backend.config = { repository: source, model: 'cache-test/node', thinkingLevel: 'off', maxParallel: 3, maxFeedback: 0,
+      backend.config = { repository: source, model: 'cache-test/node', thinkingLevel: 'off', maxParallel: 4, maxFeedback: 0,
         autoApprove: false, isolateParallelNodes: true, postTaskReview: false };
       await backend.api('save_config', { config: backend.config });
       return backend;
@@ -119,20 +119,20 @@ test('Windows projects/backends share a persistent engine and default workspaces
       assert.equal(await realpath(path), await realpath(engine));
     }
     const draft = await first.api('save_graph', { graph: { originalGoal: 'Return Completed',
-      nodes: ['A', 'B', 'C'].map(name => ({ name, task: 'Return Completed without tools' })), edges: [] }, config: first.config });
+      nodes: ['A', 'B', 'C', 'D'].map(name => ({ name, task: 'Return Completed without tools' })), edges: [] }, config: first.config });
     await first.api('control', { action: 'approve', runId: draft.runId });
     let completed;
     await until(first, async () => {
       completed = await first.api('snapshot');
       return completed.phase === 'completed';
     }, 'Graph did not publish');
-    assert.equal(completed.executions.length, 3);
+    assert.equal(completed.executions.length, 4);
     const canonicalCache = await realpath(cache);
     for (const execution of completed.executions) {
       assert.equal(execution.status, 'completed');
       assert.ok(resolve(execution.worktree).toLowerCase().startsWith(resolve(canonicalCache, '.grapher-worktrees', draft.runId).toLowerCase()));
     }
-    assert.equal(new Set(completed.executions.map(execution => execution.worktree.toLowerCase())).size, 3);
+    assert.equal(new Set(completed.executions.map(execution => execution.worktree.toLowerCase())).size, 4);
     assert.equal(await readFile(join(first.source, 'base.txt'), 'utf8'), 'keep');
     await stop(first);
     assert.equal((await readdir(engines)).filter(name => name.startsWith('grapher-native-engine-')).length, 1);

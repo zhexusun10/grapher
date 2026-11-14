@@ -2,6 +2,8 @@
 use super::*;
 use std::collections::BTreeMap;
 
+const SHARED_SOURCE_BATCH_LIMIT: usize = 3;
+
 impl Runtime {
     /// Missing selection identifies legacy Runs, whose existing ownership
     /// contract is replayed without changing directories underneath them.
@@ -13,19 +15,27 @@ impl Runtime {
         self.batch_workspaces() && self.state.isolated_workspaces == Some(false)
     }
 
+    /// One decision for both ready-group filtering and actual dispatch.
+    pub(super) fn starts_private_batch(&self, count: usize) -> bool {
+        !self.active() && count > SHARED_SOURCE_BATCH_LIMIT
+            && self.state.config.as_ref().is_some_and(|config| config.isolate_parallel_nodes)
+    }
+
     /// Recycling a slot and visiting it with Planner are different rights.
     /// Retain failed partial work against allocation without hiding it from repair.
     pub(super) fn allocation_workspace_reserved(&self, path: &Path, owner: Option<&str>) -> bool {
         (self.batch_workspaces()
             && self.state.executions.iter().any(|execution| {
-                execution.status == "failed"
+                (execution.status == "failed" || (execution.status == "completed"
+                    && execution.after.as_ref().is_some_and(|head|
+                        !head.is_empty() && !self.state.published_heads.contains(head))))
                     && Some(execution.node.as_str()) != owner
                     && !self.state.superseded_execution_ids.contains(&execution.id)
                     && self
                         .state
                         .nodes
                         .get(&execution.node)
-                        .is_some_and(|node| node.status != "completed")
+                        .is_some_and(|node| node.status != "completed" || execution.status == "completed")
                     && Self::same_workspace_path(Path::new(&execution.worktree), path)
             }))
             || self.workspace_reserved(path, owner)
@@ -82,11 +92,12 @@ impl Runtime {
                 _ => None,
             }).is_some_and(|head| state.head.as_ref() == Some(head)
                 && !self.state.published_heads.contains(head));
+        let repository = resolve_repository(&self.root, self.state.config.as_ref()?).ok()?;
         (state.edit_execution_id.is_none()
             && (failed || resolved)
             && !Self::same_workspace_path(
                 Path::new(&previous.worktree),
-                Path::new(&self.state.config.as_ref()?.repository),
+                &repository,
             )
             && !self.batch_recovery_was_delivered(previous))
             .then_some(previous)
@@ -130,6 +141,95 @@ impl Runtime {
                 EventKind::Prepared { execution_id, .. } if execution_id == &previous.id))
     }
 
+    /// Use the same complete topology layers as the overview, not the worker
+    /// cap's subset. Legacy groups spanning layers also retain the intervening
+    /// layers, so an unstarted dependency cannot be excluded from their scope.
+    pub(super) fn topology_batch(&self, nodes: &[String]) -> Vec<String> {
+        let Some(plan) = &self.state.plan else { return nodes.to_vec(); };
+        let layers: Vec<_> = plan.execution_batches.iter().enumerate()
+            .filter(|(_, layer)| layer.iter().any(|name| nodes.contains(name)))
+            .map(|(index, _)| index).collect();
+        let (Some(first), Some(last)) = (layers.first(), layers.last()) else { return nodes.to_vec(); };
+        plan.execution_batches[*first..=*last].iter().flatten().cloned().collect()
+    }
+
+    /// Keep unfinished prerequisite layers schedulable: a whole layer can
+    /// contain blocked peers whose parents are outside the original dispatch.
+    fn private_batch_scope(&self, nodes: &[String]) -> Vec<String> {
+        let mut scope: Vec<_> = nodes.iter().filter(|name| self.state.nodes.contains_key(*name)).cloned().collect();
+        loop {
+            let mut required: BTreeSet<_> = scope.iter().cloned().collect();
+            for name in &scope {
+                required.extend(self.dependency_ancestors(name).into_iter().filter(|parent|
+                    self.state.nodes.get(parent).is_some_and(|node| node.status != "completed")));
+            }
+            let next = self.topology_batch(&required.into_iter().collect::<Vec<_>>());
+            if next == scope { return scope; }
+            scope = next;
+        }
+    }
+
+    /// A prerequisite already executing in source must recover there, not fork
+    /// into a private slot just because its consumers have a held batch. Prove
+    /// its mode from the dispatch event; a matching path alone grants nothing.
+    pub(super) fn source_batch_recovery(&self, node: &str) -> bool {
+        if !self.state.private_batch.iter().any(|name| name == node) { return false; }
+        let Some(state) = self.state.nodes.get(node) else { return false; };
+        if !state.continuation && !(state.human_instruction && !state.pending_messages.is_empty()) {
+            return false;
+        }
+        if state.edit_execution_id.is_some() || state.feedback_workspace.is_some() { return false; }
+        let Some(previous) = self.state.executions.iter().rev().find(|execution|
+            execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)) else { return false; };
+        if previous.status != "failed" { return false; }
+        let Some(config) = &self.state.config else { return false; };
+        let Ok(repository) = resolve_repository(&self.root, config) else { return false; };
+        if !Self::same_workspace_path(Path::new(&previous.worktree), &repository) { return false; }
+        let Some(start) = self.state.events.iter().position(|event| matches!(&event.kind,
+            EventKind::Started { execution, .. } if execution.id == previous.id)) else { return false; };
+        self.state.events[..start].iter().rev().find_map(|event| match &event.kind {
+            EventKind::ExecutionBatchStarted { nodes, isolated, .. } => Some(!isolated && nodes.iter().any(|name| name == node)),
+            _ => None,
+        }).unwrap_or(false)
+    }
+
+    pub(super) fn restore_private_batch(&mut self) -> Result<(), String> {
+        if !self.batch_workspaces() || matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+            return Ok(());
+        }
+        if !self.state.private_batch.is_empty() {
+            let scope = self.private_batch_scope(&self.state.private_batch);
+            if scope != self.state.private_batch {
+                self.emit(EventKind::PrivateBatchSelected { nodes: scope })?;
+            }
+            if self.state.private_batch.is_empty() { return Ok(()); }
+            // Unchanged/no-op results can already be delivered. Do not strand
+            // subsequent work behind a batch with no publication left to do.
+            if self.state.private_batch.iter().all(|name| self.state.nodes.get(name).is_none_or(|node|
+                node.status == "completed" && node.head.as_ref().is_none_or(|head|
+                    head.is_empty() || self.state.published_heads.contains(head)))) {
+                self.emit(EventKind::PrivateBatchSelected { nodes: vec![] })?;
+            }
+            return Ok(());
+        }
+        // Adopt an older in-flight private dispatch without moving its writers
+        // or refreshing source. Graph revisions reconcile the surviving scope;
+        // explicit feedback/history branching still retires the old scope.
+        let previous = self.state.events.iter().rev().find_map(|event| match &event.kind {
+            EventKind::ExecutionBatchStarted { nodes, isolated, .. } => Some((*isolated).then_some(nodes.clone())),
+            EventKind::PublicationCompleted { .. } | EventKind::ConversationEdited { .. }
+                | EventKind::PrivateBatchSelected { .. } | EventKind::Invalidated { human: false, .. } => Some(None),
+            _ => None,
+        }).flatten();
+        if let Some(nodes) = previous {
+            if self.state.isolated_workspaces == Some(true) && self.state.executions.iter().any(|e|
+                nodes.contains(&e.node) && !self.state.superseded_execution_ids.contains(&e.id)) {
+                self.emit(EventKind::PrivateBatchSelected { nodes: self.private_batch_scope(&nodes) })?;
+            }
+        }
+        Ok(())
+    }
+
     /// Shared source workers may refill free slots without draining siblings.
     /// Private writers must all succeed before delivery or workspace switching.
     /// Explicit retries preserve unfinished work privately, never publish it.
@@ -146,16 +246,35 @@ impl Runtime {
                 self.private_continuation_during_publication(&node.name)));
         }
         let active = self.active();
-        if active
-            && (ready.is_empty()
-                || !self.shared_source_workspace()
-                || matches!(
-                    self.state.phase.as_str(),
-                    "publishing" | "merging" | "launching_result"
-                )
+        let source_recovery = !ready.is_empty() && ready.iter().all(|node|
+            self.source_batch_recovery(&node.name));
+        if source_recovery {
+            if active && (!self.shared_source_workspace()
                 || self.state.result_execution.as_ref().is_some_and(|e| e.status == "running")
-                || self.state.mergers.iter().any(|e| e.status == "running"))
-        {
+                || self.state.mergers.iter().any(|e| e.status == "running")) {
+                return Ok(false);
+            }
+            let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+            if self.state.executions.iter().any(|e| e.status == "running"
+                && !Self::same_workspace_path(Path::new(&e.worktree), &repository)) {
+                return Ok(false);
+            }
+            // Keep the pending private delivery group. `resumed` on a source
+            // dispatch records this temporary recovery, not a new shared batch.
+            self.emit(EventKind::ExecutionBatchStarted {
+                nodes: ready.iter().map(|node| node.name.clone()).collect(), isolated: false, resumed: true,
+            })?;
+            return Ok(true);
+        }
+        let retained = !ready.is_empty() && ready.iter().all(|node|
+            self.retained_private_continuation(&node.name).is_some());
+        let private_dispatch = retained || (!self.state.private_batch.is_empty() && !ready.is_empty());
+        if active && (ready.is_empty()
+            || (!private_dispatch && !self.shared_source_workspace())
+            || (private_dispatch && self.shared_source_workspace())
+            || (!private_dispatch && self.state.mergers.iter().any(|e| e.status == "running"))
+            || self.state.phase == "launching_result"
+            || self.state.result_execution.as_ref().is_some_and(|e| e.status == "running")) {
             return Ok(false);
         }
         let config = self.state.config.as_ref().ok_or("Missing config")?;
@@ -166,37 +285,50 @@ impl Runtime {
             Err(_) if active => return Ok(false),
             result => result?,
         };
-        if active && self.state.executions.iter().any(|execution| {
-            execution.status == "running"
-                && !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
-        }) {
+        if active && (private_dispatch && self.path_is_running(&repository)
+            || !private_dispatch && self.state.executions.iter().any(|execution| {
+                execution.status == "running"
+                    && !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
+            })) {
             return Ok(false);
         }
-        // Retry unfinished members before delivering even completed siblings.
-        // A smaller retry group is still the same private batch, not a new
-        // isolation decision. Newly ready descendants must wait for delivery.
-        if !ready.is_empty()
-            && ready.iter().all(|node| self.retained_private_continuation(&node.name).is_some())
-        {
-            if active {
-                return Ok(false);
-            }
+        // Private siblings may refill slots and retry independently. Only a
+        // source/result writer or the same physical directory is a barrier;
+        // delivery, not execution, waits for the whole topology batch.
+        if private_dispatch {
             for node in ready {
-                let previous = self.retained_private_continuation(&node.name).unwrap();
-                if self.planner_workspace_owner(previous).is_none_or(|owner| owner.id != previous.id) {
-                    return Err("Retained unfinished workspace was reassigned; refusing to resume another execution's files".into());
+                if let Some(previous) = self.retained_private_continuation(&node.name) {
+                    if self.planner_workspace_owner(previous).is_none_or(|owner| owner.id != previous.id) {
+                        return Err("Retained unfinished workspace was reassigned; refusing to resume another execution's files".into());
+                    }
+                    if self.path_is_running(Path::new(&previous.worktree)) {
+                        return Ok(false);
+                    }
                 }
             }
+            if self.state.private_batch.is_empty() {
+                self.emit(EventKind::PrivateBatchSelected {
+                    nodes: self.private_batch_scope(&ready.iter().map(|node| node.name.clone()).collect::<Vec<_>>()),
+                })?;
+            }
+            let recovered_source = self.shared_source_workspace() && self.state.events.iter().rev().find_map(|event| match &event.kind {
+                EventKind::ExecutionBatchStarted { isolated, resumed, .. } => Some(!isolated && *resumed),
+                _ => None,
+            }).unwrap_or(false);
             self.emit(EventKind::ExecutionBatchStarted {
                 nodes: ready.iter().map(|node| node.name.clone()).collect(),
                 isolated: true,
-                resumed: true,
+                // Unstarted consumers must see a prerequisite's completed
+                // source edits. Prepared retries still pin their own inputs.
+                resumed: !recovered_source,
             })?;
             return Ok(true);
         }
-        // Idle is not successful: one failure or pause keeps every completed
-        // sibling private until the unfinished member succeeds as well.
-        if self.state.nodes.keys().any(|node| self.unfinished_private_execution(node).is_some()) {
+        // Unstarted/blocked peers left behind by the worker cap also belong to
+        // this batch. An idle subset is never permission for partial delivery.
+        if self.state.private_batch.iter().any(|name|
+                self.state.nodes.get(name).is_some_and(|node| node.status != "completed"))
+            || self.state.nodes.keys().any(|node| self.unfinished_private_execution(node).is_some()) {
             if !active && allow_delivery && self.state.phase != "needs_attention" {
                 self.emit(EventKind::Settled)?;
             }
@@ -206,6 +338,7 @@ impl Runtime {
         for execution in &self.state.executions {
             if execution.status == "completed"
                 && self.state.nodes.contains_key(&execution.node)
+                && (self.state.private_batch.is_empty() || self.state.private_batch.contains(&execution.node))
                 && !self.state.superseded_execution_ids.contains(&execution.id)
                 && !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
             {
@@ -258,9 +391,9 @@ impl Runtime {
 
         // Choose isolation only at an idle boundary. Replenishment stays in the
         // active source workspace even if the ready group or total concurrency
-        // exceeds two; never snapshot or relocate a live writer's directory.
+        // exceeds three; never snapshot or relocate a live writer's directory.
         // The ready group is already dependency/feedback filtered and slot-capped.
-        let isolated = !active && config.isolate_parallel_nodes && ready.len() > 2;
+        let isolated = self.starts_private_batch(ready.len());
         let mut events = Vec::new();
         if isolated {
             #[cfg(not(feature = "fixture"))]
@@ -289,6 +422,11 @@ impl Runtime {
                     events.push(EventKind::EnvironmentInitialized { result });
                 }
             }
+        }
+        if isolated {
+            events.push(EventKind::PrivateBatchSelected {
+                nodes: self.private_batch_scope(&ready.iter().map(|node| node.name.clone()).collect::<Vec<_>>()),
+            });
         }
         events.push(EventKind::ExecutionBatchStarted {
             nodes: ready.iter().map(|node| node.name.clone()).collect(),

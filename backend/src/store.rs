@@ -48,6 +48,7 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::Approved { .. } => "approved",
         EventKind::WorkspaceIsolationSelected { .. } => "workspace_isolation_selected",
         EventKind::WorkspaceIsolationRequested => "workspace_isolation_requested",
+        EventKind::PrivateBatchSelected { .. } => "private_batch_selected",
         EventKind::ExecutionBatchStarted { .. } => "execution_batch_started",
         EventKind::BatchHandoffRequested { .. } => "batch_handoff_requested",
         EventKind::BatchRecoveryCaptured { .. } => "batch_recovery_captured",

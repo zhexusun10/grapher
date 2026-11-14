@@ -153,6 +153,7 @@ export interface SkillItem {
 export interface Snapshot {
   runId: string;
   isolatedWorkspaces?: boolean | null;
+  privateBatch?: string[];
   batchHandoff?: { recoveryExecutionIds: string[] } | null;
   planType?: "serial" | "graph";
   planningId?: string;

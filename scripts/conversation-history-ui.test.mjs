@@ -538,6 +538,36 @@ test("Planner details show the backend-selected cwd for every turn", { timeout: 
   } finally { await context.close(); }
 });
 
+test("private batch progress includes capped and failed peers until the whole visible batch publishes", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  const members = ["a", "b", "c", "d", "e"];
+  const nodes = Object.fromEntries([...members, "child"].map(name => [name,
+    { status: ["a", "b"].includes(name) ? "completed" : name === "c" ? "failed" : "waiting", revision: 1, instruction: "", error: null }]));
+  const snapshot = {
+    phase: "needs_attention", isolatedWorkspaces: true, privateBatch: members, nodes,
+    graph: { originalGoal: "whole batch", nodes: [...members, "child"].map(name => ({ name, task: name })), edges: [{ from: "a", to: "child", feedback: false }] },
+    plan: { executionBatches: [members, ["child"]], rootNodes: members, terminals: ["child"], warnings: [] },
+  };
+  try {
+    await context.addInitScript(() => localStorage.setItem("grapher_execution_overview_v1", "1"));
+    await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.setBatchSnapshot);
+    await page.evaluate(value => window.audit.setBatchSnapshot(value), snapshot);
+    const overview = page.locator(".plan-summary-card");
+    const status = overview.getByRole("status");
+    await status.getByText("Current private batch: 2/5 completed; publish after all succeed.", { exact: true }).waitFor();
+    assert.equal(await overview.locator(".plan-batch-row").first().locator(".node-chip").count(), 5);
+    assert.equal(await overview.getByTestId("publication-completed-details").count(), 0);
+    const publishing = { ...snapshot, phase: "publishing", publication: { repository: "/mock", heads: members, status: "publishing", startedAt: 1 },
+      nodes: { ...nodes, ...Object.fromEntries(members.map(name => [name, { ...nodes[name], status: "completed" }])) } };
+    await page.evaluate(value => window.audit.setBatchSnapshot(value), publishing);
+    await status.getByText("Current private batch: 5/5 completed; publishing together.", { exact: true }).waitFor();
+    await page.evaluate(value => window.audit.setBatchSnapshot({ ...value, privateBatch: [], isolatedWorkspaces: false, phase: "running", publication: null }), publishing);
+    assert.equal(await status.count(), 0, "shared mode must not claim deferred batch delivery");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("completed write-back details live inside the topology overview with copy and merger history", { timeout: 30_000 }, async () => {
   const mergerReads = [];
   const { context, page, errors } = await newPage(route => {

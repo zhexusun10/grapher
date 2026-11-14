@@ -9,23 +9,26 @@ Private workspaces have one project-file version channel: **Git**. The host prep
 
 New Graph Runs choose workspaces from **the actual ready dispatch group at an
 idle boundary**. `isolateParallelNodes` (Settings, default `true`, captured for
-new Runs) enables private workspaces when that group contains more than two
-nodes. One or two nodes share the user's source directory. `false` always uses
+new Runs) enables private workspaces when that group contains more than three
+nodes. Up to three nodes share the user's source directory. `false` always uses
 source. Total graph size, graph width, Planner Review and follow-up flags do not
-select isolation.
+select isolation. Ready-group filtering and dispatch use the same threshold;
+private-only topology filtering cannot reduce a shared group or silently turn
+a mixed private group into a smaller shared group.
 
-The overview groups nodes into topological **batches**, not dispatch/publication
-groups. Readiness is determined by actual edges, not an all-nodes-in-batch
-barrier. After dependency and feedback filtering, earlier batches have stable
-priority before the worker cap is applied, so ready peers left behind by a cap
-are not displaced by newly unlocked descendants. Remaining capacity may still
-run ready nodes from later batches. A private dispatch may deliver while other
-nodes in its displayed batch have not yet run.
+The overview and private delivery use the same topological **batches**. Before
+starting a private group, Runtime records the complete layer as
+`PrivateBatchSelected`; the worker cap only splits its execution into dispatches,
+not separate deliveries. Free slots may start unstarted peers or retry failed
+members while unrelated private writers keep running. Completed peers retain
+their unpublished directories, and ready descendants cannot enter the next
+batch before this batch is delivered. Shared-source execution keeps its existing
+dependency-driven refill and has no deferred-delivery guarantee.
 
 The scheduler filters ready nodes by dependencies, feedback and available worker
 slots. While shared-source node writers remain active, newly ready nodes may
 fill free slots immediately without waiting for unrelated siblings. Replenishment
-stays source-native even if its group or total concurrency exceeds two; it never
+stays source-native even if its group or total concurrency exceeds three; it never
 captures a private baseline or changes a live writer's directory. Once idle,
 the next dispatch chooses its workspace policy again. Source admission is not
 revalidated when active writers or unavailable slots already prohibit dispatch.
@@ -35,7 +38,7 @@ the idle scheduling attempt reports the binding error explicitly.
 
 Private batches deliver only after every retained member succeeds, not merely
 when their processes stop. A failed, interrupted or manually resolved-but-unfinished
-member keeps successful siblings private and holds new dispatch/workspace switching.
+member keeps successful siblings private and holds next-batch dispatch/workspace switching.
 Retries belong to that same batch even when only one node remains. Once all members
 succeed, their results are composed and delivered together through the recoverable
 publication path. Undelivered private results and managed result work cannot bypass
@@ -51,11 +54,31 @@ this barrier, without rewriting historical node executions or claiming another
 node review. Other business entries retain their verified previous publication
 until the refreshed descriptor installs the newly composed code.
 
-`ExecutionBatchStarted` records each dispatch group and choice, including
-source-native replenishment. Its optional `resumed` flag distinguishes a suspended
-private batch from a new batch; absent flags retain the historical new-batch
-semantics without rewriting records.
-There is no sticky promotion across idle boundaries: a `1 → 3 → 1` sequence runs
+`PrivateBatchSelected` and the checkpoint/API `privateBatch` projection retain
+whole-layer membership across dispatches and restart. Publication completion
+retires it. Planner/manual graph revisions preserve the delivery barrier and
+reconcile surviving members, new peers, removed nodes and unfinished prerequisite
+layers before scheduling; an unrelated edit is not permission to deliver a
+completed subset. History edits and feedback invalidation keep their distinct
+branching semantics rather than manufacturing completion. Older in-flight private
+groups can adopt their current topology layers without moving a writer or
+refreshing source. Newer event records require a backend that understands them.
+`ExecutionBatchStarted` still records each slot-capped dispatch and choice. Its
+optional `resumed` flag now also identifies same-batch refill: new peers and
+retries reuse the batch's source snapshot instead of collecting mid-batch source
+edits. Absent flags retain historical new-batch semantics.
+
+A held batch must not exclude a failed prerequisite in an earlier layer. Its
+scope includes unfinished prerequisite layers. If a requested retry was already
+source-native, durable dispatch history—not a path match—authorizes recovery in
+its original source directory and Pi session. Private writers first drain; no
+private result is delivered to unblock that retry. The source dispatch retains
+the pending batch (`isolated=false`, `resumed=true`). Returning to private work
+collects the recovered source for unstarted consumers, while prepared private
+attempts keep their own pinned inputs and files. Repeated failures and restart
+retain both the delivery barrier and this ownership evidence.
+
+There is no sticky promotion across idle boundaries: a `1 → 4 → 1` sequence runs
 source → private → source when each preceding group has drained. Approval does not
 allocate environments or collect Git snapshots. A private batch initializes
 native admission lazily, then its first worker captures the latest source under
@@ -84,7 +107,10 @@ it suspends the batch's delivery and workspace switching even before Continue
 or a message is queued. When those writers drain, the Run needs attention;
 merely stopping its last writer is not permission to publish completed siblings.
 A new human message also resumes in the retained workspace before delivery,
-with the normal FIFO claim and new-turn attempt number. History edits and
+with the normal FIFO claim and new-turn attempt number. A retry does not wait
+for an unrelated private node or its Merger to exit; writer admission checks the
+retained directory's ownership and live users. Source/result writers, global
+pause, dependency/feedback constraints and worker capacity remain barriers. History edits and
 already-delivered recoveries keep their distinct semantics.
 
 An already-started handoff does not lock every node conversation. A failed or

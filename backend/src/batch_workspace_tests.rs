@@ -44,14 +44,14 @@ if (task.trim() === 'Resolve the current merge conflicts.') {
   }
   if (fs.existsSync(path.join(control, 'fail-merger'))) throw Error('deliberate publication failure');
   fs.writeFileSync('base.txt', 'merged siblings');
-  execFileSync('git', ['add', 'base.txt']);
-  execFileSync('git', ['commit', '-qm', 'resolved']);
+  execFileSync('git', ['add', '-f', '--', 'base.txt']);
   console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'merged'}]}}));
   process.exit(0);
 }
 const continuation = task.trim() === '__grapher_continue_interrupted__';
 const followup = task.trim() === 'finish a';
-const name = continuation || followup ? 'a' : task.trim();
+const resumedNode = fs.existsSync(path.join(control, 'recover-b')) ? 'b' : 'a';
+const name = continuation ? resumedNode : followup ? 'a' : task.trim();
 const arg = key => process.argv[process.argv.indexOf(key)+1];
 const sessionDir = arg('--session-dir'), id = arg('--session-id');
 fs.mkdirSync(sessionDir, {recursive:true});
@@ -63,10 +63,10 @@ if (!session) {
 const sessionFile = path.join(sessionDir, session);
 if (continuation || followup) {
   const history = fs.readFileSync(sessionFile, 'utf8');
-  if (!history.includes('"text":"a"')) throw Error('lost the failed node conversation');
+  if (!history.includes(`"text":"${name}"`)) throw Error('lost the failed node conversation');
   if (JSON.parse(history.split('\n')[0]).cwd !== process.cwd()) throw Error('fork did not rebind cwd');
-  if (fs.readFileSync('partial-a.txt','utf8') !== 'unfinished work') throw Error('partial work disappeared');
-  fs.writeFileSync('partial-a.txt','recovered');
+  if (fs.readFileSync(`partial-${name}.txt`,'utf8') !== 'unfinished work') throw Error('partial work disappeared');
+  fs.writeFileSync(`partial-${name}.txt`,'recovered');
 }
 if (!continuation) {
   fs.appendFileSync(sessionFile, JSON.stringify({type:'message',id:crypto.randomUUID(),parentId:null,timestamp:new Date().toISOString(),message:{role:'user',content:[{type:'text',text:task.trim()}],timestamp:Date.now()}})+'\n');
@@ -81,14 +81,27 @@ if (['root','join'].includes(name) && fs.existsSync(path.join(control, 'external
   }
   if (fs.readFileSync('base.txt', 'utf8') !== `during ${name}`) throw Error('live source edit was lost');
 }
-if (name === 'b' && fs.existsSync(path.join(control, 'hold-b'))) {
-  fs.writeFileSync(path.join(control, 'active-b'), 'ready');
+if (['b', 'e'].includes(name) && fs.existsSync(path.join(control, `hold-${name}`))) {
+  fs.writeFileSync(path.join(control, `active-${name}`), 'ready');
   const deadline = Date.now() + 120_000;
-  while (!fs.existsSync(path.join(control, 'release-b'))) {
+  while (!fs.existsSync(path.join(control, `release-${name}`))) {
     if (Date.now() > deadline) throw Error('shared replenishment test timed out');
     await new Promise(resolve => setTimeout(resolve, 20));
   }
 }
+if (name === 'a' && fs.existsSync(path.join(control, 'hold-source-a'))) {
+  fs.writeFileSync(path.join(control, 'active-source-a'), 'ready');
+  const deadline = Date.now() + 120_000;
+  while (!fs.existsSync(path.join(control, 'release-source-a'))) {
+    if (Date.now() > deadline) throw Error('source prerequisite test timed out');
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+if (name === 'b' && fs.existsSync(path.join(control, 'fail-b'))) {
+  fs.writeFileSync('partial-b.txt', 'unfinished work');
+  throw Error('source prerequisite failed');
+}
+if (name === 'b1' && fs.readFileSync('partial-b.txt', 'utf8') !== 'recovered') throw Error('private consumer missed source recovery');
 if (name === 'a' && fs.existsSync(path.join(control, 'fail-a'))) {
   fs.writeFileSync('partial-a.txt', 'unfinished work');
   if (fs.existsSync(path.join(control, 'hold-a'))) {
@@ -102,18 +115,18 @@ if (name === 'a' && fs.existsSync(path.join(control, 'fail-a'))) {
   throw Error('deliberate provider failure');
 }
 if (name === 'join') {
-  for (const node of ['a','b','c']) if (fs.readFileSync(`${node}.txt`, 'utf8') !== node) throw Error(`missing ${node} before shared join`);
+  for (const node of ['a','b','c','d']) if (fs.readFileSync(`${node}.txt`, 'utf8') !== node) throw Error(`missing ${node} before shared join`);
 }
-if (['a','b','c'].includes(name) && fs.existsSync(path.join(control, 'chain')) && fs.readFileSync('root.txt','utf8') !== 'root') throw Error('private batch missed shared input');
+if (['a','b','c','d'].includes(name) && fs.existsSync(path.join(control, 'chain')) && fs.readFileSync('root.txt','utf8') !== 'root') throw Error('private batch missed shared input');
 if (['b', 'c'].includes(name) && fs.existsSync(path.join(control, 'conflict-bc'))) fs.writeFileSync('base.txt', name);
 fs.writeFileSync(`${name}.txt`, name);
 fs.writeFileSync(path.join(control, `audit-${name}.json`), JSON.stringify({cwd:process.cwd(), managed, continuation, followup, externalFilePresent:fs.existsSync('external.txt')}));
 console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}));
 "#).unwrap();
     let names = if fail {
-        vec!["a", "b", "c"]
+        vec!["a", "b", "c", "d"]
     } else {
-        vec!["root", "a", "b", "c", "join"]
+        vec!["root", "a", "b", "c", "d", "join"]
     };
     let edges = if fail {
         vec![]
@@ -122,9 +135,11 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
             ("root", "a"),
             ("root", "b"),
             ("root", "c"),
+            ("root", "d"),
             ("a", "join"),
             ("b", "join"),
             ("c", "join"),
+            ("d", "join"),
         ]
     };
     if fail {
@@ -188,14 +203,14 @@ fn driver_delivers_private_batch_before_shared_join_without_leaking_environment(
         drive(service.clone());
         let state = wait_for_idle(&service);
         assert_eq!(state.phase, "completed", "{:?}", state.nodes);
-        assert_eq!(state.executions.len(), 5);
+        assert_eq!(state.executions.len(), 6);
         assert_eq!(state.isolated_workspaces, Some(false));
-        for name in ["root", "a", "b", "c", "join"] {
+        for name in ["root", "a", "b", "c", "d", "join"] {
             let audit: serde_json::Value = serde_json::from_slice(
                 &fs::read(temp.path().join(format!("audit-{name}.json"))).unwrap(),
             )
             .unwrap();
-            let private = isolate && ["a", "b", "c"].contains(&name);
+            let private = isolate && ["a", "b", "c", "d"].contains(&name);
             assert_eq!(
                 crate::path_identity::same_path(Path::new(audit["cwd"].as_str().unwrap()), &repo),
                 !private
@@ -295,7 +310,7 @@ fn driver_dispatches_ready_child_before_unrelated_shared_worker_finishes() {
     {
         let mut runtime = service.runtime.lock().unwrap();
         let mut graph = runtime.state.graph.clone();
-        graph.edges = [("root", "a"), ("root", "b"), ("a", "c"), ("b", "join"), ("c", "join")]
+        graph.edges = [("root", "a"), ("root", "b"), ("root", "d"), ("a", "c"), ("b", "join"), ("c", "join"), ("d", "join")]
             .into_iter()
             .map(|(from, to)| Edge { from: from.into(), to: to.into(), feedback: false })
             .collect();
@@ -317,7 +332,7 @@ fn driver_dispatches_ready_child_before_unrelated_shared_worker_finishes() {
     assert_eq!(during.nodes["b"].status, "running");
     assert_eq!(during.nodes["join"].status, "waiting");
     assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
-    assert_eq!(completed.executions.len(), 5);
+    assert_eq!(completed.executions.len(), 6);
     assert!(completed.executions.iter().all(|execution|
         execution.status == "completed" && crate::path_identity::same_path(Path::new(&execution.worktree), &repo)));
     assert!(!completed.events.iter().any(|event|
@@ -369,7 +384,7 @@ fn driver_drains_active_workers_before_reporting_invalid_source_binding() {
     drive(service.clone());
     let completed = wait_for_idle(&service);
     assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
-    assert_eq!(completed.executions.len(), 5, "repair never reruns completed workers");
+    assert_eq!(completed.executions.len(), 6, "repair never reruns completed workers");
 }
 
 #[test]
@@ -398,7 +413,7 @@ fn assert_driver_resumes_private_node(pause_run: bool, followup: bool) {
         loop {
             let state = service.runtime.lock().unwrap().state.clone();
             if temp.path().join("active-a").exists()
-                && ["b", "c"].iter().all(|node| state.nodes[*node].status == "completed") {
+                && ["b", "c", "d"].iter().all(|node| state.nodes[*node].status == "completed") {
                 break;
             }
             assert!(Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
@@ -461,7 +476,7 @@ fn assert_driver_resumes_private_node(pause_run: bool, followup: bool) {
         assert_eq!(audit["managed"], managed);
         assert_eq!(audit["externalFilePresent"], false, "the resumed agent must keep its original project view");
         assert!(!completed.events.iter().any(|event| matches!(event.kind, EventKind::BatchRecoveryCaptured { .. })));
-        assert_eq!(completed.executions.len(), 4, "resume must succeed without another failed attempt");
+        assert_eq!(completed.executions.len(), 5, "resume must succeed without another failed attempt");
         assert_eq!(completed.events.iter().filter(|event| matches!(event.kind, EventKind::PublicationCompleted { .. })).count(),
             1, "publish the batch only after the stopped task finishes");
     }
@@ -486,7 +501,7 @@ fn assert_private_followup_during_publication(fail_publication: bool) {
     loop {
         let state = service.runtime.lock().unwrap().state.clone();
         if temp.path().join("active-a").exists()
-            && ["b", "c"].iter().all(|node| state.nodes[*node].status == "completed") { break; }
+            && ["b", "c", "d"].iter().all(|node| state.nodes[*node].status == "completed") { break; }
         assert!(Instant::now() < deadline, "workers never became ready: {:?}", state.nodes);
         thread::sleep(Duration::from_millis(20));
     }
@@ -549,10 +564,147 @@ fn assert_private_followup_during_publication(fail_publication: bool) {
         completed = wait_for_idle(&service);
     }
     assert_eq!(completed.phase, "completed", "{:?}", completed.publication);
-    assert_eq!(completed.executions.len(), 4, "publication retry must not rerun the independent node");
+    assert_eq!(completed.executions.len(), 5, "publication retry must not rerun the independent node");
     assert_eq!(fs::read_to_string(repo.join("partial-a.txt")).unwrap(), "recovered");
     assert_eq!(fs::read_to_string(repo.join("base.txt")).unwrap(), "merged siblings");
     assert_eq!(completed.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 2);
+}
+
+#[test]
+fn driver_retries_private_node_before_its_independent_sibling_finishes() {
+    let (temp, repo, service) = setup(false, true, true);
+    fs::write(temp.path().join("hold-b"), "hold").unwrap();
+    drive(service.clone());
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let checks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        loop {
+            let state = service.runtime.lock().unwrap().state.clone();
+            if state.nodes["a"].status == "failed" && state.nodes["c"].status == "completed"
+                && temp.path().join("active-b").exists() { break; }
+            assert!(Instant::now() < deadline, "initial private workers did not settle");
+            thread::sleep(Duration::from_millis(20));
+        }
+        fs::remove_file(temp.path().join("fail-a")).unwrap();
+        let run_id = service.runtime.lock().unwrap().state.run_id.clone();
+        control("resume_node".into(), Some("a".into()), None, Some(run_id), None, None, &service).unwrap();
+        loop {
+            let state = service.runtime.lock().unwrap().state.clone();
+            if state.nodes["a"].status == "completed" {
+                assert_eq!(state.nodes["b"].status, "running");
+                assert!(state.publication.is_none());
+                assert!(!repo.join("partial-a.txt").exists());
+                break;
+            }
+            assert!(Instant::now() < deadline, "private retry waited for an unrelated writer");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }));
+    fs::write(temp.path().join("release-b"), "release").unwrap();
+    let completed = wait_for_idle(&service);
+    if let Err(error) = checks { std::panic::resume_unwind(error); }
+    assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
+    assert_eq!(completed.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 1);
+}
+
+#[test]
+fn driver_publishes_the_whole_visible_private_batch_not_each_worker_group() {
+    let (temp, repo, service) = setup(false, true, true);
+    fs::remove_file(temp.path().join("fail-a")).unwrap();
+    fs::write(temp.path().join("hold-e"), "hold").unwrap();
+    {
+        let mut runtime = service.runtime.lock().unwrap();
+        let mut config = runtime.state.config.clone().unwrap();
+        config.max_parallel = 4;
+        let graph = Graph {
+            original_goal: "whole private batch".into(),
+            nodes: ["a", "b", "c", "d", "e", "child"].into_iter()
+                .map(|name| Node { name: name.into(), task: name.into() }).collect(),
+            edges: vec![crate::model::Edge { from: "a".into(), to: "child".into(), feedback: false }],
+        };
+        runtime.create(graph, config).unwrap();
+        runtime.set_route("graph").unwrap();
+        runtime.approve().unwrap();
+    }
+    drive(service.clone());
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let checks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        loop {
+            let state = service.runtime.lock().unwrap().state.clone();
+            if temp.path().join("active-e").exists() && state.nodes["d"].status == "completed" {
+                assert_eq!(state.private_batch, state.plan.as_ref().unwrap().execution_batches[0]);
+                assert_eq!(state.nodes["child"].status, "waiting");
+                assert!(state.publication.is_none());
+                for name in ["a", "b", "c", "d"] { assert!(!repo.join(format!("{name}.txt")).exists()); }
+                break;
+            }
+            assert!(Instant::now() < deadline, "the capped private batch did not refill");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }));
+    fs::write(temp.path().join("release-e"), "release").unwrap();
+    let completed = wait_for_idle(&service);
+    if let Err(error) = checks { std::panic::resume_unwind(error); }
+    assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
+    assert_eq!(completed.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 1);
+    for name in ["a", "b", "c", "d", "e", "child"] { assert!(repo.join(format!("{name}.txt")).exists()); }
+}
+
+#[test]
+fn driver_recovers_source_prerequisite_without_publishing_or_relocating_the_held_private_batch() {
+    for managed in [false, true] {
+        let (temp, repo, service) = setup(managed, true, true);
+        fs::remove_file(temp.path().join("fail-a")).unwrap();
+        fs::write(temp.path().join("fail-b"), "fail").unwrap();
+        fs::write(temp.path().join("hold-source-a"), "hold").unwrap();
+        {
+            let mut runtime = service.runtime.lock().unwrap();
+            let mut config = runtime.state.config.clone().unwrap();
+            config.max_parallel = 4;
+            runtime.create(Graph {
+                original_goal: "source prerequisite recovery".into(),
+                nodes: ["a", "b", "a1", "a2", "a3", "a4", "b1"].into_iter()
+                    .map(|name| Node { name: name.into(), task: name.into() }).collect(),
+                edges: [("a", "a1"), ("a", "a2"), ("a", "a3"), ("a", "a4"), ("b", "b1")].into_iter()
+                    .map(|(from, to)| crate::model::Edge { from: from.into(), to: to.into(), feedback: false }).collect(),
+            }, config).unwrap();
+            runtime.set_route("graph").unwrap();
+            runtime.approve().unwrap();
+        }
+        drive(service.clone());
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let ready = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            loop {
+                let state = service.runtime.lock().unwrap().state.clone();
+                if state.nodes["b"].status == "failed" && temp.path().join("active-source-a").exists() { break; }
+                assert!(Instant::now() < deadline, "source failure was not recorded");
+                thread::sleep(Duration::from_millis(20));
+            }
+        }));
+        fs::write(temp.path().join("release-source-a"), "release").unwrap();
+        let held = wait_for_idle(&service);
+        if let Err(error) = ready { std::panic::resume_unwind(error); }
+        assert_eq!(held.phase, "needs_attention", "{:?}", held.nodes);
+        assert_eq!(held.nodes["a1"].status, "completed");
+        assert_eq!(held.nodes["b1"].status, "blocked");
+        assert!(held.publication.is_none() && !repo.join("a1.txt").exists());
+        let original = held.executions.iter().find(|e| e.node == "b").unwrap();
+        fs::remove_file(temp.path().join("fail-b")).unwrap();
+        fs::write(temp.path().join("recover-b"), "b").unwrap();
+        control("resume_node".into(), Some("b".into()), None, Some(held.run_id.clone()), None, None, &service).unwrap();
+        let completed = wait_for_idle(&service);
+        assert_eq!(completed.phase, "completed", "{:?} {:?}", completed.nodes, completed.publication);
+        let retry = completed.executions.iter().rev().find(|e| e.node == "b").unwrap();
+        assert_eq!(retry.worktree, original.worktree);
+        assert_eq!(retry.session_id, original.session_id);
+        assert_eq!(completed.executions.len(), 8);
+        assert_eq!(completed.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 1);
+        let audit: serde_json::Value = serde_json::from_slice(&fs::read(temp.path().join("audit-b.json")).unwrap()).unwrap();
+        assert_eq!(audit["managed"], false, "source recovery must not load the held private environment");
+        let audit: serde_json::Value = serde_json::from_slice(&fs::read(temp.path().join("audit-b1.json")).unwrap()).unwrap();
+        assert_eq!(audit["managed"], managed);
+        assert_eq!(fs::read_to_string(repo.join("partial-b.txt")).unwrap(), "recovered");
+        assert!(repo.join("a1.txt").exists() && repo.join("b1.txt").exists());
+    }
 }
 
 #[test]
@@ -590,7 +742,7 @@ fn driver_retries_private_failure_in_place_and_delivers_the_complete_batch() {
         assert_eq!(retry.session_id, original.session_id);
         assert_eq!(retry.worktree, original.worktree);
         assert_eq!(retry.attempt, original.attempt + 1);
-        assert_eq!(completed.executions.len(), 4, "completed siblings must not rerun");
+        assert_eq!(completed.executions.len(), 5, "completed siblings must not rerun");
         assert_eq!(completed.events.iter().filter(|event|
             matches!(event.kind, EventKind::PublicationCompleted { .. })).count(), 1);
         assert_eq!(completed.executions[0].status, "failed");

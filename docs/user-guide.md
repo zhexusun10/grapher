@@ -30,20 +30,21 @@ At the bottom of **Settings**, choose the static **Dot pattern** (the default) o
 ## Choose node workspace isolation
 
 **Settings → Harness settings → Isolate parallel node workspaces** applies to new
-conversations. When no nodes are running, dispatching up to two ready nodes
+conversations. When no nodes are running, dispatching up to three ready nodes
 shares your source directory; larger groups use independent workspaces. While
 source-native nodes run, newly ready work fills free slots without waiting for
-unrelated siblings and keeps sharing source, even above two concurrent nodes.
-The overview's **batches** (when **Settings → UI settings → Show execution graph overview** is enabled; off by default) describe the graph topology, not dispatch groups:
-ready nodes in earlier batches get priority, but a batch is not a barrier for
-unrelated ready work. Private workspaces still drain and hand off the dispatched
-results before another group starts—even if the concurrency cap left peers in
-the same batch waiting. Those peers remain queued; then a smaller group can
-return to source. Planner review follows the same rule.
+unrelated siblings and keeps sharing source, even above three concurrent nodes.
+The overview's **batches** (when **Settings → UI settings → Show execution graph overview** is enabled; off by default) describe topology layers. A private batch
+keeps all its peers together for delivery: the concurrency cap limits execution,
+not which results are written back. Free slots can run remaining peers and
+independent retries, but failures or pauses hold the batch's delivery. Once the
+whole batch succeeds and is delivered, the next group's workspace mode is chosen
+again. Shared-source execution still follows dependencies without this delivery
+barrier. Planner review follows the same workspace-selection rule.
 A failed handoff blocks dispatch for repair/retry rather than losing files or
-claiming completion. Manually
-resolved private inputs are delivered before a retry moves to source; successful
-managed result runs also deliver their new files before another result launch.
+claiming completion. Manually resolved private inputs stay private until their
+node task succeeds; successful managed result runs also deliver their new files
+before another result launch.
 
 Turn the option off to always share source, reducing environment setup and merge
 cost and making intermediate files visible immediately. Shared agents have no
@@ -114,7 +115,7 @@ After fixing the cause, use the play button in an empty Node, Serial Agent or Pl
 
 Changing the Node Agent model or reasoning level in a conversation applies to all its future node attempts, including retries, feedback repairs, rerun descendants and follow-ups to completed nodes. A running attempt keeps its current model and is not restarted; its recorded model remains in the history. Session details show a retry selection separately from the previous model. Other conversations keep their own settings, and environment overrides take precedence. After saving, reopening Settings shows that conversation's saved selection. Saving from the home screen instead changes the defaults for new conversations.
 
-In Graph, Continue resumes paused or queued work first; after it settles, Continue again retries failed nodes without rerunning completed branches. Failed or paused private nodes continue in their original workspaces and conversations without writing unfinished files to source just to resume them. One failed member holds the entire private execution batch: successful siblings stay private without rerunning, and the batch writes back together only after every member succeeds. This also survives restart; acknowledging a repaired conflict does not count as task completion. Stopping one private node lets already-running siblings finish, but does not automatically write their results back while you decide how to continue. Sending a new instruction keeps the stopped node in its original workspace. If another write-back has already started, an unfinished node with a separate retained workspace can continue working when its files are not inputs to that write-back; shared source and overlapping inputs still wait. Retained workspaces preserve partial work; missing or changed recovery evidence may require explicit repair. Editing an old message branches history: Serial does **not** rewind project files, while private Graph workspaces retain Git rollback semantics. Shared-source Graphs do not rewind project files.
+In Graph, Continue resumes paused or queued work first; after it settles, Continue again retries failed nodes without rerunning completed branches. Failed or paused private nodes continue in their original workspaces and conversations without writing unfinished files to source just to resume them. One failed member holds delivery of the entire private topology batch: successful siblings stay private without rerunning, and the batch writes back together only after every member succeeds. The concurrency limit splits execution, not delivery; the overview shows the whole private batch's completion count. An independent private node can retry while its siblings keep working, subject to available worker slots and workspace ownership. This also survives restart; acknowledging a repaired conflict does not count as task completion. Unrelated plan edits do not release a partially finished batch. If a required parent failed in shared source, it can retry in its original directory after private writers stop, without first publishing their results; its unstarted consumers then receive the recovered source files. Stopping one private node lets already-running siblings finish, but does not automatically write their results back while you decide how to continue. Sending a new instruction keeps the stopped node in its original workspace. If another write-back has already started, an unfinished node with a separate retained workspace can continue working when its files are not inputs to that write-back; shared source and overlapping inputs still wait. Retained workspaces preserve partial work; missing or changed recovery evidence may require explicit repair. Editing an old message branches history: Serial does **not** rewind project files, while private Graph workspaces retain Git rollback semantics. Shared-source Graphs do not rewind project files.
 
 ## Know when the result is delivered
 

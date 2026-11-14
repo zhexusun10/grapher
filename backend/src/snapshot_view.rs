@@ -101,6 +101,7 @@ fn metadata_event(event: &Event) -> Value {
 pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
     json!({
         "nodeMessageQueueVersion": 1,
+        "privateBatch": state.private_batch,
         "isolatedWorkspaces": state.isolated_workspaces,
         "batchHandoff": state.batch_handoff,
         "runId": state.run_id, "planType": state.plan_type,
@@ -144,6 +145,7 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         })
         .collect::<Vec<_>>();
     let mut metadata = json!({
+        "privateBatch": state.private_batch,
         "isolatedWorkspaces": state.isolated_workspaces,
         "batchHandoff": state.batch_handoff,
         "runId": state.run_id, "planningId": state.planning_id, "planning": state.planning,
