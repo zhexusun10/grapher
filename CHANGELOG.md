@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Composer model changes and queue withdrawals no longer overwrite an in-progress Planner graph preview with the older durable snapshot (`src/App.tsx`, `scripts/planner-handoff-ui.test.mjs`).
+- Composer model changes and queue withdrawals no longer overwrite an in-progress Planner graph preview with the older durable snapshot. Queue recall restores keyboard focus only after the input is re-enabled, avoiding lost focus under rendering load (`src/App.tsx`, `src/components/ui/chatgpt-prompt-input.tsx`, `scripts/planner-handoff-ui.test.mjs`, `scripts/steer-order-ui.test.mjs`).
 - Composer UI ownership now includes the invocation ID and serializes commands within a Pi process, preventing abandoned polls from cancelling a new command's dialogs after navigation. Disconnected clients' dialogs are cancelled without treating HTTP timeout as command completion (`backend/src/engine/composer_ui.rs`, `src/hooks/useComposerCommands.ts`).
 - Conversation-level Node Agent `/model` and `/thinking` changes now update inherited role defaults exactly like Settings, without changing explicit role selections, per-node overrides or global defaults (`backend/src/server/composer.rs`).
 - Ordinary extension hook errors now survive in live and replayed transcripts even without a slash-command poller; dialog input values and command-handler errors remain ephemeral (`backend/src/engine.rs`, `src/services/transcriptParser.ts`, `src/services/plannerStream.ts`).

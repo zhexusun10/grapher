@@ -225,6 +225,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const hasAttachment = !!selectedFile || restoredImages.length > 0;
     const [isWithdrawing, setIsWithdrawing] = useState(false);
+    const withdrawFocusKey = useRef<string | null>(null);
     const [isDraggingOver, setIsDraggingOver] = useState(false);
     const dragCounterRef = useRef(0);
     const selectedFileRef = useRef<File | null>(null);
@@ -1032,6 +1033,14 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
     };
 
+    // Focus only after React commits the enabled textarea. A single animation
+    // frame can run before that commit under load, losing keyboard focus.
+    useLayoutEffect(() => {
+      if (withdrawFocusKey.current !== key || disabled || isBusy || isPreparing || isSubmitting) return;
+      withdrawFocusKey.current = null;
+      internalTextareaRef.current?.focus({ preventScroll: true });
+    }, [key, disabled, isBusy, isPreparing, isSubmitting, isWithdrawing]);
+
     const handleWithdraw = async () => {
       if (!onWithdraw || disabled || isBusy || isPreparing || submittingRef.current) return;
       const generation = attachmentGenerationRef.current;
@@ -1047,10 +1056,10 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         if (isCurrent()) setCommandError(error instanceof Error ? error.message : String(error));
       } finally {
         if (isCurrent()) {
+          withdrawFocusKey.current = key;
           submittingRef.current = false;
           setIsSubmitting(false);
           setIsWithdrawing(false);
-          requestAnimationFrame(() => internalTextareaRef.current?.focus({ preventScroll: true }));
         }
       }
     };
