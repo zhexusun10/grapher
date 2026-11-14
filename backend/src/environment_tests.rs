@@ -213,7 +213,8 @@ fn shared_batch_cannot_launch_an_older_private_result() {
     let mut policy = state_policy();
     policy.best_effort = true;
     policy.discovery = true;
-    let (_temp, source, mut runtime) = setup(graph(&["A", "B", "C"], &[]), policy, "");
+    // Four ready nodes cross the shared-source limit and select private work.
+    let (_temp, source, mut runtime) = setup(graph(&["A", "B", "C", "D"], &[]), policy, "");
     // The fixture seeds frozen native E/L; exercise batch scheduling on that
     // real evidence rather than manufacturing a launchable descriptor.
     runtime.emit(EventKind::WorkspaceIsolationSelected { isolated: false }).unwrap();
@@ -244,9 +245,9 @@ fn shared_batch_cannot_launch_an_older_private_result() {
     assert!(runtime.result_descriptor().unwrap_err().contains("latest batch"));
     // Selecting private work again does not make the old descriptor current:
     // only a new ResultPublished can prove the new batch's code/E/L together.
-    for node in ["A", "B", "C"] { runtime.intervene(node, "new work").unwrap(); }
+    for node in ["A", "B", "C", "D"] { runtime.intervene(node, "new work").unwrap(); }
     let next = runtime.jobs().unwrap();
-    assert_eq!(next.len(), 3);
+    assert_eq!(next.len(), 4);
     assert!(next.iter().all(|job| !job.source_direct));
     assert!(runtime.result_descriptor().unwrap_err().contains("latest batch"));
 }
@@ -289,7 +290,7 @@ fn batch_business_result_republishes_code_and_remains_launchable_after_restart()
     policy.best_effort = true;
     policy.discovery = true;
     let (_temp, source, mut runtime) = setup(
-        graph(&["A", "B", "C"], &[]), policy,
+        graph(&["A", "B", "C", "D"], &[]), policy,
         "fs.writeFileSync(`${name}.txt`, name);",
     );
     let source_head = workspace::git(&source, &["rev-parse", "HEAD"]).unwrap();

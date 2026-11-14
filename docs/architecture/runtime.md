@@ -170,6 +170,11 @@ before a restart. Opening a Run also reconciles failed-node retry selections
 that were not synchronized before a crash, without automatically starting work.
 Failure recovery remains available regardless of whether settings were changed;
 environment overrides still take precedence.
+Node-composition Mergers inherit their dispatched node job's settings;
+publication workers and explicit Merger continuations capture the latest
+conversation selection when dispatched, including after restart. Already-dispatched
+work retains its captured configuration. Merger field inheritance and environment
+precedence are defined in the [Pi adapter](../development/pi-integration.md#role-loading-policy).
 Model selections are conversation-scoped: a save made inside a Run records
 that conversation's override, including nodes the Planner adds later. Other
 conversations keep their own creation or saved selection, so their running and

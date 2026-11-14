@@ -151,6 +151,16 @@ test("role settings omit the after-saving summary but retain missing-model and o
     .includes(`${t("环境变量覆盖：")}example/plain · off`));
 });
 
+test("partial Merger overrides inherit the effective Node Agent model and thinking", () => {
+  const render = (envOverrides: Record<string, string>) => renderToStaticMarkup(React.createElement(RoleModelSettings, {
+    config: legacy, setConfig: () => {}, catalog, envOverrides, busy: false,
+  }));
+  assert.ok(render({ nodeAgent: "env/node", nodeAgentThinking: "off", mergerThinking: "max" })
+    .includes(`${t("Merger 环境变量覆盖：")}env/node · max`));
+  assert.ok(render({ nodeAgent: "env/node", nodeAgentThinking: "off", merger: "env/merger" })
+    .includes(`${t("Merger 环境变量覆盖：")}env/merger · off`));
+});
+
 test("an unavailable saved model is preserved as a disabled option with a warning", () => {
   const config = updateRoleModelConfig(legacy, "planner", { model: "closed/old" });
   const markup = renderToStaticMarkup(React.createElement(RoleModelSettings, { config, setConfig: () => {}, catalog, busy: false }));
@@ -644,6 +654,34 @@ test("failed-node model overrides provide the next attempt's fallback without re
   assert.equal(resolveExecutionModelAndThinking(execution, true, legacy, {}, replacement).model, legacy.model);
   execution.output = JSON.stringify({ type: "model_change", provider: "recorded", modelId: "original" });
   assert.equal(resolveExecutionModelAndThinking(execution, false, legacy, {}, replacement).model, "recorded/original");
+});
+
+test("Merger selections follow saved Node Agent changes unless overridden, without rewriting history", () => {
+  const execution: Execution = {
+    id: "merger", node: "merger", revision: 1, attempt: 1, sessionId: "session", worktree: "/worktree",
+    before: "base", after: null, status: "running", output: "", startedAt: 1, completedAt: null,
+  };
+  let config = legacy;
+  for (const settings of [
+    { model: "replacement/merger", thinkingLevel: "high" as const },
+    { model: "replacement/retry", thinkingLevel: "off" as const },
+  ]) {
+    config = updateRoleModelConfig(config, "nodeAgent", settings);
+    assert.deepEqual(resolveExecutionModelAndThinking(execution, true, config), settings);
+  }
+  const env = { nodeAgent: "env/node", nodeAgentThinking: "low" };
+  assert.deepEqual(resolveExecutionModelAndThinking(execution, true, config, env),
+    { model: "env/node", thinkingLevel: "low" });
+  assert.deepEqual(resolveExecutionModelAndThinking(execution, true, config, { ...env, mergerThinking: "max" }),
+    { model: "env/node", thinkingLevel: "max" });
+  assert.deepEqual(resolveExecutionModelAndThinking(execution, true, config, { ...env, merger: "env/merger" }),
+    { model: "env/merger", thinkingLevel: "low" });
+  execution.output = [
+    JSON.stringify({ type: "model_change", provider: "actual", modelId: "merger" }),
+    JSON.stringify({ type: "thinking_level_change", thinkingLevel: "high" }),
+  ].join("\n");
+  assert.deepEqual(resolveExecutionModelAndThinking(execution, true, config, env),
+    { model: "actual/merger", thinkingLevel: "high" });
 });
 
 test("retry selections are separate from historical attempts and respect environment overrides", () => {

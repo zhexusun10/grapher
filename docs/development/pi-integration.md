@@ -16,6 +16,8 @@ Scope: Grapher-side integration, not an upstream Pi implementation guide. [CONTR
 
 Serial Agent and Graph Node Agent have distinct execution identities and Bash policies. They currently share the `nodeAgent` model/thinking settings profile; that profile does not determine runtime agent identity.
 
+Merger inherits the effective Node Agent model and thinking level. Each field resolves independently: nonblank `MERGER_MODEL` / `MERGER_THINKING`, then `NODE_AGENT_MODEL` / `NODE_AGENT_THINKING`, then the saved `nodeAgent` role field, then the legacy configuration default. Saving and dispatch timing belong to [Runtime](../architecture/runtime.md#scheduling-and-concurrency); running calls are not hot-swapped.
+
 Working directories, source-write effects, and platform permissions belong to [Execution model](../architecture/execution-model.md) and [Filesystem isolation](../architecture/filesystem-isolation.md), not this loading table.
 
 ## Global extension settings

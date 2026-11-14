@@ -1051,6 +1051,7 @@ mod tests {
         let private = temp.path().join(".grapher-workspaces/run/planner");
         fs::create_dir_all(&private).unwrap();
         crate::workspace::git(&private, &["init", "-q"]).unwrap();
+        crate::workspace::git(&private, &["commit", "--allow-empty", "-qm", "base"]).unwrap();
         let error = validate_workspace(PiRole::Planner, &source, &private).unwrap_err();
         assert!(error.contains("source-equivalent"), "{error}");
         let private = private.with_file_name("planner-v2");

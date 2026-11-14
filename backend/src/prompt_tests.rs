@@ -4824,7 +4824,7 @@ fn completed_graph_is_published_by_driver() {
         .create(
             Graph {
                 original_goal: "Publish an isolated batch of independent outcomes".into(),
-                nodes: ["first", "middle", "last"].into_iter().map(|name| Node {
+                nodes: ["first", "middle", "last", "extra"].into_iter().map(|name| Node {
                     name: name.into(), task: name.into(),
                 }).collect(),
                 edges: Vec::new(),
@@ -4917,6 +4917,7 @@ fn completed_graph_is_published_by_driver() {
     assert!(source.join("first.md").exists());
     assert!(source.join("middle.md").exists());
     assert!(source.join("last.md").exists());
+    assert!(source.join("extra.md").exists());
     assert_eq!(
         crate::workspace::git(&source, &["rev-list", "--count", "HEAD"]).unwrap(),
         "1"

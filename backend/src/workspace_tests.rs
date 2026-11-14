@@ -801,6 +801,34 @@ fn tracked_managed_scope_is_detected_and_removed_from_the_index() {
 }
 
 #[test]
+fn private_git_requires_committed_history_not_only_project_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(source.join(".git")).unwrap();
+    assert!(!workspace::has_private_git(&source), "an empty .git is not usable history");
+    workspace::git(&source, &["init", "-q"]).unwrap();
+    assert!(!workspace::has_private_git(&source), "an unborn HEAD is not usable history");
+    fs::write(source.join("keep.txt"), "base").unwrap();
+    workspace::git(&source, &["add", "-A"]).unwrap();
+    workspace::git(&source, &["commit", "-qm", "base"]).unwrap();
+    assert!(workspace::has_private_git(&source));
+
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let slot = temp.path().join(".grapher-worktrees/run/node");
+    workspace::prepare(&source, &slot, &base, &[]).unwrap();
+    assert!(workspace::has_private_git(&slot));
+    let metadata = workspace::private_git_dir(&slot).unwrap();
+    let retained = metadata.with_extension("retained");
+    fs::rename(&metadata, &retained).unwrap();
+    assert!(crate::workspace_view::is_bound(&slot));
+    assert!(git2::Repository::open(&slot).unwrap().head().unwrap().peel_to_commit().is_ok());
+    assert!(!workspace::has_private_git(&slot), "project Git must not substitute for missing Graph history");
+    assert_eq!(fs::read_to_string(slot.join("keep.txt")).unwrap(), "base");
+    fs::rename(retained, metadata).unwrap();
+    assert!(workspace::has_private_git(&slot));
+}
+
+#[test]
 fn prepare_recovers_from_incomplete_or_unborn_private_git_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");

@@ -36,6 +36,7 @@ applyLaunchBinding();
 const control = path.dirname(fileURLToPath(import.meta.url));
 let task = ''; for await (const chunk of process.stdin) task += chunk;
 if (task.trim() === 'Resolve the current merge conflicts.') {
+  fs.appendFileSync(path.join(control, 'merger-args.jsonl'), JSON.stringify(process.argv.slice(2))+'\n');
   fs.writeFileSync(path.join(control, 'active-merger'), 'ready');
   const deadline = Date.now() + 120_000;
   while (!fs.existsSync(path.join(control, 'release-merger'))) {
@@ -480,6 +481,80 @@ fn assert_driver_resumes_private_node(pause_run: bool, followup: bool) {
         assert_eq!(completed.events.iter().filter(|event| matches!(event.kind, EventKind::PublicationCompleted { .. })).count(),
             1, "publish the batch only after the stopped task finishes");
     }
+}
+
+#[test]
+fn publication_merger_follows_saved_node_models_and_retry_after_restart() {
+    let (temp, repo, service) = setup(false, true, true);
+    fs::remove_file(temp.path().join("fail-a")).unwrap();
+    for marker in ["hold-b", "conflict-bc", "fail-merger"] {
+        fs::write(temp.path().join(marker), "enabled").unwrap();
+    }
+    drive(service.clone());
+    let wait_for = |marker: &str| {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !temp.path().join(marker).exists() {
+            assert!(Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
+                "worker never reached {marker}");
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let save = |model: &str, thinking: &str| {
+        let mut runtime = service.runtime.lock().unwrap();
+        let mut config = runtime.state.effective_config().unwrap();
+        config.role_models.insert("nodeAgent".into(), crate::model::RoleModelConfig {
+            model: model.into(), thinking_level: Some(thinking.into()),
+        });
+        runtime.update_node_models(&config).unwrap();
+    };
+    let checks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_for("active-b");
+        save("replacement/merger", "high");
+        fs::write(temp.path().join("release-b"), "release").unwrap();
+        wait_for("active-merger");
+        // Saving during a live Merger affects its next attempt, not this process.
+        save("replacement/retry", "off");
+    }));
+    for marker in ["release-b", "release-merger"] {
+        fs::write(temp.path().join(marker), "release").unwrap();
+    }
+    let failed = wait_for_idle(&service);
+    if let Err(panic) = checks { std::panic::resume_unwind(panic); }
+    assert_eq!(failed.phase, "publication_failed");
+    let selections = || -> Vec<(String, String)> {
+        fs::read_to_string(temp.path().join("merger-args.jsonl")).unwrap().lines().map(|line| {
+            let args: Vec<String> = serde_json::from_str(line).unwrap();
+            let value = |key| args.windows(2).find(|pair| pair[0] == key).unwrap()[1].clone();
+            (value("--model"), value("--thinking"))
+        }).collect()
+    };
+    assert_eq!(selections(), vec![("replacement/merger".into(), "high".into())]);
+    let root = service.runtime.lock().unwrap().root.clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Arc::strong_count(&service) != 1 {
+        assert!(Instant::now() < deadline, "publication driver did not release its runtime");
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(service);
+    let recovered = Runtime::open(&root).unwrap().open_run(&failed.run_id).unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(recovered),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    fs::remove_file(temp.path().join("fail-merger")).unwrap();
+    control("retry_publication".into(), None, None, Some(failed.run_id), None, None, &service).unwrap();
+    let completed = wait_for_idle(&service);
+    assert_eq!(completed.phase, "completed", "{:?}", completed.publication);
+    assert_eq!(selections(), vec![
+        ("replacement/merger".into(), "high".into()),
+        ("replacement/retry".into(), "off".into()),
+    ]);
+    assert_eq!(completed.config.as_ref().unwrap().model, "test/batches");
+    assert_eq!(completed.executions.len(), 4, "publication retry does not rerun nodes");
+    assert_eq!(fs::read_to_string(repo.join("base.txt")).unwrap(), "merged siblings");
 }
 
 #[test]

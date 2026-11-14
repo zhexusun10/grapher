@@ -30,7 +30,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
 "#).unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository":repository, "piCommand":"node", "piArgs":[script],
-        "model":"mock/model", "postTaskReview":false, "maxParallel":3
+        "model":"mock/model", "postTaskReview":false, "maxParallel":4
     })).unwrap();
     let current = service(&temp.path().join("runtime"));
     current.driving.store(true, Ordering::SeqCst);
@@ -38,8 +38,8 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
         let mut runtime = current.runtime.lock().unwrap();
         runtime.create(Graph {
             original_goal:"batch handoff".into(),
-            nodes:["a","b","c","join"].into_iter().map(|name| Node { name:name.into(), task:name.into() }).collect(),
-            edges:["a","b","c"].into_iter().map(|name| Edge { from:name.into(), to:"join".into(), feedback:false }).collect(),
+            nodes:["a","b","c","d","join"].into_iter().map(|name| Node { name:name.into(), task:name.into() }).collect(),
+            edges:["a","b","c","d"].into_iter().map(|name| Edge { from:name.into(), to:"join".into(), feedback:false }).collect(),
         }, config.clone()).unwrap();
         runtime.set_route("graph").unwrap();
         runtime.approve().unwrap();

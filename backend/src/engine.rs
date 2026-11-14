@@ -601,23 +601,34 @@ impl PiModelConfig {
         let key = match role {
             PiRole::Partitioner => "partitioner",
             PiRole::Planner => "planner",
-            // Merger is also a Node Agent and follows Node Agent settings
-            // unless MERGER_MODEL / MERGER_THINKING explicitly override them.
+            // Merger follows the effective Node Agent profile, including its
+            // environment overrides, unless MERGER_MODEL / MERGER_THINKING win.
             PiRole::NodeAgent | PiRole::Merger => "nodeAgent",
         };
         let settings = base_config.role_models.get(key);
-        let model = std::env::var(role.model_env_var())
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        let env_value = |key| std::env::var(key).ok().filter(|value| !value.trim().is_empty());
+        let model = env_value(role.model_env_var())
+            .or_else(|| {
+                if role == PiRole::Merger {
+                    env_value(PiRole::NodeAgent.model_env_var())
+                } else {
+                    None
+                }
+            })
             .or_else(|| {
                 settings
                     .map(|value| value.model.clone())
                     .filter(|value| !value.trim().is_empty())
             })
             .unwrap_or_else(|| base_config.model.clone());
-        let thinking = std::env::var(role.thinking_env_var())
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        let thinking = env_value(role.thinking_env_var())
+            .or_else(|| {
+                if role == PiRole::Merger {
+                    env_value(PiRole::NodeAgent.thinking_env_var())
+                } else {
+                    None
+                }
+            })
             .or_else(|| settings.and_then(|value| value.thinking_level.clone()))
             .unwrap_or_else(|| {
                 if role == PiRole::Partitioner {
@@ -4033,6 +4044,28 @@ sys.stdin.read()
             PiModelConfig::resolve(PiRole::NodeAgent, &config).model,
             "example/coder"
         );
+
+        std::env::set_var("NODE_AGENT_MODEL", "env/node");
+        std::env::set_var("NODE_AGENT_THINKING", "off");
+        for (model, thinking, expected_model, expected_thinking) in [
+            ("", "", "env/node", "off"),
+            ("  ", "  ", "env/node", "off"),
+            ("env/merger", "", "env/merger", "off"),
+            ("", "max", "env/node", "max"),
+            ("env/merger", "high", "env/merger", "high"),
+        ] {
+            std::env::set_var("MERGER_MODEL", model);
+            std::env::set_var("MERGER_THINKING", thinking);
+            // Saved roles and legacy configurations share the same precedence.
+            for base in [&config, &partial] {
+                let merger = PiModelConfig::resolve(PiRole::Merger, base);
+                assert_eq!(merger.model, expected_model);
+                assert_eq!(merger.thinking.as_deref(), Some(expected_thinking));
+                let node = PiModelConfig::resolve(PiRole::NodeAgent, base);
+                assert_eq!(node.model, "env/node");
+                assert_eq!(node.thinking.as_deref(), Some("off"));
+            }
+        }
     }
 
     #[test]

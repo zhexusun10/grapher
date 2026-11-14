@@ -123,7 +123,7 @@ export function RoleModelSettings({ config, setConfig, catalog, envOverrides = {
             {unavailable && <small className="role-model-warning">{t("当前使用的模型不可用，请先认证对应 Provider 或重新选择可用模型。")}</small>}
             {role.id === "nodeAgent" && (envOverrides.merger || envOverrides.mergerThinking) && (
               <small className="role-model-warning">
-                {t("Merger 环境变量覆盖：")}{envOverrides.merger || settings.model ? `${envOverrides.merger || settings.model} · ${envOverrides.mergerThinking || settings.thinkingLevel}` : t("未设置模型")}
+                {t("Merger 环境变量覆盖：")}{envOverrides.merger?.trim() || effective.model ? `${envOverrides.merger?.trim() || effective.model} · ${envOverrides.mergerThinking?.trim() || effective.thinkingLevel}` : t("未设置模型")}
               </small>
             )}
           </section>

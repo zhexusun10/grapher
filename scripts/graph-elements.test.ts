@@ -242,9 +242,18 @@ test("a batch handoff merger connects delivered producers, not unstarted graph t
   assert.equal(projected.nodes.find(node => node.id === 'b')!.data.hasBottom, false);
   const card = projected.nodes.find(node => node.id === 'merger:publication')!;
   assert.equal(card.data.name, t('批次回写 merger'));
-  assert.equal(card.position.y, projected.nodes.find(node => node.id === 'a')!.position.y);
-  assert.equal(edges[0].sourceHandle, 'right-source');
-  assert.equal(edges[0].targetHandle, 'left-target');
+  const producer = projected.nodes.find(node => node.id === 'a')!;
+  const downstream = projected.nodes.find(node => node.id === 'b')!;
+  assert.ok(card.position.y > producer.position.y);
+  assert.ok(card.position.y < downstream.position.y);
+  assert.equal(card.position.x + card.width! / 2, producer.position.x + producer.width! / 2);
+  assert.equal(edges[0].sourceHandle, 'bottom');
+  assert.equal(edges[0].targetHandle, 'top');
+  assert.equal(producer.data.hasBottom, true);
+  assert.equal(card.data.hasBottom, false, 'handoff is not a dependency of the next batch');
+  assert.ok(!projected.edges.some(edge => edge.source === card.id));
+  assert.equal(typeof projected.edges.find(edge => edge.source === 'a' && edge.target === 'b')!.data?.routeX,
+    'number', 'the existing task dependency routes around the inserted handoff card');
 });
 
 test('historical batch merger stays attached to its producers after publication clears and nodes advance', () => {
@@ -268,7 +277,7 @@ test('historical batch merger stays attached to its producers after publication 
   assert.equal(card.data.status, 'completed');
   assert.equal(card.data.name, t('批次回写 merger'));
   assert.equal(card.data.hint, t('批次回写记录，不属于任务依赖'));
-  assert.equal(card.position.y, projected.nodes.find(node => node.id === 'a')!.position.y);
+  assert.ok(card.position.y > projected.nodes.find(node => node.id === 'a')!.position.y);
   assert.ok(card.position.y < projected.nodes.find(node => node.id === 'b')!.position.y);
   assert.deepEqual(projected.edges.filter(edge => edge.target === card.id).map(edge => edge.source), ['a']);
   assert.equal(projected.nodes.find(node => node.id === 'b')!.data.hasBottom, false);
@@ -283,14 +292,15 @@ test("a node-composition merger is a selectable card in the topology", () => {
   assert.equal(mergerCard.data.kind, "merger");
   assert.equal(mergerCard.data.status, "failed");
   assert.ok(mergerCard.width! < nodeCard.width!);
-  // Both cards use their vertical midpoint as the node origin, so the compact
-  // merger card is horizontally level with its downstream node's midpoint.
   assert.deepEqual(mergerCard.origin, nodeCard.origin);
-  assert.equal(mergerCard.position.y, nodeCard.position.y);
-  // The merger edge joins the two card midpoints, so it stays a horizontal line.
+  assert.ok(mergerCard.position.y < nodeCard.position.y);
+  assert.equal(mergerCard.position.x + mergerCard.width! / 2, nodeCard.position.x + nodeCard.width! / 2);
+  // The Merger connects vertically into its target, following execution order.
   const mergerEdge = idle.edges.find(edge => edge.id === "merger:join->join")!;
-  assert.equal(mergerEdge.sourceHandle, "merger-right-source");
-  assert.equal(mergerEdge.targetHandle, "merger-left-target");
+  assert.equal(mergerEdge.sourceHandle, "bottom");
+  assert.equal(mergerEdge.targetHandle, "top");
+  assert.equal(nodeCard.data.hasTop, true);
+  assert.equal(mergerCard.data.hasBottom, true);
   assert.equal(mergerEdge.markerEnd, "workflow-arrow-default");
 
   // Selecting the merger card highlights it without highlighting the node card.
@@ -309,17 +319,45 @@ test("a node-composition merger is a selectable card in the topology", () => {
   assert.deepEqual(projectGraph(publication, "").nodes.map(node => node.id).sort(), ["join", "merger:publication"]);
 });
 
-test("a merger lane keeps task cards and the merger card from overlapping", () => {
+test("Merger rows preserve task columns and keep multiple fan-in helpers between their parents and targets", () => {
   const state = mergerState();
-  state.graph = { originalGoal: "merge", nodes: [
-    { name: "a", task: "a" }, { name: "join", task: "join" }, { name: "b", task: "b" },
-  ], edges: [] };
-  const { nodes } = projectGraph(state, "");
-  const byName = new Map(nodes.map(node => [node.id, node]));
-  const a = byName.get("a")!, join = byName.get("join")!, b = byName.get("b")!, merger = byName.get("merger:join")!;
-  assert.ok(a.position.x + a.width! <= merger.position.x, "the previous task keeps its own column");
-  assert.ok(merger.position.x + merger.width! <= join.position.x, "the merger sits between its neighbors");
-  assert.ok(join.position.x + join.width! <= b.position.x, "the downstream task keeps its own column");
+  state.graph = { originalGoal: "merge", nodes: ['a', 'b', 'join', 'other'].map(name => ({ name, task: name })),
+    edges: ['join', 'other'].flatMap(to => ['a', 'b'].map(from => ({ from, to, feedback: false }))) };
+  state.mergers!.push({ ...state.mergers![0], id: 'merger-2', node: 'merge:other' });
+  const plain = projectGraph({ ...state, mergers: [] }, '');
+  const projected = projectGraph(state, '');
+  const byName = new Map(projected.nodes.map(node => [node.id, node]));
+  for (const node of plain.nodes) assert.equal(byName.get(node.id)!.position.x, node.position.x, 'task columns do not shift');
+  for (const name of ['join', 'other']) {
+    const target = byName.get(name)!, merger = byName.get(`merger:${name}`)!;
+    assert.equal(merger.position.x + merger.width! / 2, target.position.x + target.width! / 2);
+    assert.ok(merger.position.y + 70 < target.position.y - 98, 'cards have a clear vertical gap');
+    for (const parent of ['a', 'b']) {
+      assert.ok(byName.get(parent)!.position.y + 98 < merger.position.y - 70);
+      const edge = projected.edges.find(edge => edge.source === parent && edge.target === merger.id)!;
+      assert.equal(edge.sourceHandle, 'bottom');
+      assert.equal(edge.targetHandle, 'top');
+      assert.equal(edge.data?.routeX, undefined, 'adjacent parent-to-Merger edges need no outer detour');
+    }
+  }
+  const left = byName.get('merger:join')!, right = byName.get('merger:other')!;
+  assert.equal(left.position.y, right.position.y);
+  assert.ok(left.position.x + left.width! < right.position.x);
+});
+
+test('batch Merger centers on its producers rather than a wider unrelated layer', () => {
+  const state = publicationMergerState();
+  state.graph.nodes.push(...['c', 'd', 'e'].map(name => ({ name, task: name })));
+  state.plan!.executionBatches = [['a', 'b'], ['c', 'd', 'e']];
+  state.batchHandoff = { recoveryExecutionIds: [] };
+  state.publication = { repository: '/source', heads: ['ha'], status: 'merging', head: null, error: null, startedAt: 1, completedAt: null };
+  const projected = projectGraph(state, '');
+  const card = projected.nodes.find(node => node.id === 'merger:publication')!;
+  const producer = projected.nodes.find(node => node.id === 'a')!;
+  assert.equal(card.position.x + card.width! / 2, producer.position.x + producer.width! / 2);
+  assert.ok(card.position.y > producer.position.y);
+  assert.ok(card.position.y < projected.nodes.find(node => node.id === 'c')!.position.y);
+  assert.deepEqual(projected.edges.filter(edge => edge.target === card.id).map(edge => edge.source), ['a']);
 });
 
 test("stale, superseded, invalidated, and removed-route warnings are hidden", () => {

@@ -3634,7 +3634,9 @@ fn drive(service: Arc<Service>) {
                         let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
                         if runtime.state.phase == "publishing" {
                             Some((
-                                runtime.state.config.clone().ok_or("Missing config")?,
+                                // Like node dispatch and Merger continuations,
+                                // publication captures this Run's latest model selection.
+                                runtime.state.effective_config().ok_or("Missing config")?,
                                 runtime.state.graph.original_goal.clone(),
                                 runtime
                                     .state
