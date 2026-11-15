@@ -72,8 +72,11 @@ rebuild service or proof that manifests reproduce installed dependencies.
 
 JSON reports include native tool versions, setup, source snapshot, prepare, node seal, per-worker
 fork/seal, concurrent wall time, merge preparation and immutable reconstruction.
-Each profile has a `componentStatus`. An unwinding fixture/tool/permission failure
-records its diagnostic, completed phase timings and `completedEvidence`, then
+Profiles and the summary have a `componentStatus`: `completed`, `incomplete`
+(missing tool coverage), or `failed`. A missing optional uv is **incomplete**, not
+a passing modern-tool invocation, even when the other component checks finish.
+An unwinding fixture/tool/permission failure records its diagnostic, completed
+phase timings and `completedEvidence`, then
 continues only the other explicitly requested profiles. `failedProjects` is
 retained in the JSON **before the test fails**; this is not a fallback or partial
 pass. Missing timings/fields are not zero-cost or successful phases. A killed or

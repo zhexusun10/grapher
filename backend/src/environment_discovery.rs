@@ -942,6 +942,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
                 .and_modify(|seen| *seen |= created)
                 .or_insert(created);
         }
+        let mut private_use_recorded = false;
         for (prefix, created) in unique {
             let result = (|| -> Result<_, String> {
                 let prefix = canonical(&prefix)?;
@@ -965,8 +966,16 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
                 root: Some(root),
             };
             write_receipt(&file, &receipt, &ctx.generation)?;
+            private_use_recorded |= detected_prefix.as_ref().is_some_and(|detected| {
+                crate::path_identity::same_path(detected, &prefix)
+            });
         }
+        // A used private prefix is already a candidate for drain-time native
+        // verification. Do not also label it external merely because the
+        // previous binding named another owned prefix/root. Multiple candidates
+        // still unbind; creating a prefix through a host interpreter is not use.
         let switched_from_bound = ctx.best_effort
+            && !private_use_recorded
             && launch_environment_differs(
                 &ctx.launch,
                 &workspace,
@@ -1728,6 +1737,60 @@ mod tests {
         assert!(find_conda(&["missing".into()], &workspace).is_err());
         fs::write(workspace.join(name), "not executed").unwrap();
         assert_eq!(find_conda(&[String::new()], &workspace).unwrap(), text(&canonical(&workspace.join(name)).unwrap()));
+    }
+
+    #[test]
+    fn verified_private_switches_follow_the_used_root_without_external_fallback() {
+        let (temp, workspace, _, mut launch, _) = setup();
+        let bootstrap = python(&launch);
+        let state = temp.path().join("state");
+        fs::create_dir(&state).unwrap();
+        for (label, root) in [("workspace", &workspace), ("state", &state)] {
+            let prefix = root.join("same-env");
+            let mut command = Command::new(&bootstrap);
+            command.args(["-m", "venv", "--without-pip"]).arg(&prefix);
+            environment::controlled_output(command).unwrap();
+            fs::write(prefix.join("local-patch"), label).unwrap();
+        }
+        for label in ["workspace", "state", "workspace"] {
+            let root = if label == "workspace" { &workspace } else { &state };
+            let prefix = root.join("same-env");
+            let generation = Uuid::new_v4().to_string();
+            let session = temp.path().join(&generation);
+            let observer = context_with_state(&workspace, Some(&state), &generation,
+                &launch.expanded(&workspace), &session, true).unwrap();
+            assert_eq!(tool(vec![text(&observer), "python".into(), text(&interpreter(&prefix, "venv")),
+                "-I".into(), "-c".into(), "import pathlib,sys; p=pathlib.Path(sys.prefix); assert p.resolve()==pathlib.Path(sys.argv[1]).resolve(); assert (p/'local-patch').read_text()==sys.argv[2]".into(),
+                text(&prefix), label.into()]).unwrap(), 0);
+            launch = resolve_for_policy_with_state(&workspace, Some(&state), &launch,
+                &session, &generation, false, true).unwrap();
+            let binding = launch.environment.as_ref().expect("unique verified private use must not be classified as an external switch");
+            assert_eq!(binding.root.as_deref(), Some(label));
+            assert_eq!(binding.prefix, "same-env");
+            validate_launch_with_state(&workspace, Some(&state), &launch, false).unwrap();
+            assert_eq!(launch.owned_scopes.as_ref().unwrap().len(), 2);
+            for (name, root) in [("workspace", &workspace), ("state", &state)] {
+                assert_eq!(fs::read_to_string(root.join("same-env/local-patch")).unwrap(), name,
+                    "switching does not copy or reset either private environment");
+            }
+        }
+        for external in [false, true] {
+            let generation = Uuid::new_v4().to_string();
+            let session = temp.path().join(&generation);
+            let observer = context_with_state(&workspace, Some(&state), &generation,
+                &launch.expanded(&workspace), &session, true).unwrap();
+            let programs = if external { vec![PathBuf::from(&bootstrap)] } else {
+                vec![interpreter(&workspace.join("same-env"), "venv"), interpreter(&state.join("same-env"), "venv")]
+            };
+            for program in programs {
+                assert_eq!(tool(vec![text(&observer), "python".into(), text(&program),
+                    "-I".into(), "-c".into(), "pass".into()]).unwrap(), 0);
+            }
+            let next = resolve_for_policy_with_state(&workspace, Some(&state), &launch,
+                &session, &generation, false, true).unwrap();
+            assert!(next.environment.is_none(), "external or ambiguous use must remain unbound");
+            assert_eq!(next.owned_scopes, launch.owned_scopes);
+        }
     }
 
     #[test]

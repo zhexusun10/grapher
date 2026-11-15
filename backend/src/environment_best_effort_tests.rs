@@ -206,8 +206,11 @@ fn root_qualified_scopes_keep_state_names_out_of_project_capture_and_survive_loc
     let reference = env.launch(&launch).unwrap();
     assert_eq!(env.exclusions(&reference).unwrap(), vec!["business-env"]);
     assert_eq!(env.scope_paths(&reference).unwrap(), vec!["business-env"]);
-    let current = CompositeResult { launch_ref: reference, layout: Some("current-slot".into()), ..baseline.clone() };
-    let selected = env.select_for_workspace("next", &[("parent".into(), baseline.clone())], "current-slot", &baseline, Some(&current)).unwrap();
+    let slot = temp.path().join("current-slot");
+    fs::create_dir(&slot).unwrap();
+    let spelling = temp.path().join(".").join("current-slot").to_string_lossy().into_owned();
+    let current = CompositeResult { launch_ref: reference, layout: Some(spelling), ..baseline.clone() };
+    let selected = env.select_for_workspace("next", &[("parent".into(), baseline.clone())], &slot.to_string_lossy(), &baseline, Some(&current)).unwrap();
     assert!(env.load_launch(&selected.launch_ref).unwrap().environment.is_none());
     assert_eq!(env.exclusions(&selected.launch_ref).unwrap(), vec!["business-env"]);
     let state_scopes = env.scope_paths(&selected.launch_ref).unwrap();
@@ -427,6 +430,16 @@ if(name!=='A') {
     }
     assert_eq!(runtime.state.executions[0].result.as_ref(), Some(&first));
     assert_eq!(fs::read_to_string(state_of(&runtime, &a.execution.worktree).join("business-env/marker")).unwrap(), "C");
+    let env = store(&runtime);
+    let latest = runtime.state.nodes["C"].result.as_ref().unwrap();
+    let elsewhere = CompositeResult {
+        layout: Some(Path::new(&a.execution.worktree).with_file_name("different-slot").to_string_lossy().into_owned()),
+        ..latest.clone()
+    };
+    let selected = env.select_for_workspace("next", &[("C".into(), latest.clone())],
+        &a.execution.worktree, runtime.state.environment_baseline.as_ref().unwrap(), Some(&elsewhere)).unwrap();
+    assert!(env.load_launch(&selected.launch_ref).unwrap().environment.is_none(),
+        "matching E/L alone cannot make another slot the current owner");
 }
 
 #[test]

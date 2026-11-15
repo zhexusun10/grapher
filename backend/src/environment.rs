@@ -901,11 +901,18 @@ impl Environments {
             }
             self.validate_result_metadata(input)?;
         }
+        // Layout spelling is not physical-slot identity (separators, root
+        // aliases and redundant components may differ in persisted references).
+        // Reuse still needs the current slot's exact E/L, never a sibling's.
+        let same_layout = |input: &CompositeResult| input.layout.as_deref().is_some_and(|layout| {
+            crate::path_identity::same_path(Path::new(layout), Path::new(path))
+        });
+        let local_current = current.filter(|input| same_layout(input));
         let local: Vec<_> = inputs
             .iter()
             .filter(|(_, input)| {
-                input.layout.as_deref() == Some(path)
-                    && current.is_some_and(|current| {
+                same_layout(input)
+                    && local_current.is_some_and(|current| {
                         current.environment_ref == input.environment_ref
                             && current.launch_ref == input.launch_ref
                     })
@@ -936,7 +943,7 @@ impl Environments {
         launch.ambient_hints = hints;
         // Falling back to an unbound launch does not relinquish environments
         // already owned by this physical slot. Never import sibling ownership.
-        if let Some(current) = current.filter(|current| current.layout.as_deref() == Some(path)) {
+        if let Some(current) = local_current {
             if let Some(scopes) = self.load_launch(&current.launch_ref)?.owned_scopes {
                 let owned = launch.owned_scopes.get_or_insert_with(Vec::new);
                 owned.extend(scopes);

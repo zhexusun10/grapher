@@ -829,7 +829,7 @@ fn environment_project_baseline() {
         let graph_size = size(&graph_directory, false);
         let amplification = (private_size.logical_bytes + graph_size.logical_bytes) as f64
             / source_size.logical_bytes.max(1) as f64;
-        let report = json!({"project":name,"profile":"offline-small-real-tools","componentStatus":"completed","toolVersions":tool_versions,"nodeDependencyPaddingFiles":if name == "node" {Some(files)}else{None},
+        let report = json!({"project":name,"profile":"offline-small-real-tools","componentStatus":if gaps.len() == gap_start {"completed"} else {"incomplete"},"toolVersions":tool_versions,"nodeDependencyPaddingFiles":if name == "node" {Some(files)}else{None},
             "timingsMs":times,"sourceProject":source_size,"graphAfterBaseSnapshot":graph_after_base,
             "graphFinal":graph_size,"fivePrivateViewsAndMetadata":private_size,
             "retainedLogicalStorageOverSourceProject":amplification,"concurrentWriters":2,
@@ -860,8 +860,12 @@ fn environment_project_baseline() {
     }
     let failed: Vec<_> = reports.iter().filter(|report| report["componentStatus"] == "failed")
         .map(|report| report["project"].as_str().unwrap()).collect();
+    if std::env::var_os("GRAPHER_ENV_PROBE_REQUIRE_UV").is_some() && !selected.contains(&"python") {
+        gaps.push("Required uv invocation NOT RUN: Python profile was not selected".into());
+    }
+    let status = if !failed.is_empty() { "failed" } else if !gaps.is_empty() { "incomplete" } else { "completed" };
     let report = json!({"schema":1,"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,
-        "requestedProjects":selected,"profiles":reports,"failedProjects":failed,"validationGaps":gaps});
+        "componentStatus":status,"requestedProjects":selected,"profiles":reports,"failedProjects":failed,"validationGaps":gaps});
     if let Some(path) = std::env::var_os("GRAPHER_ENV_PROBE_REPORT") {
         use std::io::Write;
         let mut file = fs::OpenOptions::new()

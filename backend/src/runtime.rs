@@ -4823,7 +4823,8 @@ impl Runtime {
                         && selected
                             .layout
                             .as_ref()
-                            .is_some_and(|path| *path != execution.worktree)
+                            .is_some_and(|path| !Self::same_workspace_path(
+                                Path::new(path), Path::new(&execution.worktree)))
                     {
                         environment_sources.push(selected.clone());
                         selected = store.select_for_workspace(
@@ -4841,7 +4842,8 @@ impl Runtime {
                         && selected
                             .layout
                             .as_ref()
-                            .is_some_and(|path| *path != execution.worktree)
+                            .is_some_and(|path| !Self::same_workspace_path(
+                                Path::new(path), Path::new(&execution.worktree)))
                     {
                         return Err("Workspace composition blocked: fixed environment cannot move to another physical slot; no silent path repair/serialization".into());
                     }

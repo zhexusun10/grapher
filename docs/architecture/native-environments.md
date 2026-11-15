@@ -225,8 +225,12 @@ composite result preserves replay of older code-only events. Only the final cwd
 is a UI selection; it is not the inventory of state needing capture.
 
 A verified fixed-layout environment is reused only at the current physical
-workspace. When environment reuse is not possible, Runtime leaves the current workspace's
-business environment paths untouched and starts the Node with an unbound launch.
+workspace. Selection and dispatch compare native path identity, not literal
+layout spelling; equivalent paths must not discard the latest parent E/L.
+Reuse still requires the current physical slot's matching E/L evidence, never
+another slot with matching references. When environment reuse is not possible,
+Runtime leaves the current workspace's business environment paths untouched and
+starts the Node with an unbound launch.
 The Node may then discover, activate, switch or install environments through Bash.
 Runtime may carry a non-owning ambient hint as
 `previous agent used: <manager> <selector> (<executable>)`. At fan-in all parent

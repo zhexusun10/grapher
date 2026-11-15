@@ -61,7 +61,7 @@ fn acl_only_edits_advance_snapshots_and_survive_fork_publication_and_removal() {
     let source_file = source.join("file");
     // Native CI volumes may already grant Everyone access. Exercise that case
     // explicitly rather than assuming the test owns every rule for this SID.
-    change_acl(&source_file, "execute");
+    change_acl(&source_file, "read");
     let original_metadata = crate::workspace_metadata::capture(
         &source_file, &fs::symlink_metadata(&source_file).unwrap(),
     ).unwrap();
@@ -72,7 +72,7 @@ fn acl_only_edits_advance_snapshots_and_survive_fork_publication_and_removal() {
     let node = slot(&temp, "acl-node");
     workspace::prepare(&source, &node, &base, &[]).unwrap();
     let before = workspace::snapshot_node(&node, &source, "acl").unwrap();
-    change_acl(&node.join("file"), "read");
+    change_acl(&node.join("file"), "execute");
     let edited = acl(&node.join("file"));
     assert_ne!(edited, original);
     let result = workspace::snapshot_node(&node, &source, "acl").unwrap();
