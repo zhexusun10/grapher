@@ -127,6 +127,15 @@ fn same_run_saves_serialize_read_modify_write_even_through_root_aliases() {
     // A newer save may only read/capture after the earlier write commits.
     let gate = write_lock(&alias, &run).unwrap();
     let serialized = matches!(gate.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+    // Creating the sidecar hierarchy must not change the gate identity. On
+    // case-insensitive macOS, probing a missing parent used to change the key
+    // when the directory appeared, allowing two writers to race the temp file.
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let after_creation = write_lock(&alias, &run).unwrap();
+    assert!(
+        Arc::ptr_eq(&gate, &after_creation),
+        "directory creation changed the writer gate"
+    );
     {
         let mut guard = cache().lock().unwrap();
         guard.git_changes.remove(&(run.clone(), "first".into()));

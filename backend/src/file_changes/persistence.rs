@@ -49,7 +49,16 @@ pub(super) fn write_lock(root: &Path, run: &str) -> Result<Arc<Mutex<()>>, Strin
     // Runtime roots already exist. Canonicalize before keying the gate so two
     // aliases of one data directory cannot race the same sidecar/temp file.
     let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let key = crate::path_identity::path_key(&root.join("file-changes").join(run));
+    // Key only the existing root through filesystem identity. Resolving the
+    // not-yet-created sidecar directory can change case normalization on macOS
+    // as it appears, allowing simultaneous writers to acquire different gates.
+    // Folding Run IDs is conservative on case-sensitive filesystems and also
+    // serializes aliases on case-insensitive ones.
+    let key = format!(
+        "{}\0{}",
+        crate::path_identity::path_key(&root),
+        run.to_ascii_lowercase()
+    );
     let mut writes = WRITES
         .get_or_init(Default::default)
         .lock()

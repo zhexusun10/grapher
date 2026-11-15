@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- File-change summary saves now retain the same per-Run writer lock while the sidecar directory is created, preventing concurrent writes from racing on case-insensitive macOS filesystems (`backend/src/file_changes/persistence.rs`).
 - Opening or deleting an already-missing conversation now removes its stale sidebar card and cached transcript; transient errors preserve it for retry. Late snapshot responses can no longer reopen a conversation deleted while it was loading (`src/App.tsx`, `src/services/runtime.ts`).
 - A single workspace card no longer leaves an empty card-sized gap in the sidebar (`src/components/layout/Sidebar.tsx`, `src/styles.css`).
 - Paused conversation indicators and background polling no longer treat dirty nodes awaiting dispatch as active writers. Running nodes, executions, Mergers and result launches remain watched until they drain (`backend/src/store/conversations.rs`, `src/lib/runPhase.ts`, `src/hooks/useSnapshotPolling.ts`).
