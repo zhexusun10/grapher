@@ -131,7 +131,8 @@ test("Feedback opt-out preserves old session edges and hides the legend only for
       edges: [{ from: "a", to: "b", feedback: false }, ...(enabled ? [{ from: "b", to: "a", feedback: true }] : [])] },
     nodes: { a: { status: "waiting", revision: 1 }, b: { status: "waiting", revision: 1 } },
   });
-  const runs = { fast: makeRun("fast", true), disabled: makeRun("disabled", false), legacy: makeRun("legacy", true, true) };
+  const runs = { fast: makeRun("fast", true), disabled: makeRun("disabled", false),
+    legacy: makeRun("legacy", true, true), legacyDisabled: makeRun("legacyDisabled", false, true) };
   const { context, page, errors } = await app(async (route, command, body) => {
     let result;
     if (command === "bootstrap") result = { ...bootstrap, config: saved, snapshot: runs.fast, runs: Object.keys(runs) };
@@ -148,6 +149,11 @@ test("Feedback opt-out preserves old session edges and hides the legend only for
     await page.locator('[data-run-id="fast"]').click();
     await until(async () => await edges().count() === 2);
     assert.equal(await legend().count(), 1);
+    await page.locator('[data-run-id="legacyDisabled"]').click();
+    await until(async () => await edges().count() === 1);
+    assert.equal(await legend().count(), 0, "legacy sessions without feedback routes stay disabled even when defaults are on");
+    await page.locator('[data-run-id="fast"]').click();
+    await until(async () => await edges().count() === 2);
     await openSettings(page);
     await page.getByRole("checkbox", { name: "Enable Feedback", exact: true }).uncheck();
     await page.locator('.save-config-btn').click();
@@ -772,7 +778,7 @@ test("serial failure displays the saved retry model without rewriting the failed
 });
 
 for (const planType of ["graph", "serial"]) {
- test(`${planType}: an unrecognized failure offers the appropriate continuation control`, { timeout: 30_000 }, async () => {
+ test(`${planType}: an unrecognized failure offers the appropriate continuation control despite a size warning`, { timeout: 30_000 }, async () => {
   const failed = { id: "unknown-attempt", node: "task", revision: 1, attempt: 1, sessionId: "session",
     worktree: "/workspace", before: "base", after: null, status: "failed", output: "", outputBytes: 0,
     startedAt: 1, completedAt: 2 };
@@ -786,6 +792,8 @@ for (const planType of ["graph", "serial"]) {
     let result;
     if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
     else if (command === "history" || command === "snapshot" || command === "load_run") result = current;
+    else if (command === "repository_status") result = { repository, valid: true, sizeLimitExceeded: true,
+      error: "The workspace size exceeds the 15GB limit." };
     else if (command === "control") {
       assert.equal(body.action, planType === "serial" ? "resume_node" : "resume");
       assert.equal(body.runId, "fast");
@@ -1024,14 +1032,64 @@ test("queued input for waiting or feedback-dirty nodes never resumes the Run or 
       await page.locator('[data-run-id="fast"]').click();
       await page.locator('.task-node[data-node-name="task"]').click();
       const composer = page.locator('.pane-bottom-chat textarea');
-      for (const text of ["Additional constraint one", "Additional constraint two"]) {
+      for (const [index, text] of ["Additional constraint one", "Additional constraint two"].entries()) {
         await composer.fill(text); await composer.press("Enter");
-        await until(async () => await composer.inputValue() === "");
+        // The composer clears optimistically, before the mocked API accepts it.
+        await until(async () => await composer.inputValue() === ""
+          && current.nodes.task.pendingMessages.length === index + 1);
       }
       assert.deepEqual(actions, ["intervene", "intervene"]);
       assert.equal(current.paused, true);
       assert.equal(current.executions.length, 0);
       assert.equal(current.nodes.task.pendingMessages.length, 2);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  }
+});
+
+test("Graph and Serial replay place the shared response after all pre-dispatch queued messages", { timeout: 45_000 }, async () => {
+  const response = "Processed both pre-start constraints";
+  const output = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: response }] } }) + "\n";
+  for (const planType of ["graph", "serial"]) {
+    const execution = { id: "first-attempt", node: "task", revision: 1, attempt: 1, sessionId: "session",
+      worktree: "/workspace", before: "", after: "", status: "completed", output, outputBytes: Buffer.byteLength(output),
+      startedAt: 3, completedAt: 4 };
+    const messages = ["First pre-start constraint", "Second pre-start constraint"];
+    const current = { ...empty, runId: "fast", config, planType, approved: true, phase: "completed",
+      graph: { originalGoal: "Queued constraints", nodes: [{ name: "task", task: "Original task" }], edges: [] },
+      plan: { executionBatches: [["task"]], roots: ["task"], terminals: ["task"], warnings: [] },
+      nodes: { task: { status: "completed", revision: 1, instruction: "", head: "", error: null, pendingMessages: [] } },
+      executions: [execution], events: [
+        ...messages.map((instruction, index) => ({ type: "node_messaged", sequence: index + 1,
+          timestamp: index + 1, node: "task", instruction, queued: true })),
+        { type: "started", sequence: 3, timestamp: 3, execution, message_sequences: [1, 2] },
+      ] };
+    const { context, page, errors } = await app(async (route, command, body) => {
+      let result;
+      if (command === "bootstrap") result = { ...bootstrap, snapshot: current };
+      else if (["history", "snapshot", "load_run"].includes(command)) result = current;
+      else if (command === "snapshot_if_changed") result = { version: "completed", snapshot: current };
+      else if (command === "get_execution_output") result = { runId: "fast", executionId: body.executionId,
+        content: output, startOffset: 0, nextOffset: Buffer.byteLength(output), totalBytes: Buffer.byteLength(output), complete: true, status: "completed" };
+      else return false;
+      await route.fulfill({ json: { result } }); return true;
+    });
+    try {
+      for (let reload = 0; reload < 2; reload++) {
+        if (reload) await page.reload({ waitUntil: "domcontentloaded" });
+        await page.locator('[data-run-id="fast"]').click();
+        if (planType === "graph") await page.locator('.task-node[data-node-name="task"]').click();
+        await page.getByText(response, { exact: true }).waitFor();
+        for (const text of messages) {
+          const message = page.getByText(text, { exact: true });
+          await message.waitFor();
+          assert.equal(await message.count(), 1);
+          assert.equal(await message.evaluate((element, response) => {
+            const output = [...document.querySelectorAll(".chat-message-assistant")].find(row => row.textContent.includes(response));
+            return !!output && !!(element.compareDocumentPosition(output) & Node.DOCUMENT_POSITION_FOLLOWING);
+          }, response), true, `${planType}: the batch response must follow every claimed input, including after reload`);
+        }
+      }
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
   }

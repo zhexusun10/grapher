@@ -6318,7 +6318,11 @@ pub fn dispatch(
 /// Include background conversations and the entire driver (preparation through
 /// publication), not just whichever Run the browser currently displays.
 fn workspace_has_active_run(primary: &Arc<Service>, repository: &str) -> Result<bool, String> {
-    let root = primary.runtime.lock().map_err(|e| e.to_string())?.root.clone();
+    let root = match primary.runtime.try_lock() {
+        Ok(runtime) => runtime.root.clone(),
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(true),
+        Err(error) => return Err(error.to_string()),
+    };
     let mut services: Vec<_> = RUN_SERVICES
         .get_or_init(Default::default)
         .lock()
@@ -6374,17 +6378,19 @@ fn repository_status(
 ) -> Result<serde_json::Value, String> {
     let path = std::path::Path::new(&repository);
     let mut error = crate::workspace::validate_binding(path).err();
+    let valid = error.is_none();
     let mut size_limit_exceeded = false;
-    if error.is_none() {
+    if valid {
         error = idle_workspace_size_error(service, path, check_size)?;
         size_limit_exceeded = error.is_some();
     }
-    // Only missing directories may be forgotten automatically; size and
-    // permission errors retain the binding and its conversations.
+    // Size warnings must not disable controls for an admitted Run. New Runs
+    // and bindings enforce admission separately; only binding failures are
+    // invalid here. Only missing directories may be forgotten automatically.
     let missing = path.is_absolute()
         && path.metadata().is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
     Ok(serde_json::json!({
-        "repository": repository, "valid": error.is_none(), "missing": missing,
+        "repository": repository, "valid": valid, "missing": missing,
         "error": error, "sizeLimitExceeded": size_limit_exceeded,
     }))
 }

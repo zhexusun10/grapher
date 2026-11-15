@@ -123,6 +123,38 @@ test('queued turns use exact durable execution claims, not the next start or mat
   assert.equal(executionIdForMessage(reloaded, messages[1]), 'batch');
 });
 
+test('pre-start queued messages remain visible after dispatch and replay without reviving abandoned turns', () => {
+  const messages: GraphEvent[] = [1, 2].map(sequence => ({
+    type: 'node_messaged', sequence, timestamp: sequence, node: 'task', queued: true,
+    instruction: 'same constraint', images: [{ type: 'image', mimeType: 'image/png', data: String(sequence) }],
+  }));
+  const first = { id: 'first', node: 'task', revision: 1, attempt: 1, sessionId: 's', worktree: '',
+    before: '', after: null, status: 'running', output: '', startedAt: 5, completedAt: null };
+  const state: Snapshot = { ...emptySnapshot,
+    nodes: { task: { status: 'waiting', revision: 1, head: null, instruction: '', error: null,
+      pendingMessages: messages.map(event => ({ sequence: event.sequence, instruction: event.instruction!, images: event.images })) } },
+    events: [{ type: 'node_messaged', sequence: 0, timestamp: 0, node: 'task', instruction: 'legacy note' }, ...messages],
+  };
+  const visible = (snapshot: Snapshot) => activeNodeConversationEvents(snapshot, 'task').filter(event => event.queued);
+  assert.deepEqual(visible(state), messages);
+  state.nodes.task.pendingMessages = [];
+  state.nodes.task.status = 'running';
+  state.executions = [first];
+  state.events.push({ type: 'started', sequence: 5, timestamp: 5, execution: first, message_sequences: [1, 2] });
+  const replayed: Snapshot = JSON.parse(JSON.stringify(state));
+  assert.deepEqual(visible(replayed), messages, 'claimed input cannot disappear at the first Started event');
+  assert.deepEqual(visible(replayed).map(event => executionIdForMessage(replayed, event)), ['first', 'first']);
+  assert.ok(!activeNodeConversationEvents(replayed, 'task').some(event => event.instruction === 'legacy note'));
+
+  const fresh = { ...first, id: 'fresh', sessionId: 'new', startedAt: 7 };
+  const newMessage = { ...messages[0], sequence: 6, timestamp: 6, instruction: 'new constraint' };
+  state.supersededExecutionIds = ['first'];
+  state.executions.push(fresh);
+  state.events.push(newMessage,
+    { type: 'started', sequence: 7, timestamp: 7, execution: fresh, fresh_restart: true, message_sequences: [6] });
+  assert.deepEqual(visible(state), [newMessage], 'only claims from the active conversation survive a fresh restart');
+});
+
 test('edited messages point at the new active execution, not the superseded anchor', () => {
   const state: Snapshot = {
     ...emptySnapshot,

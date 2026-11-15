@@ -320,12 +320,20 @@ and its attached image range. The same durable `Started` event records the exact
 `message_sequences` claim and removes those turns from the FIFO. A failed claim
 write removes nothing. Later messages cannot be consumed by an earlier claim.
 The browser uses this binding after reload and displays the shared response after
-all user turns in that batch, not between them.
+all user turns in that batch, not between them. Exact claims in the active
+conversation also retain input accepted before its first `Started` event; a
+fresh-conversation boundary must not hide those turns or revive abandoned claims.
 
 `NodeInputBound` commits the complete dispatch text and ordered images atomically
 with `Started`. When recovery proves that input never started, it resends that
 exact turn before any newer queued messages, without losing the task, feedback
-target instruction, historical edit or attachments. Pending directives keep their
+target instruction, historical edit or attachments. A bound turn that fails in
+its own pre-launch preparation remains unread even if earlier attempts in the
+same Pi session already produced output; recovery checks the owning Execution,
+not the node's old `human_instruction` flag or the whole session's activity.
+An already-dispatched directive remains historical context and is not prepended
+to later passive input (including its images), unless unstarted-input recovery
+explicitly needs it. Fresh pending feedback/history directives still keep their
 own images before queued images, whose labels use the combined image order.
 Browser metadata polls retain only the binding's event/execution identity, not
 a redundant copy of its prompt and image payload; durable events keep the complete

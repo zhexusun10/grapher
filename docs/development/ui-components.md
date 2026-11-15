@@ -75,7 +75,7 @@ The graph pane opens and closes through a clipped aperture, keeping the canvas m
 
 ## Production loading
 
-The landing page loads the workbench on demand through [AppGraphWorkbench.tsx](../../src/components/views/AppGraphWorkbench.tsx), which also owns the React Flow node and edge implementations. [vite.config.ts](../../vite.config.ts) keeps React separate from graph and Markdown engines without moving their shared CSS out of the initial cascade. While the module loads, the landing composer stays visible but cannot submit a second request; failure offers a page reload without stopping background tasks, and leaving the view invalidates the pending load. [frontend-bundle.test.mjs](../../scripts/frontend-bundle.test.mjs) builds into a temporary directory and checks production chunk boundaries, slow/failed loads, and navigation during loading.
+The landing page loads the workbench on demand through [AppGraphWorkbench.tsx](../../src/components/views/AppGraphWorkbench.tsx), which also owns the React Flow node and edge implementations. [vite.config.ts](../../vite.config.ts) keeps React separate from graph and Markdown engines without moving their shared CSS out of the initial cascade. While the module loads, the landing composer stays visible as a disabled send control; it cannot submit a second request or inherit the selected Run's running/Stop state. Failure offers a page reload without stopping background tasks, and leaving the view invalidates the pending load. [frontend-bundle.test.mjs](../../scripts/frontend-bundle.test.mjs) builds into a temporary directory and checks production chunk boundaries, slow/failed loads, and navigation during loading.
 
 ## Modal keyboard behavior
 

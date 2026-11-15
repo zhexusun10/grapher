@@ -65,12 +65,12 @@ test("production entry keeps the graph and Markdown engines out of the initial J
     `${item.fileName} is ${(item.size / 1000).toFixed(1)} kB, exceeding the default Vite warning limit`);
 });
 
-async function setupPage() {
+async function setupPage({ planType = "graph", running = false } = {}) {
   const repository = "/mock/lazy-project";
   const config = { repository, model: "test/model", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const graph = { originalGoal: "Load a conversation", nodes: [{ name: "task", task: "Task" }], edges: [] };
-  const snapshot = { runId: "lazy-run", config, planType: "graph", phase: "completed", approved: true, paused: false,
-    graph, nodes: { task: { status: "completed" } }, plan: null, executions: [], events: [], base: "", feedbackCounts: {} };
+  const snapshot = { runId: "lazy-run", config, planType, phase: running ? "running" : "completed", approved: true, paused: false,
+    graph, nodes: { task: { status: running ? "running" : "completed" } }, plan: null, executions: [], events: [], base: "", feedbackCounts: {} };
   const empty = { ...snapshot, runId: "", config: null, phase: "draft", approved: false,
     graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {} };
   const repositoryInfo = { path: repository, name: "Project", branch: "main", head: "", clean: true };
@@ -166,6 +166,51 @@ test("a slow workbench keeps the landing composer and hands off only after loadi
   } finally {
     release();
     await context.close();
+  }
+});
+
+test("opening a running conversation keeps the loading composer disabled without a Stop control", { timeout: 45_000 }, async () => {
+  for (const { planType, draft } of [{ planType: "graph", draft: "" }, { planType: "serial", draft: "Keep this landing draft" }]) {
+    const { context, page, errors } = await setupPage({ planType, running: true });
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const mutations = [];
+    page.on("request", request => {
+      if (/\/api\/(control|plan_goal_stream)$/.test(new URL(request.url()).pathname)) mutations.push(request.url());
+    });
+    await page.route(`**/${workbenchChunk().fileName}`, async route => {
+      await gate;
+      try { await route.continue(); } catch { /* A closed page cancels the request. */ }
+    });
+    try {
+      await page.goto(origin, { waitUntil: "networkidle" });
+      const composer = page.locator(".landing-screen textarea");
+      await composer.fill(draft);
+      await page.locator('[data-run-id="lazy-run"]').click();
+      await page.locator(".workbench-module-status[role=status]").waitFor();
+      assert.equal(await composer.inputValue(), draft);
+      assert.equal(await composer.isDisabled(), true);
+      const send = page.locator(".landing-screen .prompt-box-send-btn");
+      assert.equal(await send.getAttribute("aria-label"), "Send message",
+        "loading a running Run must not turn the retained send button into Stop");
+      assert.equal(await send.isDisabled(), true);
+      assert.equal(await page.getByRole("button", { name: "Click to interrupt execution", exact: true }).count(), 0,
+        "a retained landing draft must not expose a separate interrupt button either");
+      release();
+      await page.locator(".pane-bottom-chat textarea").waitFor();
+      await page.locator(".landing-screen").waitFor({ state: "detached" });
+      if (planType === "graph") {
+        assert.equal(await page.getByRole("button", { name: "Click to interrupt execution", exact: true }).count(), 0,
+          "a running worker does not make the idle Planner composer active");
+        await page.locator('.task-node[data-node-name="task"]').click();
+      }
+      await page.locator(".pane-bottom-chat").getByRole("button", { name: "Click to interrupt execution", exact: true }).waitFor();
+      assert.deepEqual(mutations, [], "opening a conversation must not submit or interrupt its work");
+      assert.deepEqual(errors, []);
+    } finally {
+      release();
+      await context.close();
+    }
   }
 });
 

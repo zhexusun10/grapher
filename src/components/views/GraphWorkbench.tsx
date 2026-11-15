@@ -836,13 +836,15 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       isInitial: true,
       // A replacement for a Steer/follow-up owns its new execution even when
       // the abandoned attempt was the session's first execution.
-      executions: attempts[0] && !nodeMessages.some(message => !message.delivery && message.executionId === attempts[0].id)
+      executions: attempts[0] && !nodeMessages.some(message => message.delivery !== "steered" && message.executionId === attempts[0].id)
         ? [attempts[0]] : [],
     }];
     const assigned = new Set(turns[0].executions.map(item => item.id));
     let nextAttempt = 1;
 
-    const lastMessageByExecution = new Map(nodeMessages.filter(message => !message.delivery && message.executionId)
+    // Passive node messages are opening input, not in-flight Steers. A claimed
+    // batch owns its response only after the last user bubble in that batch.
+    const lastMessageByExecution = new Map(nodeMessages.filter(message => message.delivery !== "steered" && message.executionId)
       .map(message => [message.executionId, message.id]));
     for (const message of nodeMessages) {
       // A steer has no execution of its own: Pi consumes it inside the running
@@ -2289,7 +2291,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       id: messages[0].id,
       userMessage: messages[0],
       isInitial: true,
-      executions: serialExecutions[0] && !messages.slice(1).some(message => !message.delivery && message.executionId === serialExecutions[0].id)
+      executions: serialExecutions[0] && !messages.slice(1).some(message => message.delivery !== "steered" && message.executionId === serialExecutions[0].id)
         ? [serialExecutions[0]] : [],
     });
 
@@ -2298,7 +2300,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       const key = steerRollbackKey(message);
       return !key || !rolledBackSteerKeys.has(key);
     });
-    const lastMessageByExecution = new Map(followUps.filter(message => !message.delivery && message.executionId)
+    const lastMessageByExecution = new Map(followUps.filter(message => message.delivery !== "steered" && message.executionId)
       .map(message => [message.executionId, message.id]));
     for (const msg of followUps) {
       // A steer belongs to the execution that received it, so its response stays

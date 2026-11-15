@@ -419,9 +419,17 @@ fn feedback_after_another_node_fails_uses_the_model_saved_for_recovery() {
 #[test]
 fn pending_feedback_survives_restart_and_replays_its_exact_output_range() {
     let (_temp, _source, mut runtime) = configured(&["owner", "review"], 1);
+    let mut settings = runtime.state.config.clone().unwrap();
+    settings.feedback_enabled = true;
+    runtime.save_default_config(&settings).unwrap();
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
     let review = runtime.jobs().unwrap().remove(0);
+    // Opting out governs new routes, not the active reviewer's verdict or the
+    // already committed route's delivery/recovery and retained budget.
+    settings.feedback_enabled = false;
+    runtime.save_default_config(&settings).unwrap();
+    assert!(review.feedback_source);
     runtime
         .emit(EventKind::Output {
             execution_id: review.execution.id.clone(),
@@ -434,7 +442,9 @@ fn pending_feedback_survives_restart_and_replays_its_exact_output_range() {
     drop(runtime);
     let mut recovered = Runtime::open(&root).unwrap();
     assert!(recovered.state.paused);
+    assert!(!recovered.feedback_enabled(true).unwrap());
     assert_eq!(recovered.state.pending_feedback.len(), 1);
+    assert_eq!(recovered.state.config.as_ref().unwrap().max_feedback, 1);
     recovered.pause(false).unwrap();
     let repair = recovered.jobs().unwrap().remove(0);
     assert_eq!(repair.execution.worktree, review.execution.worktree);

@@ -41,6 +41,52 @@ fn reopen_input_runtime(runtime: Runtime) -> Runtime {
     runtime
 }
 
+fn existing_input_runtime(mode: &str) -> (TempDir, PathBuf, Runtime) {
+    let (temp, source, mut runtime) = setup(true, single());
+    if mode == "serial" { runtime.set_route("serial").unwrap(); }
+    runtime.approve().unwrap();
+    if mode == "shared" {
+        runtime.emit(EventKind::WorkspaceIsolationSelected { isolated: false }).unwrap();
+    }
+    (temp, source, runtime)
+}
+
+/// Persist the same per-attempt launch and session evidence as a consumed turn.
+/// Earlier attempts can have activity while a later bound input is still unread.
+fn consume_input(runtime: &mut Runtime, job: &Job) {
+    use std::io::Write;
+    let path = Path::new(&job.execution.worktree);
+    if !job.source_direct && !path.is_dir() {
+        workspace::prepare(Path::new(&job.config.repository), path, &job.execution.before, &job.parent_heads).unwrap();
+    }
+    if let Some(anchor) = &job.session_fork {
+        crate::session_branch::fork_session(
+            &runtime.root.join("sessions").join(&anchor.id), &anchor.session_id, Path::new(&anchor.worktree),
+            &runtime.root.join("sessions").join(&job.execution.id), &job.execution.session_id, path,
+        ).unwrap();
+    }
+    let origin = job.resume_execution_id.as_deref().unwrap_or(&job.execution.id);
+    let directory = runtime.root.join("sessions").join(origin);
+    fs::create_dir_all(&directory).unwrap();
+    let suffix = format!("_{}.jsonl", job.execution.session_id);
+    let session = fs::read_dir(&directory).unwrap().map(|entry| entry.unwrap().path())
+        .find(|path| path.file_name().unwrap().to_string_lossy().ends_with(&suffix))
+        .unwrap_or_else(|| directory.join(format!("test{suffix}")));
+    if !session.exists() {
+        fs::write(&session, format!("{}\n", serde_json::json!({
+            "type":"session", "version":3, "id":job.execution.session_id, "cwd":job.execution.worktree,
+        }))).unwrap();
+    }
+    let mut content = vec![serde_json::json!({"type":"text", "text":job.task})];
+    content.extend(job.images.iter().flatten().map(|image| serde_json::to_value(image).unwrap()));
+    writeln!(fs::OpenOptions::new().append(true).open(session).unwrap(), "{}", serde_json::json!({
+        "type":"message", "id":Uuid::new_v4().to_string(), "parentId":null,
+        "message":{"role":"user", "content":content},
+    })).unwrap();
+    runtime.emit(EventKind::Prepared { execution_id: job.execution.id.clone(), head: job.execution.before.clone() }).unwrap();
+    runtime.emit(EventKind::Output { execution_id: job.execution.id.clone(), text: "model already processed this turn".into() }).unwrap();
+}
+
 fn claimed(state: &Snapshot, execution_id: &str) -> Vec<i64> {
     state
         .events
@@ -257,6 +303,85 @@ fn node_input_recovery_does_not_replay_consumed_bound_input() {
     assert_eq!(retry.images.as_ref().unwrap().iter().map(|image| image.data.as_str()).collect::<Vec<_>>(), ["new"]);
     assert_eq!(retry.execution.session_id, first.execution.session_id);
     assert!(!retry.initial_recovery);
+}
+
+#[test]
+fn node_input_recovery_existing_session_keeps_unstarted_passive_turn() {
+    for mode in ["serial", "shared", "private"] {
+        for append_followup in [false, true] {
+            let (_temp, _source, mut runtime) = existing_input_runtime(mode);
+            let first = runtime.jobs().unwrap().remove(0);
+            consume_input(&mut runtime, &first);
+            runtime.finish(&first.execution, Err("provider failure after model activity".into())).unwrap();
+            runtime.resume_node("task").unwrap();
+            runtime.intervene_with_images("task", "new queued requirement", Some(vec![image("new")])).unwrap();
+            let mut pending = runtime.jobs().unwrap().remove(0);
+            assert_eq!(pending.task, "new queued requirement");
+            for cycle in 0..2 {
+                // No Prepared for THIS attempt: the older session/activity is
+                // not evidence that this queued turn reached Pi.
+                runtime.finish(&pending.execution, Err("startup failure before sending the queued turn".into())).unwrap();
+                assert!(runtime.state.execution_is_preparation_only(runtime.state.executions.last().unwrap()));
+                runtime = reopen_input_runtime(runtime);
+                if append_followup && cycle == 0 {
+                    runtime.intervene_with_images("task", "one more requirement", Some(vec![image("extra")])).unwrap();
+                } else {
+                    runtime.resume_node("task").unwrap();
+                }
+                let retry = runtime.jobs().unwrap().remove(0);
+                assert!(!retry.continuation && !retry.initial_recovery, "{mode}: resend only this unread turn");
+                assert_eq!(retry.execution.session_id, first.execution.session_id);
+                assert!(!retry.task.contains("self-contained task"));
+                assert_eq!(retry.task.matches("new queued requirement").count(), 1);
+                if append_followup && cycle == 0 {
+                    assert!(retry.task.find("new queued requirement").unwrap() < retry.task.find("one more requirement").unwrap());
+                    assert!(retry.task.contains("attached images 2-2"));
+                } else {
+                    assert_eq!(retry.task, pending.task);
+                }
+                let expected = if append_followup { vec!["new", "extra"] } else { vec!["new"] };
+                assert_eq!(retry.images.as_ref().unwrap().iter().map(|image| image.data.as_str()).collect::<Vec<_>>(), expected);
+                pending = retry;
+            }
+            consume_input(&mut runtime, &pending);
+            runtime.finish(&pending.execution, Err("provider failure after queued input was consumed".into())).unwrap();
+            runtime.resume_node("task").unwrap();
+            let continued = runtime.jobs().unwrap().remove(0);
+            assert!(continued.continuation && continued.task.is_empty(), "a consumed binding must not be replayed");
+            assert!(continued.images.is_none());
+        }
+    }
+}
+
+#[test]
+fn node_input_recovery_existing_session_does_not_prepend_consumed_directive() {
+    for mode in ["serial", "shared", "private"] {
+        for equal_text in [false, true] {
+            let (_temp, _source, mut runtime) = existing_input_runtime(mode);
+            let first = runtime.jobs().unwrap().remove(0);
+            consume_input(&mut runtime, &first);
+            let head = if first.source_direct || mode == "serial" { String::new() } else { runtime.state.base.clone() };
+            runtime.finish(&first.execution, Ok((head, "initial task completed".into()))).unwrap();
+            runtime.intervene_with_images("task", "old follow-up already acted on", Some(vec![image("old")])).unwrap();
+            let followup = runtime.jobs().unwrap().remove(0);
+            consume_input(&mut runtime, &followup);
+            runtime.finish(&followup.execution, Err("provider failed after acting on the follow-up".into())).unwrap();
+            runtime = reopen_input_runtime(runtime);
+            runtime.resume_node("task").unwrap();
+            let new_text = if equal_text { "old follow-up already acted on" } else { "new requirement only" };
+            runtime.intervene_with_images("task", new_text, Some(vec![image("new")])).unwrap();
+            let retry = runtime.jobs().unwrap().remove(0);
+            assert_eq!(retry.task, new_text, "{mode}: dispatched directives are not new user requests");
+            assert_eq!(retry.images.as_ref().unwrap().iter().map(|image| image.data.as_str()).collect::<Vec<_>>(), ["new"]);
+            assert_eq!(retry.execution.session_id, followup.execution.session_id);
+            runtime.finish(&retry.execution, Err("preparation failed before the new input".into())).unwrap();
+            runtime = reopen_input_runtime(runtime);
+            runtime.resume_node("task").unwrap();
+            let again = runtime.jobs().unwrap().remove(0);
+            assert_eq!(again.task, new_text);
+            assert_eq!(again.images.as_ref().unwrap().iter().map(|image| image.data.as_str()).collect::<Vec<_>>(), ["new"]);
+        }
+    }
 }
 
 #[test]

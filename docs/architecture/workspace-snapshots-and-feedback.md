@@ -387,8 +387,11 @@ the workspace or a deeper subfolder selected. Size is not a live binding failure
 an admitted Run may finish scheduling, snapshotting and publication even if its
 workspace grows past the limit. The read-only workspace status check defers size
 validation and its UI warning until all active conversations in that workspace
-have drained (including Planner and publication work). Missing/inaccessible
-paths and the desktop guard remain errors during execution. Size scans retain
+have drained (including Planner and publication work). A size warning sets
+`sizeLimitExceeded` without invalidating the binding, so paused/failed admitted
+Runs keep their Continue and message controls. A busy primary or background Run
+mutex defers the advisory scan rather than blocking the status response.
+Missing/inaccessible paths and the desktop guard remain errors during execution. Size scans retain
 their 30-second cache and exclude `.git`/internal `.grapher*` directories.
 
 ## Shadow repository lifecycle

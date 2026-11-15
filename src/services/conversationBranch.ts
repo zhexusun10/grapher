@@ -117,11 +117,15 @@ export function activeNodeConversationEvents(state: Snapshot, node: string): Gra
   const edits = state.events.filter((event) => event.type === "conversation_edited" && event.nodes?.includes(node));
   const superseded = new Set(state.supersededExecutionIds ?? []);
   const lineage = nodeConversationLineage(state, node);
-  const freshBoundary = state.events
-    .filter((event) => event.type === "started" && event.execution?.node === node
-      && (!superseded.has(event.execution.id) || lineage.has(event.execution.id)))
-    .map((event) => event.sequence)
-    .reduce((oldest, sequence) => Math.min(oldest, sequence), Number.POSITIVE_INFINITY);
+  const starts = state.events.filter((event) => event.type === "started" && event.execution?.node === node
+    && (!superseded.has(event.execution.id) || lineage.has(event.execution.id)));
+  const freshBoundary = starts.reduce((oldest, event) => Math.min(oldest, event.sequence), Number.POSITIVE_INFINITY);
+  // A first dispatch claims input accepted before Started. Keep those turns
+  // (and still-pending input), but never revive claims from an abandoned branch.
+  const retainedMessages = new Set([
+    ...starts.flatMap(event => event.message_sequences ?? []),
+    ...(state.nodes[node]?.pendingMessages ?? []).map(message => message.sequence),
+  ]);
   const belongs = (event: GraphEvent) => event.node === node || event.target === node;
   return state.events.filter((event) => !edits.some((edit) => {
     if (event.sequence >= edit.sequence) return false;
@@ -134,6 +138,7 @@ export function activeNodeConversationEvents(state: Snapshot, node: string): Gra
       belongs(event);
   })).filter((event) => {
     if (Number.isFinite(freshBoundary) && event.sequence < freshBoundary
+      && !(belongs(event) && retainedMessages.has(event.sequence))
       && (event.type === "invalidated" || event.type === "node_messaged" || event.type === "steered")) {
       return false;
     }

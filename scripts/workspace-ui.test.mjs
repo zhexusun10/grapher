@@ -521,7 +521,7 @@ test("workspace size warning appears after background Run completion and stays d
         case "bootstrap": result = { config, snapshot: state, runs: [state.runId], repositoryInfo: info, dataPath: "/mock/.grapher" }; break;
         case "snapshot": case "history": result = state; break;
         case "snapshot_if_changed": result = { version: state.phase, snapshot: state }; break;
-        case "repository_status": result = { repository: body.repository, valid: !finished, error: finished ? sizeError : null, sizeLimitExceeded: finished }; break;
+        case "repository_status": result = { repository: body.repository, valid: true, error: finished ? sizeError : null, sizeLimitExceeded: finished }; break;
         case "detect_repository": result = info; break;
         case "list_plannings": result = []; break;
         case "list_files": result = { files: [] }; break;

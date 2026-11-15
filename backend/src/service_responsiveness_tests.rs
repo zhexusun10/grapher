@@ -42,6 +42,34 @@ fn a_busy_run_does_not_hold_the_primary_runtime_during_unrelated_lookup() {
 }
 
 #[test]
+fn repository_status_does_not_wait_for_a_busy_primary_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let primary = primary(&temp.path().join("runtime"));
+    let held = primary.runtime.lock().unwrap();
+    let other_primary = primary.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let scanned = Arc::new(AtomicBool::new(false));
+    let scan = scanned.clone();
+    let worker = thread::spawn(move || {
+        tx.send(repository_status(&other_primary, source.to_string_lossy().into_owned(), |_| {
+            scan.store(true, Ordering::SeqCst);
+            Err("size warning".into())
+        })).unwrap();
+    });
+    let result = rx.recv_timeout(Duration::from_secs(2));
+    // Release and join before asserting so the old blocking implementation
+    // fails without leaking a deadlocked test thread or poisoning its mutex.
+    drop(held);
+    worker.join().unwrap();
+    let status = result.expect("read-only binding status must not wait for the Run lock").unwrap();
+    assert_eq!(status["valid"], true);
+    assert_eq!(status["sizeLimitExceeded"], false);
+    assert!(!scanned.load(Ordering::SeqCst));
+}
+
+#[test]
 fn saving_model_defaults_does_not_rediscover_or_scan_the_repository() {
     let temp = tempfile::tempdir().unwrap();
     let primary = primary(temp.path());

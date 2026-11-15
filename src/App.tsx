@@ -2997,6 +2997,8 @@ export default function App() {
   }, [isLandingView, Workbench]);
   // Keep the existing, opaque composer on screen until the destination is
   // ready; switching to an empty Suspense fallback would break its handoff.
+  // This retained landing input is only a disabled placeholder, not a Stop
+  // control for the running conversation whose workbench is still loading.
   const waitingForWorkbench = !isLandingView && !Workbench;
   const showLandingView = isLandingView || waitingForWorkbench;
   // A warm cache resolves in a frame; announce the wait only once it is real.
@@ -3250,7 +3252,7 @@ export default function App() {
                   isBusy={waitingForWorkbench || busy || isPlanning || backendPlanning || repositoryBlocked}
                   planMode={planMode}
                   onPlanModeChange={handlePlanModeChange}
-                  isWorking={isAgentWorking}
+                  isWorking={!waitingForWorkbench && isAgentWorking}
                   onInterrupt={handleInterrupt}
                   repository={config?.repository}
                 />

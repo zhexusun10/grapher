@@ -154,11 +154,16 @@ fn workspace_size_warning_waits_for_background_runs_without_stopping_them() {
         "switching to an active workspace still refreshes its metadata");
     active.runtime.lock().unwrap().state.phase = phase;
     // An unrelated busy workspace must not suppress this workspace's warning.
+    // Size is admission policy, not a binding failure that disables Continue
+    // or message controls for already-admitted paused/failed Runs.
     let status = repository_status(&primary, repository.clone(), oversized).unwrap();
-    assert_eq!(status["valid"], false);
+    assert_eq!(status["valid"], true);
     assert_eq!(status["sizeLimitExceeded"], true);
     assert_eq!(status["missing"], false);
     assert!(status["error"].as_str().unwrap().contains("15GB"));
+    assert!(crate::workspace::validate_binding(std::path::Path::new(&repository)).is_ok());
+    assert!(crate::workspace::detect_with_size_check(Some(std::path::Path::new(&repository)), oversized).is_err(),
+        "a new binding must still enforce the size limit");
 
     // A Run starting during an in-flight scan also defers the warning.
     let status = repository_status(&primary, repository.clone(), |path| {

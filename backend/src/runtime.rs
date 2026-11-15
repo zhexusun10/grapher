@@ -3356,14 +3356,23 @@ impl Runtime {
         }).collect()
     }
 
-    fn instruction_is_queued(&self, node: &str, messages: &[PendingNodeMessage]) -> bool {
-        let directive = self.state.events.iter().rev().find(|event| match &event.kind {
+    /// A node's instruction slot outlives the turn that used it. Once dispatched,
+    /// it belongs to that attempt, not every later passive message. Dispatch is
+    /// not consumption: a proven unstarted retry restores its bound input below.
+    fn instruction_delivery(&self, node: &str, messages: &[PendingNodeMessage]) -> (bool, bool) {
+        let Some(directive) = self.state.events.iter().rev().find(|event| match &event.kind {
             EventKind::Invalidated { target, instruction, .. } => target == node && !instruction.is_empty(),
             EventKind::ConversationEdited { target, .. } => target == node,
             EventKind::FeedbackContinuationQueued { node: target, .. } => target == node,
             _ => false,
-        });
-        directive.is_some_and(|event| messages.iter().any(|message| message.sequence == event.sequence))
+        }) else {
+            return (false, false);
+        };
+        let queued = messages.iter().any(|message| message.sequence == directive.sequence);
+        let dispatched = self.state.events.iter().any(|event| event.sequence > directive.sequence
+            && matches!(&event.kind, EventKind::Started { execution, .. }
+                if execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)));
+        (queued, dispatched)
     }
 
     /// Post-publication conversations with a completed node edit the user's source
@@ -3828,9 +3837,10 @@ impl Runtime {
                 .is_some_and(|previous| previous.status == "resolved");
             let feedback_rebase = self.state.nodes[&node.name].feedback_continuation
                 .as_ref().is_some_and(|input| !input.dispatched);
+            let pending_followup = self.state.node_has_pending_followup(&node.name);
             let continuation = !feedback_rebase
                 && (self.state.nodes[&node.name].continuation || resolved_private)
-                && !self.state.node_has_pending_followup(&node.name);
+                && !pending_followup;
             // Pi writes the session file when it creates the conversation, before
             // the first turn. A startup failure (process exit, extension load
             // error, interrupted preparation) leaves the execution's session
@@ -3988,10 +3998,29 @@ impl Runtime {
             } else {
                 None
             };
-            // New feedback turns use the persisted Pi input boundary, not
-            // Prepared, to distinguish an undelivered fork from a consumed turn.
-            // Retain the older preparation-only rule for other continuations.
-            let unstarted_followup = feedback_undelivered || (continuation
+            // An existing Pi session may contain earlier, active turns while
+            // THIS dispatch failed before launch. Its complete bound input is
+            // still unread: neither a stale human_instruction flag nor activity
+            // from an older attempt may turn it into a prompt-less continuation.
+            // Feedback descendants keep their stricter delivery-boundary check.
+            let unstarted_bound_input = (continuation || pending_followup)
+                && !feedback_rebase
+                && self.state.nodes[&node.name].feedback_continuation.is_none()
+                && self.state.nodes[&node.name].edit_execution_id.is_none()
+                && resume.is_some_and(|previous| {
+                    !session_missing(previous)
+                        && previous.pid.is_none()
+                        && self.state.execution_is_preparation_only(previous)
+                        // A first session file may already contain its opening
+                        // turn (including legacy/imported launch evidence). This
+                        // extra proof applies only to an appended/resumed input.
+                        && self.state.events.iter().any(|event| matches!(&event.kind,
+                            EventKind::Started { execution, fresh_restart: false, .. } if execution.id == previous.id))
+                        && self.state.events.iter().any(|event| matches!(&event.kind,
+                            EventKind::NodeInputBound { execution_id, .. } if execution_id == &previous.id))
+                });
+            // Legacy turns without a binding retain their conservative checks.
+            let unstarted_followup = feedback_undelivered || unstarted_bound_input || (continuation
                 && self.state.nodes[&node.name].feedback_continuation.as_ref()
                     .is_none_or(|input| input.delivery_id.is_none())
                 && self.state.nodes[&node.name].human_instruction
@@ -4454,14 +4483,15 @@ impl Runtime {
                     })
                     .is_some_and(|first| first.id == anchor.id)
             });
-            let instruction_queued = self.instruction_is_queued(&node.name, &queued_messages);
+            let (instruction_queued, instruction_dispatched) = self.instruction_delivery(&node.name, &queued_messages);
+            let include_instruction = !instruction_queued && (!instruction_dispatched || recover_input);
             let delivered_feedback = state.feedback_continuation.as_ref()
                 .is_some_and(|input| input.delivery_id.is_some()) && !feedback_undelivered && !feedback_rebase;
             let retained_images = if let Some((_, images)) = &retry_input {
                 images.clone()
             } else if feedback_rebase || feedback_undelivered {
                 state.feedback_continuation.as_ref().and_then(|input| input.images.clone())
-            } else if !instruction_queued && !delivered_feedback {
+            } else if include_instruction && !delivered_feedback {
                 state.instruction_images.clone()
             } else {
                 None
@@ -4469,7 +4499,7 @@ impl Runtime {
             let queued_prompt = NodeState { pending_messages: queued_messages, ..Default::default() }
                 .pending_prompt_after_images(retained_images.len());
             let instruction_with_queue = || match &queued_prompt {
-                Some((prompt, _)) if !state.instruction.is_empty() && !instruction_queued =>
+                Some((prompt, _)) if !state.instruction.is_empty() && include_instruction =>
                     format!("{}\n\n{prompt}", state.instruction),
                 Some((prompt, _)) => prompt.clone(),
                 None => state.instruction.clone(),

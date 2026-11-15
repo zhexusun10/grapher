@@ -122,6 +122,11 @@ test("edge legends follow session capability and retained routes rather than fut
   const state = { ...emptySnapshot, graph, config: { ...defaultConfig, feedbackEnabled: false } };
   assert.equal(graphFeedbackEnabled(state, false), false);
   assert.equal(graphFeedbackEnabled(state, true), false, "enabling the default does not rewrite older disabled sessions");
+  const { feedbackEnabled: _enabled, ...legacyConfig } = state.config;
+  for (const defaultEnabled of [false, true, false]) {
+    assert.equal(graphFeedbackEnabled({ ...state, config: legacyConfig }, defaultEnabled), false,
+      "a saved legacy session without the field defaults off, not to the current global setting");
+  }
   state.config.feedbackEnabled = true;
   assert.equal(graphFeedbackEnabled(state, false), true, "an unaffected opted-in session retains its legend");
   assert.equal(graphFeedbackEnabled({ ...state, config: null }, false), false);

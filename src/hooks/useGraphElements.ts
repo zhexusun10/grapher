@@ -109,7 +109,8 @@ export function computeExecutionLayers(graph: Graph, plan?: Plan | null): string
 
 /** A saved Run owns its display capability; legacy active routes always win. */
 export function graphFeedbackEnabled(state: Pick<Snapshot, "graph" | "config">, draftEnabled = false): boolean {
-  return state.graph.edges.some(edge => edge.feedback) || (state.config?.feedbackEnabled ?? draftEnabled);
+  return state.graph.edges.some(edge => edge.feedback)
+    || (state.config ? (state.config.feedbackEnabled ?? false) : draftEnabled);
 }
 
 /** Derive topology from the snapshot only when its graph/execution inputs change. */
