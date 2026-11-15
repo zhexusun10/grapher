@@ -257,7 +257,15 @@ test('legacy environment discovery binds one private venv across a parallel Grap
     assert.ok(git('status', '--porcelain').includes('environment-probe.json'), 'delivered project files remain visible in the source worktree');
     assert.equal(git('diff', '--cached', '--name-only'), '', 'publication preserves the user index');
     const manifest = JSON.parse(await readFile(join(data, 'environments', runId, 'files', 'versions', `${byNode.create.result.environmentRef}.json`), 'utf8'));
-    assert.ok(Object.keys(manifest.entries).some((name: string) => name.startsWith('.venv/') && name.endsWith('grapher_probe.py')), 'E snapshot contains the private probe only inside .venv');
+    assert.equal(manifest.rooted.schema, 1);
+    assert.deepEqual(manifest.entries, {}, 'root-qualified evidence does not duplicate legacy entries');
+    assert.ok(manifest.rooted.roots.workspace.layout.scopes.includes('.venv'));
+    const projectProbePaths = Object.keys(manifest.rooted.roots.workspace.entries)
+      .filter(name => name.endsWith('grapher_probe.py'));
+    assert.ok(projectProbePaths.length > 0 && projectProbePaths.every(name => name.startsWith('.venv/')),
+      'W snapshot contains the private probe only inside its owned .venv');
+    assert.ok(!Object.keys(manifest.rooted.roots.state.entries).some(name => name.endsWith('grapher_probe.py')),
+      'an equally named S scope must not stand in for the W environment');
     assert.ok(manifest.parents.includes(byNode.create.input.environmentRef), 'E snapshot links the unbound input');
     for (const name of ['create', 'verify', 'report']) {
       const execution = byNode[name];
@@ -278,11 +286,15 @@ test('legacy environment discovery binds one private venv across a parallel Grap
       return check.phase === 'completed' && check;
     }, 'isolation Run');
     const execution = plain.executions[0];
-    assert.equal((await launch(execution.input.launchRef)).environment, undefined, 'a new Run is unbound at start');
-    assert.equal((await launch(execution.result.launchRef)).environment, undefined, 'an isolated no-op Run never adopts another Run environment');
+    const isolatedLaunch = (ref: string) => readFile(join(data, 'environments', isolated.runId, 'launches', `${ref}.json`), 'utf8').then(JSON.parse);
+    assert.equal((await isolatedLaunch(execution.input.launchRef)).environment, undefined, 'a new Run is unbound at start');
+    assert.equal((await isolatedLaunch(execution.result.launchRef)).environment, undefined, 'an isolated no-op Run never adopts another Run environment');
     assert.notEqual(execution.input.environmentRef, byNode.create.result.environmentRef);
     const isolatedManifest = JSON.parse(await readFile(join(data, 'environments', isolated.runId, 'files', 'versions', `${execution.result.environmentRef}.json`), 'utf8'));
-    assert.ok(!Object.keys(isolatedManifest.entries).some((name: string) => name.startsWith('.venv/')), 'a new Run does not see the previous environment');
+    assert.equal(isolatedManifest.rooted.schema, 1);
+    assert.ok(Object.values(isolatedManifest.rooted.roots).every((frame: any) =>
+      !Object.keys(frame.entries).some(name => name.startsWith('.venv/'))),
+      'neither root in a new Run sees the previous environment');
     // Reuse the existing business tasks, with no new prompt or reconciliation
     // session: a bound parent forks into a local bound and a fresh unbound task.
     const fork = await legacyGraph(api, data, { graph: { originalGoal: graph.originalGoal,

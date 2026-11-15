@@ -721,11 +721,17 @@ fn environment_project_baseline() {
             ..
         } = &project
         {
-            let mut command = private_command("cargo", &node);
+            // A host PATH may expose a standalone Cargo binary (not a Rustup
+            // proxy), especially with Homebrew. Query Rustup's default directly
+            // with private configuration roots instead of assuming cargo --version
+            // must dispatch through Rustup on every host.
+            let private_home = crate::workspace_state::process_root(&node).unwrap().join(".agent-home");
+            let mut command = private_command("rustup", &node);
             command
-                .args(["--version"])
+                .arg("default")
                 .env_remove("RUSTUP_TOOLCHAIN")
-                .env_remove("RUSTUP_HOME");
+                .env("RUSTUP_HOME", private_home.join(".rustup"))
+                .env("CARGO_HOME", private_home.join(".cargo"));
             let result = command.output().unwrap();
             assert!(
                 !result.status.success(),
@@ -733,7 +739,7 @@ fn environment_project_baseline() {
             );
             let diagnostic = String::from_utf8_lossy(&result.stderr).into_owned();
             assert!(
-                diagnostic.contains("rustup") && diagnostic.contains("default"),
+                diagnostic.contains("toolchain") && diagnostic.contains("default"),
                 "{diagnostic}"
             );
             home_discovery = json!({"sourceDefault":default,"privateDefaultExit":result.status.code(),
