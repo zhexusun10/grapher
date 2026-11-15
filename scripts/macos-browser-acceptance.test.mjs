@@ -151,7 +151,7 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
       };
       const bootstrap = await until(async () => { try { return await api('bootstrap'); } catch { return false; } }, 'backend startup');
       const config = { ...bootstrap.config, repository: project, model: 'browser-local/native', thinkingLevel: 'off',
-        maxParallel: 2, isolateParallelNodes: true, autoApprove: false, postTaskReview: false };
+        maxParallel: 4, isolateParallelNodes: true, autoApprove: false, postTaskReview: false };
       await api('save_config', { config });
       browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || 'chromium', headless: true });
       context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'en-US', reducedMotion: 'reduce' });
@@ -171,8 +171,8 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
       const composer = page.locator('.landing-screen textarea');
       await composer.waitFor({ timeout: 30_000 });
       await page.getByRole('button', { name: 'Graph', exact: true }).click();
-      // Four ready nodes select a private batch; maxParallel only caps workers.
-      // The single join then runs source-native after that batch is delivered.
+      // Four dispatchable nodes exceed the private threshold after the worker
+      // cap. The single join runs source-native after that batch is delivered.
       await composer.fill('BROWSER_MAC create four branches and combine their results');
       await composer.press('Enter');
       const approve = page.getByRole('button', { name: 'Approve', exact: true });

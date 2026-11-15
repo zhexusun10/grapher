@@ -537,7 +537,6 @@ fn launch_environment_differs(
     workspace: &Path,
     state: Option<&Path>,
     name: &str,
-    program: &Path,
     detected_prefix: Option<&Path>,
 ) -> bool {
     if !matches!(name, "python" | "python3" | "pip" | "pip3") {
@@ -553,13 +552,11 @@ fn launch_environment_differs(
     let expected = root.join(&binding.prefix);
     match detected_prefix {
         Some(prefix) => canonical(prefix).ok().as_deref() != canonical(&expected).ok().as_deref(),
-        None => {
-            let entry = launch
-                .entry
-                .replace("{workspace}", &text(workspace))
-                .replace("{state}", &text(state.unwrap_or(workspace)));
-            canonical(program).ok().as_deref() != canonical(&PathBuf::from(entry)).ok().as_deref()
-        }
+        // A host interpreter is not the bound venv even when both resolve to
+        // the same binary (the normal POSIX venv symlink layout). Its lexical
+        // prefix determines sys.prefix; executable identity cannot stand in
+        // for environment identity, including when old prefix metadata is gone.
+        None => true,
     }
 }
 
@@ -975,7 +972,6 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
                 &workspace,
                 state.as_deref(),
                 name,
-                &program,
                 detected_prefix.as_deref(),
             );
         if switched_from_bound {
