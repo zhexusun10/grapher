@@ -71,6 +71,74 @@ fn node_message_delivery_waiting_input_only_queues_even_during_planning() {
 }
 
 #[test]
+fn node_message_delivery_followup_retries_keep_identity_before_and_after_dispatch() {
+    for outcome in ["completed", "failed", "published"] {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = crate::fixture::repository(temp.path()).unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "repository": repository, "model": "mock/model", "postTaskReview": false,
+        })).unwrap();
+        let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
+        runtime.state.run_id = Uuid::new_v4().to_string();
+        runtime.emit(EventKind::Created {
+            graph: Graph { original_goal: "original".into(), nodes: vec![Node {
+                name: "task".into(), task: "original".into(),
+            }], edges: vec![] },
+            config, planning_id: None, planning: None,
+        }).unwrap();
+        runtime.approve().unwrap();
+        let first = runtime.jobs().unwrap().remove(0).execution;
+        runtime.pause(true).unwrap();
+        if outcome == "failed" {
+            runtime.finish(&first, Err("provider failed".into())).unwrap();
+        } else {
+            runtime.emit(EventKind::Finished {
+                execution_id: first.id, head: runtime.state.base.clone(), output: String::new(),
+                output_bytes: 0, metrics: None,
+            }).unwrap();
+            if outcome == "published" {
+                runtime.emit(EventKind::PublicationCompleted { head: runtime.state.base.clone() }).unwrap();
+            }
+        }
+        let run = runtime.state.run_id.clone();
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime), driving: AtomicBool::new(true),
+            drive_signal: (Mutex::new(0), Condvar::new()),
+            planning: AtomicBool::new(false), extension: temp.path().join("unused"),
+        });
+        let request = Uuid::new_v4().to_string();
+        let send = |id: &str, text: &str, data: &str| control_with_request_id(
+            "intervene".into(), Some("task".into()), Some(text.into()), Some(run.clone()),
+            None, Some(vec![ImageAttachment {
+                r#type: "image".into(), mime_type: "image/png".into(), data: data.into(), name: None,
+            }]), Some(id.into()), &service,
+        );
+        let accepted = send(&request, "follow-up", "first").unwrap();
+        let retried = send(&request, "follow-up", "first").unwrap();
+        assert_eq!(retried.events.len(), accepted.events.len(), "{outcome}: retry is not another turn");
+        assert_eq!(retried.nodes["task"].pending_messages.len(), 1);
+        assert!(send(&request, "different payload", "first").is_err());
+        assert!(send(&request, "follow-up", "different image").is_err());
+        // A genuinely new submission with identical content remains distinct.
+        send(&Uuid::new_v4().to_string(), "follow-up", "first").unwrap();
+        let event_count = {
+            let mut runtime = service.runtime.lock().unwrap();
+            runtime.resume_scheduling().unwrap();
+            let job = runtime.jobs().unwrap().remove(0);
+            assert_eq!(job.task.matches("follow-up").count(), 2);
+            assert_eq!(job.images.unwrap().len(), 2);
+            runtime.state = runtime.store.load(&run).unwrap();
+            runtime.state.events.len()
+        };
+        // A durable receipt must work without a live Pi process, even after
+        // the accepted input was claimed and the Snapshot was reloaded.
+        let replay = send(&request, "follow-up", "first").unwrap();
+        assert_eq!(replay.events.len(), event_count, "{outcome}");
+        assert!(replay.nodes["task"].pending_messages.is_empty());
+    }
+}
+
+#[test]
 fn node_message_delivery_stale_intervene_and_consecutive_steers_use_one_live_writer() {
     let temp = tempfile::tempdir().unwrap();
     let repository = crate::fixture::repository(temp.path()).unwrap();

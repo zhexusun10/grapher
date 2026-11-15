@@ -118,7 +118,6 @@ export function ProviderSettings({ onCatalogChange, onBusyChange }: {
       const result = await providerAuth.catalog(refresh);
       if (mounted.current && generation === catalogGeneration.current) {
         setCatalog(result);
-        providerAuth.setCachedCatalog(result);
         setActiveProvider(current => current ? result.providers.find(p => p.id === current.id) ?? current : null);
       }
     } catch (err) {

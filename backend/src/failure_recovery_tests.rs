@@ -666,6 +666,7 @@ fn missing_feedback_fork_uses_the_target_session_and_original_instruction() {
             target: "owner".into(),
             instruction: "apply the review".into(),
             human: false,
+            request_id: None,
             images: None,
             workspace: Some(FeedbackWorkspace {
                 source_execution_id: review.id.clone(),

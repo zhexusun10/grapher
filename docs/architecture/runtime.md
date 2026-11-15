@@ -298,9 +298,11 @@ they never replace that work or bypass dependencies, approval or capacity. This
 is pre-start steering carried in the dispatch prompt, not a live RPC to a node
 that has no process yet. Passive additions do not disable recovery of a blocked
 preparation or an already-queued continuation, including a missing session fork.
-Queued `NodeMessaged` events retain the client's request ID: retries return the
-same durable acceptance even after dispatch or replay, while another ID with equal
-text is a distinct turn. Reusing an ID with a different payload is rejected.
+Queued `NodeMessaged` events and human `Invalidated` follow-ups retain the client's
+request ID: retries return the same durable acceptance even after dispatch or
+replay, while another ID with equal text is a distinct turn. This also covers the
+first follow-up to a completed, failed or published node. Reusing an ID with a
+different payload is rejected; legacy events without an ID remain replayable.
 The browser uses that acceptance, not the latest unrelated event, to avoid
 unpausing a Run on a repeated acknowledgement. Legacy `NodeMessaged` events
 without `queued: true` remain record-only notes.
@@ -508,7 +510,11 @@ link text, not the referenced file. Larger/unreadable files retain their rows
 with zero provisional line counts; Git attributes or filters can also make the
 later Git diff differ from this estimate. A failed or malformed diff is
 unavailable data, not an empty diff. Empty Git/Planner results are cache hits too, rather than reasons to
-repeat cold work on every poll.
+repeat cold work on every poll. Transcript `write`/`edit` paths are normalized
+lexically within their workspace: unmatched absolute paths and `..` escapes are
+excluded, while ordinary project directories named `tmp`, `dev` or `proc` remain
+visible. Case-insensitive root matching preserves original UTF-8 path boundaries.
+Older derived sidecar versions are reparsed rather than retaining pre-fix rows.
 
 Sidecar persistence and display unions capture an owned cache snapshot, then
 release the process-wide display-cache mutex before merging large path sets.

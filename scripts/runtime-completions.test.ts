@@ -45,6 +45,38 @@ for (const type of ["files", "skills"] as const) {
   });
 }
 
+for (const operation of ["upload", "delete"] as const) {
+  test(`attachment ${operation} invalidates file-list reads already in flight`, async () => {
+    const originalFetch = globalThis.fetch;
+    const originalReader = globalThis.FileReader;
+    const repository = `/test/attachment-${operation}-file-list`;
+    const path = "grapher-attachments/00000000-0000-4000-8000-000000000009/input.txt";
+    let release!: (value: Response) => void;
+    let reads = 0;
+    const current = operation === "upload" ? [path] : [];
+    try {
+      globalThis.FileReader = class {
+        result = "data:text/plain;base64,Zml4dHVyZQ==";
+        onload: (() => void) | null = null;
+        readAsDataURL() { queueMicrotask(() => this.onload?.()); }
+      } as unknown as typeof FileReader;
+      globalThis.fetch = async url => String(url).endsWith("list_files")
+        ? ++reads === 1 ? new Promise<Response>(resolve => { release = resolve; }) : response({ files: current })
+        : response({ name: "input.txt", path, success: true });
+      const old = runtimeService.listFiles(repository, true);
+      if (operation === "upload") await runtimeService.writeWorkspaceFile(new File(["fixture"], "input.txt"), repository);
+      else await runtimeService.deleteWorkspaceFile(path, repository);
+      release(response({ files: operation === "upload" ? [] : [path] }));
+      await old;
+      assert.deepEqual(await runtimeService.listFiles(repository), current);
+      assert.equal(reads, 2, "a pre-mutation read cannot repopulate the invalidated cache");
+    } finally {
+      globalThis.fetch = originalFetch;
+      globalThis.FileReader = originalReader;
+    }
+  });
+}
+
 test("attachment requests preserve Run targeting and reject missing, legacy or traversing response paths", async () => {
   const originalFetch = globalThis.fetch;
   const originalReader = globalThis.FileReader;
@@ -307,6 +339,33 @@ test("Planner completion streams normalize legacy node status and Plan roots bef
     }
   } finally { globalThis.fetch = original; }
 });
+
+for (const newline of ["\n", "\r\n", "\r"]) {
+  test(`planning SSE accepts ${JSON.stringify(newline)} framing, multiline data and packet-split UTF-8`, async () => {
+    const original = globalThis.fetch;
+    const snapshot = { ...emptySnapshot, runId: "sse-framing", graph: { ...emptySnapshot.graph, originalGoal: "中文 🚀" } };
+    const events: string[] = [];
+    let cancelled = false;
+    try {
+      // A colon need not be followed by a space. Blank/comment-only frames
+      // are not messages, and consecutive data fields join with newlines.
+      const wire = [": keepalive", "", "event:run_started", 'data:{"runId":"sse-framing"}', "",
+        "event:complete", "data: {", `data: \"snapshot\": ${JSON.stringify(snapshot)}`, "data:}", "", ": unread keepalive", "", ""].join(newline);
+      globalThis.fetch = async () => new Response(new ReadableStream({
+        start(controller) {
+          // Split every CR/LF pair and every multibyte code point across reads.
+          for (const byte of new TextEncoder().encode(wire)) controller.enqueue(Uint8Array.of(byte));
+          controller.close();
+        },
+        cancel() { cancelled = true; },
+      }));
+      const result = await runtimeService.planGoalStream("goal", defaultConfig, event => events.push(event.type));
+      assert.deepEqual(result, snapshot);
+      assert.deepEqual(events, ["run_started", "complete"]);
+      assert.equal(cancelled, true, "terminal events release unread stream bytes");
+    } finally { globalThis.fetch = original; }
+  });
+}
 
 test("a durable planning or failed planning Run stays attached to its workspace", () => {
   for (const phase of ["planning", "planning_failed", "paused", "needs_attention", "awaiting_approval", "running"]) {

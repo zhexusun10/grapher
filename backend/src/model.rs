@@ -1290,6 +1290,9 @@ pub enum EventKind {
         target: String,
         instruction: String,
         human: bool,
+        /// Idempotency receipt for an accepted human follow-up, before dispatch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<Vec<ImageAttachment>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3302,6 +3305,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             workspace,
             shared_workspace,
             source_direct,
+            ..
         } => {
             state.stop_requested = false;
             if !*human {

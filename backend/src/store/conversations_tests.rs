@@ -234,6 +234,7 @@ fn sidebar_status_matches_reducer_including_standalone_mergers_and_dirty_nodes()
             target: "worker".into(),
             instruction: "Follow-up".into(),
             human: true,
+            request_id: None,
             images: None,
             workspace: None,
             shared_workspace: false,

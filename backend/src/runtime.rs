@@ -2842,10 +2842,20 @@ impl Runtime {
         instruction: &str,
         images: Option<Vec<ImageAttachment>>,
     ) -> Result<(), String> {
+        self.intervene_with_request_id(node, instruction, images, None)
+    }
+
+    pub(crate) fn intervene_with_request_id(
+        &mut self,
+        node: &str,
+        instruction: &str,
+        images: Option<Vec<ImageAttachment>>,
+        request_id: Option<String>,
+    ) -> Result<(), String> {
         if instruction.trim().is_empty() {
             return Err("Enter an instruction for the node".into());
         }
-        if self.queue_waiting_node_message(node, instruction, images.clone(), None)? {
+        if self.queue_waiting_node_message(node, instruction, images.clone(), request_id.clone())? {
             return Ok(());
         }
         if !self.state.executions.iter().any(|execution| {
@@ -2871,6 +2881,7 @@ impl Runtime {
             target: node.into(),
             instruction: instruction.trim().into(),
             human: true,
+            request_id,
             images,
             workspace: None,
             shared_workspace,
@@ -2934,6 +2945,7 @@ impl Runtime {
                 target: node.into(),
                 instruction: instruction.trim().into(),
                 human: true,
+                request_id: None,
                 images,
                 workspace: None,
                 shared_workspace: false,
@@ -5904,6 +5916,7 @@ impl Runtime {
                 target: pending.to.clone(),
                 instruction: instructions.join("\n\n"),
                 human: false,
+                request_id: None,
                 images: None,
                 workspace: (!self.batch_workspaces()).then_some(FeedbackWorkspace {
                     source_execution_id: source.source_execution_id,

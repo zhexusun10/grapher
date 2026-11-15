@@ -81,6 +81,7 @@ function saveStorageCatalog(catalog: ProviderCatalog | null) {
 
 let cachedCatalog: ProviderCatalog | null = loadStorageCatalog();
 let inFlightCatalog: Promise<ProviderCatalog> | null = null;
+let catalogGeneration = 0;
 const catalogListeners = new Set<() => void>();
 let visibilityRevision = 0;
 let knownHiddenModels = cachedCatalog?.hiddenModels;
@@ -98,7 +99,7 @@ function acceptVisibility(value: ModelVisibility) {
   if (!Array.isArray(value?.hiddenModels) || !value.hiddenModels.every(id => typeof id === "string")) throw new Error("Invalid model visibility response");
   visibilityRevision++;
   knownHiddenModels = value.hiddenModels;
-  if (cachedCatalog) setCachedCatalog(withVisibility(cachedCatalog, value.hiddenModels));
+  if (cachedCatalog) publishCatalog(withVisibility(cachedCatalog, value.hiddenModels));
   return value;
 }
 
@@ -118,6 +119,14 @@ if (typeof window !== "undefined") window.addEventListener("storage", event => {
 });
 
 function setCachedCatalog(catalog: ProviderCatalog | null) {
+  // Authentication may change while the first catalog is still loading (and
+  // the cache is already null). Fence that read even without a cache change.
+  catalogGeneration++;
+  inFlightCatalog = null;
+  publishCatalog(catalog);
+}
+
+function publishCatalog(catalog: ProviderCatalog | null) {
   if (catalog === cachedCatalog) return;
   cachedCatalog = catalog;
   saveStorageCatalog(catalog);
@@ -142,18 +151,26 @@ export const providerAuth = {
       return inFlightCatalog;
     }
     const revision = visibilityRevision;
-    inFlightCatalog = call<ProviderCatalog>("catalog", { refresh })
+    const generation = catalogGeneration;
+    const task: Promise<ProviderCatalog> = call<ProviderCatalog>("catalog", { refresh })
       .then((result) => {
+        // Old callers must receive the current catalog too; otherwise a
+        // Settings load can re-publish stale availability after logout/login.
+        if (generation !== catalogGeneration) return providerAuth.catalog();
         const current = revision !== visibilityRevision && knownHiddenModels
           ? withVisibility(result, knownHiddenModels) : result;
         knownHiddenModels = current.hiddenModels;
-        setCachedCatalog(current);
+        publishCatalog(current);
         return current;
+      }, error => {
+        if (generation !== catalogGeneration) return providerAuth.catalog();
+        throw error;
       })
       .finally(() => {
-        inFlightCatalog = null;
+        if (inFlightCatalog === task) inFlightCatalog = null;
       });
-    return inFlightCatalog;
+    inFlightCatalog = task;
+    return task;
   },
   setModelVisibility: async (changes: ModelVisibilityChange[], reset = false): Promise<ModelVisibility> => {
     const result = await withRequestTimeout(signal => callBody<ModelVisibility>("set_model_visibility", { changes, reset }, signal),

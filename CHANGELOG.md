@@ -10,12 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Clarified provisional untracked-file line-count limits and documented saved defaults, file-change sidecars and staged attachment inputs in the runtime data layout (`docs/architecture/runtime.md`, `docs/architecture/storage.md`).
+- Removed obsolete Pi 1.4 dependency-audit exception commentary; dependency installation still blocks moderate-or-higher advisories (`scripts/pi-dependencies.mjs`).
 
 ### Fixed
 
 - Local message edits and version selection now prefer the matching message ID over earlier identical text, preserving preceding turns and selecting the intended branch (`src/services/conversationBranch.ts`, `scripts/conversation-branch.test.ts`).
 - Live untracked-file summaries no longer count binary bytes as text or drop non-UTF-8 text lines. Symlinks count their link text rather than referenced contents, and regular-file reads remain bounded even when files grow (`backend/src/file_changes.rs`, `backend/src/file_changes/git_diff.rs`).
 - File-change API tests now retry only explicit display-cache contention responses, avoiding intermittent failures when parallel tests hold the shared cache while preserving validation and routing failures (`backend/src/file_changes_api_tests.rs`).
+- Follow-ups to completed, failed or published nodes now retain durable request IDs, preventing lost-response retries from duplicating text or images before dispatch, after dispatch or after replay. Reusing an ID with a different payload is rejected; legacy events remain readable (`backend/src/model.rs`, `backend/src/runtime.rs`, `backend/src/server.rs`, `backend/src/node_message_delivery_tests.rs`).
+- Transcript-derived file changes now reject external absolute paths and workspace-escaping traversal while retaining ordinary project directories named `tmp`, `dev` or `proc`. Case-insensitive workspace matching no longer slices original Unicode paths at case-folded byte offsets, and older derived sidecars are invalidated (`backend/src/file_changes.rs`, `docs/architecture/runtime.md`).
+- Provider login/logout and extension toggles now fence older catalog reads, preventing delayed responses from restoring stale model availability or overwriting saved extension selections. Obsolete read failures defer to current state, while model-visibility changes still overlay in-flight provider catalogs (`src/services/providerAuth.ts`, `src/services/piExtensions.ts`, `src/components/ProviderSettings.tsx`).
+- Attachment uploads and deletions now invalidate file-list requests already in flight, so their delayed responses cannot restore an obsolete completion cache (`src/services/runtime.ts`).
+- Already-cancelled metadata requests no longer start transport or synchronous operation work, and retain the caller's cancellation reason (`src/services/requestTimeout.ts`).
+- Planner SSE parsing now accepts LF, CRLF and CR line endings, optional spacing after field colons, multiline data and packet-split UTF-8 without waiting for HTTP EOF after completion (`src/services/runtime.ts`, `scripts/runtime-completions.test.ts`).
+- Escape during IME composition no longer cancels inline message or node-task editing and discards the draft; ordinary Escape cancellation remains available (`src/components/views/ChatBubbles.tsx`, `src/components/views/NodeTaskCard.tsx`, `scripts/frontend-audit.test.mjs`).
+
+### Removed
+
+- Removed unused legacy private-Planner copy/publication helpers and their helper-only regression tests; production Planner turns continue using source or retained node workspaces (`backend/src/workspace.rs`, `backend/tests/graph_merge.rs`).
+- Removed the repository's Markdown bug-report and feature-request issue templates (`.github/ISSUE_TEMPLATE/`).
 
 ## [1.8.9] - 2026-11-15
 

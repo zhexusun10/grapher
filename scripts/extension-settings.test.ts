@@ -56,3 +56,24 @@ test('a reopened Settings card reads the page-session catalog instead of repaint
     assert.equal(piExtensions.getCachedCatalog()?.extensions[0].id, extension.id);
   } finally { globalThis.fetch = original; }
 });
+
+for (const failed of [false, true]) {
+  test(`a ${failed ? 'failed' : 'successful'} pre-toggle refresh cannot replace the saved extension selection`, async () => {
+    const original = globalThis.fetch;
+    const extension = { id: 'global/probe.ts', name: 'probe', enabled: true, bundled: false, required: false, source: 'auto', path: 'global/probe.ts' };
+    const stale = { globalDirectory: 'global', extensions: [extension] };
+    const current = { ...stale, extensions: [{ ...extension, enabled: false }] };
+    let release!: (response: Response) => void;
+    try {
+      globalThis.fetch = async (_url, init) => JSON.parse(String(init?.body)).operation === 'catalog'
+        ? new Promise<Response>(resolve => { release = resolve; })
+        : new Response(JSON.stringify({ result: current }));
+      const refresh = piExtensions.catalog(true);
+      assert.deepEqual(await piExtensions.setEnabled(extension.id, false), current);
+      release(failed ? new Response(JSON.stringify({ error: 'stale read failed' }), { status: 500 })
+        : new Response(JSON.stringify({ result: stale })));
+      assert.deepEqual(await refresh, current, 'the mounting Settings card must not restore an obsolete selection');
+      assert.deepEqual(piExtensions.getCachedCatalog(), current);
+    } finally { globalThis.fetch = original; }
+  });
+}

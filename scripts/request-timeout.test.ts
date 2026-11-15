@@ -35,6 +35,18 @@ test("caller cancellation retains its reason and a successful request removes it
   assert.equal(signal.aborted, false);
 });
 
+test("an already-cancelled caller never starts transport or mutation work", async () => {
+  const caller = new AbortController();
+  const reason = new DOMException("Left the conversation", "AbortError");
+  caller.abort(reason);
+  let calls = 0;
+  await assert.rejects(withRequestTimeout(async () => {
+    calls++;
+    return "must not run";
+  }, 100, "Timeout", caller.signal), error => error === reason);
+  assert.equal(calls, 0);
+});
+
 test("timed-out history leaves the deduplication map and bootstrap does not retry another full deadline", async context => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   const original = globalThis.fetch;

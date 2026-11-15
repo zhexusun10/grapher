@@ -234,7 +234,12 @@ fn strip_root_prefix(path: &str, root: &str) -> Option<String> {
         }
         let prefix = format!("{root_lower}/");
         if path_lower.starts_with(&prefix) {
-            return Some(path[prefix.len()..].to_string());
+            // Case conversion can expand or shrink UTF-8 (İ, K). The
+            // comparison's byte offset is not an offset into the original.
+            // Slashes are unchanged, so locate the same boundary there.
+            let root_slashes = norm_root.bytes().filter(|byte| *byte == b'/').count();
+            let (boundary, _) = path.match_indices('/').nth(root_slashes)?;
+            return Some(path[boundary + 1..].to_string());
         }
     } else {
         if path == norm_root {
@@ -280,17 +285,26 @@ pub fn normalize_workspace_path(raw: &str, worktree: &str, repository: &str) -> 
     while let Some(rest) = cleaned.strip_prefix("./") {
         cleaned = rest.to_string();
     }
-    cleaned = cleaned.trim_start_matches('/').to_string();
-
-    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+    // An absolute path that did not match a workspace root is external, not
+    // a relative project path. Check Windows drive-relative paths on Unix too.
+    if cleaned.starts_with('/')
+        || cleaned.contains(":/")
+        || cleaned.as_bytes().get(1) == Some(&b':')
+    {
         return None;
     }
-    // Reject absolute system paths that escaped workspace stripping (e.g. /dev/null, /tmp/...)
-    if cleaned.starts_with("dev/")
-        || cleaned.starts_with("tmp/")
-        || cleaned.starts_with("proc/")
-        || cleaned.contains(":/")
-    {
+    let mut parts = Vec::new();
+    for part in cleaned.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            _ => parts.push(part),
+        }
+    }
+    let cleaned = parts.join("/");
+    if cleaned.is_empty() {
         return None;
     }
     if crate::path_identity::is_runtime_metadata_path(Path::new(&cleaned)) {
@@ -1605,7 +1619,7 @@ struct PersistedRunChanges {
 /// Derived summaries are a cache, not history. Bump this whenever transcript
 /// parsing changes semantics so an older sidecar cannot keep stale rows (for
 /// example bash deletions that were never inside the workspace) authoritative.
-const PERSISTED_CHANGES_VERSION: u32 = 2;
+const PERSISTED_CHANGES_VERSION: u32 = 3;
 
 fn read_persisted(path: &Path) -> PersistedRunChanges {
     fs::read_to_string(path)
@@ -1995,6 +2009,48 @@ mod tests {
         );
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn normalizes_unicode_root_without_using_case_folded_byte_offsets() {
+        for (path, root, expected) in [
+            ("/repo/İ/文件.txt", "/repo/İ", "文件.txt"),
+            ("/repo/K/文件.txt", "/repo/K", "文件.txt"),
+            ("/REPO/İ/file.txt", "/repo/i\u{307}", "file.txt"),
+            ("/repo/i\u{307}/file.txt", "/REPO/İ", "file.txt"),
+            ("/repo/İ", "/repo/İ", ""),
+        ] {
+            assert_eq!(strip_root_prefix(path, root).as_deref(), Some(expected), "{path}");
+        }
+        assert_eq!(strip_root_prefix("/repo/İ-other/file.txt", "/repo/İ"), None);
+    }
+
+    #[test]
+    fn tool_changes_only_report_paths_inside_the_workspace() {
+        let mut log = String::new();
+        for (index, path) in [
+            "/elsewhere/secret.txt", "../outside.txt", "/repo/../outside.txt",
+            "nested/../../outside.txt", "C:/elsewhere/secret.txt", "C:secret.txt",
+            "tmp/result.txt", "dev/config.txt", "proc/output.txt", "src/../inside.txt",
+            "/repo/nested/../absolute.txt",
+        ].into_iter().enumerate() {
+            let tool = if index % 2 == 0 { "write" } else { "edit" };
+            log.push_str(&serde_json::json!({
+                "type": "tool_execution_start", "toolCallId": index.to_string(), "toolName": tool,
+                "args": {"path": path, "content": "new", "oldText": "old", "newText": "new"},
+            }).to_string());
+            log.push('\n');
+            log.push_str(&serde_json::json!({
+                "type": "tool_execution_end", "toolCallId": index.to_string(), "toolName": tool,
+                "isError": false,
+            }).to_string());
+            log.push('\n');
+        }
+        let summary = parse_jsonl_file_changes(&log, "worker", "exec", "/repo", "/repo", false);
+        assert_eq!(summary.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
+            ["absolute.txt", "dev/config.txt", "inside.txt", "proc/output.txt", "tmp/result.txt"]);
+        assert!(summary.files.iter().all(|file| file.nodes == ["worker"] && file.execution_ids == ["exec"]));
+    }
+
     #[test]
     fn parses_write_edit_and_bash_tool_calls_from_jsonl() {
         let jsonl = [
@@ -2224,7 +2280,7 @@ mod tests {
         let path = root.join("file-changes").join(run).join("changes.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let stale = serde_json::json!({
-            "version": 1,
+            "version": PERSISTED_CHANGES_VERSION - 1,
             "executions": {
                 "exec": {
                     "files": [{"path": "pkgcheck", "status": "deleted", "source": "bash"}],

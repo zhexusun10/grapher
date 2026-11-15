@@ -223,29 +223,37 @@ export const runtimeService = {
     }
 
     const decoder = new TextDecoder();
-    let buffer = "";
+    let partialLine = "";
+    let skipLF = false;
+    let pendingEventType = "message";
+    let dataLines: string[] = [];
     try {
       while (true) {
         const { done: completed, value } = await reader.read();
         if (completed) break;
-        buffer += decoder.decode(value, { stream: true });
+        let text = decoder.decode(value, { stream: true });
+        if (!text) continue;
+        // SSE permits LF, CRLF and bare CR. A CR at the end of one packet
+        // already ended its line; consume the following LF only once.
+        if (skipLF && text.startsWith("\n")) text = text.slice(1);
+        skipLF = text.endsWith("\r");
+        const lines = (partialLine + text).split(/\r\n|\r|\n/);
+        partialLine = lines.pop() ?? "";
 
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() || "";
-
-        for (const part of parts) {
-          if (!part.trim()) continue;
-          let eventType = "message";
-          let dataStr = "";
-
-          for (const line of part.split("\n")) {
-            if (line.startsWith("event: ")) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith("data: ")) {
-              dataStr = line.slice(6).trim();
-            }
+        for (const line of lines) {
+          if (line) {
+            const colon = line.indexOf(":");
+            const field = colon < 0 ? line : line.slice(0, colon);
+            let value = colon < 0 ? "" : line.slice(colon + 1);
+            if (value.startsWith(" ")) value = value.slice(1);
+            if (field === "event") pendingEventType = value || "message";
+            else if (field === "data") dataLines.push(value);
+            continue;
           }
-
+          const eventType = pendingEventType;
+          const dataStr = dataLines.join("\n");
+          pendingEventType = "message";
+          dataLines = [];
           if (!dataStr) continue;
           let dataObj;
           try { dataObj = JSON.parse(dataStr); }
@@ -456,6 +464,7 @@ export const runtimeService = {
     }
     const key = repository || "__default__";
     filesCache.delete(key);
+    filesRequests.set(key, (filesRequests.get(key) ?? 0) + 1);
     return res;
   },
   deleteWorkspaceFile: async (
@@ -471,5 +480,6 @@ export const runtimeService = {
     });
     const key = repository || "__default__";
     filesCache.delete(key);
+    filesRequests.set(key, (filesRequests.get(key) ?? 0) + 1);
   },
 };

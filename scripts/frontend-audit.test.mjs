@@ -864,6 +864,33 @@ test("unchanged inline edit keeps the confirm visible but disabled until an actu
   } finally { await context.close(); }
 });
 
+for (const name of ["bubble", "nodeTask"]) {
+  test(`${name} inline editor preserves the draft when Escape dismisses IME candidates`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await fixture(name);
+    try {
+      if (name === "nodeTask") await page.getByRole("button", { name: "Edit task directive" }).click();
+      const editor = page.locator("textarea");
+      await editor.fill("保留正在编辑的草稿");
+      await editor.dispatchEvent("compositionstart");
+      await editor.press("Escape");
+      assert.equal(await editor.inputValue(), "保留正在编辑的草稿");
+      assert.equal(await page.evaluate(() => window.audit.cancels ?? 0), 0);
+      await editor.dispatchEvent("compositionend");
+      for (const fields of [{ isComposing: true }, { keyCode: 229 }]) {
+        await editor.evaluate((element, fields) => element.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "Escape", bubbles: true, ...fields,
+        })), fields);
+        assert.equal(await editor.inputValue(), "保留正在编辑的草稿");
+        assert.equal(await page.evaluate(() => window.audit.cancels ?? 0), 0);
+      }
+      await editor.press("Escape");
+      if (name === "nodeTask") assert.equal(await editor.count(), 0, "normal Escape still cancels editing");
+      else assert.equal(await page.evaluate(() => window.audit.cancels), 1);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
 test("inline edit keeps the caret where the user typed", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("bubble");
   try {

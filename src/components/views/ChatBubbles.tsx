@@ -297,6 +297,7 @@ export function EditableUserBubble({
                     }}
                     onKeyDown={(event) => {
                       if (event.key === "Escape") {
+                        if (event.nativeEvent.isComposing || composingRef.current || event.keyCode === 229) return;
                         event.stopPropagation();
                         if (!submittingRef.current) onCancel();
                       } else if (event.key === "Enter" && !event.shiftKey) {

@@ -167,6 +167,7 @@ export const NodeTaskCard: React.FC<NodeTaskCardProps> = React.memo(({
             }}
             onKeyDown={(e) => {
               if (e.key === "Escape") {
+                if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229) return;
                 e.stopPropagation();
                 onCancel();
               } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {

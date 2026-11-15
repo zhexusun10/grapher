@@ -851,6 +851,97 @@ test("providerAuth catalog cache stores and returns synchronously without redund
   }
 });
 
+for (const operation of ["logout", "poll", "respond"] as const) {
+  test(`provider ${operation} fences catalog reads started before the credential change`, async () => {
+    const originalFetch = globalThis.fetch;
+    const originalCatalog = providerAuth.getCachedCatalog();
+    const pending: Array<(value: Response) => void> = [];
+    const fresh = { ...catalog, models: catalog.models.map(model => ({ ...model, available: operation !== "logout" })) };
+    const reply = (result: unknown) => new Response(JSON.stringify({ result }));
+    try {
+      providerAuth.setCachedCatalog(null);
+      globalThis.fetch = async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        if (body.operation === "catalog") return new Promise<Response>(resolve => { pending.push(resolve); });
+        assert.equal(body.operation, operation);
+        return reply(operation === "logout" ? { loggedOut: true } : { status: "complete" });
+      };
+      const old = providerAuth.catalog(true);
+      if (operation === "logout") await providerAuth.logout("example");
+      else if (operation === "poll") await providerAuth.poll("login");
+      else await providerAuth.respond("login", "prompt", "key");
+      const current = providerAuth.catalog(true);
+      // Release all reads even on the broken implementation, so failure leaves
+      // no stalled timeout or cross-test request behind.
+      const reads = pending.length;
+      pending[0](reply(catalog));
+      pending[1]?.(reply(fresh));
+      const results = await Promise.all([old, current]);
+      assert.equal(reads, 2, "a post-auth reader must not join a pre-auth request");
+      assert.deepEqual(results, [fresh, fresh], "even an old caller receives current model availability");
+      assert.deepEqual(providerAuth.getCachedCatalog(), fresh);
+    } finally {
+      for (const resolve of pending) resolve(reply(fresh));
+      providerAuth.setCachedCatalog(originalCatalog);
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
+
+test("a failed obsolete provider read adopts the catalog after authentication", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalCatalog = providerAuth.getCachedCatalog();
+  let reject!: (error: Error) => void;
+  const fresh = { ...catalog, models: [] };
+  let reads = 0;
+  try {
+    providerAuth.setCachedCatalog(null);
+    globalThis.fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.operation === "catalog" && ++reads === 1) return new Promise<Response>((_resolve, fail) => { reject = fail; });
+      return new Response(JSON.stringify({ result: body.operation === "catalog" ? fresh : { loggedOut: true } }));
+    };
+    const old = providerAuth.catalog(true);
+    await providerAuth.logout("example");
+    assert.deepEqual(await providerAuth.catalog(true), fresh);
+    reject(new Error("obsolete authentication state"));
+    assert.deepEqual(await old, fresh);
+    assert.equal(reads, 2);
+  } finally {
+    providerAuth.setCachedCatalog(originalCatalog);
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("model visibility changes overlay an in-flight provider catalog without invalidating its credentials", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalCatalog = providerAuth.getCachedCatalog();
+  let release!: (response: Response) => void;
+  let reads = 0;
+  try {
+    providerAuth.setCachedCatalog(null);
+    globalThis.fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.operation === "catalog") {
+        reads++;
+        return new Promise<Response>(resolve => { release = resolve; });
+      }
+      assert.equal(body.operation, "set_model_visibility");
+      return new Response(JSON.stringify({ result: { hiddenModels: ["example/default"] } }));
+    };
+    const pending = providerAuth.catalog(true);
+    await providerAuth.setModelVisibility([{ model: "example/default", hidden: true }]);
+    release(new Response(JSON.stringify({ result: { ...catalog, hiddenModels: [] } })));
+    const result = await pending;
+    assert.deepEqual(result.hiddenModels, ["example/default"]);
+    assert.equal(result.models.find(model => model.id === "default")?.hidden, true);
+    assert.equal(reads, 1, "visibility-only changes do not restart provider/auth work");
+  } finally {
+    providerAuth.setCachedCatalog(originalCatalog);
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("ProviderSettings does not include 'configured API key' cards under bound credentials", async () => {
   const { createServer } = await import('vite');
   const vite = await createServer({

@@ -61,7 +61,8 @@ function EditorFixture() {
 function BubbleFixture() {
   const [draft, setDraft] = useState("Edited message");
   audit.calls = audit.calls ?? 0;
-  return <EditableUserBubble text="Initial message" editing draft={draft} onDraftChange={setDraft} onCancel={() => {}}
+  return <EditableUserBubble text="Initial message" editing draft={draft} onDraftChange={setDraft}
+    onCancel={() => { audit.cancels = (audit.cancels ?? 0) + 1; }}
     onSend={() => {
       audit.calls += 1;
       return new Promise<boolean>(resolve => { audit.resolve = resolve; });

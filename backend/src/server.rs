@@ -4123,8 +4123,9 @@ fn node_steer_recorded(
     let Some(existing) = state.events.iter().find_map(|event| match &event.kind {
         EventKind::Steered { request_id: Some(request_id), execution_id, node, instruction, images } if request_id == id =>
             Some((Some(execution_id), node, instruction, images)),
-        EventKind::NodeMessaged { request_id: Some(request_id), node, instruction, images, queued: true } if request_id == id =>
-            Some((None, node, instruction, images)),
+        EventKind::NodeMessaged { request_id: Some(request_id), node, instruction, images, queued: true }
+        | EventKind::Invalidated { request_id: Some(request_id), target: node, instruction, images, human: true, .. }
+            if request_id == id => Some((None, node, instruction, images)),
         _ => None,
     }) else { return Ok(false) };
     let normalized_images = images.as_ref().filter(|items| !items.is_empty());
@@ -4487,10 +4488,11 @@ fn control_with_request_id(
             if service.planning.load(Ordering::SeqCst) {
                 return Err("Wait for planning to finish".into());
             }
-            runtime.intervene_with_images(
+            runtime.intervene_with_request_id(
                 node.as_deref().unwrap_or_default(),
                 instruction.as_deref().unwrap_or_default(),
                 images,
+                request_id,
             )?;
             let snapshot = runtime.state.clone();
             drop(runtime);

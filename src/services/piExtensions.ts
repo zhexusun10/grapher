@@ -26,6 +26,7 @@ async function call(operation: string, fields: Record<string, unknown> = {}): Pr
 // refreshes behind them without changing the pane's height.
 let cachedCatalog: ExtensionCatalog | null = null;
 let inFlightCatalog: Promise<ExtensionCatalog> | null = null;
+let catalogGeneration = 0;
 
 const remember = (catalog: ExtensionCatalog) => {
   cachedCatalog = catalog;
@@ -39,8 +40,22 @@ export const piExtensions = {
   catalog: (refresh = false): Promise<ExtensionCatalog> => {
     if (!refresh && cachedCatalog) return Promise.resolve(cachedCatalog);
     if (inFlightCatalog) return inFlightCatalog;
-    inFlightCatalog = call('catalog').then(remember).finally(() => { inFlightCatalog = null; });
-    return inFlightCatalog;
+    const generation = catalogGeneration;
+    const task: Promise<ExtensionCatalog> = call('catalog').then(
+      value => generation === catalogGeneration ? remember(value) : piExtensions.catalog(),
+      error => {
+        if (generation !== catalogGeneration) return piExtensions.catalog();
+        throw error;
+      },
+    ).finally(() => { if (inFlightCatalog === task) inFlightCatalog = null; });
+    inFlightCatalog = task;
+    return task;
   },
-  setEnabled: (id: string, enabled: boolean) => call('set_enabled', { id, enabled }).then(remember),
+  setEnabled: (id: string, enabled: boolean) => call('set_enabled', { id, enabled }).then(value => {
+    // Settings refreshes behind cached rows while those rows remain usable.
+    // Its earlier read must not undo a toggle that has since been committed.
+    catalogGeneration++;
+    inFlightCatalog = null;
+    return remember(value);
+  }),
 };

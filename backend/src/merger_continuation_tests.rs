@@ -220,6 +220,7 @@ fn merger_continuation_stale_or_duplicate_completion_does_not_revive_nodes() {
             target: "task".into(),
             instruction: "new turn".into(),
             human: true,
+            request_id: None,
             images: None,
             workspace: None,
             shared_workspace: false,

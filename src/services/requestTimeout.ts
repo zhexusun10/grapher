@@ -13,6 +13,9 @@ export async function withRequestTimeout<T>(
   message: string,
   parent?: AbortSignal,
 ): Promise<T> {
+  // Do not start work that has already lost its owner. Some transports ignore
+  // abort, and `work` may perform synchronous side effects before observing it.
+  if (parent?.aborted) throw parent.reason ?? new DOMException("Cancelled", "AbortError");
   const controller = new AbortController();
   let reject!: (reason: unknown) => void;
   const cancelled = new Promise<never>((_, fail) => { reject = fail; });
