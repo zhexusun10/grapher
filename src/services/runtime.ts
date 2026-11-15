@@ -28,6 +28,17 @@ const boundedCommands = new Set([
 ]);
 const metadataTimeoutMs = 15_000;
 
+/** Only an explicit backend response proves that a Run no longer exists. */
+export class RunNotFoundError extends Error {
+  readonly runId: string;
+
+  constructor(runId: string) {
+    super("Run not found");
+    this.name = "RunNotFoundError";
+    this.runId = runId;
+  }
+}
+
 // A hot-reloaded UI can still be talking to an older backend. Normalize the
 // old Plan spelling without mutating its payload or guessing missing roots.
 function normalizePlan(plan: Plan): Plan {
@@ -102,7 +113,12 @@ async function requestBody<T>(command: string, body: Record<string, unknown>, si
     throw new Error(t("后端未返回有效响应 ({0})，请确认终端中的后端已启动。", response.status));
   });
   if (mutatesSnapshot) historyRequests.clear();
-  if (!response.ok || data.error) throw new Error(data.error || t("后端请求失败 ({0})", response.status));
+  if (!response.ok || data.error) {
+    if (data.error === "Run not found" && typeof body.runId === "string" && body.runId) {
+      throw new RunNotFoundError(body.runId);
+    }
+    throw new Error(data.error || t("后端请求失败 ({0})", response.status));
+  }
   return normalizeSnapshotResult(data.result as T);
 }
 
@@ -357,7 +373,13 @@ export const runtimeService = {
     invalidateTranscriptCaches();
   },
   deleteRun: async (runId: string) => {
-    await request<void>("delete_run", { runId });
+    try {
+      await request<void>("delete_run", { runId });
+    } catch (error) {
+      // A previous request or another tab may already have deleted this Run.
+      // Still let the caller retire its stale card and cached transcript.
+      if (!(error instanceof RunNotFoundError) || error.runId !== runId) throw error;
+    }
     invalidateTranscriptCaches(runId);
   },
   deleteWorkspace: async (repository: string) => {

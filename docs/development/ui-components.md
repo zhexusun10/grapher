@@ -10,7 +10,7 @@ Tailwind v4 uses `@tailwindcss/vite` and `src/tailwind.css`, imported by `src/ma
 
 ## Sidebar navigation
 
-Workspace and Conversation cards are native buttons with current/loading states and full accessible names. Sidebar text is not mouse-selectable, avoiding accidental selection while dragging; paths and prompts remain available through the context menu. Collapsed lists become inert immediately, including during their exit transition; keyboard focus rings stay inside the clipped list viewport.
+Workspace and Conversation cards are native buttons with current/loading states and full accessible names. Sidebar text is not mouse-selectable, avoiding accidental selection while dragging; paths and prompts remain available through the context menu. Collapsed lists become inert immediately, including during their exit transition; keyboard focus rings stay inside the clipped list viewport. An explicit `Run not found` response while opening or deleting a conversation retires its stale card and persisted browser indexes; network errors and rejected deletions retain the card for retry.
 
 Sidebar menus use [ContextMenu](../../src/components/ui/context-menu.tsx): right-click, Menu or Shift+F10 opens at the pointer/card, arrows and Home/End navigate enabled actions, Escape restores the invoking card, and Tab resumes navigation from it. Measured menu bounds account for translated/scaled text; outside clicks, scrolling and resizing dismiss stale menus. Reduced motion skips the entrance. [Sidebar browser tests](../../scripts/sidebar-copy-prompt-ui.test.mjs) cover keyboard focus, edge placement, copy actions and provisional conversations.
 

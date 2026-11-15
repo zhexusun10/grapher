@@ -112,6 +112,18 @@ test(`desktop workbench adapts to available width and short windows (${reducedMo
     }
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.waitForTimeout(400);
+    const singleWorkspaceGap = await page.locator(".projects-list").evaluate(list => {
+      const cards = [...list.querySelectorAll(".project-workspace-item")];
+      const extra = cards.slice(1);
+      extra.forEach(card => { card.style.display = "none"; });
+      // Exercise the former single-workspace state as well as its geometry.
+      list.classList.add("has-single-project");
+      const gap = list.getBoundingClientRect().bottom - cards[0].getBoundingClientRect().bottom;
+      list.classList.remove("has-single-project");
+      extra.forEach(card => { card.style.removeProperty("display"); });
+      return gap;
+    });
+    assert.ok(Math.abs(singleWorkspaceGap) < 1, `a single workspace has no reserved card slot: ${singleWorkspaceGap}px`);
     // Compare the actual card with a non-clipping reference at the same pixel
     // position. Descenders must survive the overflow needed for ellipsis.
     const card = page.locator(".project-workspace-item").first();

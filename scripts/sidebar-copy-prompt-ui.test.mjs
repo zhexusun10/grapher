@@ -80,6 +80,12 @@ async function copyPrompt(page, runId, label = "Copy prompt") {
   await page.getByRole("menuitem", { name: label, exact: true }).click();
 }
 
+async function deleteHistory(page, runId) {
+  await page.locator(`.run-item[data-run-id="${runId}"]`).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Delete this history entry", exact: true }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Delete history", exact: true }).click();
+}
+
 test("the sidebar always opens expanded, even with a stale collapsed preference", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await openApp(async () => false);
   try {
@@ -222,6 +228,123 @@ test("collapsed sidebar lists immediately leave the keyboard tab order", { timeo
     await page.keyboard.press("Tab");
     await page.keyboard.press("Tab");
     assert.equal(await page.locator(".project-workspace-item").evaluate(item => item === document.activeElement), true);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const reducedMotion of ["reduce", "no-preference"]) {
+  test(`deleted conversations leave the sidebar (${reducedMotion})`, { timeout: 30_000 }, async () => {
+    const deleted = new Set();
+    const { context, page, errors } = await openApp(async (route, command, body) => {
+      if (command === "delete_run") {
+        deleted.add(body.runId);
+        await route.fulfill({ json: { result: null } });
+        return true;
+      }
+      if ((command === "snapshot" || command === "history") && deleted.has(body.runId)) {
+        await route.fulfill({ status: 400, json: { error: "Run not found" } });
+        return true;
+      }
+      return false;
+    }, "en", reducedMotion);
+    try {
+      for (const id of ["a", "b"]) {
+        await deleteHistory(page, id);
+        await page.waitForFunction(id => {
+          const index = JSON.parse(localStorage.getItem("grapher_workspace_runs"));
+          return !Object.values(index).flat().includes(id);
+        }, id);
+        await page.locator(`.run-item[data-run-id="${id}"]`).waitFor({ state: "detached" });
+      }
+      await page.locator(".run-placeholder").waitFor();
+      assert.equal(await page.locator(".run-item").count(), 0);
+      assert.deepEqual([...deleted], ["a", "b"]);
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("deleting an already missing conversation prunes its card, but genuine failures retain it", { timeout: 30_000 }, async () => {
+  let failure = "Cannot delete a running execution";
+  const { context, page, calls, errors } = await openApp(async (route, command) => {
+    if (command !== "delete_run") return false;
+    await route.fulfill({ status: failure === "Offline" ? 503 : 400, json: { error: failure } });
+    return true;
+  });
+  try {
+    for (const message of ["Cannot delete a running execution", "Offline"]) {
+      failure = message;
+      await deleteHistory(page, "a");
+      await page.getByRole("alert").getByText(message, { exact: true }).waitFor();
+      assert.equal(await page.locator('.run-item[data-run-id="a"]').count(), 1);
+      assert.deepEqual(await page.evaluate(repository => JSON.parse(localStorage.getItem("grapher_workspace_runs"))[repository], repository), ["a", "b"]);
+    }
+    failure = "Run not found";
+    await deleteHistory(page, "a");
+    await page.locator('.run-item[data-run-id="a"]').waitFor({ state: "detached" });
+    assert.equal(await page.locator('.run-item[data-run-id="b"]').count(), 1);
+    assert.deepEqual(await page.evaluate(repository => JSON.parse(localStorage.getItem("grapher_workspace_runs"))[repository], repository), ["b"]);
+    for (const key of ["grapher_run_labels", "grapher_run_modes"]) {
+      assert.equal(await page.evaluate(key => Object.hasOwn(JSON.parse(localStorage.getItem(key)), "a"), key), false);
+    }
+    assert.equal(calls.filter(call => call.command === "delete_run").length, 3);
+    await page.getByRole("alert").waitFor({ state: "detached" });
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a late snapshot cannot reopen a conversation deleted while it was loading", { timeout: 30_000 }, async () => {
+  let releaseSnapshot;
+  let snapshotRequested;
+  const requested = new Promise(resolve => { snapshotRequested = resolve; });
+  const release = new Promise(resolve => { releaseSnapshot = resolve; });
+  const { context, page, errors } = await openApp(async (route, command, body) => {
+    if (command === "snapshot" && body.runId === "a") {
+      snapshotRequested();
+      await release;
+      await route.fulfill({ json: { result: snapshot("a", "Deleted late snapshot") } });
+      return true;
+    }
+    if (command === "delete_run") {
+      await route.fulfill({ json: { result: null } });
+      return true;
+    }
+    return false;
+  });
+  try {
+    await page.locator('.run-item[data-run-id="a"]').click();
+    await requested;
+    await deleteHistory(page, "a");
+    await page.locator('.run-item[data-run-id="a"]').waitFor({ state: "detached" });
+    releaseSnapshot();
+    await page.waitForTimeout(500);
+    assert.equal(await page.getByText("Deleted late snapshot", { exact: true }).count(), 0);
+    assert.equal(await page.locator('.run-item[data-run-id="b"]').count(), 1);
+    assert.deepEqual(errors, []);
+  } finally {
+    releaseSnapshot();
+    await context.close();
+  }
+});
+
+test("opening a confirmed missing conversation repairs the sidebar without hiding transient failures", { timeout: 30_000 }, async () => {
+  let failure = "Offline";
+  const { context, page, calls, errors } = await openApp(async (route, command, body) => {
+    if (command !== "snapshot" || body.runId !== "a") return false;
+    await route.fulfill({ status: failure === "Offline" ? 503 : 400, json: { error: failure } });
+    return true;
+  });
+  try {
+    await page.locator('.run-item[data-run-id="a"]').click();
+    await page.getByRole("alert").getByText("Offline", { exact: true }).waitFor();
+    assert.equal(await page.locator('.run-item[data-run-id="a"]').count(), 1);
+    failure = "Run not found";
+    await page.locator('.run-item[data-run-id="a"]').click();
+    await page.locator('.run-item[data-run-id="a"]').waitFor({ state: "detached" });
+    assert.deepEqual(await page.evaluate(repository => JSON.parse(localStorage.getItem("grapher_workspace_runs"))[repository], repository), ["b"]);
+    assert.equal(await page.locator('.run-item[data-run-id="b"]').count(), 1);
+    assert.equal(calls.some(call => call.command === "delete_run"), false, "repairing a missing card never deletes another Run");
+    await page.getByRole("alert").waitFor({ state: "detached" });
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

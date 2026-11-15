@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runtimeService } from "../src/services/runtime.ts";
+import { RunNotFoundError, runtimeService } from "../src/services/runtime.ts";
+import { executionTranscriptCache } from "../src/services/transcriptCache.ts";
 import { hasCurrentPlanningRun } from "../src/services/planningRecovery.ts";
 import { emptySnapshot, defaultConfig, type Snapshot } from "../src/types.ts";
 
@@ -148,6 +149,41 @@ test("targeted snapshot reads reject a different conversation even inside the sa
     result = null;
     await assert.rejects(runtimeService.snapshotForRun("requested", controller.signal), error => error instanceof Error && !(error instanceof TypeError));
   } finally { globalThis.fetch = original; }
+});
+
+test("only explicit missing-Run responses make deletion idempotent and invalidate that Run's transcript", async () => {
+  const original = globalThis.fetch;
+  const key = "missing-run:execution", otherKey = "retained-run:execution";
+  const cached = { text: "retained transcript", offset: 19, complete: true };
+  let status = 400, error = "Run not found";
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error }), { status });
+    await assert.rejects(runtimeService.snapshotForRun("missing-run"), failure =>
+      failure instanceof RunNotFoundError && failure.runId === "missing-run");
+    executionTranscriptCache.set(key, cached);
+    executionTranscriptCache.set(otherKey, cached);
+    await runtimeService.deleteRun("missing-run");
+    assert.equal(executionTranscriptCache.has(key), false);
+    assert.equal(executionTranscriptCache.has(otherKey), true);
+
+    executionTranscriptCache.set(key, cached);
+    for (const failure of [
+      { status: 400, error: "Cannot delete a running execution" },
+      { status: 503, error: "Offline" },
+      { status: 404, error: "Not found" },
+    ]) {
+      ({ status, error } = failure);
+      await assert.rejects(runtimeService.deleteRun("missing-run"), failure => !(failure instanceof RunNotFoundError));
+      assert.equal(executionTranscriptCache.has(key), true, "failed deletion must retain the transcript");
+    }
+    globalThis.fetch = async () => { throw new Error("Run not found"); };
+    await assert.rejects(runtimeService.deleteRun("missing-run"), failure => !(failure instanceof RunNotFoundError));
+    assert.equal(executionTranscriptCache.has(key), true, "a transport failure is not proof of deletion");
+  } finally {
+    globalThis.fetch = original;
+    executionTranscriptCache.delete(key);
+    executionTranscriptCache.delete(otherKey);
+  }
 });
 
 test("legacy Plan roots normalize across snapshot and compile APIs without mutating the wire payload", async () => {

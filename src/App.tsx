@@ -14,7 +14,8 @@ import {
 } from "./types";
 import { parseMessageAttachmentsAndText } from "./utils/attachmentUtils";
 import { tokens } from "./tokens";
-import { runtimeService } from "./services/runtime";
+import { RunNotFoundError, runtimeService } from "./services/runtime";
+import { invalidateTranscriptCaches } from "./services/transcriptCache";
 import { providerAuth } from "./services/providerAuth";
 import { ComposerModels, type ComposerScope } from "./services/composerCommands";
 import { applyModelConfig, modelRoles, planningModelRoles, providerIdForModel, roleModelConfig, updateRoleModelConfig } from "./modelConfig";
@@ -1418,12 +1419,10 @@ export default function App() {
     });
   };
 
-  const handleDeleteRun = (runIdToDelete: string) => run(async () => {
-    const generation = foregroundGeneration.current;
-    if (!runIdToDelete.startsWith("pending-")) {
-      await runtimeService.deleteRun(runIdToDelete);
-    }
+  // Shared by successful deletion and reads proving that a cached card is stale.
+  const forgetDeletedRun = (runIdToDelete: string) => {
     deletedRunIdsRef.current.add(runIdToDelete);
+    invalidateTranscriptCaches(runIdToDelete);
     setRunCardKeys((prev) => {
       if (!(runIdToDelete in prev)) return prev;
       const copy = { ...prev };
@@ -1453,6 +1452,14 @@ export default function App() {
     });
     messagesByRunRef.current.delete(runIdToDelete);
     composerDraftsRef.current.delete(runIdToDelete);
+  };
+
+  const handleDeleteRun = (runIdToDelete: string) => run(async () => {
+    const generation = foregroundGeneration.current;
+    if (!runIdToDelete.startsWith("pending-")) {
+      await runtimeService.deleteRun(runIdToDelete);
+    }
+    forgetDeletedRun(runIdToDelete);
     if (state.runId === runIdToDelete && generation === foregroundGeneration.current) {
       const scope = detachForeground(config.repository);
       const deleteGeneration = foregroundGeneration.current;
@@ -1467,7 +1474,7 @@ export default function App() {
       if (remainingRuns.length > 0) {
         try {
           const snapshot = await runtimeService.snapshotForRun(remainingRuns[0]);
-          if (deleteGeneration !== foregroundGeneration.current || !planningRecovery.current(scope)) return;
+          if (deleteGeneration !== foregroundGeneration.current || !planningRecovery.current(scope) || deletedRunIdsRef.current.has(snapshot.runId)) return;
           if (!snapshotBelongsToWorkspace(snapshot, config.repository)) throw new Error("Workspace ownership mismatch");
           setState(snapshot);
           setConfig(prev => applyModelConfig(
@@ -3126,13 +3133,22 @@ export default function App() {
         let snapshot: Snapshot;
         try { snapshot = await runtimeService.snapshotForRun(id, controller.signal); }
         catch (error) {
-          if (controller.signal.aborted) return;
+          if (controller.signal.aborted || deletedRunIdsRef.current.has(id)) return;
           if (generation === foregroundGeneration.current) {
-            setError(error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error));
+            if (error instanceof RunNotFoundError && error.runId === id) {
+              forgetDeletedRun(id);
+              setError("");
+              if (state.runId === id) {
+                setLoadingRunId(null);
+                handleNewConversation();
+              }
+            } else {
+              setError(error instanceof Error ? error.message : typeof error === "string" ? error : JSON.stringify(error));
+            }
           }
           return;
         }
-        if (controller.signal.aborted || generation !== foregroundGeneration.current) return;
+        if (controller.signal.aborted || generation !== foregroundGeneration.current || deletedRunIdsRef.current.has(id)) return;
         if (snapshot.config?.repository) recordRunToWorkspace(snapshot.runId, snapshot.config.repository);
         if (!snapshotBelongsToWorkspace(snapshot, config.repository)) {
           setError(t("此对话不属于当前工作区，请在对应工作区中打开。"));

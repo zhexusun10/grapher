@@ -632,11 +632,6 @@ a,
   box-sizing: border-box;
 }
 
-.projects-list.has-single-project::after {
-  content: "";
-  flex: 0 0 var(--workspace-card-height);
-}
-
 .project-workspace-item {
   text-align: left;
   display: flex;
