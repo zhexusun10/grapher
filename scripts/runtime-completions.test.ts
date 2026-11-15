@@ -77,6 +77,29 @@ for (const operation of ["upload", "delete"] as const) {
   });
 }
 
+for (const type of ["files", "skills"] as const) {
+  test(`failed ${type} reads remain retryable without caching an empty result or erasing a valid cache`, async () => {
+    const original = globalThis.fetch;
+    const repository = `/test/retry-${type}`;
+    const load = type === "files" ? runtimeService.listFiles : runtimeService.listSkills;
+    const current = type === "files" ? ["recovered.ts"] : [{ name: "recovered", description: "Available again", path: "/skill", scope: "workspace" }];
+    let fail = true, calls = 0;
+    try {
+      globalThis.fetch = async () => {
+        calls++;
+        return fail ? new Response(JSON.stringify({ error: "Temporary outage" }), { status: 503 }) : response({ [type]: current });
+      };
+      await assert.rejects(load(repository), /Temporary outage/);
+      fail = false;
+      assert.deepEqual(await load(repository), current);
+      fail = true;
+      await assert.rejects(load(repository, true), /Temporary outage/);
+      assert.deepEqual(await load(repository), current, "a failed refresh does not replace the previous authoritative cache");
+      assert.equal(calls, 3);
+    } finally { globalThis.fetch = original; }
+  });
+}
+
 test("attachment requests preserve Run targeting and reject missing, legacy or traversing response paths", async () => {
   const originalFetch = globalThis.fetch;
   const originalReader = globalThis.FileReader;

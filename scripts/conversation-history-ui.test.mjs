@@ -53,6 +53,203 @@ async function newPage(handler, language = "en") {
   return { context, page, errors };
 }
 
+for (const mode of ["graph", "serial"]) {
+  test(`${mode}: many execution records load the newest first and slow old reads stay local`, { timeout: 30_000 }, async () => {
+    const requests = [];
+    let releaseOld;
+    let failedOld = false;
+    const text = id => Array.from({ length: 60 }, (_, index) => assistant(`${id} reply ${index}`)).join("");
+    const { context, page, errors } = await newPage(async route => {
+      const command = new URL(route.request().url()).pathname.slice(5);
+      if (command !== "get_execution_output") return route.fulfill({ json: { result: {} } });
+      const body = route.request().postDataJSON();
+      requests.push(body.executionId);
+      if (body.executionId === "history-0" && !failedOld) {
+        failedOld = true;
+        await new Promise(resolve => { releaseOld = resolve; });
+        try { await route.fulfill({ status: 500, json: { error: "Deliberately slow old history" } }); } catch {}
+        return;
+      }
+      const content = text(body.executionId), bytes = Buffer.byteLength(content);
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content,
+        startOffset: 0, nextOffset: bytes, totalBytes: bytes, complete: true, status: "completed" } } });
+    });
+    try {
+      await page.goto(`${origin}/__workspace-footer?mode=${mode}&turn=follow-up`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.setExecutions);
+      await page.evaluate(executions => window.audit.setExecutions(executions), Array.from({ length: 20 }, (_, index) => ({
+        id: `history-${index}`, node: "task", status: "completed", output: "", outputBytes: Buffer.byteLength(text(`history-${index}`)),
+        revision: 1, attempt: index + 1, startedAt: index + 1, completedAt: index + 2,
+        sessionId: "session", worktree: "/mock", before: "", after: "",
+      })));
+      await page.getByText("history-19 reply 59", { exact: true }).waitFor();
+      await page.waitForTimeout(150);
+      assert.deepEqual(requests.filter(id => id.startsWith("history-")), ["history-19"],
+        "offscreen records must not each download an initial tail");
+      const scroller = page.locator(".initial-query-scroll");
+      await scroller.evaluate(element => {
+        element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+        element.scrollTop = 0;
+      });
+      for (let index = 0; index < 60 && !releaseOld; index++) await page.waitForTimeout(20);
+      assert.ok(releaseOld, "approaching an old record starts its own reader");
+      await scroller.evaluate(element => { element.scrollTop = element.scrollHeight; });
+      await page.getByText("history-19 reply 59", { exact: true }).waitFor();
+      assert.equal(await page.locator(".chat-messages-stream").evaluate(element => element.style.opacity), "1",
+        "a blocked old request cannot hide an already loaded reply");
+      releaseOld();
+      await page.getByRole("alert").filter({ hasText: "Deliberately slow old history" }).waitFor({ state: "attached" });
+      await page.getByRole("alert").getByRole("button", { name: "Retry", exact: true }).click();
+      await page.waitForFunction(() => !document.querySelector('[data-execution-id="history-0"] [role="alert"]'));
+      assert.equal(requests.filter(id => id === "history-19").length, 1,
+        "retrying another attempt must not restart the newest history");
+      assert.deepEqual(errors, []);
+    } finally { releaseOld?.(); await context.close(); }
+  });
+}
+
+test("explicitly expanding an old record works even while the newest request is stalled", { timeout: 30_000 }, async () => {
+  let releaseLatest;
+  const reads = [];
+  const { context, page, errors } = await newPage(async route => {
+    if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
+    const body = route.request().postDataJSON();
+    reads.push(body.executionId);
+    if (body.executionId === "blocked-latest") await new Promise(resolve => { releaseLatest = resolve; });
+    const content = assistant(body.executionId === "old-record" ? "READ_OLD_WITHOUT_WAITING" : "New reply");
+    const bytes = Buffer.byteLength(content);
+    try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content,
+      startOffset: 0, nextOffset: bytes, totalBytes: bytes, complete: true, status: "completed" } } }); } catch {}
+  });
+  try {
+    await page.goto(`${origin}/__workspace-footer?mode=graph&turn=follow-up`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.setExecutions);
+    await page.evaluate(() => window.audit.setExecutions(["old-record", "blocked-latest"].map((id, index) => ({
+      id, node: "task", status: "completed", output: "", outputBytes: 100,
+      revision: 1, attempt: index + 1, startedAt: index + 1, completedAt: index + 2,
+      sessionId: "session", worktree: "/mock", before: "", after: "",
+    }))));
+    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+    const header = page.locator(".session-label-toggle").first();
+    await header.click(); // Collapse the deferred placeholder.
+    await header.click(); // An explicit expansion bypasses automatic prioritization.
+    await page.getByText("READ_OLD_WITHOUT_WAITING", { exact: true }).waitFor();
+    assert.equal(reads.filter(id => id === "old-record").length, 1);
+    assert.ok(releaseLatest, "the latest request remains in flight while old output is readable");
+    assert.deepEqual(errors, []);
+  } finally { releaseLatest?.(); await context.close(); }
+});
+
+test("an old record promoted to newest stays mounted when another turn is appended", { timeout: 30_000 }, async () => {
+  let reads = 0;
+  const content = startTool("promoted-tool", "Read retained history") + endTool("promoted-tool", "RETAINED_DETAILS") + assistant("PROMOTED_REPLY");
+  const { context, page, errors } = await newPage(route => {
+    reads++;
+    const body = route.request().postDataJSON(), bytes = Buffer.byteLength(content);
+    return route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content,
+      startOffset: 0, nextOffset: bytes, totalBytes: bytes, complete: true, status: "completed" } } });
+  });
+  try {
+    await page.goto(`${origin}/__history?case=promotedHistory`, { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: "Load history", exact: true }).waitFor();
+    assert.equal(reads, 0);
+    await page.evaluate(() => window.audit.setDeferredHistory(false));
+    await page.getByText("PROMOTED_REPLY", { exact: true }).waitFor();
+    await page.locator(".tool-call-header").click();
+    await page.getByText("RETAINED_DETAILS", { exact: true }).waitFor();
+    await page.evaluate(() => { window.promotedRow = document.querySelector('[data-execution-id="retained"]'); window.audit.setDeferredHistory(true); });
+    await page.waitForTimeout(80);
+    assert.equal(await page.evaluate(() => window.promotedRow === document.querySelector('[data-execution-id="retained"]')), true,
+      "append/reordering cannot demote a visible reader back into an unloaded placeholder");
+    await page.getByText("RETAINED_DETAILS", { exact: true }).waitFor();
+    assert.equal(reads, 1);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+for (const role of ["node", "planner"]) {
+  test(`${role}: scrollbar history and retry work after the automatic budget is exhausted`, { timeout: 30_000 }, async () => {
+    const prefix = assistant("SCROLLBAR_OLDER_REPLY");
+    const tail = Array.from({ length: 32 }, (_, index) => assistant(`SCROLLBAR_TAIL_${index}`)).join("");
+    const split = Buffer.byteLength(prefix), total = split + Buffer.byteLength(tail);
+    let olderReads = 0;
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      if (body.before !== undefined) {
+        olderReads++;
+        if (olderReads === 1) return route.fulfill({ status: 500, json: { error: "Explicit scrollbar read failed" } });
+      }
+      const start = body.tail ? (body.before === undefined ? split : 0) : body.offset ?? 0;
+      const end = body.before ?? total;
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        planningId: body.planningId, role: "planner", content: Buffer.from(prefix + tail).subarray(start, end).toString(),
+        startOffset: start, nextOffset: end, totalBytes: total, complete: end === total, status: "completed", running: false } } });
+    });
+    try {
+      await page.goto(`${origin}/__history?case=historyRegression&heading=0`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.setRunning);
+      await page.evaluate(role => {
+        window.audit.setRunning(false);
+        if (role === "planner") { window.audit.setPlanningIds(["planner-latest"]); window.audit.selectHistory("planner"); }
+      }, role);
+      await page.getByText("SCROLLBAR_TAIL_31", { exact: true }).waitFor();
+      await page.locator("[data-shared-scroll]").evaluate(scroller => { scroller.scrollTop = scroller.scrollHeight; });
+      await page.waitForTimeout(100);
+      await page.evaluate(async () => {
+        const { transcriptAutoFillBudget } = await import("/src/services/transcriptPaging.ts");
+        const scroller = document.querySelector("[data-shared-scroll]");
+        const budget = transcriptAutoFillBudget(scroller);
+        budget.charge(budget.maximum);
+        // Scrollbar dragging changes scrollTop without wheel/key/touch events.
+        scroller.dataset.transcriptHistoryReading = "true";
+        delete scroller.dataset.transcriptFollowing;
+        delete scroller.dataset.transcriptPreparing;
+        scroller.scrollTop = 0;
+        scroller.dispatchEvent(new Event("scroll"));
+      });
+      const alert = page.getByRole("alert").filter({ hasText: "Explicit scrollbar read failed" });
+      await alert.waitFor();
+      await alert.getByRole("button", { name: "Retry", exact: true }).click();
+      await page.waitForFunction(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.startOffset === 0, role);
+      assert.equal(olderReads, 2);
+      await alert.waitFor({ state: "detached" });
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("concurrent sparse attempts share one automatic viewport-fill budget", { timeout: 30_000 }, async () => {
+  let olderBytes = 0;
+  const initialIds = new Set();
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON();
+    const end = body.before ?? 20 * 1024 * 1024;
+    const bytes = Math.min(body.limit, end);
+    const progress = startTool("sparse", "Sparse progress");
+    const empty = line({ type: "opaque", text: "" });
+    const content = progress + line({ type: "opaque", text: "x".repeat(bytes - Buffer.byteLength(progress + empty)) });
+    assert.equal(Buffer.byteLength(content), bytes);
+    if (body.before === undefined) initialIds.add(body.executionId);
+    else olderBytes += bytes;
+    await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content,
+      startOffset: end - bytes, nextOffset: end, totalBytes: 20 * 1024 * 1024,
+      complete: end === 20 * 1024 * 1024, status: "completed" } } });
+  });
+  try {
+    await page.goto(`${origin}/__history?case=historyBudget`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.querySelectorAll('[data-execution-id][aria-busy="false"]').length === 3);
+    await page.waitForTimeout(200);
+    assert.equal(initialIds.size, 3);
+    assert.ok(olderBytes > 0);
+    assert.ok(olderBytes <= 4 * 1024 * 1024,
+      `three attempts must share one 4 MiB fill budget, not each spend it: ${olderBytes}`);
+    const settled = olderBytes;
+    await page.waitForTimeout(300);
+    assert.equal(olderBytes, settled, "exhausting the shared budget settles instead of spinning more requests");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("transcript and parser hot updates preserve the mounted conversation", { timeout: 30_000 }, async () => {
   // The other history fixtures disable HMR. Exercise real Vite/React refresh
   // boundaries here without editing source files or touching a running backend.
@@ -727,6 +924,7 @@ test("write-back merger history preserves wheel progress in its nested viewport"
   });
   try {
     page.setDefaultTimeout(30_000);
+    await context.addInitScript(() => localStorage.setItem("grapher_execution_overview_v1", "1"));
     await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !!window.audit?.setPublicationResult);
     await page.evaluate(bytes => {
@@ -1410,6 +1608,11 @@ test("actual App reopening Planner history does not move cached follow-ups past 
     holdPrevious = true;
     await page.locator('[data-run-id="other-order-app"]').click();
     await page.getByText("OTHER_ORDER_GOAL", { exact: true }).first().waitFor();
+    // Exercise an actual LRU miss; normal navigation now retains this revision.
+    await page.evaluate(async () => {
+      const cache = await import("/src/services/transcriptCache.ts");
+      cache.planningTranscriptCache.delete("order-app:app-turn-2");
+    });
     await page.locator('[data-run-id="order-app"]').click();
     await page.getByText("APP_LAST_REPLY_79", { exact: true }).waitFor();
     for (let i = 0; i < 100 && !releasePrevious; i++) await page.waitForTimeout(20);
@@ -1630,7 +1833,7 @@ test("actual App: first Serial message keeps the footer still through approval a
 });
 
 for (const role of ["node", "planner"]) {
-  test(`${role}: tail reads, automatic scrollback, split tools and view-owned caches`, { timeout: 45_000 }, async () => {
+  test(`${role}: tail reads, automatic scrollback, split tools and bounded recent caches`, { timeout: 45_000 }, async () => {
     const prefix = Array.from({ length: 6 }, (_, index) => startTool(`older-${index}`, `older command ${index}`) + endTool(`older-${index}`, `OLDER_RESULT_${index}`)).join("") +
       line({ type: "opaque", text: "中文🚀".repeat(260_000) }) + startTool("cross-page-tool", "cross-page command");
     const tail = endTool("cross-page-tool", "CROSS_PAGE_RESULT") + Array.from({ length: 14 }, (_, index) => assistant(`Newest message ${index}`)).join("");
@@ -1701,11 +1904,7 @@ for (const role of ["node", "planner"]) {
         await page.evaluate(role => window.audit.selectHistory(role), role);
         await page.getByText("APPEND_AFTER_SCROLLBACK", { exact: true }).waitFor();
         await page.waitForTimeout(80);
-        if (role === "planner") assert.equal(requests.length, count, "Planner cache survives navigation inside the Conversation");
-        else {
-          assert.ok(requests.length > count, "leaving a Node view releases its cache; reopening reads a tail again");
-          assert.ok(requests.slice(count).filter(item => item.command === "get_execution_output").every(item => !item.full));
-        }
+        assert.equal(requests.length, count, `${role} bounded windows survive navigation without rereading settled logs`);
       }
       assert.deepEqual(errors, []);
     } finally { await context.close(); }
@@ -2319,7 +2518,7 @@ for (const role of ["node", "planner"]) {
   });
 }
 
-test("Node RAM is released on return to Planner; Planner revisions survive until Conversation exit", { timeout: 30_000 }, async () => {
+test("bounded Node and Planner windows survive navigation; exit cancels readers and deletion clears caches", { timeout: 30_000 }, async () => {
   const requests = [];
   let releasePending;
   const { context, page, errors } = await newPage(async route => {
@@ -2343,7 +2542,7 @@ test("Node RAM is released on return to Planner; Planner revisions survive until
     await page.waitForFunction(() => !!window.audit.cachedExecution());
     assert.deepEqual(await page.evaluate(() => window.audit.planningCacheKeys()), keys);
     await page.evaluate(() => window.audit.selectHistory("planner"));
-    await page.waitForFunction(() => !window.audit.cachedExecution());
+    assert.ok(await page.evaluate(() => !!window.audit.cachedExecution()), "recent Node windows remain in the bounded LRU");
     await page.getByText("PLANNER_CACHE_planner-latest", { exact: true }).waitFor();
     assert.equal(latestReads(), count, "Node-to-Planner must not discard Planner RAM");
     await page.evaluate(() => window.audit.setPlanningIds(["planner-previous", "planner-latest", "planner-next"]));
@@ -2353,9 +2552,13 @@ test("Node RAM is released on return to Planner; Planner revisions survive until
     for (let i = 0; i < 50 && !releasePending; i++) await page.waitForTimeout(20);
     assert.ok(releasePending);
     await page.evaluate(() => window.audit.selectHistory("exit"));
-    await page.waitForFunction(() => window.audit.planningCacheKeys().length === 0 && !window.audit.cachedExecution());
+    const retained = await page.evaluate(() => window.audit.planningCacheKeys());
     releasePending(); await page.waitForTimeout(100);
-    assert.deepEqual(await page.evaluate(() => window.audit.planningCacheKeys()), [], "a late response cannot resurrect exited history");
+    assert.deepEqual(await page.evaluate(() => window.audit.planningCacheKeys()), retained,
+      "a cancelled reader cannot add a late revision after exit");
+    await page.evaluate(() => window.audit.deleteConversation());
+    assert.deepEqual(await page.evaluate(() => window.audit.planningCacheKeys()), []);
+    assert.equal(await page.evaluate(() => !!window.audit.cachedExecution()), false);
     assert.deepEqual(errors, []);
   } finally { releasePending?.(); await context.close(); }
 });
@@ -2942,7 +3145,7 @@ for (const layout of ["virtualized", "long"]) {
   });
 }
 
-test("actual App preserves scrollback and releases RAM on Node/Conversation navigation", { timeout: 45_000 }, async () => {
+test("actual App preserves scrollback and reuses bounded history on Node/Conversation navigation", { timeout: 45_000 }, async () => {
   const config = { repository: "/mock/cache", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
@@ -3042,7 +3245,7 @@ test("actual App preserves scrollback and releases RAM on Node/Conversation navi
     });
     await page.locator(".back-to-query-btn").click();
     await page.getByText("APP_PLANNER_plan-run-a", { exact: true }).waitFor();
-    await page.waitForFunction(() => !window.reviewCaches.executionTranscriptCache.has("run-a:exec-run-a"));
+    assert.ok(await page.evaluate(() => window.reviewCaches.executionTranscriptCache.has("run-a:exec-run-a")));
     assert.ok(await page.evaluate(() => window.reviewCaches.planningTranscriptCache.has("run-a:plan-run-a")));
     assert.equal(plannerReads(), count);
     await page.locator('.react-flow__node[data-id="worker"]').click();
@@ -3052,13 +3255,14 @@ test("actual App preserves scrollback and releases RAM on Node/Conversation navi
       return document.querySelector(".chat-messages-stream").style.opacity === "1" &&
         scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 35;
     });
-    assert.equal(await page.evaluate(() => window.reviewCaches.executionTranscriptCache.get("run-a:exec-run-a").text.includes("APP_OLDER_0")), false,
-      "reopened Node must not restore an offset from its released byte window");
+    assert.equal(await page.evaluate(() => window.reviewCaches.executionTranscriptCache.get("run-a:exec-run-a").text.includes("APP_OLDER_0")), true,
+      "reopened Node reuses its bounded retained byte window");
     await page.locator('.run-item[data-run-id="run-b"]').click();
     await page.getByText("APP_PLANNER_plan-run-b", { exact: true }).waitFor();
-    assert.ok(await page.evaluate(() => [...window.reviewCaches.planningTranscriptCache.keys()].every(key => !key.startsWith("run-a:"))));
+    assert.ok(await page.evaluate(() => [...window.reviewCaches.planningTranscriptCache.keys()].some(key => key.startsWith("run-a:"))),
+      "recent conversations remain reusable within the global LRU limits");
     await page.getByRole("button", { name: "New conversation", exact: true }).click();
-    await page.waitForFunction(() => window.reviewCaches.planningTranscriptCache.size === 0 && window.reviewCaches.executionTranscriptCache.size === 0);
+    assert.ok(await page.evaluate(() => window.reviewCaches.planningTranscriptCache.size <= 20 && window.reviewCaches.executionTranscriptCache.size <= 20));
     assert.equal(await page.getByRole("button", { name: "Load earlier history", exact: true }).count(), 0);
     assert.deepEqual(errors, []);
   } finally { releaseOlder?.(); await context.close(); }
@@ -3111,6 +3315,12 @@ test("Node navigation keeps history painted after the fade while older pages fil
       await page.locator('.react-flow__node[data-id="short"]').click();
       await page.getByText("SHORT_NODE_REPLY", { exact: true }).waitFor();
       await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) > 0.99);
+      // This case measures a cold delayed fill in both motion modes, not the
+      // warm LRU path covered by the navigation/cache regression above.
+      await page.evaluate(async () => {
+        const cache = await import("/src/services/transcriptCache.ts");
+        cache.executionTranscriptCache.delete("node-reveal:paged");
+      });
       await page.locator('.react-flow__node[data-id="paged"]').click();
       await page.getByText("NODE_REVEAL_BOTTOM", { exact: true }).waitFor();
       await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) === 1);
@@ -3144,7 +3354,7 @@ test("Node navigation keeps history painted after the fade while older pages fil
   } finally { releaseOlder?.(); await context.close(); }
 });
 
-test("a Node reveal waits for its first viewport fill instead of re-laying out mid-fade", { timeout: 30_000 }, async () => {
+test("each Node record waits for its own first viewport fill instead of re-laying out mid-fade", { timeout: 30_000 }, async () => {
   const config = { repository: "/mock/node-fill", model: "test/old", thinkingLevel: "off", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
@@ -3197,7 +3407,8 @@ test("a Node reveal waits for its first viewport fill instead of re-laying out m
         if (scroll) {
           const row = [...scroll.querySelectorAll("[data-transcript-id]")]
             .find(candidate => candidate.textContent?.includes("FILL_TAIL_ONLY"));
-          window.revealFillFrames.push({ opacity: Number(getComputedStyle(scroll).opacity),
+          const content = scroll.querySelector(".execution-transcript-content");
+          window.revealFillFrames.push({ opacity: content ? Number(getComputedStyle(content).opacity) : 0,
             rowTop: row?.getBoundingClientRect().top ?? null,
             filled: scroll.scrollHeight > 2000,
             status: [...scroll.querySelectorAll(".transcript-history-status")].some(element => element.textContent) });
@@ -3208,10 +3419,11 @@ test("a Node reveal waits for its first viewport fill instead of re-laying out m
     });
     await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".initial-query-scroll")).opacity) === 1);
     await page.waitForTimeout(300);
+    await page.waitForFunction(() => Number(getComputedStyle(document.querySelector(".execution-transcript-content")).opacity) === 1);
     const frames = await page.evaluate(() => { window.sampleRevealFill = false; return window.revealFillFrames; });
     const fading = frames.filter(frame => frame.opacity > 0.01 && frame.opacity < 0.99);
     assert.ok(fading.length >= 3, "sample the opacity transition itself");
-    assert.ok(fading.every(frame => frame.filled), "the fill must commit before the fade paints");
+    assert.ok(fading.every(frame => frame.filled), `the fill must commit before the record fade paints: ${JSON.stringify(fading)}`);
     assert.ok(fading.every(frame => frame.rowTop !== null));
     const tops = fading.map(frame => frame.rowTop);
     assert.ok(Math.max(...tops) - Math.min(...tops) <= 1.5,
@@ -3500,6 +3712,8 @@ test("switching conversations on a large viewport stays anchored to the newest r
     // permit retry instead of leaving the conversation permanently transparent.
     for (const runId of ["graph-paged", "serial-paged"]) {
       failHistory = true;
+      // A read failure requires a cold read, not a successfully reused LRU tail.
+      await page.evaluate(runId => window.switchCache.invalidateTranscriptCaches(runId), runId);
       await page.locator(`.run-item[data-run-id="${runId}"]`).click();
       const alert = page.getByRole("alert").filter({ hasText: "Mock transcript read failed" });
       await alert.waitFor({ state: "visible" });

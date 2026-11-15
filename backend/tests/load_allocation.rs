@@ -1,6 +1,4 @@
-//! TC-09: `Store::load` must never deserialize a log payload. A counting
-//! allocator proves the replay parses business events only, even when the run
-//! still holds tens of megabytes of legacy `Finished`/`Output` text.
+//! Count allocations to verify that `Store::load` skips legacy log payloads.
 use grapher::{model::*, store::Store};
 use rusqlite::{params, Connection};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -130,13 +128,10 @@ fn load_of_a_large_legacy_run_never_parses_transcript_text() {
     TOTAL.store(0, Ordering::SeqCst);
     MAX.store(0, Ordering::SeqCst);
     TRACK.store(true, Ordering::SeqCst);
-    let started = std::time::Instant::now();
     let state = store.load("run").unwrap();
-    let elapsed = started.elapsed();
     TRACK.store(false, Ordering::SeqCst);
     let total = TOTAL.load(Ordering::SeqCst);
     let max = MAX.load(Ordering::SeqCst);
-    eprintln!("legacy load: {elapsed:?}, allocated {total} bytes, largest block {max} bytes");
     assert_eq!(state.events.len(), 5, "only business events replay");
     assert!(state
         .executions

@@ -43,6 +43,11 @@ interface Graph {
 
 The persisted Graph IR uses `name` as its stable node identifier, not as a directory name. The Planner-facing `node` tool calls the same identifier `id`; edges reference these identifiers through `from` and `to`. Older Planner node calls using `name` remain accepted for session compatibility. Unsigned historical Planner tool calls are projected as `id` in model context without rewriting stored sessions; signature-bearing assistant turns and their tool results retain their original fields for provider replay. Persisted graphs, APIs and historical transcripts retain their existing `name` fields. Edges are unique by ordered `(from, to)` pair. Historical `relation` fields are ignored on read and never serialized back.
 
+Internal node IDs retain portable legacy names; other labels use a bounded slug
+and content hash. Windows device stems are escaped before the dotted hash is
+added (`CON.<hash>` is still reserved). This mapping never changes Graph labels
+or rewrites recorded execution paths or commit identities.
+
 ### Optional feedback capability
 
 Settings **Enable Feedback** (`feedbackEnabled`) defaults to `false`, including when absent from older settings. Each subsequent Planner launch binds `GRAPHER_FEEDBACK_ENABLED` from its configuration, including prepared-process launches. When off, the `edge` tool accepts only `from`, `to` and optional `delete`: its schema and description contain no feedback protocol. Argument normalization rejects the omitted field rather than silently enabling it. Tool projections omit `feedbackTo`, feedback routes and feedback-specific warnings/notes. Rejected edits preserve their diagnostic codes and validation failure, but `E207`/`E208` are described as retained graph constraints without injecting the unavailable protocol. The Planner can add replacement dependency paths before removing old ones or request a user graph repair; constraints are never silently discarded. When on, the optional `feedback` field and its protocol description return; `maxFeedback` remains an independent budget.

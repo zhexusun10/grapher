@@ -1,7 +1,7 @@
 // Host-only preparation. Backends cache this verified copy by content, shared
 // across projects and processes, including when Grapher hosts itself.
 import { createHash } from 'node:crypto';
-import { cpSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from 'node:fs';
+import { cpSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -21,15 +21,34 @@ if (process.argv[2] === '--cache-key') {
   // Hash a cached copy using this installation's trusted verifier, never run
   // verifier/adapter code from the cache before its inputs have been checked.
   const input = process.argv[3] ? resolve(process.argv[3]) : root;
+  // Dependency directories are deliberately omitted from the digest. Check the
+  // copy's install metadata against the trusted source profile before admission.
+  if (process.argv[3]) {
+    try {
+      verifyPiDependencies(root, { installationRoot: input });
+    } catch (error) {
+      throw new Error(`Cached Pi dependency verification failed: ${error.message}`, { cause: error });
+    }
+  }
   const hash = createHash('sha256').update(`grapher-native-runtime-v2:${process.platform}:${process.arch}:${process.versions.modules}\n`);
+  const directories = new Set();
   const add = (path, name) => {
-    const stat = lstatSync(path);
+    // Windows copies dereference links. Hash the same bytes/shape that the
+    // destination retains, not a junction spelling absent from that copy.
+    const stat = process.platform === 'win32' ? statSync(path) : lstatSync(path);
     hash.update(`${name}\0`);
     if (stat.isSymbolicLink()) {
       hash.update(`link:${readlinkSync(path)}\0`);
     } else if (stat.isDirectory()) {
-      for (const child of readdirSync(path).sort()) {
-        if (child !== 'node_modules' && child !== '.git' && !child.startsWith('.grapher-masks-')) add(join(path, child), `${name}/${child}`);
+      const physical = process.platform === 'win32' ? realpathSync.native(path) : undefined;
+      if (physical && directories.has(physical)) throw new Error(`Cyclic native runtime input: ${name}`);
+      if (physical) directories.add(physical);
+      try {
+        for (const child of readdirSync(path).sort()) {
+          if (child !== 'node_modules' && child !== '.git' && !child.startsWith('.grapher-masks-')) add(join(path, child), `${name}/${child}`);
+        }
+      } finally {
+        if (physical) directories.delete(physical);
       }
     } else {
       hash.update(String(stat.size)).update('\0').update(readFileSync(path));

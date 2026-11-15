@@ -10,7 +10,18 @@ use std::{
 };
 use uuid::Uuid;
 
+mod rooted;
+pub(crate) use rooted::RootScope;
+
 type Entries = BTreeMap<String, Entry>;
+
+struct Materialization {
+    root: PathBuf,
+    desired: Entries,
+    current: Entries,
+    tracked: BTreeSet<String>,
+    previous_paths: Vec<PathBuf>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -38,12 +49,19 @@ struct Version {
     entries: Entries,
     #[serde(default)]
     checksum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rooted: Option<rooted::Snapshot>,
 }
 
 impl Version {
     fn checksum(&self) -> Result<String, String> {
-        let bytes = serde_json::to_vec(&(&self.head, &self.parents, &self.entries))
-            .map_err(|e| e.to_string())?;
+        // The old tuple and omitted field are byte-for-byte unchanged for
+        // legacy single-root manifests. New coverage is part of the checksum.
+        let bytes = if let Some(rooted) = &self.rooted {
+            serde_json::to_vec(&(&self.head, &self.parents, &self.entries, rooted))
+        } else {
+            serde_json::to_vec(&(&self.head, &self.parents, &self.entries))
+        }.map_err(|e| e.to_string())?;
         git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
             .map(|id| id.to_string())
             .map_err(|e| e.to_string())
@@ -201,6 +219,7 @@ impl Files {
                 parents: vec![],
                 entries: Entries::new(),
                 checksum: None,
+                rooted: None,
             },
         )
     }
@@ -259,11 +278,19 @@ impl Files {
                 relative(target)?;
             }
         }
+        if let Some(rooted) = &value.rooted {
+            if !value.head.is_empty() || !value.entries.is_empty() {
+                return Err("Mixed single-root and root-qualified environment manifest".into());
+            }
+            self.validate_rooted_metadata(rooted)?;
+        }
         Ok(value)
     }
 
     pub(crate) fn same_contents(&self, left: &str, right: &str) -> Result<bool, String> {
-        Ok(self.load(left)?.entries == self.load(right)?.entries)
+        let left = self.load(left)?;
+        let right = self.load(right)?;
+        Ok(left.entries == right.entries && left.rooted == right.rooted)
     }
 
     /// Compare a business prefix independently of writer HOME/other scopes.
@@ -273,13 +300,17 @@ impl Files {
         left: &str,
         right: &str,
         scope: &str,
+        root: &str,
     ) -> Result<bool, String> {
         relative(scope)?;
         let entries = |version: &str| -> Result<Entries, String> {
-            Ok(self
-                .load(version)?
-                .entries
-                .into_iter()
+            let value = self.load(version)?;
+            let entries = if let Some(rooted) = value.rooted {
+                rooted.roots.get(root).ok_or("Missing environment snapshot root")?.entries.clone()
+            } else {
+                value.entries
+            };
+            Ok(entries.into_iter()
                 .filter(|(name, _)| workspace::scope_contains(Path::new(name), Path::new(scope)))
                 .collect())
         };
@@ -525,6 +556,7 @@ impl Files {
                 parents: parents.to_vec(),
                 entries,
                 checksum: None,
+                rooted: None,
             },
         )
     }
@@ -545,6 +577,11 @@ impl Files {
     }
 
     fn compose(&self, versions: &[String]) -> Result<Entries, String> {
+        for version in versions {
+            if self.load(version)?.rooted.is_some() {
+                return Err("Root-qualified environment snapshots require explicit root targets, not directory composition".into());
+            }
+        }
         let versions: BTreeSet<_> = versions.iter().cloned().collect();
         let ancestry = versions
             .iter()
@@ -640,7 +677,18 @@ impl Files {
     }
 
     pub(crate) fn validate(&self, versions: &[String]) -> Result<(), String> {
-        let entries = self.compose(versions)?;
+        if versions.len() == 1 {
+            if let Some(rooted) = self.load(&versions[0])?.rooted {
+                for root in rooted.roots.values() {
+                    self.validate_entries(&root.entries)?;
+                }
+                return Ok(());
+            }
+        }
+        self.validate_entries(&self.compose(versions)?)
+    }
+
+    fn validate_entries(&self, entries: &Entries) -> Result<(), String> {
         for entry in entries.values() {
             if let Entry::File { blob, .. } = entry {
                 let path = self.blob_path(blob)?;
@@ -656,6 +704,9 @@ impl Files {
 
     pub(crate) fn verify(&self, workspace: &Path, version: &str, head: &str) -> Result<(), String> {
         let value = self.load(version)?;
+        if value.rooted.is_some() {
+            return Err("Root-qualified environment verification requires explicit root targets".into());
+        }
         if value.head != head {
             return Err("Feedback file snapshot does not match its Git head".into());
         }
@@ -681,6 +732,19 @@ impl Files {
     ) -> Result<(), String> {
         self.validate(versions)?;
         let desired = self.compose(versions)?;
+        if let Some(plan) = self.plan_materialization(workspace, desired, previous, reuse)? {
+            self.apply_materialization(plan)?;
+        }
+        Ok(())
+    }
+
+    fn plan_materialization(
+        &self,
+        workspace: &Path,
+        desired: Entries,
+        previous: Option<&str>,
+        reuse: bool,
+    ) -> Result<Option<Materialization>, String> {
         if desired.keys().any(|name| self.is_excluded(Path::new(name))) {
             return Err("Workspace file snapshot overlaps an excluded managed scope".into());
         }
@@ -708,8 +772,12 @@ impl Files {
         }
         if reuse {
             if let Some(previous) = previous {
-                if self.load(previous)?.entries == desired {
-                    return Ok(());
+                let previous = self.load(previous)?;
+                if previous.rooted.is_some() {
+                    return Err("Root-qualified environment snapshot cannot be used as a single-root predecessor".into());
+                }
+                if previous.entries == desired {
+                    return Ok(None);
                 }
             }
         }
@@ -720,6 +788,37 @@ impl Files {
         for path in self.scoped_paths(&root)? {
             self.collect(&root, &path, &mut current, None)?;
         }
+        // Resolve all destination parents before changing even the first root.
+        // A captured regular file that will be replaced by a directory is not
+        // traversal: removal precedes creation. Links remain forbidden, even
+        // when the snapshot would replace them with a directory.
+        for name in desired.keys() {
+            if let Some(parent) = Path::new(name).parent().filter(|path| !path.as_os_str().is_empty()) {
+                let mut replaced = None;
+                for ancestor in parent.ancestors().filter(|path| !path.as_os_str().is_empty()) {
+                    let key = path_name(ancestor)?;
+                    if matches!(current.get(&key), Some(Entry::File { .. }))
+                        && matches!(desired.get(&key), Some(Entry::Directory { .. }))
+                    {
+                        replaced = Some(ancestor);
+                        break;
+                    }
+                }
+                real_child_path(&root, &root.join(replaced.unwrap_or(parent)), replaced.is_some())?;
+            }
+        }
+        let previous_paths = if let Some(previous) = previous.filter(|version| self.exists(version)) {
+            let previous = self.load(previous)?;
+            if previous.rooted.is_some() {
+                return Err("Root-qualified environment snapshot cannot be used as a single-root predecessor".into());
+            }
+            previous.entries.keys().map(|name| root.join(name)).collect()
+        } else { Vec::new() };
+        Ok(Some(Materialization { root, desired, current, tracked: tracked.into_iter().map(str::to_owned).collect(), previous_paths }))
+    }
+
+    fn apply_materialization(&self, plan: Materialization) -> Result<(), String> {
+        let Materialization { root, desired, current, tracked, previous_paths } = plan;
         #[cfg(unix)]
         for (name, entry) in &current {
             if matches!(entry, Entry::Directory { .. }) {
@@ -736,14 +835,7 @@ impl Files {
             }
         }
         let mut remove: Vec<_> = current.keys().map(|name| root.join(name)).collect();
-        if let Some(previous) = previous.filter(|version| self.exists(version)) {
-            remove.extend(
-                self.load(previous)?
-                    .entries
-                    .keys()
-                    .map(|name| root.join(name)),
-            );
-        }
+        remove.extend(previous_paths);
         remove.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
         remove.dedup();
         for path in remove {
@@ -851,7 +943,7 @@ impl Files {
                 } else {
                     PathBuf::from(target)
                 };
-                link(&target, &root.join(name), *directory)?;
+                link(&root, &target, &root.join(name), *directory)?;
             }
         }
         // Restore directory metadata only AFTER creating files and links.
@@ -893,7 +985,8 @@ fn unlink(path: &Path, directory: bool) -> Result<(), String> {
     fs::remove_file(path).map_err(|error| error.to_string())
 }
 
-fn link(target: &Path, path: &Path, directory: bool) -> Result<(), String> {
+fn link(root: &Path, target: &Path, path: &Path, directory: bool) -> Result<(), String> {
+    let _ = root;
     #[cfg(unix)]
     {
         let _ = directory;
@@ -902,20 +995,13 @@ fn link(target: &Path, path: &Path, directory: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
         if directory {
-            let output = std::process::Command::new("node")
-                .args([
-                    "-e",
-                    "require('node:fs').symlinkSync(process.argv[1],process.argv[2],'junction')",
-                ])
-                .arg(crate::native::host_path(target))
-                .arg(crate::native::host_path(path))
-                .output()
-                .map_err(|error| error.to_string())?;
-            if output.status.success() {
-                Ok(())
-            } else {
-                Err(String::from_utf8_lossy(&output.stderr).into())
-            }
+            // Same native junction contract, without spawning a PATH-selected
+            // Node or exposing backend work to business NODE_OPTIONS/NODE_PATH.
+            crate::workspace_symlinks::materialize(root, path, &crate::workspace_symlinks::Link {
+                value: target.to_str().ok_or("Environment junction target must be UTF-8")?.into(),
+                project_absolute: false,
+                kind: crate::workspace_symlinks::Kind::Junction,
+            })
         } else {
             std::os::windows::fs::symlink_file(target, path).map_err(|error| {
                 format!(

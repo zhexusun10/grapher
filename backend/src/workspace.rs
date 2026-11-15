@@ -1313,13 +1313,6 @@ pub fn remove_shadow_repo(target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Compatibility alias for metadata-only initialization. It no longer stages
-/// or commits; callers that need a usable `HEAD` must call
-/// [`materialize_shadow_repo`] explicitly.
-pub fn ensure_shadow_repo(target: &Path) -> Result<PathBuf, String> {
-    ensure_shadow_metadata(target)
-}
-
 pub fn pick_folder() -> Result<Option<PathBuf>, String> {
     #[cfg(target_os = "macos")]
     {
@@ -2741,9 +2734,10 @@ fn snapshot_slot_to_ref_scoped(
     let view_identity =
         crate::workspace_view::stage_node_snapshot(&canonical_path, &canonical_repo, exclusions)?;
     let current = git(&canonical_path, &["rev-parse", "HEAD"])?;
-    let changed_view = view_identity.as_ref().is_some_and(|identity| {
-        !crate::workspace_view::record_matches(&canonical_repo, &current, identity)
-    });
+    let changed_view = match view_identity.as_deref() {
+        Some(identity) => !crate::workspace_view::record_matches(&canonical_repo, &current, identity)?,
+        None => false,
+    };
     // A head that already exists without a view record (an explicit human or
     // agent commit) is captured below instead of being given a redundant
     // snapshot commit. This keeps `runtime.resolved` importing the user's
@@ -2875,15 +2869,12 @@ pub(crate) fn scope_contains(path: &Path, scope: &Path) -> bool {
     Path::new(&key(path)).starts_with(Path::new(&key(scope)))
 }
 
-/// Dependency/bytecode directory names the runtime never treats as authored
-/// source. A package install or interpreter cache is rebuilt from a manifest,
-/// so collecting it would only multiply snapshot, composition and write-back
-/// cost. The files stay on disk for the agent; the runtime just does not
-/// collect, compose or publish them. `dist`/`build`/`out`/`target` are
-/// deliberately absent: they are ambiguous with authored directories.
+/// Rebuildable tool caches, not installed dependencies or runnable output.
+/// A directory name does not prove that a manifest/registry can reproduce its
+/// bytes. node_modules, .next, dist/build/out/target and standalone bytecode
+/// therefore follow the ordinary project Git channel, including ignored files.
+/// Tracked cache files still override this exclusion policy.
 pub(crate) const GENERATED_ARTIFACT_DIRS: &[&str] = &[
-    "node_modules",
-    ".next",
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
@@ -2891,11 +2882,11 @@ pub(crate) const GENERATED_ARTIFACT_DIRS: &[&str] = &[
     ".turbo",
     ".parcel-cache",
 ];
-/// Compiler/interpreter cache file suffixes.
-pub(crate) const GENERATED_ARTIFACT_SUFFIXES: &[&str] = &[".pyc", ".pyo", ".tsbuildinfo"];
+/// Incremental compiler state. Standalone .pyc/.pyo can be the only executable
+/// module distribution; only bytecode beneath __pycache__ is a disposable cache.
+pub(crate) const GENERATED_ARTIFACT_SUFFIXES: &[&str] = &[".tsbuildinfo"];
 
-/// True when any path component names a dependency/bytecode directory, or the
-/// file name ends with a generated-artifact suffix.
+/// True when a path names a rebuildable cache, not a dependency/runtime artifact.
 pub(crate) fn is_generated_artifact(relative: &Path) -> bool {
     if relative.components().any(|part| match part {
         std::path::Component::Normal(name) => {
@@ -2999,8 +2990,8 @@ pub(crate) fn repository_status(path: &Path, exclusions: &[String]) -> Result<St
     let args = scoped_args(&["status", "--porcelain", "-z"], exclusions);
     let raw = repository_git(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     if crate::workspace_view::is_bound(path) {
-        // Generated artifacts are not collected, so do not enumerate them as
-        // ignored files (a large dependency tree would otherwise be walked here).
+        // Rebuildable caches are not collected, so do not enumerate them as
+        // ignored files. Installed dependencies remain real project changes.
         let mut ignored_args = vec![
             "ls-files".to_string(),
             "--others".to_string(),
@@ -3868,6 +3859,8 @@ mod status_filter_tests {
         let other = filtered_status_for(raw, root, &exclusions, false);
         assert!(other.contains("!! ._late"), "{other}");
         assert!(other.contains("!! nested/.DS_Store"), "{other}");
+        // This legacy status helper reports ignored host metadata only; private
+        // project views enumerate ordinary ignored files in repository_status.
         assert!(!other.contains("node_modules"), "{other}");
         assert!(!other.contains("managed/._cache"), "{other}");
         assert!(other.contains("?? ._new"), "{other}");

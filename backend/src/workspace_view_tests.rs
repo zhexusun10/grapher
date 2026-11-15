@@ -1,5 +1,9 @@
 use super::*;
 
+mod environment_probe {
+    include!("workspace_view/environment_probe.rs");
+}
+
 fn source(temp: &tempfile::TempDir) -> PathBuf {
     let root = temp.path().join("source");
     fs::create_dir(&root).unwrap();
@@ -453,7 +457,7 @@ fn legacy_foreign_ownership_is_inherited_without_privileged_chown() {
     let identity = node_identity_scoped(&upstream, &source, &[])
         .unwrap()
         .unwrap();
-    assert!(record_matches(&source, &result, &identity));
+    assert!(record_matches(&source, &result, &identity).unwrap());
     let downstream = slot(&temp, "downstream");
     let inherited = downstream.join("output");
     workspace::prepare(&source, &downstream, &base, &[result.clone()]).unwrap();
@@ -627,6 +631,50 @@ fn fan_in_preserves_each_parents_staging_without_committing_it_to_user_history()
         workspace::project_git(&target, &["log", "--all", "--format=%s"]).unwrap(),
         "project history"
     );
+}
+
+#[test]
+fn fan_in_and_publication_keep_deleted_intent_to_add_without_recreating_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let user_index = bytes(&source.join(".git/index"));
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let a = slot(&temp, "intent-a");
+    let b = slot(&temp, "intent-b");
+    workspace::prepare(&source, &a, &base, &[]).unwrap();
+    workspace::prepare(&source, &b, &base, &[]).unwrap();
+    let intent_names = ["missing intent", "Missing intent"];
+    for name in intent_names {
+        fs::write(a.join(name), "unfinished\n").unwrap();
+        workspace::project_git(&a, &[
+            "-c", "core.ignorecase=false", "add", "-N", "--chmod=+x", "--", name,
+        ]).unwrap();
+        fs::remove_file(a.join(name)).unwrap();
+    }
+    fs::write(b.join("other.txt"), "other staged work\n").unwrap();
+    workspace::project_git(&b, &["add", "other.txt"]).unwrap();
+    let ah = workspace::snapshot_node(&a, &source, "intent-a").unwrap();
+    let bh = workspace::snapshot_node(&b, &source, "intent-b").unwrap();
+    let target = slot(&temp, "intent-join");
+    workspace::prepare(&source, &target, &base, &[ah.clone(), bh.clone()]).unwrap();
+    let published = crate::graph_merge::merge_graph(&source, &[ah, bh], || panic!("no conflict")).unwrap();
+    let follow = slot(&temp, "intent-follow");
+    workspace::prepare(&source, &follow, &published, &[]).unwrap();
+    for path in [&target, &follow] {
+        let staged = workspace::project_git(path, &["ls-files", "--stage"]).unwrap();
+        let visible = workspace::project_git(path, &["diff", "--cached", "--ita-visible-in-index", "--name-only", "-z"]).unwrap();
+        let invisible = workspace::project_git(path, &["diff", "--cached", "--ita-invisible-in-index", "--name-only", "-z"]).unwrap();
+        for name in intent_names {
+            assert!(fs::symlink_metadata(path.join(name)).is_err());
+            assert!(staged.contains(&format!("100755 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 0\t{name}")));
+            assert!(visible.split('\0').any(|candidate| candidate == name));
+            assert!(!invisible.split('\0').any(|candidate| candidate == name));
+        }
+    }
+    assert!(intent_names.iter().all(|name| !source.join(name).exists()));
+    assert_eq!(bytes(&source.join("other.txt")), b"other staged work\n");
+    assert_eq!(bytes(&source.join(".git/index")), user_index);
+    verify_result(&follow, &source, &published).unwrap();
 }
 
 #[test]
@@ -938,8 +986,7 @@ fn metadata_materialization_requires_full_equality_and_never_hides_a_restore() {
         Some(&file(1, plain.clone())),
         &file(0, plain.clone())
     ));
-    // A security-descriptor difference must still restore even though the
-    // view-identity comparison ignores `security`.
+    // A security-descriptor difference requires a restore just like a mode edit.
     assert!(!metadata_materialized(
         Some(&file(0, secured.clone())),
         &file(0, plain.clone())
@@ -1088,12 +1135,14 @@ fn sha256_repository_prepares_and_materializes_project_bytes() {
 }
 
 #[test]
-fn generated_artifacts_are_not_collected_unless_tracked() {
+fn runtime_artifacts_are_collected_but_rebuildable_caches_still_require_tracking() {
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);
     for (path, value) in [
         ("node_modules/pkg/index.js", "dep\n"),
         (".next/build-id", "build\n"),
+        ("standalone.pyc", "sourceless module\n"),
+        ("standalone.pyo", "legacy sourceless module\n"),
         ("src/__pycache__/mod.pyc", "bytecode\n"),
         ("tsconfig.tsbuildinfo", "cache\n"),
         ("dist/authored.txt", "authored\n"),
@@ -1102,19 +1151,15 @@ fn generated_artifacts_are_not_collected_unless_tracked() {
         fs::write(source.join(path), value).unwrap();
     }
     // A generated-looking file that the user committed is authored content.
-    fs::write(source.join("committed.pyc"), "tracked bytecode\n").unwrap();
-    workspace::git(&source, &["add", "-f", "committed.pyc"]).unwrap();
-    workspace::git(&source, &["commit", "-qm", "commit bytecode"]).unwrap();
+    fs::write(source.join("committed.tsbuildinfo"), "tracked compiler state\n").unwrap();
+    workspace::git(&source, &["add", "-f", "committed.tsbuildinfo"]).unwrap();
+    workspace::git(&source, &["commit", "-qm", "commit compiler state"]).unwrap();
 
     let assert_collected = |target: &Path| {
-        assert!(
-            !target.join("node_modules").exists(),
-            "node_modules must not be collected"
-        );
-        assert!(
-            !target.join(".next").exists(),
-            ".next must not be collected"
-        );
+        assert_eq!(bytes(&target.join("node_modules/pkg/index.js")), b"dep\n");
+        assert_eq!(bytes(&target.join(".next/build-id")), b"build\n");
+        assert_eq!(bytes(&target.join("standalone.pyc")), b"sourceless module\n");
+        assert_eq!(bytes(&target.join("standalone.pyo")), b"legacy sourceless module\n");
         assert!(
             !target.join("src/__pycache__").exists(),
             "__pycache__ must not be collected"
@@ -1125,7 +1170,7 @@ fn generated_artifacts_are_not_collected_unless_tracked() {
         );
         // An ambiguous authored directory and a committed generated file stay.
         assert_eq!(bytes(&target.join("dist/authored.txt")), b"authored\n");
-        assert_eq!(bytes(&target.join("committed.pyc")), b"tracked bytecode\n");
+        assert_eq!(bytes(&target.join("committed.tsbuildinfo")), b"tracked compiler state\n");
     };
 
     // Default snapshot (scanned/staged project view).
@@ -1139,6 +1184,69 @@ fn generated_artifacts_are_not_collected_unless_tracked() {
     let forced = slot(&temp, "generated-forced-add");
     workspace::prepare(&source, &forced, &scoped, &[]).unwrap();
     assert_collected(&forced);
+}
+
+#[test]
+fn offline_dependencies_and_runnable_output_survive_snapshots_forks_and_source_drift() {
+    for project_git in [false, true] {
+        for scoped in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = if project_git {
+                source(&temp)
+            } else {
+                let source = temp.path().join("source");
+                fs::create_dir_all(&source).unwrap();
+                source
+            };
+            fs::write(source.join(".gitignore"), "node_modules/\n.next/\n").unwrap();
+            fs::create_dir_all(source.join("node_modules/offline-local")).unwrap();
+            fs::create_dir_all(source.join(".next/server")).unwrap();
+            fs::write(source.join("node_modules/offline-local/index.js"), "exports.value='captured';\n").unwrap();
+            fs::write(source.join(".next/server/value.cjs"), "module.exports='build';\n").unwrap();
+            fs::write(source.join("app.cjs"), "console.log(require('offline-local').value+':'+require('./.next/server/value.cjs'));\n").unwrap();
+            // No manifest/lockfile or registry access: the installed bytes are
+            // the only available dependency, as with offline/local patches.
+            let index = project_git.then(|| bytes(&source.join(".git/index")));
+            let head = project_git.then(|| workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap());
+            let exclusions = if scoped { vec!["managed-env".into()] } else { vec![] };
+            let base = workspace::snapshot_repository_scoped(&source, &exclusions).unwrap();
+            let run = |root: &Path| {
+                let output = std::process::Command::new(crate::native::trusted_node().unwrap())
+                    .arg("app.cjs").current_dir(root).env_remove("NODE_PATH").env_remove("NODE_OPTIONS")
+                    .output().unwrap();
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            // A recorded base is authoritative. Preparing a node must not
+            // refresh a dependency from today's live source directory.
+            fs::write(source.join("node_modules/offline-local/index.js"), "exports.value='source-later';\n").unwrap();
+            let node = slot(&temp, "offline-dependencies");
+            workspace::prepare(&source, &node, &base, &[]).unwrap();
+            assert_eq!(run(&node), "captured:build");
+            assert_eq!(run(&source), "source-later:build");
+            fs::write(node.join("node_modules/offline-local/index.js"), "exports.value='node-patch';\n").unwrap();
+            assert!(workspace::repository_status(&node, &exclusions).unwrap().contains("node_modules/offline-local/index.js"));
+            let result = workspace::snapshot_node_scoped(&node, &source, "offline", None, &exclusions).unwrap();
+            verify_result(&node, &source, &result).unwrap();
+            let child = slot(&temp, "offline-fork");
+            workspace::prepare(&source, &child, &base, &[result.clone()]).unwrap();
+            assert_eq!(run(&child), "node-patch:build");
+            verify_result(&child, &source, &result).unwrap();
+            fs::write(child.join("node_modules/offline-local/index.js"), "exports.value='child-only';\n").unwrap();
+            assert_eq!(run(&node), "node-patch:build");
+            assert_eq!(run(&source), "source-later:build");
+            assert!(verify_result(&child, &source, &result).is_err(), "dependency edits must be observable");
+            fs::create_dir_all(child.join("node_modules/new-local")).unwrap();
+            fs::write(child.join("node_modules/new-local/index.js"), "module.exports=1;\n").unwrap();
+            assert!(workspace::repository_status(&child, &exclusions).unwrap().contains("node_modules/new-local/index.js"), "new ignored dependencies must not be hidden from private status");
+            if let (Some(index), Some(head)) = (index, head) {
+                assert_eq!(bytes(&source.join(".git/index")), index);
+                assert_eq!(workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(), head);
+            } else {
+                assert!(!source.join(".git").exists());
+            }
+        }
+    }
 }
 
 #[test]
@@ -1201,7 +1309,7 @@ fn reused_slot_keeps_unrecorded_project_content() {
 #[test]
 fn git_metadata_scan_keeps_generated_looking_entries_but_not_runtime_locks() {
     let temp = tempfile::tempdir().unwrap();
-    for file in ["HEAD", "node_modules/pkg/cache.PYC", "index.lock", "refs/heads/topic.lock", "worktrees/other/state"] {
+    for file in ["HEAD", "node_modules/pkg/cache.tsbuildinfo", "index.lock", "refs/heads/topic.lock", "worktrees/other/state"] {
         let path = temp.path().join(file);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "metadata bytes").unwrap();
@@ -1209,7 +1317,7 @@ fn git_metadata_scan_keeps_generated_looking_entries_but_not_runtime_locks() {
     let mut entries = BTreeMap::new();
     scan(temp.path(), Path::new(""), &mut entries, true).unwrap();
     let blob = git2::Oid::hash_object(git2::ObjectType::Blob, b"metadata bytes").unwrap().to_string();
-    for name in ["HEAD", "node_modules/pkg/cache.PYC"] {
+    for name in ["HEAD", "node_modules/pkg/cache.tsbuildinfo"] {
         assert!(matches!(entries.get(name), Some(Entry::File { blob: actual, .. }) if actual == &blob));
     }
     for name in ["index.lock", "refs/heads/topic.lock", "worktrees", "worktrees/other/state"] {
@@ -1235,22 +1343,23 @@ fn in_place_generated_filter_matches_cloning_for_nested_views_and_hardlinks() {
     let entry = Entry::File {
         mode: 0o644, blob: "a".repeat(40), extra: Default::default(),
     };
-    for name in ["keep.txt", "alias.txt", "untracked.pyc", "tracked.PYC"] {
+    for name in ["keep.txt", "alias.txt", "untracked.tsbuildinfo", "tracked.TSBUILDINFO"] {
         view.entries.insert(name.into(), entry.clone());
     }
     // Git evidence is not project-generated content and must remain untouched.
     view.git_entries = Some(view.entries.clone());
     view.hardlinks = serde_json::from_value(serde_json::json!({
-        "aliases": { "alias.txt": "keep.txt", "untracked.pyc": "keep.txt", "tracked.PYC": "keep.txt" },
-        "outside": { "keep.txt": 2, "untracked.pyc": 1 }
+        "aliases": { "alias.txt": "keep.txt", "untracked.tsbuildinfo": "keep.txt", "tracked.TSBUILDINFO": "keep.txt" },
+        "outside": { "keep.txt": 2, "untracked.tsbuildinfo": 1 }
     })).unwrap();
     let mut nested = view.clone();
     nested.repositories.insert("child".into(), view.clone());
     view.repositories.insert("node_modules".into(), nested.clone());
+    view.repositories.insert("__pycache__".into(), nested.clone());
     view.repositories.insert("nested".into(), nested);
     for tracked in [
         std::collections::BTreeSet::new(),
-        std::collections::BTreeSet::from(["tracked.PYC".to_string(), "node_modules".to_string()]),
+        std::collections::BTreeSet::from(["tracked.TSBUILDINFO".to_string(), "__pycache__".to_string()]),
     ] {
         let expected = cloning_reference(&view, &tracked);
         let mut actual = view.clone();
@@ -1276,7 +1385,7 @@ fn completed_view_check_tolerates_recorded_generated_artifacts() {
     let record = record_path(&source, &head).unwrap();
     let mut view = load(&record).unwrap();
     view.entries.insert(
-        "node_modules/pkg/index.js".into(),
+        "__pycache__/old.pyc".into(),
         Entry::Directory {
             mode: 0,
             extra: crate::workspace_metadata::Extra::default(),
@@ -1947,6 +2056,49 @@ fn hardlinks_keep_alias_semantics_and_counts_without_sharing_source_or_sibling_i
     fs::write(fork.join("same-inode"), "fork only").unwrap();
     assert_eq!(bytes(&fork.join("tracked.txt")), b"fork only");
     assert_eq!(bytes(&target.join("tracked.txt")), b"private task");
+}
+
+#[test]
+fn prepared_reuse_rejects_corrupt_view_even_with_the_original_checksum() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "corrupt-reuse");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    let head = workspace::snapshot_node(&node, &source, "corrupt-reuse").unwrap();
+    let record = record_path(&source, &head).unwrap();
+    let checksum = fs::read(record.join("checksum")).unwrap();
+    let mut damaged: serde_json::Value = serde_json::from_slice(&fs::read(record.join("view.json")).unwrap()).unwrap();
+    damaged["entries"]["tracked.txt"]["extra"]["security"] = serde_json::json!([9, 8, 7]);
+    fs::write(record.join("view.json"), serde_json::to_vec(&damaged).unwrap()).unwrap();
+
+    let error = seal_prepared_scoped(&node, &source, &[], None).unwrap_err();
+    assert!(error.contains("Damaged project-view evidence"), "{error}");
+    assert!(workspace::snapshot_node(&node, &source, "corrupt-reuse").unwrap_err()
+        .contains("Damaged project-view evidence"));
+    assert_eq!(workspace::git(&node, &["rev-parse", "HEAD"]).unwrap(), head);
+    assert_eq!(fs::read(record.join("checksum")).unwrap(), checksum);
+}
+
+#[test]
+fn snapshot_does_not_repair_bad_checksum_or_partial_evidence_from_live_files() {
+    for damage in ["checksum", "missing-checksum", "missing-view"] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = source(&temp);
+        let base = workspace::snapshot_repository(&source).unwrap();
+        let node = slot(&temp, "partial-record");
+        workspace::prepare(&source, &node, &base, &[]).unwrap();
+        let head = workspace::snapshot_node(&node, &source, "partial-record").unwrap();
+        let record = record_path(&source, &head).unwrap();
+        match damage {
+            "checksum" => fs::write(record.join("checksum"), "damaged").unwrap(),
+            "missing-checksum" => fs::remove_file(record.join("checksum")).unwrap(),
+            "missing-view" => fs::remove_file(record.join("view.json")).unwrap(),
+            _ => unreachable!(),
+        }
+        assert!(workspace::snapshot_node(&node, &source, "partial-record").is_err(), "{damage}");
+        assert_eq!(workspace::git(&node, &["rev-parse", "HEAD"]).unwrap(), head, "{damage}");
+    }
 }
 
 #[test]

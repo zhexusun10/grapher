@@ -15,13 +15,26 @@ function getStorage(storage?: Storage): Storage | null {
   return null;
 }
 
+// Browser data is only a hint. A malformed/older value must not permanently
+// disable future saves, and non-string entries must not become legacy drafts.
+function readDrafts(raw: string | null): Record<string, string> {
+  try {
+    const value: unknown = JSON.parse(raw ?? "null");
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] =>
+        typeof entry[1] === "string"));
+    }
+  } catch { }
+  return {};
+}
+
 export function loadLandingDraft(repository?: string, storage?: Storage): string {
   const store = getStorage(storage);
   if (!store) return "";
   try {
     const raw = store.getItem(LANDING_GOAL_STORAGE_KEY);
     if (raw) {
-      const drafts = JSON.parse(raw) as Record<string, string>;
+      const drafts = readDrafts(raw);
       const key = landingDraftKey(repository);
       if (typeof drafts[key] === "string" && drafts[key].trim()) {
         return drafts[key];
@@ -43,8 +56,9 @@ export function saveLandingDraft(repository: string | undefined, text: string, s
   const store = getStorage(storage);
   if (!store) return;
   try {
-    const raw = store.getItem(LANDING_GOAL_STORAGE_KEY);
-    const drafts = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    // Storage access failures must reach the outer catch: unlike malformed
+    // JSON, an unreadable map cannot safely be replaced with an empty one.
+    const drafts = readDrafts(store.getItem(LANDING_GOAL_STORAGE_KEY));
     const key = landingDraftKey(repository);
     if (text.trim()) {
       drafts[key] = text;
@@ -78,8 +92,7 @@ export function clearLandingDraft(repository?: string, storage?: Storage): void 
   const store = getStorage(storage);
   if (!store) return;
   try {
-    const raw = store.getItem(LANDING_GOAL_STORAGE_KEY);
-    const drafts = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    const drafts = readDrafts(store.getItem(LANDING_GOAL_STORAGE_KEY));
     const key = landingDraftKey(repository);
     delete drafts[key];
     delete drafts["__unbound__"];

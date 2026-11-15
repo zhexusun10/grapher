@@ -44,6 +44,10 @@ fn state_of(runtime: &Runtime, worktree: &str) -> PathBuf {
 // Exercise the native adapter at the owning writer's Prepared boundary. The
 // fixture Agent does only its existing business task; Rust creates/observes E.
 fn run_created(runtime: &mut Runtime, job: &Job, prefix: &str) {
+    run_created_at(runtime, job, prefix, false);
+}
+
+fn run_created_at(runtime: &mut Runtime, job: &Job, prefix: &str, workspace_owned: bool) {
     let root = runtime.root.clone();
     let result = perform(
         job,
@@ -62,15 +66,16 @@ fn run_created(runtime: &mut Runtime, job: &Job, prefix: &str) {
                 .expanded(Path::new(&job.execution.worktree));
             let session = root.join("sessions").join(&job.execution.id);
             let state = env.state_root(Path::new(&job.execution.worktree))?;
-            let context = crate::environment_discovery::context_with_state(
+            let context = crate::environment_discovery::context_with_source(
                 Path::new(&job.execution.worktree),
                 Some(&state),
+                Some(Path::new(&runtime.state.config.as_ref().unwrap().repository)),
                 &job.execution.id,
                 &launch,
                 &session,
                 true,
             )?;
-            let venv = state.join(prefix);
+            let venv = if workspace_owned { Path::new(&job.execution.worktree).join(prefix) } else { state.join(prefix) };
             assert!(!venv.exists(), "unportable input must not be copied");
             let bootstrap = automatic().launch.entry;
             let code = crate::environment_discovery::tool(vec![
@@ -124,6 +129,137 @@ fn publish(runtime: &mut Runtime, source: &Path) -> ResultDescriptor {
         .unwrap();
     assert_eq!(runtime.state.phase, "completed");
     runtime.result_descriptor().unwrap()
+}
+
+#[test]
+fn unbound_dual_root_ownership_excludes_environments_without_hiding_project_files() {
+    let (_temp, _source, mut runtime) = setup(graph(&["A"], &[]), automatic(), r#"
+for (const name of ['env-a','env-b']) {
+  fs.mkdirSync(name,{recursive:true});
+  fs.writeFileSync(name+'/pyvenv.cfg','home = native-python\n');
+  fs.writeFileSync(name+'/marker',name);
+}
+const state=process.env.GTEST_STATE;
+for (const name of ['env-a','state-only']) {
+  fs.mkdirSync(state+'/'+name,{recursive:true});
+  fs.writeFileSync(state+'/'+name+'/pyvenv.cfg','home = native-python\n');
+  fs.writeFileSync(state+'/'+name+'/marker','state');
+}
+for (const name of ['state-only','.agent-home']) {
+  fs.mkdirSync(name,{recursive:true});
+  fs.writeFileSync(name+'/authored.txt','project');
+}
+fs.writeFileSync('code.txt','business-code');
+"#);
+    let job = runtime.jobs().unwrap().remove(0);
+    run(&mut runtime, &job);
+    let env = store(&runtime);
+    let result = runtime.state.nodes["A"].result.as_ref().unwrap();
+    let launch = env.load_launch(&result.launch_ref).unwrap();
+    assert!(launch.environment.is_none(), "metadata alone must not activate an interpreter");
+    let scopes = launch.owned_scopes.as_ref().unwrap();
+    assert!(launch.managed_scopes.is_empty());
+    for (root, path) in [("workspace", "env-a"), ("workspace", "env-b"), ("state", "env-a"), ("state", "state-only")] {
+        assert!(scopes.contains(&EnvironmentScope { root: root.into(), path: path.into() }));
+    }
+    assert_eq!(env.exclusions(&result.launch_ref).unwrap(), vec!["env-a", "env-b"]);
+    let tree = workspace::git(Path::new(&job.execution.worktree), &["ls-tree", "-r", "--name-only", &result.code_ref]).unwrap();
+    assert!(!tree.contains("env-a/"), "{tree}");
+    assert!(!tree.contains("env-b/"), "{tree}");
+    assert!(tree.contains("state-only/authored.txt"), "{tree}");
+    assert!(tree.contains(".agent-home/authored.txt"), "{tree}");
+    for name in ["env-a", "env-b"] {
+        assert!(Path::new(&job.execution.worktree).join(name).join("marker").is_file());
+    }
+    env.verify_view(Path::new(&job.execution.worktree), &result.launch_ref, &result.environment_ref).unwrap();
+
+    // A later failed activation retains the same ownership, even though no
+    // active binding remains. It must not reinterpret state paths as project paths.
+    let mut bound = launch;
+    bound.environment = Some(crate::environment_discovery::Binding {
+        kind: "venv".into(), prefix: "env-a".into(), abi: "0".repeat(40), root: Some("workspace".into()),
+    });
+    let input = CompositeResult { launch_ref: env.launch(&bound).unwrap(), ..result.clone() };
+    let next = env.discover(Path::new(&job.execution.worktree), &input, &runtime.root.join("empty-session")).unwrap();
+    assert!(env.load_launch(&next.launch_ref).unwrap().environment.is_none());
+    assert_eq!(env.exclusions(&next.launch_ref).unwrap(), vec!["env-a", "env-b"]);
+}
+
+#[test]
+fn root_qualified_scopes_keep_state_names_out_of_project_capture_and_survive_local_unbinding() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = automatic();
+    config.launch.owned_scopes = Some(vec![]);
+    let env = Environments::new(&temp.path().join("data"), &Uuid::new_v4().to_string(), &config).unwrap();
+    let project = temp.path().join("source");
+    fs::create_dir_all(&project).unwrap();
+    workspace::git(&project, &["init", "-q"]).unwrap();
+    let baseline = env.initialize(&project).unwrap();
+    let mut launch = config.launch.clone();
+    launch.owned_scopes = Some(vec![
+        EnvironmentScope { root: "workspace".into(), path: "business-env".into() },
+        EnvironmentScope { root: "state".into(), path: "state-only".into() },
+    ]);
+    launch.environment = Some(crate::environment_discovery::Binding {
+        kind: "venv".into(), prefix: "business-env".into(), abi: "0".repeat(40), root: Some("workspace".into()),
+    });
+    let reference = env.launch(&launch).unwrap();
+    assert_eq!(env.exclusions(&reference).unwrap(), vec!["business-env"]);
+    assert_eq!(env.scope_paths(&reference).unwrap(), vec!["business-env"]);
+    let current = CompositeResult { launch_ref: reference, layout: Some("current-slot".into()), ..baseline.clone() };
+    let selected = env.select_for_workspace("next", &[("parent".into(), baseline.clone())], "current-slot", &baseline, Some(&current)).unwrap();
+    assert!(env.load_launch(&selected.launch_ref).unwrap().environment.is_none());
+    assert_eq!(env.exclusions(&selected.launch_ref).unwrap(), vec!["business-env"]);
+    let state_scopes = env.scope_paths(&selected.launch_ref).unwrap();
+    assert!(state_scopes.contains(&"state-only".into()));
+    assert!(!state_scopes.contains(&"business-env".into()));
+    let sibling = env.select_for_workspace("sibling", &[("parent".into(), current.clone())], "other-slot", &baseline, Some(&current)).unwrap();
+    assert!(env.exclusions(&sibling.launch_ref).unwrap().is_empty(), "a sibling must not inherit physical-slot ownership");
+}
+
+#[test]
+fn retained_slot_ownership_cannot_be_inherited_from_invalid_current_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = automatic();
+    config.launch.owned_scopes = Some(vec![]);
+    let env = Environments::new(&temp.path().join("data"), &Uuid::new_v4().to_string(), &config).unwrap();
+    let project = temp.path().join("source");
+    fs::create_dir_all(&project).unwrap();
+    workspace::git(&project, &["init", "-q"]).unwrap();
+    let baseline = env.initialize(&project).unwrap();
+    let mut launch = config.launch.clone();
+    launch.owned_scopes = Some(vec![EnvironmentScope { root: "workspace".into(), path: "owned-env".into() }]);
+    let current = CompositeResult {
+        layout: Some(temp.path().join("slot").to_string_lossy().into()),
+        launch_ref: env.launch(&launch).unwrap(),
+        ..baseline.clone()
+    };
+    let inputs = vec![("parent".into(), baseline.clone())];
+    let path = current.layout.as_deref().unwrap();
+    env.select_for_workspace("next", &inputs, path, &baseline, Some(&current)).unwrap();
+    let mut foreign = current.clone();
+    foreign.domain.baseline = "foreign-baseline".into();
+    assert!(env.select_for_workspace("next", &inputs, path, &baseline, Some(&foreign)).is_err());
+    let mut missing = current.clone();
+    missing.environment_ref = Uuid::new_v4().to_string();
+    assert!(env.select_for_workspace("next", &inputs, path, &baseline, Some(&missing)).is_err());
+    assert_eq!(env.load_launch(&current.launch_ref).unwrap(), launch);
+}
+
+#[test]
+fn root_qualified_discovery_refuses_to_hide_authored_tracked_environment_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = automatic();
+    let env = Environments::new(&temp.path().join("data"), &Uuid::new_v4().to_string(), &config).unwrap();
+    let project = temp.path().join(".grapher-worktrees/ownership/slot");
+    fs::create_dir_all(project.join("authored-env")).unwrap();
+    git2::Repository::init(&project).unwrap();
+    fs::write(project.join("authored-env/pyvenv.cfg"), "home = native-python\n").unwrap();
+    workspace::project_git(&project, &["add", "authored-env/pyvenv.cfg"]).unwrap();
+    let baseline = env.initialize(&project).unwrap();
+    let error = env.discover(&project, &baseline, &temp.path().join("session")).unwrap_err();
+    assert!(error.contains("authored-env/pyvenv.cfg"), "{error}");
+    assert!(project.join("authored-env/pyvenv.cfg").is_file());
 }
 
 #[test]
@@ -304,6 +440,63 @@ fn best_effort_independent_terminal_environments_publish_and_launch_named_entrie
 }
 
 #[test]
+fn rooted_terminals_with_w_and_s_bindings_keep_named_results_and_real_interpreters() {
+    let (_temp, source, mut runtime) = setup(graph(&["A", "B"], &[]), automatic(), "");
+    for job in runtime.jobs().unwrap() {
+        run_created_at(&mut runtime, &job, ".venv", job.execution.node == "A");
+    }
+    let descriptor = publish(&mut runtime, &source);
+    assert_eq!(descriptor.entries.len(), 2);
+    assert!(descriptor.default_entry.is_none());
+    assert!(!source.join(".venv").exists(), "managed scopes do not gain a source delivery channel");
+    for name in ["A", "B"] {
+        let result = runtime.state.nodes[name].result.as_ref().unwrap();
+        let env = store(&runtime);
+        let launch = env.load_launch(&result.launch_ref).unwrap();
+        assert_eq!(launch.environment.as_ref().unwrap().root.as_deref(), Some(if name == "A" { "workspace" } else { "state" }));
+        env.verify_view(Path::new(result.layout.as_deref().unwrap()), &result.launch_ref, &result.environment_ref).unwrap();
+        let entry = descriptor.entries.iter().find(|entry| entry.name == name).unwrap();
+        let expected = if name == "A" { PathBuf::from(&entry.workspace).join(".venv") } else { state_of(&runtime, &entry.workspace).join(".venv") };
+        fs::write(expected.join("marker"), "partial environment edit").unwrap();
+        let restored = env.prepare(Path::new(&entry.workspace), &entry.result, &Uuid::new_v4().to_string(), &entry.result.code_ref, vec![], false, true).unwrap();
+        assert_eq!(fs::read_to_string(expected.join("marker")).unwrap(), name);
+        assert_eq!(restored.environment_ref, entry.result.environment_ref);
+        env.validate_launch(Path::new(&entry.workspace), &env.load_launch(&restored.launch_ref).unwrap()).unwrap();
+        let launch = env.load_launch(&restored.launch_ref).unwrap().expanded(Path::new(&entry.workspace));
+        let mut command = Command::new(&launch.entry);
+        command.args(["-I", "-c", "import sys,pathlib; assert pathlib.Path(sys.prefix).resolve()==pathlib.Path(sys.argv[1]).resolve(); print(sys.executable)"]).arg(&expected);
+        controlled_output(command).unwrap();
+    }
+}
+
+#[test]
+fn rooted_result_reconstructs_missing_w_and_restores_s_without_rewriting_execution_history() {
+    let (_temp, source, mut runtime) = setup(graph(&["A"], &[]), automatic(), r#"
+fs.mkdirSync(process.env.HOME,{recursive:true});
+fs.writeFileSync(process.env.HOME+'/recorded-config','S config');
+"#);
+    let job = runtime.jobs().unwrap().remove(0);
+    run_created_at(&mut runtime, &job, ".venv", true);
+    let descriptor = publish(&mut runtime, &source);
+    let path = PathBuf::from(&descriptor.workspace);
+    let state = state_of(&runtime, &descriptor.workspace);
+    let historical = runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>();
+    fs::remove_dir_all(&path).unwrap();
+    fs::write(state.join(".agent-home/recorded-config"), "partial S config").unwrap();
+    fs::create_dir_all(state.join(".venv")).unwrap();
+    fs::write(state.join(".venv/later-only"), "absent from selected S coverage").unwrap();
+    let args = vec!["-I".into(), "-c".into(), "import pathlib,os,sys; assert pathlib.Path(sys.prefix).resolve()==pathlib.Path(os.getcwd(),'.venv').resolve(); assert pathlib.Path(os.environ['HOME'],'recorded-config').read_text()=='S config'; print(pathlib.Path(sys.prefix,'marker').read_text())".into()];
+    let (job, control) = runtime.start_result(&args).unwrap();
+    let outcome = perform_result(&job, &control, |input| runtime.emit(EventKind::ResultExecutionPrepared { input }));
+    assert_eq!(runtime.finish_result(&job, &control, outcome).unwrap().trim(), "A");
+    assert_eq!(runtime.state.executions.iter().map(|execution| execution.result.clone()).collect::<Vec<_>>(), historical);
+    assert_eq!(fs::read_to_string(state.join(".agent-home/recorded-config")).unwrap(), "S config");
+    assert!(!state.join(".venv").exists(), "recorded S absence is distinct from W .venv");
+    assert!(path.join(".venv/marker").is_file());
+    assert!(!source.join(".venv").exists());
+}
+
+#[test]
 fn best_effort_home_changes_do_not_require_environment_agreement_or_a_default_choice() {
     let (_temp, source, mut runtime) = setup(graph(&["A", "B"], &[]), automatic(),
         "fs.mkdirSync(process.env.HOME,{recursive:true});fs.writeFileSync(process.env.HOME+'/writer',name);");
@@ -348,7 +541,7 @@ fn best_effort_ignored_input_corruption_fails_before_a_writer_or_reset() {
         .unwrap(),
     )
     .unwrap();
-    let blob = version["entries"][".venv/marker"]["blob"].as_str().unwrap();
+    let blob = version["rooted"]["roots"]["state"]["entries"][".venv/marker"]["blob"].as_str().unwrap();
     fs::write(
         runtime
             .root
@@ -563,6 +756,9 @@ fn saved_policy_without_best_effort_preserves_the_old_domain_and_semantics() {
     let original = policy();
     let json = serde_json::to_value(&original).unwrap();
     assert!(json.get("bestEffort").is_none());
+    assert!(json["launch"].get("inheritAmbient").is_none());
+    assert!(json["launch"].get("ownedScopes").is_none());
+    assert!(json["launch"].get("unboundPath").is_none());
     let restored: EnvironmentConfig = serde_json::from_value(json.clone()).unwrap();
     assert!(!restored.best_effort);
     assert_eq!(serde_json::to_value(restored).unwrap(), json);

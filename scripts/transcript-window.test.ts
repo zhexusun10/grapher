@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { appendTranscriptPage, prependTranscriptPage, renderTranscriptWindow, windowFromPage } from "../src/services/transcriptWindow.ts";
-import { executionTranscriptCache } from "../src/services/transcriptCache.ts";
+import { cancelTranscriptReaders, executionTranscriptCache, invalidateTranscriptCaches, registerTranscriptReader } from "../src/services/transcriptCache.ts";
+import { transcriptAutoFillBudget, TranscriptAutoFillBudget } from "../src/services/transcriptPaging.ts";
 import { retainedRowAnchor, rowOffsets, visibleTranscriptRows } from "../src/services/transcriptLayout.ts";
 import type { TranscriptItem } from "../src/types.ts";
 
@@ -57,6 +58,77 @@ test("a small tail of a huge log is cached by retained bytes, not its absolute c
   assert.equal(executionTranscriptCache.has("huge:tail"), true);
   assert.equal(executionTranscriptCache.byteSize, 10);
   executionTranscriptCache.clear();
+});
+
+test("automatic history reservations share a viewport budget across concurrent attempts", () => {
+  const budget = new TranscriptAutoFillBudget(100);
+  budget.charge(20); // The visible initial tail is part of this viewport's work.
+  const first = budget.reserve(60)!;
+  const second = budget.reserve(60)!;
+  assert.equal(first.bytes, 60);
+  assert.equal(second.bytes, 20);
+  assert.equal(budget.reserve(4), null, "concurrent requests cannot each spend the full budget");
+  first.finish(68); // Bounded chunk look-behind is charged too.
+  second.finish(); // An aborted/failed request releases its reservation.
+  assert.equal(budget.remaining, 12);
+  second.finish(500);
+  assert.equal(budget.remaining, 12, "cleanup is idempotent");
+  const gesture = new Event("wheel");
+  budget.renew(gesture);
+  budget.charge(25);
+  budget.renew(gesture);
+  assert.equal(budget.remaining, 75, "one bubbling gesture renews all readers only once");
+  const pending = budget.reserve(50)!;
+  budget.renew(new Event("wheel"));
+  assert.equal(budget.remaining, 50, "a new gesture cannot forget outstanding requests");
+  pending.finish(50);
+  assert.equal(budget.remaining, 50);
+});
+
+test("an exhausted automatic budget never blocks explicit history pages or retries", () => {
+  const budget = new TranscriptAutoFillBudget(100);
+  budget.charge(100);
+  assert.equal(budget.reserve(40), null);
+  const requested = budget.reserve(40, true)!;
+  assert.equal(requested.bytes, 40, "a scrollbar/read request is not an automatic fill");
+  assert.equal(budget.reserve(4), null, "explicit work cannot reopen automatic quota");
+  requested.finish(); // A failed page can be retried without another gesture.
+  const retry = budget.reserve(40, true)!;
+  retry.finish(40);
+  assert.equal(budget.remaining, 0);
+  assert.equal(budget.reserve(4), null);
+  budget.renew(new Event("wheel"));
+  assert.equal(budget.remaining, 100);
+});
+
+test("reusing a scroller for another conversation does not inherit an exhausted budget", () => {
+  let view = "node-a";
+  const scroller = { closest: () => ({ dataset: { transcriptBudgetKey: view } }) } as unknown as HTMLElement;
+  const first = transcriptAutoFillBudget(scroller);
+  first.charge(first.maximum);
+  assert.equal(transcriptAutoFillBudget(scroller).remaining, 0);
+  view = "node-b";
+  const second = transcriptAutoFillBudget(scroller);
+  assert.notEqual(second, first);
+  assert.equal(second.remaining, second.maximum);
+  first.charge(100);
+  assert.equal(second.remaining, second.maximum, "a late old reservation cannot charge the new view");
+});
+
+test("navigation cancels readers while bounded windows survive, but deletion invalidates both", () => {
+  executionTranscriptCache.clear();
+  executionTranscriptCache.set("recent:exec", { text: "cached", offset: 6, complete: true });
+  const controller = new AbortController();
+  const unregister = registerTranscriptReader("execution", "recent:exec", controller);
+  try {
+    cancelTranscriptReaders("other");
+    assert.equal(controller.signal.aborted, false);
+    cancelTranscriptReaders("recent");
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(executionTranscriptCache.get("recent:exec")?.text, "cached");
+    invalidateTranscriptCaches("recent");
+    assert.equal(executionTranscriptCache.has("recent:exec"), false);
+  } finally { unregister(); executionTranscriptCache.clear(); }
 });
 
 test("blank assistant rows do not consume layout or move revision boundaries", () => {

@@ -13,22 +13,47 @@ pub(super) struct CacheSnapshot {
 impl CacheSnapshot {
     pub(super) fn capture(cache: &FileChangesCache, run: &str) -> Self {
         let mut captured = Self::default();
-        for ((owner, execution), summary) in cache.log_changes.iter().chain(&cache.git_changes) {
-            if owner == run {
-                captured
-                    .executions
-                    .entry(execution.clone())
-                    .or_default()
-                    .push(summary.clone());
+        for (changes, live) in [
+            (&cache.log_changes, Some(&cache.live)),
+            (&cache.git_changes, None),
+        ] {
+            for (key, summary) in changes {
+                if key.0 == run {
+                    captured.executions.entry(key.1.clone()).or_default().push(
+                        Self::durable_summary(summary, live.and_then(|live| live.get(key))),
+                    );
+                }
             }
         }
-        for ((owner, planning), summary) in &cache.planning_changes {
-            if owner == run {
-                captured.planning.insert(planning.clone(), summary.clone());
+        for (key, summary) in &cache.planning_changes {
+            if key.0 == run {
+                captured.planning.insert(
+                    key.1.clone(),
+                    Self::durable_summary(summary, cache.planning_live.get(key)),
+                );
             }
         }
         captured.publication = cache.publication_changes.get(run).cloned();
         captured
+    }
+
+    fn durable_summary(
+        summary: &FileChangeSummary,
+        live: Option<&ChangeAccumulator>,
+    ) -> FileChangeSummary {
+        // A sibling can save while this process still has in-flight tools.
+        // Persist only confirmed changes; pending overlays are live UI state,
+        // not evidence that may become permanent if the backend crashes.
+        live.map_or_else(
+            || summary.clone(),
+            |acc| {
+                FileChangeSummary::from_files(
+                    acc.committed.values().cloned().collect(),
+                    false,
+                    None,
+                )
+            },
+        )
     }
 
     pub(super) fn merge_into(self, previous: PersistedRunChanges) -> PersistedRunChanges {

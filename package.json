@@ -17,6 +17,7 @@
     "pi": "node engine/entrypoint.mjs",
     "test:native": "node scripts/test.mjs native",
     "test:native:scripts": "node scripts/test.mjs native:scripts",
+    "test:filesystem": "node scripts/test.mjs filesystem",
     "test:prewarm": "node scripts/test.mjs prewarm",
     "probe:prewarm": "node scripts/probe-prewarm.mjs",
     "probe:frontend-performance": "node scripts/node-ts.mjs scripts/probe-frontend-performance.ts",

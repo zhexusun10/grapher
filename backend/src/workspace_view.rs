@@ -15,9 +15,14 @@ mod normalization;
 
 mod sha256_stage;
 
+const VIEW_SCHEMA: u32 = 6;
+
 #[cfg(test)]
 #[path = "workspace_view/scan_bench.rs"]
 mod scan_bench;
+
+#[cfg(all(test, any(windows, target_os = "macos")))]
+mod acl_tests;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -64,9 +69,8 @@ pub(crate) struct View {
     git_global: Vec<u8>,
 }
 
-// View equality follows the source-equivalent identity: per-path storage
-// history (`security`) and the per-workspace `.git/index` stat cache are
-// excluded, so two otherwise-equal project views compare equal.
+// View equality follows the versioned checksum projection. Current views bind
+// native ACLs and all project paths, excluding only the Git-index stat cache.
 impl PartialEq for View {
     fn eq(&self, other: &Self) -> bool {
         equality::equal(self, other)
@@ -84,10 +88,22 @@ fn strip_entry_system_managed(entry: &mut Entry) {
 }
 
 impl View {
+    fn validate_schema(&self) -> Result<(), String> {
+        if !matches!(self.schema, 5 | VIEW_SCHEMA) {
+            return Err("Unsupported project-view schema".into());
+        }
+        for repository in self.repositories.values() {
+            repository.validate_schema()?;
+        }
+        Ok(())
+    }
+
     /// Legacy view records may contain host-managed metadata that is not part
     /// of the project. Normalize after checksum validation so old evidence
     /// remains loadable while comparisons use the stable project identity.
     fn strip_system_managed(&mut self) {
+        // Upgrade only after validation; immutable legacy files stay untouched.
+        self.schema = VIEW_SCHEMA;
         self.root_extra.strip_system_managed();
         for entry in self.entries.values_mut().chain(
             self.git_entries
@@ -506,7 +522,7 @@ fn inspect_scoped(source: &Path, owner: &Path, exclusions: &[String]) -> Result<
         None
     };
     Ok(View {
-        schema: 5,
+        schema: VIEW_SCHEMA,
         source: crate::path_identity::path_key(&source),
         root_mode: mode(&root),
         root_extra: crate::workspace_metadata::capture(&source, &root)?,
@@ -1064,10 +1080,8 @@ fn record_path(repository: &Path, head: &str) -> Result<PathBuf, String> {
         .join("agent-views")
         .join(head))
 }
-/// Serialize a view for identity/equality purposes with every `security`
-/// field removed. The SDDL is path/inheritance-specific storage history that
-/// Windows re-derives on restore, so it must not distinguish otherwise-equal
-/// project views (for example the independent entries of one publication).
+/// Versioned checksum/equality projection. Schema 5 retains its exact historic
+/// omissions for validation; schema 6 includes ACLs and all project path names.
 fn normalized_bytes(view: &View) -> Result<Vec<u8>, String> {
     normalization::bytes(view)
 }
@@ -1077,6 +1091,7 @@ fn legacy_normalized_bytes(view: &View) -> Result<Vec<u8>, String> {
     encode_normalized_value(serde_json::to_value(view).map_err(|e| e.to_string())?)
 }
 
+#[cfg(test)]
 fn encode_normalized_value(mut value: serde_json::Value) -> Result<Vec<u8>, String> {
     fn strip(value: &mut serde_json::Value) {
         match value {
@@ -1106,8 +1121,9 @@ fn encode_normalized_value(mut value: serde_json::Value) -> Result<Vec<u8>, Stri
             }
         }
     }
+    let legacy = value.get("schema").and_then(serde_json::Value::as_u64) == Some(5);
     remove_git_index(&mut value);
-    strip(&mut value);
+    if legacy { strip(&mut value); }
     serde_json::to_vec(&value).map_err(|e| e.to_string())
 }
 
@@ -1142,9 +1158,7 @@ fn load(path: &Path) -> Result<View, String> {
     {
         return Err("Damaged project-view evidence; refusing a partial reconstruction".into());
     }
-    if view.schema != 5 {
-        return Err("Unsupported project-view schema".into());
-    }
+    view.validate_schema()?;
     for key in view.entries.keys() {
         if !Path::new(key)
             .components()
@@ -2548,7 +2562,7 @@ fn assemble_view(
         None
     };
     let mut view = View {
-        schema: 5,
+        schema: VIEW_SCHEMA,
         source: crate::path_identity::path_key(path),
         root_mode: mode(&root),
         root_extra: crate::workspace_metadata::capture(path, &root)?,
@@ -2799,10 +2813,9 @@ pub(crate) fn seal_prepared_scoped(
         return Ok(head);
     };
     let record = ViewRecord::new(&view)?;
-    if record_matches(source, &head, &record.identity) {
-        // Normalized identity intentionally ignores host-specific Git index
-        // stat caches and security inheritance. Do not require byte-identical
-        // evidence for an already recorded, equivalent view.
+    if record_matches(source, &head, &record.identity)? {
+        // Native Git index stat caches do not distinguish equivalent views;
+        // ACLs do. Do not require byte-identical index evidence on reuse.
         return Ok(head);
     }
     if !has_record(source, &head) {
@@ -3105,7 +3118,7 @@ pub(crate) fn seal_composed_view(
         None
     };
     let mut composed = View {
-        schema: 5,
+        schema: VIEW_SCHEMA,
         source: crate::path_identity::path_key(path),
         root_mode,
         root_extra,
@@ -3174,8 +3187,11 @@ pub(crate) fn verify_result_scoped(
     Ok(())
 }
 
-pub(crate) fn preparation_guard(path: &Path) -> Result<String, String> {
-    let bytes = serde_json::to_vec(&inspect(path)?).map_err(|e| e.to_string())?;
+pub(crate) fn preparation_guard(path: &Path, exclusions: &[String]) -> Result<String, String> {
+    // Only recorded, root-qualified managed W scopes may change during E
+    // restoration. All ordinary project/Git metadata stays in this guard.
+    let view = if exclusions.is_empty() { inspect(path)? } else { inspect_scoped(path, path, exclusions)? };
+    let bytes = serde_json::to_vec(&view).map_err(|e| e.to_string())?;
     Ok(git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
         .map_err(|e| e.to_string())?
         .to_string())
@@ -3233,27 +3249,21 @@ fn node_view_identity(view: &View) -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .to_string())
 }
-pub(crate) fn record_matches(source: &Path, head: &str, identity: &str) -> bool {
-    let Ok(path) = record_path(source, head) else {
-        return false;
-    };
-    if fs::read_to_string(path.join("checksum")).ok().as_deref() == Some(identity) {
-        return true;
+pub(crate) fn record_matches(source: &Path, head: &str, identity: &str) -> Result<bool, String> {
+    let path = record_path(source, head)?;
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+        Ok(metadata) if !metadata.is_dir() || crate::workspace_symlinks::is_link(&metadata) => {
+            return Err("Invalid project-view record directory".into());
+        }
+        Ok(_) => {}
     }
-    // A legacy record may have been saved before a host-managed metadata
-    // exclusion existed. The immutable view is still valid; compare its
-    // normalized identity instead of forcing a redundant snapshot commit.
-    load(&path).ok().is_some_and(|view| {
-        normalized_bytes(&view)
-            .ok()
-            .and_then(|bytes| {
-                git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
-                    .ok()
-                    .map(|oid| oid.to_string())
-            })
-            .as_deref()
-            == Some(identity)
-    })
+    // A matching checksum file is only a claim: validate its view before
+    // reusing the reference. Damaged/partial records must fail, not become
+    // 'changed metadata' that a new snapshot silently replaces from live files.
+    // Load also validates legacy bytes before upgrading their identity in memory.
+    Ok(node_view_identity(&load(&path)?)? == identity)
 }
 
 /// Recheck the private node slot (`path`), not the live source directory.

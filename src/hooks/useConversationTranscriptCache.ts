@@ -1,10 +1,11 @@
 import { useLayoutEffect } from "react";
-import { invalidateTranscriptCaches } from "../services/transcriptCache";
+import { cancelTranscriptReaders } from "../services/transcriptCache";
 
-/** Planner history survives Node navigation, but never leaving its Conversation. */
+/** Navigation cancels stale readers, not reusable bounded history windows.
+ * Deletion/reset still invalidate both readers and cache entries explicitly. */
 export function useConversationTranscriptCache(runId: string) {
   useLayoutEffect(() => {
     if (!runId) return;
-    return () => invalidateTranscriptCaches(runId);
+    return () => cancelTranscriptReaders(runId);
   }, [runId]);
 }

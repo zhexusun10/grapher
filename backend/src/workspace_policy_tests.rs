@@ -519,6 +519,91 @@ fn shared_source_dispatches_ready_children_while_unrelated_sibling_runs() {
 }
 
 #[test]
+fn shared_dispatch_reuses_admission_but_revalidates_before_worker_launch() {
+    for git in [false, true] {
+        let (_temp, source, mut runtime) = adaptive(git,
+            graph(&["root", "a", "b", "c", "join"], &[
+                ("root", "a"), ("root", "b"), ("root", "c"),
+                ("a", "join"), ("b", "join"), ("c", "join"),
+            ]), true, 3);
+        let dispatch = |runtime: &mut Runtime| {
+            REPOSITORY_RESOLUTIONS.with(|count| count.set(0));
+            let jobs = runtime.jobs().unwrap();
+            assert_eq!(REPOSITORY_RESOLUTIONS.with(|count| count.get()), 1,
+                "one source admission per dispatch, not per node or completed ancestor");
+            assert!(jobs.iter().all(|job| job.source_direct
+                && Path::new(&job.execution.worktree) == source && !job.materialize_source));
+            jobs
+        };
+        let root = dispatch(&mut runtime).remove(0);
+        finish_shared(&mut runtime, &root, "done");
+        runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+        let peers = dispatch(&mut runtime);
+        assert_eq!(peers.len(), 3);
+        for job in &peers[..2] {
+            finish_shared(&mut runtime, job, "done");
+        }
+        REPOSITORY_RESOLUTIONS.with(|count| count.set(0));
+        assert!(runtime.jobs().unwrap().is_empty(), "join still needs its last parent");
+        assert_eq!(REPOSITORY_RESOLUTIONS.with(|count| count.get()), 0,
+            "blocked dispatch must not revalidate completed source history");
+        finish_shared(&mut runtime, &peers[2], "done");
+        runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+        let join = dispatch(&mut runtime).remove(0);
+        assert_eq!(join.execution.node, "join");
+
+        // Admission reuse is scoped to scheduling. A source removed after
+        // Started must still fail before Prepared, attachments or model launch.
+        let moved = source.with_file_name("moved-source");
+        fs::rename(&source, &moved).unwrap();
+        REPOSITORY_RESOLUTIONS.with(|count| count.set(0));
+        let result = perform(&join, &runtime.root, &[], |_| {}, |_| {
+            panic!("invalid source reached Prepared")
+        });
+        fs::rename(&moved, &source).unwrap();
+        assert_eq!(REPOSITORY_RESOLUTIONS.with(|count| count.get()), 1);
+        let error = result.unwrap_err();
+        assert!(error.contains("绑定"), "{error}");
+        runtime.finish(&join.execution, Err(error)).unwrap();
+        assert_eq!(runtime.state.nodes["join"].status, "failed");
+        assert!(runtime.state.events.iter().all(|event|
+            !matches!(event.kind, EventKind::PublicationStarted { .. })));
+    }
+}
+
+#[test]
+fn shared_dispatch_keeps_historical_environment_evidence_inert_after_replay() {
+    for isolate in [false, true] {
+        let (_temp, source, mut runtime) = adaptive(false,
+            graph(&["root", "child"], &[("root", "child")]), isolate, 3);
+        let root = runtime.jobs().unwrap().remove(0);
+        finish_shared(&mut runtime, &root, "done");
+        // Legacy/source-bound E/L evidence remains historical even if its
+        // physical layout matches today's source. Its absent records must not
+        // become an input to a new, explicitly unmanaged source job.
+        let historical: crate::environment::CompositeResult = serde_json::from_value(serde_json::json!({
+            "domain": {"platform":"historical", "arch":"historical", "baseline":"old", "policy":"old", "contract":"old"},
+            "codeRef":"historical", "environmentRef":"unavailable", "launchRef":"unavailable",
+            "resourceRefs":[], "layout":source, "generation":"historical",
+        })).unwrap();
+        runtime.emit(EventKind::ExecutionResultRecorded {
+            execution_id: root.execution.id.clone(), result: historical.clone(),
+        }).unwrap();
+        runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+        let child = runtime.jobs().unwrap().remove(0);
+        assert!(child.source_direct && child.config.environment.is_none());
+        assert!(child.environment_previous.is_none());
+        assert!(child.environment_input.is_none() && child.environment_sources.is_empty());
+        assert_eq!(runtime.state.executions.iter().find(|e| e.id == root.execution.id).unwrap().result.as_ref(), Some(&historical));
+        finish_shared(&mut runtime, &child, "done");
+        runtime.jobs().unwrap();
+        assert_eq!(runtime.state.phase, "completed");
+        assert!(!runtime.run_workspace_root().exists());
+        assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
+    }
+}
+
+#[test]
 fn shared_replenishment_pins_source_and_respects_available_worker_slots() {
     for limit in [0, 2, 3, 4] {
         // Keep at least one queued child beyond the available slots regardless

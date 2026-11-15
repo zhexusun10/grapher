@@ -25,6 +25,10 @@ Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`:
 
 Data-directory writer exclusion and startup recovery are specified in [Recovery and ownership](runtime.md#recovery-and-ownership).
 
+### Derived file-change summaries
+
+`file-changes/` sidecars are versioned caches, not history. Saves replace each cached execution's complete summary (including an authoritative empty result), while retaining executions not loaded in the current process. Repeated saves do not accumulate the same edits again. In-flight tool overlays remain live UI state; only confirmed tool changes are persisted. Terminal cache settlement follows the successful event commit, for both single and batched writes. Incompatible cache versions are rebuilt from retained evidence without rewriting events or transcripts.
+
 ## Workspace placement and lifetime
 
 Graph workspaces default to:
@@ -97,6 +101,22 @@ The browser removes its workspace/conversation indexes only after the commit. It
 All projects/backends with the same engine inputs share one content-keyed Pi runtime cache under the OS cache's `workspaces/.grapher-workspaces/`. `GRAPHER_NATIVE_RUNTIME_PARENT` overrides this location.
 
 The key covers engine/adapters, Pi source/builds, dependency locks, bundled extensions and platform/Node ABI—not workspace/session paths. An exclusive cache lock serializes preparation; shared process-lifetime file leases protect active readers. Cached engine inputs are rechecked before reuse. Damaged idle copies are rebuilt, never overwritten under live readers.
+
+Pi's installed dependency trees are omitted from the digest, so admission also
+checks the copy's install marker, required package versions, workspace bindings
+and extraneous packages against the trusted installation's profile/manifests.
+This uses the installed [dependency verifier](../../scripts/pi-dependencies.mjs),
+never verifier code from the cache. It is metadata validation, not byte-integrity
+verification of every dependency file. The [readiness regression](../../scripts/ensure-deps.test.mjs)
+covers damaged copies without loading the engine or extension factories.
+
+Windows preparation dereferences runtime-input links, so its key likewise hashes
+resolved bytes and directory shape rather than a link spelling absent from the
+copy. Changing a linked adapter/extension invalidates the source key; the copied
+code remains independent. Recursive directory links in hashed input scopes fail
+during key calculation, before copying, while nonrecursive aliases remain valid.
+Unix retains its existing link-preserving copy/key behavior. These rules concern
+engine inputs, not project workspace inheritance or additional filesystem isolation.
 
 Successful caches survive shutdown/restart. Failed preparations, abandoned per-backend copies and unused obsolete versions are reclaimed before preparation; live versions are never removed. Marked copies at the old project-adjacent default are also recovered. Unknown unmarked legacy directories require explicit offline cleanup rather than guessed deletion.
 

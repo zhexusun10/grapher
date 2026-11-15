@@ -172,6 +172,7 @@ export const en: Record<string, string> = {
   "执行记录与请求不匹配": "The execution record does not match the request",
   "工作区就绪，等待节点指令输出…": "Workspace ready. Waiting for node output…",
   "正在加载历史记录…": "Loading history…",
+  "加载历史记录": "Load history",
   "正在加载对话界面…": "Loading conversation…",
   "无法加载对话界面。刷新页面可重试，但未发送的附件可能丢失；后台任务不受影响。": "Could not load the conversation view. Reload to try again; unsent attachments may be lost, but background tasks are unaffected.",
   "刷新页面": "Reload page",

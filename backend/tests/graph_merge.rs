@@ -55,8 +55,7 @@ fn branch(source: &Path, base: &str, path: &Path, file: &str, content: &str) -> 
 fn concurrent_graph_preparation_never_uses_another_runs_base() {
     let temp = TempDir::new().unwrap();
     let (source, _) = repository(temp.path());
-    // Production pins a captured snapshot, not a live user HEAD. Capture the
-    // clean base before the source working tree changes.
+    // Pin a snapshot before changing the source tree.
     let base_a = snapshot_repository(&source).unwrap();
     fs::write(source.join("shared"), "newer\n").unwrap();
     let base_b = snapshot_repository(&source).unwrap();
@@ -299,8 +298,7 @@ fn failed_resolver_preserves_conflict_and_user_edits_publish_before_merge() {
     let a = branch(&source, &base, &temp.path().join("a"), "shared", "first\n");
     let b = branch(&source, &base, &temp.path().join("b"), "shared", "second\n");
     fs::write(source.join("local"), "user changes").unwrap();
-    // Pending user work is captured privately and remains uncommitted. It is not a merge
-    // conflict, so publication succeeds without launching the Merger.
+    // Non-conflicting user edits stay uncommitted and need no Merger.
     merge_graph(&source, std::slice::from_ref(&a), || {
         panic!("User edits are not a merge conflict")
     })
@@ -324,9 +322,7 @@ fn failed_resolver_preserves_conflict_and_user_edits_publish_before_merge() {
     );
 }
 
-// Ancestor-first inputs used to create two merges (and could re-open conflicts
-// already resolved in a later input). Both composition and publication must
-// consume the descendant directly while retaining every input in history.
+// Merge descendants directly to avoid reopening resolved ancestor conflicts.
 #[test]
 fn redundant_ancestors_do_not_create_extra_merges_in_either_order() {
     for reverse in [false, true] {
@@ -346,8 +342,7 @@ fn redundant_ancestors_do_not_create_extra_merges_in_either_order() {
         prepare(&source, &child, &base, &heads).unwrap();
         merge_graph(&source, &heads, || panic!("No conflict expected")).unwrap();
         for path in [&child, &source] {
-            // The child's graph Git knows the internal base; the source keeps its
-            // own project history and must simply stay unchanged.
+            // Compare the child to its snapshot and the source to its original HEAD.
             let from = if path == &child { &base } else { &source_head };
             assert_eq!(
                 git(

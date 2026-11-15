@@ -1,4 +1,4 @@
-// Process substitution is not part of the production engine capability surface.
+// Custom engine commands are fixture-only.
 #![cfg(feature = "fixture")]
 
 use grapher::{
@@ -110,7 +110,6 @@ fn parse_route_decision_recognizes_exact_single_words_and_formatting() {
 
 #[test]
 fn parse_route_decision_recognizes_keywords_in_discursive_sentences() {
-    // Model outputs conversational text instead of single word
     assert_eq!(
         parse_route_decision("I recommend parallel for this task."),
         Route {
@@ -123,7 +122,6 @@ fn parse_route_decision_recognizes_keywords_in_discursive_sentences() {
             plan_type: "serial".into()
         }
     );
-    // Multiline reasoning ending with recommendation
     assert_eq!(
         parse_route_decision("Analysis:\n- Independent modules\n- Independent work\nTherefore, parallel execution is required."),
         Route { plan_type: "graph".into() }
@@ -138,7 +136,7 @@ fn parse_route_decision_recognizes_keywords_in_discursive_sentences() {
 
 #[test]
 fn parse_route_decision_resolves_comparison_of_both_keywords() {
-    // When both words are mentioned, later occurrence represents the conclusion
+    // The last keyword wins.
     assert_eq!(
         parse_route_decision("Serial execution was considered, but we should use parallel."),
         Route {
@@ -183,21 +181,18 @@ fn parse_route_decision_recognizes_explicit_decision_marker() {
 
 #[test]
 fn parse_route_decision_safe_fallback_on_ambiguity_or_gibberish() {
-    // Empty output
     assert_eq!(
         parse_route_decision(""),
         Route {
             plan_type: "serial".into()
         }
     );
-    // Hallucination / gibberish
     assert_eq!(
         parse_route_decision("I am not sure what to do here. Hello world!"),
         Route {
             plan_type: "serial".into()
         }
     );
-    // Unrelated text
     assert_eq!(
         parse_route_decision("42 is the answer to everything."),
         Route {
@@ -226,9 +221,6 @@ fn parse_route_decision_does_not_recognize_graph_or_partial_keywords() {
 
 #[test]
 fn partitioner_prompt_requests_the_labels_the_parser_recognizes() {
-    // The routing parser only recognizes the "parallel" and "serial" labels, so the
-    // prompt must keep asking the model for exactly those labels. Wording may
-    // otherwise evolve freely.
     let prompt = include_str!("../resources/prompts/partitioner.md").replace("\r\n", "\n");
     assert!(prompt.contains("parallel"));
     assert!(prompt.contains("serial"));
@@ -259,11 +251,11 @@ exit 1
     let err = result.unwrap_err();
     assert!(
         err.contains("Insufficient Balance"),
-        "Expected Insufficient Balance, got: {err}"
+        "{err}"
     );
     assert!(
         !err.starts_with("Pi exited with"),
-        "Should not be overshadowed by exit code: {err}"
+        "{err}"
     );
 }
 
@@ -280,7 +272,6 @@ fn nonzero_exit_and_empty_response_fail_closed() {
 
 #[test]
 fn successful_provider_retry_clears_the_previous_assistant_error() {
-    // Supplemental adapter protocol regression, not a substitute for real-Pi acceptance testing.
     let (result, stream) = execute_script(
         r#"cat >/dev/null
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"Temporary provider failure","content":[]}}' '{"type":"auto_retry_start","attempt":1}' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"Recovered successfully"}]}}'
@@ -384,7 +375,6 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         role_models: Default::default(),
     };
 
-    // 1. Node Agent: must NOT have --no-skills or --no-extensions, MUST have --approve, must NOT restrict tools
     let mut node_agent_out = String::new();
     let _ = run_pi(
         PiRequest {
@@ -403,28 +393,11 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         },
         |text| node_agent_out.push_str(&text),
     );
-    assert!(
-        !node_agent_out.contains("--no-skills"),
-        "Node agent must not have --no-skills"
-    );
-    assert!(
-        !node_agent_out.contains("--no-extensions"),
-        "Node agent must not have --no-extensions"
-    );
-    assert!(
-        !node_agent_out.contains("--no-approve"),
-        "Node agent must not have --no-approve"
-    );
-    assert!(
-        node_agent_out.contains("--approve"),
-        "Node agent must have --approve for workspace trust"
-    );
-    assert!(
-        !node_agent_out.contains("--tools"),
-        "Node agent must not restrict tools via --tools"
-    );
-
-    // 2. Planner: accepts skills/extensions, excludes ls/find/grep without hiding extension tools.
+    assert!(!node_agent_out.contains("--no-skills"));
+    assert!(!node_agent_out.contains("--no-extensions"));
+    assert!(!node_agent_out.contains("--no-approve"));
+    assert!(node_agent_out.contains("--approve"));
+    assert!(!node_agent_out.contains("--tools"));
     let mut planner_out = String::new();
     let _ = run_pi(
         PiRequest {
@@ -443,30 +416,13 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         },
         |text| planner_out.push_str(&text),
     );
-    assert!(
-        !planner_out.contains("--no-skills"),
-        "Planner must allow skills"
-    );
-    assert!(
-        !planner_out.contains("--no-extensions"),
-        "Planner must allow selected extensions"
-    );
-    assert!(
-        planner_out.contains("--no-approve"),
-        "Planner must have --no-approve"
-    );
-    assert!(
-        planner_out.contains("--exclude-tools ls,find,grep") && !planner_out.contains("--tools"),
-        "Planner must restrict base tools without excluding extension tools"
-    );
-    assert!(
-        planner_out.contains("PLANNER_WRITE_TOOLS: true"),
-        "Planner extension must be told to mount its file tools"
-    );
+    assert!(!planner_out.contains("--no-skills"));
+    assert!(!planner_out.contains("--no-extensions"));
+    assert!(planner_out.contains("--no-approve"));
+    assert!(planner_out.contains("--exclude-tools ls,find,grep") && !planner_out.contains("--tools"));
+    assert!(planner_out.contains("PLANNER_WRITE_TOOLS: true"));
     assert!(planner_out.contains("FEEDBACK_ENABLED: false"));
-    // A saved setting can withhold file mutation tools; it must not use a
-    // --tools allowlist that would also hide extension-contributed tools. The
-    // request keeps the full descriptive list so Config stays authoritative.
+    // Config excludes file tools without hiding extension tools.
     let read_only_config = Config {
         feedback_enabled: true,
         planner_write_tools: false,
@@ -494,15 +450,9 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(read_only_planner_out.contains("FEEDBACK_ENABLED: true"));
     assert!(
         read_only_planner_out.contains("--exclude-tools ls,find,grep,write,edit")
-            && !read_only_planner_out.contains("--tools"),
-        "Planner file tools must be excluded without hiding extension tools"
+            && !read_only_planner_out.contains("--tools")
     );
-    assert!(
-        read_only_planner_out.contains("PLANNER_WRITE_TOOLS: false"),
-        "Planner extension must be told to skip file tool registration"
-    );
-
-    // 3. Partitioner: MUST have --no-skills, --no-extensions, --no-approve, and --no-tools
+    assert!(read_only_planner_out.contains("PLANNER_WRITE_TOOLS: false"));
     let mut partitioner_out = String::new();
     let _ = run_pi(
         PiRequest {
@@ -521,24 +471,10 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         },
         |text| partitioner_out.push_str(&text),
     );
-    assert!(
-        partitioner_out.contains("--no-skills"),
-        "Partitioner must have --no-skills"
-    );
-    assert!(
-        partitioner_out.contains("--no-extensions"),
-        "Partitioner must have --no-extensions"
-    );
-    assert!(
-        partitioner_out.contains("--no-approve"),
-        "Partitioner must have --no-approve"
-    );
-    assert!(
-        partitioner_out.contains("--no-tools"),
-        "Partitioner must have --no-tools"
-    );
-
-    // 4. Merger: MUST have --no-skills and --no-approve, but must NOT have --no-extensions (continuity exception)
+    assert!(partitioner_out.contains("--no-skills"));
+    assert!(partitioner_out.contains("--no-extensions"));
+    assert!(partitioner_out.contains("--no-approve"));
+    assert!(partitioner_out.contains("--no-tools"));
     let mut merger_out = String::new();
     let _ = run_pi(
         PiRequest {
@@ -557,22 +493,11 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         },
         |text| merger_out.push_str(&text),
     );
-    assert!(
-        merger_out.contains("--no-skills"),
-        "Merger must have --no-skills"
-    );
-    assert!(
-        !merger_out.contains("--no-extensions"),
-        "Merger must not have --no-extensions so continuity can load"
-    );
-    assert!(
-        merger_out.contains("--no-approve"),
-        "Merger must have --no-approve"
-    );
-    assert!(
-        merger_out.contains("--tools read,write,bash,edit"),
-        "Merger must receive fixed tools"
-    );
+    assert!(merger_out.contains("--no-skills"));
+    // Continuity requires extensions.
+    assert!(!merger_out.contains("--no-extensions"));
+    assert!(merger_out.contains("--no-approve"));
+    assert!(merger_out.contains("--tools read,write,bash,edit"));
 }
 
 #[test]
@@ -726,7 +651,6 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
 "#;
     fs::write(&script_path, script).unwrap();
 
-    // Set external PI_MODEL, PI_THINKING, PI_SESSION_ID, PI_SESSION_FILE in current test process
     std::env::set_var("PI_MODEL", "leaked-external-model");
     std::env::set_var("PI_THINKING", "leaked-external-thinking");
     std::env::set_var("PI_SESSION_ID", "leaked-external-session");
@@ -749,7 +673,6 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         planner_write_tools: true,
     };
 
-    // Verify PiModelConfig::resolve for NodeAgent ignores PI_MODEL and uses base_config.model
     use grapher::engine::PiModelConfig;
     let resolved = PiModelConfig::resolve(PiRole::NodeAgent, &base_config);
     assert_eq!(resolved.model, "internal-grapher-model");
@@ -763,7 +686,6 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         Some("low")
     );
     std::env::set_var("PARTITIONER_THINKING", "medium");
-    // Partitioner defaults to low, but an explicit role override is respected.
     assert_eq!(
         PiModelConfig::resolve(PiRole::Partitioner, &base_config)
             .thinking
@@ -775,13 +697,11 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         None => std::env::remove_var("PARTITIONER_THINKING"),
     }
 
-    // Verify NODE_AGENT_MODEL overrides base_config.model
     std::env::set_var("NODE_AGENT_MODEL", "override-node-model");
     let resolved_override = PiModelConfig::resolve(PiRole::NodeAgent, &base_config);
     assert_eq!(resolved_override.model, "override-node-model");
     std::env::remove_var("NODE_AGENT_MODEL");
 
-    // Verify run_pi strips PI_MODEL, PI_THINKING, PI_SESSION_ID, PI_SESSION_FILE from child process environment
     let effective = resolved.effective_config(&base_config);
     let mut output = String::new();
     let _ = run_pi(
@@ -802,28 +722,11 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         |text| output.push_str(&text),
     );
 
-    assert!(
-        output.contains("PI_MODEL_ENV: UNSET"),
-        "Child process must not inherit PI_MODEL"
-    );
-    assert!(
-        output.contains("PI_THINKING_ENV: UNSET"),
-        "Child process must not inherit PI_THINKING"
-    );
-    assert!(
-        output.contains("PI_SESSION_ID_ENV: UNSET"),
-        "Child process must not inherit PI_SESSION_ID"
-    );
-    assert!(
-        output.contains("PI_SESSION_FILE_ENV: UNSET"),
-        "Child process must not inherit PI_SESSION_FILE"
-    );
-    assert!(
-        output.contains("CLI_MODEL: internal-grapher-model"),
-        "Child must receive internal grapher model via --model"
-    );
-
-    // Clean up test env
+    assert!(output.contains("PI_MODEL_ENV: UNSET"));
+    assert!(output.contains("PI_THINKING_ENV: UNSET"));
+    assert!(output.contains("PI_SESSION_ID_ENV: UNSET"));
+    assert!(output.contains("PI_SESSION_FILE_ENV: UNSET"));
+    assert!(output.contains("CLI_MODEL: internal-grapher-model"));
     std::env::remove_var("PI_MODEL");
     std::env::remove_var("PI_THINKING");
     std::env::remove_var("PI_SESSION_ID");

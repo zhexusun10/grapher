@@ -1116,9 +1116,8 @@ pub fn compute_git_changes(
 
     // If comparing against live working tree (`after` is None), also collect untracked files.
     // Ignored ordinary project files are force-added to graph snapshots, so they are
-    // still reported; generated dependency/cache trees are not part of a snapshot and
-    // must stay out. The ignored listing uses the collector's artifact pathspecs so
-    // Git skips an inherited node_modules tree instead of materializing it here.
+    // still reported, including installed dependencies and runnable artifacts.
+    // Only rebuildable caches use the collector's artifact pathspec exclusions.
     if after.is_none() {
         let mut untracked =
             run_git(&["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
@@ -1257,7 +1256,9 @@ pub fn update_from_log_text(
             if let Ok(mut guard) = cache().lock() {
                 let key = (run_id.to_string(), execution_id.to_string());
                 guard.log_changed(&key);
-                guard.log_changes.remove(&key);
+                guard
+                    .log_changes
+                    .insert(key.clone(), FileChangeSummary::default());
                 guard.live.remove(&key);
             }
         }
@@ -1294,7 +1295,9 @@ pub fn update_from_log_text(
     } else if replace {
         if let Ok(mut guard) = cache().lock() {
             guard.log_changed(&key);
-            guard.log_changes.remove(&key);
+            guard
+                .log_changes
+                .insert(key.clone(), FileChangeSummary::default());
             guard.live.remove(&key);
         }
     } else if !is_running {
@@ -1347,13 +1350,11 @@ pub fn update_from_log_chunk(
         is_running,
     );
     let summary = accumulator_summary(acc);
-    if summary.is_empty() {
-        if !is_running {
-            guard.log_changes.remove(&key);
-            guard.live.remove(&key);
-        }
-        return;
+    if summary.is_empty() && !is_running {
+        guard.live.remove(&key);
     }
+    // Empty is authoritative too: a failed last tool must clear its live row
+    // and replace any older sidecar summary rather than resurrecting it.
     guard.log_changes.insert(key, summary);
 }
 
@@ -1391,11 +1392,9 @@ pub fn settle(run_id: &str, execution_id: &str) {
     acc.settled();
     let summary = accumulator_summary(acc);
     if summary.is_empty() {
-        guard.log_changes.remove(&key);
         guard.live.remove(&key);
-    } else {
-        guard.log_changes.insert(key, summary);
     }
+    guard.log_changes.insert(key, summary);
 }
 
 pub fn reset_planning(run_id: &str, planning_id: &str) {
@@ -1448,11 +1447,7 @@ pub fn update_planning_from_log_chunk(
         true,
     );
     let summary = accumulator_summary(acc);
-    if summary.is_empty() {
-        guard.planning_changes.remove(&key);
-    } else {
-        guard.planning_changes.insert(key, summary);
-    }
+    guard.planning_changes.insert(key, summary);
 }
 
 pub fn settle_planning(run_id: &str, planning_id: &str) {
@@ -1470,11 +1465,9 @@ pub fn settle_planning(run_id: &str, planning_id: &str) {
     acc.settled();
     let summary = accumulator_summary(acc);
     if summary.is_empty() {
-        guard.planning_changes.remove(&key);
         guard.planning_live.remove(&key);
-    } else {
-        guard.planning_changes.insert(key, summary);
     }
+    guard.planning_changes.insert(key, summary);
 }
 
 pub fn record_git_commit_changes(
@@ -1619,7 +1612,7 @@ struct PersistedRunChanges {
 /// Derived summaries are a cache, not history. Bump this whenever transcript
 /// parsing changes semantics so an older sidecar cannot keep stale rows (for
 /// example bash deletions that were never inside the workspace) authoritative.
-const PERSISTED_CHANGES_VERSION: u32 = 3;
+const PERSISTED_CHANGES_VERSION: u32 = 4;
 
 fn read_persisted(path: &Path) -> PersistedRunChanges {
     fs::read_to_string(path)
@@ -1648,16 +1641,11 @@ fn merge_persisted_executions(
     per_execution: BTreeMap<String, Vec<FileChangeSummary>>,
 ) -> PersistedRunChanges {
     for (execution_id, parts) in per_execution {
-        // Cache entries are newer, so they merge over the persisted summary.
-        let merged = match persisted.executions.remove(&execution_id) {
-            Some(existing) => {
-                let mut all = vec![existing];
-                all.extend(parts);
-                merge_summaries(&all, false)
-            }
-            None => merge_summaries(&parts, false),
-        };
-        persisted.executions.insert(execution_id, merged);
+        // Each cached execution is a complete summary, not a delta. Adding its
+        // previous saved copy double-counts edits and retains removed paths.
+        persisted
+            .executions
+            .insert(execution_id, merge_summaries(&parts, false));
     }
     persisted
 }
@@ -2402,7 +2390,7 @@ mod tests {
     }
 
     #[test]
-    fn live_changes_keep_ignored_project_files_but_drop_generated_artifacts() {
+    fn live_changes_keep_dependencies_and_runnable_artifacts_but_drop_rebuildable_caches() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         fs::create_dir(&repo).unwrap();
@@ -2410,29 +2398,36 @@ mod tests {
         crate::workspace::git(&repo, &["config", "user.email", "test@example.com"]).unwrap();
         crate::workspace::git(&repo, &["config", "user.name", "Test"]).unwrap();
 
-        fs::write(repo.join(".gitignore"), "dist/\n").unwrap();
+        fs::write(repo.join(".gitignore"), "dist/\nnode_modules/\n.next/\n__pycache__/\n").unwrap();
         fs::write(repo.join("kept.txt"), "base\n").unwrap();
         crate::workspace::git(&repo, &["add", "-A"]).unwrap();
         crate::workspace::git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
         let before = crate::workspace::git(&repo, &["rev-parse", "HEAD"]).unwrap();
 
-        // Ignored ordinary files are force-added to graph snapshots, so `dist/` is a
-        // live project change. `node_modules/` is not listed in .gitignore, so only the
-        // collector's generated-artifact boundary can keep it out. Both are present
-        // in inherited workspaces; the dependency tree must not become node changes.
+        // Ignored dependency bytes and runnable artifacts are real changes;
+        // rebuildable caches stay excluded whether ignored or untracked.
         fs::create_dir_all(repo.join("dist")).unwrap();
         fs::write(repo.join("dist/bundle.js"), "generated\n").unwrap();
         fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
         fs::write(repo.join("node_modules/pkg/index.js"), "dependency\n").unwrap();
+        fs::create_dir(repo.join(".next")).unwrap();
+        fs::write(repo.join(".next/server.js"), "runnable\n").unwrap();
+        fs::write(repo.join("module.pyc"), [0_u8, 1, 2]).unwrap();
+        fs::write(repo.join("module.pyo"), [0_u8, 3, 4]).unwrap();
+        for cache in ["__pycache__", ".pytest_cache"] {
+            fs::create_dir(repo.join(cache)).unwrap();
+            fs::write(repo.join(cache).join("cache"), "rebuildable\n").unwrap();
+        }
+        fs::write(repo.join("build.tsbuildinfo"), "incremental\n").unwrap();
         fs::write(repo.join("src.ts"), "export const value = 1;\n").unwrap();
 
         let live = compute_git_changes(&repo, &before, None, "worker", "exec-live").unwrap();
         let paths: Vec<&str> = live.files.iter().map(|file| file.path.as_str()).collect();
         assert_eq!(
             paths,
-            vec!["dist/bundle.js", "src.ts"],
-            "authored files stay: {paths:?}"
+            vec![".next/server.js", "dist/bundle.js", "module.pyc", "module.pyo", "node_modules/pkg/index.js", "src.ts"],
+            "project artifacts stay: {paths:?}"
         );
-        assert_eq!(live.added_count, 2);
+        assert_eq!(live.added_count, 6);
     }
 }

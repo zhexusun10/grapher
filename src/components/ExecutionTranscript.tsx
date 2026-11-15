@@ -9,8 +9,8 @@ import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityP
 import { isRuntimeEventsConnected, RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS, subscribeExecutionOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
 import { cacheTranscriptWindow, executionTranscriptCache, transcriptFromCache } from "../services/transcriptCache";
 import { appendTranscriptPage, prependTranscriptPage, renderTranscriptWindow, validateTranscriptPrepend, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
-import { markTranscriptPrepend, markTranscriptPrependIfReading, olderPageFits, onTranscriptScroll } from "../services/transcriptScroll";
-import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES, TRANSCRIPT_REVEAL_FALLBACK_MS } from "../services/transcriptPaging";
+import { markTranscriptPrepend, markTranscriptPrependIfReading, olderPageFits, onTranscriptScroll, transcriptScrollParent } from "../services/transcriptScroll";
+import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES, transcriptAutoFillBudget, TRANSCRIPT_REVEAL_FALLBACK_MS } from "../services/transcriptPaging";
 import { TranscriptHistoryStatus } from "./TranscriptHistoryStatus";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { useTranscriptReader } from "../hooks/useTranscriptReader";
@@ -22,6 +22,9 @@ type Props = {
   runId: string;
   execution: Execution;
   endOffset?: number;
+  /** Older attempts acquire a reader only when the viewport reaches them. */
+  defer?: boolean;
+  foregroundReady?: boolean;
   onLoadingChange?: (loading: boolean) => void;
   onUserResize?: (expanded?: boolean, card?: HTMLElement) => void;
   onInitialOutputReady?: (executionId: string) => void;
@@ -36,8 +39,33 @@ type Props = {
 
 export function ExecutionTranscript(props: Props) {
   return <WorkspaceImageProvider runId={props.runId} executionId={props.execution.id}>
-    <ExecutionHistory key={`${props.runId}:${props.execution.id}:${props.endOffset ?? "full"}`} {...props} />
+    <ViewportExecutionHistory key={`${props.runId}:${props.execution.id}:${props.endOffset ?? "full"}`} {...props} />
   </WorkspaceImageProvider>;
+}
+
+function ViewportExecutionHistory(props: Props) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [activated, setActivated] = useState(!props.defer);
+  const active = activated || !props.defer;
+  useEffect(() => {
+    // Promotion to the newest record is permanent for this mount. A later
+    // appended turn must not turn that already-visible reader back into a stub.
+    if (active) { if (!activated) setActivated(true); return; }
+    if (props.foregroundReady === false) return;
+    const element = ref.current;
+    if (!element) return;
+    if (typeof IntersectionObserver === "undefined") { setActivated(true); return; }
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) setActivated(true);
+    }, { root: transcriptScrollParent(element) });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [active, activated, props.foregroundReady]);
+  return <div ref={ref} data-deferred-execution-id={!active ? props.execution.id : undefined}>
+    {active ? <ExecutionHistory {...props} /> : <div className="transcript-loading" style={{ minHeight: 320 }}>
+      <button type="button" onClick={() => setActivated(true)}>{t("加载历史记录")}</button>
+    </div>}
+  </div>;
 }
 
 /** Keep pending turns identical to an empty live transcript, including its
@@ -72,10 +100,6 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
   const displayedText = paged ? (window ? renderTranscriptWindow(window) : "") : endOffset === undefined ? execution.output :
     new TextDecoder().decode(new TextEncoder().encode(execution.output).subarray(0, endOffset));
 
-  // Node histories are view-owned. Going back to Planner releases their RAM,
-  // including on collapse, Node-to-Node navigation and Conversation exit.
-  useEffect(() => () => { executionTranscriptCache.delete(cacheKey); }, [cacheKey]);
-
   const publish = useCallback((next: TranscriptWindow) => {
     windowRef.current = next;
     executionTranscriptCache.set(cacheKey, cacheTranscriptWindow(next));
@@ -104,21 +128,26 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
     return onTranscriptScroll(wrapperRef.current, () => { if (commitPendingOlder()) setHoldingOlder(false); });
   }, [holdingOlder, commitPendingOlder]);
 
-  const loadOlder = useStableCallback(async (preserveReading: boolean = true) => {
+  const loadOlder = useStableCallback(async (preserveReading: boolean = true, readerRequested: boolean = preserveReading) => {
     const before = windowRef.current;
     const signal = lifetime.current;
     if (!signal || signal.aborted) return;
     if (olderBusy.current) { if (preserveReading) setShowOlderLoading(true); return; }
     if (pendingOlder.current) { if (commitPendingOlder()) setHoldingOlder(false); return; }
     if (!before || before.start === 0) return;
+    const scroller = transcriptScrollParent(wrapperRef.current);
+    const reservation = scroller ? transcriptAutoFillBudget(scroller).reserve(OLDER_TRANSCRIPT_BYTES, readerRequested) : null;
+    if (scroller && !reservation) return;
+    let receivedBytes = 0;
     olderBusy.current = true; failedOlder.current = false;
     setLoadingOlder(true); setShowOlderLoading(preserveReading); setError("");
     if (preserveReading) markTranscriptPrepend(wrapperRef.current);
     try {
-      const page = await runtimeService.getExecutionOutput(runId, execution.id, 0, signal, false, true, before.start, OLDER_TRANSCRIPT_BYTES, endOffset);
+      const page = await runtimeService.getExecutionOutput(runId, execution.id, 0, signal, false, true, before.start, reservation?.bytes ?? OLDER_TRANSCRIPT_BYTES, endOffset);
       if (signal.aborted) return;
       if (page.runId !== runId || page.executionId !== execution.id) throw new Error(t("执行记录与请求不匹配"));
-      validateTranscriptPrepend(before, page);
+      const older = validateTranscriptPrepend(before, page);
+      receivedBytes = older.end - older.start;
       // Older bytes extend the history above the reader. Keep them out of the
       // layout until the reader reaches that point, so the page lands where
       // they scrolled to instead of compensating the scroll position under
@@ -134,13 +163,14 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
       publish(next);
     } catch (caught) { if (!signal.aborted) { failedOlder.current = true; setError(String(caught)); } }
     finally {
+      reservation?.finish(receivedBytes);
       olderBusy.current = false;
       if (!signal.aborted) { setLoadingOlder(false); setShowOlderLoading(false); }
     }
   });
 
   const initialReady = useAutoTranscriptHistory(wrapperRef, hasOlder, loadingOlder, error, window,
-    preserveReading => { void loadOlder(preserveReading); }, ready, window ? window.end - window.start : 0, holdingOlder);
+    preserveReading => { void loadOlder(preserveReading, false); }, ready, window ? window.end - window.start : 0, holdingOlder);
 
   useLayoutEffect(() => {
     notifyLoading(!initialReady);
@@ -191,6 +221,10 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
         const next = latest
           ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, settled || page.status !== "running")
           : windowFromPage(page, settled || page.status !== "running");
+        if (!before) {
+          const scroller = transcriptScrollParent(wrapperRef.current);
+          if (scroller) transcriptAutoFillBudget(scroller).charge(next.end - next.start);
+        }
         publish(next); // Empty terminal pages still update settled/total.
         setReady(true);
         emptyPages = page.content ? 0 : emptyPages + 1;
@@ -225,9 +259,10 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
         user's turn and the streamed reply until the execution settles. The
         component compensates the scroller when the label appears instead. */}
     <TranscriptHistoryStatus loading={loadingOlder && showOlderLoading} reserve={false} />
-    {settled && !ready && !error ? <div className="transcript-loading" role="status" aria-label={t("正在加载历史记录…")}>
+    {settled && !ready && !error ? <div key="loading" className="transcript-loading" role="status" aria-label={t("正在加载历史记录…")}>
       <Loader2 size={14} className="spin" aria-hidden="true" />
-    </div> : <VirtualizedTranscript compact output={displayedText} startOffset={window?.start ?? 0} settled={settled}
+    </div> : <div key="output" className="execution-transcript-content" style={{ opacity: announcedRef.current || !settled || initialReady || revealFallback || error ? 1 : 0 }}>
+      <VirtualizedTranscript compact output={displayedText} startOffset={window?.start ?? 0} settled={settled}
       showUserTurns={!!inlineUserTurnTexts?.length}
       userTurnTexts={inlineUserTurnTexts}
       liveSteers={liveSteers}
@@ -237,6 +272,6 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
       onReachTop={window?.start && !error ? () => { void loadOlder(); } : undefined}
       onUserResize={onUserResize}
       onCompactingChange={onCompactingChange}
-      emptyText={execution.status === "running" ? "" : t("该节点没有产生日志输出")} />}
+      emptyText={execution.status === "running" ? "" : t("该节点没有产生日志输出")} /></div>}
   </div>;
 }

@@ -54,6 +54,7 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspacePath, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "./services/workspaceConversations";
 import { loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
 import { useHideAutoMode, useLandingBackground } from "./services/displayPreferences";
+import { STORAGE_KEYS, readStorageJson, readStorageString, writeStorageJson, writeStorageString } from "./services/appStorage";
 import { LandingView } from "./components/views/LandingView";
 import { FloatingPathsBackground } from "./components/ui/floating-paths";
 import { ApprovalModal } from "./components/modals/ApprovalModal";
@@ -63,46 +64,6 @@ import { SettingsModal } from "./components/modals/SettingsModal";
 import { EditorModal } from "./components/modals/EditorModal";
 
 type WorkbenchComponent = typeof import("./components/views/AppGraphWorkbench").AppGraphWorkbench;
-
-const STORAGE_KEYS = {
-  projects: "grapher_projects",
-  workspaceRuns: "grapher_workspace_runs",
-  runLabels: "grapher_run_labels",
-  runModes: "grapher_run_modes",
-  config: "grapher_config",
-  dataPath: "grapher_data_path",
-  planMode: "grapher_plan_mode",
-} as const;
-
-function readStorageString(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
-function readStorageJson<T>(key: string): T | null {
-  const raw = readStorageString(key);
-  if (raw === null) return null;
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
-}
-
-function writeStorageString(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value);
-  } catch {}
-}
-
-function writeStorageJson(key: string, value: unknown): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {}
-}
 
 // A conversation without an explicit override keeps the model composition it
 // was created with. Snapshots always describe their own Run, never whichever
@@ -129,7 +90,7 @@ export default function App() {
   const hideAutoMode = useHideAutoMode();
   const [state, setState] = useSnapshotState(emptySnapshot);
   const [projects, setProjects] = useState<ProjectItem[]>(() => {
-    const items = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
+    const items = readStorageJson(STORAGE_KEYS.projects);
     if (!Array.isArray(items)) return [];
     // Match the order bootstrap derives from `lastOpened`; otherwise the
     // first authoritative sort visibly rearranges the restored cards.
@@ -141,11 +102,11 @@ export default function App() {
   });
   const [config, setConfig] = useState<Config>(() => {
     let initialConfig: Config = { ...defaultConfig };
-    const parsed = readStorageJson<Partial<Config>>(STORAGE_KEYS.config);
+    const parsed = readStorageJson(STORAGE_KEYS.config);
     if (parsed) {
       initialConfig = { ...initialConfig, ...parsed, model: "", maxFeedback: normalizeMaxFeedback(parsed.maxFeedback) };
     }
-    const list = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
+    const list = readStorageJson(STORAGE_KEYS.projects);
     if (Array.isArray(list) && list.length > 0) {
       const sorted = [...list].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
       if (sorted[0]?.path) {
@@ -216,14 +177,14 @@ export default function App() {
   // Warm initial cache with stored workspace runs to prevent initial skeleton flash.
   // Bootstrap subsequently repairs ownership and updates persisted lists.
   const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>(() => {
-    const saved = readStorageJson<Record<string, string[]>>(STORAGE_KEYS.workspaceRuns);
+    const saved = readStorageJson(STORAGE_KEYS.workspaceRuns);
     return saved ? normalizeWorkspaceRuns(saved) : {};
   });
   const [isSidebarReady, setIsSidebarReady] = useState(() => {
-    const parsedProjects = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
+    const parsedProjects = readStorageJson(STORAGE_KEYS.projects);
     if (!parsedProjects) return false;
     if (!Array.isArray(parsedProjects) || parsedProjects.length === 0) return true;
-    const parsedRuns = readStorageJson<Record<string, string[]>>(STORAGE_KEYS.workspaceRuns);
+    const parsedRuns = readStorageJson(STORAGE_KEYS.workspaceRuns);
     if (parsedRuns) {
       const sorted = [...parsedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
       const active = sorted[0];
@@ -240,10 +201,10 @@ export default function App() {
   // supersedes its read even when the foreground Run has not changed.
   const settingsReadGeneration = useRef(0);
   const [runLabels, setRunLabels] = useState<Record<string, string>>(
-    () => readStorageJson<Record<string, string>>(STORAGE_KEYS.runLabels) ?? {}
+    () => readStorageJson(STORAGE_KEYS.runLabels) ?? {}
   );
   const [runModes, setRunModes] = useState<Record<string, PlanMode>>(
-    () => readStorageJson<Record<string, PlanMode>>(STORAGE_KEYS.runModes) ?? {}
+    () => readStorageJson(STORAGE_KEYS.runModes) ?? {}
   );
   const hasConversationSummariesRef = useRef(false);
   const pendingRunLabelIdsRef = useRef(new Set<string>());
@@ -886,14 +847,14 @@ export default function App() {
     if (!planningRecovery.current(scope)) return;
     if (data.envOverrides) setEnvOverrides(data.envOverrides);
 
-    const rawProjects = readStorageJson<ProjectItem[]>(STORAGE_KEYS.projects);
+    const rawProjects = readStorageJson(STORAGE_KEYS.projects);
     const storedProjects = Array.isArray(rawProjects)
       ? rawProjects.map(project => ({
           ...project, path: normalizeWorkspacePath(project.path), id: normalizeWorkspacePath(project.id || project.path),
         }))
       : null;
 
-    const storedWorkspaceRuns = readStorageJson<Record<string, string[]>>(STORAGE_KEYS.workspaceRuns);
+    const storedWorkspaceRuns = readStorageJson(STORAGE_KEYS.workspaceRuns);
 
     let activeRepo = "";
     let activeInfo: RepositoryInfo | null = null;

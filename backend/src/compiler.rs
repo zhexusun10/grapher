@@ -89,6 +89,11 @@ pub fn node_id(name: &str) -> String {
     if slug.is_empty() {
         slug.push_str("node");
     }
+    // A dotted hash is an extension on Windows: CON.<hash> is still a
+    // device name. Escape the stem before adding the deterministic suffix.
+    if is_windows_reserved_name(&slug) {
+        slug.push_str("-node");
+    }
     let digest = git2::Oid::hash_object(git2::ObjectType::Blob, name.as_bytes())
         .map(|oid| oid.to_string())
         .unwrap_or_else(|_| "0000000000000000000000000000000000000000".into());
@@ -349,7 +354,10 @@ fn compile_with_policy(
             "W303: If <FEEDBACK> is sent from {} to {}, these nodes will rerun: {}.",
             edge.from,
             edge.to,
-            downstream(graph, &edge.to).into_iter().collect::<Vec<_>>().join(", ")
+            downstream(graph, &edge.to)
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     Ok(Plan {
@@ -366,14 +374,25 @@ mod node_id_tests {
 
     #[test]
     fn windows_device_names_never_become_git_ref_components() {
-        for name in ["CON", "con", "NUL", "COM1", "lpt9"] {
+        let temp = tempfile::tempdir().unwrap();
+        for name in [
+            "CON", "con", "NUL", "COM1", "lpt9", "AUX", "PRN", "CONIN$", "CONOUT$", "con...",
+            "NUL ", "COM1!",
+        ] {
             let id = node_id(name);
             assert_ne!(id, name);
             assert!(
-                id.starts_with("con")
-                    || id.starts_with("nul")
-                    || id.starts_with("com")
-                    || id.starts_with("lpt")
+                !is_windows_reserved_name(&id),
+                "{name:?} produced a reserved component: {id}"
+            );
+            // Windows rejects reserved device stems even with a .hash suffix.
+            // Exercise real paths, not just the shape of the generated string.
+            let directory = temp.path().join(&id);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("marker"), name).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(directory.join("marker")).unwrap(),
+                name
             );
         }
         assert_eq!(node_id("worker"), "worker");

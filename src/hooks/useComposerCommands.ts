@@ -47,6 +47,10 @@ export function useComposerCommands({ text, runId, node, planMode, conversationM
     ? updateRoleModelConfig(context.config, role, context.snapshot.nodes[modelNode].modelConfig!) : context?.config;
   const settings = effectiveConfig ? roleModelConfig(effectiveConfig, role, context?.envOverrides)
     : { model: "", thinkingLevel: "low" as ThinkingLevel };
+  const settingsKey = JSON.stringify([settings.model, settings.thinkingLevel,
+    context?.envOverrides[role], context?.envOverrides[`${role}Thinking`]]);
+  const settingsIdentity = useRef(settingsKey);
+  settingsIdentity.current = settingsKey;
   const argument = text.match(/^\/(model|thinking)\s+([^\n]*)$/);
   const mcpArgument = text.match(/^\/mcp\s+([^\n]*)$/);
   const model = catalog?.models.find(item => `${item.provider}/${item.id}` === settings.model);
@@ -162,7 +166,10 @@ export function useComposerCommands({ text, runId, node, planMode, conversationM
       const envKey = command.name === "model" ? role : `${role}Thinking`;
       if (context.envOverrides[envKey]) throw new Error(t("此配置由环境变量覆盖，请先移除环境变量。"));
       const fresh = await providerAuth.catalog();
-      if (!isCurrent()) return "menu";
+      // Settings can change while this catalog read is pending without changing
+      // the conversation scope. Never save a patch built from the old selection
+      // over that newer edit; leave the command as a draft for an explicit retry.
+      if (!isCurrent() || settingsIdentity.current !== settingsKey) return "menu";
       let patch;
       if (command.name === "model") {
         const matches = availableCatalogModels(fresh).filter(model => `${model.provider}/${model.id}` === command.args || model.id === command.args);

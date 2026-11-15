@@ -37,6 +37,7 @@ function Fixture() {
       <button onClick={() => setNode(node === "a" ? "b" : "a")}>Switch node</button>
       <button onClick={() => setSnapshot(previous => ({ ...previous, runId: previous.runId === "run-a" ? "run-b" : "run-a" }))}>Switch run</button>
       <button onClick={() => setShowComposer(previous => !previous)}>Toggle composer</button>
+      <button onClick={() => setConfig(previous => updateRoleModelConfig(previous, "planner", { model: "test/two", thinkingLevel: "off" }))}>Apply newer settings</button>
       {showComposer && <PromptBox repository={config.repository} runId={snapshot.runId || undefined} node={node}
         conversationModel={conversationModel} planMode={mode}
         value={value} onChange={event => setValue(event.target.value)}

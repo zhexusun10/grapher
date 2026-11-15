@@ -11,6 +11,17 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "environment_snapshots.rs"]
+mod snapshots;
+
+/// Ownership evidence is independent of which environment is currently active.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnvironmentScope {
+    pub root: String,
+    pub path: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LaunchConfig {
@@ -18,17 +29,29 @@ pub struct LaunchConfig {
     pub entry: String,
     /// Complete business PATH, not additions to an inherited host PATH.
     pub path: Vec<String>,
+    /// The business search path before activation. New automatic launches keep
+    /// project, relative and missing entries here; legacy records omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unbound_path: Option<Vec<String>>,
     pub shell: String,
     #[serde(default)]
     pub variables: BTreeMap<String, String>,
     /// Names only. Values (including credentials) are injected, never persisted.
     #[serde(default)]
     pub inherit: Vec<String>,
+    /// Source-like business variables remain transient, never serialized into L.
+    /// Older explicit policies retain their allowlisted inheritance contract.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inherit_ambient: bool,
     /// Trusted Bash initialization, e.g. a declared Conda activation hook.
     #[serde(default)]
     pub hook: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_scopes: Vec<String>,
+    /// Root-qualified ownership. None preserves legacy single-root records;
+    /// Some(empty) is an unbound launch with the current ownership contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_scopes: Option<Vec<EnvironmentScope>>,
     /// Non-owning hints from previous business processes. Runtime never copies,
     /// activates or cleans these environments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -283,6 +306,28 @@ fn reserved(key: &str) -> bool {
         )
 }
 
+/// Rebind an absolute project path without resolving away a project's own
+/// directory links. Root aliases are accepted; external/relative paths and
+/// dotted paths retain native semantics instead of guessing another layout.
+pub(crate) fn project_path_template(path: &Path, source: &Path) -> Option<String> {
+    if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir)) {
+        return None;
+    }
+    let relative = path.ancestors().find_map(|ancestor| {
+        crate::path_identity::same_path(ancestor, source)
+            .then(|| path.strip_prefix(ancestor).ok().map(Path::to_path_buf)).flatten()
+    }).or_else(|| {
+        let actual = crate::path_identity::actual_path(path).ok()?;
+        actual.ancestors().find_map(|ancestor| {
+            crate::path_identity::same_path(ancestor, source)
+                .then(|| actual.strip_prefix(ancestor).ok().map(Path::to_path_buf)).flatten()
+        })
+    })?;
+    let suffix = relative.to_str()?;
+    let suffix = if cfg!(windows) { suffix.replace('\\', "/") } else { suffix.to_string() };
+    Some(if suffix.is_empty() { "{workspace}".into() } else { format!("{{workspace}}/{suffix}") })
+}
+
 impl LaunchConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.path.is_empty()
@@ -292,15 +337,18 @@ impl LaunchConfig {
         {
             return Err("Launch needs an explicit entry, complete PATH and an existing absolute native Bash shell".into());
         }
-        for path in self.path.iter().chain(std::iter::once(&self.entry)) {
-            if path.contains('\0')
-                || !(Path::new(path).is_absolute()
-                    || path.starts_with("{workspace}/")
-                    || path.starts_with("{state}/"))
-            {
-                return Err(format!(
-                    "Launch path must be absolute, workspace-bound or state-bound: {path}"
-                ));
+        let absolute = |path: &str| Path::new(path).is_absolute()
+            || matches!(path, "{workspace}" | "{state}")
+            || path.starts_with("{workspace}/") || path.starts_with("{state}/");
+        if self.entry.contains('\0') || !absolute(&self.entry) {
+            return Err("Launch entry must be absolute, workspace-bound or state-bound".into());
+        }
+        if self.unbound_path.as_ref().is_some_and(Vec::is_empty) {
+            return Err("Unbound business PATH must not be empty".into());
+        }
+        for path in self.path.iter().chain(self.unbound_path.iter().flatten()) {
+            if path.contains('\0') || self.unbound_path.is_none() && !absolute(path) {
+                return Err(format!("Invalid launch PATH entry: {path}"));
             }
         }
         if let Some(binding) = &self.environment {
@@ -308,6 +356,17 @@ impl LaunchConfig {
         }
         for scope in &self.managed_scopes {
             safe_relative(scope)?;
+        }
+        if let Some(scopes) = &self.owned_scopes {
+            if !self.managed_scopes.is_empty() {
+                return Err("Mixed legacy and root-qualified environment scopes".into());
+            }
+            for scope in scopes {
+                if !matches!(scope.root.as_str(), "workspace" | "state") {
+                    return Err("Invalid managed environment ownership root".into());
+                }
+                safe_relative(&scope.path)?;
+            }
         }
         for hint in &self.ambient_hints {
             hint.validate()?;
@@ -325,10 +384,26 @@ impl LaunchConfig {
         Ok(())
     }
 
+    pub(crate) fn restore_unbound_path(&mut self) {
+        if let Some(path) = &self.unbound_path {
+            self.path.clone_from(path);
+        } else {
+            // Preserve the frozen behavior of older explicit launch records.
+            self.path.retain(|path| !path.starts_with("{workspace}/") && !path.starts_with("{state}/"));
+        }
+    }
+
+    pub(crate) fn requires_entry_first(&self) -> bool {
+        // An unbound automatic entry is an absolute Bash executable, not a
+        // business-tool selector. Its installation must not outrank host tools.
+        !self.inherit_ambient || self.environment.is_some() || self.hook.is_some()
+    }
+
     pub(crate) fn state_bound(&self) -> bool {
         self.variables
             .values()
             .chain(&self.path)
+            .chain(self.unbound_path.iter().flatten())
             .chain(std::iter::once(&self.entry))
             .any(|value| value.contains("{state}"))
     }
@@ -349,6 +424,7 @@ impl LaunchConfig {
         Self {
             entry: expand(&self.entry),
             path: self.path.iter().map(|v| expand(v)).collect(),
+            unbound_path: self.unbound_path.as_ref().map(|path| path.iter().map(|v| expand(v)).collect()),
             shell: self.shell.clone(),
             variables: self
                 .variables
@@ -356,8 +432,10 @@ impl LaunchConfig {
                 .map(|(k, v)| (k.clone(), expand(v)))
                 .collect(),
             inherit: self.inherit.clone(),
+            inherit_ambient: self.inherit_ambient,
             hook: self.hook.as_ref().map(|v| expand(v)),
             managed_scopes: self.managed_scopes.clone(),
+            owned_scopes: self.owned_scopes.clone(),
             ambient_hints: self.ambient_hints.clone(),
             environment: self.environment.clone(),
         }
@@ -611,8 +689,11 @@ impl Environments {
         launch: &str,
         version: &str,
     ) -> Result<(), String> {
-        self.scoped_files(launch)?
-            .verify(&self.environment_root_for(path, launch)?, version, "")
+        if let Some(layouts) = self.snapshot_layouts(launch, version)? {
+            self.files.verify_roots(&self.snapshot_targets(path, &layouts)?, version)
+        } else {
+            self.scoped_files(launch)?.verify(&self.environment_root_for(path, launch)?, version, "")
+        }
     }
 
     pub(crate) fn validate_launch(&self, path: &Path, launch: &LaunchConfig) -> Result<(), String> {
@@ -657,12 +738,16 @@ impl Environments {
         let mut command = Command::new(&self.config.baseline[0]);
         command.args(&self.config.baseline[1..]);
         let mut probe = self.config.launch.clone();
+        // Business variables must not inject code/configuration into the trusted
+        // baseline probe, or make unrelated host configuration part of D.
+        probe.inherit_ambient = false;
         probe
             .variables
             .retain(|_, value| !value.contains("{workspace}") && !value.contains("{state}"));
         probe
             .path
-            .retain(|value| !value.contains("{workspace}") && !value.contains("{state}"));
+            .retain(|value| Path::new(value).is_absolute()
+                && !value.contains("{workspace}") && !value.contains("{state}"));
         clean_command(&mut command, &probe, None)?;
         command.env("PYTHONDONTWRITEBYTECODE", "1");
         let output = controlled_output(command)?;
@@ -738,6 +823,7 @@ impl Environments {
         }
         self.scoped_files(&result.launch_ref)?
             .validate_manifest(&result.environment_ref)?;
+        self.snapshot_layouts(&result.launch_ref, &result.environment_ref)?;
         self.load_launch(&result.launch_ref)?;
         Ok(())
     }
@@ -748,6 +834,7 @@ impl Environments {
         }
         self.scoped_files(&result.launch_ref)?
             .validate(std::slice::from_ref(&result.environment_ref))?;
+        self.snapshot_layouts(&result.launch_ref, &result.environment_ref)?;
         self.load_launch(&result.launch_ref)?;
         Ok(())
     }
@@ -808,7 +895,7 @@ impl Environments {
             return self.select(node, inputs);
         }
         self.validate_result_metadata(baseline)?;
-        for (_, input) in inputs {
+        for input in inputs.iter().map(|(_, input)| input).chain(current) {
             if input.domain != baseline.domain {
                 return Err("Environment inputs belong to different native domains".into());
             }
@@ -847,6 +934,16 @@ impl Environments {
         hints.dedup();
         let mut launch = self.load_launch(&selected.launch_ref)?;
         launch.ambient_hints = hints;
+        // Falling back to an unbound launch does not relinquish environments
+        // already owned by this physical slot. Never import sibling ownership.
+        if let Some(current) = current.filter(|current| current.layout.as_deref() == Some(path)) {
+            if let Some(scopes) = self.load_launch(&current.launch_ref)?.owned_scopes {
+                let owned = launch.owned_scopes.get_or_insert_with(Vec::new);
+                owned.extend(scopes);
+                owned.sort();
+                owned.dedup();
+            }
+        }
         selected.launch_ref = self.launch(&launch)?;
         selected.selected_from = inputs.iter().map(|(name, _)| name.clone()).collect();
         selected.inheritance = Some(InheritanceDecision {
@@ -888,12 +985,17 @@ impl Environments {
         preserve_failed: bool,
         history_edit: bool,
     ) -> Result<CompositeResult, String> {
+        self.validate_result_metadata(selected)?;
+        let root_layouts = self.snapshot_layouts(&selected.launch_ref, &selected.environment_ref)?;
+        let project_exclusions = if root_layouts.is_some() { self.exclusions(&selected.launch_ref)? } else { Vec::new() };
         let project_guard = if self.config.launch.state_bound() {
-            Some(crate::workspace_view::preparation_guard(path)?)
+            Some(crate::workspace_view::preparation_guard(path, &project_exclusions)?)
         } else {
             None
         };
-        self.validate_result_metadata(selected)?;
+        if history_edit {
+            self.validate_history_result(selected, &selected.launch_ref)?;
+        }
         if self.baseline()? != selected.domain {
             return Err("Native baseline/domain changed; refusing unsafe environment reuse".into());
         }
@@ -918,16 +1020,15 @@ impl Environments {
                 .environment
                 .is_none();
         if !unbound_best_effort && same_view && !history_edit && !preserve_failed {
-            scoped.verify(&state, &selected.environment_ref, "")?;
+            self.verify_view(path, &selected.launch_ref, &selected.environment_ref)?;
         } else if !preserve_failed && !unbound_best_effort {
-            // Materialization itself validates every stored byte before touching
-            // the view; do not repeat the same multi-GiB scan beforehand.
-            scoped.materialize(
-                &state,
-                std::slice::from_ref(&selected.environment_ref),
-                None,
-                false,
-            )?;
+            // Materialization validates every root's bytes and destinations
+            // before applying any root. Legacy records keep their own format.
+            if let Some(layouts) = &root_layouts {
+                self.files.materialize_roots(&self.snapshot_targets(path, layouts)?, &selected.environment_ref)?;
+            } else {
+                scoped.materialize(&state, std::slice::from_ref(&selected.environment_ref), None, false)?;
+            }
         } else {
             scoped.validate(std::slice::from_ref(&selected.environment_ref))?;
         }
@@ -963,7 +1064,7 @@ impl Environments {
         }
         // Cache leaves are created by their actual consumer, outside project Git.
         if let Some(expected) = project_guard {
-            if crate::workspace_view::preparation_guard(path)? != expected {
+            if crate::workspace_view::preparation_guard(path, &project_exclusions)? != expected {
                 return Err("Native environment preparation modified the project view; no agent may see runtime-injected files".into());
             }
         }
@@ -987,7 +1088,9 @@ impl Environments {
             self.validate_launch(path, &launch)?;
         }
         let expanded = launch.expanded(path);
-        if Path::new(&expanded.entry).parent() != expanded.path.first().map(Path::new) {
+        if launch.requires_entry_first()
+            && Path::new(&expanded.entry).parent() != expanded.path.first().map(Path::new)
+        {
             return Err(
                 "Default entry directory must be first in the declared business PATH".into(),
             );
@@ -1018,12 +1121,35 @@ impl Environments {
         previous: &str,
     ) -> Result<(), String> {
         if self.config.discovery {
-            if let Some(binding) = self.load_launch(previous)?.environment {
-                if !self.exclusions(selected)?.iter().any(|scope| {
-                    workspace::scope_contains(Path::new(&binding.prefix), Path::new(scope))
-                }) {
-                    return Err("Historical rollback drops a dynamic environment scope outside the frozen roots; refusing unsafe partial scope restoration".into());
+            let before = self.load_launch(previous)?;
+            let target = self.load_launch(selected)?;
+            // Git exclusions describe W only. Rollback restores the E snapshot,
+            // whose root may instead be S; equal relative names are not proof
+            // that a snapshot can restore another ownership root.
+            if self.scope_root(&before) != self.scope_root(&target) {
+                return Err("Historical rollback changes the environment ownership root; refusing unsafe partial scope restoration".into());
+            }
+            // L records ownership in both W and S, but the historical Files
+            // format captures only the active root. Never treat exclusion or
+            // ownership evidence as restorable bytes from the other root.
+            for launch in [&before, &target] {
+                let captured_root = self.scope_root(launch);
+                if self.config.launch.state_bound() && captured_root != "state" {
+                    return Err("Historical rollback lacks state-root byte evidence (including private HOME); refusing unsafe partial scope restoration".into());
                 }
+                if let Some(scope) = launch.owned_scopes.as_ref().and_then(|scopes| {
+                    scopes.iter().find(|scope| scope.root != captured_root)
+                }) {
+                    return Err(format!("Historical rollback has ownership only, not captured bytes, for {}:{}; refusing unsafe partial scope restoration", scope.root, scope.path));
+                }
+            }
+            let target_scopes = self.scope_paths(selected)?;
+            if self.scope_paths(previous)?.iter().any(|previous| {
+                !target_scopes.iter().any(|scope| {
+                    workspace::scope_contains(Path::new(previous), Path::new(scope))
+                })
+            }) {
+                return Err("Historical rollback drops a dynamic environment scope outside the frozen roots; refusing unsafe partial scope restoration".into());
             }
         }
         Ok(())
@@ -1037,6 +1163,20 @@ impl Environments {
     pub(crate) fn exclusions(&self, reference: &str) -> Result<Vec<String>, String> {
         if self.config.launch.state_bound() {
             let launch = self.load_launch(reference)?;
+            if let Some(scopes) = &launch.owned_scopes {
+                let mut paths: Vec<_> = scopes.iter()
+                    .filter(|scope| scope.root == "workspace")
+                    .map(|scope| scope.path.clone())
+                    .collect();
+                if let Some(binding) = &launch.environment {
+                    if binding.root.as_deref() == Some("workspace") {
+                        paths.push(binding.prefix.clone());
+                    }
+                }
+                paths.sort();
+                paths.dedup();
+                return Ok(paths);
+            }
             // A genuine project environment stays in the visible workspace, so
             // its project-relative scopes must remain excluded from Git. An
             // environment provisioned under {state} is not project-relative.
@@ -1063,48 +1203,56 @@ impl Environments {
         self.scope_paths(reference)
     }
 
+    fn scope_root<'a>(&self, launch: &'a LaunchConfig) -> &'a str {
+        launch.environment.as_ref().and_then(|binding| binding.root.as_deref())
+            .unwrap_or(if self.config.launch.state_bound() { "state" } else { "workspace" })
+    }
+
+    fn uses_project_scopes(&self, launch: &LaunchConfig) -> bool {
+        self.config.launch.state_bound() && launch.owned_scopes.is_some()
+            && self.scope_root(launch) == "workspace"
+    }
+
     fn scope_paths(&self, reference: &str) -> Result<Vec<String>, String> {
-        let mut paths: Vec<_> = self
-            .config
-            .scopes
-            .iter()
-            .chain(&self.config.caches)
-            .cloned()
-            .collect();
-        if let Some(binding) = self.load_launch(reference)?.environment {
-            if !paths.iter().any(|scope| {
-                workspace::scope_contains(Path::new(&binding.prefix), Path::new(scope))
-            }) {
-                paths.push(binding.prefix.clone());
-            }
+        let launch = self.load_launch(reference)?;
+        // State HOME/cache names must never become project exclusions simply
+        // because the selected interpreter lives in the project.
+        let mut paths: Vec<_> = if self.uses_project_scopes(&launch) {
+            Vec::new()
+        } else {
+            self.config.scopes.iter().chain(&self.config.caches).cloned().collect()
+        };
+        if let Some(binding) = &launch.environment {
+            paths.push(binding.prefix.clone());
         }
-        paths.extend(self.load_launch(reference)?.managed_scopes);
+        if let Some(scopes) = &launch.owned_scopes {
+            paths.extend(scopes.iter().filter(|scope| scope.root == self.scope_root(&launch))
+                .map(|scope| scope.path.clone()));
+        } else {
+            paths.extend(launch.managed_scopes);
+        }
         paths.sort();
         paths.dedup();
         Ok(paths)
     }
 
     pub(crate) fn scoped_files(&self, reference: &str) -> Result<Files, String> {
-        let scopes: Vec<_> = self
-            .scope_paths(reference)?
-            .into_iter()
-            .filter(|scope| !self.config.caches.contains(scope))
-            .collect();
-        Ok(
-            Files::environment(&self.directory.join("files"), &scopes, &self.config.caches)?
-                .with_project_index(!self.config.launch.state_bound()),
-        )
+        let launch = self.load_launch(reference)?;
+        let caches = if self.uses_project_scopes(&launch) { &[][..] } else { &self.config.caches };
+        let scopes: Vec<_> = self.scope_paths(reference)?.into_iter()
+            .filter(|scope| !caches.contains(scope)).collect();
+        Ok(Files::environment(&self.directory.join("files"), &scopes, caches)?
+            .with_project_index(!self.config.launch.state_bound()))
     }
 
     fn capture_scoped(&self, path: &Path, parent: &str, reference: &str) -> Result<String, String> {
         let files = self.scoped_files(reference)?;
         let version = Uuid::new_v4().to_string();
-        files.capture(
-            &self.environment_root_for(path, reference)?,
-            &version,
-            "",
-            &[parent.into()],
-        )?;
+        if let Some(layouts) = self.root_layouts_for_launch(&self.load_launch(reference)?)? {
+            self.files.capture_roots(&self.snapshot_targets(path, &layouts)?, &layouts, &version, &[parent.into()])?;
+        } else {
+            files.capture(&self.environment_root_for(path, reference)?, &version, "", &[parent.into()])?;
+        }
         if files.same_contents(parent, &version)? {
             Ok(parent.into())
         } else {
@@ -1133,12 +1281,30 @@ impl Environments {
         )?;
         let reference = self.launch(&launch)?;
         let exclusions = self.exclusions(&reference)?;
-        let mut policy = self.config.clone();
-        policy.scopes = exclusions
-            .into_iter()
-            .filter(|scope| !policy.caches.contains(scope))
-            .collect();
-        policy.check_tracked(path)?;
+        if self.config.launch.state_bound() && launch.owned_scopes.is_some() {
+            // Inspect authored project Git, not the force-collected graph index.
+            // Ordinary folders have no native index. Never silently hide a
+            // tracked file or adopt an escaping link as an environment scope.
+            let tracked = if path.join(".git").exists() {
+                workspace::project_git(path, &["ls-files", "-z", "--cached"])?
+            } else {
+                String::new()
+            };
+            for scope in &exclusions {
+                real_child_path(path, &path.join(scope), false)?;
+                if let Some(name) = tracked.split('\0').filter(|name| !name.is_empty()).find(|name| {
+                    workspace::scope_contains(Path::new(name), Path::new(scope))
+                        || workspace::scope_contains(Path::new(scope), Path::new(name))
+                }) {
+                    return Err(format!("Managed environment/cache conflicts with tracked file: {name}"));
+                }
+            }
+        } else {
+            let mut policy = self.config.clone();
+            policy.scopes = exclusions.into_iter()
+                .filter(|scope| !policy.caches.contains(scope)).collect();
+            policy.check_tracked(path)?;
+        }
         Ok(CompositeResult {
             launch_ref: reference,
             ..input.clone()
@@ -1330,22 +1496,62 @@ impl Environments {
     }
 }
 
-/// No inherited business environment; OS plumbing and explicitly authorized
-/// values are separate from immutable L. Native launcher overrides survive.
+/// Business values are transient, not part of immutable L. Legacy launches
+/// keep explicit inheritance; automatic launches retain ordinary host variables.
 pub(crate) fn clean_command(
     command: &mut Command,
     launch: &LaunchConfig,
     binding: Option<&Path>,
 ) -> Result<(), String> {
+    clean_command_with_environment(command, launch, binding, std::env::vars_os().collect())
+}
+
+fn clean_command_with_environment(
+    command: &mut Command,
+    launch: &LaunchConfig,
+    binding: Option<&Path>,
+    ambient: BTreeMap<std::ffi::OsString, std::ffi::OsString>,
+) -> Result<(), String> {
     let loader_variable = |key: &str| {
         key.to_ascii_uppercase().starts_with("LD_") || key.to_ascii_uppercase().starts_with("DYLD_")
     };
+    let node_variable = |key: &std::ffi::OsStr| {
+        let key = key.to_string_lossy();
+        matches!(key.as_ref(), "NODE_OPTIONS" | "NODE_PATH")
+            || cfg!(windows) && matches!(key.to_ascii_uppercase().as_str(), "NODE_OPTIONS" | "NODE_PATH")
+    };
     let mut loaders = BTreeMap::<String, String>::new();
+    let mut business_node = BTreeMap::<String, String>::new();
     let overrides: Vec<_> = command
         .get_envs()
         .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
         .collect();
+    let root = |name: &str| overrides.iter().find_map(|(key, value)| {
+        (key == name).then(|| value.as_ref().map(PathBuf::from)).flatten()
+    });
+    let project_roots = root("GRAPHER_ORIGINAL_ROOT").zip(root("GRAPHER_WORKSPACE_ROOT"));
     command.env_clear();
+    let mut inherited = BTreeMap::new();
+    if launch.inherit_ambient {
+        for (key, value) in &ambient {
+            let upper = key.to_string_lossy().to_ascii_uppercase();
+            if binding.is_some() && node_variable(key) {
+                business_node.insert(upper, value.clone().into_string()
+                    .map_err(|_| "Non-UTF-8 business Node binding")?);
+                continue;
+            }
+            // Keep business configuration and credentials, not an outer Agent's
+            // identity or code injected into the trusted engine's Node startup.
+            if !upper.starts_with("GRAPHER_") && !upper.starts_with("PI_")
+                && !matches!(upper.as_str(), "PATH" | "NODE_OPTIONS" | "NODE_PATH")
+                // Like native activation, a verified Python prefix must not be
+                // redirected to a different installation by ambient PYTHONHOME.
+                && !(launch.environment.is_some() && upper == "PYTHONHOME")
+            {
+                inherited.insert(key.clone(), value.clone());
+            }
+        }
+    }
     for key in [
         "SystemRoot",
         "WINDIR",
@@ -1357,27 +1563,55 @@ pub(crate) fn clean_command(
         "TMPDIR",
         "LANG",
         "LC_ALL",
-    ] {
-        if let Some(value) = std::env::var_os(key) {
+    ].into_iter().chain(launch.inherit.iter().map(String::as_str)) {
+        if let Some((name, value)) = ambient.iter().find(|(name, _)| {
+            if cfg!(windows) { name.to_string_lossy().eq_ignore_ascii_case(key) }
+            else { name.as_os_str() == std::ffi::OsStr::new(key) }
+        }) {
+            inherited.insert(name.clone(), value.clone());
+        }
+    }
+    for (key, value) in inherited {
+        // These are activation metadata, not arbitrary strings or secrets.
+        // Match project PATH rebinding without adopting/relocating an environment.
+        let value = if launch.unbound_path.is_some()
+            && matches!(key.to_string_lossy().to_ascii_uppercase().as_str(),
+                "VIRTUAL_ENV" | "CONDA_PREFIX" | "CONDA_DEFAULT_ENV")
+        {
+            project_roots.as_ref().and_then(|(source, workspace)| {
+                let mapped = project_path_template(Path::new(value.to_str()?), source)?;
+                Some(std::ffi::OsString::from(mapped.replace("{workspace}",
+                    &native::host_path(workspace).to_string_lossy().replace('\\', "/"))))
+            }).unwrap_or(value)
+        } else { value };
+        if binding.is_some() && loader_variable(&key.to_string_lossy()) {
+            loaders.insert(key.to_string_lossy().into(), value.into_string()
+                .map_err(|_| "Non-UTF-8 loader binding")?);
+        } else {
             command.env(key, value);
         }
     }
-    for key in &launch.inherit {
-        if let Some(value) = std::env::var_os(key) {
-            if binding.is_some() && loader_variable(key) {
-                loaders.insert(
-                    key.clone(),
-                    value
-                        .into_string()
-                        .map_err(|_| "Non-UTF-8 loader binding")?,
-                );
-            } else {
-                command.env(key, value);
-            }
-        }
-    }
+    native::clear_git_environment(command);
     for (key, value) in overrides {
+        let upper = key.to_string_lossy().to_ascii_uppercase();
+        if binding.is_some() && node_variable(&key) {
+            business_node.remove(&upper);
+            if let Some(value) = value {
+                business_node.insert(upper, value.into_string()
+                    .map_err(|_| "Non-UTF-8 business Node binding")?);
+            }
+            command.env_remove(key);
+            continue;
+        }
         if binding.is_some() && loader_variable(&key.to_string_lossy()) {
+            loaders.retain(|name, _| if cfg!(windows) {
+                !name.eq_ignore_ascii_case(&key.to_string_lossy())
+            } else { name != &key.to_string_lossy() });
+            if let Some(value) = value {
+                loaders.insert(key.to_string_lossy().into(), value.into_string()
+                    .map_err(|_| "Non-UTF-8 loader binding")?);
+            }
+            command.env_remove(key);
             continue;
         }
         if let Some(value) = value {
@@ -1397,6 +1631,28 @@ pub(crate) fn clean_command(
             command.env(key, value);
         }
     }
+    if launch.unbound_path.is_some() {
+        if let (Some(value), Some((source, workspace))) = (business_node.get("NODE_PATH"), &project_roots) {
+            let workspace = native::host_path(workspace).to_string_lossy().replace('\\', "/");
+            let mut changed = false;
+            let delimiter = if cfg!(windows) { ';' } else { ':' };
+            // Node's module loader uses a literal delimiter split. Windows
+            // PATH's quote grammar must not be applied to NODE_PATH.
+            let paths = value.split(delimiter).map(|value| {
+                if let Some(mapped) = project_path_template(Path::new(value), source) {
+                    let mapped = mapped.replace("{workspace}", &workspace);
+                    if mapped.contains(delimiter) {
+                        return Err("Rebound NODE_PATH directory contains its list delimiter; choose a workspace path representable by Node".to_string());
+                    }
+                    changed = true;
+                    Ok(mapped)
+                } else { Ok(value.to_string()) }
+            }).collect::<Result<Vec<_>, String>>()?;
+            if changed {
+                business_node.insert("NODE_PATH".into(), paths.join(&delimiter.to_string()));
+            }
+        }
+    }
     // Business loader variables must not inject code into bubblewrap/Seatbelt
     // or trusted Node BEFORE the established native boundary. Values inherited
     // by name stay transient; the inner CLI applies them before factories.
@@ -1405,6 +1661,10 @@ pub(crate) fn clean_command(
             "GRAPHER_BUSINESS_LOADER_ENV",
             serde_json::to_string(&loaders).map_err(|e| e.to_string())?,
         );
+        // Apply only to business children, never the trusted Node, its build
+        // bootstrap, activation capture, extension/MCP factories or probes.
+        command.env("GRAPHER_BUSINESS_NODE_ENV",
+            serde_json::to_string(&business_node).map_err(|e| e.to_string())?);
     }
     if let Some(path) = binding {
         command.env("GRAPHER_LAUNCH_BINDING", native::host_path(path));
@@ -1587,9 +1847,15 @@ pub(crate) fn bind_command(
         command.env("GRAPHER_PREVIOUS_AGENT_ENVIRONMENT_HINTS", hints);
     }
     if config.discovery {
-        let context = crate::environment_discovery::context_with_state(
+        // Read only the launcher's explicit source binding, never a model
+        // argument or an inherited outer Agent's environment variable.
+        let source = command.get_envs().find_map(|(key, value)| {
+            (key == "GRAPHER_ORIGINAL_ROOT").then(|| value.map(PathBuf::from)).flatten()
+        }).ok_or("Missing source binding for native environment observation")?;
+        let context = crate::environment_discovery::context_with_source(
             path,
             state.as_deref(),
+            Some(&source),
             &input.generation,
             &launch,
             session,
@@ -1620,6 +1886,10 @@ fn previous_agent_environment_hints(launch: &LaunchConfig) -> Option<String> {
             .join("\n")
     })
 }
+
+#[cfg(test)]
+#[path = "environment_snapshot_tests.rs"]
+mod snapshot_tests;
 
 #[cfg(test)]
 #[path = "environment_tests.rs"]

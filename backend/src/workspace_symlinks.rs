@@ -40,7 +40,20 @@ fn text(path: &Path) -> Result<String, String> {
         path.into()
     })
 }
-fn normalized(path: &Path) -> PathBuf {
+fn normalized(path: &Path) -> Option<PathBuf> {
+    #[cfg(unix)]
+    if path.components().any(|part| matches!(part, Component::ParentDir)) {
+        // POSIX resolves a directory link before processing the following '..'.
+        // Lexically popping the link would change which file the target names.
+        // An unresolvable traversal is not proof of project ownership.
+        return if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+            // Preserve a final link's name: only its parent traversal decides
+            // ownership, and private edits to that link must remain visible.
+            crate::path_identity::actual_path(parent).ok().map(|parent| parent.join(name))
+        } else {
+            crate::path_identity::actual_path(path).ok()
+        };
+    }
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
@@ -51,22 +64,26 @@ fn normalized(path: &Path) -> PathBuf {
             _ => result.push(component.as_os_str()),
         }
     }
-    result
+    Some(result)
 }
 fn relative(root: &Path, target: &Path) -> Option<PathBuf> {
-    let root = normalized(&crate::native::host_path(root));
-    let target = normalized(&crate::native::host_path(target));
-    let rc: Vec<_> = root.components().collect();
-    let tc: Vec<_> = target.components().collect();
-    if tc.len() < rc.len()
-        || rc.iter().zip(&tc).any(|(a, b)| {
-            crate::path_identity::lexical_key(Path::new(a.as_os_str()))
-                != crate::path_identity::lexical_key(Path::new(b.as_os_str()))
-        })
-    {
-        return None;
+    let root = normalized(&crate::native::host_path(root))?;
+    let target = normalized(&crate::native::host_path(target))?;
+    if let Ok(suffix) = target.strip_prefix(&root) {
+        return Some(suffix.to_path_buf());
     }
-    Some(tc[rc.len()..].iter().map(|part| part.as_os_str()).collect())
+    // Root aliases can have different component counts (/var vs /private/var,
+    // or a junction elsewhere). Find the first physical root boundary, not a
+    // same-length spelling or a later descendant link back to the root.
+    let parts: Vec<_> = target.components().collect();
+    let mut prefix = PathBuf::new();
+    for (index, part) in parts.iter().enumerate() {
+        prefix.push(part.as_os_str());
+        if prefix.is_absolute() && crate::path_identity::same_path(&root, &prefix) {
+            return Some(parts[index + 1..].iter().map(|part| part.as_os_str()).collect());
+        }
+    }
+    None
 }
 pub(crate) fn capture(root: &Path, path: &Path, metadata: &fs::Metadata) -> Result<Link, String> {
     let target = fs::read_link(path).map_err(|e| e.to_string())?;
@@ -167,6 +184,100 @@ pub(crate) fn materialize(root: &Path, path: &Path, link: &Link) -> Result<(), S
             Kind::SymbolicDirectory => std::os::windows::fs::symlink_dir(target, path).map_err(|e| format!("Cannot create native project directory symlink (enable Developer Mode or symlink privilege): {e}")),
             Kind::SymbolicFile => std::os::windows::fs::symlink_file(target, path).map_err(|e| format!("Cannot create native project file symlink (enable Developer Mode or symlink privilege): {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn absolute_links_obey_volume_case_rules_and_preserve_missing_leaf_spelling() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Project");
+        let lower = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        assert_eq!(relative(&root, &root.join("MissingLeaf")), Some("MissingLeaf".into()));
+        if lower.exists() {
+            assert_eq!(relative(&root, &lower.join("MissingLeaf")), Some("MissingLeaf".into()));
+        } else {
+            fs::create_dir(&lower).unwrap();
+            assert_eq!(relative(&root, &lower.join("MissingLeaf")), None);
+        }
+        assert_eq!(relative(&root, &temp.path().join("Project-other/MissingLeaf")), None);
+    }
+
+    #[test]
+    fn root_aliases_at_different_depths_preserve_the_logical_suffix() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let parent = temp.path().join("holder");
+        fs::create_dir(&parent).unwrap();
+        let alias = parent.join("alias");
+        crate::path_safety::directory_link(&root, &alias);
+        crate::path_safety::directory_link(&root, &root.join("sub/back"));
+        assert_eq!(relative(&alias, &root.join("MissingLeaf")), Some("MissingLeaf".into()));
+        assert_eq!(relative(&root, &alias.join("MissingLeaf")), Some("MissingLeaf".into()));
+        // Do not match a later link back to root and drop its logical path.
+        assert_eq!(relative(&alias, &root.join("sub/back/MissingLeaf")), Some("sub/back/MissingLeaf".into()));
+        let selected = root.join("selected");
+        crate::path_safety::directory_link(&root.join("sub"), &selected);
+        let link = capture(&alias, &selected, &fs::symlink_metadata(&selected).unwrap()).unwrap();
+        assert!(link.project_absolute);
+        assert_eq!(link.value, "sub");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_link_parent_traversal_preserves_native_link_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir_all(outside.join("nested")).unwrap();
+        fs::write(root.join("payload"), "project bytes").unwrap();
+        fs::write(outside.join("payload"), "external bytes").unwrap();
+        std::os::unix::fs::symlink(outside.join("nested"), root.join("jump")).unwrap();
+        let raw = root.join("jump/../payload");
+        let path = root.join("alias");
+        std::os::unix::fs::symlink(&raw, &path).unwrap();
+        let link = capture(&root, &path, &fs::symlink_metadata(&path).unwrap()).unwrap();
+        assert!(!link.project_absolute);
+        let fork = temp.path().join("fork");
+        fs::create_dir(&fork).unwrap();
+        fs::write(fork.join("payload"), "wrong private bytes").unwrap();
+        materialize(&fork, &fork.join("alias"), &link).unwrap();
+        assert_eq!(fs::read_to_string(fork.join("alias")).unwrap(), "external bytes");
+        assert_eq!(relative(&root, &root.join("jump/../missing")), None);
+
+        fs::create_dir(root.join("sub")).unwrap();
+        std::os::unix::fs::symlink(outside.join("payload"), root.join("inner")).unwrap();
+        let path = root.join("via-inner");
+        std::os::unix::fs::symlink(root.join("sub/../inner"), &path).unwrap();
+        let link = capture(&root, &path, &fs::symlink_metadata(&path).unwrap()).unwrap();
+        assert!(link.project_absolute);
+        assert_eq!(link.value, "inner");
+        std::os::unix::fs::symlink(fork.join("payload"), fork.join("inner")).unwrap();
+        materialize(&fork, &fork.join("via-inner"), &link).unwrap();
+        assert_eq!(fs::read_to_string(fork.join("via-inner")).unwrap(), "wrong private bytes");
+    }
+
+    #[test]
+    fn case_distinct_external_directory_link_is_not_rebound_as_project_owned() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Project");
+        let lower = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        if lower.exists() {
+            return; // This host volume does not admit two case-distinct roots.
+        }
+        fs::create_dir(&lower).unwrap();
+        let path = root.join("external");
+        crate::path_safety::directory_link(&lower, &path);
+        let link = capture(&root, &path, &fs::symlink_metadata(&path).unwrap()).unwrap();
+        assert!(!link.project_absolute);
+        assert!(crate::path_identity::same_path(&link.target(&root).unwrap(), &lower));
     }
 }
 

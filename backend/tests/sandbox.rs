@@ -30,7 +30,7 @@ fn graph_filesystem_policy_and_inherited_child_processes() {
     }
     let profile = base.join("profile.sb");
     sandbox::write_graph_profile(&profile, &source, &root, &current).unwrap();
-    // These directories do not exist when the policy is generated.
+    // Cover directories created after policy generation.
     let later = root.join("run/later");
     let other_run = root.join("another-run/node");
     for dir in [&later, &other_run] {
@@ -88,8 +88,7 @@ fn grapher_installation_and_shared_engine_are_write_protected() {
     let source = base.join("source");
     let root = base.join(".grapher-worktrees");
     let current = root.join("run/current");
-    // Production keeps the default runtime data root inside the installation,
-    // so its writable session must be carved out of the installation denial.
+    // Sessions must stay writable inside the protected installation.
     let installation = base.join("installation");
     let data = installation.join(".grapher");
     let session = data.join("sessions/current");
@@ -111,8 +110,7 @@ fn grapher_installation_and_shared_engine_are_write_protected() {
     )
     .unwrap();
     for target in [&engine, &installation] {
-        // The shared engine copy and the original installation stay readable so
-        // linked dependency targets resolve, but an execution may never write.
+        // Linked dependencies need read access, not write access.
         let read = run(&profile, &current, "/bin/cat \"$1/marker\"", &[target]);
         assert!(read.status.success(), "read blocked: {}", target.display());
         let write = run(
@@ -339,7 +337,6 @@ fn standalone_workspace_exposes_project_git_while_protecting_source() {
         String::from_utf8_lossy(&isolated.stderr)
     );
 
-    // Inside sandbox: source repository must remain DENIED!
     let leak_check = run(&profile, &current, "/bin/cat \"$1/file.txt\"", &[&source]);
     assert!(
         !leak_check.status.success(),

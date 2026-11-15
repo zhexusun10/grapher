@@ -478,6 +478,9 @@ pub(crate) fn trusted_node() -> Result<PathBuf, String> {
     NODE.get_or_init(|| {
         let output = Command::new("node")
             .args(["-p", "process.execPath"])
+            // Discovery itself is an engine bootstrap, not a business child.
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH")
             .output()
             .map_err(|e| e.to_string())?;
         if !output.status.success() {
@@ -848,6 +851,31 @@ mod tests {
         assert!(STARTED.load(Ordering::SeqCst));
         assert!(schedule_runtime_prewarm(&STARTED, || panic!("already prepared")).is_none());
     }
+
+    #[test]
+    fn trusted_node_probe_never_loads_ambient_business_preloads() {
+        const CHILD: &str = "GRAPHER_TEST_NODE_DISCOVERY_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(trusted_node().unwrap().is_absolute());
+            println!("TRUSTED_NODE_PROBE_OK");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("business-preload-ran");
+        let preload = temp.path().join("business-preload.cjs");
+        fs::write(&preload, format!("require('node:fs').writeFileSync({},'injected');", serde_json::to_string(&marker.to_string_lossy()).unwrap())).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "native::tests::trusted_node_probe_never_loads_ambient_business_preloads", "--nocapture"])
+            .env(CHILD, "1")
+            .env("NODE_OPTIONS", format!("--require {}", serde_json::to_string(&native_test_path(&preload)).unwrap()))
+            .env("NODE_PATH", temp.path())
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("TRUSTED_NODE_PROBE_OK"), "child probe must actually run");
+        assert!(!marker.exists(), "trusted Node resolution must not execute a business preload");
+    }
+
+    fn native_test_path(path: &Path) -> String { host_path(path).to_string_lossy().replace('\\', "/") }
 
     #[test]
     fn source_binding_named_like_a_graph_slot_keeps_its_own_git_directory() {

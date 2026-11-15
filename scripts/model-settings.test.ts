@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { defaultConfig, normalizeMaxFeedback, normalizeMaxParallel, type Config } from "../src/types.ts";
 import { applyModelConfig, availableCatalogModels, defaultRoleThinkingLevel, normalizeModelThinkingLevels, planningModelRoles, providerIdForModel, resolveExecutionModelAndThinking, resolveRetryModelAndThinking, roleModelConfig, updateRoleModelConfig } from "../src/modelConfig.ts";
 import { RoleModelSettings } from "../src/components/RoleModelSettings.tsx";
-import { providerAuth, hasUnsupportedCredentialCharacters, type ProviderCatalog } from "../src/services/providerAuth.ts";
+import { providerAuth, hasUnsupportedCredentialCharacters, loadStorageCatalog, type ProviderCatalog } from "../src/services/providerAuth.ts";
 import { t } from "../src/i18n/index.ts";
 import type { Execution } from "../src/types.ts";
 
@@ -791,6 +791,29 @@ test("resolveExecutionModelAndThinking falls back to config and role models when
   });
   assert.equal(mergerResult.model, "env/merger-model");
   assert.equal(mergerResult.thinkingLevel, "xhigh");
+});
+
+test("stored Provider catalogs reject corrupt renderable fields while retaining legacy optional capabilities", () => {
+  const read = (value: unknown) => loadStorageCatalog({ getItem: () => JSON.stringify(value) });
+  assert.deepEqual(read(catalog), catalog);
+  const legacy = { ...catalog, models: catalog.models.map(({ thinkingLevels, thinkingLevelFallbacks, ...model }) => model) };
+  assert.deepEqual(read(legacy), legacy, "older caches without optional thinking capabilities remain usable");
+  for (const invalid of [
+    {}, [], "old cache", 1,
+    { ...catalog, models: [null] },
+    { ...catalog, models: [{ ...catalog.models[0], name: {} }] },
+    { ...catalog, models: [{ ...catalog.models[0], thinkingLevels: {} }] },
+    { ...catalog, models: [{ ...catalog.models[0], thinkingLevels: [null] }] },
+    { ...catalog, models: [{ ...catalog.models[0], thinkingLevelFallbacks: { high: {} } }] },
+    { ...catalog, providers: [null] },
+    { ...catalog, providers: [{ ...catalog.providers[0], methods: null }] },
+    { ...catalog, providers: [{ ...catalog.providers[0], methods: [{ id: "api_key", name: {} }] }] },
+    { ...catalog, hiddenModels: {} },
+    { ...catalog, hiddenModels: [null] },
+    { ...catalog, warning: { error: "Not a React child" } },
+  ]) assert.equal(read(invalid), null, JSON.stringify(invalid));
+  assert.equal(loadStorageCatalog({ getItem: () => "{broken" }), null);
+  assert.equal(loadStorageCatalog({ getItem: () => { throw new Error("Blocked"); } }), null);
 });
 
 test("provider catalog subscribers observe replacement and invalidation, but not duplicate snapshots", () => {

@@ -619,6 +619,48 @@ fn planner_workspace_uses_the_latest_running_frontier_without_waiting() {
 }
 
 #[test]
+fn node_completion_retains_all_workspaces_borrowed_by_the_running_planner() {
+    let (_temp, _repo, service, _config) = setup(false);
+    let mut runtime = service.runtime.lock().unwrap();
+    // Make the two parallel children terminal, so only Planner (not a pending
+    // dependent) can retain their slots after both node writers finish.
+    let mut graph = runtime.state.graph.clone();
+    graph.nodes.retain(|node| node.name != "join");
+    graph.edges.retain(|edge| edge.to != "join");
+    runtime.revise_graph(graph, PlanningSummary::default()).unwrap();
+    let root = runtime.jobs().unwrap().remove(0);
+    complete(&mut runtime, root);
+    let jobs = runtime.jobs().unwrap();
+    assert_eq!(jobs.len(), 2);
+    let planning_id = Uuid::new_v4().to_string();
+    let mut borrowed = Vec::new();
+    for job in jobs {
+        let planning = PlanningSummary {
+            planning_id:planning_id.clone(), status:Some("running".into()),
+            worktree:Some(job.execution.worktree.clone()),
+            workspace_execution_id:Some(job.execution.id.clone()),
+            ..Default::default()
+        };
+        runtime.emit(EventKind::PlannerWorkspaceSelected { planning }).unwrap();
+        borrowed.push(PathBuf::from(&job.execution.worktree));
+        complete(&mut runtime, job);
+        assert!(borrowed.iter().all(|path| path.is_dir()),
+            "earlier switch targets must survive after Planner moves elsewhere");
+    }
+    let mut settled = runtime.state.planning.clone().unwrap();
+    settled.status = Some("failed".into());
+    runtime.emit(EventKind::PlannerTurnAborted { planning:settled }).unwrap();
+    // Settled Planner turns must not pin obsolete directories indefinitely.
+    let mut graph = runtime.state.graph.clone();
+    graph.nodes.push(Node { name:"later".into(), task:"later".into() });
+    runtime.revise_graph(graph, PlanningSummary::default()).unwrap();
+    let later = runtime.jobs().unwrap().remove(0);
+    complete(&mut runtime, later);
+    assert!(borrowed.iter().any(|path| !path.exists()),
+        "node completion should reclaim retired slots once Planner has settled");
+}
+
+#[test]
 fn planner_workspace_writes_survive_success_failure_and_reach_children() {
     for action in ["success", "fail"] {
         let (temp, repo, service, config) = setup(false);

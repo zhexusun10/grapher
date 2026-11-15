@@ -7,6 +7,7 @@ use std::{
     sync::{Mutex, MutexGuard, OnceLock},
 };
 
+mod append;
 mod cleanup;
 mod conversations;
 mod logs;
@@ -274,9 +275,17 @@ impl Store {
     /// Independent read-only connection for cold log projection. No schema
     /// setup, write transaction, or Runtime mutex is needed for these reads.
     pub(crate) fn open_reader(path: &Path) -> Result<Self, String> {
-        let connection =
-            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|error| error.to_string())?;
+        Self::open_existing(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    }
+
+    /// Legacy log backfill only: never initialize/migrate a schema on a read.
+    pub(crate) fn open_log_writer(path: &Path) -> Result<Self, String> {
+        Self::open_existing(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+    }
+
+    fn open_existing(path: &Path, flags: rusqlite::OpenFlags) -> Result<Self, String> {
+        let connection = Connection::open_with_flags(path, flags)
+            .map_err(|error| error.to_string())?;
         connection
             .busy_timeout(std::time::Duration::from_secs(10))
             .map_err(|error| error.to_string())?;
@@ -287,197 +296,18 @@ impl Store {
         })
     }
 
-    pub fn append(&self, state: &mut Snapshot, mut kind: EventKind) -> Result<(), String> {
-        if matches!(kind, EventKind::Output { .. }) {
-            return self.append_logs(state, vec![kind]);
-        }
-        let _write_guard = store_write_guard()?;
-        self.ensure_not_deleted(&state.run_id)?;
-        if let EventKind::Finished {
-            execution_id,
-            output,
-            output_bytes,
-            metrics,
-            ..
-        } = &mut kind
-        {
-            if !output.is_empty() {
-                let started = state
-                    .executions
-                    .iter()
-                    .chain(&state.mergers)
-                    .find(|e| e.id == *execution_id)
-                    .map(|e| e.started_at)
-                    .unwrap_or(0);
-                *metrics = metrics.take().or_else(|| {
-                    Some(crate::model::parse_execution_metrics(
-                        output,
-                        started,
-                        now(),
-                    ))
-                });
-                *output_bytes = output.len();
-                self.replace_logs(&state.run_id, execution_id, output)?;
-                let (node_name, worktree) = state
-                    .executions
-                    .iter()
-                    .chain(&state.mergers)
-                    .find(|e| e.id == *execution_id)
-                    .map(|e| (e.node.clone(), e.worktree.clone()))
-                    .unwrap_or_default();
-                let repo = state
-                    .config
-                    .as_ref()
-                    .map(|c| c.repository.as_str())
-                    .unwrap_or_default();
-                crate::file_changes::update_from_log_text(
-                    &state.run_id,
-                    execution_id,
-                    &node_name,
-                    &worktree,
-                    repo,
-                    output,
-                    false,
-                    true,
-                );
-                *output = String::new();
-            }
-        }
-        match &kind {
-            EventKind::Finished { execution_id, .. }
-            | EventKind::Failed {
-                execution_id: Some(execution_id),
-                ..
-            }
-            | EventKind::MergerFinished { execution_id, .. }
-            | EventKind::MergerFailed { execution_id, .. } => {
-                crate::file_changes::settle(&state.run_id, execution_id);
-            }
-            _ => {}
-        }
-        let initial = if let EventKind::Started { execution, .. }
-        | EventKind::MergerStarted { execution } = &mut kind
-        {
-            if execution.output.is_empty() {
-                None
-            } else {
-                let text = std::mem::take(&mut execution.output);
-                self.replace_logs(&state.run_id, &execution.id, &text)?;
-                execution.output_bytes = text.len();
-                Some((execution.id.clone(), text))
-            }
-        } else {
-            None
-        };
-        let timestamp = now();
-        let payload = serde_json::to_string(&kind).map_err(|error| error.to_string())?;
-        let (direct, nested) = created_planning_ids(&kind);
-        let kind_name = event_kind_name(&kind);
-        let execution_id = event_execution_id(&kind);
-        self.connection
-            .execute(
-                "INSERT INTO events(run_id, timestamp, payload, planning_id, nested_planning_id, kind, execution_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![state.run_id, timestamp, payload, direct, nested, kind_name, execution_id],
-            )
-            .map_err(|error| error.to_string())?;
-        let event = Event {
-            sequence: self.connection.last_insert_rowid(),
-            timestamp,
-            kind,
-        };
-        apply(state, &event);
-        if let Some((id, text)) = initial {
-            if let Some(execution) = state
-                .executions
-                .iter_mut()
-                .chain(state.mergers.iter_mut())
-                .find(|e| e.id == id)
-            {
-                crate::model::append_live_output(execution, &text);
-            }
-            state.run_metrics = Some(state.compute_run_metrics());
-        }
-        if matches!(
-            event.kind,
-            EventKind::Finished { .. }
-                | EventKind::Failed { .. }
-                | EventKind::MergerFinished { .. }
-                | EventKind::MergerFailed { .. }
-        ) {
-            if let Some(id) = event_execution_id(&event.kind) {
-                self.forget_log_cursor(id);
-            }
-            self.save_checkpoint(state);
-        }
-        self.note_appended(state, 1);
-        Ok(())
+    pub fn append(&self, state: &mut Snapshot, kind: EventKind) -> Result<(), String> {
+        self.append_events(state, vec![kind])
     }
 
-    /// Persist a bounded batch atomically, then update the in-memory projection.
-    /// Never expose output in memory if the transaction did not commit.
+    /// Logs, business events and their derived projections commit together,
+    /// including mixed batches and legacy events carrying inline transcripts.
     pub fn append_batch(
         &mut self,
         state: &mut Snapshot,
         kinds: Vec<EventKind>,
     ) -> Result<(), String> {
-        if kinds
-            .iter()
-            .all(|kind| matches!(kind, EventKind::Output { .. }))
-        {
-            return self.append_logs(state, kinds);
-        }
-        // Normal starts have no transcript to import and must stay in the
-        // transaction with their input bindings and message claims. Only the
-        // legacy nonempty-output forms need the single-event log path.
-        if kinds.iter().any(|kind| {
-            matches!(kind, EventKind::Output { .. })
-                || matches!(kind, EventKind::Started { execution, .. }
-                    | EventKind::MergerStarted { execution } if !execution.output.is_empty())
-                || matches!(kind, EventKind::Finished { output, .. } if !output.is_empty())
-        }) {
-            for kind in kinds {
-                self.append(state, kind)?;
-            }
-            return Ok(());
-        }
-        let count = kinds.len();
-        let _write_guard = store_write_guard()?;
-        self.ensure_not_deleted(&state.run_id)?;
-        let transaction = self.connection.transaction().map_err(|e| e.to_string())?;
-        let mut events = Vec::with_capacity(count);
-        for kind in kinds {
-            let timestamp = now();
-            let payload = serde_json::to_string(&kind).map_err(|e| e.to_string())?;
-            let (direct, nested) = created_planning_ids(&kind);
-            let kind_name = event_kind_name(&kind);
-            let execution_id = event_execution_id(&kind);
-            transaction.execute(
-                "INSERT INTO events(run_id, timestamp, payload, planning_id, nested_planning_id, kind, execution_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![state.run_id, timestamp, payload, direct, nested, kind_name, execution_id],
-            ).map_err(|e| e.to_string())?;
-            events.push(Event {
-                sequence: transaction.last_insert_rowid(),
-                timestamp,
-                kind,
-            });
-        }
-        transaction.commit().map_err(|e| e.to_string())?;
-        let terminal = events
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::Finished { .. }));
-        for event in events {
-            apply(state, &event);
-            if matches!(event.kind, EventKind::Finished { .. }) {
-                if let Some(id) = event_execution_id(&event.kind) {
-                    self.forget_log_cursor(id);
-                }
-            }
-        }
-        if terminal {
-            self.save_checkpoint(state);
-        }
-        self.note_appended(state, count);
-        Ok(())
+        self.append_events(state, kinds)
     }
 
     /// Output writes also trigger checkpoints, retaining live pid/byte metadata.
@@ -657,11 +487,19 @@ impl Store {
     /// delivered heads were accumulated would otherwise let a later publication
     /// retry a result whose internal Git objects are already reclaimed.
     pub fn delivered_heads(&self, run_id: &str) -> Result<Vec<String>, String> {
+        // Normal startup does not backfill legacy `kind` columns. Include both
+        // halves of an unindexed publication without deserializing old logs.
         let mut statement = self
             .connection
             .prepare(
                 "SELECT payload FROM events
-                 WHERE run_id=?1 AND kind IN ('publication_started','publication_completed')
+                 WHERE run_id=?1 AND (
+                     kind IN ('publication_started','publication_completed')
+                     OR (kind IS NULL AND (
+                         substr(payload,1,64) LIKE '{\"type\":\"publication_started\"%'
+                         OR substr(payload,1,64) LIKE '{\"type\":\"publication_completed\"%'
+                     ))
+                 )
                  ORDER BY sequence",
             )
             .map_err(|error| error.to_string())?;
@@ -752,7 +590,8 @@ impl Store {
                 // built from the first 512 bytes; migrated rows are already
                 // small and keep their structured metrics. `Output` chunks are
                 // filtered by tag prefix, so an unmigrated database is opened
-                // without parsing a single log payload.
+                // without parsing a single log payload. The 65-character field
+                // windows include the closing quote of a 64-character ID/head.
                 "SELECT sequence, timestamp,
                     CASE
                         WHEN (kind = 'finished'
@@ -763,10 +602,10 @@ impl Store {
                         THEN json_object('type','finished',
                             'execution_id', substr(payload,
                                 instr(substr(payload,1,512), '\"execution_id\":\"') + 16,
-                                instr(substr(payload, instr(substr(payload,1,512), '\"execution_id\":\"') + 16, 64), '\"') - 1),
+                                instr(substr(payload, instr(substr(payload,1,512), '\"execution_id\":\"') + 16, 65), '\"') - 1),
                             'head', substr(payload,
                                 instr(substr(payload,1,512), '\"head\":\"') + 8,
-                                instr(substr(payload, instr(substr(payload,1,512), '\"head\":\"') + 8, 64), '\"') - 1),
+                                instr(substr(payload, instr(substr(payload,1,512), '\"head\":\"') + 8, 65), '\"') - 1),
                             'output', '', 'output_bytes', 0)
                         ELSE payload
                     END
@@ -846,6 +685,7 @@ impl Store {
             .connection
             .unchecked_transaction()
             .map_err(|e| e.to_string())?;
+        let mut deleted = Vec::new();
         for (run_id, cleanup) in runs {
             // Ownership and tombstones commit with ALL event/log deletions.
             // A crash or locked file after commit cannot orphan cleanup.
@@ -868,9 +708,12 @@ impl Store {
                 .map_err(|e| e.to_string())?;
             tx.execute("DELETE FROM execution_logs WHERE run_id=?1", [run_id])
                 .map_err(|e| e.to_string())?;
-            crate::file_changes::invalidate_run(run_id);
+            deleted.push(run_id);
         }
         tx.commit().map_err(|e| e.to_string())?;
+        for run_id in deleted {
+            crate::file_changes::invalidate_run(run_id);
+        }
         self.execution_offsets.borrow_mut().clear();
         self.reclaim_deleted_pages();
         Ok(())
@@ -904,6 +747,9 @@ impl Store {
         .map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO workspace_selection(id,run_id) VALUES(1,NULL) ON CONFLICT(id) DO UPDATE SET run_id=NULL", [])
             .map_err(|e| e.to_string())?;
+        // Include newly tombstoned Runs and provisional cleanup owners, but
+        // never invalidate live accumulators belonging to another data store.
+        let cleared = self.deleted_runs()?;
         tx.execute("DELETE FROM checkpoints", [])
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM events", [])
@@ -911,7 +757,9 @@ impl Store {
         tx.execute("DELETE FROM execution_logs", [])
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
-        crate::file_changes::clear_all();
+        for run_id in cleared {
+            crate::file_changes::invalidate_run(&run_id);
+        }
         self.execution_offsets.borrow_mut().clear();
         self.reclaim_deleted_pages();
         Ok(())

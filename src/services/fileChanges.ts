@@ -152,28 +152,3 @@ export function mergeFileChangeSummaries(
     ? { ...present[0], files: merged.files, isRunning: merged.isRunning, activeFilePath: merged.activeFilePath }
     : merged;
 }
-
-/** Split a normalized path into `{ fileName, dirPath }` for compact UI display. */
-export function splitFilePath(path: string): { fileName: string; dirPath: string } {
-  const index = path.lastIndexOf("/");
-  if (index < 0) return { fileName: path, dirPath: "" };
-  return { fileName: path.slice(index + 1), dirPath: path.slice(0, index) };
-}
-
-/** Filter backend-reported files by status, path query and owning node. */
-export function filterFileChanges(
-  files: FileChangeItem[],
-  statusFilter: "all" | FileChangeStatus,
-  searchQuery = "",
-  nodeFilter = "",
-): FileChangeItem[] {
-  const query = searchQuery.trim().toLowerCase();
-  return files.filter((item) => {
-    if (statusFilter !== "all" && item.status !== statusFilter) return false;
-    if (nodeFilter && (!item.nodes || !item.nodes.includes(nodeFilter))) return false;
-    if (query && !item.path.toLowerCase().includes(query) && !item.oldPath?.toLowerCase().includes(query)) {
-      return false;
-    }
-    return true;
-  });
-}

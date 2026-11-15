@@ -83,6 +83,50 @@ test("saving empty string clears draft", () => {
   assert.equal(store.getItem(LANDING_GOAL_STORAGE_KEY), null);
 });
 
+test("corrupt draft caches can be replaced and cleared without dropping valid workspace drafts", () => {
+  for (const raw of ["{broken", "null", "[]", '"old"', "42", '{"/other":"Keep me","/invalid":null}']) {
+    const store = new MemoryStorage();
+    store.setItem(LANDING_GOAL_STORAGE_KEY, raw);
+    saveLandingDraft("/current", "Recovered draft", store);
+    assert.equal(loadLandingDraft("/current", store), "Recovered draft", raw);
+    if (raw.includes("Keep me")) assert.equal(loadLandingDraft("/other", store), "Keep me");
+    clearLandingDraft("/current", store);
+    assert.equal(loadLandingDraft("/current", store), "");
+    if (raw.includes("Keep me")) assert.equal(loadLandingDraft("/other", store), "Keep me");
+    else assert.equal(store.getItem(LANDING_GOAL_STORAGE_KEY), null);
+  }
+});
+
+test("clearing a corrupt draft cache also retires its legacy fallback", () => {
+  const store = new MemoryStorage();
+  store.setItem(LANDING_GOAL_STORAGE_KEY, "null");
+  store.setItem(LEGACY_LANDING_GOAL_STORAGE_KEY, "Already submitted draft");
+  clearLandingDraft("/current", store);
+  assert.equal(loadLandingDraft("/current", store), "");
+  assert.equal(store.getItem(LEGACY_LANDING_GOAL_STORAGE_KEY), null);
+});
+
+for (const operation of ["save", "clear"] as const) {
+  test(`a failed draft-storage read cannot erase other workspaces during ${operation}`, () => {
+    const store = new MemoryStorage();
+    saveLandingDraft("/other", "Keep the other workspace's draft", store);
+    const getItem = store.getItem.bind(store);
+    const before = [getItem(LANDING_GOAL_STORAGE_KEY), getItem(LEGACY_LANDING_GOAL_STORAGE_KEY)];
+    store.getItem = key => {
+      if (key === LANDING_GOAL_STORAGE_KEY) throw new Error("Storage temporarily unreadable");
+      return getItem(key);
+    };
+    if (operation === "save") saveLandingDraft("/current", "New draft", store);
+    else clearLandingDraft("/current", store);
+    assert.deepEqual([getItem(LANDING_GOAL_STORAGE_KEY), getItem(LEGACY_LANDING_GOAL_STORAGE_KEY)], before,
+      "a failed read is not evidence that the draft map is empty");
+    store.getItem = getItem;
+    saveLandingDraft("/current", "Recovered write", store);
+    assert.equal(loadLandingDraft("/other", store), "Keep the other workspace's draft");
+    assert.equal(loadLandingDraft("/current", store), "Recovered write");
+  });
+}
+
 test("fallback to legacy key if drafts map is absent", () => {
   const store = new MemoryStorage();
   store.setItem(LEGACY_LANDING_GOAL_STORAGE_KEY, "Legacy draft content");

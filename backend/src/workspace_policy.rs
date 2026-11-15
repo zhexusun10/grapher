@@ -95,13 +95,13 @@ impl Runtime {
                 _ => None,
             }).is_some_and(|head| state.head.as_ref() == Some(head)
                 && !self.state.published_heads.contains(head));
+        // Ordinary completed/running source nodes have no private recovery to
+        // validate. Reject them before touching the source binding or paths.
+        if state.edit_execution_id.is_some() || !(failed || resolved) {
+            return None;
+        }
         let repository = resolve_repository(&self.root, self.state.config.as_ref()?).ok()?;
-        (state.edit_execution_id.is_none()
-            && (failed || resolved)
-            && !Self::same_workspace_path(
-                Path::new(&previous.worktree),
-                &repository,
-            )
+        (!Self::same_workspace_path(Path::new(&previous.worktree), &repository)
             && !self.batch_recovery_was_delivered(previous))
             .then_some(previous)
     }
@@ -237,17 +237,19 @@ impl Runtime {
     /// Shared source workers may refill free slots without draining siblings.
     /// Private writers must all succeed before delivery or workspace switching.
     /// Explicit retries preserve unfinished work privately, never publish it.
+    /// Return the admitted binding for this scheduling pass only; each worker
+    /// still revalidates it immediately before performing filesystem work.
     pub(super) fn prepare_execution_batch(
         &mut self,
         ready: &[Node],
         allow_delivery: bool,
-    ) -> Result<bool, String> {
-        if !self.batch_workspaces() {
-            return Ok(true);
-        }
+    ) -> Result<Option<PathBuf>, String> {
         if matches!(self.state.phase.as_str(), "publishing" | "merging") {
-            return Ok(!ready.is_empty() && ready.iter().all(|node|
-                self.private_continuation_during_publication(&node.name)));
+            if ready.is_empty() || !ready.iter().all(|node|
+                self.private_continuation_during_publication(&node.name)) {
+                return Ok(None);
+            }
+            return resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?).map(Some);
         }
         let active = self.active();
         let source_recovery = !ready.is_empty() && ready.iter().all(|node|
@@ -256,19 +258,19 @@ impl Runtime {
             if active && (!self.shared_source_workspace()
                 || self.state.result_execution.as_ref().is_some_and(|e| e.status == "running")
                 || self.state.mergers.iter().any(|e| e.status == "running")) {
-                return Ok(false);
+                return Ok(None);
             }
             let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
             if self.state.executions.iter().any(|e| e.status == "running"
                 && !Self::same_workspace_path(Path::new(&e.worktree), &repository)) {
-                return Ok(false);
+                return Ok(None);
             }
             // Keep the pending private delivery group. `resumed` on a source
             // dispatch records this temporary recovery, not a new shared batch.
             self.emit(EventKind::ExecutionBatchStarted {
                 nodes: ready.iter().map(|node| node.name.clone()).collect(), isolated: false, resumed: true,
             })?;
-            return Ok(true);
+            return Ok(Some(repository));
         }
         let retained = !ready.is_empty() && ready.iter().all(|node|
             self.retained_private_continuation(&node.name).is_some());
@@ -279,14 +281,14 @@ impl Runtime {
             || (!private_dispatch && self.state.mergers.iter().any(|e| e.status == "running"))
             || self.state.phase == "launching_result"
             || self.state.result_execution.as_ref().is_some_and(|e| e.status == "running")) {
-            return Ok(false);
+            return Ok(None);
         }
         let config = self.state.config.as_ref().ok_or("Missing config")?;
         let repository = match resolve_repository(&self.root, config) {
             // An invalid source cannot admit replenishment. Let existing workers
             // drain before surfacing the admission error, otherwise the driver's
             // error path would discard their completion channel and log writer.
-            Err(_) if active => return Ok(false),
+            Err(_) if active => return Ok(None),
             result => result?,
         };
         if active && (private_dispatch && self.path_is_running(&repository)
@@ -294,7 +296,7 @@ impl Runtime {
                 execution.status == "running"
                     && !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
             })) {
-            return Ok(false);
+            return Ok(None);
         }
         // Private siblings may refill slots and retry independently. Only a
         // source/result writer or the same physical directory is a barrier;
@@ -306,7 +308,7 @@ impl Runtime {
                         return Err("Retained unfinished workspace was reassigned; refusing to resume another execution's files".into());
                     }
                     if self.path_is_running(Path::new(&previous.worktree)) {
-                        return Ok(false);
+                        return Ok(None);
                     }
                 }
             }
@@ -326,7 +328,7 @@ impl Runtime {
                 // source edits. Prepared retries still pin their own inputs.
                 resumed: !recovered_source,
             })?;
-            return Ok(true);
+            return Ok(Some(repository));
         }
         // Unstarted/blocked peers left behind by the worker cap also belong to
         // this batch. An idle subset is never permission for partial delivery.
@@ -336,23 +338,22 @@ impl Runtime {
             if !active && allow_delivery && self.state.phase != "needs_attention" {
                 self.emit(EventKind::Settled)?;
             }
-            return Ok(false);
+            return Ok(None);
         }
         let mut heads = BTreeSet::new();
         for execution in &self.state.executions {
+            // Source results have empty heads. Check that cheap evidence before
+            // resolving any physical workspace identity in historical records.
+            let Some(head) = execution.after.as_ref()
+                .filter(|head| !head.is_empty() && !self.state.published_heads.contains(head))
+            else { continue; };
             if execution.status == "completed"
                 && self.state.nodes.contains_key(&execution.node)
                 && (self.state.private_batch.is_empty() || self.state.private_batch.contains(&execution.node))
                 && !self.state.superseded_execution_ids.contains(&execution.id)
                 && !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
             {
-                if let Some(head) = execution
-                    .after
-                    .as_ref()
-                    .filter(|head| !head.is_empty() && !self.state.published_heads.contains(head))
-                {
-                    heads.insert(head.clone());
-                }
+                heads.insert(head.clone());
             }
         }
         // A business entry is a separate writer: its accepted result advances
@@ -387,10 +388,10 @@ impl Runtime {
                     },
                 ])?;
             }
-            return Ok(false);
+            return Ok(None);
         }
         if ready.is_empty() {
-            return Ok(true);
+            return Ok(Some(repository));
         }
 
         // Choose isolation only at an idle boundary. Replenishment stays in the
@@ -438,7 +439,7 @@ impl Runtime {
             resumed: false,
         });
         self.emit_outputs(events)?;
-        Ok(true)
+        Ok(Some(repository))
     }
 
     /// Replay-only compatibility for a previously recorded recovery handoff.

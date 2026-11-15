@@ -100,6 +100,18 @@ test("graph collapse ignores invalid or unmeasured pointer geometry", () => {
   }
 });
 
+test("a blocked localStorage getter cannot crash opening or resizing a workbench", () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, get() { throw new DOMException("Blocked", "SecurityError"); } });
+  try {
+    assert.equal(getStoredRatio(), DEFAULT_SPLIT_RATIO);
+    assert.doesNotThrow(() => persistRatio(0.4));
+  } finally {
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
+});
+
 test("storage exceptions do not throw and fall back to default", () => {
   const throwingStorage = {
     getItem: () => {

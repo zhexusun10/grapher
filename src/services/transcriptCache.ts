@@ -24,29 +24,10 @@ export function transcriptFromCache(entry: CachedTranscript | undefined): Transc
     total: entry.totalBytes ?? entry.offset, settled: entry.complete || (!!entry.status && entry.status !== "running") } : null;
 }
 
-const cacheListeners = new Set<() => void>();
-let notifyScheduled = false;
-
-export function subscribeTranscriptCacheChanges(listener: () => void): () => void {
-  cacheListeners.add(listener);
-  return () => { cacheListeners.delete(listener); };
-}
-
-export function notifyTranscriptCacheChanged(): void {
-  if (cacheListeners.size === 0 || notifyScheduled) return;
-  notifyScheduled = true;
-  queueMicrotask(() => {
-    notifyScheduled = false;
-    for (const listener of cacheListeners) listener();
-  });
-}
-
 export function cacheTranscriptWindow(window: TranscriptWindow): CachedTranscript {
-  const cached: CachedTranscript = { text: window.text, offset: window.end, startOffset: window.start, totalBytes: window.total,
+  return { text: window.text, offset: window.end, startOffset: window.start, totalBytes: window.total,
     complete: window.start === 0 && window.end === window.total && window.settled,
     status: window.settled ? "completed" : "running" };
-  notifyTranscriptCacheChanged();
-  return cached;
 }
 
 export function composePlanningOutput(ids: string[], segments: ReadonlyMap<string, TranscriptWindow>): string {
@@ -70,11 +51,17 @@ export function cachedPlanningOutput(runId: string, ids: string[]): string {
 type CacheKind = "execution" | "planning";
 const readers = new Set<{ kind: CacheKind; key: string; controller: AbortController }>();
 
-/** Invalidation cancels readers too: a late response must not resurrect RAM history. */
+/** Readers are view-owned; bounded, validated byte windows may outlive a view. */
 export function registerTranscriptReader(kind: CacheKind, key: string, controller: AbortController): () => void {
   const reader = { kind, key, controller };
   readers.add(reader);
   return () => { controller.abort(); readers.delete(reader); };
+}
+
+export function cancelTranscriptReaders(runId?: string): void {
+  for (const reader of readers) {
+    if (!runId || reader.key.startsWith(`${runId}:`)) reader.controller.abort();
+  }
 }
 
 function clearCache(kind: CacheKind, runId?: string): void {

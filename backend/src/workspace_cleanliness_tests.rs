@@ -1,5 +1,4 @@
-//! Acceptance regression for the workspace-cleanliness target: the slot the
-//! agent sees is the project tree, and Grapher state lives outside it.
+//! Regressions for source-equivalent project views and external runtime state.
 
 use std::{
     fs,
@@ -173,8 +172,8 @@ fn workspace_is_the_project_tree_and_runtime_state_reclaims_outside_it() {
     assert!(target.join("src/main.txt").is_file());
 }
 
-/// Windows path shape and file-state cases from the compatibility row: spaces,
-/// non-ASCII names, readonly files and the visible Git view. Runs in the same
+/// Windows path shape and file-state cases: spaces, non-ASCII names, readonly
+/// files and the visible Git view. Runs in the same
 /// crate so it can use the public `workspace` entry points without touching the
 /// running implementation files.
 #[cfg(windows)]

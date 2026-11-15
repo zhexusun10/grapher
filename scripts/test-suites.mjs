@@ -22,7 +22,7 @@ export const suites = {
     description: 'Frontend state, graph projection and transcript logic; no browser or production build.',
     steps: [
       sourceTests(
-        'display-preferences.test.ts', 'landing-draft.test.ts', 'graph-elements.test.ts',
+        'display-preferences.test.ts', 'app-storage.test.ts', 'landing-draft.test.ts', 'graph-elements.test.ts',
         'file-changes.test.ts', 'planner-user-turns.test.ts', 'planner-graph-edits.test.ts',
         'conversation-branch.test.ts', 'conversation-scroll.test.ts', 'transcript-window.test.ts',
         'tool-output.test.ts', 'pi-tree-branch.test.ts', 'planner-branch.test.ts',
@@ -86,6 +86,14 @@ export const suites = {
       cargo('test', '--lib', 'native::tests'),
       cargo('test', '--lib', 'native_runtime_storage::tests'),
       cargo('test', '--lib', 'linux_sandbox::tests')],
+  },
+  filesystem: {
+    description: 'Focused native ACLs, path identity, links and versioned snapshot integrity; Rust/Git, no browser or model calls.',
+    steps: [cargo('test', '--no-default-features', '--features', 'fixture', '--lib', '--',
+      'path_identity::tests', 'workspace_symlinks::', 'workspace_metadata::',
+      'workspace_view::acl_tests', 'workspace_view::equality::tests',
+      'prepared_reuse_rejects_corrupt_view', 'snapshot_does_not_repair',
+      '--test-threads=2', '--nocapture')],
   },
   prewarm: {
     description: 'Ignored Rust prewarm tests, headless backend build and HTTP/native acceptance.',

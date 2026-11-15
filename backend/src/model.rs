@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod recovery_hints;
+
 #[cfg(feature = "acceptance")]
 pub static LOG_TEXT_DESERIALIZED_BYTES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -1650,12 +1652,22 @@ pub fn parse_execution_metrics(
     started_at: u64,
     completed_at: u64,
 ) -> ExecutionMetrics {
+    parse_execution_metric_lines(output.lines(), started_at, completed_at)
+}
+
+/// Parse complete log lines, including an uncommitted newline-separated tail,
+/// without concatenating or cloning the already-retained transcript.
+pub(crate) fn parse_execution_metric_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    started_at: u64,
+    completed_at: u64,
+) -> ExecutionMetrics {
     let mut metrics = ExecutionMetrics::default();
     // Pi may omit the initial model/thinking change. Assistant messages carry
     // the selected model, and later observations must win in stream order.
     let mut observed_thinking = None;
 
-    for line in output.lines() {
+    for line in lines {
         if !line_advances_live_metrics(line) && !line.contains("\"grapher_process_exited\"") {
             continue;
         }
@@ -2029,6 +2041,15 @@ impl Snapshot {
                     .then(|| name.clone())
             })
             .collect()
+    }
+
+    /// Run-wide and per-node browser hints share one indexed recovery pass.
+    pub(crate) fn recovery_hints(&self) -> (bool, BTreeSet<String>) {
+        recovery_hints::project(self)
+    }
+
+    pub fn resumable_nodes(&self) -> BTreeSet<String> {
+        self.recovery_hints().1
     }
 
     /// A node-specific retry may run alongside independent writers, but must

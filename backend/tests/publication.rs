@@ -79,8 +79,7 @@ fn concurrent_source_edit_of_node_file_is_not_discarded_on_conflict_or_retry() {
         &["cat-file", "-e", &format!("{}^{{commit}}", heads[0])]
     )
     .is_err());
-    // Publication is files-only: the user's HEAD never moves. `base` is the
-    // internal captured snapshot, so compare against the captured user HEAD.
+    // Compare against the user's HEAD, not the internal snapshot.
     assert_eq!(
         workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(),
         source_head
@@ -119,8 +118,7 @@ fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollutio
     );
     let heads = [a, b];
     fs::write(source.join("user.txt"), "user work").unwrap();
-    // User edits are always accepted: publication commits them as the base
-    // and merges node results on top instead of rejecting the directory.
+    // Capture user edits as the private merge base.
     let published =
         graph_merge::merge_graph(&source, &heads, || panic!("No conflict expected")).unwrap();
     assert_eq!(
@@ -199,8 +197,7 @@ fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollutio
             .is_empty()
     );
 
-    // This merger fixture uses /bin/sh. The cross-platform publication path
-    // above runs on Windows; a native Windows merger needs its own shell-free probe.
+    // This Merger fixture requires /bin/sh.
     #[cfg(all(feature = "fixture", unix))]
     {
         use grapher::model::{Config, EventKind};
@@ -476,15 +473,13 @@ fn a_clean_publication_records_its_view_without_materializing_a_workspace() {
         "node result\n"
     );
 
-    // The clean composition must not have checked the project out at all.
     let materialized = graph_merge::publication_workspace(&source, &heads).unwrap();
     assert!(
         !materialized.exists(),
         "a clean publication must not materialize a composition workspace"
     );
 
-    // The composed head still carries a complete project view: preparing a
-    // follow-up workspace from it yields the published content and metadata.
+    // The composed head must reproduce the full project view.
     workspace::prepare(&source, &temp.path().join("follow-up"), &published, &[]).unwrap();
     let follow_up = temp.path().join("follow-up");
     assert_eq!(
@@ -499,8 +494,6 @@ fn a_clean_publication_records_its_view_without_materializing_a_workspace() {
         .unwrap()
         .is_empty());
 
-    // And the recorded view is reproducible, so the published head can be
-    // published again without recomposing anything.
     assert_eq!(
         published,
         graph_merge::merge_graph(&source, &heads, || panic!("no conflict")).unwrap()
@@ -521,8 +514,7 @@ fn a_composed_view_keeps_a_mode_only_change() {
     workspace::repository_git(&source, &["add", "-A"]).unwrap();
     workspace::repository_git(&source, &["commit", "-qm", "base"]).unwrap();
     let base = workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap();
-    // The node changes only the executable bit: Git records a mode change while
-    // the bytes the composed view reuses stay identical.
+    // Change only the executable bit, leaving content unchanged.
     let node_workspace = temp.path().join("node");
     let _ = branch(&source, &base, &node_workspace, "node.txt", "x");
     fs::set_permissions(
@@ -544,8 +536,7 @@ fn a_composed_view_keeps_a_mode_only_change() {
         "delivered file must stay executable"
     );
 
-    // Preparing from the composed view must reproduce the executable bit, not
-    // the pre-change permission recorded in the earlier view.
+    // Follow-up preparation must use the new mode.
     let follow_up = temp.path().join("follow-up-mode");
     workspace::prepare(&source, &follow_up, &published, &[]).unwrap();
     assert!(

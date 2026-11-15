@@ -12,8 +12,8 @@ import { VirtualizedTranscript } from "./VirtualizedTranscript";
 import { cacheTranscriptWindow, composePlanningOutput, planningTranscriptCache, planningTranscriptKey, transcriptFromCache } from "../services/transcriptCache";
 import { activePlannerOutput } from "../lib/plannerOutput";
 import { appendTranscriptPage, prependTranscriptPage, validateTranscriptPrepend, windowFromPage, type TranscriptWindow } from "../services/transcriptWindow";
-import { markTranscriptPrepend, markTranscriptPrependIfReading, olderPageFits, onTranscriptScroll } from "../services/transcriptScroll";
-import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES, TRANSCRIPT_REVEAL_FALLBACK_MS } from "../services/transcriptPaging";
+import { markTranscriptPrepend, markTranscriptPrependIfReading, olderPageFits, onTranscriptScroll, transcriptScrollParent } from "../services/transcriptScroll";
+import { INITIAL_TRANSCRIPT_BYTES, OLDER_TRANSCRIPT_BYTES, transcriptAutoFillBudget, TRANSCRIPT_REVEAL_FALLBACK_MS } from "../services/transcriptPaging";
 import { TranscriptHistoryStatus } from "./TranscriptHistoryStatus";
 export { planningTranscriptCache } from "../services/transcriptCache";
 export { activePlannerOutput } from "../lib/plannerOutput";
@@ -148,7 +148,8 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     return onTranscriptScroll(sectionRef.current, () => { if (commitPendingOlder()) setHoldingOlder(false); });
   }, [holdingOlder, commitPendingOlder]);
 
-  const loadOlder = useStableCallback(async (preserveReading: boolean = true, requestedId?: string, quiet = false) => {
+  const loadOlder = useStableCallback(async (preserveReading: boolean = true, requestedId?: string, quiet = false,
+    readerRequested: boolean = preserveReading) => {
     const signal = lifetime.current;
     if (!ready || !signal || signal.aborted) return false;
     if (olderBusy.current) {
@@ -168,16 +169,20 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
       ? requestedId : olderTarget(planningIds, segments.current);
     if (!id) return false;
     const before = segments.current.get(id);
+    const scroller = transcriptScrollParent(sectionRef.current);
+    const reservation = scroller ? transcriptAutoFillBudget(scroller).reserve(OLDER_TRANSCRIPT_BYTES, readerRequested) : null;
+    if (scroller && !reservation) return false;
+    let receivedBytes = 0;
     olderBusy.current = true; olderRequested.current = preserveReading;
     setLoadingOlder(true); setShowOlderLoading(preserveReading);
     if (!quiet) { failedOlder.current = false; setError(""); }
     if (preserveReading) markTranscriptPrepend(sectionRef.current);
     try {
-      const page = await runtimeService.getPlanningOutput(id, "planner", 0, signal, true, before?.start, OLDER_TRANSCRIPT_BYTES);
+      const page = await runtimeService.getPlanningOutput(id, "planner", 0, signal, true, before?.start, reservation?.bytes ?? OLDER_TRANSCRIPT_BYTES);
       if (signal.aborted) return;
       if (page.planningId !== id || page.role !== "planner") throw new Error(t("执行记录与请求不匹配"));
-      if (before) validateTranscriptPrepend(before, page);
-      else windowFromPage(page, !page.running);
+      const older = before ? validateTranscriptPrepend(before, page) : windowFromPage(page, !page.running);
+      receivedBytes = older.end - older.start;
       // Older bytes extend the history above the reader. Keep them out of the
       // layout until the reader reaches that point, so the page lands where
       // they scrolled to instead of compensating the scroll position under
@@ -200,6 +205,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
+      reservation?.finish(receivedBytes);
       olderBusy.current = false; olderRequested.current = false;
       if (!signal.aborted) { setLoadingOlder(false); setShowOlderLoading(false); }
     }
@@ -225,7 +231,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
 
   const loadedBytes = [...segments.current.values()].reduce((sum, window) => sum + window.end - window.start, 0);
   const initialReady = useAutoTranscriptHistory(sectionRef, hasOlder, loadingOlder, error, activeOutput,
-    preserveReading => { void loadOlder(preserveReading); }, ready, loadedBytes, holdingOlder,
+    preserveReading => { void loadOlder(preserveReading, undefined, false, false); }, ready, loadedBytes, holdingOlder,
     olderTarget(planningIds, segments.current) ?? undefined);
 
   useLayoutEffect(() => { notifyOutput(output); }, [key, output, notifyOutput]);
@@ -297,6 +303,10 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
           const next = latest
             ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, settled)
             : windowFromPage(page, settled);
+          if (!current) {
+            const scroller = transcriptScrollParent(sectionRef.current);
+            if (scroller) transcriptAutoFillBudget(scroller).charge(next.end - next.start);
+          }
           publish(planningId, next); // Also publish empty terminal pages.
           emptyPages = page.content ? 0 : emptyPages + 1;
           if (planningId === latestId) {

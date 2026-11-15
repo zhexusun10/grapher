@@ -226,11 +226,3 @@ export function mapPhysicalPath(value, workspace, roots, caseInsensitive = isCas
   }
   return value;
 }
-
-/** Compare two directories by filesystem identity, then by normalized spelling. */
-export function sameDirectory(left, right) {
-  if (!left || !right) return false;
-  const identity = statusIdentity(left, right);
-  if (identity !== undefined) return identity;
-  return samePath(left, right);
-}

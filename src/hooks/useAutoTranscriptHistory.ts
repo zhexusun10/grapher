@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { FOLLOW_LATEST_EVENT, isNestedScrollGesture, olderInsertionTop, transcriptScrollParent } from "../services/transcriptScroll";
-import { MAX_AUTO_TRANSCRIPT_BYTES, TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
+import { transcriptAutoFillBudget, TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
 import { useStableCallback } from "./useStableCallback";
 
 function needsInitialTranscriptFill(element: HTMLElement | null, hasOlder: boolean, error: string): boolean {
@@ -23,7 +23,6 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
   const initialReadyRef = useRef(false);
   const measuredViewportRef = useRef("");
   const busyRetryRef = useRef<number | null>(null);
-  const autoFillStartRef = useRef(0);
   // The prompt or an earlier turn is already in the DOM above a partially
   // loaded transcript. A fast fling can cross that gap before the page arrives,
   // briefly exposing content that is not actually adjacent to the loaded rows.
@@ -85,6 +84,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
       setInitialReady(true);
     };
     if (error || !element || !parent) { complete(); return; }
+    const budget = transcriptAutoFillBudget(parent);
     let frame: number | null = null;
     const check = () => {
       if (frame !== null) return;
@@ -116,7 +116,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
         // history. Only a page that extends the history they are reading waits
         // for them to reach its insertion point.
         const needsFill = needsInitialTranscriptFill(element, hasOlder, error);
-        const withinBudget = loadedBytes - autoFillStartRef.current < MAX_AUTO_TRANSCRIPT_BYTES;
+        const withinBudget = budget.remaining >= 4;
         // A prefetched page may be waiting for the reader to reach its
         // insertion point. It is not an in-flight fill: retrying it on every
         // layout leaves initial readiness stuck until the reader scrolls.
@@ -156,9 +156,10 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
       if (event instanceof WheelEvent && event.deltaY >= -0.5) return;
       if (event instanceof KeyboardEvent && !["ArrowUp", "PageUp", "Home"].includes(event.key) && !(event.key === " " && event.shiftKey)) return;
       if (isNestedScrollGesture(event, parent, touchDeltaY)) return;
-      autoFillStartRef.current = loadedBytes;
+      budget.renew(event);
       check();
     };
+    const unsubscribeBudget = budget.subscribe(check);
     const observer = new ResizeObserver(check);
     observer.observe(element); observer.observe(parent);
     parent.addEventListener("wheel", resumeFill, { passive: true });
@@ -169,6 +170,7 @@ export function useAutoTranscriptHistory(ref: RefObject<HTMLElement | null>, has
     document.addEventListener("visibilitychange", check);
     check();
     return () => {
+      unsubscribeBudget();
       observer.disconnect(); parent.removeEventListener(FOLLOW_LATEST_EVENT, check);
       parent.removeEventListener("wheel", resumeFill);
       parent.removeEventListener("touchstart", onTouchStart);

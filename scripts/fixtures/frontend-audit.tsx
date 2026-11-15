@@ -21,7 +21,7 @@ import { TranscriptHistoryStatus } from "../../src/components/TranscriptHistoryS
 import { ExecutionTranscript, executionTranscriptCache } from "../../src/components/ExecutionTranscript";
 import { PlanningActivity, planningTranscriptCache } from "../../src/components/PlanningActivity";
 import { useConversationTranscriptCache } from "../../src/hooks/useConversationTranscriptCache";
-import { cachedPlanningOutput, planningTranscriptKey } from "../../src/services/transcriptCache";
+import { cachedPlanningOutput, invalidateTranscriptCaches, planningTranscriptKey } from "../../src/services/transcriptCache";
 import { GraphWorkbench } from "../../src/components/views/GraphWorkbench";
 import { tokens } from "../../src/tokens";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../../src/services/thinkingTranscript";
@@ -193,6 +193,26 @@ function HeldHistoryFixture() {
   </div>;
 }
 
+function PromotedHistoryFixture() {
+  const [defer, setDefer] = useState(true);
+  audit.setDeferredHistory = setDefer;
+  return <div className="initial-query-scroll" data-shared-scroll style={{ height: 380, width: 850, overflowY: "auto" }}>
+    <ExecutionTranscript runId="promotion" defer={defer} foregroundReady={false} execution={{
+      id: "retained", node: "worker", status: "completed", output: "", outputBytes: 100,
+      revision: 1, attempt: 1, startedAt: 1, completedAt: 2, sessionId: "promotion", worktree: "/mock", before: "", after: "",
+    }} />
+  </div>;
+}
+
+function HistoryBudgetFixture() {
+  return <div className="initial-query-scroll" data-shared-scroll style={{ height: 380, width: 850, overflowY: "auto" }}>
+    {[0, 1, 2].map(index => <ExecutionTranscript key={index} runId="budget" execution={{
+      id: `budget-${index}`, node: "worker", status: "completed", output: "", outputBytes: 20 * 1024 * 1024,
+      revision: 1, attempt: index + 1, startedAt: 1, completedAt: 2, sessionId: "budget", worktree: "/mock", before: "", after: "",
+    }} />)}
+  </div>;
+}
+
 function HistoryRegressionFixture() {
   const [view, setView] = useState("node");
   const [running, setRunning] = useState(true);
@@ -211,6 +231,7 @@ function HistoryRegressionFixture() {
     return latest ? { ...latest, text: cachedPlanningOutput("regression", planningIds) } : undefined;
   };
   audit.planningCacheKeys = () => [...planningTranscriptCache.keys()];
+  audit.deleteConversation = () => invalidateTranscriptCaches("regression");
   const ready = useCallback(() => { requestAnimationFrame(() => {
     if (scroll.current) {
       delete scroll.current.dataset.transcriptHistoryReading;
@@ -436,6 +457,7 @@ function PollingFixture() {
     setSnapshot(previous => ({ ...previous, graph: { ...emptyGraph, originalGoal: "Action result" } }));
   };
   audit.removeBroken = () => setIds(["background", "view"]);
+  audit.setPollingRuns = setIds;
   return <output data-viewed-goal>{snapshot.graph.originalGoal}</output>;
 }
 function ThinkingFixture() {
@@ -554,7 +576,8 @@ const cases: Record<string, React.ComponentType> = {
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
   transcriptOutput: TranscriptOutputFixture, virtualScroll: VirtualScrollFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, heldHistory: HeldHistoryFixture, historyRegression: HistoryRegressionFixture, nodeEntry: NodeEntryFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture, plannerHistoryOrder: PlannerHistoryOrderFixture, plannerScrollRestore: PlannerScrollRestoreFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
-  timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture,
+  timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture, historyBudget: HistoryBudgetFixture,
+  promotedHistory: PromotedHistoryFixture,
 };
 const Component = cases[new URLSearchParams(location.search).get("case") || "settings"];
 createRoot(document.getElementById("root")!).render(<Component />);

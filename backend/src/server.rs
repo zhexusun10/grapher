@@ -25,6 +25,7 @@ mod composer;
 mod open_file;
 mod project_discovery;
 mod sse;
+mod transcript;
 mod workspace_images;
 #[path = "workspace_attachments.rs"]
 mod workspace_attachments;
@@ -37,6 +38,7 @@ use open_file::*;
 use project_discovery::*;
 pub(crate) use sse::{notify_output_available, notify_snapshot_changed};
 use sse::*;
+use transcript::*;
 use workspace_attachments::{delete_workspace_attachment, write_workspace_attachment};
 
 pub struct Service {
@@ -57,7 +59,26 @@ static RUN_SERVICES: OnceLock<
 static HOT_SERVICES: OnceLock<Mutex<std::collections::VecDeque<(PathBuf, String, Arc<Service>)>>> =
     OnceLock::new();
 
+// Roots are immutable for a Service. Weak ownership must not keep a Runtime
+// lease alive after its last reader/worker has gone away.
+type ServiceRoots = std::collections::HashMap<usize, (Weak<Service>, PathBuf)>;
+static SERVICE_ROOTS: OnceLock<Mutex<ServiceRoots>> = OnceLock::new();
+
+fn remember_service_root(service: &Arc<Service>, root: &std::path::Path) {
+    if let Ok(mut roots) = SERVICE_ROOTS.get_or_init(Default::default).lock() {
+        roots.retain(|_, (service, _)| service.strong_count() > 0);
+        roots.insert(Arc::as_ptr(service) as usize, (Arc::downgrade(service), root.to_owned()));
+    }
+}
+
+fn known_service_root(service: &Arc<Service>) -> Option<PathBuf> {
+    let roots = SERVICE_ROOTS.get()?.lock().ok()?;
+    let (owner, root) = roots.get(&(Arc::as_ptr(service) as usize))?;
+    owner.upgrade().filter(|owner| Arc::ptr_eq(owner, service)).map(|_| root.clone())
+}
+
 fn cache_service(root: &std::path::Path, id: &str, service: Arc<Service>) -> Arc<Service> {
+    remember_service_root(&service, root);
     if let Ok(mut cache) = HOT_SERVICES.get_or_init(Default::default).lock() {
         cache.retain(|(path, key, saved)| {
             path != root || (key != id && !Arc::ptr_eq(saved, &service))
@@ -270,8 +291,22 @@ fn service_for_run(
     run_id: &str,
     create: bool,
 ) -> Result<Arc<Service>, String> {
+    // A hot child Run already has an identity owner. Do not queue its reads
+    // (including nonblocking snapshot polls) behind an unrelated primary Run.
+    if !create {
+        if let Some(root) = known_service_root(primary) {
+            let cached = RUN_SERVICES.get().and_then(|registry| registry.lock().ok()
+                .and_then(|runs| runs.get(&root)?.get(run_id)?.upgrade()));
+            if let Some(cached) = cached.filter(|cached| !Arc::ptr_eq(cached, primary)) {
+                let reader = crate::store::Store::open_reader(&root.join("events.sqlite"))?;
+                if !reader.contains_run(run_id)? { return Err("Run not found".into()); }
+                return Ok(cache_service(&root, run_id, cached));
+            }
+        }
+    }
     let (root, exists, open_run) = {
         let runtime = primary.runtime.lock().map_err(|e| e.to_string())?;
+        remember_service_root(primary, &runtime.root);
         if runtime.state.run_id == run_id {
             return Ok(primary.clone());
         }
@@ -1416,16 +1451,23 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
         .bytes()
         .filter(|&b| !b.is_ascii_whitespace())
         .collect();
+    let padding = clean.iter().rev().take_while(|&&byte| byte == b'=').count();
+    let data_len = clean.len() - padding;
+    // Preserve whitespace and valid unpadded input, but padding, when present,
+    // must complete exactly one final four-character group.
+    if padding > 2
+        || data_len % 4 == 1
+        || (padding > 0 && (clean.len() % 4 != 0 || data_len % 4 + padding != 4))
+    {
+        return None;
+    }
     let mut out = Vec::with_capacity(clean.len() * 3 / 4);
     let mut buf = 0u32;
     let mut bits = 0u32;
-    for &b in &clean {
-        if b == b'=' {
-            break;
-        }
+    for &b in &clean[..data_len] {
         let val = TABLE[b as usize];
         if val < 0 {
-            continue;
+            return None;
         }
         buf = (buf << 6) | (val as u32);
         bits += 6;
@@ -1433,6 +1475,9 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
             bits -= 8;
             out.push((buf >> bits) as u8);
         }
+    }
+    if bits > 0 && buf & ((1 << bits) - 1) != 0 {
+        return None; // Unused bits in the final base64 digit must be zero.
     }
     Some(out)
 }
@@ -2226,13 +2271,12 @@ fn plan_goal_internal_with_options(
                     {
                         return Err(("Cannot continue this Planner turn: the workspace policy now uses source. Its private workspace and history are retained; send a new Planner message to work in source.".into(), None));
                     }
-                    if !workspace.is_dir() || runtime.path_is_running(&workspace) {
-                        return Err(("The retained Planner workspace is missing or currently in use".into(), None));
+                    if !workspace.is_dir() {
+                        return Err(("The retained Planner workspace is missing".into(), None));
                     }
-                    let selected = previous.workspace_execution_id.as_ref()
-                        .map(|id| runtime.state.executions.iter().find(|execution| &execution.id == id)
-                            .cloned().ok_or(("The Planner workspace execution is missing".into(), None)))
-                        .transpose()?;
+                    let selected = runtime.planner_continuation_workspace(
+                        &workspace, previous.workspace_execution_id.as_deref(),
+                    ).map_err(|error| (format!("Cannot continue Planner workspace: {error}"), None))?;
                     let (session_dir, session_id) = planner_session_directory_for_workspace(
                         &root, &root.join("planning").join(previous_id), &repository, &workspace, Some(&runtime.state),
                     ).map_err(|error| (error, None))?;
@@ -5335,13 +5379,23 @@ fn is_valid_planning_id(id: &str) -> bool {
 
 fn enrich_planning_summary(summary: &mut PlanningSummary, directory: &std::path::Path) {
     if summary.plan_type.is_none() {
-        summary.plan_type = fs::read(directory.join("route.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Route>(&bytes).ok())
-            .map(|route| route.plan_type);
+        summary.plan_type = crate::path_safety::real_child_path(
+            directory, &directory.join("route.json"), true,
+        )
+        .ok()
+        .flatten()
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<Route>(&bytes).ok())
+        .map(|route| route.plan_type);
     }
     if summary.goal.is_none() || summary.run_id.is_none() {
-        if let Ok(bytes) = fs::read(directory.join("request.json")) {
+        let request = crate::path_safety::real_child_path(
+            directory, &directory.join("request.json"), true,
+        )
+        .ok()
+        .flatten()
+        .and_then(|path| fs::read(path).ok());
+        if let Some(bytes) = request {
             if let Ok(req) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                 if summary.goal.is_none() {
                     summary.goal = req["goal"].as_str().map(str::to_owned);
@@ -5360,36 +5414,31 @@ fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningS
     }
     let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
     let planning_dir = runtime.root.join("planning");
-    let summary_path = planning_dir.join(&planning_id).join("summary.json");
-    if let Ok(canonical_summary) = summary_path.canonicalize() {
-        if let Ok(canonical_planning_dir) = planning_dir.canonicalize() {
-            if !canonical_summary.starts_with(&canonical_planning_dir) {
-                return Err(format!(
-                    "Invalid planning ID: path traversal detected: {planning_id}"
-                ));
+    let summary_path = crate::path_safety::real_child_path(
+        &planning_dir,
+        &planning_dir.join(&planning_id).join("summary.json"),
+        true,
+    )?
+    .ok_or_else(|| format!("Planning summary not found: {planning_id}"))?;
+    let content = fs::read_to_string(&summary_path).map_err(|error| error.to_string())?;
+    let mut summary =
+        serde_json::from_str::<PlanningSummary>(&content).map_err(|error| error.to_string())?;
+    if summary.repository.is_none() {
+        if let Some(repo) = runtime
+            .store
+            .find_repository_by_planning_id(&summary.planning_id)
+        {
+            summary.repository = Some(repo);
+            if let Ok(migrated_json) = serde_json::to_string_pretty(&summary) {
+                let _ = fs::write(&summary_path, migrated_json);
             }
         }
     }
-    if summary_path.exists() {
-        let content = fs::read_to_string(&summary_path).map_err(|error| error.to_string())?;
-        let mut summary =
-            serde_json::from_str::<PlanningSummary>(&content).map_err(|error| error.to_string())?;
-        if summary.repository.is_none() {
-            if let Some(repo) = runtime
-                .store
-                .find_repository_by_planning_id(&summary.planning_id)
-            {
-                summary.repository = Some(repo);
-                if let Ok(migrated_json) = serde_json::to_string_pretty(&summary) {
-                    let _ = fs::write(&summary_path, migrated_json);
-                }
-            }
-        }
-        enrich_planning_summary(&mut summary, &planning_dir.join(&planning_id));
-        Ok(summary)
-    } else {
-        Err(format!("Planning summary not found: {planning_id}"))
-    }
+    enrich_planning_summary(
+        &mut summary,
+        summary_path.parent().ok_or("Missing planning directory")?,
+    );
+    Ok(summary)
 }
 
 // Planning traces are loaded only when opened in the UI. Keep raw model output
@@ -5418,30 +5467,22 @@ fn get_planning_output(
     let root = root
         .canonicalize()
         .map_err(|_| "Planning output not found")?;
-    let directory = root
-        .join(&planning_id)
-        .canonicalize()
-        .map_err(|_| "Planning output not found")?;
-    if !directory.starts_with(&root) {
-        return Err("Invalid planning output path".into());
-    }
-    let running = fs::read(directory.join("summary.json"))
-        .ok()
+    let directory = crate::path_safety::real_child_path(&root, &root.join(&planning_id), false)?
+        .ok_or("Planning output not found")?;
+    let running = crate::path_safety::real_child_path(&root, &directory.join("summary.json"), true)?
+        .and_then(|path| fs::read(path).ok())
         .and_then(|bytes| serde_json::from_slice::<PlanningSummary>(&bytes).ok())
         .is_some_and(|summary| summary.status.as_deref() == Some("running"));
-    let file_path = directory.join(format!("{role}.jsonl"));
-    if !file_path.exists() && running && offset == 0 {
+    let file_path = crate::path_safety::real_child_path(
+        &root, &directory.join(format!("{role}.jsonl")), true,
+    )?;
+    if file_path.is_none() && running && offset == 0 {
         return Ok(
             serde_json::json!({ "planningId": planning_id, "role": role, "content": "",
             "nextOffset": 0, "totalBytes": 0, "complete": true, "running": true }),
         );
     }
-    let file_path = file_path
-        .canonicalize()
-        .map_err(|_| "Planning output not found")?;
-    if !file_path.starts_with(&root) {
-        return Err("Invalid planning output path".into());
-    }
+    let file_path = file_path.ok_or("Planning output not found")?;
     let mut file = fs::File::open(file_path).map_err(|e| e.to_string())?;
     let total_bytes = file.metadata().map_err(|e| e.to_string())?.len();
     // Larger bounded backward pages reduce scrollback round trips. Live forward
@@ -5549,10 +5590,15 @@ fn list_plannings(
         return Ok(Vec::new());
     }
     let mut summaries = Vec::new();
-    if let Ok(entries) = fs::read_dir(planning_dir) {
+    if let Ok(entries) = fs::read_dir(&planning_dir) {
         for entry in entries.flatten() {
-            let summary_path = entry.path().join("summary.json");
-            if summary_path.exists() {
+            // Listings may backfill summaries, so never follow a linked
+            // history directory or leaf file, even to another planning entry.
+            if let Ok(Some(summary_path)) = crate::path_safety::real_child_path(
+                &planning_dir,
+                &entry.path().join("summary.json"),
+                true,
+            ) {
                 if let Ok(content) = fs::read_to_string(&summary_path) {
                     if let Ok(mut summary) = serde_json::from_str::<PlanningSummary>(&content) {
                         // If repository is missing, attempt to backfill from associated run in event store
@@ -5578,7 +5624,9 @@ fn list_plannings(
                                 continue; // Reject unrelated or unattributed history.
                             }
                         }
-                        enrich_planning_summary(&mut summary, &entry.path());
+                        if let Some(directory) = summary_path.parent() {
+                            enrich_planning_summary(&mut summary, directory);
+                        }
                         summaries.push(summary);
                     }
                 }
@@ -5599,192 +5647,6 @@ fn argument<T: serde::de::DeserializeOwned>(
 ) -> Result<T, String> {
     serde_json::from_value(body.get(key).cloned().unwrap_or(serde_json::Value::Null))
         .map_err(|error| format!("Invalid {key}: {error}"))
-}
-
-fn get_execution_output(
-    body: &serde_json::Value,
-    service: &Arc<Service>,
-) -> Result<serde_json::Value, String> {
-    let run_id: String = argument(body, "runId")?;
-    let execution_id: String = argument(body, "executionId")?;
-    let offset: usize = body
-        .get("offset")
-        .map(|_| argument(body, "offset"))
-        .transpose()?
-        .unwrap_or(0);
-    let tail = body
-        .get("tail")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let before: Option<usize> = body
-        .get("before")
-        .map(|_| argument(body, "before"))
-        .transpose()?;
-    let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-    if runtime.state.run_id != run_id {
-        return Err("Run does not match service".into());
-    }
-    let status = runtime
-        .state
-        .executions
-        .iter()
-        .chain(&runtime.state.mergers)
-        .find(|exec| exec.id == execution_id)
-        .ok_or("Execution not found in run")?
-        .status
-        .clone();
-    let mut total = runtime.store.log_bytes(&run_id, &execution_id)?;
-    if total == 0 && status != "running" {
-        total = runtime.store.ensure_legacy_logs(&run_id, &execution_id)?;
-        let state = &mut runtime.state;
-        if let Some(exec) = state
-            .executions
-            .iter_mut()
-            .chain(state.mergers.iter_mut())
-            .find(|e| e.id == execution_id)
-        {
-            exec.output_bytes = total;
-        }
-        if total > 0 {
-            runtime.touch();
-        }
-    }
-    let limit = if status != "running"
-        && body.get("full").and_then(serde_json::Value::as_bool) == Some(true)
-    {
-        usize::MAX
-    } else {
-        body.get("limit")
-            .map(|_| argument::<usize>(body, "limit"))
-            .transpose()?
-            .unwrap_or(256 * 1024)
-            .clamp(4, 1024 * 1024)
-    };
-    // Prefix views use the durable edit cursor, not the abandoned execution's
-    // physical EOF. Byte offsets stay those of the original immutable log.
-    let end = body
-        .get("endOffset")
-        .map(|_| argument::<usize>(body, "endOffset"))
-        .transpose()?
-        .unwrap_or(total)
-        .min(total);
-    let mut page = if tail {
-        runtime.store.execution_log_tail_page(
-            &run_id,
-            &execution_id,
-            before.unwrap_or(end).min(end),
-            limit,
-        )?
-    } else {
-        if offset > end {
-            return Err("Invalid prefix output offset".into());
-        }
-        runtime
-            .store
-            .execution_log_page(&run_id, &execution_id, offset, limit.min(end - offset))?
-    };
-    page.total_bytes = end;
-    page.complete = page.next_offset == end;
-    // Legacy events without a checkpoint have no structured metrics. Recover
-    // them from the already requested full response, never during Store::load.
-    if end == total && !page.content.is_empty() && page.start_offset == 0 && page.complete {
-        if let Some(exec) = runtime
-            .state
-            .executions
-            .iter()
-            .chain(&runtime.state.mergers)
-            .find(|e| e.id == execution_id)
-        {
-            let repo = runtime
-                .state
-                .config
-                .as_ref()
-                .map(|c| c.repository.as_str())
-                .unwrap_or_default();
-            crate::file_changes::update_from_log_text(
-                &run_id,
-                &execution_id,
-                &exec.node,
-                &exec.worktree,
-                repo,
-                &page.content,
-                status == "running",
-                true,
-            );
-        }
-    }
-    if end == total && status != "running" && page.start_offset == 0 && page.complete {
-        let state = &mut runtime.state;
-        if let Some(exec) = state
-            .executions
-            .iter_mut()
-            .chain(state.mergers.iter_mut())
-            .find(|e| e.id == execution_id && e.metrics.is_none())
-        {
-            exec.metrics = Some(parse_execution_metrics(
-                &page.content,
-                exec.started_at,
-                exec.completed_at.unwrap_or_else(now),
-            ));
-            state.run_metrics = Some(state.compute_run_metrics());
-            runtime.touch();
-        }
-    }
-    // Recover legacy context counters from the requested tail. Older counters
-    // omitted output tokens; new Pi snapshots also account for trailing tools,
-    // compaction and context edits. Never scan historical logs at Store::load.
-    if end == total && status != "running" && page.complete {
-        let stale = |metrics: &Option<ExecutionMetrics>| {
-            metrics.as_ref().is_some_and(|metrics| {
-                metrics.context_usage.is_none() && metrics.assistant_messages > 0
-            })
-        };
-        if runtime
-            .state
-            .executions
-            .iter()
-            .chain(&runtime.state.mergers)
-            .any(|e| e.id == execution_id && stale(&e.metrics))
-        {
-            let mut recovered = crate::model::parse_context_from_tail(&page.content);
-            if recovered.is_none() {
-                // A long failed tail can exceed the delivered page. Look back one
-                // bounded window instead of charging a full log to every read.
-                const BACKFILL_WINDOW: usize = 1024 * 1024;
-                recovered = runtime
-                    .store
-                    .execution_log_tail_page(
-                        &run_id,
-                        &execution_id,
-                        page.total_bytes,
-                        BACKFILL_WINDOW,
-                    )
-                    .ok()
-                    .and_then(|wide| crate::model::parse_context_from_tail(&wide.content));
-            }
-            if let Some(mut recovered) = recovered {
-                let state = &mut runtime.state;
-                let target = state
-                    .executions
-                    .iter_mut()
-                    .chain(state.mergers.iter_mut())
-                    .find(|e| e.id == execution_id && stale(&e.metrics));
-                if let Some(metrics) = target.and_then(|e| e.metrics.as_mut()) {
-                    metrics.context_tokens = recovered.tokens;
-                    metrics.context_peak = metrics.context_peak.max(recovered.peak);
-                    recovered.peak = metrics.context_peak;
-                    metrics.context_usage = Some(recovered);
-                    state.run_metrics = Some(state.compute_run_metrics());
-                    runtime.touch();
-                }
-            }
-        }
-    }
-    Ok(
-        serde_json::json!({ "runId":run_id, "executionId":execution_id,
-        "content":page.content, "startOffset":page.start_offset, "nextOffset":page.next_offset, "totalBytes":page.total_bytes,
-        "complete":page.complete, "status":status }),
-    )
 }
 
 fn get_file_changes(
@@ -5977,13 +5839,15 @@ pub fn dispatch(
                 serde_json::json!({ "version": version, "snapshot": null, "activity": activity }),
             );
         }
-        // Hold the lock across version and snapshot capture so they describe
-        // exactly the same state. Do not clone or serialize on a cache hit.
-        let mut value = if metadata {
-            snapshot_metadata(&runtime.state)?
+        // Capture version and projection together. Reuse a per-version browser
+        // projection, but clone/serialize the response outside the Run mutex.
+        let captured = if metadata {
+            runtime.browser_metadata()?
         } else {
-            serde_json::to_value(&runtime.state).map_err(|e| e.to_string())?
+            Arc::new(serde_json::to_value(&runtime.state).map_err(|e| e.to_string())?)
         };
+        drop(runtime);
+        let mut value = Arc::unwrap_or_clone(captured);
         if compact {
             if let Some(events) = value
                 .get_mut("events")
@@ -5999,8 +5863,8 @@ pub fn dispatch(
         );
     }
     if command == "snapshot" && metadata {
-        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-        return snapshot_metadata(&runtime.state);
+        let captured = service.runtime.lock().map_err(|e| e.to_string())?.browser_metadata()?;
+        return Ok(Arc::unwrap_or_clone(captured));
     }
     if command == "history" && metadata {
         return snapshot_metadata(&history(argument(&body, "runId")?, service)?);
@@ -6647,6 +6511,7 @@ pub fn run() -> Result<(), String> {
         planning: AtomicBool::new(false),
         extension,
     });
+    remember_service_root(&service, &root);
     #[cfg(not(feature = "fixture"))]
     crate::native::check_retired_leases(&root)?;
     recover_plannings(&service)?;
@@ -6925,6 +6790,9 @@ fn handle_http_request(
             )
             .map_err(|e| e.to_string())
             .and_then(|_| {
+                if input.len() > 10 * 1024 * 1024 {
+                    return Err("Request too large".into());
+                }
                 serde_json::from_str::<serde_json::Value>(&input).map_err(|e| e.to_string())
             });
 

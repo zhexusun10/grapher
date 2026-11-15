@@ -224,6 +224,52 @@ test("composer model scope, slash completion, blocking and extension dialogs", a
   }
 });
 
+test("a delayed model command cannot overwrite newer settings in the same conversation", { timeout: 30_000 }, async () => {
+  const server = await commandServer();
+  let browser;
+  try {
+    await server.listen();
+    browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
+    for (const command of ["/thinking low", "/model test/one"]) {
+      const page = await browser.newPage();
+      let catalogRequest;
+      const errors = [];
+      page.on("pageerror", error => errors.push(String(error)));
+      await page.route("**/api/*", async route => {
+        const url = route.request().url();
+        if (url.endsWith("/provider_auth")) { catalogRequest = route; return; }
+        const result = url.endsWith("/list_files") ? { files: [] } : url.endsWith("/list_skills") ? { skills: [] }
+          : { instance: "model-fixture", commands: [] };
+        await route.fulfill({ json: { result } });
+      });
+      await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__commands?run=1`);
+      const input = page.locator("textarea").first();
+      await input.fill(command); await input.press("Escape"); await input.press("Enter");
+      await expect.poll(() => !!catalogRequest).toBe(true);
+      await expect(input).toBeDisabled();
+      await page.getByRole("button", { name: "Apply newer settings", exact: true }).click();
+      await catalogRequest.fulfill({ json: { result: { providers: [], warning: null, models: ["one", "two"].map(id => ({
+        provider: "test", id, name: id, available: true, thinkingLevels: ["off", "low", "high"],
+      })) } } });
+      await expect(input).toBeEnabled();
+      await expect(input, "an obsolete command remains a retryable draft").toHaveValue(command);
+      const read = async () => JSON.parse(await page.locator("output").textContent());
+      assert.equal((await read()).calls.length, 0, "catalog completion must not save captured old settings");
+      assert.deepEqual((await read()).config.roleModels.planner, { model: "test/two", thinkingLevel: "off" });
+      await input.fill(command === "/thinking low" ? "/thinking high" : command);
+      await input.press("Escape"); await input.press("Enter");
+      await expect.poll(async () => (await read()).calls.length).toBe(1);
+      assert.deepEqual((await read()).calls[0].settings, command === "/thinking low"
+        ? { model: "test/two", thinkingLevel: "high" } : { model: "test/one", thinkingLevel: "off" });
+      assert.deepEqual(errors, []);
+      await page.close();
+    }
+  } finally {
+    await browser?.close();
+    await server.close();
+  }
+});
+
 test("returning to a live process cannot let an old command cancel the new command's UI", async () => {
   const server = await commandServer();
   let browser;

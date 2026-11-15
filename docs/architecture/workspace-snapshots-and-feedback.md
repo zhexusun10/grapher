@@ -34,7 +34,13 @@ the next dispatch chooses its workspace policy again. Source admission is not
 revalidated when active writers or unavailable slots already prohibit dispatch.
 An invalid source binding never admits replenishment; existing workers first
 drain so the driver retains their terminal output and completion evidence, then
-the idle scheduling attempt reports the binding error explicitly.
+the idle scheduling attempt reports the binding error explicitly. A scheduling
+pass reuses its admitted source binding for the selected jobs; every worker still
+revalidates before filesystem work. Dependency/running-node indexes live only for
+that pass. Empty or already-delivered result heads are filtered before physical
+workspace checks; ordinary completed nodes do not trigger private-recovery binding
+validation. These shortcuts never cache source files or bypass pending private
+delivery, feedback, pause or capacity barriers.
 
 Private batches deliver only after every retained member succeeds, not merely
 when their processes stop. A failed, interrupted or manually resolved-but-unfinished
@@ -84,7 +90,8 @@ allocate environments or collect Git snapshots. A private batch initializes
 native admission lazily, then its first worker captures the latest source under
 the source lock, outside the Run mutex. Shared results have empty Git heads and
 no E/L evidence. Dormant private environment evidence stays Run-owned, but shared
-jobs never load that binding or require its completion seals. Each new private
+jobs never load that binding, scan historical environment layouts or require its
+completion seals. Each new private
 batch starts from the latest delivered/shared source files, not a pre-switch
 baseline; source itself can never be borrowed as a private slot. A retained
 managed result descriptor is historical after any new batch starts; querying or
@@ -245,7 +252,13 @@ composed view. The current format records project hardlink topology,
 including external link counts using private control-owned witnesses. Forks do
 not share writable inodes with source or siblings. Native symlinks and Windows
 junctions are reconstructed, not flattened; absolute project-local targets are
-rebound to the private root, and a source `.git` directory link is rebound to
+rebound to the private root using filesystem identity, not unconditional case
+folding. Root aliases may differ in depth (for example `/var` and `/private/var`);
+the first physical root boundary retains the complete logical suffix. Case-distinct
+external targets remain external on sensitive APFS volumes.
+On POSIX, parent traversal resolves directory links before `..`; classification
+preserves the final link name so private edits to it remain visible.
+A source `.git` directory link is rebound to
 slot-owned metadata. Named pipes and (where the native filesystem/privilege
 allows) device nodes are recreated with their recorded type and mode. Nested
 repositories/submodules retain independent native Git and index evidence;
@@ -262,7 +275,10 @@ view identity and materialization verification (including legacy view records).
 Host-managed macOS storage/revision/security flags are omitted for the same
 reason while the private copy keeps its own, and destination-only xattrs/streams
 are cleared so inherited or stale host metadata cannot make an otherwise equal
-view fail. Linux SELinux labels are likewise host security policy rather than
+view fail. Native ACL-only changes advance private snapshot identity, survive
+forks and composed publication evidence, and conflict instead of being silently
+chosen away at fan-in. A recorded empty macOS ACL clears stale destination rules.
+Files-only source delivery is not a general ACL synchronization mechanism. Linux SELinux labels are likewise host security policy rather than
 project metadata; file capabilities (`security.capability`) remain project
 metadata. Windows EFS encryption state is recreated for the private entry; a
 destination volume without EFS fails the preparation explicitly rather than
@@ -312,12 +328,12 @@ with pathspec exclusions for:
 - `.git` and Git internals;
 - `.grapher*` and Runtime data;
 - managed environment/cache scopes;
-- generated dependency/bytecode artifacts (see below);
+- rebuildable tool caches (see below);
 - untracked macOS host metadata (`.DS_Store`, `._*`). Tracked metadata stays
   in the snapshot: exact index paths are staged again after the excluded add.
   Windows and Linux retain their previous collection strategy.
 
-The collector does not query ignore status: additions, modifications and deletions enter source/node snapshot commits even under ignored directories. `.gitignore` is an ordinary tracked project file, not a collection boundary. No `before-*`/`after-*` project-file manifests, content hashes or Run blob stores are created.
+The collector does not query ignore status: additions, modifications and deletions enter source/node snapshot commits even under ignored directories. `.gitignore` is an ordinary tracked project file, not a collection boundary.
 
 Regular-file scans keep the existing parallel threshold (256 files) and cap of
 four workers per scan, limited by available parallelism. Workers claim the next
@@ -332,21 +348,26 @@ independent revalidation passes around snapshot capture and publication.
 
 ### Generated artifacts
 
-Runtime owns a generated-artifact policy: dependency trees and interpreter
-caches are rebuilt from a manifest, so they are not collected, composed or
-published. A path is excluded when any component is `node_modules`, `.next`,
+Runtime excludes rebuildable tool caches when any path component is
 `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.turbo` or
-`.parcel-cache`, or its name ends with `.pyc`, `.pyo` or `.tsbuildinfo`.
-`dist`, `build`, `out` and `target` are deliberately absent: they are ambiguous
-with authored directories.
+`.parcel-cache`, or a filename ends with `.tsbuildinfo`. Project Git tracking
+still overrides these cache exclusions.
 
-The policy never overrides the project's own Git: an artifact the user tracks
-(a committed dependency tree or bytecode file) is authored content and stays in
-the snapshot, composition and publication. Untracked artifacts are excluded
-whether they were pre-installed in the source or generated by a node, and they
-remain on disk for the agent to use. This is a runtime decision — no agent
-task, prompt or user setting selects it — and it is why a large dependency tree
-does not dominate preparation and write-back cost.
+Installed dependencies and runnable artifacts are **not** disposable caches.
+`node_modules`, `.next`, `dist`, `build`, `out`, `target` and standalone
+`.pyc`/`.pyo` files follow the ordinary project Git channel, even when ignored or
+untracked. A manifest or registry may be missing, and local package patches,
+private/offline dependencies and sourceless modules cannot be assumed
+rebuildable. Grapher does not run an installer to replace their bytes.
+
+Fresh nodes and forks inherit the recorded dependency/artifact bytes, not a
+live-source copy or writable link to another workspace. Dependency-only edits
+are real changes and must be snapshotted; unrecorded edits fail the same
+completed-view checks as other project files. This prioritizes correctness over
+snapshot size: large installed trees increase hashing, storage and delivery
+cost. Existing immutable records are not retroactively populated from source;
+if an older snapshot omitted dependencies, use a fresh source snapshot or the
+project's explicit setup procedure rather than silently borrowing today's files.
 
 On macOS, cleanliness/status checks also ignore untracked host metadata; browsing in Finder cannot alone block publication. Tracked metadata edits remain real changes.
 
@@ -367,12 +388,11 @@ environment policy does not declare a `PYTHONPYCACHEPREFIX` redirect: Runtime
 owns bytecode policy uniformly instead of giving a managed cache scope its own
 rules.
 
-This changes what agents *create*, not what a project already tracks. A `.pyc`
-that the user's own Git history committed stays an ordinary tracked project
-file: it is collected, merged and published like any other project file, and
-`git status` still reports it. Program/model behavior is unaffected — bytecode
-is a cache, and CPU/NPU kernel caches such as Triton, TorchInductor and CUDA
-JIT outputs are separate systems that this policy does not touch.
+This changes what agents *create*, not what a project already contains.
+Standalone `.pyc`/`.pyo` distributions remain project files even without matching
+source or native Git tracking. Rebuildable bytecode under `__pycache__` remains
+excluded unless tracked. CPU/NPU kernel caches such as Triton, TorchInductor and
+CUDA JIT outputs are separate systems that this policy does not redirect.
 
 ### Binding and size checks
 
@@ -521,13 +541,51 @@ validation and persistence; it is distinct from the raw source-snapshot identity
 Managed-scope staging retains its exclusion/removal checks, and special-entry
 validation is unchanged.
 
-Checksum normalization retains its historical JSON bytes. A borrowed serialization
-projection avoids allocating values known to be discarded: metadata `security`,
-entry/repository-map members named `security`, and each view's Git `index` entry. The existing
-recursive cleanup and JSON encoder remain authoritative; legacy owner fields stay
-until load validates the original checksum. This is not a collection exclusion or
-a file-observation cache. Full `view.json` evidence and raw source identities still
-use the complete serializer, including security history, without a schema change.
+New project-view records use schema 6: checksum normalization includes native
+ACL evidence and every project path name, including `security`. Only each native
+Git `index` entry's per-workspace stat cache remains omitted. A borrowed projection
+serializes sorted JSON directly, without constructing a JSON value tree. Schema-5
+records retain their historical checksum algorithm (including its recursive
+`security` omissions) for validation, then upgrade in memory; existing evidence
+files/checksums are never rewritten. Nested view versions are checked before
+this upgrade. Reusing a code reference validates its stored view/checksum first;
+damaged or partial existing evidence fails instead of being recaptured from live
+files. Legacy owner fields likewise remain until the original checksum is validated. Differential tests pin legacy bytes and cover
+current ACL/path identity and corruption; [native ACL regressions](../../backend/src/workspace_view/acl_tests.rs)
+cover snapshot, fork, composition and conflicting permission changes on Windows/macOS.
+This is not a collection exclusion or a file-observation cache. Full `view.json`
+evidence and raw source identities still use the complete serializer.
+
+Native project-index composition probes full index flags as well as content and
+modes before taking its no-staging fast path: intent-to-add on a committed empty
+blob can look clean to both `diff-index` and `ls-files -v`. Debug flag records are
+parsed without constructing another complete path map. The selected native index
+is copied through an exclusively created `index.lock`, synced and atomically
+renamed before Git composition continues. A foreign lock or failed copy preserves
+the retained target index; no foreign lock is adopted or removed.
+
+Composition restores flags in NUL-delimited batches instead of rewriting the
+index in separate Git processes for every changed path. Only
+removed/reinserted entries enter this pass; unchanged entries retain their selected
+input's state, and zero-flag entries need no flag commands. Private insertions
+explicitly disable `core.ignorestat` so the target's configuration cannot invent
+`assume-unchanged` flags absent from the recorded inputs; stored configuration is
+not changed. Private intent recovery also disables sparse-checkout filtering for
+that command only, so recorded paths outside the target's sparse selection are
+not dropped or rejected. Intent-to-add entries are removed before batched literal-path
+`add -N`, because that command does not mark an existing ordinary cache entry as
+intent-to-add. Recovery uses disposable, metadata-owned worktree skeletons,
+not the real project: deleted intent paths and checkout-free composition retain
+their index state without recreating project files. Recovery Git commands use
+byte-exact case matching without changing stored `core.ignorecase`. ASCII paths
+share a skeleton only when every directory/leaf prefix has compatible spelling;
+case aliases use separate skeletons. Non-ASCII paths are isolated conservatively,
+so host case/Unicode equivalence cannot collapse distinct native index names.
+Recorded regular/executable/link modes are restored independently of live file
+modes. Skeletons are removed
+after success or failure; managed-slot scratch stays in host-only graph metadata.
+The complete composed index is still independently checked, and source/input
+indexes remain untouched.
 
 ## Composition and conflicts
 

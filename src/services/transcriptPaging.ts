@@ -11,3 +11,56 @@ export const MAX_AUTO_TRANSCRIPT_BYTES = 4 * 1024 * 1024;
  * mid-fade. A slow or stalled older read must not keep the pane hidden, so this
  * bounds that wait. */
 export const TRANSCRIPT_REVEAL_FALLBACK_MS = 300;
+
+/** One automatic-fill budget for a conversation scroller, not one per attempt.
+ * Reservations include concurrent reads; boundary look-behind may overrun one
+ * reservation, but cannot start another burst. Explicit upward gestures renew it. */
+export class TranscriptAutoFillBudget {
+  private used = 0;
+  private reserved = 0;
+  private lastGesture: Event | undefined;
+  private listeners = new Set<() => void>();
+  readonly maximum: number;
+  constructor(maximum = MAX_AUTO_TRANSCRIPT_BYTES) { this.maximum = maximum; }
+  get remaining() { return Math.max(0, this.maximum - this.used - this.reserved); }
+  subscribe(listener: () => void) {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+  private notify() { for (const listener of this.listeners) listener(); }
+  charge(bytes: number) { this.used += bytes; this.notify(); }
+  renew(event: Event) {
+    // Several mounted readers receive the same bubbling gesture.
+    if (this.lastGesture === event) return;
+    this.lastGesture = event;
+    this.used = 0;
+    this.notify();
+  }
+  reserve(wanted: number, readerRequested = false) {
+    // Quotas bound automatic work, never a reader's explicit page or retry
+    // (scrollbar dragging does not necessarily emit a wheel/key/touch gesture).
+    const bytes = readerRequested ? wanted : Math.min(wanted, this.remaining);
+    if (bytes < 4) return null;
+    this.reserved += bytes;
+    let pending = true;
+    return { bytes, finish: (actualBytes = 0) => {
+      if (!pending) return;
+      pending = false;
+      this.reserved -= bytes;
+      this.charge(actualBytes);
+    } };
+  }
+}
+
+const viewportBudgets = new WeakMap<HTMLElement, { key: string; budget: TranscriptAutoFillBudget }>();
+export function transcriptAutoFillBudget(scroller: HTMLElement): TranscriptAutoFillBudget {
+  // Node-to-Node navigation can reuse the actual DOM scroller. Its new
+  // conversation must not inherit the previous view's exhausted budget.
+  const key = scroller.closest<HTMLElement>("[data-transcript-budget-key]")?.dataset.transcriptBudgetKey ?? "";
+  let entry = viewportBudgets.get(scroller);
+  if (!entry || entry.key !== key) {
+    entry = { key, budget: new TranscriptAutoFillBudget() };
+    viewportBudgets.set(scroller, entry);
+  }
+  return entry.budget;
+}

@@ -1464,9 +1464,16 @@ button.transcript-error-toggle {
   color: #91a7b7;
 }
 
+.execution-transcript-content {
+  transition: opacity 0.2s ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .transcript-loading .spin {
     animation: none;
+  }
+  .execution-transcript-content {
+    transition: none;
   }
 }
 

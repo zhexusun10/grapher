@@ -41,6 +41,31 @@ impl Topology {
     }
 }
 
+/// Sorted checksum projection; full stored topology keeps every project path.
+pub(crate) struct ForViewIdentity<'a>(pub(crate) &'a Topology);
+impl Serialize for ForViewIdentity<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        struct Paths<'a, T>(&'a BTreeMap<String, T>);
+        impl<T: Serialize> Serialize for Paths<'_, T> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut map = serializer.serialize_map(None)?;
+                for (name, value) in self.0 {
+                    if name != "security" {
+                        map.serialize_entry(name, value)?;
+                    }
+                }
+                map.end()
+            }
+        }
+        let Topology { aliases, outside } = self.0;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("aliases", &Paths(aliases))?;
+        map.serialize_entry("outside", &Paths(outside))?;
+        map.end()
+    }
+}
+
 fn safe(name: &str) -> Result<(), String> {
     if name.is_empty()
         || !Path::new(name)

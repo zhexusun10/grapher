@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { dirname, join, resolve, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -11,12 +11,12 @@ const shell = process.platform === 'win32'
   ? join(resolve(execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(), '../../..'), 'bin/bash.exe') : '/bin/bash';
 const module = pathToFileURL(resolve('engine/launch-binding.mjs')).href;
 const base = () => ({ entry: process.execPath, path: [dirname(process.execPath)], shell, variables: { LAUNCH_TEST: 'configured' }, inherit: [], hook: null });
-const run = (launch, code, extra = {}) => {
+const run = (launch, code, extra = {}, cwd = undefined) => {
   const directory = mkdtempSync(join(tmpdir(), 'grapher-launch-'));
   try {
     const binding = join(directory, 'launch.json'); writeFileSync(binding, JSON.stringify(launch));
-    return spawnSync(process.execPath, ['--input-type=module', '-e', `import {applyLaunchBinding,managedBashOptions,managedBashCommand} from ${JSON.stringify(module)}; import {execFileSync} from 'node:child_process'; applyLaunchBinding(); ${code}`], {
-      encoding: 'utf8', env: { ...process.env, GRAPHER_LAUNCH_BINDING: binding, GRAPHER_MODE: 'node', ...extra }, timeout: 15000,
+    return spawnSync(process.execPath, ['--input-type=module', '-e', `import {applyLaunchBinding,managedBashOptions,managedBashCommand,managedBusinessEnvironment} from ${JSON.stringify(module)}; import {execFileSync} from 'node:child_process'; applyLaunchBinding(); ${code}`], {
+      cwd, encoding: 'utf8', env: { ...process.env, GRAPHER_LAUNCH_BINDING: binding, GRAPHER_MODE: 'node', ...extra }, timeout: 15000,
     });
   } finally { rmSync(directory, { recursive: true, force: true }); }
 };
@@ -37,6 +37,163 @@ test('Pi PATH preprocessing cannot change an explicit managed Bash PATH and shel
     CDPATH: 'project-cd', OLDPWD: 'previous-dir', GLOBIGNORE: '*.tmp',
     PYTHONDONTWRITEBYTECODE: '1', KEEP: 'yes', PATH: dirname(process.execPath),
   });
+});
+
+test('automatic unbound Bash preserves business PATH precedence without weakening bound entries', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-business-path-'));
+  try {
+    const first = join(directory, 'host-first');
+    const second = join(directory, 'bootstrap-second');
+    for (const [bin, value] of [[first, 'host-first'], [second, 'bootstrap-second']]) {
+      mkdirSync(bin);
+      writeFileSync(join(bin, 'parity-tool'), `#!/bin/sh\nprintf '%s\\n' '${value}'\n`, { mode: 0o755 });
+    }
+    const launch = { ...base(), inheritAmbient: true, entry: shell, path: [first, second, dirname(shell)] };
+    const result = run(launch, `console.log(execFileSync(${JSON.stringify(shell)},['--noprofile','--norc','-c',managedBashCommand('parity-tool')],{env:managedBashOptions({env:{...process.env}}).env,encoding:'utf8'}).trim())`);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), 'host-first');
+    for (const strict of [
+      { ...launch, inheritAmbient: false },
+      { ...launch, environment: { kind: 'venv', prefix: 'env', abi: '0'.repeat(40) } },
+      { ...launch, hook: 'true' },
+    ]) {
+      const refused = run(strict, "console.log('FACTORY_RAN')");
+      assert.notEqual(refused.status, 0);
+      assert.match(refused.stderr, /Declared default entry\/PATH/);
+      assert.doesNotMatch(refused.stdout, /FACTORY_RAN/);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('automatic PATH keeps relative, empty and future entries with native cd semantics', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-relative-path-'));
+  try {
+    const script = (path, output) => writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' '${output}'\n`, { mode: 0o755 });
+    mkdirSync(join(directory, 'bin'));
+    mkdirSync(join(directory, 'sub/bin'), { recursive: true });
+    script(join(directory, 'bin/choice'), 'root-bin');
+    script(join(directory, 'sub/bin/choice'), 'nested-bin');
+    script(join(directory, 'cwd-only'), 'cwd-entry');
+    const path = ['future', 'bin', '', dirname(shell)];
+    const launch = { ...base(), entry: shell, inheritAmbient: true, path, unboundPath: path };
+    // Native Bash caches command paths; the business command explicitly clears
+    // that cache after cd rather than having the adapter change shell options.
+    const code = `process.chdir(${JSON.stringify(directory)}); console.log(execFileSync(${JSON.stringify(shell)},['--noprofile','--norc','-c',managedBashCommand('choice; cwd-only; cd sub; hash -r; choice',process.cwd())],{cwd:process.cwd(),env:managedBashOptions({env:{...process.env}}).env,encoding:'utf8'}).trim())`;
+    const result = run(launch, code);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim().replaceAll('\r', ''), 'root-bin\ncwd-entry\nnested-bin');
+    mkdirSync(join(directory, 'future'));
+    script(join(directory, 'future/choice'), 'future-installed');
+    const installed = run(launch, code);
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.equal(installed.stdout.trim().replaceAll('\r', ''), 'future-installed\ncwd-entry\nnested-bin');
+    const legacy = run({ ...launch, unboundPath: undefined }, '');
+    assert.notEqual(legacy.status, 0, 'old explicit bindings still require absolute PATH entries');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Windows PATH keeps a semicolon directory as one entry through validation and Bash', { skip: process.platform !== 'win32' }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-path-list-'));
+  try {
+    const bin = join(directory, 'native;bin');
+    mkdirSync(bin);
+    const entry = join(bin, 'business-node.exe');
+    copyFileSync(process.execPath, entry);
+    writeFileSync(join(bin, 'path-choice'), "#!/bin/sh\nprintf 'semicolon-directory\\n'\n", { mode: 0o755 });
+    const launch = { ...base(), entry, path: [bin, dirname(shell)] };
+    const result = run(launch, `
+const env=managedBashOptions({env:{...process.env}}).env;
+const shell=execFileSync(${JSON.stringify(shell)},['--noprofile','--norc','-c',managedBashCommand('path-choice')],{env,encoding:'utf8'}).trim();
+const entry=execFileSync(${JSON.stringify(entry)},['-p','6*7'],{env:managedBusinessEnvironment(),encoding:'utf8'}).trim();
+console.log(JSON.stringify({shell,entry,path:env.PATH}));`);
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.shell, 'semicolon-directory');
+    assert.equal(output.entry, '42');
+    assert.equal(output.path, `"${bin}";${dirname(shell)}`);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('bound hooks cannot replace their absolute entry directory with cwd or an absent PATH', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-hook-path-'));
+  try {
+    const entry = join(directory, 'entry');
+    writeFileSync(entry, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    for (const hook of ['unset PATH', 'export PATH=.', 'export PATH=']) {
+      const launch = { ...base(), entry, path: [directory], hook };
+      const result = run(launch, "console.log('FACTORY_RAN')", {}, directory);
+      assert.notEqual(result.status, 0, hook);
+      assert.match(result.stderr, /Declared default entry\/PATH/);
+      assert.doesNotMatch(result.stdout, /FACTORY_RAN/);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('activation hooks restore the workspace after inherited Bash startup changes cwd', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-hook-cwd-'));
+  try {
+    const workspace = join(directory, 'workspace');
+    const elsewhere = join(directory, 'startup-directory');
+    mkdirSync(workspace);
+    mkdirSync(elsewhere);
+    writeFileSync(join(workspace, 'context.txt'), 'workspace');
+    writeFileSync(join(elsewhere, 'context.txt'), 'startup');
+    const startup = join(directory, 'startup.sh');
+    const quote = value => `'${value.replaceAll('\\', '/').replaceAll("'", "'\\''")}'`;
+    writeFileSync(startup, `cd ${quote(elsewhere)}\nexport STARTUP_VALUE=retained\n`);
+    const launch = { ...base(), hook: 'export HOOK_CONTEXT="$(<context.txt)"' };
+    const result = run(launch, "console.log(JSON.stringify({context:process.env.HOOK_CONTEXT,startup:process.env.STARTUP_VALUE}))", { BASH_ENV: startup }, workspace);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { context: 'workspace', startup: 'retained' });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('business Node options and module paths reach children but not engine factories or hook capture', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-business-node-'));
+  try {
+    const preload = join(directory, 'preload.cjs');
+    writeFileSync(preload, "globalThis.businessPreload='loaded';\n");
+    const modules = join(directory, 'modules');
+    mkdirSync(join(modules, 'business-only'), { recursive: true });
+    writeFileSync(join(modules, 'business-only/index.js'), 'module.exports=42;\n');
+    const values = {
+      NODE_OPTIONS: `--stack-trace-limit=29 --require ${JSON.stringify(preload.replaceAll('\\', '/'))}`,
+      NODE_PATH: modules,
+    };
+    const launch = { ...base(), hook: 'export NODE_OPTIONS=invalid-hook-option; export NODE_PATH=invalid-hook-modules' };
+    const result = run(launch, `
+if(process.env.NODE_OPTIONS || process.env.NODE_PATH || globalThis.businessPreload) throw Error('Business Node setup reached factories');
+if(process.env.GRAPHER_BUSINESS_NODE_ENV) throw Error('Transient transport was not consumed');
+const code="process.stdout.write(JSON.stringify([globalThis.businessPreload,require('business-only'),Error.stackTraceLimit]))";
+const direct=execFileSync(process.execPath,['-e',code],{env:managedBusinessEnvironment(),encoding:'utf8'});
+const quote=s=>"'"+s.replaceAll("'","'\\\\''")+"'";
+const bash=execFileSync(${JSON.stringify(shell)},['--noprofile','--norc','-c',managedBashCommand(quote(process.execPath.replaceAll('\\\\','/'))+' -e '+quote(code))],{env:managedBashOptions({env:{...process.env}}).env,encoding:'utf8'});
+console.log(JSON.stringify({direct:JSON.parse(direct),bash:JSON.parse(bash),override:managedBusinessEnvironment({NODE_OPTIONS:'--stack-trace-limit=7'}).NODE_OPTIONS}));
+`, { NODE_OPTIONS: undefined, NODE_PATH: undefined, GRAPHER_BUSINESS_NODE_ENV: JSON.stringify(values) });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { direct: ['loaded', 42, 29], bash: ['loaded', 42, 29], override: '--stack-trace-limit=7' });
+    for (const invalid of [[], null, { PATH: 'poison' }, { NODE_OPTIONS: 3 }]) {
+      const refused = run(base(), "console.log('FACTORY_RAN')", { GRAPHER_BUSINESS_NODE_ENV: JSON.stringify(invalid) });
+      assert.notEqual(refused.status, 0);
+      assert.match(refused.stderr, /Invalid transient business Node binding/);
+      assert.doesNotMatch(refused.stdout, /FACTORY_RAN/);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('discovery preserves startup functions, readonly wrappers and aliases', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'grapher-shell-wrappers-'));
+  try {
+    const startup = join(directory, 'startup.sh');
+    writeFileSync(startup, `python() { printf 'host-python\\n'; }\npip() { printf 'host-pip\\n'; }\nreadonly -f pip\nshopt -s expand_aliases\nalias conda='printf "host-conda\\n"'\n`);
+    const result = run(base(), `console.log(execFileSync(${JSON.stringify(shell)},['--noprofile','--norc','-c',managedBashCommand('python; pip; conda; type -t python3')],{env:managedBashOptions({env:{...process.env}}).env,encoding:'utf8'}).trim())`, {
+      BASH_ENV: startup,
+      GRAPHER_ENVIRONMENT_DISCOVERY: join(directory, 'observer.json'),
+      GRAPHER_ENVIRONMENT_HELPER: process.execPath,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim().replaceAll('\r', ''), 'host-python\nhost-pip\nhost-conda\nfunction');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('a managed shell without an explicit environment preserves PATH and shell controls', () => {

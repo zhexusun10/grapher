@@ -1,7 +1,7 @@
 //! Lazy environment observation from native tool receipts. The current workspace
 //! lets Bash explore/use ambient tools and only records verifiable private environments.
 use crate::{
-    environment::{self, LaunchConfig},
+    environment::{self, EnvironmentScope, LaunchConfig},
     native,
     path_safety::real_child_path,
     workspace,
@@ -70,11 +70,14 @@ impl Binding {
         Ok(())
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Context {
     schema: u32,
     workspace: String,
+    /// Backend-bound source, never chosen by tool argv. Absent in old receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
     /// External process-state root for state-bound launches. Absent in old
     /// receipts and for source-only policies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,6 +239,7 @@ pub(crate) fn context(
 ) -> Result<PathBuf, String> {
     context_with_state(root, None, generation, launch, session, best_effort)
 }
+#[cfg(test)]
 pub(crate) fn context_with_state(
     workspace: &Path,
     state: Option<&Path>,
@@ -244,20 +248,43 @@ pub(crate) fn context_with_state(
     session: &Path,
     best_effort: bool,
 ) -> Result<PathBuf, String> {
+    context_with_source(workspace, state, None, generation, launch, session, best_effort)
+}
+
+pub(crate) fn context_with_source(
+    workspace: &Path,
+    state: Option<&Path>,
+    source: Option<&Path>,
+    generation: &str,
+    launch: &LaunchConfig,
+    session: &Path,
+    best_effort: bool,
+) -> Result<PathBuf, String> {
     Uuid::parse_str(generation).map_err(|_| "Invalid discovery writer generation")?;
     let file = session.join(format!("environment-observer-{generation}.json"));
-    let bytes = serde_json::to_vec(&Context {
+    let mut context = Context {
         schema: 1,
         workspace: text(&canonical(workspace)?),
+        source: source.map(canonical).transpose()?.map(|path| text(&path)),
         state: state.map(canonical).transpose()?.map(|path| text(&path)),
         generation: generation.into(),
         launch: launch.clone(),
         best_effort,
-    })
-    .map_err(|e| e.to_string())?;
+    };
+    let bytes = serde_json::to_vec(&context).map_err(|e| e.to_string())?;
     if file.exists() {
-        if fs::read(&file).map_err(|e| e.to_string())? != bytes {
-            return Err("Discovery writer context changed within a generation".into());
+        let saved = fs::read(&file).map_err(|e| e.to_string())?;
+        if saved != bytes {
+            // A resumed pre-guard generation keeps its immutable context. This
+            // compatibility exception cannot change any other recorded input.
+            let previous: Context = serde_json::from_slice(&saved).map_err(|e| e.to_string())?;
+            if previous.source.is_some() {
+                return Err("Discovery writer context changed within a generation".into());
+            }
+            context.source = None;
+            if previous != context {
+                return Err("Discovery writer context changed within a generation".into());
+            }
         }
     } else {
         write(&file, &bytes)?;
@@ -536,19 +563,16 @@ fn launch_environment_differs(
     }
 }
 
-fn unbound_launch(launch: &LaunchConfig, scopes: &[String]) -> Result<LaunchConfig, String> {
+fn unbound_launch(launch: &LaunchConfig) -> Result<LaunchConfig, String> {
     let mut next = launch.clone();
     next.entry = next.shell.clone();
-    next.path
-        .retain(|path| !path.starts_with("{workspace}/") && !path.starts_with("{state}/"));
+    next.restore_unbound_path();
     next.hook = None;
     next.environment = None;
     next.variables.remove("VIRTUAL_ENV");
     next.variables.remove("CONDA_PREFIX");
     next.variables.remove("CONDA_DEFAULT_ENV");
-    next.managed_scopes.extend(scopes.iter().cloned());
-    next.managed_scopes.sort();
-    next.managed_scopes.dedup();
+    // Ownership survives even when activation cannot be verified.
     next.validate()?;
     Ok(next)
 }
@@ -567,6 +591,32 @@ fn write_receipt(file: &Path, receipt: &Receipt, generation: &str) -> Result<(),
         &receipt_path(file, generation)?,
         &serde_json::to_vec(receipt).map_err(|e| e.to_string())?,
     )
+}
+
+/// Standard venv activation/console launchers often retain their creation path.
+/// Private execution must not silently run a source-bound environment tool,
+/// even if its local copy was removed. This is a bounded tool diagnostic, not
+/// path relocation or a sandbox for arbitrary programs. Unrelated ambient
+/// environments remain usable; source permissions and project bytes are intact.
+fn reject_source_environment_tool(
+    workspace: &Path,
+    source: Option<&str>,
+    requested: &Path,
+) -> Result<(), String> {
+    let Some(source) = source else { return Ok(()); };
+    if source.contains('\0') || !Path::new(source).is_absolute() {
+        return Err("Invalid native observer source binding".into());
+    }
+    let source = Path::new(source);
+    if crate::path_identity::same_path(workspace, source) {
+        return Ok(());
+    }
+    // Compare executable directories BEFORE resolving the executable symlink:
+    // Unix venv/bin/python usually points at an unrelated host Python binary.
+    if requested.parent().is_some_and(|parent| workspace::scope_contains(parent, source)) {
+        return Err("Source-bound environment tool selected from a private workspace; refusing source-environment execution. A copied activation script or launcher may still name its old location. Recreate/install the environment at its current workspace path or use an unrelated external environment; no automatic relocation is performed.".into());
+    }
+    Ok(())
 }
 
 /// This is a tool adapter, not a model/fixture command-injection actuator.
@@ -610,7 +660,10 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     if cfg!(windows) && !requested.is_file() && requested.extension().is_none() {
         requested.set_extension("exe");
     }
+    reject_source_environment_tool(&workspace, ctx.source.as_deref(), &requested)?;
     let program = canonical(&requested)?;
+    // Also catch executable-file aliases into source, not only directory aliases.
+    reject_source_environment_tool(&workspace, ctx.source.as_deref(), &program)?;
     let detected_prefix = executable_prefix(&requested)?;
     let private = detected_prefix
         .clone()
@@ -783,11 +836,15 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     // launching its host target would silently lose sys.prefix/pyvenv.cfg.
     let mut command = Command::new(&requested);
     command.args(&business);
-    for key in ["HOME", "USERPROFILE", "CONDA_ENVS_PATH", "CONDA_PKGS_DIRS"] {
-        if let Some(value) = ctx.launch.variables.get(key) {
-            command.env(key, value);
+    if !ctx.best_effort {
+        for key in ["HOME", "USERPROFILE", "CONDA_ENVS_PATH", "CONDA_PKGS_DIRS"] {
+            if let Some(value) = ctx.launch.variables.get(key) {
+                command.env(key, value);
+            }
         }
     }
+    // Best-effort observation inherits this Bash invocation, including explicit
+    // per-command exports. Recording provenance must not undo business setup.
     if name == "conda" && !ctx.best_effort {
         command
             .env("CONDA_ENVS_PATH", conda_root.join(".environments"))
@@ -1248,7 +1305,10 @@ pub(crate) fn resolve_for_policy_with_state(
                 if let Ok(Some(_environment_kind)) = kind(&prefix) {
                     match owned(root, &prefix) {
                         Ok(relative) => {
-                            discovered_scopes.push(relative.clone());
+                            discovered_scopes.push(EnvironmentScope {
+                                root: (*label).into(),
+                                path: relative.clone(),
+                            });
                             let observed = candidates
                                 .contains_key(&((*label).into(), relative.clone()))
                                 || launch.environment.as_ref().is_some_and(|binding| {
@@ -1268,22 +1328,44 @@ pub(crate) fn resolve_for_policy_with_state(
             }
         }
     }
-    let mut next = if best_effort {
-        let mut next = launch.clone();
-        next.managed_scopes.extend(discovered_scopes);
+    let mut next = launch.clone();
+    // Version new ownership evidence in L, not the frozen policy. Legacy
+    // single-root records stay readable; a dual-root discovery must never
+    // collapse equal relative names from W and S into one scope.
+    if state.is_some() && next.owned_scopes.is_none() {
+        let root = binding_root_label(launch, &roots);
+        next.owned_scopes = Some(next.managed_scopes.drain(..)
+            .map(|path| EnvironmentScope { root: root.into(), path }).collect());
+    }
+    if best_effort {
+        if let Some(scopes) = &mut next.owned_scopes {
+            scopes.extend(discovered_scopes);
+        } else {
+            next.managed_scopes.extend(discovered_scopes.into_iter().map(|scope| scope.path));
+        }
+        next.ambient_hints = ambient_hints;
+    }
+    if let Some(scopes) = &mut next.owned_scopes {
+        // Also retain a previously bound scope if its metadata was removed or
+        // damaged during this turn; unbinding is not permission to publish it.
+        if let Some(binding) = &launch.environment {
+            scopes.push(EnvironmentScope {
+                root: binding_root_label(launch, &roots).into(),
+                path: binding.prefix.clone(),
+            });
+        }
+        scopes.sort();
+        scopes.dedup();
+    } else {
         next.managed_scopes.sort();
         next.managed_scopes.dedup();
-        next.ambient_hints = ambient_hints;
-        next
-    } else {
-        launch.clone()
-    };
+    }
     if best_effort && external_selected {
-        return unbound_launch(&next, &[]);
+        return unbound_launch(&next);
     }
     if candidates.len() > 1 {
         if best_effort {
-            return unbound_launch(&next, &[]);
+            return unbound_launch(&next);
         }
         return Err("Ambiguous independent native environments in this execution; no automatic authority or user selection".into());
     }
@@ -1291,7 +1373,7 @@ pub(crate) fn resolve_for_policy_with_state(
         let root = root_for(&roots, &root_label)?;
         let binding = match verify(root, &root_label, &prefix, &kind, project_requirements) {
             Ok(binding) => binding,
-            Err(_) if best_effort => return unbound_launch(&next, &[]),
+            Err(_) if best_effort => return unbound_launch(&next),
             Err(error) => return Err(error),
         };
         let token = if root_label == "state" {
@@ -1306,8 +1388,7 @@ pub(crate) fn resolve_for_policy_with_state(
                 .ok_or("Missing environment entry directory")?,
         );
         next.entry = text(&entry);
-        next.path
-            .retain(|p| !p.starts_with("{workspace}/") && !p.starts_with("{state}/"));
+        next.restore_unbound_path();
         next.path.insert(0, bin);
         next.variables.remove("VIRTUAL_ENV");
         next.variables.remove("CONDA_PREFIX");
@@ -1316,7 +1397,11 @@ pub(crate) fn resolve_for_policy_with_state(
             let conda = fs::read(session.join(format!("environment-observer-{generation}.json")))
                 .map_err(|e| e.to_string())?;
             let ctx: Context = serde_json::from_slice(&conda).map_err(|e| e.to_string())?;
-            let tool = find_conda(&ctx.launch.path)?;
+            let tool = match find_conda(&ctx.launch.path, workspace) {
+                Ok(tool) => tool,
+                Err(_) if best_effort => return unbound_launch(&next),
+                Err(error) => return Err(error),
+            };
             let quoted = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
             next.hook = Some(format!(
                 "eval \"$({} shell.bash hook)\" && conda activate {}",
@@ -1335,9 +1420,15 @@ pub(crate) fn resolve_for_policy_with_state(
                 .insert("VIRTUAL_ENV".into(), format!("{token}/{prefix}"));
         }
         next.environment = Some(binding);
-        next.managed_scopes.push(prefix);
-        next.managed_scopes.sort();
-        next.managed_scopes.dedup();
+        if let Some(scopes) = &mut next.owned_scopes {
+            scopes.push(EnvironmentScope { root: root_label, path: prefix });
+            scopes.sort();
+            scopes.dedup();
+        } else {
+            next.managed_scopes.push(prefix);
+            next.managed_scopes.sort();
+            next.managed_scopes.dedup();
+        }
     } else if let Some(binding) = &launch.environment {
         let root_label = binding_root_label(launch, &roots).to_string();
         let root = root_for(&roots, &root_label)?;
@@ -1349,7 +1440,7 @@ pub(crate) fn resolve_for_policy_with_state(
             project_requirements,
         ) {
             Ok(verified) => next.environment = Some(verified),
-            Err(_) if best_effort => return unbound_launch(&next, &[]),
+            Err(_) if best_effort => return unbound_launch(&next),
             Err(error) => return Err(error),
         }
     }
@@ -1357,9 +1448,11 @@ pub(crate) fn resolve_for_policy_with_state(
     Ok(next)
 }
 
-fn find_conda(paths: &[String]) -> Result<String, String> {
+fn find_conda(paths: &[String], workspace: &Path) -> Result<String, String> {
     for directory in paths {
-        let path = Path::new(directory).join(if cfg!(windows) { "conda.exe" } else { "conda" });
+        // Native relative/empty PATH entries belong to the business cwd, never
+        // the backend installation's cwd. Absolute entries remain unchanged.
+        let path = workspace.join(directory).join(if cfg!(windows) { "conda.exe" } else { "conda" });
         if path.is_file() {
             return Ok(text(&canonical(&path)?));
         }
@@ -1386,6 +1479,78 @@ mod tests {
         let generation = Uuid::new_v4().to_string();
         context(&root, &generation, &launch, &session, false).unwrap();
         (temp, root, session, launch, generation)
+    }
+
+    #[test]
+    fn observer_source_binding_is_immutable_and_legacy_contexts_are_not_rewritten() {
+        let (temp, root, session, launch, generation) = setup();
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        let file = session.join(format!("environment-observer-{generation}.json"));
+        let legacy = fs::read(&file).unwrap();
+        context_with_source(&root, None, Some(&source), &generation, &launch, &session, false).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), legacy);
+        let mut changed = launch.clone();
+        changed.variables.insert("BUSINESS".into(), "changed".into());
+        assert!(context_with_source(&root, None, Some(&source), &generation, &changed, &session, false).is_err());
+        let generation = Uuid::new_v4().to_string();
+        let file = context_with_source(&root, None, Some(&source), &generation, &launch, &session, true).unwrap();
+        let current = fs::read(&file).unwrap();
+        let context: Context = serde_json::from_slice(&current).unwrap();
+        assert_eq!(context.source.as_deref(), Some(text(&canonical(&source).unwrap()).as_str()));
+        assert!(context_with_source(&root, None, Some(&root), &generation, &launch, &session, true).is_err());
+        assert_eq!(fs::read(&file).unwrap(), current);
+    }
+
+    #[test]
+    fn copied_venv_activation_cannot_run_or_modify_the_source_environment_through_observed_tools() {
+        let (temp, root, _session, launch, generation) = setup();
+        let source = temp.path().join("source project");
+        fs::create_dir_all(&source).unwrap();
+        let source_env = source.join("custom-python");
+        let private_env = root.join("custom-python");
+        let python = python(&launch);
+        let mut create = Command::new(&python);
+        create.args(["-m", "venv", "--without-pip"]).arg(&source_env);
+        environment::controlled_output(create).unwrap();
+        fs::create_dir_all(&private_env).unwrap();
+        crate::native_copy::copy_tree(&source_env, &private_env, |_| false).unwrap();
+        let activation = if cfg!(windows) { "Scripts/activate" } else { "bin/activate" };
+        let original = fs::read(source_env.join(activation)).unwrap();
+        let quote = |value: &str| format!("'{}'", value.replace('\\', "/").replace('\'', "'\\''"));
+        let script = "import json,sys; print(json.dumps({'executable':sys.executable,'prefix':sys.prefix}))";
+        let mut bash = Command::new(&launch.shell);
+        bash.args(["--noprofile", "--norc", "-c", &format!("source {} && python -c {}", quote(&text(&private_env.join(activation))), quote(script))])
+            .current_dir(&root).env_remove("BASH_ENV").env_remove("ENV").env("PYTHONDONTWRITEBYTECODE", "1");
+        let output: serde_json::Value = serde_json::from_slice(&environment::controlled_output(bash).unwrap()).unwrap();
+        assert!(crate::path_identity::same_path(Path::new(output["prefix"].as_str().unwrap()), &source_env), "a standard copied activation still selects its original prefix");
+        let session = temp.path().join("guarded-session");
+        let observer = context_with_source(&root, None, Some(&source), &generation, &launch, &session, true).unwrap();
+        let marker = source_env.join("must-not-be-written");
+        let source_alias = temp.path().join("source-alias");
+        crate::path_safety::directory_link(&source, &source_alias);
+        for executable in [PathBuf::from(output["executable"].as_str().unwrap()), interpreter(&source_alias.join("custom-python"), "venv")] {
+            let error = tool(vec![text(&observer), "python".into(), text(&executable), "-c".into(),
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('source modified')".into(), text(&marker)]).unwrap_err();
+            assert!(error.contains("Source-bound environment tool") && error.contains("Recreate/install"), "{error}");
+            assert!(!marker.exists());
+        }
+        assert_eq!(fs::read(source_env.join(activation)).unwrap(), original);
+        assert_eq!(fs::read(private_env.join(activation)).unwrap(), original);
+        // Direct local interpreter use remains valid; do not turn a copied
+        // activation diagnostic into a blanket ban on private/ambient Python.
+        assert_eq!(tool(vec![text(&observer), "python".into(), text(&interpreter(&private_env, "venv")), "-I".into(), "-c".into(),
+            "import pathlib,sys; assert pathlib.Path(sys.prefix).resolve()==pathlib.Path(sys.argv[1]).resolve()".into(), text(&private_env)]).unwrap(), 0);
+        assert_eq!(tool(vec![text(&observer), "python".into(), python, "-c".into(), "pass".into()]).unwrap(), 0);
+        // Deleting a local environment after activation must not silently
+        // authorize the stale source prefix again.
+        fs::remove_dir_all(&private_env).unwrap();
+        let error = tool(vec![text(&observer), "python".into(), text(&interpreter(&source_env, "venv")), "-c".into(),
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('source modified')".into(), text(&marker)]).unwrap_err();
+        assert!(error.contains("Source-bound environment tool"), "{error}");
+        assert!(!marker.exists());
+        assert_eq!(fs::read(source_env.join(activation)).unwrap(), original);
+        reject_source_environment_tool(&source, Some(&text(&source)), &interpreter(&source_env, "venv")).unwrap();
     }
 
     #[test]
@@ -1517,6 +1682,13 @@ mod tests {
             .unwrap(),
             0
         );
+        // Temporary per-command configuration is business state, not a change
+        // to L. Observation must not reset it to the original launch values.
+        assert_eq!(tool(vec![
+            text(&observer), "python".into(), python.clone(), "-c".into(),
+            "import json,os,sys; assert os.environ.get('HOME') == json.loads(sys.argv[1])".into(),
+            serde_json::to_string(&std::env::var("HOME").ok()).unwrap(),
+        ]).unwrap(), 0);
         // The adapter must not reject an ambient interpreter merely because the
         // pip target is outside the managed workspace. pip itself may reject the
         // disposable dry-run request; that is business command status, not Runtime policy.
@@ -1548,6 +1720,58 @@ mod tests {
         assert!(next.environment.is_none());
         assert!(!root.join(".venv").exists());
     }
+    #[test]
+    fn relative_conda_lookup_uses_the_business_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.join("tools")).unwrap();
+        let name = if cfg!(windows) { "conda.exe" } else { "conda" };
+        let tool = workspace.join("tools").join(name);
+        fs::write(&tool, "not executed").unwrap();
+        assert_eq!(find_conda(&["tools".into()], &workspace).unwrap(), text(&canonical(&tool).unwrap()));
+        assert!(find_conda(&["missing".into()], &workspace).is_err());
+        fs::write(workspace.join(name), "not executed").unwrap();
+        assert_eq!(find_conda(&[String::new()], &workspace).unwrap(), text(&canonical(&workspace.join(name)).unwrap()));
+    }
+
+    #[test]
+    fn environment_switching_and_unbinding_preserve_project_and_relative_business_paths() {
+        let (temp, root, _session, mut launch, _) = setup();
+        let python = python(&launch);
+        let mut business = vec!["{workspace}/tools".into(), "relative-bin".into(), String::new()];
+        business.extend(launch.path.clone());
+        launch.path = business.clone();
+        launch.unbound_path = Some(business.clone());
+        for name in ["first-env", "second-env"] {
+            let session = temp.path().join(format!("session-{name}"));
+            let generation = Uuid::new_v4().to_string();
+            let observer = context(&root, &generation, &launch.expanded(&root), &session, true).unwrap();
+            assert_eq!(tool(vec![text(&observer), "python".into(), python.clone(),
+                "-m".into(), "venv".into(), "--without-pip".into(), text(&root.join(name))]).unwrap(), 0);
+            let switching = launch.environment.is_some();
+            launch = resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
+            if switching {
+                // Using another interpreter during a bound turn retains the
+                // existing best-effort unbound decision, not automatic authority.
+                assert!(launch.environment.is_none());
+                assert_eq!(launch.path, business);
+                let session = temp.path().join(format!("activate-{name}"));
+                let generation = Uuid::new_v4().to_string();
+                let observer = context(&root, &generation, &launch.expanded(&root), &session, true).unwrap();
+                assert_eq!(tool(vec![text(&observer), "python".into(), text(&interpreter(&root.join(name), "venv")),
+                    "-c".into(), "pass".into()]).unwrap(), 0);
+                launch = resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
+            }
+            assert_eq!(launch.environment.as_ref().unwrap().prefix, name);
+            assert!(launch.path[0].contains(name));
+            assert_eq!(&launch.path[1..], business.as_slice(), "activation must not drop project tools or accumulate old prefixes");
+        }
+        let unbound = unbound_launch(&launch).unwrap();
+        assert!(unbound.environment.is_none());
+        assert_eq!(unbound.path, business);
+        assert_eq!(unbound.unbound_path, launch.unbound_path);
+    }
+
     #[test]
     fn business_created_custom_venv_binds_from_receipt_and_actual_native_prefix() {
         let (temp, root, session, launch, generation) = setup();
@@ -1601,6 +1825,12 @@ mod tests {
         assert!(resolve(&root, &launch, &session, &generation)
             .unwrap_err()
             .contains("Ambiguous"));
+        let unbound = resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
+        assert!(unbound.environment.is_none());
+        assert_eq!(unbound.owned_scopes.unwrap(), vec![
+            EnvironmentScope { root: "workspace".into(), path: "first".into() },
+            EnvironmentScope { root: "workspace".into(), path: "second".into() },
+        ], "ambiguity must not release either observed environment into project Git");
     }
     #[test]
     fn native_conda_names_are_private_prefixes_and_never_host_base_or_a_name_search() {

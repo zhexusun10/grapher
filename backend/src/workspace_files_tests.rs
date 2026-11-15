@@ -1,6 +1,10 @@
 use super::*;
 use tempfile::TempDir;
 
+mod rooted_tests {
+    include!("workspace_files/rooted_tests.rs");
+}
+
 fn managed_store(temp: &TempDir, workspace: &Path) -> Files {
     workspace::git(workspace, &["init", "-q"]).unwrap();
     let version_store = temp.path().join("environment-files");

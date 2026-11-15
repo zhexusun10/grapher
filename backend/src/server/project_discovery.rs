@@ -1,6 +1,7 @@
 use super::Service;
 use serde::Serialize;
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -190,8 +191,13 @@ pub(super) fn collect_files_from_dir(dir: &Path) -> Vec<String> {
             base: &Path,
             files: &mut Vec<String>,
             limit: usize,
+            ancestors: &mut HashSet<String>,
         ) {
             if files.len() >= limit {
+                return;
+            }
+            let identity = crate::path_identity::path_key(walk_dir);
+            if !ancestors.insert(identity.clone()) {
                 return;
             }
             if let Ok(entries) = fs::read_dir(walk_dir) {
@@ -207,7 +213,7 @@ pub(super) fn collect_files_from_dir(dir: &Path) -> Vec<String> {
                         }
                     }
                     if path.is_dir() {
-                        walk(&path, base, files, limit);
+                        walk(&path, base, files, limit, ancestors);
                     } else if path.is_file() {
                         if let Ok(rel) = path.strip_prefix(base) {
                             let rel_str = rel.to_string_lossy().replace('\\', "/");
@@ -218,8 +224,11 @@ pub(super) fn collect_files_from_dir(dir: &Path) -> Vec<String> {
                     }
                 }
             }
+            // Track only this branch, not every visited directory: two
+            // noncyclic aliases must both remain available as project paths.
+            ancestors.remove(&identity);
         }
-        walk(dir, dir, &mut files, 3000);
+        walk(dir, dir, &mut files, 3000, &mut HashSet::new());
     }
     files
 }
@@ -284,8 +293,13 @@ pub(super) fn list_skills(
         scope: &str,
         skills: &mut Vec<SkillItem>,
         seen_names: &mut std::collections::HashSet<String>,
+        ancestors: &mut HashSet<String>,
     ) {
         if !dir.exists() || !dir.is_dir() {
+            return;
+        }
+        let identity = crate::path_identity::path_key(dir);
+        if !ancestors.insert(identity.clone()) {
             return;
         }
         if let Ok(entries) = fs::read_dir(dir) {
@@ -307,7 +321,7 @@ pub(super) fn list_skills(
                         }
                     } else {
                         // 深入子分组目录扫描
-                        scan_skills_dir(&path, scope, skills, seen_names);
+                        scan_skills_dir(&path, scope, skills, seen_names, ancestors);
                     }
                 } else if path.is_file() {
                     // Pi 规范：~/.pi/agent/skills 与 ~/.pi/skills 支持直接根级单文件技能
@@ -331,10 +345,17 @@ pub(super) fn list_skills(
                 }
             }
         }
+        ancestors.remove(&identity);
     }
 
     for (dir, scope) in &search_dirs {
-        scan_skills_dir(dir, scope, &mut skills, &mut seen_names);
+        scan_skills_dir(
+            dir,
+            scope,
+            &mut skills,
+            &mut seen_names,
+            &mut HashSet::new(),
+        );
     }
 
     skills.sort_by(|a, b| {
@@ -350,4 +371,85 @@ pub(super) fn list_skills(
     });
 
     Ok(serde_json::json!({ "skills": skills }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_discovery_skips_ancestor_links_without_hiding_noncyclic_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let external = temp.path().join("external");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&external).unwrap();
+        fs::write(root.join("main.txt"), "project").unwrap();
+        fs::write(external.join("shared.txt"), "linked input").unwrap();
+        crate::path_safety::directory_link(&root, &root.join("back"));
+        crate::path_safety::directory_link(&external, &root.join("dependency"));
+        crate::path_safety::directory_link(&external, &root.join("alias"));
+        let mut files = collect_files_from_dir(&root);
+        files.sort();
+        assert_eq!(
+            files,
+            ["alias/shared.txt", "dependency/shared.txt", "main.txt"]
+        );
+        for link in ["back", "dependency", "alias"] {
+            crate::path_safety::remove_directory_link(&root.join(link));
+        }
+    }
+
+    #[test]
+    fn skill_discovery_avoids_cycles_and_keeps_linked_skill_directories() {
+        use crate::runtime::Runtime;
+        use std::sync::{atomic::AtomicBool, Condvar, Mutex};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let skills = root.join(".agents/skills");
+        let group = skills.join("group");
+        fs::create_dir_all(group.join("task")).unwrap();
+        let external = temp.path().join("external");
+        fs::create_dir(&external).unwrap();
+        let group_name = uuid::Uuid::new_v4().to_string();
+        let linked_name = uuid::Uuid::new_v4().to_string();
+        for (directory, name) in [
+            (&group.join("task"), &group_name),
+            (&external, &linked_name),
+        ] {
+            fs::write(
+                directory.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: linked fixture\n---\n"),
+            )
+            .unwrap();
+        }
+        crate::path_safety::directory_link(&group, &group.join("back"));
+        crate::path_safety::directory_link(&external, &skills.join("linked"));
+        let service = Arc::new(Service {
+            runtime: Mutex::new(Runtime::open_lazy(&temp.path().join("runtime")).unwrap()),
+            driving: AtomicBool::new(false),
+            drive_signal: (Mutex::new(0), Condvar::new()),
+            planning: AtomicBool::new(false),
+            extension: PathBuf::new(),
+        });
+        let result = list_skills(&service, Some(root.to_string_lossy().into_owned())).unwrap();
+        let entries = result["skills"].as_array().unwrap();
+        for (name, path) in [
+            (&group_name, group.join("task/SKILL.md")),
+            (&linked_name, skills.join("linked/SKILL.md")),
+        ] {
+            let matched: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry["name"] == *name)
+                .collect();
+            assert_eq!(matched.len(), 1);
+            assert_eq!(matched[0]["scope"], "workspace");
+            assert_eq!(
+                Path::new(matched[0]["path"].as_str().unwrap()),
+                path.as_path()
+            );
+        }
+        crate::path_safety::remove_directory_link(&group.join("back"));
+        crate::path_safety::remove_directory_link(&skills.join("linked"));
+    }
 }

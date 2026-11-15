@@ -2,18 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildSummaryFromFiles,
-  filterFileChanges,
   mergeFileChangeSummaries,
-  splitFilePath,
 } from "../src/services/fileChanges.ts";
-
-test("splitFilePath separates the file name and its directory", () => {
-  assert.deepEqual(splitFilePath("src/components/changes/WorkspaceChangesPanel.tsx"), {
-    fileName: "WorkspaceChangesPanel.tsx",
-    dirPath: "src/components/changes",
-  });
-  assert.deepEqual(splitFilePath("README.md"), { fileName: "README.md", dirPath: "" });
-});
 
 test("merging repeated attempts counts shared paths once", () => {
   const summary = buildSummaryFromFiles([
@@ -56,8 +46,4 @@ test("merging backend summaries keeps Git counts authoritative and unions nodes"
   assert.equal(plan.deletions, 3);
   assert.equal(plan.source, "git");
   assert.deepEqual(plan.nodes, ["planner", "api_node"]);
-
-  assert.equal(filterFileChanges(merged.files, "added").length, 2);
-  assert.equal(filterFileChanges(merged.files, "all", "api").length, 1);
-  assert.equal(filterFileChanges(merged.files, "all", "", "api_node").length, 2);
 });

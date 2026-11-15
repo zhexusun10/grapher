@@ -18,6 +18,14 @@ Omit the JS name filter to run that file. Rust `--lib` covers `backend/src/`; `-
 
 Reuse existing coverage; add a small regression for changed behavior that is not covered. Assert observable behavior and meaningful failure paths, not source spelling, exact copy, decorative CSS or workflow indentation. An unavailable browser, platform tool or build environment is a validation gap—not a reason to retry unrelated suites.
 
+The [batch-driver Node fixtures](../../backend/src/batch_workspace_tests.rs) embed
+`launch-binding.mjs` and `path-identity.mjs` in the Rust test binary and materialize
+a temporary adapter copy. A checkout edit therefore cannot switch adapter policy
+between the source root and its parallel private children in an already-running
+test. Rebuild the Rust test target after editing either module; Cargo tracks these
+embedded inputs. The adjacent controlled-update regression uses an import barrier
+and disposable modules, never edits the live checkout or runs a model.
+
 ## Test and script organization
 
 [package.json](../../package.json) exposes stable npm commands; [test-suites.mjs](../../scripts/test-suites.mjs) owns their ordered commands and explicit file lists. [test.mjs](../../scripts/test.mjs) runs those commands without a shell, preserving the caller's environment (including `CARGO_TARGET_DIR`) and stopping at the first failure. It uses the installed `tsx`, not an `npx` download. There is deliberately no default/all suite: native, browser, build and stress checks have different prerequisites.
@@ -52,6 +60,41 @@ node scripts/temporary-target.mjs -- node scripts/cargo.mjs <original-arguments>
 
 The wrapper cleans only its own temporary target; an existing `CARGO_TARGET_DIR` is reused and never deleted. A fresh target may require a cold build. Do not stop the backend or clean its cache. For an npm suite use `npm run test:temporary -- <script>`; `test:isolated` means the full Rust fixture suite, not a single-test workaround. Release builds and [packaging](../../scripts/package-release.mjs) must share the same target directory.
 
+## Managed environment root recovery
+
+Choose the affected boundary; these are not an execution checklist:
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib workspace_files::tests -- --test-threads=1
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib environment::snapshot_tests -- --test-threads=1
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib rooted_terminals_with_w_and_s_bindings -- --test-threads=1
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib rooted_result_reconstructs_missing_w -- --test-threads=1
+```
+
+The first two cover old checksum/JSON compatibility, all-root preflight, missing
+blobs, root/coverage mismatch, unbound ownership, recorded absence and preserved
+partial retries. The terminal check uses actual native venvs and interpreter/
+prefix/ABI validation for W and S restoration, with named result descriptors;
+the result check reconstructs a missing W, restores S and checks unchanged
+historical execution results. Neither validates host/source compatibility or
+native sandbox permissions. Existing `environment::tests::history_` checks
+retain legacy refusal coverage.
+The [contract](../architecture/native-environments.md#current-state-historical-evidence-and-ownership)
+distinguishes old single-root ownership from new root-qualified byte evidence.
+
+## Offline project environment baseline (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib environment_project_baseline -- --ignored --nocapture --test-threads=1
+```
+
+[Procedures and report definitions](environment-baselines.md) cover offline
+Node/npm, real Python venv/PEP-517/uv and Rustup/Cargo projects, source drift,
+concurrent forks, composition, managed E capture/materialization and storage
+amplification. Missing uv is explicitly NOT RUN unless required (CI requires it).
+This component probe does not run a native sandbox, validate host compatibility
+or gate publication. Native boundary/lifecycle acceptance remains separate below.
+
 ## Workspace staging microbenchmark (opt-in)
 
 ```sh
@@ -74,8 +117,8 @@ node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-feat
 [The comparison probe](../../backend/src/workspace_view/equality_tests.rs) measures
 legacy normalized-JSON equality against borrowed-field equality on 5,000 project
 and 1,000 Git metadata entries, including a late difference. It excludes filesystem
-scanning and checksum computation. The adjacent differential tests compare the new
-projection with the unchanged serializer and pin a legacy fixture checksum.
+scanning and checksum computation. The adjacent differential tests pin the
+schema-5 serializer/checksum and cover schema-6 ACL/path identity separately.
 
 ## Workspace view normalization probe (opt-in)
 
@@ -84,13 +127,41 @@ node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-feat
 ```
 
 [The probe](../../backend/src/workspace_view/equality_tests.rs) compares the
-legacy full-JSON construction with the borrowed checksum projection. Cases
-include empty, ordinary and large security descriptors; every output must match
+legacy full-JSON construction, the previous borrowed-projection/JSON-DOM path,
+and direct borrowed serialization. Cases include empty, ordinary and large
+security descriptors; every output must match
 byte-for-byte. Five warm samples alternate order and report medians in Cargo's
 test profile. The adjacent differential tests cover serialized scalars, variants,
 optional fields, nested repositories and legacy owners, and pin the historical
-checksum and full stored JSON. This measures in-memory normalization only, not
+checksum and full stored JSON. Current-schema tests also reject ACL corruption
+while loading legacy records without rewriting them. Native ACL-only snapshot,
+fork and composition checks on Windows/macOS use `--lib workspace_view::acl_tests`.
+This measures in-memory normalization only, not
 filesystem scans, object staging or end-to-end task latency.
+
+## Native project-index flag batching probe (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib index_flag_batching_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+[The probe](../../backend/src/workspace_git_index_tests.rs) compares the former
+per-path Git flag updates with batched restoration on 65/257 index entries,
+including zero-flag and mixed assume-unchanged/skip-worktree cases. Three warm
+samples alternate order, resetting the disposable index outside the timed region
+and independently checking all resulting paths, modes, object IDs and flags.
+It measures flag restoration only, not scanning, staged-object transfer, full
+composition, publication or end-to-end handoff latency; there are no timing
+assertions. Adjacent SHA-1/SHA-256 regressions cover literal unusual paths,
+intent-to-add combinations, deleted intent paths and their recorded executable/
+link modes, `core.ignorestat` flag injection, staged binary content, deletions,
+flag clearing, intent-only changes on a committed empty blob, sparse-checkout
+selection, foreign index locks during initial copying as well as flag updates,
+copy failure/absent-index recovery, byte-exact case/Unicode aliases and aliased
+directory prefixes under `core.ignorecase`, unchanged input indexes and retry. The
+[workspace-view regressions](../../backend/src/workspace_view_tests.rs) also
+exercise deleted, case-aliased intent-to-add through snapshot, fan-in, publication
+and follow-up preparation without recreating the missing project files.
 
 ## Workspace scan and staging phase probes (opt-in)
 
@@ -183,6 +254,7 @@ are no timing assertions.
 | `test:ui-polish` | Separate bilingual home/settings viewport sweep; same browser requirement. `GRAPHER_UI_SCREENSHOTS` optionally saves screenshots. |
 | `test:pi`, `test:extensions` | Pi transport and [role/tool contracts](pi-integration.md#role-loading-policy). |
 | `test:native`, `test:native:scripts`, `test:planner-bash` | Native paths, launchers, Planner workspace rebinding and Bash semantics. `test:native:scripts` omits Rust tests; it still needs pinned Pi and Git/Bash. |
+| `test:filesystem` | Native ACLs, path identity, links and versioned snapshot integrity; Rust/Git, no browser or model calls. |
 | `test:prewarm` | Separate prewarm tests, production build and HTTP/native acceptance. |
 | `test:environment`, `test:environment-chain` | Environment admission/lifecycle; needs Python 3.11+, Git, Bash and the platform boundary. |
 | `test:merger`, `test:bindings` | Git composition/publication and project binding/routing. |
@@ -209,4 +281,30 @@ This uses pinned Pi, native Git/Bash, a deterministic local provider and disposa
 
 ## CI
 
-[planner-source.yml](../../.github/workflows/planner-source.yml), [release.yml](../../.github/workflows/release.yml) and [security-audit.yml](../../.github/workflows/security-audit.yml) own CI coverage. Model-free checks do not establish provider quality or every sandbox boundary.
+[planner-source.yml](../../.github/workflows/planner-source.yml), [release.yml](../../.github/workflows/release.yml) and [security-audit.yml](../../.github/workflows/security-audit.yml) own CI coverage.
+
+Planner Source Contract runs on main pushes, pull requests, its weekly schedule
+and manual dispatch. Its dedicated macOS filesystem job runs `test:filesystem`
+on both Apple Silicon (`macos-15`) and Intel (`macos-15-intel`), first on the host
+volume and then with temporary fixtures on an explicitly mounted case-sensitive
+APFS sparse image. A real case probe must succeed before testing, so sensitive
+path branches cannot silently be skipped on a case-insensitive volume; the image
+is detached on success or failure. The ARM job also installs pinned Pi and
+Playwright Chromium and runs `test:macos-browser`; failure logs are retained for
+seven days as an artifact. Failures fail the workflow; no `continue-on-error`
+is used. Requiring these checks for merging remains a branch-protection setting.
+
+Windows pushes run the focused filesystem suite; PR/scheduled/manual runs retain
+the full Windows library suite. The Linux/macOS backend suites also execute the
+applicable POSIX-link and snapshot regressions. The matrix also explicitly provisions pinned uv and retains the model-free
+[dependency-cost report](environment-baselines.md) for seven days; this is a
+component measurement, not a replacement for its real native-boundary checks.
+Windows pushes additionally run focused `rooted_` capture/recovery regressions,
+including NTFS aliases/junctions and real W/S interpreters; other matrix/event
+paths cover them in their existing backend/environment suites. These component
+checks do not claim an OS sandbox on Windows. Windows pushes also run the
+trusted Node bootstrap-isolation check; other matrix/event paths cover it in
+the existing backend suites.
+Configuring a job is not evidence
+that it passed: inspect the corresponding CI run. Model-free checks do not
+establish provider quality or every sandbox boundary.

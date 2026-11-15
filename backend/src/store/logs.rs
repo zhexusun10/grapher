@@ -48,7 +48,7 @@ fn insert_chunks(
 /// Fill the last partial block across writer batches too. Flushing live output
 /// must not turn every small stdout packet into a permanent row and index entry.
 /// Only the suffix grows; all previously committed UTF-8 byte offsets stay valid.
-fn append_chunks(
+pub(super) fn append_chunks(
     db: &Connection,
     run: &str,
     id: &str,
@@ -94,30 +94,64 @@ pub struct MigrationReport {
     pub deleted_chunks: usize,
 }
 
+pub(super) fn replace_logs(db: &Connection, run: &str, id: &str, text: &str) -> Result<(), String> {
+    db.execute(
+        "DELETE FROM execution_logs WHERE execution_id=?1 AND run_id=?2",
+        params![id, run],
+    )
+    .map_err(|e| e.to_string())?;
+    insert_chunks(db, run, id, 0, text, false)
+}
+
+/// Update live output and derived changes only after its transaction commits.
+pub(super) fn apply_output(state: &mut Snapshot, id: &str, text: &str, bytes: usize) {
+    let repo = state
+        .config
+        .as_ref()
+        .map(|c| c.repository.as_str())
+        .unwrap_or_default();
+    if let Some(execution) = state
+        .executions
+        .iter_mut()
+        .chain(state.mergers.iter_mut())
+        .find(|e| e.id == id)
+    {
+        append_live_output(execution, text);
+        execution.output_bytes = bytes;
+        if text.contains("\"tool") || text.contains("\"grapher_process") {
+            crate::file_changes::update_from_log_chunk(
+                &state.run_id,
+                &execution.id,
+                &execution.node,
+                &execution.worktree,
+                repo,
+                text,
+                execution.status == "running",
+            );
+        } else {
+            crate::file_changes::note_read_only_log_append(
+                &state.run_id,
+                &execution.id,
+                execution.output_bytes,
+                execution.status == "running",
+            );
+        }
+    }
+}
+
 impl Store {
     pub fn log_bytes(&self, run: &str, id: &str) -> Result<usize, String> {
-        self.connection.query_row(
-            "SELECT offset + bytes FROM execution_logs WHERE execution_id=?1 AND run_id=?2 ORDER BY offset DESC LIMIT 1",
-            params![id, run], |r| r.get::<_, i64>(0),
-        ).optional().map(|v| v.unwrap_or(0) as usize).map_err(|e| e.to_string())
-    }
-
-    pub(super) fn replace_logs(&self, run: &str, id: &str, text: &str) -> Result<(), String> {
-        let tx = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|e| e.to_string())?;
-        tx.execute(
-            "DELETE FROM execution_logs WHERE execution_id=?1 AND run_id=?2",
-            params![id, run],
-        )
-        .map_err(|e| e.to_string())?;
-        insert_chunks(&tx, run, id, 0, text, false)?;
-        tx.commit().map_err(|e| e.to_string())?;
-        self.execution_offsets
-            .borrow_mut()
-            .insert(id.to_owned(), text.len());
-        Ok(())
+        let last = self.connection.query_row(
+            "SELECT offset,bytes FROM execution_logs WHERE execution_id=?1 AND run_id=?2 ORDER BY offset DESC LIMIT 1",
+            params![id, run], |row| Ok((row.get::<_, usize>(0)?, row.get::<_, usize>(1)?)),
+        ).optional().map_err(|error| error.to_string())?;
+        let Some((offset, bytes)) = last else {
+            return Ok(0);
+        };
+        offset
+            .checked_add(bytes)
+            .filter(|end| i64::try_from(*end).is_ok())
+            .ok_or_else(|| "Corrupt execution log byte range".into())
     }
 
     pub(super) fn append_logs(
@@ -156,41 +190,8 @@ impl Store {
         }
         tx.commit().map_err(|e| e.to_string())?;
         // Neither cursors nor the live projection advance before COMMIT.
-        let repo = state
-            .config
-            .as_ref()
-            .map(|c| c.repository.clone())
-            .unwrap_or_default();
         for (execution_id, text) in texts {
-            if let Some(execution) = state
-                .executions
-                .iter_mut()
-                .chain(state.mergers.iter_mut())
-                .find(|e| e.id == execution_id)
-            {
-                append_live_output(execution, &text);
-                execution.output_bytes = offsets[&execution_id];
-                // Incremental parse of just this flush; a long transcript is
-                // never re-read on every append.
-                if text.contains("\"tool") || text.contains("\"grapher_process") {
-                    crate::file_changes::update_from_log_chunk(
-                        &state.run_id,
-                        &execution.id,
-                        &execution.node,
-                        &execution.worktree,
-                        &repo,
-                        &text,
-                        execution.status == "running",
-                    );
-                } else {
-                    crate::file_changes::note_read_only_log_append(
-                        &state.run_id,
-                        &execution.id,
-                        execution.output_bytes,
-                        execution.status == "running",
-                    );
-                }
-            }
+            apply_output(state, &execution_id, &text, offsets[&execution_id]);
         }
         // Live output folds usage into the running attempt's metrics, so the
         // session totals must reflect it before the terminal event arrives.
@@ -224,7 +225,7 @@ impl Store {
                 complete: true,
             });
         }
-        let start: i64 = self.connection.query_row(
+        let start: usize = self.connection.query_row(
             "SELECT offset FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset<=?3 ORDER BY offset DESC LIMIT 1",
             params![id, run, offset as i64], |r| r.get(0),
         ).map_err(|e| e.to_string())?;
@@ -237,13 +238,18 @@ impl Store {
             .map_err(|e| e.to_string())?;
         let mut content = String::new();
         let mut next = offset;
+        let mut expected_start = start;
+        let mut boundary_limited = false;
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let block_start = row.get::<_, i64>(0).map_err(|e| e.to_string())? as usize;
-            let bytes = row.get::<_, i64>(1).map_err(|e| e.to_string())? as usize;
+            let block_start = row.get::<_, usize>(0).map_err(|e| e.to_string())?;
+            let bytes = row.get::<_, usize>(1).map_err(|e| e.to_string())?;
             let text: String = row.get(2).map_err(|e| e.to_string())?;
-            if text.len() != bytes || block_start > next {
+            if text.len() != bytes || block_start != expected_start {
                 return Err("Corrupt execution log".into());
             }
+            expected_start = block_start
+                .checked_add(bytes)
+                .ok_or("Corrupt execution log byte range")?;
             let from = next.saturating_sub(block_start);
             if from > text.len() || !text.is_char_boundary(from) {
                 return Err("Invalid output offset".into());
@@ -255,8 +261,14 @@ impl Store {
             content.push_str(&text[from..to]);
             next = block_start + to;
             if to < bytes {
+                boundary_limited = true;
                 break;
             }
+        }
+        // A short page is legitimate only at a UTF-8 boundary within a stored
+        // block, not when missing chunks leave the cursor unable to advance.
+        if next < end && !boundary_limited {
+            return Err("Corrupt execution log: missing byte range".into());
         }
         Ok(LogPage {
             content,
@@ -292,12 +304,12 @@ impl Store {
         let candidate = end.saturating_sub(limit);
         let chunk_start: usize = self.connection.query_row(
             "SELECT offset FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset<=?3 ORDER BY offset DESC LIMIT 1",
-            params![id, run, candidate as i64], |r| r.get::<_, i64>(0),
-        ).map_err(|e| e.to_string())? as usize;
+            params![id, run, candidate as i64], |r| r.get::<_, usize>(0),
+        ).map_err(|e| e.to_string())?;
         let start: usize = self.connection.query_row(
             "SELECT offset FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset<?3 ORDER BY offset DESC LIMIT 1",
-            params![id, run, chunk_start as i64], |r| r.get::<_, i64>(0),
-        ).optional().map_err(|e| e.to_string())?.map(|value: i64| value as usize).unwrap_or(chunk_start);
+            params![id, run, chunk_start as i64], |r| r.get::<_, usize>(0),
+        ).optional().map_err(|e| e.to_string())?.unwrap_or(chunk_start);
         let mut stmt = self.connection.prepare(
             "SELECT offset,bytes,text FROM execution_logs WHERE execution_id=?1 AND run_id=?2 AND offset>=?3 AND offset<?4 ORDER BY offset",
         ).map_err(|e| e.to_string())?;
@@ -306,13 +318,18 @@ impl Store {
             .map_err(|e| e.to_string())?;
         let mut content = String::new();
         let mut next = start;
+        let mut expected_start = start;
+        let mut boundary_limited = false;
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let block_start = row.get::<_, i64>(0).map_err(|e| e.to_string())? as usize;
-            let bytes = row.get::<_, i64>(1).map_err(|e| e.to_string())? as usize;
+            let block_start = row.get::<_, usize>(0).map_err(|e| e.to_string())?;
+            let bytes = row.get::<_, usize>(1).map_err(|e| e.to_string())?;
             let text: String = row.get(2).map_err(|e| e.to_string())?;
-            if text.len() != bytes || block_start > next {
+            if text.len() != bytes || block_start != expected_start {
                 return Err("Corrupt execution log".into());
             }
+            expected_start = block_start
+                .checked_add(bytes)
+                .ok_or("Corrupt execution log byte range")?;
             let from = next.saturating_sub(block_start);
             if from > text.len() || !text.is_char_boundary(from) {
                 return Err("Invalid output offset".into());
@@ -324,8 +341,12 @@ impl Store {
             content.push_str(&text[from..to]);
             next = block_start + to;
             if to < bytes {
+                boundary_limited = true;
                 break;
             }
+        }
+        if next < end && !boundary_limited {
+            return Err("Corrupt execution log: missing byte range".into());
         }
         // Keep the complete byte range, including a possible leading JSONL
         // fragment. Dropping through its newline can drop an entire tool result
@@ -353,11 +374,11 @@ impl Store {
                 OR (kind IS NULL AND (
                     (instr(substr(payload,1,512),'\"execution_id\":\"') > 0 AND
                      substr(payload, instr(substr(payload,1,512),'\"execution_id\":\"') + 16,
-                        instr(substr(payload, instr(substr(payload,1,512),'\"execution_id\":\"') + 16, 64),'\"') - 1) = ?2)
+                        instr(substr(payload, instr(substr(payload,1,512),'\"execution_id\":\"') + 16, 65),'\"') - 1) = ?2)
                     OR
                     (instr(substr(payload,1,512),'\"execution\":{\"id\":\"') > 0 AND
                      substr(payload, instr(substr(payload,1,512),'\"execution\":{\"id\":\"') + 19,
-                        instr(substr(payload, instr(substr(payload,1,512),'\"execution\":{\"id\":\"') + 19, 64),'\"') - 1) = ?2)
+                        instr(substr(payload, instr(substr(payload,1,512),'\"execution\":{\"id\":\"') + 19, 65),'\"') - 1) = ?2)
                 ))
              )
              ORDER BY sequence",
@@ -400,18 +421,33 @@ impl Store {
         Ok((text, terminal))
     }
 
-    /// JIT writes only the log table. The IMMEDIATE transaction serializes
-    /// cross-Service readers and checks for an already committed migration.
+    /// Serialize only readers migrating this execution. Materializing legacy
+    /// text is read-only and stays outside both the Run and Store write locks;
+    /// the transaction rechecks deletion and a racing committed backfill.
     pub fn ensure_legacy_logs(&self, run: &str, id: &str) -> Result<usize, String> {
-        let _write_guard = store_write_guard()?;
-        let tx =
-            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
-                .map_err(|e| e.to_string())?;
+        use std::sync::{Arc, Mutex, OnceLock, Weak};
+        type Key = (String, String, String);
+        type Migrations = Mutex<HashMap<Key, Weak<Mutex<()>>>>;
+        static MIGRATIONS: OnceLock<Migrations> = OnceLock::new();
+        let migration = {
+            let mut pending = MIGRATIONS.get_or_init(Default::default).lock().map_err(|e| e.to_string())?;
+            pending.retain(|_, lock| lock.strong_count() > 0);
+            let key = (self.connection.path().unwrap_or(":memory:").to_owned(), run.to_owned(), id.to_owned());
+            let lock = pending.get(&key).and_then(Weak::upgrade).unwrap_or_default();
+            pending.insert(key, Arc::downgrade(&lock));
+            lock
+        };
+        let _migration = migration.lock().map_err(|e| e.to_string())?;
+        self.ensure_not_deleted(run)?;
         let existing = self.log_bytes(run, id)?;
-        if existing > 0 {
-            return Ok(existing);
-        }
+        if existing > 0 { return Ok(existing); }
         let (text, _) = self.legacy_transcript(run, id)?;
+        let _write_guard = store_write_guard()?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        self.ensure_not_deleted(run)?;
+        let existing = self.log_bytes(run, id)?;
+        if existing > 0 { return Ok(existing); }
         insert_chunks(&tx, run, id, 0, &text, true)?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(text.len())

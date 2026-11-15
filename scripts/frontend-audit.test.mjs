@@ -3465,6 +3465,39 @@ test("Escape dismisses suggestions before collapsing the expanded prompt and doe
   } finally { await context.close(); }
 });
 
+test("IME candidate navigation and its final Enter never select composer completions", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("prompt", async (route, command) => {
+    if (command !== "list_files") return false;
+    await route.fulfill({ json: { result: { files: ["alpha.ts", "beta.ts"] } } });
+    return true;
+  });
+  try {
+    const input = page.locator("textarea");
+    await input.fill("@");
+    await page.locator(".prompt-box-suggestion-item").nth(1).waitFor();
+    const secondFile = await page.locator(".suggestion-item-title").nth(1).innerText();
+    const result = await input.evaluate(element => {
+      element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      const prevented = ["ArrowDown", "ArrowUp", "Tab", "Enter"].map(key => {
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        element.dispatchEvent(event);
+        return event.defaultPrevented;
+      });
+      element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+      element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      return prevented;
+    });
+    assert.deepEqual(result, [false, false, false, false], "candidate keys belong to the IME");
+    assert.equal(await input.inputValue(), "@", "the IME's final Enter must not insert a file mention");
+    assert.equal(await page.evaluate(() => window.audit.submissions ?? 0), 0);
+    await page.waitForTimeout(60);
+    await input.press("ArrowDown");
+    await input.press("Enter");
+    assert.equal(await input.inputValue(), `@${secondFile} `, "normal completion resumes after composition");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("late workspace completions cannot replace current files/skills; controlled input clears on accepted send", { timeout: 30_000 }, async () => {
   let oldRequests = 0, oldReplies = 0;
   const gate = deferred();
@@ -3514,6 +3547,94 @@ test("late workspace completions cannot replace current files/skills; controlled
     assert.equal(await input.inputValue(), "");
     assert.deepEqual(errors, []);
   } finally { gate.resolve(); await context.close(); }
+});
+
+for (const type of ["files", "skills"]) {
+  test(`an open ${type} completion menu recovers from a transient metadata failure without retyping`, { timeout: 30_000 }, async () => {
+    let reads = 0;
+    const commandName = type === "files" ? "list_files" : "list_skills";
+    const { context, page, errors } = await fixture("prompt", async (route, command) => {
+      if (command !== commandName) return false;
+      reads++;
+      await route.fulfill(reads === 1 ? { status: 503, json: { error: "Temporary completion outage" } }
+        : { json: { result: type === "files" ? { files: ["recovered.ts"] }
+          : { skills: [{ name: "recovered", description: "Available again", path: "/skill", scope: "workspace" }] } } });
+      return true;
+    });
+    try {
+      const input = page.locator("textarea");
+      const draft = type === "files" ? "@rec" : "/skill:rec";
+      await input.fill(draft);
+      await page.locator(".suggestion-item-title").filter({ hasText: type === "files" ? "recovered.ts" : "/skill:recovered" }).waitFor();
+      assert.equal(await input.inputValue(), draft, "metadata recovery must not modify the draft");
+      assert.equal(reads, 2, "retry only the failed lookup, then retain the successful result");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("completion retries wait for pending scans, stop on dismissal and resume without losing the draft", { timeout: 30_000 }, async () => {
+  const gate = deferred();
+  let files = 0, skills = 0;
+  const { context, page, errors } = await fixture("prompt", async (route, command) => {
+    if (command === "list_files") {
+      files++;
+      await route.fulfill(files === 1 ? { status: 503, json: { error: "Temporary outage" } }
+        : { json: { result: { files: ["recovered.ts"] } } });
+      return true;
+    }
+    if (command === "list_skills") {
+      skills++; await gate.promise;
+      await route.fulfill({ json: { result: { skills: [] } } });
+      return true;
+    }
+    return false;
+  });
+  try {
+    const input = page.locator("textarea");
+    await input.fill("@rec");
+    await waitFor(() => files === 1 && skills === 1);
+    await page.waitForTimeout(2200);
+    assert.equal(files, 1, "a fast failure must not start another batch while a scan is still pending");
+    assert.equal(skills, 1);
+    await input.press("Escape");
+    await page.locator(".prompt-box-suggestions-popover").waitFor({ state: "detached" });
+    gate.resolve();
+    await page.waitForTimeout(2200);
+    assert.equal(files, 1, "dismissing suggestions cancels the retry timer");
+    assert.equal(await input.inputValue(), "@rec");
+    await input.fill("No trigger"); await input.fill("@rec");
+    await page.locator(".suggestion-item-title").filter({ hasText: "recovered.ts" }).waitFor();
+    assert.equal(files, 2);
+    assert.equal(skills, 1, "the successful lookup stays cached across retries");
+    assert.deepEqual(errors, []);
+  } finally { gate.resolve(); await context.close(); }
+});
+
+test("completion retry backs off in hidden tabs and resumes when the composer becomes visible", { timeout: 30_000 }, async () => {
+  let reads = 0;
+  const { context, page, errors } = await fixture("prompt", async (route, command) => {
+    if (command !== "list_files") return false;
+    reads++;
+    await route.fulfill(reads === 1 ? { status: 503, json: { error: "Temporary outage" } }
+      : { json: { result: { files: ["recovered.ts"] } } });
+    return true;
+  });
+  try {
+    await page.locator("textarea").fill("@rec");
+    await waitFor(() => reads === 1);
+    await page.evaluate(() => {
+      window.audit.hidden = true;
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => window.audit.hidden });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await page.waitForTimeout(2200);
+    assert.equal(reads, 1, "hidden tabs must not keep the visible retry cadence");
+    await page.evaluate(() => { window.audit.hidden = false; document.dispatchEvent(new Event("visibilitychange")); });
+    await page.locator(".suggestion-item-title").filter({ hasText: "recovered.ts" }).waitFor();
+    assert.equal(reads, 2);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
 });
 
 test("attachments stay local until Send and retries reuse only their own managed upload", { timeout: 30_000 }, async () => {
@@ -3717,6 +3838,265 @@ test("one unavailable Run cannot starve other polls, and a stale poll cannot ove
     assert.equal(await page.locator("[data-viewed-goal]").innerText(), "Action result");
     await page.evaluate(() => window.audit.removeBroken());
     await waitFor(() => backgroundRequests >= 2);
+    assert.deepEqual(errors, []);
+  } finally { gate.resolve(); await context.close(); }
+});
+
+for (const version of ["background-v2", "", "deleted-run"]) {
+  const deleted = version === "deleted-run";
+  test(deleted ? "a confirmed missing background Run does not retry its final push forever"
+    : `a failed background refresh retains its ${version ? "versioned" : "unversioned"} push invalidation`, { timeout: 30_000 }, async () => {
+    let backgroundReads = 0;
+    const { context, page, errors } = await fixture("polling", async (route, command, body) => {
+      if (command !== "snapshot_if_changed") return false;
+      if (body.runId === "background" && ++backgroundReads === 2) {
+        await route.fulfill({ status: deleted ? 400 : 503, json: { error: deleted ? "Run not found" : "Temporary outage" } });
+        return true;
+      }
+      // Keep the viewed phase stable: this case exercises a push, not an
+      // unrelated phase-change abort of the initial background request.
+      const phase = body.runId === "view" || (body.runId === "background" && backgroundReads > 2) ? "running" : "completed";
+      const resultVersion = body.runId === "background" && backgroundReads > 2 ? version || "background-v2" : `${body.runId}-${backgroundReads}`;
+      await route.fulfill({ json: { result: { version: resultVersion, snapshot: {
+        runId: body.runId, phase, config: { repository: "/a" }, events: [], nodes: {}, executions: [],
+        graph: { originalGoal: "Retained view", nodes: [], edges: [] },
+      } } } });
+      return true;
+    });
+    try {
+      await waitFor(() => backgroundReads === 1);
+      await page.waitForFunction(() => window.audit.observed?.includes("background") &&
+        document.querySelector("[data-viewed-goal]")?.textContent === "Retained view");
+      await page.evaluate(async version => {
+        // Keep a rerender/resubscription from creating a real /api/events GET.
+        window.EventSource = class { static CLOSED = 2; addEventListener() {} close() {} };
+        const events = await import("/src/services/runtimeEvents.ts");
+        events.setRuntimeEventsConnectedForTest(true);
+        window.audit.observed = [];
+        events.dispatchSnapshotChangedForTest({ runId: "background", version });
+      }, version);
+      await waitFor(() => backgroundReads >= 2);
+      if (deleted) {
+        await page.waitForTimeout(2300);
+        assert.equal(backgroundReads, 2, "an explicit deletion must retire the invalidation, not keep the watchdog alive");
+      } else {
+        await page.waitForFunction(() => window.audit.observed?.includes("background"));
+        assert.ok(backgroundReads >= 3, "retry without requiring another push or reconnect");
+      }
+      assert.equal(await page.locator("[data-viewed-goal]").innerText(), "Retained view");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+for (const version of ["pending-version", ""]) {
+  test(`an in-flight ${version ? "versioned" : "unversioned"} invalidation survives poll resubscription`, { timeout: 30_000 }, async () => {
+    let backgroundReads = 0;
+    const gate = deferred();
+    const { context, page, errors } = await fixture("polling", async (route, command, body) => {
+      if (command !== "snapshot_if_changed") return false;
+      if (body.runId === "background" && ++backgroundReads === 2) await gate.promise;
+      await route.fulfill({ json: { result: { version: `current-${backgroundReads}`, snapshot: {
+        runId: body.runId, phase: body.runId === "view" ? "running" : "completed",
+        config: { repository: "/a" }, events: [], nodes: {}, executions: [],
+        graph: { originalGoal: "Resubscribed view", nodes: [], edges: [] },
+      } } } });
+      return true;
+    });
+    try {
+      await page.waitForFunction(() => window.audit.observed?.includes("background"));
+      await page.evaluate(async version => {
+        window.EventSource = class { static CLOSED = 2; addEventListener() {} close() {} };
+        const events = await import("/src/services/runtimeEvents.ts");
+        events.setRuntimeEventsConnectedForTest(true);
+        events.dispatchSnapshotChangedForTest({ runId: "background", version });
+      }, version);
+      await waitFor(() => backgroundReads === 2);
+      await page.evaluate(() => window.audit.setPollingRuns(["broken", "background", "view"]));
+      gate.resolve();
+      await waitFor(() => backgroundReads >= 3);
+      assert.deepEqual(errors, []);
+    } finally { gate.resolve(); await context.close(); }
+  });
+}
+
+for (const deletedRun of ["background", "view"]) {
+  test(`a confirmed deleted active ${deletedRun} Run leaves watchdog and fallback polling`, { timeout: 30_000 }, async () => {
+    let deletedReads = 0, otherReads = 0;
+    const { context, page, errors } = await fixture("polling", async (route, command, body) => {
+      if (command !== "snapshot_if_changed") return false;
+      if (body.runId === deletedRun && ++deletedReads > 1) {
+        await route.fulfill({ status: 400, json: { error: "Run not found" } });
+        return true;
+      }
+      if (body.runId !== deletedRun) otherReads++;
+      await route.fulfill({ json: { result: { version: "initial", snapshot: {
+        runId: body.runId, phase: "running", config: { repository: "/a" }, events: [], nodes: {}, executions: [],
+        graph: { originalGoal: "Active view", nodes: [], edges: [] },
+      } } } });
+      return true;
+    });
+    try {
+      await page.waitForFunction(() => window.audit.observed?.includes("background") &&
+        document.querySelector("[data-viewed-goal]")?.textContent === "Active view");
+      await page.evaluate(async runId => {
+        window.EventSource = class { static CLOSED = 2; addEventListener() {} close() {} };
+        const events = await import("/src/services/runtimeEvents.ts");
+        events.setRuntimeEventsConnectedForTest(true);
+        events.dispatchSnapshotChangedForTest({ runId, version: "deleted" });
+      }, deletedRun);
+      await waitFor(() => deletedReads >= 2);
+      await page.waitForTimeout(2400);
+      assert.equal(deletedReads, 2, "the active phase must not keep a deleted Run on the watchdog");
+      await page.evaluate(async () => {
+        (await import("/src/services/runtimeEvents.ts")).setRuntimeEventsConnectedForTest(false);
+        window.audit.setPollingRuns(["broken", "background", "view"]);
+      });
+      const before = otherReads;
+      await waitFor(() => otherReads > before);
+      await page.waitForTimeout(1600);
+      assert.equal(deletedReads, 2, "fallback polling and resubscription must retain the deletion fence");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("background notification retries cannot starve foreground polling after SSE disconnects", { timeout: 30_000 }, async () => {
+  let backgroundReads = 0, viewedReads = 0;
+  const { context, page, errors } = await fixture("polling", async (route, command, body) => {
+    if (command !== "snapshot_if_changed") return false;
+    if (body.runId === "background" && ++backgroundReads > 1) {
+      await route.fulfill({ status: 503, json: { error: "Temporary background outage" } });
+      return true;
+    }
+    if (body.runId === "view") viewedReads++;
+    await route.fulfill({ json: { result: { version: `${body.runId}-${viewedReads}`, snapshot: {
+      runId: body.runId, phase: body.runId === "view" ? "running" : "completed",
+      config: { repository: "/a" }, events: [], nodes: {}, executions: [],
+      graph: { originalGoal: `Foreground ${viewedReads}`, nodes: [], edges: [] },
+    } } } });
+    return true;
+  });
+  try {
+    await page.waitForFunction(() => window.audit.observed?.includes("background"));
+    await page.evaluate(async () => {
+      window.EventSource = class { static CLOSED = 2; addEventListener() {} close() {} };
+      const events = await import("/src/services/runtimeEvents.ts");
+      events.setRuntimeEventsConnectedForTest(true);
+      events.dispatchSnapshotChangedForTest({ runId: "background", version: "pending-background" });
+    });
+    await waitFor(() => backgroundReads >= 2);
+    await page.evaluate(async () => (await import("/src/services/runtimeEvents.ts")).setRuntimeEventsConnectedForTest(false));
+    const before = viewedReads;
+    await waitFor(() => viewedReads >= before + 2);
+    assert.ok(backgroundReads >= 3, "the failed invalidation still retries independently");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a burst of slow background invalidations cannot queue the foreground behind all concurrency slots", { timeout: 30_000 }, async () => {
+  const gate = deferred();
+  let slow = false, viewedReads = 0, waiting = 0, released = 0;
+  const backgrounds = Array.from({ length: 5 }, (_, index) => `queued-${index}`);
+  const { context, page, errors } = await fixture("polling", async (route, command, body) => {
+    if (command !== "snapshot_if_changed") return false;
+    if (body.runId === "view") viewedReads++;
+    const held = slow && backgrounds.includes(body.runId);
+    if (held) { waiting++; await gate.promise; }
+    await route.fulfill({ json: { result: { version: "current", snapshot: {
+      runId: body.runId, phase: "completed", config: { repository: "/a" }, events: [], nodes: {}, executions: [],
+      graph: { originalGoal: "Foreground first", nodes: [], edges: [] },
+    } } } });
+    if (held) released++;
+    return true;
+  });
+  try {
+    await page.waitForFunction(() => window.audit.observed?.includes("background") &&
+      document.querySelector("[data-viewed-goal]")?.textContent === "Foreground first");
+    await page.evaluate(ids => window.audit.setPollingRuns(["view", ...ids]), backgrounds);
+    await page.waitForFunction(ids => ids.every(id => window.audit.observed?.includes(id)), backgrounds);
+    slow = true;
+    const before = viewedReads;
+    await page.evaluate(async ids => {
+      window.EventSource = class { static CLOSED = 2; addEventListener() {} close() {} };
+      const events = await import("/src/services/runtimeEvents.ts");
+      events.setRuntimeEventsConnectedForTest(true);
+      for (const runId of ids) events.dispatchSnapshotChangedForTest({ runId, version: "invalidated" });
+    }, backgrounds);
+    await waitFor(() => waiting >= 3);
+    await waitFor(() => viewedReads > before);
+    assert.equal(released, 0, "the foreground is refreshed before slow background reads settle");
+    assert.deepEqual(errors, []);
+  } finally {
+    slow = false; gate.resolve();
+    await waitFor(() => released === waiting);
+    await context.close();
+  }
+});
+
+for (const busy of [false, true]) {
+  test(`a notification older than the durable snapshot settles ${busy ? "after a busy read" : "without a busy read"}`, { timeout: 30_000 }, async () => {
+    let backgroundReads = 0;
+    const expectedReads = busy ? 3 : 2;
+    const { context, page, errors } = await fixture("polling", async (route, command, body) => {
+      if (command !== "snapshot_if_changed") return false;
+      if (body.runId === "background") backgroundReads++;
+      if (busy && body.runId === "background" && backgroundReads === 2) {
+        await route.fulfill({ json: { result: { version: body.version, snapshot: null, busy: true } } });
+        return true;
+      }
+      const version = body.runId === "background" && backgroundReads > 1 ? "durable-newer-version" : "initial-version";
+      await route.fulfill({ json: { result: { version, snapshot: {
+        runId: body.runId, phase: body.runId === "view" ? "running" : "completed", config: { repository: "/a" }, events: [], nodes: {}, executions: [],
+        graph: { originalGoal: "Settled view", nodes: [], edges: [] },
+      } } } });
+      return true;
+    });
+    try {
+      await page.waitForFunction(() => window.audit.observed?.includes("background") &&
+        document.querySelector("[data-viewed-goal]")?.textContent === "Settled view");
+      await page.evaluate(async () => {
+        window.EventSource = class { static CLOSED = 2; addEventListener() {} close() {} };
+        const events = await import("/src/services/runtimeEvents.ts");
+        events.setRuntimeEventsConnectedForTest(true);
+        events.dispatchSnapshotChangedForTest({ runId: "background", version: "older-notification-version" });
+      });
+      await waitFor(() => backgroundReads >= expectedReads);
+      await page.waitForTimeout(1000);
+      assert.equal(backgroundReads, expectedReads, "an already superseded version must not keep fast retries alive");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("a notification arriving during a read still triggers a second authoritative read", { timeout: 30_000 }, async () => {
+  let backgroundReads = 0;
+  const gate = deferred();
+  const { context, page, errors } = await fixture("polling", async (route, command, body) => {
+    if (command !== "snapshot_if_changed") return false;
+    if (body.runId === "background" && ++backgroundReads === 2) await gate.promise;
+    const version = body.runId === "background" ? `background-${backgroundReads}` : "initial-view";
+    await route.fulfill({ json: { result: { version, snapshot: {
+      runId: body.runId, phase: body.runId === "view" ? "running" : "completed", config: { repository: "/a" }, events: [], nodes: {}, executions: [],
+      graph: { originalGoal: "Notification fence", nodes: [], edges: [] },
+    } } } });
+    return true;
+  });
+  try {
+    await page.waitForFunction(() => window.audit.observed?.includes("background") &&
+      document.querySelector("[data-viewed-goal]")?.textContent === "Notification fence");
+    await page.evaluate(async () => {
+      window.EventSource = class { static CLOSED = 2; addEventListener() {} close() {} };
+      const events = await import("/src/services/runtimeEvents.ts");
+      events.setRuntimeEventsConnectedForTest(true);
+      events.dispatchSnapshotChangedForTest({ runId: "background", version: "background-2" });
+    });
+    await waitFor(() => backgroundReads === 2);
+    await page.evaluate(async () => (await import("/src/services/runtimeEvents.ts")).dispatchSnapshotChangedForTest({ runId: "background", version: "background-3" }));
+    gate.resolve();
+    await waitFor(() => backgroundReads >= 3);
+    await page.waitForTimeout(300);
+    assert.equal(backgroundReads, 3);
     assert.deepEqual(errors, []);
   } finally { gate.resolve(); await context.close(); }
 });

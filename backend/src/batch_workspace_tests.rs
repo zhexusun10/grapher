@@ -11,6 +11,17 @@ fn wait_for_idle(service: &Arc<Service>) -> Snapshot {
     service.runtime.lock().unwrap().state.clone()
 }
 
+fn compiled_launch_adapter(root: &Path) -> PathBuf {
+    // This fixture replaces Pi with Node, but its launch adapter must still
+    // match the Rust binary rather than an independently edited live checkout.
+    let directory = root.join("compiled-launch-adapter");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("path-identity.mjs"), include_str!("../../engine/path-identity.mjs")).unwrap();
+    let adapter = directory.join("launch-binding.mjs");
+    fs::write(&adapter, include_str!("../../engine/launch-binding.mjs")).unwrap();
+    adapter
+}
+
 fn setup(managed: bool, isolate: bool, fail: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>) {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("source");
@@ -20,13 +31,9 @@ fn setup(managed: bool, isolate: bool, fail: bool) -> (tempfile::TempDir, PathBu
     crate::workspace::git(&repo, &["add", "-A"]).unwrap();
     crate::workspace::git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
     let script = temp.path().join("agent.mjs");
-    let binding = crate::native::host_path(
-        &crate::native::installation_root().join("engine/launch-binding.mjs"),
-    )
-    .to_string_lossy()
-    .replace('\\', "/");
-    let binding = serde_json::to_string(&format!("file:///{binding}")).unwrap();
-    fs::write(&script, format!("import {{ applyLaunchBinding }} from {binding};\n") + r#"
+    let adapter = compiled_launch_adapter(temp.path());
+    let adapter = serde_json::to_string(&crate::native::host_path(&adapter)).unwrap();
+    fs::write(&script, format!("import {{pathToFileURL as compiledAdapterUrl}} from 'node:url';\nconst {{applyLaunchBinding}} = await import(compiledAdapterUrl({adapter}));\n") + r#"
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -261,6 +268,124 @@ fn driver_delivers_private_batch_before_shared_join_without_leaking_environment(
             .input
             .is_none());
     }
+}
+
+#[test]
+fn compiled_launch_adapter_survives_an_update_between_parallel_process_starts() {
+    use std::process::{Command, Stdio};
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    crate::workspace::git(&source, &["init", "-q"]).unwrap();
+    let mut launch = crate::environment_automatic::resolve(&source, false).unwrap().0.unwrap().launch;
+    launch.variables.clear();
+    let business_first = temp.path().join("business-first");
+    fs::create_dir(&business_first).unwrap();
+    launch.path.insert(0, crate::native::host_path(&business_first).to_string_lossy().into_owned());
+    launch.unbound_path = Some(launch.path.clone());
+    let binding = temp.path().join("launch.json");
+    fs::write(&binding, serde_json::to_vec(&launch).unwrap()).unwrap();
+    let live = temp.path().join("live-adapter.mjs");
+    fs::write(&live, include_str!("../../engine/launch-binding.mjs")).unwrap();
+    fs::write(temp.path().join("path-identity.mjs"), include_str!("../../engine/path-identity.mjs")).unwrap();
+    // Spaces/Unicode/URL-special characters exercise the same URL conversion
+    // the batch fixture needs, independently of the checkout's spelling.
+    let pinned = compiled_launch_adapter(&temp.path().join("pinned 空格#%"));
+    let consumer = temp.path().join("consumer.mjs");
+    fs::write(&consumer, r#"
+import fs from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const [adapter,ready,release]=process.argv.slice(2);
+fs.writeFileSync(ready,'ready');
+while(!fs.existsSync(release)) await new Promise(resolve=>setTimeout(resolve,10));
+const module=await import(pathToFileURL(adapter));
+module.applyLaunchBinding();
+if(!module.managedLaunch()) throw Error('managed binding missing');
+console.log('managed binding ready');
+"#).unwrap();
+    let release = temp.path().join("release");
+    let mut children = Vec::new();
+    for (pinned, adapter) in [(false, &live), (true, &pinned)] {
+        for index in 0..4 {
+            let ready = temp.path().join(format!("ready-{pinned}-{index}"));
+            let mut command = Command::new(crate::native::trusted_node().unwrap());
+            command.arg(&consumer).arg(adapter).arg(&ready).arg(&release)
+                .current_dir(&source).stdout(Stdio::piped()).stderr(Stdio::piped());
+            crate::environment::clean_command(&mut command, &launch, Some(&binding)).unwrap();
+            crate::process_control::configure_command(&mut command);
+            let mut child = command.spawn().unwrap();
+            let tree = crate::process_control::track(&child).unwrap_or_else(|error| {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("cannot track adapter consumer: {error}");
+            });
+            children.push((pinned, ready, child, tree));
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !children.iter().all(|(_, ready, _, _)| ready.is_file()) {
+        if Instant::now() >= deadline || children.iter_mut().any(|(_, _, child, _)| child.try_wait().unwrap().is_some()) {
+            for (_, _, child, tree) in &mut children {
+                tree.terminate();
+                let _ = child.wait();
+            }
+            panic!("adapter consumers did not reach the import boundary");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Simulate an older entry-first policy in a disposable installation. Rust
+    // has admitted an automatic business-first PATH, but the old adapter rejects
+    // it. Every child is at the import barrier, so this is not a timing bet.
+    fs::write(&live, r#"
+import {readFileSync} from 'node:fs';
+import {dirname} from 'node:path';
+let launch;
+export function applyLaunchBinding(){
+  launch=JSON.parse(readFileSync(process.env.GRAPHER_LAUNCH_BINDING,'utf8'));
+  if(launch.path[0]!==dirname(launch.entry)) throw Error('Declared default entry/PATH must be first (older launch policy)');
+}
+export function managedLaunch(){return launch;}
+"#).unwrap();
+    fs::write(&release, "go").unwrap();
+    let results: Vec<_> = children.into_iter().map(|(pinned, _, child, _tree)|
+        (pinned, child.wait_with_output().unwrap())).collect();
+    for (pinned, output) in results {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if pinned {
+            assert!(output.status.success(), "{stderr}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "managed binding ready");
+        } else {
+            assert!(!output.status.success());
+            assert!(stderr.contains("Error: Declared default entry/PATH"), "{stderr}");
+        }
+    }
+}
+
+#[test]
+fn managed_startup_failure_keeps_its_cause_and_holds_private_delivery() {
+    let (temp, repo, service) = setup(true, true, false);
+    let script = temp.path().join("agent.mjs");
+    let original = fs::read_to_string(&script).unwrap();
+    fs::write(&script, original.replacen("applyLaunchBinding();",
+        "applyLaunchBinding(); if (managed) throw new Error('managed startup diagnostic sentinel');", 1)).unwrap();
+    drive(service.clone());
+    let state = wait_for_idle(&service);
+    assert_eq!(state.phase, "needs_attention");
+    assert_eq!(state.nodes["root"].status, "completed");
+    assert_eq!(state.nodes["join"].status, "blocked");
+    for name in ["a", "b", "c", "d"] {
+        let node = &state.nodes[name];
+        assert_eq!(node.status, "failed");
+        let error = node.error.as_deref().unwrap();
+        assert!(error.contains("managed startup diagnostic sentinel"), "{name}: {error}");
+        let execution = state.executions.iter().find(|execution| execution.node == name).unwrap();
+        assert!(Path::new(&execution.worktree).is_dir());
+        assert!(!crate::path_identity::same_path(Path::new(&execution.worktree), &repo));
+        assert!(!repo.join(format!("{name}.txt")).exists());
+    }
+    assert!(state.events.iter().all(|event|
+        !matches!(event.kind, EventKind::PublicationStarted { .. })));
 }
 
 #[test]

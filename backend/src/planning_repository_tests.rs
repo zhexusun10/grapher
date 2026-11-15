@@ -122,6 +122,122 @@ fn planning_history_and_snapshot_accept_resolved_aliases_without_crossing_bindin
 }
 
 #[test]
+fn planning_history_refuses_linked_directories_and_preserves_external_summaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("data");
+    let service = service(&root);
+    let planning = root.join("planning");
+    fs::create_dir_all(&planning).unwrap();
+    let real = planning.join("real-history");
+    fs::create_dir(&real).unwrap();
+    let summary = PlanningSummary {
+        planning_id: "real-history".into(),
+        status: Some("failed".into()),
+        repository: Some("/repo".into()),
+        ..Default::default()
+    };
+    write_planning_summary(&real, &summary).unwrap();
+    fs::write(real.join("planner.jsonl"), "private trace\n").unwrap();
+    crate::path_safety::directory_link(&real, &planning.join("linked-history"));
+    assert!(get_planning("linked-history".into(), &service).is_err());
+    assert!(get_planning_output(
+        "linked-history".into(),
+        "planner".into(),
+        0,
+        false,
+        None,
+        None,
+        &service
+    )
+    .is_err());
+
+    let outside = temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    let mut summary = summary;
+    summary.planning_id = "outside-history".into();
+    summary.repository = None;
+    write_planning_summary(&outside, &summary).unwrap();
+    let before = fs::read(outside.join("summary.json")).unwrap();
+    crate::path_safety::directory_link(&outside, &planning.join("outside-history"));
+    let config: Config =
+        serde_json::from_value(serde_json::json!({"repository":"/repo", "model":"test"})).unwrap();
+    service
+        .runtime
+        .lock()
+        .unwrap()
+        .emit(EventKind::PlanningStarted {
+            goal: "test".into(),
+            config,
+            planning: summary,
+            plan_type: Some("graph".into()),
+        })
+        .unwrap();
+    let listed = list_plannings(&service, None).unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "linked histories must not leak into listings"
+    );
+    assert_eq!(listed[0].planning_id, "real-history");
+    assert_eq!(
+        fs::read(outside.join("summary.json")).unwrap(),
+        before,
+        "listing must not backfill through a link"
+    );
+    assert_eq!(
+        get_planning("real-history".into(), &service)
+            .unwrap()
+            .planning_id,
+        "real-history"
+    );
+    assert_eq!(
+        get_planning_output(
+            "real-history".into(),
+            "planner".into(),
+            0,
+            false,
+            None,
+            None,
+            &service
+        )
+        .unwrap()["content"],
+        "private trace\n"
+    );
+    #[cfg(unix)]
+    {
+        // Leaf links are unsafe even if the history directory itself is real.
+        fs::write(outside.join("trace.jsonl"), "outside trace\n").unwrap();
+        fs::remove_file(real.join("planner.jsonl")).unwrap();
+        std::os::unix::fs::symlink(outside.join("trace.jsonl"), real.join("planner.jsonl"))
+            .unwrap();
+        assert!(get_planning_output(
+            "real-history".into(),
+            "planner".into(),
+            0,
+            false,
+            None,
+            None,
+            &service
+        )
+        .is_err());
+        fs::write(outside.join("request.json"), r#"{"goal":"outside secret"}"#).unwrap();
+        std::os::unix::fs::symlink(outside.join("request.json"), real.join("request.json"))
+            .unwrap();
+        assert!(get_planning("real-history".into(), &service)
+            .unwrap()
+            .goal
+            .is_none());
+        fs::remove_file(real.join("summary.json")).unwrap();
+        std::os::unix::fs::symlink(outside.join("summary.json"), real.join("summary.json"))
+            .unwrap();
+        assert!(get_planning("real-history".into(), &service).is_err());
+        assert!(list_plannings(&service, None).unwrap().is_empty());
+    }
+    crate::path_safety::remove_directory_link(&planning.join("linked-history"));
+    crate::path_safety::remove_directory_link(&planning.join("outside-history"));
+}
+
+#[test]
 fn nonexistent_repository_paths_never_match_just_because_resolution_failed() {
     let temp = tempfile::tempdir().unwrap();
     let left = temp

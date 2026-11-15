@@ -74,28 +74,32 @@ fn scalar_changes(value: &Value, path: &str, changes: &mut Vec<(String, Value)>)
 }
 
 #[test]
-fn every_serialized_scalar_matches_legacy_normalized_equality() {
-    let original = fixture(true);
-    check_normalization(&original);
-    let value = serde_json::to_value(&original).unwrap();
-    let mut changes = Vec::new();
-    scalar_changes(&value, "", &mut changes);
-    let mut checked = 0;
-    for (path, replacement) in changes {
-        let mut changed = value.clone();
-        *changed.pointer_mut(&path).unwrap() = replacement;
-        // Enum discriminants cannot be arbitrary strings; valid alternative
-        // variants and optional/map shapes are exercised separately below.
-        if let Ok(other) = serde_json::from_value::<View>(changed) {
-            check_normalization(&other);
-            let expected = legacy_normalized_bytes(&original).unwrap() == legacy_normalized_bytes(&other).unwrap();
-            assert_eq!(equal(&original, &other), expected, "{path}");
-            assert_eq!(equal(&other, &original), expected, "reverse {path}");
-            assert_eq!(original == other, expected, "View equality at {path}");
-            checked += 1;
+fn every_serialized_scalar_matches_versioned_normalized_equality() {
+    for schema in [5, super::super::VIEW_SCHEMA] {
+        let mut original = fixture(true);
+        original.schema = schema;
+        for child in original.repositories.values_mut() { child.schema = schema; }
+        check_normalization(&original);
+        let value = serde_json::to_value(&original).unwrap();
+        let mut changes = Vec::new();
+        scalar_changes(&value, "", &mut changes);
+        let mut checked = 0;
+        for (path, replacement) in changes {
+            let mut changed = value.clone();
+            *changed.pointer_mut(&path).unwrap() = replacement;
+            // Enum discriminants cannot be arbitrary strings; valid alternative
+            // variants and optional/map shapes are exercised separately below.
+            if let Ok(other) = serde_json::from_value::<View>(changed) {
+                check_normalization(&other);
+                let expected = legacy_normalized_bytes(&original).unwrap() == legacy_normalized_bytes(&other).unwrap();
+                assert_eq!(equal(&original, &other), expected, "{path}");
+                assert_eq!(equal(&other, &original), expected, "reverse {path}");
+                assert_eq!(original == other, expected, "View equality at {path}");
+                checked += 1;
+            }
         }
+        assert!(checked > 200, "the fixture must exercise all evidence fields: {checked}");
     }
-    assert!(checked > 200, "the fixture must exercise all evidence fields: {checked}");
 }
 
 #[test]
@@ -158,6 +162,79 @@ fn stored_evidence_and_checksum_stay_unchanged() {
     portable.strip_system_managed();
     check(&loaded, &portable);
     assert!(equal(&loaded, &portable));
+}
+
+#[test]
+fn current_view_identity_tracks_acl_changes_and_security_named_paths() {
+    let mut original = fixture(true);
+    original.strip_system_managed();
+    let value = serde_json::to_value(&original).unwrap();
+    for path in [
+        "/root_extra/security", "/entries/file/extra/security",
+        "/entries/security/extra/security", "/git_entries/HEAD/extra/security",
+        "/git_file_metadata/1/security", "/git_link_metadata/1/security",
+        "/repositories/child/root_extra/security", "/repositories/security/root_extra/security",
+    ] {
+        let mut changed = value.clone();
+        *changed.pointer_mut(path).unwrap() = json!([4, 5, 6]);
+        let other: View = serde_json::from_value(changed).unwrap();
+        check(&original, &other);
+        assert_ne!(original, other, "ACL change at {path} must affect identity");
+    }
+    for container in ["/entries", "/git_entries", "/repositories", "/hardlinks/aliases", "/hardlinks/outside", "/git_files"] {
+        let mut changed = value.clone();
+        changed.pointer_mut(container).unwrap().as_object_mut().unwrap().remove("security");
+        let other: View = serde_json::from_value(changed).unwrap();
+        check(&original, &other);
+        assert_ne!(original, other, "project path in {container} must affect identity");
+    }
+}
+
+#[test]
+fn nested_comparisons_follow_the_records_checksum_version() {
+    for schema in [5, super::super::VIEW_SCHEMA] {
+        let mut original = fixture(true);
+        original.schema = schema;
+        let mut changed = serde_json::to_value(&original).unwrap();
+        changed["repositories"]["child"]["root_extra"]["security"] = json!([9, 8, 7]);
+        let other: View = serde_json::from_value(changed).unwrap();
+        check(&original, &other);
+        assert_eq!(original == other, schema == 5);
+    }
+}
+
+#[test]
+fn loading_rejects_unknown_nested_schema_before_in_memory_upgrade() {
+    for schema in [5, super::super::VIEW_SCHEMA] {
+        let mut view = fixture(true);
+        view.schema = schema;
+        view.repositories.get_mut("child").unwrap().schema = 999;
+        let temp = tempfile::tempdir().unwrap();
+        save(temp.path(), &view).unwrap();
+        let before = std::fs::read(temp.path().join("view.json")).unwrap();
+        assert!(load(temp.path()).unwrap_err().contains("Unsupported project-view schema"));
+        assert_eq!(std::fs::read(temp.path().join("view.json")).unwrap(), before);
+    }
+}
+
+#[test]
+fn current_checksums_reject_acl_corruption_and_legacy_records_remain_immutable() {
+    let legacy = fixture(true);
+    let temp = tempfile::tempdir().unwrap();
+    save(temp.path(), &legacy).unwrap();
+    let original_json = std::fs::read(temp.path().join("view.json")).unwrap();
+    let original_checksum = std::fs::read(temp.path().join("checksum")).unwrap();
+    let current = load(temp.path()).unwrap();
+    assert_eq!(current.schema, super::super::VIEW_SCHEMA);
+    assert!(current.repositories.values().all(|view| view.schema == current.schema));
+    assert_eq!(std::fs::read(temp.path().join("view.json")).unwrap(), original_json);
+    assert_eq!(std::fs::read(temp.path().join("checksum")).unwrap(), original_checksum);
+
+    save(temp.path(), &current).unwrap();
+    let mut damaged = serde_json::to_value(&current).unwrap();
+    damaged["entries"]["file"]["extra"]["security"] = json!([9, 8, 7]);
+    std::fs::write(temp.path().join("view.json"), serde_json::to_vec(&damaged).unwrap()).unwrap();
+    assert!(load(temp.path()).unwrap_err().contains("Damaged project-view evidence"));
 }
 
 #[test]
@@ -241,12 +318,16 @@ fn normalization_matches_legacy_for_generated_nested_views_without_mutating_evid
     }
     let mut seed = 0x5eed_2026_u64;
     for _ in 0..128 {
-        let view = generated_view(&mut seed, 2);
-        let before = serde_json::to_vec(&view).unwrap();
-        let expected = legacy_normalized_bytes(&view).unwrap();
-        assert_eq!(normalized_bytes(&view).unwrap(), expected);
-        assert_eq!(normalization::bytes(&view).unwrap(), expected);
-        assert_eq!(serde_json::to_vec(&view).unwrap(), before);
+        let legacy = generated_view(&mut seed, 2);
+        let mut current = legacy.clone();
+        current.strip_system_managed();
+        for view in [legacy, current] {
+            let before = serde_json::to_vec(&view).unwrap();
+            let expected = legacy_normalized_bytes(&view).unwrap();
+            assert_eq!(normalized_bytes(&view).unwrap(), expected);
+            assert_eq!(normalization::bytes(&view).unwrap(), expected);
+            assert_eq!(serde_json::to_vec(&view).unwrap(), before);
+        }
     }
 }
 
@@ -279,19 +360,22 @@ fn view_normalization_benchmark() {
         }
         let expected = legacy_normalized_bytes(&view).unwrap();
         assert_eq!(normalization::bytes(&view).unwrap(), expected);
-        let mut legacy = Vec::new();
-        let mut projected = Vec::new();
+        let mut times = [Vec::new(), Vec::new(), Vec::new()];
         for round in 0..5 {
-            for fast in if round % 2 == 0 { [false, true] } else { [true, false] } {
+            for strategy in if round % 2 == 0 { [0, 1, 2] } else { [2, 1, 0] } {
                 let started = Instant::now();
-                let bytes = if fast { normalization::bytes(&view) } else { legacy_normalized_bytes(&view) }.unwrap();
+                let bytes = match strategy {
+                    0 => legacy_normalized_bytes(&view),
+                    1 => normalization::buffered_bytes(&view),
+                    _ => normalization::bytes(&view),
+                }.unwrap();
                 let elapsed = started.elapsed();
                 assert_eq!(bytes, expected);
-                if fast { projected.push(elapsed); } else { legacy.push(elapsed); }
+                times[strategy].push(elapsed);
             }
         }
-        println!("normalization {label}: files={files}+{git_files}, security_bytes={security_bytes}, old={:?}, projected={:?}, output_bytes={}",
-            median(legacy), median(projected), expected.len());
+        let [legacy, projected, direct] = times.map(median);
+        println!("normalization {label}: files={files}+{git_files}, security_bytes={security_bytes}, full_json={legacy:?}, projected_json={projected:?}, direct={direct:?}, output_bytes={}", expected.len());
     }
 }
 

@@ -440,10 +440,26 @@ Focused evidence: [queue/replay regressions](../../backend/src/node_message_queu
 Business events include graph creation/revision, approval, execution transitions,
 feedback, human intervention, pause, and publication. Execution output is stored
 separately in UTF-8 byte-indexed `execution_logs` chunks; terminal events carry
-structured metadata rather than full transcripts. New output fills the final
-partial chunk up to 32 KiB instead of one row per stdout packet. Extending a chunk
+structured metadata rather than full transcripts. Metadata-only legacy replay
+preserves both SHA-1 and SHA-256 heads without rewriting stored events. New output
+fills the final partial chunk up to 32 KiB instead of one row per stdout packet. Extending a chunk
 never changes its committed prefix or existing byte cursors; log writes and
-cursor/projection updates remain commit-ordered.
+cursor/projection updates remain commit-ordered. Mixed event/output batches and
+legacy inline transcript imports or replacements share one SQLite transaction;
+failed commits leave logs, projections and derived caches unchanged. Run-deletion
+cache invalidation likewise follows the successful deletion transaction; clearing
+one data store does not reset another store's live tool tracking. The
+[append writer](../../backend/src/store/append.rs) owns this ordering. After the
+output writer's flush barrier, a node's final-response tail, completion and pending
+feedback commit in one transaction; a failed completion leaves no tail to duplicate
+on retry. Terminal metrics still parse the complete retained log plus that tail,
+using borrowed lines rather than copying the transcript. If metadata recovery has
+removed an in-memory log prefix, completion reads its committed bytes once instead
+of sealing partial metrics; missing or length-mismatched evidence refuses completion
+before writing the tail. Complete live buffers incur no recovery read. The terminal
+checkpoint covers the whole batch and resets the periodic checkpoint interval, so reaching
+the interval cannot write that same checkpoint twice. Event durability and
+synchronous file-change persistence remain unchanged.
 
 The engine coalesces adjacent text/thinking deltas within a bounded byte/time
 window before persistence; message/block changes, other events, stderr, EOF and
@@ -553,11 +569,31 @@ Snapshot/history/list requests are metadata-oriented. Node logs load on demand b
 Execution-log pages default to 256 KiB and are capped at 1 MiB; planning forward
 pages are capped at 256 KiB, and planning tails accept a `limit` capped at 1 MiB.
 `tail=true` with an optional exclusive `before` cursor returns `startOffset` and
-`nextOffset`. Browser transcript fill, cache and folding behavior lives in
+`nextOffset`. Execution reads capture only identity/status under a short Run
+lock, then use an independent read-only SQLite connection for the byte page.
+Hot child-Run service lookups reuse a weakly owned immutable root and validate
+existence through a read-only connection, without waiting on an unrelated
+primary Run mutex; cold service creation still follows the guarded replay path.
+Legacy backfills serialize per execution; reconstruction runs outside the Run
+and Store write locks, and commit rechecks deletion before inserting log chunks.
+Tool/file-change recovery belongs to its separate scoped API. Derived legacy
+counters are parsed outside the Run lock and applied without making the HTTP
+reader wait behind another Run operation. Repeated browser metadata reads share
+a versioned projection invalidated by `Runtime::touch`. Run-wide and per-node
+recovery hints share [one indexed pass](../../backend/src/model/recovery_hints.rs)
+over executions, supersession, preparation/failure events, dependencies and
+Merger evidence. Scheduler mutation predicates remain authoritative.
+Missing/overlapping chunks, inconsistent byte lengths and invalid
+integer ranges fail explicitly instead of returning a stalled or partial-success
+page; readers never repair stored rows. UTF-8 boundary flooring and empty prefix
+reads remain valid. Browser transcript fill, cache and folding behavior lives in
 [transcriptCache.ts](../../src/services/transcriptCache.ts) and is covered by
 [conversation history browser tests](../../scripts/conversation-history-ui.test.mjs)
 and [byte-window tests](../../scripts/transcript-window.test.ts); those UI budgets
-are not a storage cap.
+are not a storage cap. Planning history reads and summary backfills reject
+symlinked/junction descendants and leaf files beneath the trusted planning root;
+root aliases remain supported. JSON POST bodies, including planning-stream
+requests, are limited to 10 MiB before command validation or execution.
 
 Scroll-triggered older reads require reader intent. Replacing estimated row
 heights with measured ones, or shrinking the pane, clamps `scrollTop` upwards
@@ -617,6 +653,13 @@ not poll indefinitely. Tests and legacy-log migration are described in
 ## Recovery and ownership
 
 One backend process exclusively owns a runtime data directory through `runtime.lock`. Its selected Run pointer is a UI selection, not a single-active-Run restriction.
+
+A nonzero engine exit without a structured provider/model error reports a bounded
+stderr context (up to 64 nonempty lines and 8 KiB), falling back to plain stdout
+when stderr is empty. Runtime/version trailers therefore do not hide the preceding
+exception. Structured model errors still take precedence; diagnostic context does
+not turn a failed process into success, automatically retry it, or release private
+results for publication. Retained execution logs remain the detailed evidence.
 
 After interruption:
 

@@ -55,11 +55,9 @@ fn config() -> Config {
     }
 }
 
-// These Git/publication tests exercise the retained legacy private contract.
-// Adaptive source-sharing coverage lives in workspace_policy_tests.rs.
+// Legacy private workspaces; adaptive coverage is in workspace_policy_tests.rs.
 fn create_private(runtime: &mut Runtime, graph: Graph, config: Config) {
-    // These execution fixtures opt into rechecks without depending on the
-    // intentionally unconfigured production continuation-message wording.
+    // Enable fixture rechecks without production continuation prompts.
     fs::create_dir_all(runtime.root.join("prompts")).unwrap();
     for name in ["feedback-returned.md", "feedback-updated.md"] {
         fs::write(runtime.root.join("prompts").join(name), "{{node}}\n[fixture: recheck after {{target}}]").unwrap();
@@ -184,11 +182,10 @@ fn arbitrary_node_names_map_to_safe_internal_ids() {
         assert!(!id.starts_with('.') && !id.ends_with('.'));
         assert!(!id.contains(".."));
     }
-    // Distinct labels must not collapse to one internal id.
     assert_ne!(node_id("Foo"), node_id("foo"));
     assert_ne!(node_id("a b"), node_id("a-b"));
     assert_ne!(node_id(""), node_id("node"));
-    // The empty name stays a presence error, not a format constraint.
+    // Empty names are presence errors, not format errors.
     let graph = Graph {
         nodes: vec![Node {
             name: String::new(),
@@ -200,7 +197,7 @@ fn arbitrary_node_names_map_to_safe_internal_ids() {
         .unwrap_err()
         .iter()
         .any(|e| e.code == "E201"));
-    // Legacy-safe names keep their identity so existing refs and worktrees stay valid.
+    // Preserve legacy refs and worktree identities.
     for name in ["a-dep-b_9".into(), "x".repeat(64)] {
         assert_eq!(node_id(&name), name);
         let graph = Graph {
@@ -336,7 +333,7 @@ fn compiler_warns_about_identical_tasks_without_rejecting_the_graph() {
     ];
     assert_eq!(compile(&candidate, false).unwrap().warnings, expected);
     assert_eq!(compile(&candidate, true).unwrap().warnings, expected);
-    // Group names deterministically, but do not normalize text or infer similarity.
+    // Ordering must not affect grouping.
     candidate.nodes.reverse();
     assert_eq!(compile(&candidate, true).unwrap().warnings, expected);
     candidate
@@ -386,8 +383,7 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
         "W303: If <FEEDBACK> is sent from review to frontend, these nodes will rerun: delivery, frontend, inspect, review.",
         "W303: If <FEEDBACK> is sent from inspect to spec, these nodes will rerun: backend, delivery, frontend, inspect, review, spec.",
     ]);
-    // Compare the reported set to the actual event, not a size heuristic or
-    // merely the dependency path from the target to the feedback source.
+    // Compare diagnostics with the actual invalidation event.
     let temp = TempDir::new().unwrap();
     let mut runtime = Runtime::open(temp.path()).unwrap();
     runtime.create(candidate, config()).unwrap();
@@ -442,21 +438,16 @@ fn compiler_describes_feedback_invalidation_without_following_feedback_edges() {
 
 #[test]
 fn unremovable_published_nodes_report_a_removal_diagnostic_at_the_tool_boundary() {
-    // A run whose results already published cannot lose a delivered node, but
-    // the graph structure stays valid: the Planner tool boundary needs the
-    // runtime-owned name set to reject the edit where the model still reacts.
+    // Published-node protection belongs at the Planner tool boundary.
     let mut candidate = graph();
-    // An unremovable node that is still present is not a problem.
     assert!(unremovable_node_diagnostics(&candidate, &["review".into()]).is_empty());
     assert!(unremovable_node_diagnostics(&candidate, &[]).is_empty());
-    // Deleting it produces the boundary rejection; other nodes do not.
     candidate.nodes.pop();
     let removed = unremovable_node_diagnostics(&candidate, &["review".into(), "spec".into()]);
     assert_eq!(removed.len(), 1);
     assert_eq!(removed[0].code, "E210");
     assert!(removed[0].message.contains("review"));
     assert!(removed[0].message.contains("already published"));
-    // Keeping the node but reworking its task is the sanctioned alternative.
     candidate.nodes.push(Node {
         name: "review".into(),
         task: "Review again".into(),
@@ -486,7 +477,7 @@ fn compiler_warns_when_feedback_marker_cannot_route_an_instruction() {
         .warnings
         .iter()
         .any(|warning| warning.starts_with("W302") && warning.contains("review")));
-    // This is advisory: literal report examples do not make a structurally valid graph illegal.
+    // Advisory warnings do not invalidate the graph.
     assert!(compile(&candidate, false).is_ok());
 }
 
@@ -515,7 +506,7 @@ fn compiler_rejects_multiple_feedback_targets_from_one_source() {
     assert!(error
         .message
         .contains("node tasks remain consistent with the resulting feedback routes"));
-    // The suggestions add no graph-shape or task-wording requirements.
+    // Suggestions impose no additional constraints.
     assert!(compile(&graph(), true).is_ok());
     let mut retargeted = graph();
     retargeted
@@ -574,7 +565,6 @@ fn compiler_rejects_meaningless_feedback() {
     invalid.edges.last_mut().unwrap().from = "backend".into();
     assert_eq!(compile(&invalid, true).unwrap_err()[0].code, "E207");
     assert!(compile(&invalid, false).is_err());
-    // Arbitrary labels are valid; only their internal id must stay safe.
     let arbitrary = Graph {
         original_goal: "g".into(),
         nodes: vec![Node {
@@ -738,10 +728,9 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
             !runtime.feedback_source_busy("review"),
             "exhausted edges cannot invalidate running work"
         );
-        // Even a large final response must not change consumers' task text.
         let body = format!(
-            "请处理未解决的问题🚀\n{}\n── Final response ──\nLast instruction",
-            "反馈内容🚀".repeat(6000)
+            "请处理未解决的问题𠀀\n{}\n── Final response ──\nLast instruction",
+            "反馈内容𠀀".repeat(6000)
         );
         let output = format!("{body}\n<FEEDBACK>\n");
         runtime
@@ -802,7 +791,6 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
                 .contains("Last instruction"),
             "do not duplicate the body in node state or events"
         );
-        // Event replay preserves the warning without altering task inputs.
         runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
         let jobs = runtime.jobs().unwrap();
         assert_eq!(
@@ -1012,8 +1000,7 @@ fn pause_drains_and_intervention_preserves_history() {
         .finish(&job.execution, Ok(("spec-head".into(), "completed".into())))
         .unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
-    // A never-started node accepts passive input without a Pi session or a
-    // revision change; it must still wait for both unpause and its dependency.
+    // Passive input must not bypass pause or dependencies.
     runtime.intervene("frontend", "Use Svelte").unwrap();
     assert!(runtime.state.paused);
     assert_eq!(runtime.state.nodes["frontend"].status, "waiting");
@@ -1021,7 +1008,7 @@ fn pause_drains_and_intervention_preserves_history() {
     assert!(runtime.jobs().unwrap().is_empty());
     runtime.intervene("spec", "Use Svelte").unwrap();
     runtime.intervene("spec", "Switch to React").unwrap();
-    // The first follow-up invalidates spec; the second joins that pending turn.
+    // Both follow-ups share one invalidation.
     assert_eq!(runtime.state.nodes["spec"].revision, 2);
     assert_eq!(runtime.state.nodes["backend"].revision, 1);
     assert_eq!(runtime.state.nodes["backend"].status, "waiting");
@@ -1175,19 +1162,16 @@ fn load_run_switches_active_state_and_allows_continuation() {
     let run1 = rt.state.run_id.clone();
     rt.approve().unwrap();
 
-    // Create a second run
     rt.create(graph(), config()).unwrap();
     let run2 = rt.state.run_id.clone();
     assert_ne!(run1, run2);
     assert_eq!(rt.state.run_id, run2);
 
-    // Switch back to run1 via load_run
     let snapshot1 = rt.load_run(&run1).unwrap();
     assert_eq!(snapshot1.run_id, run1);
     assert_eq!(rt.state.run_id, run1);
     assert!(rt.state.approved);
 
-    // Continue run1: pause and resume
     rt.pause(true).unwrap();
     assert!(rt.state.paused);
     rt.pause(false).unwrap();
@@ -1306,7 +1290,6 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     let node_a = temp.path().join("node_a");
     let node_b = temp.path().join("node_b");
 
-    // 1. Prepare Node A
     workspace::prepare(&repository, &node_a, &base, &[]).unwrap();
     assert!(!node_a.join(".git/grapher-repository").exists());
     assert!(!node_a.join(".git/grapher-node-id").exists());
@@ -1315,7 +1298,7 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
         "grapher-node"
     );
     fs::write(node_a.join("a.txt"), "hello from node A\n").unwrap();
-    // Arbitrary labels are accepted but reach the ref namespace only as safe ids.
+    // Encode arbitrary labels before using them in refs.
     let invalid_ref = format!("refs/grapher/nodes/{}", node_id("../invalid"));
     assert!(workspace::snapshot_node(&node_a, &repository, "../invalid").is_ok());
     assert!(
@@ -1324,19 +1307,17 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     assert!(workspace::git(&repository, &["rev-parse", "--verify", &invalid_ref]).is_err());
     let head_a = workspace::snapshot_node(&node_a, &repository, "nodeA").unwrap();
 
-    // 2. Verify the host-only database has refs/grapher/nodes/nodeA pointing to head_a
     let host_ref_a =
         workspace::repository_git(&repository, &["rev-parse", "refs/grapher/nodes/nodeA"]).unwrap();
     assert_eq!(host_ref_a, head_a);
     assert!(workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeA"]).is_err());
 
-    // Verify .git/FETCH_HEAD does NOT exist in host repository (avoiding parallel race conditions)
+    // Shared FETCH_HEAD writes would race across parallel nodes.
     assert!(
         !repository.join(".git/FETCH_HEAD").exists(),
-        ".git/FETCH_HEAD was written to host repository!"
+        "source FETCH_HEAD was written"
     );
 
-    // 3. Prepare child Node B depending on parent "nodeA"
     workspace::prepare(&repository, &node_b, &base, &["nodeA".to_string()]).unwrap();
     assert!(
         node_b.join("a.txt").exists(),
@@ -1346,11 +1327,9 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
         workspace::git(&node_b, &["rev-parse", "refs/grapher/parents/nodeA"]).unwrap();
     assert_eq!(child_parent_ref, head_a);
 
-    // 4. Node B completes and snapshots
     fs::write(node_b.join("b.txt"), "hello from node B\n").unwrap();
     let head_b = workspace::snapshot_node(&node_b, &repository, "nodeB").unwrap();
 
-    // 5. Verify the host-only database has refs/grapher/nodes/nodeB pointing to head_b
     let host_ref_b =
         workspace::repository_git(&repository, &["rev-parse", "refs/grapher/nodes/nodeB"]).unwrap();
     assert_eq!(host_ref_b, head_b);

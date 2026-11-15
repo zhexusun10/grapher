@@ -2,7 +2,7 @@ use grapher::workspace;
 use std::fs;
 use tempfile::tempdir;
 
-/// Keep fixture runs from writing shadow repositories into the checkout.
+// Keep fixture shadow repositories outside the checkout.
 fn isolate_data_root() {
     #[cfg(feature = "fixture")]
     grapher::ensure_test_data_root();
@@ -16,7 +16,6 @@ fn detect_plain_directory_creates_nothing() {
     fs::create_dir_all(&project).unwrap();
     fs::write(project.join("main.py"), "print('hello shadow')\n").unwrap();
 
-    // A pure filesystem report: no `.git`, no shadow metadata, empty HEAD.
     let detected = workspace::detect(Some(&project)).unwrap().unwrap();
     assert!(detected.is_shadow);
     assert_eq!(detected.name, "my-cool-project");
@@ -53,8 +52,7 @@ fn first_materialization_is_forced_and_reusable() {
     let tracked = workspace::repository_git(&project, &["ls-files"]).unwrap();
     assert!(tracked.contains(".cache/package"));
 
-    // Re-materializing an unchanged tree reuses HEAD instead of adding an
-    // empty commit (crash recovery and shared sources rely on this).
+    // Recovery and shared sources require unchanged trees to reuse HEAD.
     let again = workspace::materialize_shadow_repo(&project, &[]).unwrap();
     assert_eq!(again, head);
     assert_eq!(
@@ -62,7 +60,6 @@ fn first_materialization_is_forced_and_reusable() {
         "1"
     );
 
-    // Explicit verify materializes again and yields a usable HEAD.
     let verified = workspace::verify(&project).unwrap();
     assert_eq!(verified, head);
     assert_eq!(
@@ -93,7 +90,6 @@ fn first_materialization_is_forced_and_reusable() {
             .is_empty()
     );
 
-    // Publication success reclaims the snapshot completely.
     workspace::remove_shadow_repo(&project).unwrap();
     assert!(workspace::shadow_repo_if_exists(&project)
         .unwrap()
@@ -124,7 +120,6 @@ fn serial_execution_never_materializes_a_plain_directory() {
     fs::create_dir_all(&project).unwrap();
     fs::write(project.join("main.py"), "print('hello')\n").unwrap();
 
-    // A serial source-direct execution has no Git snapshot at all.
     let head = workspace::snapshot_execution(&project, &project, "task").unwrap();
     assert_eq!(head, "");
     assert!(workspace::shadow_repo_if_exists(&project)

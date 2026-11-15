@@ -11,9 +11,9 @@ export const SPLIT_RATIO_STORAGE_KEY = "grapher_workbench_split_ratio";
 export const LEGACY_WIDTH_STORAGE_KEY = "grapher_pane_width";
 
 export function getStoredRatio(storage?: Pick<Storage, "getItem">): number {
-  const store = storage ?? (typeof localStorage === "undefined" ? undefined : localStorage);
-  if (!store) return DEFAULT_SPLIT_RATIO;
   try {
+    const store = storage ?? (typeof localStorage === "undefined" ? undefined : localStorage);
+    if (!store) return DEFAULT_SPLIT_RATIO;
     const savedRatio = store.getItem(SPLIT_RATIO_STORAGE_KEY);
     if (savedRatio !== null) {
       const parsed = parseFloat(savedRatio);
@@ -36,9 +36,9 @@ export function getStoredRatio(storage?: Pick<Storage, "getItem">): number {
 }
 
 export function persistRatio(ratio: number, storage?: Pick<Storage, "setItem">): void {
-  const store = storage ?? (typeof localStorage === "undefined" ? undefined : localStorage);
-  if (!store) return;
   try {
+    const store = storage ?? (typeof localStorage === "undefined" ? undefined : localStorage);
+    if (!store) return;
     store.setItem(SPLIT_RATIO_STORAGE_KEY, String(ratio));
     store.setItem(LEGACY_WIDTH_STORAGE_KEY, String(Math.round(ratio * 1200)));
   } catch {

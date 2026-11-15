@@ -106,8 +106,8 @@ function activityStatusText(activity: RuntimeActivity[]): string | null {
   return null;
 }
 
-/** Planner positions persist within a Conversation; Node views reopen a fresh
- * bounded tail after their view-owned history has been released. */
+/** Planner positions persist within a Conversation; Node views reopen at the
+ * newest output, reusing recent bounded byte windows when available. */
 interface GraphWorkbenchProps {
   state: Snapshot;
   transcriptRunId?: string;
@@ -482,6 +482,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const [attemptId, setAttemptId] = useState("");
   const showExecutionOverview = useExecutionOverview();
   const [collapsedAttemptIds, setCollapsedAttemptIds] = useState<Set<string>>(new Set());
+  const [openedAttemptIds, setOpenedAttemptIds] = useState<ReadonlySet<string>>(() => new Set());
   // A pause/resume request can wait for the runtime lock. Reflect the click
   // immediately instead of leaving the footer silent until the snapshot lands.
   const [controlPending, setControlPending] = useState<"pause" | "resume" | null>(null);
@@ -556,6 +557,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   useEffect(() => {
     setAttemptId("");
     setCollapsedAttemptIds(new Set());
+    setOpenedAttemptIds(new Set());
     setEditingTaskNode("");
     setTaskDraft("");
     onCancelEditMessage?.();
@@ -1337,7 +1339,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       pinContentBottom(recover);
     });
   });
-  const readyExecutionIdsRef = useRef(new Set<string>());
+  const [readyForegroundExecution, setReadyForegroundExecution] = useState("");
   // The first-byte reveal must not let the viewport jump when older pages are
   // auto-filled behind it. Track the transcripts still filling their initial
   // viewport so the scroller keeps pinning the newest rows to the bottom.
@@ -1373,8 +1375,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
 
   if (activeConversationViewRef.current !== conversationViewKey) {
     if (previousNodeViewRef.current) {
-      // Its byte window is released on unmount, so an old pixel offset no longer
-      // describes the reopened Node's fresh tail. Only Planner positions persist.
+      // Node views intentionally reopen at their newest output, even when a
+      // recent byte window survives in the LRU. Only Planner positions persist.
       conversationScrollStateRef.current.delete(activeConversationViewRef.current);
     } else if (chatScrollRef.current && activeConversationViewRef.current) {
       const scroll = chatScrollRef.current;
@@ -1399,7 +1401,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     if (chatScrollRef.current) delete chatScrollRef.current.dataset.transcriptHistoryReading;
     suppressAutoScrollRef.current = false;
     isPreparingConversationRef.current = true;
-    readyExecutionIdsRef.current.clear();
   }
 
   const handleChatScroll = useCallback(() => {
@@ -1961,6 +1962,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const hasExpandedBelow = attemptIndex >= 0 && attempts.slice(attemptIndex + 1).some(a => isAttemptExpanded(a.id));
 
     if (willExpand) {
+      setOpenedAttemptIds(previous => new Set([...previous, execId]));
       if (!hasExpandedBelow) {
         setUserScrolledUp(false);
         userGestureUpRef.current = false;
@@ -2559,19 +2561,19 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     });
   }, [conversationViewKey, syncViewScroll, setScrollBottomVisible]);
 
-  const visibleExecutionIds = useMemo(() => {
-    if (selectedNode && routeType === "graph") {
-      return nodeTurns.flatMap(turn => turn.executions).filter(exec => isAttemptExpanded(exec.id)).map(exec => exec.id);
-    }
-    return routeType === "serial" ? serialTurns.flatMap(turn => turn.executions).map(exec => exec.id) : [];
-  }, [selectedNode, routeType, nodeTurns, serialTurns, isAttemptExpanded]);
-
+  const foregroundExecutionId = routeType === "serial" ? serialExecutions.at(-1)?.id : attempts.at(-1)?.id;
+  const foregroundExecutionKey = JSON.stringify([conversationViewKey, foregroundExecutionId]);
+  const foregroundExecutionReady = readyForegroundExecution === foregroundExecutionKey;
   const handleExecutionOutputReady = useCallback((execId: string) => {
-    readyExecutionIdsRef.current.add(execId);
-    if (!isConversationReady && visibleExecutionIds.every(id => readyExecutionIdsRef.current.has(id))) {
-      revealConversation();
+    // Wait only to activate *automatic* older readers, never to paint the pane.
+    // A short first-page placeholder otherwise exposes adjacent old records
+    // before the newest transcript has established the bottom viewport.
+    if (execId === foregroundExecutionId) {
+      syncViewScroll(conversationViewKey);
+      setReadyForegroundExecution(foregroundExecutionKey);
     }
-  }, [isConversationReady, visibleExecutionIds, revealConversation]);
+    if (!isConversationReady) revealConversation();
+  }, [foregroundExecutionId, foregroundExecutionKey, conversationViewKey, syncViewScroll, isConversationReady, revealConversation]);
 
   useLayoutEffect(() => {
     const el = chatScrollRef.current;
@@ -2608,12 +2610,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       });
     }
 
-    // Readiness includes the initial viewport fill, not just the newest turn's
-    // first byte page. A timer must not reveal unfinished history on a slow read.
-    // Readers also announce errors/empty logs so those remain visible and retryable.
+    // Planner revisions share one history window. Execution records instead
+    // reveal independently, so the pane can show local loading/error states
+    // immediately and position its viewport before activating older readers.
     const needsPlanner = !selectedNode && routeType !== "serial" && savedPlannerIds.length > 0 && useSavedPlanner;
-    const outputReady = visibleExecutionIds.every(id => readyExecutionIdsRef.current.has(id)) &&
-      (!needsPlanner || readySavedPlannerKey === savedPlannerKey);
+    const outputReady = !needsPlanner || readySavedPlannerKey === savedPlannerKey;
     if (readyConversationKey !== conversationViewKey && outputReady) revealConversation();
   }, [
     conversationViewKey,
@@ -2621,7 +2622,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     readyConversationKey,
     selectedNode,
     routeType,
-    visibleExecutionIds,
     savedPlannerIds.length,
     savedPlannerKey,
     readySavedPlannerKey,
@@ -2831,7 +2831,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
               return accepted;
             }} />
         ) : selectedNode && routeType === "graph" ? (
-          <div className="initial-query-view">
+          <div className="initial-query-view" data-transcript-budget-key={conversationViewKey}>
             <div className="conversation-heading">
               <div className="heading-title-col">
                 <h2 title={selectedNodeLabel}>{selectedNodeLabel}</h2>
@@ -2984,6 +2984,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                     runId={state.runId}
                                     execution={exec}
                                     endOffset={exec.historyEndOffset}
+                                    defer={exec.outputBytes !== undefined && exec.id !== attempts.at(-1)?.id && exec.status !== "running" && !openedAttemptIds.has(exec.id)}
+                                    foregroundReady={isConversationReady && foregroundExecutionReady}
                                     onUserResize={handleExpandableContentChange}
                                     onInitialOutputReady={handleExecutionOutputReady}
                                     onLoadingChange={(loading) => handleExecutionLoadingChange(exec.id, loading)}
@@ -3118,7 +3120,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
             </motion.div>
           </div>
         ) : (
-          <div className="initial-query-view">
+          <div className="initial-query-view" data-transcript-budget-key={conversationViewKey}>
             <div
               className={`initial-query-scroll ${isConversationReady ? "conversation-ready" : "conversation-preparing"}`}
               data-transcript-preparing={(!isConversationReady || initialFillPending) && !isUserScrolledUpRef.current ? "true" : undefined}
@@ -3211,6 +3213,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                       runId={state.runId}
                                       execution={exec}
                                       endOffset={exec.historyEndOffset}
+                                      defer={exec.outputBytes !== undefined && exec.id !== serialExecutions.at(-1)?.id && exec.status !== "running"}
+                                      foregroundReady={isConversationReady && foregroundExecutionReady}
                                       onUserResize={handleExpandableContentChange}
                                       onInitialOutputReady={handleExecutionOutputReady}
                                       onLoadingChange={(loading) => handleExecutionLoadingChange(exec.id, loading)}

@@ -163,6 +163,119 @@ fn same_run_saves_serialize_read_modify_write_even_through_root_aliases() {
 }
 
 #[test]
+fn repeated_saves_replace_current_execution_counts_without_losing_unloaded_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = uuid::Uuid::new_v4().to_string();
+    put(&run, "history", "history.txt", 7);
+    persist(temp.path(), &run).unwrap();
+    invalidate_run(&run);
+    cache().lock().unwrap().log_changes.insert(
+        (run.clone(), "current".into()),
+        summary("current.txt", "edit", 3),
+    );
+    for _ in 0..3 {
+        persist(temp.path(), &run).unwrap();
+    }
+    let path = persisted_path(temp.path(), &run).unwrap();
+    let saved = read_persisted(&path);
+    assert_eq!(saved.executions["current"].total_additions, 3);
+    assert_eq!(saved.executions["current"].total_deletions, 1);
+    assert_eq!(saved.executions["history"].total_additions, 7);
+    cache().lock().unwrap().log_changes.insert(
+        (run.clone(), "current".into()),
+        summary("replacement.txt", "edit", 2),
+    );
+    persist(temp.path(), &run).unwrap();
+    let saved = read_persisted(&path);
+    assert_eq!(saved.executions["current"].files.len(), 1);
+    assert_eq!(saved.executions["current"].files[0].path, "replacement.txt");
+    assert_eq!(saved.executions["history"].total_additions, 7);
+    invalidate_run(&run);
+}
+
+#[test]
+fn saving_a_pending_overlay_keeps_confirmed_edits_to_the_same_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = uuid::Uuid::new_v4().to_string();
+    let text = concat!(
+        "{\"type\":\"tool_execution_start\",\"toolCallId\":\"done\",\"toolName\":\"edit\",\"args\":{\"path\":\"current.txt\",\"oldText\":\"old\",\"newText\":\"new\"}}\n",
+        "{\"type\":\"tool_execution_end\",\"toolCallId\":\"done\",\"toolName\":\"edit\",\"isError\":false}\n",
+        "{\"type\":\"tool_execution_start\",\"toolCallId\":\"pending\",\"toolName\":\"edit\",\"args\":{\"path\":\"current.txt\",\"oldText\":\"new\",\"newText\":\"pending\"}}\n",
+    );
+    update_from_log_chunk(&run, "current", "worker", "/repo", "/repo", text, true);
+    persist(temp.path(), &run).unwrap();
+    let saved = read_persisted(&persisted_path(temp.path(), &run).unwrap());
+    let summary = &saved.executions["current"];
+    assert_eq!(summary.total_files, 1);
+    assert_eq!(summary.total_additions, 1);
+    assert_eq!(summary.total_deletions, 1);
+    assert!(!summary.is_running);
+    assert!(!summary.files[0].is_running);
+    let live = cache().lock().unwrap().log_changes[&(run.clone(), "current".into())].clone();
+    assert!(live.is_running, "saving must not settle live UI state");
+    assert_eq!(live.total_additions, 2);
+    invalidate_run(&run);
+}
+
+#[test]
+fn failed_or_unfinished_tools_disappear_from_persisted_and_rehydrated_summaries() {
+    for planner in [false, true] {
+        for failed_tool in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let run = uuid::Uuid::new_v4().to_string();
+            let start = "{\"type\":\"tool_execution_start\",\"toolCallId\":\"pending\",\"toolName\":\"write\",\"args\":{\"path\":\"unconfirmed.txt\",\"content\":\"pending\"}}\n";
+            let failed = "{\"type\":\"tool_execution_end\",\"toolCallId\":\"pending\",\"toolName\":\"write\",\"isError\":true}\n";
+            let update = |chunk| {
+                if planner {
+                    update_planning_from_log_chunk(&run, "current", "/repo", "/repo", chunk);
+                } else {
+                    update_from_log_chunk(&run, "current", "worker", "/repo", "/repo", chunk, true);
+                }
+            };
+            update(start);
+            // A sibling's completion may save this still-running attempt too.
+            persist(temp.path(), &run).unwrap();
+            let saved = read_persisted(&persisted_path(temp.path(), &run).unwrap());
+            let saved = if planner {
+                &saved.planning["current"]
+            } else {
+                &saved.executions["current"]
+            };
+            assert!(
+                saved.is_empty(),
+                "pending overlays are not durable evidence"
+            );
+            if failed_tool {
+                update(failed);
+            } else if planner {
+                settle_planning(&run, "current");
+            } else {
+                settle(&run, "current");
+            }
+            let check = || {
+                let guard = cache().lock().unwrap();
+                let changes = if planner {
+                    &guard.planning_changes
+                } else {
+                    &guard.log_changes
+                };
+                let empty = changes
+                    .get(&(run.clone(), "current".into()))
+                    .is_none_or(FileChangeSummary::is_empty);
+                drop(guard);
+                assert!(empty, "planner={planner}, failed_tool={failed_tool}: unconfirmed tool must not survive");
+            };
+            check();
+            persist(temp.path(), &run).unwrap();
+            invalidate_run(&run);
+            hydrate_run(temp.path(), &run);
+            check();
+            invalidate_run(&run);
+        }
+    }
+}
+
+#[test]
 fn failed_save_keeps_prior_sidecar_and_releases_the_writer_for_retry() {
     let temp = tempfile::tempdir().unwrap();
     let run = uuid::Uuid::new_v4().to_string();

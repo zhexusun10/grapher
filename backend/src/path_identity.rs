@@ -208,7 +208,7 @@ pub(crate) fn same_repository_binding(left: &str, right: &str) -> bool {
         return false;
     }
     if let (Ok(left), Ok(right)) = (left.canonicalize(), right.canonicalize()) {
-        return left == right;
+        return same_path(&left, &right);
     }
     #[cfg(windows)]
     if let (Some(left), Some(right)) = (windows_repository_key(left), windows_repository_key(right))
@@ -315,9 +315,35 @@ mod tests {
         let directory = temp.path().join("MixedCaseDir");
         fs::create_dir(&directory).unwrap();
         let lower = PathBuf::from(directory.to_string_lossy().to_lowercase());
-        assert!(same_path(&directory, &lower));
-        let actual = actual_path(&lower).unwrap();
-        assert_eq!(actual, actual_path(&directory).unwrap());
+        if lower.exists() {
+            assert!(same_path(&directory, &lower));
+            let actual = actual_path(&lower).unwrap();
+            assert_eq!(actual, actual_path(&directory).unwrap());
+        } else {
+            assert!(!same_path(&directory, &lower));
+        }
+    }
+
+    #[test]
+    fn repository_bindings_follow_filesystem_identity_and_volume_case_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("MixedCaseProject");
+        let lower = temp.path().join("mixedcaseproject");
+        fs::create_dir(&project).unwrap();
+        let matches = |other: &Path| {
+            same_repository_binding(project.to_str().unwrap(), other.to_str().unwrap())
+        };
+        assert!(matches(&project));
+        if lower.exists() {
+            assert!(matches(&lower));
+        } else {
+            fs::create_dir(&lower).unwrap();
+            assert!(!matches(&lower));
+        }
+        let alias = temp.path().join("alias");
+        crate::path_safety::directory_link(&project, &alias);
+        assert!(matches(&alias));
+        assert!(!matches(&temp.path().join("missing")));
     }
 
     #[test]

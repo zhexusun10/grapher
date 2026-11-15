@@ -7,7 +7,7 @@ use crate::{
     workspace,
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -125,7 +125,14 @@ fn known_engine(engine: &str) -> bool {
     engine == "pi"
 }
 
+#[cfg(test)]
+thread_local! {
+    static REPOSITORY_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn resolve_repository(root: &Path, config: &Config) -> Result<PathBuf, String> {
+    #[cfg(test)]
+    REPOSITORY_RESOLUTIONS.with(|count| count.set(count.get() + 1));
     #[cfg(feature = "fixture")]
     if config.engine == crate::fixture::ENGINE {
         return crate::fixture::repository(root);
@@ -208,6 +215,7 @@ pub struct Runtime {
     // client from reusing a version after a backend restart.
     epoch: Uuid,
     revision: u64,
+    browser_metadata: std::cell::RefCell<Option<(String, u64, Arc<serde_json::Value>)>>,
     pub root: PathBuf,
     _lock: Arc<RuntimeLock>,
 }
@@ -252,6 +260,7 @@ impl Runtime {
             state,
             epoch: Uuid::new_v4(),
             revision: 0,
+            browser_metadata: Default::default(),
             root: root.into(),
             _lock: lock,
         };
@@ -321,6 +330,7 @@ impl Runtime {
             state,
             epoch: Uuid::new_v4(),
             revision: 0,
+            browser_metadata: Default::default(),
             root,
             _lock: lock,
         };
@@ -416,7 +426,19 @@ impl Runtime {
         format!("{}:{}", self.epoch, self.revision)
     }
 
+    /// Repeated readers share the projection for this exact version. The HTTP
+    /// layer clones/serializes it after releasing the Run mutex.
+    pub(crate) fn browser_metadata(&self) -> Result<Arc<serde_json::Value>, String> {
+        if let Some((run, revision, value)) = self.browser_metadata.borrow().as_ref() {
+            if run == &self.state.run_id && *revision == self.revision { return Ok(value.clone()); }
+        }
+        let value = Arc::new(crate::snapshot_view::snapshot_metadata(&self.state)?);
+        *self.browser_metadata.borrow_mut() = Some((self.state.run_id.clone(), self.revision, value.clone()));
+        Ok(value)
+    }
+
     pub fn touch(&mut self) {
+        self.browser_metadata.get_mut().take();
         self.revision = self.revision.wrapping_add(1);
         crate::server::notify_snapshot_changed(&self.state.run_id, &self.snapshot_version());
     }
@@ -1407,6 +1429,41 @@ impl Runtime {
             return Ok(None);
         }
         Ok(Some(execution))
+    }
+
+    /// Continuation keeps the retained cwd, but a retry may have become its
+    /// physical owner since the interrupted turn. Validate that owner just as
+    /// for a new Planner turn; an active writer alone does not exclude Planner.
+    pub(crate) fn planner_continuation_workspace(
+        &self,
+        workspace: &Path,
+        execution_id: Option<&str>,
+    ) -> Result<Option<Execution>, String> {
+        let repository = resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
+        if Self::same_workspace_path(workspace, &repository) {
+            return Ok(None);
+        }
+        let selected = self.state.executions.iter()
+            .find(|execution| Some(execution.id.as_str()) == execution_id)
+            .ok_or("The Planner workspace execution is missing")?;
+        if !Self::same_workspace_path(workspace, Path::new(&selected.worktree)) {
+            return Err("The retained Planner workspace differs from its recorded execution".into());
+        }
+        let owner = self.planner_workspace_owner(selected)
+            .ok_or("Planner workspace no longer has a recorded physical owner")?;
+        let root = PathBuf::from(workspace::normalize_workspace_display_path(
+            &self.run_workspace_root(),
+        ));
+        let actual = crate::path_safety::real_child_path(&root, workspace, false)?
+            .ok_or("Planner workspace is no longer owned by this Run")?;
+        if !workspace::has_private_git(&actual) {
+            return Err("The retained Planner workspace is not a private Git repository".into());
+        }
+        self.validate_planner_workspace(owner, &repository)?;
+        Ok(Some(owner.clone()))
     }
 
     fn validate_planner_workspace(
@@ -3646,9 +3703,11 @@ impl Runtime {
         // possible. Do not abandon active workers over an idle admission check.
         // Legacy admission still validates before scheduling; perform() checks
         // again before filesystem work in either mode.
-        if !batch_workspaces {
-            resolve_repository(&self.root, &config)?;
-        }
+        let resolved_repository = if !batch_workspaces {
+            Some(resolve_repository(&self.root, &config)?)
+        } else {
+            None
+        };
         #[cfg(not(feature = "fixture"))]
         if !self.is_serial() && !batch_workspaces {
             crate::native::require_graph_execution()?;
@@ -3685,6 +3744,12 @@ impl Runtime {
         ) {
             busy_feedback.extend(downstream(&self.state.graph, source));
         }
+        // Build dispatch-local indexes once; never cache readiness across graph
+        // revisions, feedback invalidation or completed worker returns.
+        let mut dependencies: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for edge in self.state.graph.edges.iter().filter(|edge| !edge.feedback) {
+            dependencies.entry(edge.to.clone()).or_default().push(edge.from.clone());
+        }
         loop {
             let blocked: Vec<_> = self
                 .state
@@ -3697,13 +3762,10 @@ impl Runtime {
                             self.state.nodes[&node.name].status.as_str(),
                             "waiting" | "dirty"
                         )
-                        && self.state.graph.edges.iter().any(|edge| {
-                            !edge.feedback
-                                && edge.to == node.name
-                                && matches!(
-                                    self.state.nodes[&edge.from].status.as_str(),
-                                    "failed" | "blocked"
-                                )
+                        && dependencies.get(&node.name).is_some_and(|parents| {
+                            parents.iter().any(|parent| matches!(
+                                self.state.nodes[parent].status.as_str(), "failed" | "blocked"
+                            ))
                         })
                 })
                 .map(|node| node.name.clone())
@@ -3718,6 +3780,10 @@ impl Runtime {
                 })?;
             }
         }
+        let running_nodes: BTreeSet<_> = self.state.executions.iter()
+            .filter(|execution| execution.status == "running")
+            .map(|execution| execution.node.as_str())
+            .collect();
         let mut ready: Vec<_> = self
             .state
             .graph
@@ -3729,16 +3795,10 @@ impl Runtime {
                         self.state.nodes[&node.name].status.as_str(),
                         "waiting" | "dirty"
                     )
-                    && !self.state.executions.iter().any(|execution| {
-                        execution.node == node.name && execution.status == "running"
+                    && !running_nodes.contains(node.name.as_str())
+                    && dependencies.get(&node.name).is_none_or(|parents| {
+                        parents.iter().all(|parent| self.state.nodes[parent].status == "completed")
                     })
-                    && self
-                        .state
-                        .graph
-                        .edges
-                        .iter()
-                        .filter(|edge| !edge.feedback && edge.to == node.name)
-                        .all(|edge| self.state.nodes[&edge.from].status == "completed")
             })
             .cloned()
             .collect();
@@ -3786,9 +3846,13 @@ impl Runtime {
             Err(_) if self.active() => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
-        if !self.prepare_execution_batch(&ready, allow_publication && pending_sources.is_empty())? {
-            return Ok(Vec::new());
-        }
+        let resolved_repository = match resolved_repository {
+            Some(repository) => repository,
+            None => match self.prepare_execution_batch(&ready, allow_publication && pending_sources.is_empty())? {
+                Some(repository) => repository,
+                None => return Ok(Vec::new()),
+            },
+        };
         let shared_source = !publishing && self.shared_source_workspace();
         let mut config = self.state.effective_config().ok_or("Missing config")?;
         if shared_source {
@@ -3800,7 +3864,6 @@ impl Runtime {
             && (self.state.phase == "followup" || self.state.nodes.values().any(|node| {
                 node.pending_messages.first().is_some_and(|message| message.source_direct)
             })));
-        let resolved_repository = resolve_repository(&self.root, &config)?;
         let materialize_source = !source_direct_run
             && !self.is_serial()
             && (!workspace::is_standard_git(&resolved_repository) || self.latest_source_head().is_empty())
@@ -3816,7 +3879,7 @@ impl Runtime {
             } else {
                 self.latest_source_head().to_owned()
             };
-            let parent_names = self.parents(&node.name);
+            let parent_names = dependencies.get(&node.name).cloned().unwrap_or_default();
             let mut parent_heads = parent_names
                 .iter()
                 .map(|parent| {
@@ -4219,9 +4282,7 @@ impl Runtime {
                         .unwrap_or_else(fresh_path)
                 }
             } else if self.is_serial() || source_direct_run {
-                resolve_repository(&self.root, &config)?
-                    .to_string_lossy()
-                    .into()
+                resolved_repository.to_string_lossy().into_owned()
             } else if let Some(terminal) = shared_terminal {
                 before = self
                     .state
@@ -4345,11 +4406,7 @@ impl Runtime {
                 if feedback_workspace.is_some() {
                     None
                 } else if parent_names.is_empty() {
-                    Some(
-                        resolve_repository(&self.root, &config)?
-                            .to_string_lossy()
-                            .into_owned(),
-                    )
+                    Some(resolved_repository.to_string_lossy().into_owned())
                 } else if let Some(terminal) = shared_terminal.filter(|terminal| {
                     !busy(Path::new(&terminal.worktree)) && Path::new(&terminal.worktree).is_dir()
                 }) {
@@ -4600,7 +4657,9 @@ impl Runtime {
                 .iter()
                 .any(|edge| edge.feedback && edge.from == node.name);
             let history_edit = state.edit_execution_id.is_some();
-            let environment_previous = self
+            // No environment binding can consume historical layout evidence in
+            // source mode. Do not walk/re-resolve private E/L history there.
+            let environment_previous = config.environment.as_ref().and_then(|_| self
                 .state
                 .executions
                 .iter()
@@ -4631,7 +4690,7 @@ impl Runtime {
                         })
                         .or(previous.result.as_ref())
                 })
-                .cloned();
+                .cloned());
             let mut environment_input = None;
             let mut environment_sources = Vec::new();
             let preserve_failed_environment = !history_edit
@@ -5321,6 +5380,26 @@ impl Runtime {
                 keep.insert(path);
             }
         }
+        // A borrowed slot is still live after its node finishes. A failed
+        // Planner also retains its cwd for explicit retry, including the gap
+        // between continuation preflight and publishing the next selection.
+        if let Some(planning) = self.state.planning.as_ref().filter(|planning| {
+            matches!(planning.status.as_deref(), Some("running" | "failed"))
+        }) {
+            let visited = self.state.events.iter().filter_map(|event| match &event.kind {
+                EventKind::PlannerWorkspaceSelected { planning: selected }
+                    if planning.status.as_deref() == Some("running")
+                        && selected.planning_id == planning.planning_id => selected.worktree.as_deref(),
+                _ => None,
+            });
+            // Running processes may still write in earlier switch targets;
+            // retain all of them until the process tree drains and capture ends.
+            for worktree in planning.worktree.as_deref().into_iter().chain(visited) {
+                if let Ok(path) = Path::new(worktree).canonicalize() {
+                    keep.insert(path);
+                }
+            }
+        }
         for pending in &self.state.pending_feedback {
             if let Some(execution) = self
                 .state
@@ -5477,34 +5556,49 @@ impl Runtime {
                     }
                 }
                 // The driver has already awaited the writer's Flush. Commit
-                // the tail synchronously under this same runtime lock: waiting
-                // for a writer ACK here would deadlock on the lock we hold.
+                // the tail with completion and feedback under this runtime lock,
+                // without another writer ACK or a separate output transaction.
                 let prefix = "\n── Final response ──\n";
-                let output_offset = self
-                    .state
-                    .executions
-                    .iter()
-                    .find(|item| item.id == execution.id)
-                    .ok_or("Execution not found")?
-                    .output_bytes
-                    + prefix.len();
-                self.emit_outputs(vec![EventKind::Output {
-                    execution_id: execution.id.clone(),
-                    text: format!("{prefix}{output}\n"),
-                }])?;
+                let tail = format!("{prefix}{output}\n");
                 let live = self
                     .state
                     .executions
                     .iter()
                     .find(|item| item.id == execution.id)
                     .ok_or("Execution not found")?;
-                let output_bytes = live.output.len();
-                let metrics = Some(parse_execution_metrics(
-                    &live.output,
+                let previous_bytes = live.output_bytes.max(live.output.len());
+                let output_offset = previous_bytes + prefix.len();
+                let output_bytes = previous_bytes + tail.len();
+                // A restored projection retains byte counts, not its live log
+                // prefix. Read that prefix only on recovery, as for failures;
+                // partial metrics must never become a durable successful result.
+                let recovered;
+                let transcript = if live.output.len() != previous_bytes {
+                    self.store.ensure_legacy_logs(&self.state.run_id, &execution.id)?;
+                    recovered = self.store.execution_log_page(
+                        &self.state.run_id, &execution.id, 0, usize::MAX,
+                    )?.content;
+                    if recovered.len() != previous_bytes {
+                        return Err(format!(
+                            "Completion log for {} has {} bytes; expected {previous_bytes}; refusing incomplete terminal evidence",
+                            execution.id, recovered.len(),
+                        ));
+                    }
+                    &recovered
+                } else {
+                    &live.output
+                };
+                // The tail starts on a new line, so parse both borrowed parts
+                // without copying the full transcript or mutating live state.
+                let metrics = Some(parse_execution_metric_lines(
+                    transcript.lines().chain(tail.lines()),
                     live.started_at,
                     now(),
                 ));
-                let mut terminal = Vec::new();
+                let mut terminal = vec![EventKind::Output {
+                    execution_id: execution.id.clone(),
+                    text: tail,
+                }];
                 if let Some((input, result)) = composite {
                     if live.input.is_none() {
                         terminal.push(EventKind::ExecutionInputRecorded {
@@ -5553,7 +5647,8 @@ impl Runtime {
                         },
                     });
                 }
-                // Completion and its pending verdict must survive/replay together.
+                // Tail bytes, completion and the pending verdict either all
+                // commit or all roll back, including their projection/cursors.
                 self.emit_outputs(terminal)?;
                 if let Err(error) = self.reclaim_workspace_slots(execution) {
                     eprintln!("Cannot reclaim retired node workspaces: {error}");
@@ -6290,6 +6385,11 @@ impl PublicationJob {
             );
             let exclusions = self.store.exclusions(&selected.launch_ref)?;
             let present = path.is_dir();
+            if !present {
+                // The existing E recovery check must precede code reconstruction,
+                // not discover unsupported legacy coverage after creating W.
+                self.store.validate_history_result(selected, &selected.launch_ref)?;
+            }
             if present {
                 // Other entries still hold the previous publication after one
                 // business entry advances code. Validate that recorded view, not
@@ -6365,11 +6465,14 @@ impl PublicationJob {
             let launch = self.store.load_launch(&first.result.launch_ref)?;
             let mut equivalent = true;
             for entry in &entries {
-                equivalent &= entry.result.launch_ref == first.result.launch_ref;
+                if entry.result.launch_ref != first.result.launch_ref {
+                    equivalent = false;
+                    continue; // Independent roots remain named entries, not a failed comparison.
+                }
                 if let Some(binding) = &launch.environment {
-                    equivalent &= self.store.files.same_scope_contents(
-                        &first.result.environment_ref,
-                        &entry.result.environment_ref,
+                    equivalent &= self.store.same_business_prefix_contents(
+                        &first.result,
+                        &entry.result,
                         &binding.prefix,
                     )?;
                 }
@@ -6467,6 +6570,7 @@ pub(crate) fn perform_result(
                     &job.descriptor.result,
                 )?;
                 if !present {
+                    store.validate_history_result(&job.descriptor.result, &job.descriptor.result.launch_ref)?;
                     workspace::prepare_with_merger_expected_for_run_scoped(
                         &repository,
                         path,
@@ -6775,7 +6879,7 @@ fn perform_with_merger_inner(
             &job.previous_environment_launch,
         ) {
             let store = crate::environment::Environments::new(root, &job.run_id, policy)?;
-            store.validate_history_scopes(&input.launch_ref, previous)?;
+            store.preflight_history_result(path, input, previous)?;
         }
     }
     if preserve_failed_environment {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 import type { RuntimeActivity, Snapshot } from "../types";
-import { runtimeService } from "../services/runtime";
+import { RunNotFoundError, runtimeService } from "../services/runtime";
 import { startVisibilityPolling } from "../services/visibilityPolling";
 import { isRuntimeEventsConnected, RUNTIME_EVENTS_WATCHDOG_MS, subscribeRuntimeEventsStatus, subscribeSnapshotChanges } from "../services/runtimeEvents";
 import { mapWithConcurrency } from "../services/boundedRequests";
@@ -25,6 +25,8 @@ export function useSnapshotPolling(
   const versions = useRef(new Map<string, string>());
   const notifiedVersions = useRef(new Map<string, string>());
   const dirtyRuns = useRef(new Set<string>());
+  // A confirmed deletion outlives effect resubscriptions and stale Run indexes.
+  const missingRuns = useRef(new Set<string>());
   const phases = useRef(new Map<string, string>());
   const revisions = useRef(new Map<string, number>());
   const activeRuns = useRef(new Set<string>());
@@ -36,6 +38,7 @@ export function useSnapshotPolling(
   heldRunIdRef.current = heldRunId;
   const setBackendStatus = useCallback((status: { runId: string | null; phase: string | null } & Partial<Pick<Snapshot, "executions" | "mergers" | "nodes" | "resultExecution">> & { hasActiveExecutions?: boolean }) => {
     if (!status.runId || !status.phase) return;
+    missingRuns.current.delete(status.runId);
     phases.current.set(status.runId, status.phase);
     const hasRunningWork = status.hasActiveExecutions ?? runHasActiveExecutions(status);
     if (hasRunningWork) writerRuns.current.add(status.runId);
@@ -45,7 +48,7 @@ export function useSnapshotPolling(
     // Actions supersede polls already in flight, even at the same event sequence.
     revisions.current.set(status.runId, (revisions.current.get(status.runId) ?? 0) + 1);
   }, []);
-  if (viewedRunId) {
+  if (viewedRunId && !missingRuns.current.has(viewedRunId)) {
     phases.current.set(viewedRunId, viewedPhase);
     if (viewedHasActiveExecutions) writerRuns.current.add(viewedRunId);
     else writerRuns.current.delete(viewedRunId);
@@ -55,8 +58,15 @@ export function useSnapshotPolling(
     if (!enabled) return;
     let cancelled = false;
     const abort = new AbortController();
+    const pendingInvalidations = new Map<string, number>();
     const ids = [...new Set([viewedRunId, ...runIds].filter(id => !!id && !id.startsWith("pending-")))];
     const retained = new Set(ids);
+    for (const id of missingRuns.current) {
+      if (!retained.has(id)) missingRuns.current.delete(id);
+    }
+    for (const id of dirtyRuns.current) {
+      if (id && !retained.has(id)) dirtyRuns.current.delete(id);
+    }
     for (const id of phases.current.keys()) {
       if (retained.has(id)) continue;
       phases.current.delete(id); versions.current.delete(id); revisions.current.delete(id);
@@ -64,7 +74,7 @@ export function useSnapshotPolling(
       activeRuns.current.delete(id); writerRuns.current.delete(id);
     }
     if (!ids.length && !viewedRunId) ids.push("");
-    const fallbackDelay = () => activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? "")) || (viewedRunId && (phases.current.get(viewedRunId) === "needs_attention" || viewedHasActiveExecutions)) ? 750 : 2500;
+    const fallbackDelay = () => activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? "")) || (viewedRunId && !missingRuns.current.has(viewedRunId) && (phases.current.get(viewedRunId) === "needs_attention" || viewedHasActiveExecutions)) ? 750 : 2500;
     const nextDelay = () => {
       if (dirtyRuns.current.size > 0) return 150;
       // Pushes are an accelerator, not the authority. Re-read durable state on a
@@ -80,17 +90,25 @@ export function useSnapshotPolling(
       // The watched Run is always included so a retried background Run cannot
       // starve it while that Run's mutex stays busy.
       const connected = isRuntimeEventsConnected();
-      const targetIds = dirtyRuns.current.size > 0 || connected
-        ? [...new Set([...dirtyRuns.current, ...(connected ? watchdogIds() : [])])]
-        : ids;
+      // Keep the foreground first, even behind many dirty background Runs.
+      // Once SSE disconnects, a retained retry must not suppress normal polls.
+      const targetIds = [...new Set([...(connected ? watchdogIds() : ids), ...dirtyRuns.current])]
+        .filter(id => !missingRuns.current.has(id));
+      const requestedDirtyRuns = new Set(dirtyRuns.current);
+      for (const id of requestedDirtyRuns) {
+        pendingInvalidations.set(id, revisions.current.get(id) ?? 0);
+      }
       dirtyRuns.current.clear();
+      let retryDelay = 0;
       // A slow/unavailable background Run cannot serialize the foreground request.
       await mapWithConcurrency(targetIds, 4, async id => {
         if (cancelled) return;
         const phase = phases.current.get(id);
         const isViewed = id === viewedRunId;
-        if (!isViewed && phase && !livePhases.has(phase) && !writerRuns.current.has(id) && !activeRuns.current.has(id) && !notifiedVersions.current.has(id)) return;
+        if (!isViewed && phase && !livePhases.has(phase) && !writerRuns.current.has(id) && !activeRuns.current.has(id) &&
+            !notifiedVersions.current.has(id) && !requestedDirtyRuns.has(id)) return;
         const revision = revisions.current.get(id) ?? 0;
+        const requestedNotificationVersion = notifiedVersions.current.get(id);
         try {
           const { version, snapshot, activity, busy } = await runtimeService.snapshotIfChanged(versions.current.get(id) ?? null, abort.signal, id || undefined);
           if (cancelled || revision !== (revisions.current.get(id) ?? 0)) return;
@@ -130,13 +148,17 @@ export function useSnapshotPolling(
               : previous);
             return;
           }
-          versions.current.set(id, version);
+          if (!busy) versions.current.set(id, version);
           const targetVersion = notifiedVersions.current.get(id);
-          if (targetVersion && targetVersion !== version) {
-            // The Run mutex was busy during try_lock(); retry shortly.
-            dirtyRuns.current.add(id);
-          } else {
+          if (!busy && (targetVersion === version || targetVersion === requestedNotificationVersion)) {
+            // A non-busy read is authoritative for notifications predating it.
+            // Its version may already have advanced beyond the pushed version;
+            // waiting for exact equality would retry a superseded version forever.
             notifiedVersions.current.delete(id);
+          } else if (targetVersion) {
+            // A busy read, or a newer push arriving during this request, still
+            // needs another durable read. Version strings are opaque, not ordered.
+            dirtyRuns.current.add(id);
           }
           if (activity?.length) activeRuns.current.add(id);
           else activeRuns.current.delete(id);
@@ -150,14 +172,36 @@ export function useSnapshotPolling(
           setSnapshot(previous => previous.runId === snapshot.runId &&
             (snapshot.events.at(-1)?.sequence ?? 0) >= (previous.events.at(-1)?.sequence ?? 0) ? snapshot : previous);
         } catch (error) {
-          if (!cancelled) console.warn("Snapshot poll error:", id, error);
+          if (!cancelled && revision === (revisions.current.get(id) ?? 0)) {
+            // Consuming a push is not acknowledgement of its durable update.
+            // Retain it on failure, including for an otherwise settled Run that
+            // the connected watchdog would not select again.
+            if (error instanceof RunNotFoundError) {
+              // Retire every poll source, not just its last push: an active or
+              // viewed Run would otherwise still be selected by the watchdog.
+              missingRuns.current.add(id);
+              phases.current.delete(id);
+              versions.current.delete(id);
+              activeRuns.current.delete(id);
+              writerRuns.current.delete(id);
+              notifiedVersions.current.delete(id);
+              dirtyRuns.current.delete(id);
+            } else if (requestedDirtyRuns.has(id) || notifiedVersions.current.has(id)) {
+              dirtyRuns.current.add(id);
+              retryDelay = 750;
+            }
+            console.warn("Snapshot poll error:", id, error);
+          }
+        } finally {
+          pendingInvalidations.delete(id);
         }
       });
-      return cancelled ? null : nextDelay();
+      return cancelled ? null : Math.max(retryDelay, nextDelay());
     };
     const stopPolling = startVisibilityPolling(poll, nextDelay());
     const unsubscribeSnapshot = subscribeSnapshotChanges(event => {
       const targetId = event.runId || (ids.includes("") ? "" : viewedRunId);
+      if (missingRuns.current.has(targetId)) return;
       if (targetId && !retained.has(targetId) && targetId !== viewedRunId) return;
       if (event.version && versions.current.get(targetId) === event.version && targetId !== heldRunIdRef.current) {
         return;
@@ -176,6 +220,7 @@ export function useSnapshotPolling(
         ids.some(id => workingPhases.has(phases.current.get(id) ?? ""));
       if (status.connected && (reconnected || hasActive)) {
         for (const id of ids) {
+          if (missingRuns.current.has(id)) continue;
           if (reconnected || workingPhases.has(phases.current.get(id) ?? "") ||
               writerRuns.current.has(id) || activeRuns.current.has(id) || id === viewedRunId) {
             dirtyRuns.current.add(id);
@@ -184,7 +229,17 @@ export function useSnapshotPolling(
       }
       stopPolling.wake();
     });
-    return () => { cancelled = true; unsubscribeSnapshot(); unsubscribeConnect(); stopPolling(); abort.abort(); };
+    return () => {
+      cancelled = true;
+      // A new index/phase restarts this effect. Aborting its request is not an
+      // acknowledgement, especially for pushes without a version to retain.
+      for (const [id, revision] of pendingInvalidations) {
+        if (revision === (revisions.current.get(id) ?? 0) && !missingRuns.current.has(id)) {
+          dirtyRuns.current.add(id);
+        }
+      }
+      unsubscribeSnapshot(); unsubscribeConnect(); stopPolling(); abort.abort();
+    };
   }, [observeActivity, observeSnapshot, setSnapshot, runIds, viewedRunId, viewedPhase, viewedHasActiveExecutions, enabled]);
   return setBackendStatus;
 }

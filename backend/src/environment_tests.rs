@@ -38,6 +38,252 @@ fn shell() -> String {
 }
 
 #[test]
+fn ambient_launch_preserves_business_values_through_backend_binding_and_real_bash() {
+    let temp = tempfile::tempdir().unwrap();
+    let startup = temp.path().join("startup.sh");
+    fs::write(&startup, "export GTEST_STARTUP=ready\n").unwrap();
+    let binding = temp.path().join("launch.json");
+    let adapter = native::installation_root().join("engine/launch-binding.mjs");
+    for inherit_ambient in [false, true] {
+        let mut launch = policy().launch;
+        launch.inherit_ambient = inherit_ambient;
+        launch.inherit.push("GTEST_AUTHORIZED".into());
+        launch.variables.insert("HOME".into(), temp.path().to_string_lossy().into());
+        let serialized = serde_json::to_vec(&launch).unwrap();
+        fs::write(&binding, &serialized).unwrap();
+        let mut ambient: BTreeMap<_, _> = std::env::vars_os().collect();
+        for (key, value) in [
+            ("GTEST_BUSINESS", "business-secret-not-persisted"),
+            ("GTEST_AUTHORIZED", "authorized-secret-not-persisted"),
+            ("GTEST_REMOVED", "remove-me"),
+            ("HTTPS_PROXY", "http://proxy.invalid:9000"),
+            ("SSL_CERT_FILE", "business-cert.pem"),
+            ("PYTHONPATH", "business-modules"),
+            ("GIT_ASKPASS", "host-credential-helper"),
+            ("GIT_DIR", "/wrong-repository"),
+            ("NODE_OPTIONS", "--stack-trace-limit=37"),
+            ("NODE_PATH", "business-node-modules"),
+            ("GRAPHER_MODE", "outer-agent"),
+            ("PI_SESSION_ID", "outer-session"),
+            ("HOME", "/wrong-home"),
+            ("PYTHONDONTWRITEBYTECODE", "0"),
+        ] {
+            ambient.insert(key.into(), value.into());
+        }
+        // Explicitly avoid external loader/startup hooks in this native probe.
+        ambient.retain(|key, _| {
+            let key = key.to_string_lossy().to_ascii_uppercase();
+            !key.starts_with("LD_") && !key.starts_with("DYLD_")
+                && !matches!(key.as_str(), "ENV" | "BASH_ENV")
+        });
+        ambient.insert("BASH_ENV".into(), startup.as_os_str().into());
+        let mut command = Command::new(native::trusted_node().unwrap());
+        command.current_dir(temp.path()).args(["--input-type=module", "-e", r#"
+import {pathToFileURL} from 'node:url';
+import {execFileSync} from 'node:child_process';
+const {applyLaunchBinding,managedLaunch,managedBashOptions,managedBashCommand}=await import(pathToFileURL(process.argv[1]));
+if(process.env.NODE_OPTIONS||process.env.NODE_PATH) throw Error('Business Node settings reached engine startup');
+applyLaunchBinding();
+if(process.env.NODE_OPTIONS||process.env.NODE_PATH) throw Error('Business Node settings reached factories');
+const keys=['GTEST_BUSINESS','GTEST_AUTHORIZED','GTEST_REMOVED','HTTPS_PROXY','SSL_CERT_FILE','PYTHONPATH','GIT_ASKPASS','GIT_DIR','NODE_OPTIONS','NODE_PATH','GRAPHER_MODE','PI_SESSION_ID','HOME','PYTHONDONTWRITEBYTECODE','GTEST_STARTUP'];
+const code=`console.log(JSON.stringify({...Object.fromEntries(${JSON.stringify(keys)}.map(k=>[k,process.env[k]??null])),limit:Error.stackTraceLimit}))`;
+const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
+const options=managedBashOptions({env:{...process.env}},true);
+process.stdout.write(execFileSync(managedLaunch().shell,['--noprofile','--norc','-c',managedBashCommand(quote(process.execPath.replaceAll('\\','/'))+' -e '+quote(code),process.cwd())],{...options,encoding:'utf8'}));
+"#]).arg(&adapter).env("GRAPHER_MODE", "node").env_remove("GTEST_REMOVED");
+        clean_command_with_environment(&mut command, &launch, Some(&binding), ambient).unwrap();
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let values: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        for (key, expected) in [
+            ("GTEST_BUSINESS", "business-secret-not-persisted"),
+            ("HTTPS_PROXY", "http://proxy.invalid:9000"),
+            ("SSL_CERT_FILE", "business-cert.pem"),
+            ("PYTHONPATH", "business-modules"),
+            ("GIT_ASKPASS", "host-credential-helper"),
+            ("GTEST_STARTUP", "ready"),
+            ("NODE_OPTIONS", "--stack-trace-limit=37"),
+            ("NODE_PATH", "business-node-modules"),
+        ] {
+            assert_eq!(values[key], if inherit_ambient { serde_json::json!(expected) } else { serde_json::Value::Null }, "{key}");
+        }
+        assert_eq!(values["GTEST_AUTHORIZED"], "authorized-secret-not-persisted");
+        if inherit_ambient { assert_eq!(values["limit"], 37); }
+        for key in ["GTEST_REMOVED", "GIT_DIR", "GRAPHER_MODE", "PI_SESSION_ID"] {
+            assert!(values[key].is_null(), "{key}: {}", values[key]);
+        }
+        assert!(crate::path_identity::same_path(Path::new(values["HOME"].as_str().unwrap()), temp.path()));
+        assert_eq!(values["PYTHONDONTWRITEBYTECODE"], "1");
+        assert_eq!(serde_json::to_vec(&launch).unwrap(), serialized);
+        assert!(!String::from_utf8(serialized).unwrap().contains("secret-not-persisted"));
+    }
+}
+
+#[test]
+fn ambient_business_node_settings_defer_overrides_and_honor_explicit_removal() {
+    let mut launch = policy().launch;
+    launch.inherit_ambient = true;
+    let mut command = Command::new(native::trusted_node().unwrap());
+    command.env_remove(if cfg!(windows) { "nOdE_OpTiOnS" } else { "NODE_OPTIONS" })
+        .env("NODE_PATH", "explicit-modules");
+    clean_command_with_environment(&mut command, &launch, Some(Path::new("binding.json")), [
+        ("NODE_OPTIONS".into(), "--stack-trace-limit=37".into()),
+        ("NODE_PATH".into(), "old-modules".into()),
+    ].into_iter().collect()).unwrap();
+    let values: BTreeMap<_, _> = command.get_envs().filter_map(|(key, value)| value.map(|value|
+        (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned()))).collect();
+    assert!(!values.keys().any(|key| matches!(key.to_ascii_uppercase().as_str(), "NODE_OPTIONS" | "NODE_PATH")));
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&values["GRAPHER_BUSINESS_NODE_ENV"]).unwrap(),
+        serde_json::json!({"NODE_PATH":"explicit-modules"}));
+}
+
+#[test]
+fn project_activated_python_path_and_markers_follow_the_private_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source project");
+    fs::create_dir_all(&source).unwrap();
+    git2::Repository::init(&source).unwrap();
+    let prefix = source.join("tools/custom-python");
+    let python = python();
+    let mut create = Command::new(&python);
+    create.args(["-m", "venv", "--without-pip"]).arg(&prefix).env("PYTHONDONTWRITEBYTECODE", "1");
+    controlled_output(create).unwrap();
+    let bin = if cfg!(windows) { "Scripts" } else { "bin" };
+    let modules = source.join("extra-node-modules");
+    fs::create_dir_all(modules.join("from-project")).unwrap();
+    fs::write(modules.join("from-project/index.js"), "module.exports='private-snapshot';\n").unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = temp.path().join(".grapher-worktrees/project-path/node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(modules.join("from-project/index.js"), "module.exports='source-later';\n").unwrap();
+    let config = crate::environment_automatic::resolve(&source, false).unwrap().0.unwrap();
+    let mut launch = config.launch;
+    let mut paths = vec![prefix.join(bin), source.join("future-tools")];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    launch.path = crate::environment_automatic::business_path(&source, &std::env::join_paths(paths).unwrap()).unwrap();
+    launch.unbound_path = Some(launch.path.clone());
+    let launch = launch.expanded(&node);
+    let binding = temp.path().join("launch.json");
+    fs::write(&binding, serde_json::to_vec(&launch).unwrap()).unwrap();
+    let mut ambient: BTreeMap<_, _> = std::env::vars_os().collect();
+    ambient.insert("VIRTUAL_ENV".into(), prefix.as_os_str().into());
+    ambient.insert("CONDA_PREFIX".into(), prefix.as_os_str().into());
+    ambient.insert("CONDA_DEFAULT_ENV".into(), "business-name".into());
+    ambient.insert("NODE_PATH".into(), modules.as_os_str().into());
+    ambient.remove(std::ffi::OsStr::new("NODE_OPTIONS"));
+    ambient.remove(std::ffi::OsStr::new("BASH_ENV"));
+    ambient.remove(std::ffi::OsStr::new("ENV"));
+    ambient.remove(std::ffi::OsStr::new("PYTHONHOME"));
+    let mut command = Command::new(native::trusted_node().unwrap());
+    command.current_dir(&node).args(["--input-type=module", "-e", r#"
+import {pathToFileURL} from 'node:url';
+import {execFileSync} from 'node:child_process';
+const {applyLaunchBinding,managedLaunch,managedBashOptions,managedBashCommand,managedBusinessEnvironment}=await import(pathToFileURL(process.argv[1]));
+applyLaunchBinding();
+const code="import json,os,sys; print(json.dumps({'prefix':sys.prefix,'virtual':os.environ['VIRTUAL_ENV'],'conda':os.environ['CONDA_PREFIX'],'name':os.environ['CONDA_DEFAULT_ENV']}))";
+const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
+const python=JSON.parse(execFileSync(managedLaunch().shell,['--noprofile','--norc','-c',managedBashCommand('python -c '+quote(code),process.cwd())],{env:managedBashOptions({env:{...process.env}},true).env,encoding:'utf8'}));
+const module=execFileSync(process.execPath,['-e',"process.stdout.write(require('from-project'))"],{env:managedBusinessEnvironment(),encoding:'utf8'});
+console.log(JSON.stringify({...python,module}));
+"#]).arg(native::installation_root().join("engine/launch-binding.mjs"))
+        .env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_WORKSPACE_ROOT", &node);
+    clean_command_with_environment(&mut command, &launch, Some(&binding), ambient).unwrap();
+    let values: serde_json::Value = serde_json::from_slice(&controlled_output(command).unwrap()).unwrap();
+    for key in ["prefix", "virtual", "conda"] {
+        assert!(crate::path_identity::same_path(Path::new(values[key].as_str().unwrap()), &node.join("tools/custom-python")), "{key}: {}", values[key]);
+    }
+    assert_eq!(values["name"], "business-name");
+    assert_eq!(values["module"], "private-snapshot", "NODE_PATH must not import today's source files");
+    assert!(!source.join("future-tools").exists());
+    assert!(!node.join("future-tools").exists());
+}
+
+#[test]
+fn native_business_paths_do_not_relax_entry_or_legacy_validation() {
+    let mut launch = policy().launch;
+    launch.path = vec!["relative-bin".into(), String::new()];
+    assert!(launch.validate().is_err());
+    launch.unbound_path = Some(launch.path.clone());
+    launch.validate().unwrap();
+    let entry = launch.entry.clone();
+    launch.entry = "relative-entry".into();
+    assert!(launch.validate().is_err());
+    launch.entry = entry;
+    launch.unbound_path = Some(vec![]);
+    assert!(launch.validate().is_err());
+    launch.unbound_path = Some(vec!["bad\0path".into()]);
+    assert!(launch.validate().is_err());
+}
+
+#[test]
+fn ambient_python_home_is_retained_only_without_a_verified_prefix() {
+    let mut launch = policy().launch;
+    launch.inherit_ambient = true;
+    for bound in [false, true] {
+        launch.environment = bound.then(|| crate::environment_discovery::Binding {
+            kind: "venv".into(), prefix: "business-env".into(), abi: "0".repeat(40), root: Some("workspace".into()),
+        });
+        let mut command = Command::new(native::trusted_node().unwrap());
+        clean_command_with_environment(&mut command, &launch, Some(Path::new("binding.json")),
+            [("PYTHONHOME".into(), "host-python-home".into())].into_iter().collect()).unwrap();
+        let home = command.get_envs().find(|(key, _)| *key == "PYTHONHOME").and_then(|(_, value)| value);
+        assert_eq!(home.is_some(), !bound);
+    }
+}
+
+#[test]
+fn ambient_loader_values_are_deferred_and_explicit_removals_win() {
+    let mut launch = policy().launch;
+    launch.inherit_ambient = true;
+    let mut command = Command::new(native::trusted_node().unwrap());
+    command.env_remove("LD_PRELOAD").env("DYLD_LIBRARY_PATH", "/explicit-business-libs");
+    let ambient = [
+        ("LD_PRELOAD", "/must-not-load"),
+        ("LD_LIBRARY_PATH", "/ambient-business-libs"),
+        ("DYLD_LIBRARY_PATH", "/old-business-libs"),
+    ].into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+    clean_command_with_environment(&mut command, &launch, Some(Path::new("binding.json")), ambient).unwrap();
+    let values: BTreeMap<_, _> = command.get_envs().filter_map(|(k, v)| v.map(|v|
+        (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))).collect();
+    assert!(!values.contains_key("LD_PRELOAD"));
+    assert!(!values.contains_key("LD_LIBRARY_PATH"));
+    assert!(!values.contains_key("DYLD_LIBRARY_PATH"));
+    let loaders: serde_json::Value = serde_json::from_str(&values["GRAPHER_BUSINESS_LOADER_ENV"]).unwrap();
+    assert_eq!(loaders, serde_json::json!({
+        "LD_LIBRARY_PATH": "/ambient-business-libs",
+        "DYLD_LIBRARY_PATH": "/explicit-business-libs",
+    }));
+}
+
+#[test]
+fn ignored_sourceless_python_dependency_runs_in_source_and_private_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join(".gitignore"), "*.pyc\n").unwrap();
+    fs::write(source.join("offline_dependency.py"), "VALUE = 'sourceless'\n").unwrap();
+    fs::write(source.join("app.py"), "import offline_dependency\nprint(offline_dependency.VALUE)\n").unwrap();
+    let python = python();
+    let mut compile = Command::new(&python);
+    compile.current_dir(&source).args(["-c", "import py_compile; py_compile.compile('offline_dependency.py', cfile='offline_dependency.pyc', doraise=True)"]);
+    controlled_output(compile).unwrap();
+    fs::remove_file(source.join("offline_dependency.py")).unwrap();
+    let bytecode = fs::read(source.join("offline_dependency.pyc")).unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = temp.path().join(".grapher-worktrees/sourceless/node");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    for path in [&source, &node] {
+        let mut command = Command::new(&python);
+        command.current_dir(path).arg("app.py").env("PYTHONDONTWRITEBYTECODE", "1");
+        assert_eq!(String::from_utf8(controlled_output(command).unwrap()).unwrap().trim(), "sourceless");
+        assert_eq!(fs::read(path.join("offline_dependency.pyc")).unwrap(), bytecode);
+        assert!(!path.join("offline_dependency.py").exists());
+        assert!(!path.join("__pycache__").exists());
+    }
+    assert!(!source.join(".git").exists());
+}
+
+#[test]
 fn tracked_scope_admission_uses_the_live_source_index_not_an_older_graph_snapshot() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
@@ -74,10 +320,13 @@ pub(super) fn policy() -> EnvironmentConfig {
                     .to_string_lossy()
                     .into(),
             ],
+            unbound_path: None,
             shell: shell(),
             variables: BTreeMap::new(),
             inherit: vec![],
+            inherit_ambient: false,
             managed_scopes: vec![],
+            owned_scopes: None,
             ambient_hints: vec![],
             hook: None,
             environment: None,
@@ -381,6 +630,186 @@ fn history_scope_transition_is_checked_before_touching_code_or_partial_environme
     store
         .validate_history_scopes(&empty, &store.launch(&previous).unwrap())
         .unwrap();
+}
+
+#[test]
+fn history_scope_checks_compare_snapshot_roots_not_project_exclusions() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = policy();
+    config.discovery = true;
+    config.scopes = vec![".venv".into(), ".agent-home".into()];
+    config.launch.variables.insert("HOME".into(), "{state}/.agent-home".into());
+    config.launch.owned_scopes = Some(vec![]);
+    let store = Environments::new(temp.path(), &Uuid::new_v4().to_string(), &config).unwrap();
+    let empty = store.launch(&config.launch).unwrap();
+    let bound = |root: &str, prefix: &str| {
+        let mut launch = config.launch.clone();
+        launch.environment = Some(crate::environment_discovery::Binding {
+            kind: "venv".into(), prefix: prefix.into(), abi: "0".repeat(40), root: Some(root.into()),
+        });
+        launch.owned_scopes = Some(vec![EnvironmentScope { root: root.into(), path: prefix.into() }]);
+        store.launch(&launch).unwrap()
+    };
+    let state = bound("state", ".venv");
+    let project = bound("workspace", ".venv");
+    assert!(store.exclusions(&state).unwrap().is_empty());
+    store.validate_history_scopes(&state, &state).unwrap();
+    store.validate_history_scopes(&empty, &state).unwrap();
+    assert!(store.validate_history_scopes(&project, &project).unwrap_err().contains("state-root byte evidence"), "a W snapshot does not also capture private HOME in S");
+    assert!(store.validate_history_scopes(&project, &state).is_err(), "equal relative names do not identify the same ownership root");
+    assert!(store.validate_history_scopes(&state, &project).is_err());
+    let custom = bound("state", "custom-env");
+    store.validate_history_scopes(&custom, &custom).unwrap();
+    assert!(store.validate_history_scopes(&empty, &custom).is_err());
+    let mut unbound = config.launch.clone();
+    unbound.owned_scopes = Some(vec![EnvironmentScope { root: "state".into(), path: "unbound-custom".into() }]);
+    let unbound = store.launch(&unbound).unwrap();
+    assert!(store.validate_history_scopes(&empty, &unbound).is_err(), "unbinding must not hide a captured dynamic scope from rollback validation");
+}
+
+#[test]
+fn history_restores_recorded_unbound_state_scopes_without_touching_w_names_or_caches() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    workspace::git(&source, &["init", "-q"]).unwrap();
+    fs::write(source.join("business.txt"), "code").unwrap();
+    let code = workspace::snapshot_repository(&source).unwrap();
+    let path = temp.path().join(".grapher-worktrees/48b8e1d1-2428-42a2-9b28-9d90f631f9d1/node");
+    workspace::prepare(&source, &path, &code, &[]).unwrap();
+    let mut config = policy();
+    config.discovery = true;
+    config.scopes.push(".agent-home".into());
+    config.launch.variables.insert("HOME".into(), "{state}/.agent-home".into());
+    config.launch.owned_scopes = Some(vec![EnvironmentScope {
+        root: "state".into(), path: "second-env".into(),
+    }]);
+    let store = Environments::new(temp.path(), &Uuid::new_v4().to_string(), &config).unwrap();
+    let baseline = store.initialize(&source).unwrap();
+    let input = store.prepare(&path, &baseline, &Uuid::new_v4().to_string(), &code, vec![], false, false).unwrap();
+    let state = store.state_root(&path).unwrap();
+    for name in [".env", "second-env", ".agent-home", ".cache"] {
+        fs::create_dir_all(state.join(name)).unwrap();
+        fs::write(state.join(name).join("value"), format!("recorded {name}")).unwrap();
+    }
+    let result = store.seal(&path, &input, &code, vec![]).unwrap();
+    let historical_manifest = store.directory.join("files/versions").join(format!("{}.json", result.environment_ref));
+    let historical_bytes = fs::read(&historical_manifest).unwrap();
+    for name in [".env", "second-env", ".agent-home", ".cache"] {
+        fs::write(state.join(name).join("value"), "later state").unwrap();
+        fs::create_dir_all(path.join(name)).unwrap();
+        fs::write(path.join(name).join("value"), "unrelated W bytes").unwrap();
+    }
+    fs::write(state.join("second-env/later-only"), "remove on rollback").unwrap();
+    let restored = store.prepare(&path, &result, &Uuid::new_v4().to_string(), &code, vec![], false, true).unwrap();
+    for name in [".env", "second-env", ".agent-home"] {
+        assert_eq!(fs::read_to_string(state.join(name).join("value")).unwrap(), format!("recorded {name}"));
+        assert_eq!(fs::read_to_string(path.join(name).join("value")).unwrap(), "unrelated W bytes");
+    }
+    assert!(!state.join("second-env/later-only").exists());
+    assert_eq!(fs::read_to_string(state.join(".cache/value")).unwrap(), "later state");
+    assert_eq!(fs::read(&historical_manifest).unwrap(), historical_bytes);
+    assert!(store.load_launch(&restored.launch_ref).unwrap().environment.is_none());
+    store.verify_view(&path, &restored.launch_ref, &restored.environment_ref).unwrap();
+}
+
+#[test]
+fn history_rejects_unbound_other_root_ownership_without_touching_live_state_or_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    workspace::git(&source, &["init", "-q"]).unwrap();
+    fs::write(source.join("business.txt"), "recorded code").unwrap();
+    let code = workspace::snapshot_repository(&source).unwrap();
+    let path = temp.path().join(".grapher-worktrees/48b8e1d1-2428-42a2-9b28-9d90f631f9d1/node");
+    workspace::prepare(&source, &path, &code, &[]).unwrap();
+    let mut config = policy();
+    config.discovery = true;
+    config.launch.variables.insert("HOME".into(), "{state}/.agent-home".into());
+    config.launch.owned_scopes = Some(vec![EnvironmentScope {
+        root: "workspace".into(), path: "business-env".into(),
+    }]);
+    let store = Environments::new(temp.path(), &Uuid::new_v4().to_string(), &config).unwrap();
+    let baseline = store.initialize(&source).unwrap();
+    let generation = Uuid::new_v4().to_string();
+    let input = store.prepare(&path, &baseline, &generation, &code, vec![], false, false).unwrap();
+    let state = store.state_root(&path).unwrap();
+    fs::create_dir_all(state.join(".env")).unwrap();
+    fs::write(state.join(".env/value"), "recorded state").unwrap();
+    let sealed = store.seal(&path, &input, &code, vec![]).unwrap();
+    // Simulate an old single-root E without rewriting the newly sealed record.
+    let legacy_version = Uuid::new_v4().to_string();
+    store.scoped_files(&sealed.launch_ref).unwrap().capture(&state, &legacy_version, "", &[]).unwrap();
+    let result = CompositeResult { environment_ref: legacy_version, ..sealed };
+    let launch_bytes = fs::read(store.directory.join("launches").join(format!("{}.json", result.launch_ref))).unwrap();
+    let manifest_path = store.directory.join("files/versions").join(format!("{}.json", result.environment_ref));
+    let manifest_bytes = fs::read(&manifest_path).unwrap();
+    fs::create_dir_all(path.join("business-env")).unwrap();
+    fs::write(path.join("business-env/value"), "uncaptured W state").unwrap();
+    fs::write(state.join(".env/value"), "partial S state").unwrap();
+    let error = store.prepare(&path, &result, &Uuid::new_v4().to_string(), &code, vec![], false, true).unwrap_err();
+    assert!(error.contains("workspace:business-env"), "{error}");
+    assert_eq!(fs::read_to_string(path.join("business.txt")).unwrap(), "recorded code");
+    assert_eq!(fs::read_to_string(path.join("business-env/value")).unwrap(), "uncaptured W state");
+    assert_eq!(fs::read_to_string(state.join(".env/value")).unwrap(), "partial S state");
+    assert_eq!(fs::read(manifest_path).unwrap(), manifest_bytes);
+    assert_eq!(fs::read(store.directory.join("launches").join(format!("{}.json", result.launch_ref))).unwrap(), launch_bytes);
+    // Reading/retrying the legacy single-root record is still supported; only
+    // an unsupported whole-environment rollback is refused.
+    store.validate_result(&result).unwrap();
+}
+
+#[test]
+fn node_path_rebinding_preserves_nodes_literal_quote_semantics() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let target = temp.path().join("target");
+    for (root, value) in [(&source, "source"), (&target, "private")] {
+        for (directory, package) in [("modules", "ordinary"), ("quoted", "quoted-only")] {
+            fs::create_dir_all(root.join(directory).join(package)).unwrap();
+            fs::write(root.join(directory).join(package).join("index.js"), format!("module.exports='{value}';")).unwrap();
+        }
+    }
+    let delimiter = if cfg!(windows) { ';' } else { ':' };
+    // Node splits NODE_PATH on its delimiter; quotes are literal path bytes,
+    // unlike Windows PATH. The quoted directory must stay non-resolving.
+    let original = format!("\"{}\"{delimiter}{}", source.join("quoted").display(), source.join("modules").display());
+    let expected = format!("\"{}\"{delimiter}{}", source.join("quoted").display(), target.join("modules").display());
+    let mut launch = policy().launch;
+    launch.inherit_ambient = true;
+    launch.unbound_path = Some(launch.path.clone());
+    let mut command = Command::new(native::trusted_node().unwrap());
+    command.env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_WORKSPACE_ROOT", &target);
+    clean_command_with_environment(&mut command, &launch, Some(Path::new("binding.json")),
+        [("NODE_PATH".into(), original.clone().into())].into_iter().collect()).unwrap();
+    let encoded = command.get_envs().find(|(name, _)| *name == "GRAPHER_BUSINESS_NODE_ENV").unwrap().1.unwrap();
+    let values: serde_json::Value = serde_json::from_str(encoded.to_str().unwrap()).unwrap();
+    let private = values["NODE_PATH"].as_str().unwrap();
+    assert_eq!(private.replace('\\', "/"), expected.replace('\\', "/"));
+    for (root, path, expected_value) in [(&source, original.as_str(), "source"), (&target, private, "private")] {
+        let mut child = Command::new(native::trusted_node().unwrap());
+        child.current_dir(root).env_remove("NODE_OPTIONS").env("NODE_PATH", path)
+            .args(["-e", "let quoted=false;try{require('quoted-only');quoted=true}catch(e){if(e.code!=='MODULE_NOT_FOUND')throw e}console.log(JSON.stringify({ordinary:require('ordinary'),quoted}))"]);
+        let output: serde_json::Value = serde_json::from_slice(&controlled_output(child).unwrap()).unwrap();
+        assert_eq!(output, serde_json::json!({"ordinary":expected_value,"quoted":false}));
+    }
+}
+
+#[test]
+fn node_path_rebinding_refuses_unrepresentable_destination_components() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir_all(source.join("modules")).unwrap();
+    let target = temp.path().join(if cfg!(windows) { "target;part" } else { "target:part" });
+    fs::create_dir_all(&target).unwrap();
+    let mut launch = policy().launch;
+    launch.inherit_ambient = true;
+    launch.unbound_path = Some(launch.path.clone());
+    let mut command = Command::new(native::trusted_node().unwrap());
+    command.env("GRAPHER_ORIGINAL_ROOT", &source).env("GRAPHER_WORKSPACE_ROOT", &target);
+    let error = clean_command_with_environment(&mut command, &launch, Some(Path::new("binding.json")),
+        [("NODE_PATH".into(), source.join("modules").into_os_string())].into_iter().collect()).unwrap_err();
+    assert!(error.contains("NODE_PATH"), "{error}");
 }
 
 #[cfg(feature = "fixture")]

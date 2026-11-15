@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { bundledExtensions, bundledExtensionNames, missingBundledExtensions, verifyBundledExtensions } from './bundled-extensions.mjs';
 import { assertSupportedNode, ensureDependencies, findCargoExecutable, rootDependenciesReady } from './ensure-deps.mjs';
 import { pathValue, prependPath } from './cargo.mjs';
-import { corePackages, dependencyManifest, dependencyProfileHashes } from './pi-dependencies.mjs';
+import { corePackages, dependencyManifest, dependencyProfileHashes, verifyPiDependencies } from './pi-dependencies.mjs';
 import { piBuildArtifacts, piBuildReady, recordPiBuild } from './pi-build-state.mjs';
 
 function fixture(t) {
@@ -135,6 +135,80 @@ function installPiFixture(f) {
   for (const path of piBuildArtifacts) f.write(`pi/${path}`, '');
   recordPiBuild(f.root);
 }
+
+test('native cache admission checks copied dependencies against the trusted installation without loading cached code', t => {
+  const f = fixture(t);
+  installPiFixture(f);
+  f.write('pi/package-lock.json', '{}');
+  f.write('engine/entrypoint.mjs', 'throw new Error("Cache admission must not launch the engine");');
+  for (const script of ['prepare-native-runtime.mjs', 'pi-dependencies.mjs', 'bundled-extensions.mjs']) {
+    mkdirSync(join(f.root, 'scripts'), { recursive: true });
+    cpSync(new URL(script, import.meta.url), join(f.root, 'scripts', script));
+  }
+  f.write('scripts/pi-baseline.mjs', `
+import { fileURLToPath } from 'node:url';
+export const root = fileURLToPath(new URL('../', import.meta.url));
+export const source = fileURLToPath(new URL('../pi/', import.meta.url));
+export function verifyBaseline() {}
+`);
+  f.write('scripts/cargo.mjs', '');
+  f.write('scripts/model-data-manifest.mjs', '');
+  const cached = mkdtempSync(join(tmpdir(), 'grapher-dependency-cache-'));
+  t.after(() => rmSync(cached, { recursive: true, force: true }));
+  cpSync(f.root, cached, { recursive: true, filter: process.platform === 'win32' ? () => true : undefined });
+  const key = copy => spawnSync(process.execPath, [join(f.root, 'scripts/prepare-native-runtime.mjs'), '--cache-key', ...(copy ? [copy] : [])], {
+    cwd: f.root, encoding: 'utf8', timeout: 10000,
+  });
+  const initial = key();
+  assert.equal(initial.status, 0, initial.stderr);
+  assert.match(initial.stdout, /^[a-f0-9]{64}$/);
+  const healthy = key(cached);
+  assert.equal(healthy.status, 0, healthy.stderr);
+  assert.equal(healthy.stdout, initial.stdout);
+  const reject = pattern => {
+    const result = key(cached);
+    assert.notEqual(result.stdout, initial.stdout, 'damaged copied dependencies must not retain the healthy admission key');
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '', 'a damaged dependency copy must not produce an admissible key');
+    assert.match(result.stderr, /Cached Pi dependency verification failed/);
+    assert.match(result.stderr, pattern);
+    assert.doesNotMatch(result.stderr, /Cached verifier executed|must not launch the engine|Readiness must not load extension code/);
+    assert.throws(() => verifyPiDependencies(f.root, { installationRoot: cached }), pattern);
+  };
+  for (const [path, content, pattern] of [
+    ['pi/node_modules/.grapher-pi-dependencies.json', null, /Pi dependencies are missing or use an unreviewed install/],
+    ['pi/node_modules/typescript/package.json', '{"version":"0.0.0"}', /Installed Pi dependency mismatch: node_modules\/typescript/],
+    ['pi/node_modules/@fixture/agent/package.json', '{"name":"@fixture/agent","version":"1.2.3","changed":true}', /Pi workspace binding mismatch/],
+  ]) {
+    const target = join(cached, path);
+    const original = readFileSync(target);
+    try {
+      if (content === null) rmSync(target);
+      else writeFileSync(target, content);
+      reject(pattern);
+    } finally {
+      writeFileSync(target, original);
+    }
+  }
+  const extra = join(cached, 'pi/node_modules/unexpected');
+  mkdirSync(extra);
+  writeFileSync(join(extra, 'package.json'), '{"version":"1.2.3"}');
+  reject(/Extraneous Pi dependency: node_modules\/unexpected/);
+  rmSync(extra, { recursive: true });
+  // A cache cannot redefine the expected workspace manifest to bless its copy.
+  const manifest = join(cached, 'pi/packages/agent/package.json');
+  const original = readFileSync(manifest);
+  const changed = JSON.stringify({ ...JSON.parse(original), changed: true });
+  writeFileSync(manifest, changed);
+  writeFileSync(join(cached, 'pi/node_modules/@fixture/agent/package.json'), changed);
+  reject(/Pi workspace binding mismatch/);
+  writeFileSync(manifest, original);
+  writeFileSync(join(cached, 'pi/node_modules/@fixture/agent/package.json'), original);
+  writeFileSync(join(cached, 'scripts/pi-dependencies.mjs'), 'throw new Error("Cached verifier executed");');
+  writeFileSync(join(cached, 'pi/node_modules/typescript/package.json'), '{"version":"0.0.0"}');
+  reject(/Installed Pi dependency mismatch/);
+  assert.equal(key().stdout, initial.stdout, 'damage stays in the cache, not the trusted installation');
+});
 
 const bootstrap = (f, run, options = {}) => ensureDependencies({
   installationRoot: f.root, env: f.env, cargoPath: process.execPath, log: () => {}, run, ...options,

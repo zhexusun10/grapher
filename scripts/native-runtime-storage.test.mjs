@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 
 function fixture(t) {
@@ -31,16 +31,30 @@ export function verifyBaseline() {}
     env: { ...process.env, GRAPHER_NATIVE_RUNTIME_PARENT: runtimeParent, GRAPHER_NATIVE_RUNTIME_DIR: destination },
   });
   const child = () => join(parent, `grapher-native-engine-${randomUUID()}`);
-  const key = (installation = root, runtimeParent = parent, cachedCopy) => {
-    const result = spawnSync(process.execPath, [join(installation, 'scripts/prepare-native-runtime.mjs'), '--cache-key', ...(cachedCopy ? [cachedCopy] : [])], {
-      cwd: installation, encoding: 'utf8', timeout: 10000,
-      env: { ...process.env, GRAPHER_NATIVE_RUNTIME_PARENT: runtimeParent },
-    });
+  const keyResult = (installation = root, runtimeParent = parent, cachedCopy) => spawnSync(process.execPath, [join(installation, 'scripts/prepare-native-runtime.mjs'), '--cache-key', ...(cachedCopy ? [cachedCopy] : [])], {
+    cwd: installation, encoding: 'utf8', timeout: 10000,
+    env: { ...process.env, GRAPHER_NATIVE_RUNTIME_PARENT: runtimeParent },
+  });
+  const key = (...args) => {
+    const result = keyResult(...args);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^[a-f0-9]{64}$/);
     return result.stdout;
   };
-  return { root, parent, run, child, key };
+  return { root, parent, run, child, key, keyResult };
+}
+
+function seedRuntimeInputs(f) {
+  for (const [name, text] of Object.entries({
+    'engine/entrypoint.mjs': 'export {};',
+    'pi/package.json': '{"type":"module"}',
+    'pi/package-lock.json': '{}',
+    'pi/packages/core/dist/index.js': 'export {};',
+  })) {
+    const path = join(f.root, name);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, text);
+  }
 }
 
 test('leased preparation rejects external, nonempty and linked destinations without deleting data', t => {
@@ -97,6 +111,51 @@ test('cache identity follows engine inputs, not workspace, cache parent or insta
     assert.notEqual(changed, previous, `${path} invalidates the engine cache`);
     previous = changed;
   }
+});
+
+test('Windows linked runtime inputs hash copied bytes and stay independent after preparation', { skip: process.platform !== 'win32' }, t => {
+  const f = fixture(t);
+  seedRuntimeInputs(f);
+  const linked = join(f.root, 'linked-extension');
+  mkdirSync(linked);
+  writeFileSync(join(linked, 'index.js'), 'export const version=1;');
+  mkdirSync(join(f.root, 'node_modules'));
+  symlinkSync(linked, join(f.root, 'node_modules/pi-trim'), 'junction');
+  // Repeated aliases of one directory are valid, not recursive link cycles.
+  symlinkSync(linked, join(f.root, 'engine/alias-a'), 'junction');
+  symlinkSync(linked, join(f.root, 'engine/alias-b'), 'junction');
+  writeFileSync(join(f.root, 'scripts/bundled-extensions.mjs'), 'export const bundledExtensionNames=["pi-trim"]; export function verifyBundledExtensions() {}');
+  const first = f.key();
+  writeFileSync(join(linked, 'index.js'), 'export const version=2;');
+  const changed = f.key();
+  assert.notEqual(changed, first, 'same-length edits behind a junction must invalidate the key');
+
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+  const git = (...args) => execFileSync('git', ['-C', join(f.root, 'pi'), ...args], { env, stdio: 'pipe' });
+  git('init', '-q'); git('add', '.');
+  git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'fixture');
+  const destination = f.child();
+  mkdirSync(destination);
+  writeFileSync(join(destination, 'runtime.lock'), '');
+  const result = f.run(destination);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(lstatSync(join(destination, 'node_modules/pi-trim')).isSymbolicLink(), false);
+  assert.equal(f.key(f.root, f.parent, destination), changed, 'the source key must describe the dereferenced copy');
+  writeFileSync(join(linked, 'index.js'), 'export const version=3;');
+  assert.notEqual(f.key(), changed);
+  assert.equal(readFileSync(join(destination, 'node_modules/pi-trim/index.js'), 'utf8'), 'export const version=2;');
+  assert.equal(f.key(f.root, f.parent, destination), changed, 'source edits cannot mutate the accepted cached code');
+});
+
+test('Windows cyclic runtime links fail with an input diagnostic before copying', { skip: process.platform !== 'win32' }, t => {
+  const f = fixture(t);
+  seedRuntimeInputs(f);
+  symlinkSync(join(f.root, 'engine'), join(f.root, 'engine/loop'), 'junction');
+  const result = f.keyResult();
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /Cyclic native runtime input/);
+  assert.doesNotMatch(result.stderr, /Maximum call stack/);
+  assert.equal(result.stdout, '', 'a refused input must not produce a usable cache key');
 });
 
 test('preparation uses the already leased directory, including extended Windows parent paths', t => {

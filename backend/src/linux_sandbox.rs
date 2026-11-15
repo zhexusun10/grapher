@@ -44,7 +44,7 @@ fn base_command() -> Command {
 
 /// Prepare empty, read-only mount trees OUTSIDE the protected paths. A tmpfs
 /// over source would preserve integrity but falsely let source writes succeed;
-/// read-only binds make those writes fail like the macOS/Windows boundaries.
+/// read-only binds make those writes fail.
 /// Directories for the private exceptions exist before their parents are masked.
 fn mount_boundaries(
     command: &mut Command,

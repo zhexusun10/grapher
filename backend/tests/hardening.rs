@@ -33,7 +33,6 @@ fn shadow_identity_requires_an_existing_path() {
     let missing = temp.path().join("missing");
     let error = workspace::shadow_repo_dir(&missing).unwrap_err();
     assert!(error.contains("Cannot resolve workspace path"));
-    assert!(workspace::ensure_shadow_repo(&missing).is_err());
     assert!(!missing.exists());
 }
 

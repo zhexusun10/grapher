@@ -813,23 +813,23 @@ fn collection_predicates_keep_case_unicode_and_tracked_override_rules() {
     use std::collections::BTreeSet;
     let cases = [
         ("src/file.ts", false, false, false),
-        ("src/你好.PyC", true, false, false),
+        ("src/你好.PyC", false, false, false),
         ("é", false, false, false),
         ("代码", false, false, false),
-        (".pYc", true, false, false),
+        (".pYc", false, false, false),
         ("pyc", false, false, false),
-        ("nested/cache.PYO", true, false, false),
+        ("nested/cache.PYO", false, false, false),
         ("file.TsBuIlDiNfO", true, false, false),
-        ("NODE_MODULES/pkg/file.js", true, false, false),
+        ("NODE_MODULES/pkg/file.js", false, false, false),
         ("src/__PyCache__/module", true, false, false),
-        (".Next/build-id", true, false, false),
+        (".Next/build-id", false, false, false),
         ("not_node_modules/file.js", false, false, false),
         ("dist/build/out/target/authored", false, false, false),
         ("x/.grapher-publish-0123456789abcdef.tmp", false, true, false),
         ("x/.grapher-publish-0123456789abcdeG.tmp", false, false, false),
         ("x/.grapher-publish-01234.tmp", false, false, false),
         ("managed/normal.txt", false, false, true),
-        ("managed/tracked.pyc", true, false, true),
+        ("managed/tracked.pyc", false, false, true),
         ("managed/.grapher-publish-0123456789abcdef.tmp", false, true, true),
     ];
     for (name, generated, reserved, managed) in cases {
@@ -853,7 +853,9 @@ fn collection_predicates_keep_case_unicode_and_tracked_override_rules() {
 fn generated_suffix_checks_keep_non_utf8_name_behavior() {
     use std::os::unix::ffi::OsStrExt;
     for (bytes, generated) in [
-        (b"cache/\xff.PyC".as_slice(), true),
+        (b"cache/\xff.PyC".as_slice(), false),
+        (b"cache/\xff.TsBuildInfo".as_slice(), true),
+        (b"__pycache__/\xff.pyc".as_slice(), true),
         (b"src/\xff.rs".as_slice(), false),
         (b"\xff".as_slice(), false),
     ] {

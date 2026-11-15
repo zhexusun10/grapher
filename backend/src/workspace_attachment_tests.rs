@@ -188,6 +188,60 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
 }
 
 #[test]
+fn malformed_attachment_content_fails_before_direct_or_staged_files_are_created() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
+    let repo = temp.path().join("repo");
+    let (child, id) = run(&primary, &repo);
+    let tree = temp.path().join("node");
+    start(&child, &tree);
+    let root = child.runtime.lock().unwrap().root.clone();
+    for node in [None, Some("worker")] {
+        for content in [
+            "%%%%", "Zg=", "Zg==trailer", "Z",
+            "not-a-data-url,Zg==", "data:text/plain,Zg==",
+            "data:application/octet-stream;base64", "data:;base64,Zg==trailer",
+        ] {
+            let mut body = upload(&repo, &id, node);
+            body["content"] = content.into();
+            let error = request(&primary, UPLOAD, body).unwrap_err();
+            assert!(error.contains("Invalid base64"), "{error}");
+            assert!(!repo.join(ATTACHMENTS).exists());
+            assert!(!tree.join(ATTACHMENTS).exists());
+            assert!(!root.join(crate::attachment_inputs::BUCKET).exists());
+        }
+    }
+}
+
+#[test]
+fn raw_and_data_url_uploads_preserve_bytes_and_browser_retry_compatibility() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    for (content, expected) in [
+        ("AAEC/f7/", &b"\x00\x01\x02\xfd\xfe\xff"[..]),
+        ("data:application/octet-stream;base64,AAEC/f7/", &b"\x00\x01\x02\xfd\xfe\xff"[..]),
+        ("DATA:application/octet-stream;BASE64,AAEC/f7/", &b"\x00\x01\x02\xfd\xfe\xff"[..]),
+        ("data:text/plain;base64, Z m 8\r\n", &b"fo"[..]),
+        ("data:;base64,", &b""[..]),
+    ] {
+        let body = serde_json::json!({
+            "repository": repo, "filename": "input.bin",
+            "attachmentId": Uuid::new_v4().to_string(), "content": content,
+        });
+        let uploaded = request(&primary, UPLOAD, body.clone()).unwrap();
+        let retried = request(&primary, UPLOAD, body).unwrap();
+        assert_eq!(retried["path"], uploaded["path"]);
+        assert_eq!(retried["size"], expected.len());
+        assert_eq!(
+            fs::read(repo.join(uploaded["path"].as_str().unwrap())).unwrap(),
+            expected,
+        );
+    }
+}
+
+#[test]
 fn uploads_are_staged_per_run_and_delivered_only_to_their_owning_workspace() {
     let temp = tempfile::tempdir().unwrap();
     let primary = service(Runtime::open(&temp.path().join("runtime")).unwrap());

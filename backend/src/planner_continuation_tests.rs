@@ -85,6 +85,189 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
 }
 
 #[test]
+fn planner_continuation_shares_active_source_and_private_workspaces() {
+    for (mode, drain_at) in [
+        ("source", "never"), ("source", "during-turn"),
+        ("private", "never"), ("private", "during-turn"),
+        ("legacy-private", "never"), ("legacy-private", "during-turn"),
+        ("legacy-private", "before-launch"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = crate::fixture::repository(temp.path()).unwrap();
+        let script = temp.path().join("planner.mjs");
+        fs::write(&script, r#"
+import fs from 'node:fs'; import path from 'node:path';
+let input=''; for await (const chunk of process.stdin) input += chunk;
+const arg = name => process.argv[process.argv.indexOf(name)+1];
+const dir=arg('--session-dir'), id=arg('--session-id');
+const session=path.join(dir, `test_${id}.jsonl`);
+const graph=JSON.parse(fs.readFileSync(process.env.GRAPHER_GRAPH_PATH, 'utf8'));
+if (process.env.GRAPHER_CONTINUE_INTERRUPTED !== 'true') {
+  fs.writeFileSync(session, JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n'+
+    JSON.stringify({type:'message',id:'original',parentId:null,message:{role:'user',content:'retained request'}})+'\n');
+  graph.nodes.push({name:'partial',task:'retained draft'});
+  fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
+  process.exit(1);
+}
+if (input !== '__grapher_continue_interrupted__') throw Error('unexpected prompt');
+const history=fs.readFileSync(session,'utf8');
+if (JSON.parse(history.split('\n')[0]).cwd !== process.cwd() || !history.includes('retained request'))
+  throw Error('lost session or cwd');
+if (!graph.nodes.some(node => node.name === 'partial')) throw Error('lost draft');
+fs.writeFileSync('continued.txt', 'Planner shares the active workspace');
+console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}));
+"#).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "repository": repository, "piCommand":"node", "piArgs":[script],
+            "model":"mock/model", "postTaskReview":false, "maxParallel":4
+        })).unwrap();
+        let current = service(&temp.path().join("runtime"));
+        // All worker states are controlled by this test, not a background driver.
+        current.driving.store(true, Ordering::SeqCst);
+        let run_id = {
+            let mut runtime = current.runtime.lock().unwrap();
+            let count = if mode == "private" { 4 } else { 2 };
+            let graph = Graph {
+                original_goal:"shared Planner continuation".into(),
+                nodes:(0..count).map(|index| Node {
+                    name:format!("worker{index}"), task:format!("work {index}"),
+                }).collect(),
+                edges:vec![],
+            };
+            if mode == "legacy-private" {
+                runtime.state.run_id = Uuid::new_v4().to_string();
+                runtime.emit(EventKind::Created {
+                    graph, config:config.clone(), planning_id:None, planning:None,
+                }).unwrap();
+                runtime.store.select_run(Some(&runtime.state.run_id)).unwrap();
+            } else {
+                runtime.create(graph, config.clone()).unwrap();
+            }
+            runtime.set_route("graph").unwrap();
+            runtime.approve().unwrap();
+            let root = runtime.root.clone();
+            let jobs = runtime.jobs().unwrap();
+            assert_eq!(jobs.len(), count);
+            for mut job in jobs {
+                runtime.attach_job_source(&mut job, &[]).unwrap();
+                let error = perform_with_merger(&job, &root, &[], |_| {}, |head| {
+                    runtime.emit(EventKind::Prepared {
+                        execution_id:job.execution.id.clone(), head,
+                    })?;
+                    Err("prepared only".into())
+                }, |_| Err("unexpected merger".into())).unwrap_err();
+                assert_eq!(error, "prepared only");
+            }
+            assert_eq!(runtime.shared_source_workspace(), mode == "source");
+            runtime.state.run_id.clone()
+        };
+        let failed = plan_goal_internal("revise".into(), config.clone(), Some("graph"), None,
+            Some(run_id.clone()), &current, |_| {}, |_| {}, |_| {}).unwrap_err().1.unwrap();
+        let workspace = PathBuf::from(failed.worktree.as_ref().unwrap());
+        assert_eq!(crate::path_identity::same_path(&workspace, &repository), mode == "source");
+        assert!(current.runtime.lock().unwrap().path_is_running(&workspace));
+        let retry = || plan_goal_internal_with_options(
+            "revise".into(), config.clone(), Some("graph"), None, Some(run_id.clone()),
+            &current, false, Some(&failed.planning_id), |_| {}, |_| {}, |_| {}, |_| {},
+        );
+        let expected_owner = if mode != "source" {
+            // A missing directory must still reject without replacing the turn.
+            let saved = workspace.with_extension("saved");
+            fs::rename(&workspace, &saved).unwrap();
+            let before = current.runtime.lock().unwrap().state.events.len();
+            assert!(retry().unwrap_err().0.contains("workspace is missing"));
+            fs::rename(&saved, &workspace).unwrap();
+            assert_eq!(current.runtime.lock().unwrap().state.events.len(), before);
+
+            // Reproduce restart/retry reusing the same physical directory. The
+            // old Prepared event must not authorize its still-preparing successor.
+            let successor = {
+                let mut runtime = current.runtime.lock().unwrap();
+                let previous = runtime.state.executions.iter().find(|execution|
+                    Some(&execution.id) == failed.workspace_execution_id.as_ref()).unwrap().clone();
+                runtime.finish(&previous, Err("worker interrupted".into())).unwrap();
+                let successor = Execution {
+                    id:Uuid::new_v4().to_string(), attempt:previous.attempt + 1,
+                    status:"running".into(), completed_at:None, ..previous
+                };
+                runtime.emit(EventKind::Started {
+                    execution:successor.clone(), message_sequences:None, fresh_restart:false,
+                }).unwrap();
+                successor
+            };
+            let before = current.runtime.lock().unwrap().state.events.len();
+            let error = retry().unwrap_err();
+            assert!(error.0.contains("preparation has not completed"), "{}", error.0);
+            assert!(error.1.is_none(), "reject before recording or launching a turn");
+            {
+                let mut runtime = current.runtime.lock().unwrap();
+                assert_eq!(runtime.state.events.len(), before);
+                assert_eq!(runtime.state.planning.as_ref().unwrap().planning_id, failed.planning_id);
+                runtime.emit(EventKind::Prepared {
+                    execution_id:successor.id.clone(), head:successor.before.clone(),
+                }).unwrap();
+            }
+            Some(successor.id)
+        } else {
+            None
+        };
+        let drain_workers = || {
+            let mut runtime = current.runtime.lock().unwrap();
+            let mut workers: Vec<_> = runtime.state.executions.iter()
+                .filter(|execution| execution.status == "running").cloned().collect();
+            // The selected writer finishes first; an unrelated completion must
+            // not reclaim the cwd, before or during the continued Planner turn.
+            workers.sort_by_key(|execution| Some(&execution.id) != expected_owner.as_ref());
+            for execution in workers {
+                let head = if mode == "source" {
+                    String::new()
+                } else {
+                    crate::workspace::snapshot_node_scoped(
+                        std::path::Path::new(&execution.worktree), &repository,
+                        &execution.node, Some(&run_id), &runtime.exclusions().unwrap(),
+                    ).unwrap()
+                };
+                runtime.finish(&execution, Ok((head, "done".into()))).unwrap();
+                assert!(workspace.is_dir(), "{mode}: reclaimed the retained Planner cwd");
+            }
+        };
+        let result = plan_goal_internal_with_options(
+            "revise".into(), config.clone(), Some("graph"), None, Some(run_id.clone()),
+            &current, false, Some(&failed.planning_id), |_| {
+                if drain_at == "before-launch" {
+                    drain_workers();
+                }
+            }, |_| {}, |_| {}, |text| {
+                if drain_at == "during-turn" && text.contains("\"type\":\"message_end\"") {
+                    drain_workers();
+                }
+            },
+        ).unwrap_or_else(|error| panic!("{mode}, drain={drain_at}: {error:?}"));
+        let planning = result.planning.as_ref().unwrap();
+        assert_eq!(result.run_id, run_id);
+        assert_eq!(planning.status.as_deref(), Some("success"));
+        assert_eq!(planning.worktree, failed.worktree);
+        assert_eq!(planning.workspace_execution_id, expected_owner);
+        assert!(result.graph.nodes.iter().any(|node| node.name == "partial"));
+        assert_eq!(fs::read_to_string(workspace.join("continued.txt")).unwrap(),
+            "Planner shares the active workspace");
+        if mode != "source" {
+            assert!(!repository.join("continued.txt").exists());
+        }
+        let runtime = current.runtime.lock().unwrap();
+        assert_eq!(runtime.path_is_running(&workspace), drain_at == "never");
+        assert!(!runtime.state.paused, "Planner continuation must not pause shared writers");
+        let captures = runtime.state.events.iter().filter(|event| matches!(&event.kind,
+            EventKind::PlannerWorkspaceSnapshotted { .. })).count();
+        assert_eq!(captures, usize::from(drain_at == "before-launch"),
+            "Planner captures late edits only after the selected writer has drained");
+        let replay = runtime.store.load(&run_id).unwrap();
+        assert_eq!(replay.planning, result.planning);
+        assert_eq!(replay.graph, result.graph);
+    }
+}
+
+#[test]
 fn approved_graph_revision_continues_its_failed_draft_without_replacing_the_run() {
     let temp = tempfile::tempdir().unwrap();
     let repository = crate::fixture::repository(temp.path()).unwrap();

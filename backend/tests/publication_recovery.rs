@@ -176,8 +176,7 @@ fn interrupted_atomic_copy_retries_large_addition_without_installing_partial_byt
     let heads = [workspace::snapshot_node(&path, &source, "worker").unwrap()];
     let result = publish(&source, &heads, |_| panic!()).unwrap();
     let journal = interrupt(&source, &heads);
-    // A stopped adjacent copy cannot leave a truncated target: it remains
-    // absent (or at its full previous content), and only the owned temp is short.
+    // Simulate interruption: only the owned temporary file is truncated.
     fs::remove_file(source.join("large.exe")).unwrap();
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     journal.canonicalize().unwrap().hash(&mut hash);
@@ -483,8 +482,7 @@ fn sha256_delivery_keeps_all_new_objects_private() {
     workspace::prepare(&source, &path, &base, &[]).unwrap();
     git(&path, &["config", "fastimport.unpackLimit", "0"]);
     fs::write(path.join("file.txt"), "sha256\n").unwrap();
-    // Cross the small-blob batch boundary and force packed private objects,
-    // independently of the host's global Git unpack-limit configuration.
+    // Cross the blob batch boundary; unpackLimit=0 forces packed objects.
     for index in 0..130 {
         fs::write(path.join(format!("batch-{index:04}.bin")), format!("unique bytes {index}\0\r\n")).unwrap();
     }

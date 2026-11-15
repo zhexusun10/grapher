@@ -134,7 +134,7 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
         expected
     );
 
-    // Old checkpoints containing history remain readable; output is discarded.
+    // Legacy checkpoints remain readable without restoring output.
     let old = serde_json::to_value(&runtime.state).unwrap();
     db.execute(
         "UPDATE checkpoints SET sequence=?1,payload=?2",
@@ -176,6 +176,17 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
 
 #[test]
 fn a_legacy_checkpoint_without_delivered_heads_is_repaired_from_the_event_log() {
+    for unindexed in [
+        None,
+        Some("publication_started"),
+        Some("publication_completed"),
+        Some("both"),
+    ] {
+        assert_legacy_delivered_heads_repaired(unindexed);
+    }
+}
+
+fn assert_legacy_delivered_heads_repaired(unindexed: Option<&str>) {
     let temp = TempDir::new().unwrap();
     let mut runtime = grapher::runtime::Runtime::open(temp.path()).unwrap();
     runtime.state.run_id = "run".into();
@@ -208,9 +219,7 @@ fn a_legacy_checkpoint_without_delivered_heads_is_repaired_from_the_event_log() 
             head: "b".repeat(40),
         })
         .unwrap();
-    // Force a checkpoint (projection-independent events only) and then strip the
-    // field the way a checkpoint written before delivered heads were projected
-    // did, so a restart would otherwise forget what was already published.
+    // Checkpoint, then remove publishedHeads to simulate the legacy projection.
     runtime
         .emit(EventKind::Failed {
             node: "task".into(),
@@ -237,8 +246,36 @@ fn a_legacy_checkpoint_without_delivered_heads_is_repaired_from_the_event_log() 
             [value.to_string()],
         )
         .unwrap();
+    if let Some(kind) = unindexed {
+        connection
+            .execute("UPDATE events SET kind=NULL WHERE kind IN ('publication_started','publication_completed') AND (?1='both' OR kind=?1)", [kind])
+            .unwrap();
+    }
+    let original_events: Vec<(i64, String)> = connection
+        .prepare("SELECT sequence,payload FROM events ORDER BY sequence")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
     drop(connection);
 
     let replayed = grapher::runtime::Runtime::open(temp.path()).unwrap();
-    assert_eq!(replayed.state.published_heads, vec![delivered]);
+    assert_eq!(
+        replayed.state.published_heads,
+        vec![delivered],
+        "{unindexed:?}"
+    );
+    let connection = Connection::open(temp.path().join("events.sqlite")).unwrap();
+    let reopened_events: Vec<(i64, String)> = connection
+        .prepare("SELECT sequence,payload FROM events ORDER BY sequence")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        reopened_events, original_events,
+        "repair must not rewrite history"
+    );
 }

@@ -9,6 +9,7 @@ import { samePath, toHostInput } from './path-identity.mjs';
 let active;
 let activePath;
 let deviceEnvironment = {};
+let businessNodeEnvironment = {};
 const runtimePathKey = key => /^(HOME|USERPROFILE|APPDATA|LOCALAPPDATA|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|TMPDIR|TMP|TEMP|XDG_RUNTIME_DIR|npm_config_cache|PIP_CACHE_DIR|CONDA_ENVS_PATH|CONDA_PKGS_DIRS)$/i.test(key);
 const workspaceBindingKey = key => runtimePathKey(key) || /^(GIT_CONFIG_GLOBAL|GIT_CEILING_DIRECTORIES)$/i.test(key);
 let runtimeEnvironment = process.env.GRAPHER_EXECUTION_KIND === 'graph'
@@ -31,22 +32,56 @@ export function rebindWorkspaceEnvironment(bindings, workspace) {
 }
 
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+const isNativeAbsolute = value => typeof value === 'string' && isAbsolute(value)
+  && (process.platform !== 'win32' || /^(?:[a-z]:[\\/]|[\\/]{2})/i.test(value));
+// Match Rust std::env::{join_paths,split_paths}, not Node's simpler NODE_PATH
+// delimiter grammar. Windows PATH can quote a directory containing ';'.
+function splitNativePath(value) {
+  if (process.platform !== 'win32') return value.split(delimiter);
+  const paths = [];
+  let entry = '', quoted = false;
+  for (const character of value) {
+    if (character === '"') quoted = !quoted;
+    else if (character === ';' && !quoted) { paths.push(entry); entry = ''; }
+    else entry += character;
+  }
+  paths.push(entry);
+  return paths;
+}
+function joinNativePath(paths) {
+  return paths.map(entry => {
+    if (process.platform === 'win32') {
+      if (/["\r\n]/.test(entry)) throw new Error('Invalid native PATH entry');
+      return entry.includes(';') ? `"${entry}"` : entry;
+    }
+    if (entry.includes(delimiter)) throw new Error('Invalid native PATH entry');
+    return entry;
+  }).join(delimiter);
+}
 function bindBashPath(path) {
   // Native Git Bash's MSYS startup prepends host bins even with --noprofile.
   // Reset PATH INSIDE Bash, using the trusted shell installation's converter.
-  if (process.platform === 'win32') return `__grapher_path=$(/usr/bin/cygpath -u -p ${quote(path)}) || exit $?\nexport PATH="$__grapher_path"\nunset __grapher_path\n`;
+  if (process.platform === 'win32') {
+    const entries = splitNativePath(path).map(entry => entry || '.');
+    if (entries.some(entry => /[\r\n]/.test(entry))) throw new Error('Invalid native PATH entry');
+    // Convert separate arguments in ONE process. cygpath -p does not honor
+    // native PATH quotes and drops empty entries; '.' retains cwd semantics.
+    return `__grapher_path=$(/usr/bin/cygpath -u -- ${entries.map(quote).join(' ')}) || exit $?\ncase "$__grapher_path" in *:*) printf '%s\\n' 'Native PATH entry cannot be represented in Bash' >&2; exit 1;; esac\nexport PATH="\${__grapher_path//$'\\n'/:}"\nunset __grapher_path\n`;
+  }
   return `export PATH=${quote(path)}\n`;
 }
+function restoreBashCwd(workspaceCwd) {
+  if (workspaceCwd === undefined) return '';
+  if (typeof workspaceCwd !== 'string' || workspaceCwd.includes('\0') || !isAbsolute(workspaceCwd)) {
+    throw new Error('Invalid Bash workspace cwd');
+  }
+  // BASH_ENV runs first. Retain its setup, but restore the selected directory
+  // before path conversion and before any relative tool/activation-hook work.
+  const path = process.platform === 'win32' ? toHostInput(workspaceCwd).replaceAll('\\', '/') : workspaceCwd;
+  return `if [ -n "\${BASH_VERSION-}\${ZSH_VERSION-}" ]; then\n\\builtin cd -- ${quote(path)} || exit $?\nelse\ncd -- ${quote(path)} || exit $?\nfi\n`;
+}
 export function managedBashCommand(command, workspaceCwd) {
-  const restoreWorkspace = workspaceCwd === undefined ? '' : (() => {
-    if (typeof workspaceCwd !== 'string' || workspaceCwd.includes('\0') || !isAbsolute(workspaceCwd)) {
-      throw new Error('Invalid Bash workspace cwd');
-    }
-    // BASH_ENV runs before this command string. Keep its setup effects, but
-    // restore the tool's requested cwd before model-authored relative paths run.
-    const path = process.platform === 'win32' ? toHostInput(workspaceCwd).replaceAll('\\', '/') : workspaceCwd;
-    return `if [ -n "\${BASH_VERSION-}\${ZSH_VERSION-}" ]; then\n\\builtin cd -- ${quote(path)} || exit $?\nelse\ncd -- ${quote(path)} || exit $?\nfi\n`;
-  })();
+  const restoreWorkspace = restoreBashCwd(workspaceCwd);
   if (!active) return restoreWorkspace + command;
   let observer = '';
   if (process.env.GRAPHER_ENVIRONMENT_DISCOVERY) {
@@ -56,9 +91,15 @@ export function managedBashCommand(command, workspaceCwd) {
     // Instrument native tool argv/resolution, never parse model Shell text.
     // Each invocation is scoped to this Bash; temporary exports are not L.
     observer = `__grapher_env_tool() { local __grapher_tool="$1"; shift; local __grapher_exe; __grapher_exe=$(type -P "$__grapher_tool") || return 127; ${quote(helper.replaceAll('\\', '/'))} --grapher-env-tool ${quote(context.replaceAll('\\', '/'))} "$__grapher_tool" "$__grapher_exe" "$@"; }\n`;
-    for (const tool of ['python', 'python3', 'pip', 'pip3', 'conda']) observer += `${tool}() { __grapher_env_tool ${tool} "$@"; }\n`;
+    for (const tool of ['python', 'python3', 'pip', 'pip3', 'conda']) {
+      // Provenance must not replace business wrappers/activation functions.
+      // Delay parsing the definition so an existing alias cannot expand inside
+      // a skipped function declaration (BASH_ENV may enable expand_aliases).
+      const definition = `${tool}() { __grapher_env_tool ${tool} "$@"; }`;
+      observer += `case "$(type -t ${tool} 2>/dev/null || true)" in\nfunction|alias) ;;\n*) eval ${quote(definition)} ;;\nesac\n`;
+    }
   }
-  return bindBashPath(activePath) + observer + restoreWorkspace + command;
+  return restoreWorkspace + bindBashPath(activePath) + observer + command;
 }
 
 export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
@@ -71,11 +112,13 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
   const protectedKeys = key => /^(GRAPHER_|PI_|GIT_)/i.test(key)
     || key.toUpperCase() === 'PYTHONDONTWRITEBYTECODE'
     || /^(PATH|NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|CDPATH|OLDPWD|GLOBIGNORE)$/i.test(key);
-  if (typeof launch.entry !== 'string' || !isAbsolute(launch.entry) ||
-      typeof launch.shell !== 'string' || !isAbsolute(launch.shell) || !existsSync(launch.shell) ||
-      !Array.isArray(launch.path) || !launch.path.length || !launch.path.every(value => typeof value === 'string' && isAbsolute(value)) ||
+  if (!isNativeAbsolute(launch.entry) ||
+      !isNativeAbsolute(launch.shell) || !existsSync(launch.shell) ||
+      !Array.isArray(launch.path) || !launch.path.length || !launch.path.every(value => typeof value === 'string' && !value.includes('\0') && (launch.unboundPath != null || isNativeAbsolute(value))) ||
+      launch.unboundPath != null && (!Array.isArray(launch.unboundPath) || !launch.unboundPath.length || !launch.unboundPath.every(value => typeof value === 'string' && !value.includes('\0'))) ||
       !launch.variables || typeof launch.variables !== 'object' || Array.isArray(launch.variables) ||
       Object.entries(launch.variables).some(([key, value]) => protectedKeys(key) || !/^[a-zA-Z_][a-zA-Z_0-9]*$/.test(key) || typeof value !== 'string' || value.includes('\0')) ||
+      launch.inheritAmbient != null && typeof launch.inheritAmbient !== 'boolean' ||
       launch.hook != null && (typeof launch.hook !== 'string' || launch.hook.includes('\0'))) {
     throw new Error('Invalid native launch binding');
   }
@@ -83,12 +126,21 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
   for (const key of Object.keys(process.env)) {
     if (key.toUpperCase() === 'PATH') delete process.env[key];
   }
-  process.env.PATH = launch.path.join(delimiter);
+  process.env.PATH = joinNativePath(launch.path);
   const loaders = JSON.parse(process.env.GRAPHER_BUSINESS_LOADER_ENV || '{}');
   delete process.env.GRAPHER_BUSINESS_LOADER_ENV;
   for (const [key, value] of Object.entries(loaders)) {
     if (!/^(LD_|DYLD_)/i.test(key) || typeof value !== 'string') throw new Error('Invalid transient business loader binding');
     process.env[key] = value;
+  }
+  const nodeEnvironment = JSON.parse(process.env.GRAPHER_BUSINESS_NODE_ENV || '{}');
+  delete process.env.GRAPHER_BUSINESS_NODE_ENV;
+  if (!nodeEnvironment || typeof nodeEnvironment !== 'object' || Array.isArray(nodeEnvironment)) throw new Error('Invalid transient business Node binding');
+  businessNodeEnvironment = {};
+  for (const [name, value] of Object.entries(nodeEnvironment)) {
+    const key = process.platform === 'win32' ? name.toUpperCase() : name;
+    if (!['NODE_OPTIONS', 'NODE_PATH'].includes(key) || typeof value !== 'string' || value.includes('\0')) throw new Error('Invalid transient business Node binding');
+    businessNodeEnvironment[key] = value;
   }
   for (const [key, value] of Object.entries(launch.variables)) process.env[key] = value;
   runtimeEnvironment = Object.fromEntries(Object.entries(launch.variables).filter(([key]) => runtimePathKey(key)));
@@ -113,7 +165,7 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
     const capture = `process.stdout.write('\\0GRAPHER_ENV\\0'+JSON.stringify(process.env)+'\\0')`;
     // Do not use an env/python/node found on the business PATH for capture.
     const output = spawnSync(launch.shell, ['--noprofile', '--norc', '-c',
-      `${bindBashPath(process.env.PATH)}${launch.hook}\n__grapher_status=$?\nif [ "$__grapher_status" -ne 0 ]; then exit "$__grapher_status"; fi\nwhile IFS= read -r __grapher_key; do\ncase "$__grapher_key" in\n[Nn][Oo][Dd][Ee]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss]|[Nn][Oo][Dd][Ee]_[Pp][Aa][Tt][Hh]|[Bb][Aa][Ss][Hh]_[Ee][Nn][Vv]|[Ee][Nn][Vv]) unset "$__grapher_key";;\nesac\ndone < <(compgen -e)\n${quote(node)} -e ${quote(capture)}`],
+      `${restoreBashCwd(process.cwd())}${bindBashPath(process.env.PATH)}${launch.hook}\n__grapher_status=$?\nif [ "$__grapher_status" -ne 0 ]; then exit "$__grapher_status"; fi\nwhile IFS= read -r __grapher_key; do\ncase "$__grapher_key" in\n[Nn][Oo][Dd][Ee]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss]|[Nn][Oo][Dd][Ee]_[Pp][Aa][Tt][Hh]|[Bb][Aa][Ss][Hh]_[Ee][Nn][Vv]|[Ee][Nn][Vv]) unset "$__grapher_key";;\nesac\ndone < <(compgen -e)\n${quote(node)} -e ${quote(capture)}`],
     { cwd: process.cwd(), env: { ...process.env }, encoding: 'utf8', timeout: 30_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
     if (output.error || output.status !== 0) throw new Error('Declared native activation hook failed; no fallback');
     const marker = '\0GRAPHER_ENV\0';
@@ -130,8 +182,12 @@ export function applyLaunchBinding(file = process.env.GRAPHER_LAUNCH_BINDING) {
   // symlinked environments, case-insensitive volumes and Windows spellings
   // still identify the same declared PATH root.
 
-  if (!existsSync(launch.entry) || !statSync(launch.entry).isFile() ||
-      !samePath(process.env.PATH?.split(delimiter)[0] || '', dirname(launch.entry))) {
+  // The unbound automatic entry is an absolute Bash, not a reason to put
+  // Git/Bash's bundled tools ahead of the user's business executables.
+  const entryFirst = !launch.inheritAmbient || launch.environment != null || launch.hook != null;
+  const firstPath = typeof process.env.PATH === 'string' ? splitNativePath(process.env.PATH)[0] : undefined;
+  if (!existsSync(launch.entry) || !statSync(launch.entry).isFile() || typeof process.env.PATH !== 'string' ||
+      entryFirst && (!isNativeAbsolute(firstPath) || !samePath(firstPath, dirname(launch.entry)))) {
     throw new Error('Declared default entry/PATH is unavailable or changed by the hook; no fallback');
   }
   // Activation may alter business variables, not the runtime's external HOME,
@@ -186,6 +242,15 @@ export function scrubModelShellEnvironment(env, { useCacheScratch = true } = {})
   }
   return scratch;
 }
+/** Business Node settings never enter the trusted host/factory or hook-capture process. */
+export function managedBusinessEnvironment(environment = process.env) {
+  const env = { ...environment };
+  for (const [key, value] of Object.entries(businessNodeEnvironment)) {
+    const explicit = Object.keys(env).some(name => process.platform === 'win32' ? name.toUpperCase() === key : name === key);
+    if (!explicit) env[key] = value;
+  }
+  return env;
+}
 /**
  * Build the model's shell environment. `managed` marks a Grapher role process
  * (always true from the workspace policy); the unmanaged compatibility process
@@ -195,7 +260,7 @@ export function managedBashOptions(options, managed = false) {
   if (!active && !Object.keys(runtimeEnvironment).length && !managed) return options;
   // The bash tool supplies the full shell environment; Pi's user_bash path may
   // omit it entirely. Keep the same Runtime bytecode policy in both cases.
-  const env = { ...(options.env ?? process.env) };
+  const env = managedBusinessEnvironment(options.env ?? process.env);
   env.PYTHONDONTWRITEBYTECODE = '1';
   if (active) {
     for (const key of Object.keys(env)) if (/^PATH$/i.test(key)) delete env[key];

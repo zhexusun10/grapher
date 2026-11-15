@@ -1887,6 +1887,38 @@ fn run_turn(
     })
 }
 
+const PROCESS_FAILURE_TAIL_BYTES: usize = 8 * 1024;
+const PROCESS_FAILURE_TAIL_LINES: usize = 64;
+
+/// Runtime/version trailers are not the failure cause. Keep a bounded context
+/// block instead of reporting just the final line of an uncaught exception.
+fn process_failure_tail(lines: &[String]) -> String {
+    let mut tail = Vec::new();
+    let mut bytes = 0;
+    for line in lines.iter().rev().map(|line| line.trim()).filter(|line| !line.is_empty())
+        .take(PROCESS_FAILURE_TAIL_LINES)
+    {
+        let separator = usize::from(!tail.is_empty());
+        let available = PROCESS_FAILURE_TAIL_BYTES.saturating_sub(bytes + separator);
+        if available == 0 {
+            break;
+        }
+        let mut start = line.len().saturating_sub(available);
+        while !line.is_char_boundary(start) {
+            start += 1;
+        }
+        if start < line.len() {
+            tail.push(&line[start..]);
+            bytes += separator + line.len() - start;
+        }
+        if start > 0 {
+            break;
+        }
+    }
+    tail.reverse();
+    tail.join("\n")
+}
+
 /// Commit a finished turn: park the warm Serial shell, or terminate the process
 /// boundary exactly as before. Parking keeps a source-native Serial session's
 /// shell (and any service it started) alive for the next turn.
@@ -1992,27 +2024,14 @@ fn finish_turn(
         return Err(clean_model_error(&error));
     }
     if !status.success() && !settled_response {
-        let stderr_summary = if !outcome.stderr_tail.trim().is_empty() {
-            outcome.stderr_tail.trim().to_string()
-        } else {
-            outcome
-                .stderr_lines
-                .iter()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .cloned()
-                .unwrap_or_default()
-        };
+        let mut stderr_summary = process_failure_tail(&outcome.stderr_lines);
+        if stderr_summary.is_empty() {
+            stderr_summary = process_failure_tail(std::slice::from_ref(&outcome.stderr_tail));
+        }
         let tail = if !stderr_summary.is_empty() {
             stderr_summary
         } else {
-            outcome
-                .raw_stdout_lines
-                .iter()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .cloned()
-                .unwrap_or_default()
+            process_failure_tail(&outcome.raw_stdout_lines)
         };
         return Err(if tail.is_empty() {
             format!("Pi exited with {status}")
@@ -2512,6 +2531,37 @@ mod tests {
         ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn process_failure_tail_keeps_exception_cause_before_runtime_trailers() {
+        let lines: Vec<_> = [
+            "file:///private/agent.mjs:7", "throw new Error('startup failed')", "",
+            "Error: startup failed", "    at file:///private/agent.mjs:7:1", "",
+            "Node.js v24.16.0", "",
+        ].into_iter().map(String::from).collect();
+        let detail = process_failure_tail(&lines);
+        assert!(detail.contains("Error: startup failed"));
+        assert!(detail.ends_with("Node.js v24.16.0"));
+        assert!(detail.find("Error: startup failed") < detail.find("Node.js v24.16.0"));
+        assert!(process_failure_tail(&[]).is_empty());
+        assert!(process_failure_tail(&["  \n".into()]).is_empty());
+    }
+
+    #[test]
+    fn process_failure_tail_is_bounded_and_preserves_utf8() {
+        let lines = vec!["old noise".repeat(4096), "中文🚀".repeat(4096),
+            "Error: managed startup failed".into(), "Node.js v24.16.0".into()];
+        let detail = process_failure_tail(&lines);
+        assert!(detail.len() <= PROCESS_FAILURE_TAIL_BYTES);
+        assert!(detail.contains("Error: managed startup failed"));
+        assert!(detail.ends_with("Node.js v24.16.0"));
+        assert!(!detail.contains("old noise"));
+        let lines: Vec<_> = (0..100).map(|index| format!("diagnostic {index}")).collect();
+        let detail = process_failure_tail(&lines);
+        assert_eq!(detail.lines().count(), PROCESS_FAILURE_TAIL_LINES);
+        assert!(detail.starts_with("diagnostic 36\n"));
+        assert!(detail.ends_with("diagnostic 99"));
     }
 
     #[test]

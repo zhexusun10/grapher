@@ -42,6 +42,49 @@ fn a_busy_run_does_not_hold_the_primary_runtime_during_unrelated_lookup() {
 }
 
 #[test]
+fn hot_run_lookup_and_deletion_checks_do_not_wait_for_an_unrelated_primary() {
+    for deleted in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = primary(temp.path());
+        let hot = service_for_run(&primary, "hot-conversation", true).unwrap();
+        hot.runtime.lock().unwrap().emit(EventKind::Created {
+            graph: Graph::default(), config: serde_json::from_value(serde_json::json!({
+                "repository":temp.path(), "model":"test/model", "maxParallel":1
+            })).unwrap(), planning_id: None, planning: None,
+        }).unwrap();
+        if deleted { hot.runtime.lock().unwrap().store.delete_run("hot-conversation").unwrap(); }
+        let held = primary.runtime.lock().unwrap();
+        let reader = primary.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            tx.send(service_for_run(&reader, "hot-conversation", false)).unwrap();
+        });
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        drop(held);
+        worker.join().unwrap();
+        invalidate_service_cache(temp.path(), None);
+        let result = result.expect("a hot Run lookup must not wait for the primary Run lock");
+        if deleted {
+            assert_eq!(result.err().as_deref(), Some("Run not found"), "a cached owner cannot resurrect a deleted Run");
+        } else {
+            assert!(Arc::ptr_eq(&result.unwrap(), &hot));
+        }
+    }
+}
+
+#[test]
+fn remembered_service_roots_do_not_keep_runtime_leases_alive() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = primary(temp.path());
+    let child = service_for_run(&service, "weak-address", true).unwrap();
+    invalidate_service_cache(temp.path(), None);
+    drop(child);
+    drop(service);
+    let reopened = Runtime::open_lazy(temp.path());
+    assert!(reopened.is_ok(), "root memoization must retain only weak Service ownership");
+}
+
+#[test]
 fn repository_status_does_not_wait_for_a_busy_primary_runtime() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");

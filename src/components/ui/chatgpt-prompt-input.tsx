@@ -15,6 +15,7 @@ import {
   Play,
 } from "lucide-react";
 import { runtimeService } from "../../services/runtime";
+import { startVisibilityPolling } from "../../services/visibilityPolling";
 import { ComposerDrafts, type RecalledMessage } from "../../services/composerDrafts";
 import { useComposerCommands } from "../../hooks/useComposerCommands";
 import { parseSlashCommand } from "../../services/composerCommands";
@@ -319,25 +320,29 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
 
     // 惰性加载：仅当出现 @ / / 触发词且当前工作区尚未加载时才拉取数据，
     // 避免首页挂载即全量遍历工作区文件与技能目录。
-    const loadCompletions = useCallback(async (force = false) => {
+    const loadCompletions = useCallback(async (force = false): Promise<boolean> => {
       const key = repository || "__default__";
-      if (!force && loadedRepoRef.current === key) return;
-      if (loadingRepoRef.current === key) return;
+      if (!force && loadedRepoRef.current === key) return true;
+      if (loadingRepoRef.current === key) return false;
       const generation = completionsGenerationRef.current;
       loadingRepoRef.current = key;
       try {
-        const [files, skills] = await Promise.all([
+        // Wait for both reads before retrying, so one fast failure cannot
+        // start overlapping workspace scans while the other read is stalled.
+        const [files, skills] = await Promise.allSettled([
           runtimeService.listFiles(repository, force), runtimeService.listSkills(repository, force),
         ]);
-        if (generation !== completionsGenerationRef.current) return;
-        setWorkspaceFiles(files || []);
-        setWorkspaceSkills(skills || []);
+        if (generation !== completionsGenerationRef.current) return false;
+        if (files.status === "fulfilled") setWorkspaceFiles(files.value);
+        if (skills.status === "fulfilled") setWorkspaceSkills(skills.value);
+        if (files.status === "rejected") throw files.reason;
+        if (skills.status === "rejected") throw skills.reason;
         loadedRepoRef.current = key;
+        return true;
       } catch (err) {
-        if (generation !== completionsGenerationRef.current) return;
+        if (generation !== completionsGenerationRef.current) return false;
         console.warn("Failed to load completions:", err);
-        setWorkspaceFiles([]);
-        setWorkspaceSkills([]);
+        return false;
       } finally {
         if (generation === completionsGenerationRef.current) loadingRepoRef.current = null;
       }
@@ -422,12 +427,12 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
     }, [triggerStart, triggerQuery, dismissedTrigger]);
 
-    // 触发词（@ 或 /）首次出现时才加载当前工作区的补全数据（已加载则跳过）
+    // Failed metadata is retryable, not an empty completion catalog. Keep the
+    // retry bounded and stop it when the menu closes or the scope changes.
     useEffect(() => {
-      if (triggerMode !== null) {
-        loadCompletions();
-      }
-    }, [triggerMode, repository, loadCompletions]);
+      if (triggerMode === null || !showSuggestions) return;
+      return startVisibilityPolling(async () => await loadCompletions() ? null : 2000);
+    }, [triggerMode, showSuggestions, repository, loadCompletions]);
 
     const suggestions = useMemo<SuggestionCandidate[]>(() => {
       if (!triggerMode) return [];
@@ -1070,8 +1075,11 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
       restProps.onKeyDown?.(e);
       if (e.defaultPrevented) return;
-      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey &&
-          !e.nativeEvent.isComposing && !composingRef.current && e.keyCode !== 229) {
+      // Candidate navigation belongs to the IME, even while a completion menu
+      // is open. Its final Enter may arrive just after compositionend.
+      if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229 ||
+          (e.key === "Enter" && Date.now() - compositionEndedAtRef.current < 50)) return;
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
         const key = e.code || `Key${e.key.toUpperCase()}`;
         if ((key === "KeyQ" && onWithdraw) || key === "KeyS") {
           e.preventDefault();
@@ -1085,7 +1093,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
       if (showSuggestions) {
         if (e.key === "Escape") {
-          if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229) return;
           e.preventDefault();
           e.stopPropagation();
           setDismissedTrigger({ start: triggerStart, query: triggerQuery });
@@ -1105,7 +1112,6 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
             return;
           }
           if (e.key === "Enter" || e.key === "Tab") {
-            if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229) return;
             e.preventDefault();
             if (suggestions[activeIndex]) {
               applySuggestion(suggestions[activeIndex]);
@@ -1116,13 +1122,9 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
       }
 
       if (e.key === "Enter" && !e.shiftKey) {
-        // IME candidate selection (including the final Enter) is not a send.
-        if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229 ||
-            Date.now() - compositionEndedAtRef.current < 50) return;
         e.preventDefault();
         handleSubmitAction();
       } else if (e.key === "Escape") {
-        if (e.nativeEvent.isComposing || composingRef.current || e.keyCode === 229) return;
         if (isExpanded) {
           e.preventDefault();
           e.stopPropagation();

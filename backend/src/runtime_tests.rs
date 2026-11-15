@@ -52,7 +52,6 @@ fn setup(git: bool, graph: Graph) -> (TempDir, PathBuf, Runtime) {
     }))
     .unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    // Test-only wording; production feedback notices await user approval.
     fs::create_dir_all(runtime.root.join("prompts")).unwrap();
     fs::write(runtime.root.join("prompts/feedback-returned.md"), "{{node}}\n[fixture: feedback returned from {{target}}]").unwrap();
     fs::write(runtime.root.join("prompts/feedback-updated.md"), "{{node}}\n[fixture: upstream {{target}} updated]").unwrap();

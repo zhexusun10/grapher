@@ -123,13 +123,24 @@ pub(super) fn write_workspace_attachment(
     let raw: String = argument(&body, "filename")?;
     let name = filename(&raw)?;
     let content: String = argument(&body, "content")?;
-    let bytes = decode_base64(
-        content
+    let data = if content
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+    {
+        let (header, data) = content
             .split_once(',')
-            .map(|(_, data)| data)
-            .unwrap_or(&content),
-    )
-    .ok_or("Invalid base64 attachment content")?;
+            .ok_or("Invalid base64 attachment content")?;
+        if !header
+            .rsplit_once(';')
+            .is_some_and(|(_, encoding)| encoding.eq_ignore_ascii_case("base64"))
+        {
+            return Err("Invalid base64 attachment content".into());
+        }
+        data
+    } else {
+        content.as_str()
+    };
+    let bytes = decode_base64(data).ok_or("Invalid base64 attachment content")?;
     // The optional client UUID is an idempotency key, not a workspace hint.
     // Target ownership is still resolved from the current backend state.
     let id = argument::<Option<String>>(&body, "attachmentId")?

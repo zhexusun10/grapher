@@ -37,6 +37,21 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     command.extend_from_slice(args);
     workspace::project_git(root, &command)
 }
+/// Consume the five metadata lines of one `ls-files --debug -z` record.
+/// Share the flag parser with the allocation-free fast-path probe, so intent
+/// flags cannot be missed merely because `ls-files -v` reports an ordinary H.
+fn read_index_flags(rest: &mut &str) -> Result<u32, String> {
+    let mut flags = None;
+    for _ in 0..5 {
+        let (line, after) = rest.split_once('\n').ok_or("Incomplete native index flags")?;
+        if let Some((_, value)) = line.split_once("flags: ") {
+            flags = Some(u32::from_str_radix(value.trim(), 16).map_err(|e| e.to_string())? & 0x6000_8000);
+        }
+        *rest = after;
+    }
+    flags.ok_or_else(|| "Missing native index flags".into())
+}
+
 fn index(root: &Path) -> Result<Index, String> {
     let output = git(root, &["ls-files", "--stage", "--debug", "-z"])?;
     let mut rest = output.as_str();
@@ -57,23 +72,10 @@ fn index(root: &Path) -> Result<Index, String> {
             return Err("Invalid native index entry".into());
         }
         rest = after;
-        let mut flags = None;
-        // Git's --debug record has five metadata lines after each NUL path.
-        for _ in 0..5 {
-            let (line, after) = rest
-                .split_once('\n')
-                .ok_or("Incomplete native index flags")?;
-            if let Some((_, value)) = line.split_once("flags: ") {
-                flags = Some(
-                    u32::from_str_radix(value.trim(), 16).map_err(|e| e.to_string())? & 0x6000_8000,
-                );
-            }
-            rest = after;
-        }
         let item = Item {
             mode: fields[0].into(),
             oid: fields[1].into(),
-            flags: flags.ok_or("Missing native index flags")?,
+            flags: read_index_flags(&mut rest)?,
         };
         match fields[2] {
             "0" => {
@@ -136,22 +138,26 @@ fn delta(root: &Path) -> Result<Delta, String> {
         .collect())
 }
 
-/// `diff-index` only compares content and modes, so an index whose entries
-/// differ solely by `assume-unchanged`/`skip-worktree` flags looks clean while
-/// `compose` must still carry those flags. `ls-files -v` tags every ordinary
-/// cached entry with `H`; any other tag (lowercase assume-unchanged, `S`
-/// skip-worktree, unmerged, ...) needs the full composition.
+/// Content/mode comparisons cannot prove that index flags match HEAD. In
+/// particular, intent-to-add on an already committed empty blob looks clean
+/// to `diff-index` and is still tagged H by `ls-files -v`. Read debug flags in
+/// that same probe, without allocating a complete path/item map.
 fn index_has_flag_delta(root: &Path, workspace_root: bool) -> Result<bool, String> {
-    let args = ["ls-files", "-v", "-z"];
+    let args = ["ls-files", "-v", "--debug", "-z"];
     let output = if workspace_root {
         workspace::project_git(root, &args)?
     } else {
         git(root, &args)?
     };
-    Ok(output
-        .split('\0')
-        .filter(|entry| !entry.is_empty())
-        .any(|entry| entry.as_bytes().first() != Some(&b'H')))
+    let mut rest = output.as_str();
+    while !rest.is_empty() {
+        let (header, after) = rest.split_once('\0').ok_or("Incomplete native index entry")?;
+        rest = after;
+        if header.as_bytes().first() != Some(&b'H') || read_index_flags(&mut rest)? != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// No record has a staged delta and the workspace index already follows its own
@@ -188,6 +194,192 @@ fn nothing_staged(
         return Ok(false);
     }
     Ok(matches!(index_has_flag_delta(workspace, true), Ok(false)))
+}
+
+/// Keep filesystem aliases out of the same skeleton. Compare every prefix,
+/// not just leaf names: Dir/a and dir/b can share a physical parent even when
+/// the leaves differ. Isolate non-ASCII paths conservatively because host
+/// case/Unicode equivalence is not defined by Rust's string case folding.
+fn intent_batches<'a>(names: &[&'a str]) -> Vec<Vec<&'a str>> {
+    let mut batches = Vec::new();
+    let mut pending = Vec::new();
+    let mut spellings = BTreeMap::<String, String>::new();
+    for &name in names {
+        let mut prefix = String::new();
+        let prefixes: Vec<_> = name.split('/').map(|part| {
+            if !prefix.is_empty() { prefix.push('/'); }
+            prefix.push_str(part);
+            prefix.clone()
+        }).collect();
+        let isolated = !name.is_ascii();
+        let conflict = prefixes.iter().any(|prefix| {
+            spellings.get(&prefix.to_ascii_lowercase()).is_some_and(|prior| prior != prefix)
+        });
+        if isolated || conflict {
+            if !pending.is_empty() { batches.push(std::mem::take(&mut pending)); }
+            spellings.clear();
+        }
+        if isolated {
+            batches.push(vec![name]);
+        } else {
+            for prefix in prefixes { spellings.insert(prefix.to_ascii_lowercase(), prefix); }
+            pending.push(name);
+        }
+    }
+    if !pending.is_empty() { batches.push(pending); }
+    batches
+}
+
+/// Restore intent-to-add from a disposable, metadata-owned worktree skeleton.
+/// `add -N` needs a path on disk even though it records no file content. Never
+/// depend on or recreate that path in the real (possibly unmaterialized) project.
+fn restore_intent(path: &Path, names: &[&str]) -> Result<(), String> {
+    let metadata = PathBuf::from(workspace::project_git(path, &["rev-parse", "--absolute-git-dir"])?);
+    let current = index(&metadata)?;
+    let owner = crate::workspace_view::owner(path).unwrap_or(path);
+    let storage = workspace::private_git_dir(owner).unwrap_or_else(|| metadata.clone());
+    let scratch = storage.join(format!("intent-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&scratch).map_err(|e| e.to_string())?;
+    struct Scratch(Option<PathBuf>);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if let Some(path) = &self.0 { let _ = fs::remove_dir_all(path); }
+        }
+    }
+    let mut lease = Scratch(Some(scratch.clone()));
+    let mut remove = Vec::new();
+    let mut batches = Vec::new();
+    for (batch, names) in intent_batches(names).into_iter().enumerate() {
+        let worktree = scratch.join(batch.to_string());
+        fs::create_dir(&worktree).map_err(|e| e.to_string())?;
+        let mut groups = [Vec::new(), Vec::new(), Vec::new()];
+        for name in names {
+            let relative = Path::new(name);
+            if !relative.components().all(|part| matches!(part, std::path::Component::Normal(_))) {
+                return Err("Unsafe intent-to-add path".into());
+            }
+            let item = current.get(name).ok_or("Missing intent-to-add index entry")?;
+            let target = worktree.join(relative);
+            fs::create_dir_all(target.parent().ok_or("Missing intent-to-add parent")?).map_err(|e| e.to_string())?;
+            let group = match item.mode.as_str() {
+                "100644" => 0,
+                "100755" => 1,
+                "120000" => 2,
+                _ => return Err("Unsupported intent-to-add entry mode".into()),
+            };
+            if group == 2 {
+                crate::workspace_symlinks::materialize(&worktree, &target, &crate::workspace_symlinks::Link {
+                    value: "intent-placeholder".into(), project_absolute: false,
+                    kind: crate::workspace_symlinks::Kind::SymbolicFile,
+                })?;
+            } else {
+                fs::write(&target, []).map_err(|e| e.to_string())?;
+            }
+            remove.extend_from_slice(name.as_bytes());
+            remove.push(0);
+            groups[group].extend_from_slice(b":(literal)");
+            groups[group].extend_from_slice(name.as_bytes());
+            groups[group].push(0);
+        }
+        batches.push((worktree, groups));
+    }
+    // An existing ordinary cache entry is not made intent-to-add by `add -N`.
+    workspace::project_git_bytes(path, &[
+        "-c", "core.ignorecase=false", "update-index", "--force-remove", "-z", "--stdin",
+    ], Some(&remove))?;
+    for (worktree, groups) in batches {
+        for (group, input) in groups.iter().enumerate().filter(|(_, input)| !input.is_empty()) {
+            let mut args = vec![
+                "--git-dir", metadata.to_str().ok_or("Invalid native index path")?,
+                "--work-tree", worktree.to_str().ok_or("Invalid intent worktree path")?,
+                "-c", "core.ignorestat=false", "-c", "core.symlinks=true",
+                // Recorded names/modes, not user checkout policies, define
+                // this private skeleton. Stored configuration is untouched.
+                "-c", "core.ignorecase=false", "-c", "core.sparseCheckout=false",
+                "add", "-f", "-N", "--pathspec-from-file=-", "--pathspec-file-nul",
+            ];
+            if group < 2 { args.push(if group == 1 { "--chmod=+x" } else { "--chmod=-x" }); }
+            workspace::project_git_bytes(path, &args, Some(input))?;
+        }
+    }
+    fs::remove_dir_all(&scratch).map_err(|e| e.to_string())?;
+    lease.0 = None;
+    Ok(())
+}
+
+/// Restore flags only for entries just removed/reinserted by --index-info.
+/// Insertions disable core.ignorestat so flags start at zero; unchanged entries never
+/// enter this pass. NUL-delimited stdin keeps unusual paths literal and avoids
+/// one (or two) Git processes and index rewrites per changed file.
+fn restore_flags<'a>(
+    path: &Path,
+    entries: impl IntoIterator<Item = (&'a str, u32)>,
+) -> Result<(), String> {
+    let mut intent = Vec::new();
+    let mut assume = Vec::new();
+    let mut skip = Vec::new();
+    for (name, flags) in entries {
+        if flags & 0x2000_0000 != 0 {
+            intent.push(name);
+        }
+        for (bit, input) in [(0x8000, &mut assume), (0x4000_0000, &mut skip)] {
+            if flags & bit != 0 {
+                input.extend_from_slice(name.as_bytes());
+                input.push(0);
+            }
+        }
+    }
+    if !intent.is_empty() {
+        restore_intent(path, &intent)?;
+    }
+    for (flag, input) in [("--assume-unchanged", assume), ("--skip-worktree", skip)] {
+        if !input.is_empty() {
+            workspace::project_git_bytes(
+                path, &["update-index", flag, "-z", "--stdin"], Some(&input),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Install the selected index with Git's own lock/rename protocol. Copying
+/// directly onto `index` ignores foreign locks and can leave a truncated index
+/// if preparation stops mid-copy. These disposable bytes can be rebuilt, but a
+/// failed copy must not damage the previously retained native staging state.
+fn install_selected_index(source: &Path, index: &Path) -> Result<(), String> {
+    let mut lock_name = index.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    let lock_path = PathBuf::from(lock_name);
+    let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&lock_path)
+        .map_err(|e| format!("Cannot reserve native index lock {}: {e}", lock_path.display()))?;
+    struct IndexLock(Option<PathBuf>);
+    impl Drop for IndexLock {
+        fn drop(&mut self) {
+            if let Some(path) = &self.0 { let _ = fs::remove_file(path); }
+        }
+    }
+    let mut lease = IndexLock(Some(lock_path.clone()));
+    let input = match fs::File::open(source) {
+        Ok(file) => Some(file),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.to_string()),
+    };
+    if let Some(mut input) = input {
+        std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+        output.sync_all().map_err(|e| e.to_string())?;
+        drop(output);
+        fs::rename(&lock_path, index).map_err(|e| e.to_string())?;
+        // A new Git writer may now acquire index.lock; never unlink its lease.
+        lease.0 = None;
+    } else {
+        drop(output);
+        match fs::remove_file(index) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
 }
 
 /// Each record is an immutable project Git database, never graph Git. Merge
@@ -244,12 +436,7 @@ pub(crate) fn compose(
         &["rev-parse", "--path-format=absolute", "--git-path", "index"],
     )?);
     // Preserve the selected input's native index extensions and cache flags.
-    let source_index = selected.join("index");
-    if source_index.is_file() {
-        fs::copy(source_index, &index_path).map_err(|e| e.to_string())?;
-    } else if index_path.exists() {
-        fs::remove_file(&index_path).map_err(|e| e.to_string())?;
-    }
+    install_selected_index(&selected.join("index"), &index_path)?;
     let selected_head = git(selected, &["rev-parse", "--verify", "HEAD"]).ok();
     let current_head = workspace::project_git(path, &["rev-parse", "--verify", "HEAD"]).ok();
     if selected_head != current_head {
@@ -318,52 +505,25 @@ pub(crate) fn compose(
         }
         changed.push(name);
     }
+    // core.ignorestat otherwise adds CE_VALID to every inserted entry, even
+    // when the recorded input explicitly did not assume it was unchanged.
     workspace::project_git_bytes(
         path,
-        &["update-index", "-z", "--index-info"],
+        &["-c", "core.ignorestat=false", "update-index", "-z", "--index-info"],
         Some(&updates),
     )?;
-    for name in changed {
-        if let Some(item) = wanted.get(name) {
-            if item.flags & 0x2000_0000 != 0 {
-                workspace::project_git(
-                    path,
-                    &["add", "-f", "-N", "--", &format!(":(literal){name}")],
-                )?;
-            }
-            workspace::project_git(
-                path,
-                &[
-                    "update-index",
-                    if item.flags & 0x8000 != 0 {
-                        "--assume-unchanged"
-                    } else {
-                        "--no-assume-unchanged"
-                    },
-                    "--",
-                    name,
-                ],
-            )?;
-            workspace::project_git(
-                path,
-                &[
-                    "update-index",
-                    if item.flags & 0x4000_0000 != 0 {
-                        "--skip-worktree"
-                    } else {
-                        "--no-skip-worktree"
-                    },
-                    "--",
-                    name,
-                ],
-            )?;
-        }
-    }
+    restore_flags(path, changed.into_iter().filter_map(|name| {
+        wanted.get(name).map(|item| (name.as_str(), item.flags))
+    }))?;
     if index(&metadata)? != wanted {
         return Err("Native project index did not preserve the composed staging state".into());
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "workspace_git_index_tests.rs"]
+mod batching_tests;
 
 #[cfg(test)]
 mod tests {

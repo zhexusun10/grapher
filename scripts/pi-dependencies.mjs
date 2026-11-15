@@ -76,16 +76,19 @@ export function verifyDependencyProfile(root) {
   return { manifest, lock };
 }
 
-export function verifyPiDependencies(root) {
+export function verifyPiDependencies(root, { installationRoot = root } = {}) {
+  // The caller's trusted profile/workspace manifests define expected identity;
+  // an inspected cache supplies only the installed dependency metadata.
   const { manifest, lock } = verifyDependencyProfile(root);
-  const source = join(root, 'pi');
+  const source = join(installationRoot, 'pi');
+  const expectedSource = join(root, 'pi');
   const modules = join(source, 'node_modules');
   const markerPath = join(modules, '.grapher-pi-dependencies.json');
   if (!existsSync(markerPath) || JSON.stringify(json(markerPath)) !== JSON.stringify(dependencyProfileHashes(root))) {
     throw new Error('Pi dependencies are missing or use an unreviewed install; run npm run pi:setup');
   }
   const internal = new Map(corePackages.map(directory => {
-    const pkg = json(join(source, 'packages', directory, 'package.json'));
+    const pkg = json(join(expectedSource, 'packages', directory, 'package.json'));
     return [`node_modules/${pkg.name}`, directory];
   }));
   for (const [path, entry] of Object.entries(lock.packages)) {
@@ -106,7 +109,7 @@ export function verifyPiDependencies(root) {
       const key = relative(source, path).replaceAll('\\', '/');
       const metadata = join(path, 'package.json');
       if (internal.has(key)) {
-        if (hash(metadata) !== hash(join(source, 'packages', internal.get(key), 'package.json'))) throw new Error(`Pi workspace binding mismatch: ${key}`);
+        if (hash(metadata) !== hash(join(expectedSource, 'packages', internal.get(key), 'package.json'))) throw new Error(`Pi workspace binding mismatch: ${key}`);
       } else if (!lock.packages[key]) {
         throw new Error(`Extraneous Pi dependency: ${key}; run npm run pi:setup`);
       }

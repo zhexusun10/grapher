@@ -57,11 +57,42 @@ async function callBody<T>(operation: string, fields: Record<string, unknown>, s
 }
 const CATALOG_STORAGE_KEY = "grapher_provider_catalog_cache";
 
-function loadStorageCatalog(): ProviderCatalog | null {
+const record = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+const strings = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every(item => typeof item === "string");
+
+// This is only a disposable browser hint, not the Provider/Auth authority.
+// Discard malformed caches as a whole rather than publishing partial choices
+// or allowing a parsed object to crash a composer before any refresh can run.
+function validCachedCatalog(value: unknown): value is ProviderCatalog {
+  if (!record(value) || !Array.isArray(value.providers) || !Array.isArray(value.models) ||
+      (value.warning != null && typeof value.warning !== "string") ||
+      (value.hiddenModels !== undefined && !strings(value.hiddenModels))) return false;
+  return value.providers.every(provider => record(provider) &&
+    typeof provider.id === "string" && typeof provider.name === "string" && typeof provider.configured === "boolean" &&
+    Array.isArray(provider.methods) && provider.methods.every(method => record(method) &&
+      ["api_key", "oauth"].includes(method.id as string) && typeof method.name === "string") &&
+    ["authType", "authSource", "authEnvVar"].every(key => provider[key] == null || typeof provider[key] === "string")) &&
+    value.models.every(model => record(model) && ["provider", "id", "name"].every(key => typeof model[key] === "string") &&
+      typeof model.available === "boolean" &&
+      (model.api === undefined || typeof model.api === "string") &&
+      (model.contextWindow === undefined || (typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow))) &&
+      (model.hidden === undefined || typeof model.hidden === "boolean") &&
+      (model.thinkingLevels === undefined || strings(model.thinkingLevels)) &&
+      (model.thinkingLevelFallbacks === undefined || (record(model.thinkingLevelFallbacks) &&
+        Object.values(model.thinkingLevelFallbacks).every(level => typeof level === "string"))));
+}
+
+export function loadStorageCatalog(storage?: Pick<Storage, "getItem">): ProviderCatalog | null {
   try {
-    if (typeof sessionStorage !== "undefined") {
-      const saved = sessionStorage.getItem(CATALOG_STORAGE_KEY);
-      if (saved) return JSON.parse(saved);
+    const store = storage ?? (typeof sessionStorage !== "undefined" ? sessionStorage : undefined);
+    if (store) {
+      const saved = store.getItem(CATALOG_STORAGE_KEY);
+      if (saved) {
+        const value: unknown = JSON.parse(saved);
+        return validCachedCatalog(value) ? value : null;
+      }
     }
   } catch {}
   return null;

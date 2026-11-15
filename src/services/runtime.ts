@@ -402,15 +402,12 @@ export const runtimeService = {
     }
     const ticket = (filesRequests.get(key) ?? 0) + 1;
     filesRequests.set(key, ticket);
-    try {
-      const res = await request<{ files: string[] }>("list_files", repository ? { repository } : {});
-      const files = res?.files || [];
-      if (filesRequests.get(key) === ticket) filesCache.set(key, files);
-      return files;
-    } catch (err) {
-      console.warn("Failed to list files:", err);
-      return [];
-    }
+    // A failed lookup is not an authoritative empty workspace. Let the
+    // composer retry while retaining any previously successful cache.
+    const res = await request<{ files: string[] }>("list_files", repository ? { repository } : {});
+    const files = res?.files || [];
+    if (filesRequests.get(key) === ticket) filesCache.set(key, files);
+    return files;
   },
   listSkills: async (repository?: string, forceRefresh = false): Promise<SkillItem[]> => {
     const key = repository || "__default__";
@@ -419,16 +416,11 @@ export const runtimeService = {
     }
     const ticket = (skillsRequests.get(key) ?? 0) + 1;
     skillsRequests.set(key, ticket);
-    try {
-      const res = await request<{ skills: SkillItem[] }>("list_skills", repository ? { repository } : {});
-      const skills = res?.skills || [];
-      // An empty refresh is authoritative too; removed skills must stay removed.
-      if (skillsRequests.get(key) === ticket) skillsCache.set(key, skills);
-      return skills;
-    } catch (err) {
-      console.warn("Failed to list skills:", err);
-      return skillsCache.get(key) || [];
-    }
+    const res = await request<{ skills: SkillItem[] }>("list_skills", repository ? { repository } : {});
+    const skills = res?.skills || [];
+    // An empty refresh is authoritative too; removed skills must stay removed.
+    if (skillsRequests.get(key) === ticket) skillsCache.set(key, skills);
+    return skills;
   },
   writeWorkspaceFile: async (
     file: File,

@@ -55,17 +55,22 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
           if (results.length === 0) tool = { name: 'node', arguments: { nodes: [
             { name: 'alpha', task: 'BROWSER_MAC_ALPHA' },
             { name: 'beta', task: 'BROWSER_MAC_BETA' },
+            { name: 'gamma', task: 'BROWSER_MAC_GAMMA' },
+            { name: 'delta', task: 'BROWSER_MAC_DELTA' },
             { name: 'join', task: 'BROWSER_MAC_JOIN' },
           ] } };
           if (results.length === 1) tool = { name: 'edge', arguments: { edges: [
             { from: 'alpha', to: 'join' }, { from: 'beta', to: 'join' },
+            { from: 'gamma', to: 'join' }, { from: 'delta', to: 'join' },
           ] } };
         } else {
           const command = prompt.includes('BROWSER_MAC_ALPHA')
             ? 'test "$(cat input.txt)" = "unstaged latest" && test ! -e .DS_Store && printf alpha > alpha.txt'
             : prompt.includes('BROWSER_MAC_BETA') ? 'printf beta > beta.txt'
+              : prompt.includes('BROWSER_MAC_GAMMA') ? 'printf gamma > gamma.txt'
+              : prompt.includes('BROWSER_MAC_DELTA') ? 'printf delta > delta.txt'
               : prompt.includes('BROWSER_MAC_JOIN')
-                ? 'test "$(cat alpha.txt)" = alpha && test "$(cat beta.txt)" = beta && printf combined > result.txt'
+                ? 'test "$(cat alpha.txt)" = alpha && test "$(cat beta.txt)" = beta && test "$(cat gamma.txt)" = gamma && test "$(cat delta.txt)" = delta && test "$(cat .DS_Store)" = "finder metadata" && printf combined > result.txt'
                 : prompt.includes('BROWSER_MAC_SERIAL') ? 'printf first > serial.txt'
                   : prompt.includes('BROWSER_MAC_FOLLOWUP') ? 'test "$(cat serial.txt)" = first && printf continued > serial.txt'
                     : undefined;
@@ -146,7 +151,7 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
       };
       const bootstrap = await until(async () => { try { return await api('bootstrap'); } catch { return false; } }, 'backend startup');
       const config = { ...bootstrap.config, repository: project, model: 'browser-local/native', thinkingLevel: 'off',
-        maxParallel: 2, autoApprove: false, postTaskReview: false };
+        maxParallel: 2, isolateParallelNodes: true, autoApprove: false, postTaskReview: false };
       await api('save_config', { config });
       browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || 'chromium', headless: true });
       context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'en-US', reducedMotion: 'reduce' });
@@ -166,7 +171,9 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
       const composer = page.locator('.landing-screen textarea');
       await composer.waitFor({ timeout: 30_000 });
       await page.getByRole('button', { name: 'Graph', exact: true }).click();
-      await composer.fill('BROWSER_MAC create two branches and combine their results');
+      // Four ready nodes select a private batch; maxParallel only caps workers.
+      // The single join then runs source-native after that batch is delivered.
+      await composer.fill('BROWSER_MAC create four branches and combine their results');
       await composer.press('Enter');
       const approve = page.getByRole('button', { name: 'Approve', exact: true });
       await approve.waitFor({ timeout: 120_000 });
@@ -175,8 +182,8 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
       const runId = runs[0];
       const planned = await api('snapshot', { runId });
       assert.equal(planned.phase, 'awaiting_approval');
-      assert.equal(planned.graph.nodes.length, 3);
-      assert.equal(planned.graph.edges.length, 2);
+      assert.equal(planned.graph.nodes.length, 5);
+      assert.equal(planned.graph.edges.length, 4);
       await assert.rejects(readFile(join(project, 'result.txt')), { code: 'ENOENT' }, 'no node runs before approval');
       await approve.click();
       await page.getByRole('button', { name: 'Approve and start', exact: true }).click();
@@ -186,7 +193,16 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
         return state.phase === 'completed' && state;
       }, 'Graph publication');
       assert.equal(completed.publication.status, 'completed');
-      for (const name of ['alpha', 'beta', 'join']) assert.equal(completed.nodes[name].status, 'completed');
+      for (const name of ['alpha', 'beta', 'gamma', 'delta', 'join']) {
+        assert.equal(completed.nodes[name].status, 'completed');
+        const execution = completed.executions.find(execution => execution.node === name);
+        assert.ok(execution, `${name} must have an execution`);
+        // Delivered private slots may already be reclaimed at completion.
+        const cwd = resolve(execution.worktree).normalize('NFD');
+        const source = resolve(project).normalize('NFD');
+        if (name === 'join') assert.equal(cwd, source);
+        else assert.notEqual(cwd, source, `${name} must use a private workspace`);
+      }
       assert.equal(await readFile(join(project, 'result.txt'), 'utf8'), 'combined');
       assert.equal(await readFile(join(project, 'input.txt'), 'utf8'), 'unstaged latest\n');
       assert.equal(await readFile(join(project, '.DS_Store'), 'utf8'), 'finder metadata');

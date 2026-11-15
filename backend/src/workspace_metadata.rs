@@ -16,14 +16,13 @@ pub(crate) struct Extra {
     efs: bool,
 }
 
-// `security` is the SDDL/inheritance history of the source path. Windows
-// re-inherits ACLs from the destination parent on restore, so it must not make
-// two project views with the same explicit permissions compare unequal. It is
-// still serialized in the record for restore. On Unix, numeric owner/group IDs
-// describe the host copy rather than the private project view.
+// Captured security is normalized native ACL evidence, not disposable storage
+// history. ACL-only edits must participate in composition and verification.
+// Unix numeric owner/group IDs remain host ownership, not portable metadata.
 impl PartialEq for Extra {
     fn eq(&self, other: &Self) -> bool {
         self.attributes == other.attributes
+            && self.security == other.security
             && self.protected == other.protected
             && self.flags == other.flags
             && (cfg!(unix) || self.owner == other.owner)
@@ -32,43 +31,41 @@ impl PartialEq for Extra {
 }
 impl Eq for Extra {}
 
-/// Borrowed checksum projection only. Raw persisted metadata still includes
-/// `security`; legacy owner values must survive until checksum validation.
-pub(crate) struct WithoutSecurity<'a>(pub(crate) &'a Extra);
-impl Serialize for WithoutSecurity<'_> {
+/// Sorted checksum projection. Schema 5 omitted ACLs; schema 6 binds them.
+/// Legacy owners survive checksum validation before host normalization.
+pub(crate) struct ForViewIdentity<'a>(pub(crate) &'a Extra, pub(crate) bool);
+impl Serialize for ForViewIdentity<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let Extra { attributes, security: _, protected, flags, owner, efs } = self.0;
+        let Extra { attributes, security, protected, flags, owner, efs } = self.0;
         let mut map = serializer.serialize_map(None)?;
+        // Match serde_json::Value's sorted object keys without building a DOM.
         map.serialize_entry("attributes", attributes)?;
-        map.serialize_entry("protected", protected)?;
+        map.serialize_entry("efs", efs)?;
         map.serialize_entry("flags", flags)?;
         map.serialize_entry("owner", owner)?;
-        map.serialize_entry("efs", efs)?;
+        map.serialize_entry("protected", protected)?;
+        if self.1 { map.serialize_entry("security", security)?; }
         map.end()
     }
 }
 
 impl Extra {
-    /// Exact equality of serialized view evidence with `security` omitted.
-    /// Unlike portable metadata equality, legacy owner fields still count on
-    /// Unix: load validates their checksum before stripping host-managed data.
-    pub(crate) fn eq_for_view_identity(&self, other: &Self) -> bool {
-        let Self { attributes, security: _, protected, flags, owner, efs } = self;
+    /// Match the selected checksum format. Unlike portable equality, legacy
+    /// owner fields count until load validates and normalizes their evidence.
+    pub(crate) fn eq_for_view_identity(&self, other: &Self, security: bool) -> bool {
+        let Self { attributes, security: acl, protected, flags, owner, efs } = self;
         attributes == &other.attributes
+            && (!security || acl == &other.security)
             && *protected == other.protected
             && *flags == other.flags
             && *owner == other.owner
             && *efs == other.efs
     }
 
-    /// Full equality, including the recorded Windows security descriptor.
-    /// The derived `PartialEq` deliberately ignores `security` so two
-    /// source-equivalent views compare equal; materialization uses this
-    /// stricter form so an entry is left untouched only when even its ACL,
-    /// streams, attributes and encryption state already match what `restore`
-    /// would write. Unix UID/GID are host ownership and do not participate.
-    /// Skipping an identical restore is a pure no-op for project metadata.
+    /// Complete portable metadata equality for skipping a redundant restore.
+    /// ACLs, streams, attributes and encryption must already match; Unix UID/GID
+    /// remain host ownership and do not participate.
     pub(crate) fn identical(&self, other: &Self) -> bool {
         self.attributes == other.attributes
             && self.security == other.security
@@ -84,11 +81,20 @@ impl Extra {
     pub(crate) fn strip_system_managed(&mut self) {
         self.attributes.retain(|(name, _)| !is_system_managed(name));
         self.flags &= !MACOS_HOST_MANAGED_FLAGS;
+        #[cfg(target_os = "macos")]
+        normalize_empty_acl(&mut self.security);
         #[cfg(unix)]
         {
             self.owner = None;
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_empty_acl(security: &mut Vec<u8>) {
+    // acl_to_text represents an empty ACL by a header; legacy captures may
+    // instead contain no bytes (ENOENT/ENOTSUP). Both mean no extended rules.
+    if security.trim_ascii() == b"!#acl 1" { security.clear(); }
 }
 
 fn is_system_managed(name: &str) -> bool {
@@ -149,6 +155,7 @@ mod platform {
         fn acl_get_link_np(path: *const libc::c_char, kind: i32) -> *mut libc::c_void;
         fn acl_to_text(acl: *mut libc::c_void, length: *mut isize) -> *mut libc::c_char;
         fn acl_from_text(text: *const libc::c_char) -> *mut libc::c_void;
+        fn acl_init(count: i32) -> *mut libc::c_void;
         fn acl_set_link_np(path: *const libc::c_char, kind: i32, acl: *mut libc::c_void) -> i32;
         fn acl_free(value: *mut libc::c_void) -> i32;
         fn lchflags(path: *const libc::c_char, flags: u32) -> i32;
@@ -174,12 +181,13 @@ mod platform {
             }
             return Err(std::io::Error::last_os_error().to_string());
         }
-        let value =
+        let mut value =
             unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length as usize) }.to_vec();
         unsafe {
             acl_free(text.cast());
             acl_free(acl);
         }
+        normalize_empty_acl(&mut value);
         Ok(value)
     }
     unsafe fn list(p: *const libc::c_char, out: *mut libc::c_char, size: usize) -> isize {
@@ -405,9 +413,13 @@ mod platform {
             }
         }
         #[cfg(target_os = "macos")]
-        if !extra.security.is_empty() {
+        if !extra.security.is_empty() || !acl(&p)?.is_empty() {
             let text = CString::new(extra.security.clone()).map_err(|e| e.to_string())?;
-            let acl = unsafe { acl_from_text(text.as_ptr()) };
+            // An empty recorded ACL must clear inherited/stale destination
+            // rules, not leave them behind as the old conditional did.
+            let acl = unsafe {
+                if extra.security.is_empty() { acl_init(0) } else { acl_from_text(text.as_ptr()) }
+            };
             if acl.is_null() {
                 return Err("Damaged macOS project ACL evidence".into());
             }
@@ -944,6 +956,22 @@ mod macos_tests {
             .push(("com.apple.provenance".into(), vec![1, 2, 3]));
         legacy.strip_system_managed();
         assert_eq!(legacy, captured);
+    }
+
+    #[test]
+    fn macos_empty_acl_clears_destination_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::write(&source, "project bytes").unwrap();
+        fs::write(&target, "project bytes").unwrap();
+        let expected = capture(&source, &fs::symlink_metadata(&source).unwrap()).unwrap();
+        let output = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read"]).arg(&target).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_ne!(capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap(), expected);
+        restore(&target, &expected).unwrap();
+        assert_eq!(capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap(), expected);
     }
 
     #[test]

@@ -5,26 +5,23 @@ use crate::{
     native, workspace,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Command,
 };
 fn text(path: &Path) -> String {
     native::host_path(path).to_string_lossy().replace('\\', "/")
 }
-fn executable(paths: &[PathBuf], name: &str) -> Result<PathBuf, String> {
-    for directory in paths {
-        let path = directory.join(name);
-        if path.is_file() {
-            return path
-                .canonicalize()
-                .map(|path| native::host_path(&path))
-                .map_err(|e| e.to_string());
+pub(crate) fn business_path(source: &Path, value: &std::ffi::OsStr) -> Result<Vec<String>, String> {
+    std::env::split_paths(value).map(|path| {
+        if let Some(mapped) = environment::project_path_template(&path, source) {
+            return Ok(mapped);
         }
-    }
-    Err(format!(
-        "Native bootstrap tool unavailable: {name}; no installation/OS fallback"
-    ))
+        // Missing, relative and empty entries are meaningful native PATH
+        // entries. Keep their spelling/order; do not resolve toolchain shims.
+        native::host_path(&path).into_os_string().into_string()
+            .map_err(|_| "Business PATH must be UTF-8; refusing lossy tool selection".into())
+    }).collect()
 }
 pub(crate) fn resolve(
     source: &Path,
@@ -43,35 +40,16 @@ pub(crate) fn resolve(
         .canonicalize()
         .map(|path| native::host_path(&path))
         .map_err(|e| e.to_string())?;
-    let mut paths = Vec::new();
-    let mut seen = BTreeSet::new();
-    for path in
-        std::env::split_paths(&std::env::var_os("PATH").ok_or("Native bootstrap PATH unavailable")?)
-    {
-        if !path.is_absolute() || !path.is_dir() {
-            continue;
-        }
-        let path = path
-            .canonicalize()
-            .map(|path| native::host_path(&path))
-            .map_err(|e| e.to_string())?;
-        if workspace::scope_contains(&path, &source) {
-            continue;
-        }
-        let key = if cfg!(windows) {
-            text(&path).to_lowercase()
-        } else {
-            text(&path)
-        };
-        if seen.insert(key) {
-            paths.push(path);
-        }
-    }
+    let mut path = business_path(&source,
+        &std::env::var_os("PATH").ok_or("Native bootstrap PATH unavailable")?)?;
     let node = native::trusted_node()?;
     if workspace::scope_contains(&node, &source) {
         return Err("Trusted Node must be outside the business project".into());
     }
-    let git = executable(&paths, if cfg!(windows) { "git.exe" } else { "git" })?;
+    let git = native::trusted_git()?;
+    if workspace::scope_contains(&git, &source) {
+        return Err("Trusted Git must be outside the business project".into());
+    }
     let shell = if cfg!(windows) {
         let mut command = Command::new(&git);
         command.arg("--exec-path").env_clear();
@@ -92,22 +70,28 @@ pub(crate) fn resolve(
     if !shell.is_file() {
         return Err("Native bootstrap Bash is unavailable; no substitute".into());
     }
-    let mut path = vec![
+    // Engine Node/Git/Bash are invoked by absolute path. Their installations
+    // must not take precedence over the user's business-tool search order.
+    let mut bootstrap = vec![
         text(shell.parent().ok_or("Missing Bash directory")?),
         text(node.parent().ok_or("Missing Node directory")?),
     ];
-    path.extend(paths.iter().map(|p| text(p)));
     if cfg!(windows) {
-        let root = shell
-            .parent()
-            .and_then(Path::parent)
-            .ok_or("Missing Git root")?;
-        path.extend([text(&root.join("usr/bin")), text(&root.join("mingw64/bin"))]);
+        let root = shell.parent().and_then(Path::parent).ok_or("Missing Git root")?;
+        bootstrap.extend([text(&root.join("usr/bin")), text(&root.join("mingw64/bin"))]);
+    }
+    for directory in bootstrap {
+        if !path.iter().any(|existing| if cfg!(windows) {
+            existing.eq_ignore_ascii_case(&directory)
+        } else { existing == &directory }) {
+            path.push(directory);
+        }
     }
     let proof = r#"const fs=require('node:fs'),cp=require('node:child_process'),crypto=require('node:crypto'),path=require('node:path');
 const [git,shell]=process.argv.slice(1);
 const probe=(exe,args)=>({path:exe,sha256:crypto.createHash('sha256').update(fs.readFileSync(exe)).digest('hex'),output:cp.execFileSync(exe,args,{encoding:'utf8',timeout:30000}).trim()});
-const tools=[];for(const directory of process.env.PATH.split(path.delimiter)){for(const name of process.platform==='win32'?['python.exe','python3.exe','conda.exe']:['python3','python','conda']){const file=path.join(directory,name);if(fs.existsSync(file)&&fs.statSync(file).isFile())tools.push({path:file,sha256:crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')});}}
+const directories=[];let directory='',quoted=false;for(const character of process.env.PATH){if(process.platform==='win32'&&character==='"')quoted=!quoted;else if(character===path.delimiter&&!quoted){directories.push(directory);directory='';}else directory+=character;}directories.push(directory);
+const tools=[];for(const directory of directories){for(const name of process.platform==='win32'?['python.exe','python3.exe','conda.exe']:['python3','python','conda']){const file=path.join(directory,name);if(fs.existsSync(file)&&fs.statSync(file).isFile())tools.push({path:file,sha256:crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')});}}
 console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(process.versions)']),git:probe(git,['--version']),shell:probe(shell,['--noprofile','--norc','--version']),tools}));"#;
     let mut caches = vec![".runtime-cache".to_string()];
     if cfg!(windows) {
@@ -131,6 +115,7 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
         launch: LaunchConfig {
             entry: text(&shell),
             shell: text(&shell),
+            unbound_path: Some(path.clone()),
             path,
             variables: BTreeMap::from([
                 ("HOME".into(), "{state}/.agent-home".into()),
@@ -174,7 +159,9 @@ console.log(JSON.stringify({node:probe(process.execPath,['-p','JSON.stringify(pr
                 "CONDA_DEFAULT_ENV".into(),
                 "CONDA_SHLVL".into(),
             ],
+            inherit_ambient: true,
             managed_scopes: vec![],
+            owned_scopes: Some(vec![]),
             ambient_hints: vec![],
             hook: None,
             environment: None,
@@ -240,6 +227,76 @@ mod tests {
             assert!(!source.path().join(".venv").exists());
         }
     }
+    #[test]
+    fn automatic_unbound_launch_preserves_host_business_path_precedence() {
+        let source = project();
+        let policy = resolve(source.path(), false).unwrap().0.unwrap();
+        assert!(policy.launch.inherit_ambient);
+        assert!(!policy.launch.requires_entry_first());
+        assert_eq!(policy.launch.owned_scopes, Some(vec![]));
+        let expected: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|directory| environment::project_path_template(&directory, source.path())
+                .unwrap_or_else(|| native::host_path(&directory).to_string_lossy().into_owned()))
+            .collect();
+        assert!(policy.launch.path.starts_with(&expected), "bootstrap bins must not outrank host tools");
+        assert_eq!(policy.launch.unbound_path.as_ref(), Some(&policy.launch.path));
+        assert!(Path::new(&policy.launch.shell).is_absolute());
+        assert!(policy.launch.environment.is_none());
+    }
+
+    #[test]
+    fn business_path_rebinds_project_roots_without_dropping_native_search_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("project space");
+        let external = temp.path().join("external");
+        fs::create_dir_all(source.join("tools")).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        let alias = temp.path().join("project-alias");
+        let subdir_alias = temp.path().join("tools-alias");
+        let external_alias = temp.path().join("external-alias");
+        crate::path_safety::directory_link(&source, &alias);
+        crate::path_safety::directory_link(&source.join("tools"), &subdir_alias);
+        crate::path_safety::directory_link(&external, &external_alias);
+        crate::path_safety::directory_link(&external, &source.join("linked-external"));
+        let paths = vec![
+            source.join("tools"), alias.join("tools"), subdir_alias,
+            source.clone(), source.join("future/bin"),
+            PathBuf::from("relative-bin"), PathBuf::from(""), PathBuf::from("../shared-bin"),
+            external_alias.clone(), external.join("not-installed-yet"),
+            source.join("linked-external/bin"), source.join("../external"),
+        ];
+        let path = business_path(&source, &std::env::join_paths(&paths).unwrap()).unwrap();
+        assert_eq!(&path[..8], [
+            "{workspace}/tools", "{workspace}/tools", "{workspace}/tools",
+            "{workspace}", "{workspace}/future/bin", "relative-bin", "", "../shared-bin",
+        ]);
+        assert_eq!(Path::new(&path[8]), external_alias);
+        assert_eq!(Path::new(&path[9]), external.join("not-installed-yet"));
+        assert_eq!(path[10], "{workspace}/linked-external/bin");
+        assert_eq!(Path::new(&path[11]), source.join("../external"));
+    }
+
+    #[test]
+    fn automatic_baseline_hashes_tools_in_semicolon_path_entries() {
+        let source = project();
+        let data = tempfile::tempdir().unwrap();
+        let tools = data.path().join("native;tools");
+        fs::create_dir_all(&tools).unwrap();
+        let python = tools.join(if cfg!(windows) { "python.exe" } else { "python" });
+        // The bootstrap inventory hashes these bytes; it must never execute
+        // this deliberately non-executable fixture as a Python interpreter.
+        fs::write(&python, "native-probe-before").unwrap();
+        let mut policy = resolve(source.path(), false).unwrap().0.unwrap();
+        policy.launch.path.insert(0, text(&tools));
+        policy.launch.unbound_path = Some(policy.launch.path.clone());
+        let store = environment::Environments::new(data.path(), &uuid::Uuid::new_v4().to_string(), &policy).unwrap();
+        let before = store.baseline().unwrap();
+        fs::write(&python, "native-probe-after!").unwrap();
+        let after = store.baseline().unwrap();
+        assert_ne!(before.baseline, after.baseline, "a quoted PATH component must not disappear from bootstrap evidence");
+        assert_eq!(before.policy, after.policy);
+    }
+
     #[test]
     fn automatic_policy_events_replay_without_changing_legacy_runs_or_allowing_stale_policy_replacement(
     ) {

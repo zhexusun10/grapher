@@ -43,8 +43,8 @@ approval. The execution contract is backend-owned, not a user environment choice
   remaining unbound. Serial/shared batches use source-native launches; ordinary-folder private batches retain their unmanaged launch contract.
 - Ordinary business tasks may create, install into, activate and switch between
   whatever native Python/Conda environments their Bash process can access.
-  For the active workspace, the adapter does not reject an ambient interpreter,
-  rewrite Conda names, forbid package installation destinations, or turn a
+  For the active workspace, the adapter accepts unrelated ambient interpreters;
+  it does not rewrite Conda names, forbid package installation destinations, or turn a
   temporary activation into a Runtime failure. The OS sandbox/permissions and
   the command's own exit status still apply. Runtime records receipts only when
   a private project-owned environment can be verified; external use is recorded
@@ -77,17 +77,63 @@ binding adds its private prefix to the current workspace scopes through versione
 not by editing the policy. Traversal, overlapping paths, Runtime metadata and
 tracked-file conflicts fail. Windows case aliases and reserved names are checked.
 
-The default entry directory is first in the complete business PATH. Trusted
-engine Node and the bootstrap Git used for Pi build and dependency verification
-are resolved independently, before that binding. Pi PATH processing and Windows MSYS
+New automatic launches inherit ordinary host business variables transiently,
+including proxy/certificate settings, package-manager configuration, credentials
+and Bash startup controls. They do not inherit an outer Agent's `GRAPHER_*`/`PI_*`
+identity. `NODE_OPTIONS`/`NODE_PATH` are transported transiently and applied only
+to business Bash/result children, never to the trusted Node bootstrap, activation
+capture, extension/MCP factories or baseline probes. Explicit business-child
+settings still override those inherited defaults. Host Git overrides are cleared;
+explicit backend project-Git bindings and HOME/cache ownership still win.
+A verified Python prefix also suppresses ambient `PYTHONHOME`, as native activation
+would; an unbound launch retains it. Legacy explicit launches keep their recorded
+name-based inheritance contract. The trusted baseline probe remains restricted.
+
+New automatic launches preserve business PATH order and external shim spelling,
+including missing, relative and empty entries; missing bootstrap directories are
+appended, not prepended. Absolute project-root entries (including root aliases)
+are rebound to `{workspace}` instead of discarded. Relative entries retain native
+cwd semantics; Windows Bash represents empty entries as `.` so MSYS conversion
+does not drop the cwd search. Windows PATH quoting is preserved: a directory
+containing `;` remains one native entry, including in bootstrap-tool evidence.
+Bash conversion batches separate path arguments in one native converter process,
+not a lossy split of a joined path list. Absolute paths containing `..` are not guessed or
+rewritten. The recorded `unboundPath` survives environment switches: activation
+prepends its verified bins, while unbinding restores the original business path
+rather than deleting all project paths. Older records keep their recorded rules.
+
+For these launches, project-root `NODE_PATH` entries and absolute activation
+markers (`VIRTUAL_ENV`, `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`) are also rebound
+transiently. `NODE_PATH` follows Node's literal delimiter grammar, not Windows
+PATH quoting: quote characters remain literal. A rebased directory containing
+Node's list delimiter is refused rather than split into unintended search roots.
+External paths and Conda names stay unchanged. Arbitrary variable
+strings, `NODE_OPTIONS` contents and script bytes are not rewritten; this is not
+environment relocation. No host HOME/configuration tree is copied as a fallback.
+A PATH shim may still depend on missing HOME defaults: the offline project
+[baseline and explicit setup guidance](../development/environment-baselines.md#private-home-discovery-is-not-mutable-state)
+reproduce this with real Rustup/Cargo. Tool discovery/configuration, per-slot
+writable state, cache and credential helpers are distinct inputs; there is no
+generic automatic host-config import or cross-layout rebuild API.
+
+An unbound automatic entry is an absolute Bash and need not be first in PATH.
+Bound environments, activation hooks and legacy explicit launches still require
+the default entry directory first as a fully absolute path. A hook cannot replace
+it with an empty/relative PATH merely because the current cwd matches that
+directory. Activation subprocesses restore the selected workspace after
+`BASH_ENV`, before path conversion and hook execution, while retaining startup
+variables/functions; startup side effects are not undone. Trusted engine Node and bootstrap Git are
+resolved independently outside the business project, before that binding. Pi PATH processing and Windows MSYS
 startup cannot add host bins; managed Bash resets PATH inside Bash. Hooks run
 before extension/MCP factories and cannot change Runtime/Pi identity, Node
-bootstrap or the default entry. Loader variables enter inside the established
+bootstrap or the default entry. Trusted Node path discovery itself also removes
+ambient `NODE_OPTIONS`/`NODE_PATH` before executing its probe. Loader variables enter inside the established
 native boundary, not outer bubblewrap/Seatbelt. One-shot exports cannot rebind a
 later tool call.
 
-Credentials are transient values injected by authorized name, not serialized
-into L. No secret values belong in literal policy variables, hooks, arguments or
+Inherited credentials are transient process values, not serialized into L.
+Automatic policies record the inheritance rule, not an inventory of secret values;
+legacy explicit policies authorize inherited values by name. No secret values belong in literal policy variables, hooks, arguments or
 managed trees. Arbitrary business files are not automatically scrubbed for
 secrets. Existing [native permission limits](filesystem-isolation.md) apply.
 
@@ -117,6 +163,41 @@ into an environment-selection workflow. Byte content is verified, not trusted on
 from size/mtime. Event-actor reference/manifest checks stay metadata-only; native
 writer byte/ABI checks and managed publication preflight run outside the Run mutex.
 Verification does not save new blobs or repair missing history from a live directory.
+History restoration compares recorded **root-qualified byte coverage**, not
+project Git exclusions or directory names. New state-bound discovery snapshots
+with root-qualified ownership use `rooted.schema = 1` inside the existing immutable
+E manifest. Each W/S frame includes its declared scopes, cache exclusions and
+entries; all are included in the manifest checksum. S captures the frozen state
+scopes plus known S prefixes; W captures only known W prefixes. Active, switched
+and unbound environments retain their ownership. An equally named W directory
+is never a substitute for S. This does not capture arbitrary external state.
+
+| Evidence | What it can restore |
+| --- | --- |
+| New validated root-qualified E | Its recorded non-cache scopes in **both** W and S, including inactive/unbound prefixes and private HOME. Recorded absence can remove later entries within that coverage, subject to the existing link/metadata limitations below. |
+| Legacy single-root E (no `rooted` field) | Only its recorded active root and scopes. A W E does not contain S HOME; an unbound S E does not contain owned W prefixes. |
+| `ownedScopes` / Git exclusions alone | Ownership only, not byte evidence. A target lacking coverage for a previously known root/scope cannot authorize partial rollback. |
+| Link targets outside recorded scopes | Link metadata/reference only; target bytes are not captured merely because a link is inside a managed scope. This includes external toolchain files. |
+| Cache paths, skipped unresolved links, ambient toolchains/configuration/services | Not restorable E evidence. Project code separately follows its immutable Git/view record. |
+
+The native worker validates every stored byte and all root targets/conflicts
+before materializing the first root; historical preflight runs before project
+code reset, outside the Run mutex. Actual project Git conflicts are checked in W,
+not in S or against the engine's force-collected index. W's preparation guard
+excludes only recorded managed W prefixes; ordinary project/Git bytes remain
+protected. A binding may change its active W/S root only when the selected E has
+coverage for **all** previously known scopes. Otherwise live partial state is
+preserved and recovery explicitly fails. Native interpreter/prefix/ABI validation
+still applies after materialization; this is not environment relocation.
+
+Old manifest JSON, checksums, E/L references and historical execution results are
+not rewritten. Legacy records remain readable/retryable, but missing other-root
+history is never filled from live files. New captures can append root-qualified
+records to that lineage. Failed retries preserve their current W/S bytes instead
+of restoring an old input. All-root preflight is not a filesystem transaction:
+an I/O failure during application can still leave a failed partial view, never a
+successful partial rollback. Full host-state and arbitrary-root rollback remain
+out of scope.
 
 A failed database commit may leave unreferenced storage but never a completion
 referring to an incomplete seal. A missing current workspace view is rebuilt only
@@ -152,8 +233,36 @@ E/L are provenance, not constraints on the downstream task. Otherwise the curren
 workspace starts unbound. Runtime never cleans or resets business environment
 paths. All input manifests and stored bytes are still validated before preparation,
 including environments not selected for reuse. Known custom prefixes remain
-excluded from copying and Git collection. Ordinary business Bash retains its
-existing exploration/creation behavior and permissions.
+excluded from copying and Git collection. Root-qualified ownership in L is
+independent of the active interpreter: ambiguity, an external switch or failed
+verification cannot drop an already known project prefix from the exclusion set.
+The same relative name under W and S has distinct ownership. Reusing a physical
+slot preserves its current ownership even when activation falls back to unbound;
+a sibling does not inherit that ownership. A retained current alias must pass
+the same domain and manifest checks as parent inputs before contributing ownership;
+a matching physical layout alone cannot authorize corrupt or foreign evidence.
+Selecting a project environment never
+turns S's HOME/cache scope names into exclusions of same-named project files.
+Tracked project-file conflicts are checked against native project Git, not the
+force-collected graph index. Ownership alone does not prove an unselected
+environment can be reconstructed or relocated.
+
+Ordinary business Bash retains its existing exploration/creation behavior and
+permissions. Best-effort tool observation preserves per-command exports rather
+than resetting HOME or package-manager configuration to the initial launch.
+
+Copying project bytes is not venv relocation. New native observer contexts also
+record the backend-bound source root. If an observed environment tool resolves
+into that source, the observer refuses execution before starting the source tool
+and asks for environment recreation at the current path or an unrelated external
+environment. Removing a private copy does not authorize a stale source prefix.
+It checks both executable directories (before resolving Unix interpreter
+symlinks) and resolved executables; it does not rewrite activation scripts, console launchers,
+editable paths or package bytes. Direct local interpreters and unrelated ambient
+environments remain usable. A resumed legacy context retains its immutable
+source-less contract; new generations get the source binding. This guard covers
+observed tool invocations, not arbitrary scripts, explicit executables or custom
+wrappers that bypass observation; the OS permission boundary is unchanged.
 
 Scopes support basic files/directories, Unix modes/Windows readonly and supported
 links. Special files, escaping directory links and nested Runtime/Git metadata
@@ -167,8 +276,7 @@ anything at or below a cache path is excluded from the snapshot and left
 untouched in the live view. The automatic policy excludes the machine-local
 Windows/browser caches under S's redirected `.agent-home` (for example
 `AppData/Local`, which holds `INetCache`, `D3DSCache` and browser profiles), npm
-caches, and `.runtime-cache`. Environment capture/materialization is relative to
-S and does not inspect a project Git index. S's `.project-git` / `.git-config`
+caches, and `.runtime-cache`. Environment capture/materialization does not inspect a project Git index. S's `.project-git` / `.git-config`
 metadata is not an environment scope and cannot be adopted by discovery.
 Genuine project `.venv`, `.agent-home` and same-named files remain in W; external
 state ownership never excludes or moves them by name. Environment preparation is
@@ -176,6 +284,10 @@ checked not to inject entries or change project files. A cache may not equal or 
 topology are not preserved by the basic snapshot contract.
 
 Physical copying uses the shared [native copy primitive](workspace-snapshots-and-feedback.md#physical-copy-primitive); it does not add environment relocation or logical-path guarantees.
+Managed Windows directory links use the existing native junction implementation,
+not a PATH-selected Node subprocess; business Node options/module paths cannot
+inject into that backend materialization helper. The basic link contract is
+unchanged.
 
 ## Native resources
 
@@ -260,7 +372,8 @@ Serial/source Planner launches retain their source-native environment contract; 
 
 ## Capabilities not implemented or accepted
 
-- Complete dynamic-scope rollback outside the initial ownership roots.
+- Recovery outside recorded W/S scope coverage, arbitrary external-root rollback
+  and complete host-state restoration.
 - Complete automatic package/toolchain and resource/device policy synthesis;
   transparent cross-slot environment rebuilding and arbitrary multi-environment
   execution; new fan-in uses local reuse/unbound selection, not a package solver.
@@ -275,4 +388,7 @@ Unsupported strong requirements fail closed, not by changing OS, mode, layout
 or device. Compiled capability reporting and configured CI are not native
 acceptance evidence.
 
-For local native regressions, see [Testing](../development/testing.md) for suite selection, host prerequisites, and explicitly opt-in profiles.
+For local native regressions, see [Testing](../development/testing.md) for suite selection, host prerequisites, and explicitly opt-in profiles. The
+[offline real-tool baseline](../development/environment-baselines.md) measures
+retention costs and records explicit validation gaps; it is not native boundary
+acceptance or a publication condition.

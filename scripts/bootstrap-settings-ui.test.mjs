@@ -26,13 +26,15 @@ before(async () => {
 });
 after(async () => { await browser?.close(); await server?.close(); });
 
-async function app(handler, projects = [{ id: repository, path: repository, name: "Responsiveness", lastOpened: 1 }], cachedRuns, connectedEvents = false, reducedMotion = "reduce") {
+async function app(handler, projects = [{ id: repository, path: repository, name: "Responsiveness", lastOpened: 1 }], cachedRuns, connectedEvents = false, reducedMotion = "reduce", storageHints = {}, sessionHints = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "en-US", reducedMotion });
-  await context.addInitScript(({ projects, config, cachedRuns, connectedEvents }) => {
+  await context.addInitScript(({ projects, config, cachedRuns, connectedEvents, storageHints, sessionHints }) => {
     localStorage.setItem("grapher_language_v1", "en");
     if (projects !== null) localStorage.setItem("grapher_projects", JSON.stringify(projects));
     if (cachedRuns) localStorage.setItem("grapher_workspace_runs", JSON.stringify(cachedRuns));
     localStorage.setItem("grapher_config", JSON.stringify({ ...config, model: "stale/browser-model" }));
+    for (const [key, value] of Object.entries(storageHints)) localStorage.setItem(key, JSON.stringify(value));
+    for (const [key, value] of Object.entries(sessionHints)) sessionStorage.setItem(key, JSON.stringify(value));
     if (connectedEvents) {
       // Connected but silent: only watchdog reads can discover durable changes.
       window.EventSource = class {
@@ -45,7 +47,7 @@ async function app(handler, projects = [{ id: repository, path: repository, name
         close() { this.readyState = 2; }
       };
     }
-  }, { projects, config, cachedRuns, connectedEvents });
+  }, { projects, config, cachedRuns, connectedEvents, storageHints, sessionHints });
   const errors = [], calls = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
@@ -81,6 +83,35 @@ async function until(check) {
   const end = Date.now() + 8_000;
   while (!await check()) { assert.ok(Date.now() < end, "expected request/state did not arrive"); await new Promise(completed => setTimeout(completed, 20)); }
 }
+
+test("corrupt browser hints cannot crash startup or prevent authoritative settings from loading", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await app(async () => false,
+    [null, 42, { path: 123 }, { path: repository, name: { invalid: true }, lastOpened: "invalid" }],
+    { [repository]: [null, "fast", 7] }, false, "reduce", {
+      grapher_config: { repository: null, roleModels: { planner: null }, thinkingLevel: {} },
+      grapher_run_labels: { fast: { invalid: "React child" } },
+      grapher_run_modes: ["serial"],
+    });
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    await openSettings(page);
+    assert.equal(await nodeModel(page).inputValue(), "test/old");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("a corrupt Provider cache cannot crash the landing composer or prevent a fresh catalog", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await app(async () => false, undefined, undefined, false, "reduce", {}, {
+    grapher_provider_catalog_cache: { ...catalog, models: [null] },
+  });
+  try {
+    await page.locator('[data-run-id="fast"]').waitFor();
+    await page.locator(".landing-screen textarea").fill("Preserved draft");
+    await openSettings(page);
+    assert.equal(await nodeModel(page).inputValue(), "test/old");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 test("Feedback defaults off and is staged until saved, then survives reopening and reload", { timeout: 30_000 }, async () => {
   let saved = { ...config };

@@ -259,17 +259,20 @@ fn user_text(value: &Value) -> Option<String> {
     if let Some(text) = content.as_str() {
         return Some(crate::engine::feedback_input::strip(text));
     }
-    content.as_array().map(|parts| {
-        parts
-            .iter()
-            .filter_map(|part| {
-                (part.get("type")?.as_str()? == "text")
-                    .then(|| part.get("text")?.as_str())
-                    .flatten()
-            })
-            .collect::<Vec<_>>()
-            .join("")
-    }).map(|text| crate::engine::feedback_input::strip(&text))
+    content
+        .as_array()
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| {
+                    (part.get("type")?.as_str()? == "text")
+                        .then(|| part.get("text")?.as_str())
+                        .flatten()
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .map(|text| crate::engine::feedback_input::strip(&text))
 }
 
 pub fn branch_before_user(
@@ -427,6 +430,8 @@ pub fn output_user_turn(
 /// the session, and it rechecks membership after the writer has stopped.
 pub struct UserBranch {
     path: PathBuf,
+    validated_len: usize,
+    validated_hash: git2::Oid,
     selected_id: String,
     parent: Option<String>,
     pub first_user_turn: bool,
@@ -453,6 +458,21 @@ pub fn prepare_node_user_branch(
         false,
         selector,
     )
+}
+
+fn session_entries(values: &[Value]) -> Result<HashMap<&str, &Value>, String> {
+    let mut entries = HashMap::new();
+    for entry in values.iter().skip(1) {
+        let id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or("Pi session entry has no identity")?;
+        if entries.insert(id, entry).is_some() {
+            return Err("Pi session contains duplicate entry identities".into());
+        }
+    }
+    Ok(entries)
 }
 
 fn prepare_user_branch(
@@ -495,17 +515,7 @@ fn prepare_user_branch(
     {
         return Err("Pi session belongs to another workspace or execution".into());
     }
-    let entries: HashMap<&str, &Value> = values
-        .iter()
-        .skip(1)
-        .map(|entry| {
-            entry
-                .get("id")
-                .and_then(Value::as_str)
-                .map(|id| (id, entry))
-                .ok_or("Pi session entry has no identity".to_string())
-        })
-        .collect::<Result<_, _>>()?;
+    let entries = session_entries(&values)?;
     let leaf = values
         .last()
         .and_then(|entry| entry.get("id"))
@@ -566,10 +576,19 @@ fn prepare_user_branch(
     }
     let candidate = if let Some(selector) = selector {
         let active: Vec<_> = matches.iter().filter(|(_, _, active)| *active).collect();
+        // An explicit identity is authoritative. Falling back to time or
+        // occurrence could edit an equal-text turn on a different branch.
         let by_id = selector
             .entry_id
             .as_deref()
-            .and_then(|id| active.iter().copied().find(|candidate| candidate.0 == id));
+            .map(|id| {
+                active
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate.0 == id)
+                    .ok_or("The selected Pi user turn is no longer in the active branch")
+            })
+            .transpose()?;
         let by_time: Vec<_> = active
             .iter()
             .copied()
@@ -652,6 +671,9 @@ fn prepare_user_branch(
         .is_some_and(|entry| entry["id"].as_str() == Some(candidate.0));
     Ok(UserBranch {
         path,
+        validated_len: contents.len(),
+        validated_hash: git2::Oid::hash_object(git2::ObjectType::Blob, contents.as_bytes())
+            .map_err(|error| error.to_string())?,
         selected_id: candidate.0.into(),
         parent,
         first_user_turn,
@@ -663,6 +685,18 @@ fn prepare_user_branch(
 impl UserBranch {
     pub fn commit(self) -> Result<PreparedBranch, String> {
         let contents = fs::read_to_string(&self.path).map_err(|error| error.to_string())?;
+        // Stopping a live writer may append legitimate output, but must not
+        // authorize a rewritten session, selected turn or ancestry. Pin only
+        // the validated prefix so ordinary append-only progress remains valid.
+        let prefix = contents
+            .get(..self.validated_len)
+            .ok_or("Pi session history changed after edit validation")?;
+        if git2::Oid::hash_object(git2::ObjectType::Blob, prefix.as_bytes())
+            .map_err(|error| error.to_string())?
+            != self.validated_hash
+        {
+            return Err("Pi session history changed after edit validation".into());
+        }
         if !contents.ends_with('\n') {
             return Err("Pi session has an incomplete last entry".into());
         }
@@ -676,28 +710,19 @@ impl UserBranch {
             .last()
             .and_then(|entry| entry["id"].as_str())
             .ok_or("Missing Pi leaf")?;
-        if self.require_active {
-            let entries: HashMap<_, _> = values
-                .iter()
-                .skip(1)
-                .filter_map(|entry| entry["id"].as_str().map(|id| (id, entry)))
-                .collect();
-            let mut cursor = Some(leaf);
-            let mut seen = HashSet::new();
-            let mut found = false;
-            while let Some(id) = cursor {
-                if !seen.insert(id) {
-                    return Err("Pi session contains a cycle".into());
-                }
-                if id == self.selected_id {
-                    found = true;
-                    break;
-                }
-                cursor = entries.get(id).ok_or("Missing Pi parent")?["parentId"].as_str();
+        let entries = session_entries(&values)?;
+        let mut cursor = Some(leaf);
+        let mut seen = HashSet::new();
+        let mut found = false;
+        while let Some(id) = cursor {
+            if !seen.insert(id) {
+                return Err("Pi session contains a cycle".into());
             }
-            if !found {
-                return Err("The selected user turn is no longer active".into());
-            }
+            found |= id == self.selected_id;
+            cursor = entries.get(id).ok_or("Missing Pi parent")?["parentId"].as_str();
+        }
+        if self.require_active && !found {
+            return Err("The selected user turn is no longer active".into());
         }
         let marker = json!({
             "type": "custom", "id": Uuid::new_v4().to_string(), "parentId": self.parent,
@@ -767,21 +792,179 @@ mod tests {
         let delivery = Uuid::new_v4().to_string();
         let path = temp.path().join(format!("test_{id}.jsonl"));
         let hint = "\n\n[Image: original 3000x2000, displayed at 2000x1333.]";
-        let marked = format!("{}{hint}", crate::engine::feedback_input::prompt("inspect", Some(&delivery)));
+        let marked = format!(
+            "{}{hint}",
+            crate::engine::feedback_input::prompt("inspect", Some(&delivery))
+        );
         let entries = [
             json!({"type":"session", "id":id, "cwd":temp.path()}),
             json!({"type":"message", "id":"goal", "parentId":null, "message":{"role":"user","content":"goal","timestamp":1}}),
             json!({"type":"message", "id":"feedback", "parentId":"goal", "message":{"role":"user",
                 "content":[{"type":"text","text":marked}],"timestamp":2}}),
         ];
-        let original = entries.iter().map(|entry| format!("{entry}\n")).collect::<String>();
+        let original = entries
+            .iter()
+            .map(|entry| format!("{entry}\n"))
+            .collect::<String>();
         fs::write(&path, &original).unwrap();
-        let branch = branch_before_user(temp.path(), &id, temp.path(), &format!("inspect{hint}"), 0, 10).unwrap();
+        let branch = branch_before_user(
+            temp.path(),
+            &id,
+            temp.path(),
+            &format!("inspect{hint}"),
+            0,
+            10,
+        )
+        .unwrap();
         assert!(!branch.first_user_turn);
         let contents = fs::read_to_string(&path).unwrap();
-        assert!(contents.starts_with(&original), "branching must not rewrite receipt evidence");
+        assert!(
+            contents.starts_with(&original),
+            "branching must not rewrite receipt evidence"
+        );
         let marker: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(marker["parentId"], "goal");
+    }
+
+    #[test]
+    fn explicit_output_identity_never_falls_back_to_another_equal_user_turn() {
+        for selected_id in [Some("old"), Some("missing"), None] {
+            let temp = tempfile::tempdir().unwrap();
+            let id = Uuid::new_v4().to_string();
+            let path = temp.path().join(format!("test_{id}.jsonl"));
+            let entries = [
+                json!({"type":"session", "id":id, "cwd":temp.path()}),
+                json!({"type":"message", "id":"root", "parentId":null, "message":{"role":"system", "content":"system"}}),
+                json!({"type":"message", "id":"old", "parentId":"root", "message":{"role":"user", "content":"again", "timestamp":10}}),
+                json!({"type":"custom", "id":"branch", "parentId":"root", "customType":"grapher-edit"}),
+                json!({"type":"message", "id":"current", "parentId":"branch", "message":{"role":"user", "content":"again", "timestamp":10}}),
+            ];
+            let original = entries
+                .iter()
+                .map(|entry| format!("{entry}\n"))
+                .collect::<String>();
+            fs::write(&path, &original).unwrap();
+            let mut row = json!({"type":"message_start", "message":{"role":"user", "content":"again", "timestamp":10}});
+            if let Some(selected_id) = selected_id {
+                row["message"]["id"] = json!(selected_id);
+            }
+            let selector = output_user_turn(&format!("{row}\n"), 0, "again").unwrap();
+            let pending = prepare_node_user_branch(
+                temp.path(),
+                &id,
+                temp.path(),
+                "again",
+                0,
+                20,
+                Some(&selector),
+            );
+            if selected_id.is_some() {
+                assert!(
+                    pending.is_err(),
+                    "an absent or abandoned identity must not select the current equal-text turn"
+                );
+            } else {
+                assert!(
+                    pending.is_ok(),
+                    "legacy rows without an ID retain unambiguous timestamp matching"
+                );
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn session_edit_commit_rejects_rewritten_history_but_allows_append_only_progress() {
+        for change in [
+            "identity",
+            "workspace",
+            "parent",
+            "text",
+            "truncate",
+            "append",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let id = Uuid::new_v4().to_string();
+            let path = temp.path().join(format!("test_{id}.jsonl"));
+            let mut entries = vec![
+                json!({"type":"session", "id":id, "cwd":temp.path()}),
+                json!({"type":"message", "id":"root", "parentId":null, "message":{"role":"system", "content":"system"}}),
+                json!({"type":"message", "id":"target", "parentId":"root", "message":{"role":"user", "content":"edit me", "timestamp":10}}),
+            ];
+            let encode = |entries: &[Value]| {
+                entries
+                    .iter()
+                    .map(|entry| format!("{entry}\n"))
+                    .collect::<String>()
+            };
+            fs::write(&path, encode(&entries)).unwrap();
+            let pending =
+                prepare_node_user_branch(temp.path(), &id, temp.path(), "edit me", 0, 20, None)
+                    .unwrap();
+            match change {
+                "identity" => entries[0]["id"] = json!(Uuid::new_v4().to_string()),
+                "workspace" => entries[0]["cwd"] = json!(temp.path().join("another-workspace")),
+                "parent" => entries[2]["parentId"] = Value::Null,
+                "text" => entries[2]["message"]["content"] = json!("different input"),
+                "truncate" => { entries.pop(); },
+                _ => entries.push(json!({"type":"message", "id":"answer", "parentId":"target", "message":{"role":"assistant", "content":[]}})),
+            }
+            let current = encode(&entries);
+            fs::write(&path, &current).unwrap();
+            let result = pending.commit();
+            if change == "append" {
+                let branch = result.expect("a live writer may append before it is drained");
+                assert!(fs::read_to_string(&path).unwrap().starts_with(&current));
+                branch.rollback().unwrap();
+            } else {
+                assert!(
+                    result.is_err(),
+                    "changed {change} must not receive a branch marker"
+                );
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), current);
+        }
+    }
+
+    #[test]
+    fn duplicate_pi_entry_ids_are_rejected_before_and_after_edit_preparation() {
+        for after_prepare in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let id = Uuid::new_v4().to_string();
+            let path = temp.path().join(format!("test_{id}.jsonl"));
+            let history = [
+                json!({"type":"session", "id":id, "cwd":temp.path()}),
+                json!({"type":"message", "id":"root", "parentId":null, "message":{"role":"system", "content":"system"}}),
+                json!({"type":"message", "id":"target", "parentId":"root", "message":{"role":"user", "content":"edit me", "timestamp":10}}),
+            ].iter().map(|entry| format!("{entry}\n")).collect::<String>();
+            fs::write(&path, &history).unwrap();
+            let pending = if after_prepare {
+                Some(
+                    prepare_node_user_branch(temp.path(), &id, temp.path(), "edit me", 0, 20, None)
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let current = format!(
+                "{history}{}\n",
+                json!({"type":"message", "id":"target", "parentId":"root", "message":{"role":"assistant", "content":[]}})
+            );
+            fs::write(&path, &current).unwrap();
+            if let Some(pending) = pending {
+                assert!(
+                    pending.commit().is_err(),
+                    "an appended duplicate ID must not pass commit validation"
+                );
+            } else {
+                assert!(
+                    prepare_node_user_branch(temp.path(), &id, temp.path(), "edit me", 0, 20, None)
+                        .is_err(),
+                    "ambiguous Pi identities must fail before a writer is stopped"
+                );
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), current);
+        }
     }
 
     #[test]
