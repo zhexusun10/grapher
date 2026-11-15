@@ -227,7 +227,7 @@ impl Files {
                 .map_err(|error| error.to_string())?;
             let mut entries = Entries::new();
             for path in files.scoped_paths(&root)? {
-                files.collect(&root, &path, &mut entries, None)?;
+                files.collect(&root, &path, &mut entries, Collection::Capture)?;
             }
             snapshot.roots.insert(
                 label.clone(),
@@ -261,7 +261,7 @@ impl Files {
             .rooted
             .ok_or("Missing root-qualified environment byte evidence")?;
         self.check_root_targets(paths, value.roots.keys().cloned())?;
-        // collect(expected) hashes BOTH live and stored bytes for every file;
+        // collect(Verify) hashes BOTH live and stored bytes for every file;
         // exact entry equality below proves none were omitted. As with legacy
         // verify(), do not hash the same stored tree twice on successful reuse.
         for (label, root) in &value.roots {
@@ -271,7 +271,7 @@ impl Files {
                 .map_err(|error| error.to_string())?;
             let mut current = Entries::new();
             for child in files.scoped_paths(&path)? {
-                files.collect(&path, &child, &mut current, Some(&root.entries))?;
+                files.collect(&path, &child, &mut current, Collection::Verify(&root.entries))?;
             }
             if current != root.entries {
                 return Err(format!(
@@ -293,7 +293,8 @@ impl Files {
             .ok_or("Missing root-qualified environment byte evidence")?;
         self.check_root_targets(paths, snapshot.roots.keys().cloned())?;
         // All stored bytes and every target's scopes/metadata are preflighted
-        // before applying a single plan. No missing history is saved from live FS.
+        // before applying a single plan. Current-tree inspection is read-only:
+        // it neither saves discarded partial bytes nor repairs missing history.
         self.validate(&[version.into()])?;
         self.check_native_project_scopes(paths, &snapshot)?;
         let mut plans = Vec::new();

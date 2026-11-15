@@ -35,7 +35,6 @@ fn change_acl(path: &Path, rule: &str) {
             "read" => { command.args(["/grant:r", "*S-1-1-0:(R)"]); }
             "execute" => { command.args(["/grant:r", "*S-1-1-0:(RX)"]); }
             "inherit-read" => { command.args(["/grant:r", "*S-1-1-0:(OI)(CI)(R)"]); }
-            "remove" => { command.args(["/remove:g", "*S-1-1-0"]); }
             _ => unreachable!(),
         }
         command
@@ -46,7 +45,6 @@ fn change_acl(path: &Path, rule: &str) {
         match rule {
             "read" => { command.args(["+a", "everyone allow read"]); }
             "execute" => { command.args(["+a", "everyone allow read,execute"]); }
-            "remove" => { command.arg("-N"); }
             _ => unreachable!(),
         }
         command.arg(path);
@@ -61,6 +59,12 @@ fn acl_only_edits_advance_snapshots_and_survive_fork_publication_and_removal() {
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);
     let source_file = source.join("file");
+    // Native CI volumes may already grant Everyone access. Exercise that case
+    // explicitly rather than assuming the test owns every rule for this SID.
+    change_acl(&source_file, "execute");
+    let original_metadata = crate::workspace_metadata::capture(
+        &source_file, &fs::symlink_metadata(&source_file).unwrap(),
+    ).unwrap();
     let original = acl(&source_file);
     let user_head = workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap();
     let user_index = fs::read(source.join(".git/index")).unwrap();
@@ -83,9 +87,12 @@ fn acl_only_edits_advance_snapshots_and_survive_fork_publication_and_removal() {
     assert_eq!(acl(&published_fork.join("file")), edited);
     assert_eq!(acl(&source_file), original, "files-only delivery keeps source ACLs");
 
-    change_acl(&fork.join("file"), "remove");
+    // Remove only our change, not pre-existing Everyone grants. Dropping all
+    // rules for that SID would create a real conflict with unchanged source.
+    crate::workspace_metadata::restore(&fork.join("file"), &original_metadata).unwrap();
     let removed = acl(&fork.join("file"));
     assert_ne!(removed, edited);
+    assert_eq!(removed, original);
     let removal = workspace::snapshot_node(&fork, &source, "acl-removal").unwrap();
     assert_ne!(removal, result);
     let child = slot(&temp, "acl-removed");

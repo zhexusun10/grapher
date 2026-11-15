@@ -182,8 +182,13 @@ is never a substitute for S. This does not capture arbitrary external state.
 
 The native worker validates every stored byte and all root targets/conflicts
 before materializing the first root; historical preflight runs before project
-code reset, outside the Run mutex. Actual project Git conflicts are checked in W,
-not in S or against the engine's force-collected index. W's preparation guard
+code reset, outside the Run mutex. Current-tree inspection still hashes live
+files and checks paths/links/metadata, but never saves their discarded partial
+bytes as new blobs. Successful or refused preflight does not write/repair the
+immutable store; actual capture/sealing remains the only source of new byte
+evidence. Materialized files still receive full byte verification. Actual project
+Git conflicts are checked in W, not in S or against the engine's force-collected
+index. W's preparation guard
 excludes only recorded managed W prefixes; ordinary project/Git bytes remain
 protected. A binding may change its active W/S root only when the selected E has
 coverage for **all** previously known scopes. Otherwise live partial state is

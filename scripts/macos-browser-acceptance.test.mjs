@@ -192,7 +192,13 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
         if (['needs_attention', 'failed', 'publication_failed'].includes(state.phase)) throw new Error(JSON.stringify(state));
         return state.phase === 'completed' && state;
       }, 'Graph publication');
-      assert.equal(completed.publication.status, 'completed');
+      // Starting the source-native join clears the current publication card,
+      // not the durable delivery evidence of its four private predecessors.
+      const deliveries = completed.events.filter(event => event.type === 'publication_completed');
+      assert.equal(deliveries.length, 1);
+      const joinStarted = completed.events.find(event => event.type === 'started' && event.execution.node === 'join');
+      assert.ok(joinStarted && deliveries[0].sequence < joinStarted.sequence,
+        'private results must be delivered before the source-native join starts');
       for (const name of ['alpha', 'beta', 'gamma', 'delta', 'join']) {
         assert.equal(completed.nodes[name].status, 'completed');
         const execution = completed.executions.find(execution => execution.node === name);
@@ -201,7 +207,11 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
         const cwd = resolve(execution.worktree).normalize('NFD');
         const source = resolve(project).normalize('NFD');
         if (name === 'join') assert.equal(cwd, source);
-        else assert.notEqual(cwd, source, `${name} must use a private workspace`);
+        else {
+          assert.notEqual(cwd, source, `${name} must use a private workspace`);
+          assert.ok(execution.after && completed.publishedHeads.includes(execution.after),
+            `${name}'s recorded head must be delivered`);
+        }
       }
       assert.equal(await readFile(join(project, 'result.txt'), 'utf8'), 'combined');
       assert.equal(await readFile(join(project, 'input.txt'), 'utf8'), 'unstaged latest\n');

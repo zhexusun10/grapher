@@ -15,6 +15,16 @@ pub(crate) use rooted::RootScope;
 
 type Entries = BTreeMap<String, Entry>;
 
+#[derive(Clone, Copy)]
+enum Collection<'a> {
+    Capture,
+    Verify(&'a Entries),
+    // Restoration needs the current tree for safe removal/conflict planning,
+    // not a new snapshot of bytes it is about to discard. Still hash every
+    // live file and retain all existing path/link/metadata checks.
+    Inspect,
+}
+
 struct Materialization {
     root: PathBuf,
     desired: Entries,
@@ -390,7 +400,7 @@ impl Files {
         root: &Path,
         path: &Path,
         entries: &mut Entries,
-        expected: Option<&Entries>,
+        collection: Collection<'_>,
     ) -> Result<(), String> {
         let name = path.strip_prefix(root).map_err(|error| error.to_string())?;
         if self.scopes.is_some() && excluded(name) {
@@ -478,27 +488,29 @@ impl Files {
                     root,
                     &child.map_err(|error| error.to_string())?.path(),
                     entries,
-                    expected,
+                    collection,
                 )?;
             }
             return Ok(());
         } else if metadata.is_file() {
-            let blob = if let Some(expected) = expected {
-                let Some(Entry::File { blob, .. }) = expected.get(&name) else {
-                    return Err("Feedback workspace files changed after completion".into());
-                };
-                if hash(path)? != *blob {
-                    return Err("Feedback workspace files changed after completion".into());
+            let blob = match collection {
+                Collection::Capture => self.save_blob(path)?,
+                Collection::Inspect => hash(path)?,
+                Collection::Verify(expected) => {
+                    let Some(Entry::File { blob, .. }) = expected.get(&name) else {
+                        return Err("Feedback workspace files changed after completion".into());
+                    };
+                    if hash(path)? != *blob {
+                        return Err("Feedback workspace files changed after completion".into());
+                    }
+                    let stored = self.blob_path(blob)?;
+                    real_child_path(&self.directory, &stored, true)?
+                        .ok_or("Missing workspace file blob")?;
+                    if hash(&stored)? != *blob {
+                        return Err(format!("Damaged workspace file blob: {blob}"));
+                    }
+                    blob.clone()
                 }
-                let stored = self.blob_path(blob)?;
-                real_child_path(&self.directory, &stored, true)?
-                    .ok_or("Missing workspace file blob")?;
-                if hash(&stored)? != *blob {
-                    return Err(format!("Damaged workspace file blob: {blob}"));
-                }
-                blob.clone()
-            } else {
-                self.save_blob(path)?
             };
             Entry::File {
                 blob,
@@ -547,7 +559,7 @@ impl Files {
             .map_err(|error| error.to_string())?;
         let mut entries = Entries::new();
         for path in self.scoped_paths(&root)? {
-            self.collect(&root, &path, &mut entries, None)?;
+            self.collect(&root, &path, &mut entries, Collection::Capture)?;
         }
         self.save_version(
             version,
@@ -715,7 +727,7 @@ impl Files {
             .map_err(|error| error.to_string())?;
         let mut entries = Entries::new();
         for path in self.scoped_paths(&root)? {
-            self.collect(&root, &path, &mut entries, Some(&value.entries))?;
+            self.collect(&root, &path, &mut entries, Collection::Verify(&value.entries))?;
         }
         if entries != value.entries {
             return Err("Feedback workspace files changed after completion".into());
@@ -786,7 +798,7 @@ impl Files {
             .map_err(|error| error.to_string())?;
         let mut current = Entries::new();
         for path in self.scoped_paths(&root)? {
-            self.collect(&root, &path, &mut current, None)?;
+            self.collect(&root, &path, &mut current, Collection::Inspect)?;
         }
         // Resolve all destination parents before changing even the first root.
         // A captured regular file that will be replaced by a directory is not

@@ -93,7 +93,21 @@ Node/npm, real Python venv/PEP-517/uv and Rustup/Cargo projects, source drift,
 concurrent forks, composition, managed E capture/materialization and storage
 amplification. Missing uv is explicitly NOT RUN unless required (CI requires it).
 This component probe does not run a native sandbox, validate host compatibility
-or gate publication. Native boundary/lifecycle acceptance remains separate below.
+or gate publication. Failed profiles retain diagnostics and completed measurements
+before failing; missing phases are not validated. Native boundary/lifecycle
+acceptance remains separate below.
+
+For the narrower dirty managed-state preflight/materialization cost, without
+project Git preparation:
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib managed_recovery_preflight_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+Its synthetic distributions and measurement limits are documented in
+[the baseline procedure](environment-baselines.md#managed-dirty-view-recovery-cost-opt-in).
+Use `--lib workspace_files::tests` for regressions covering read-only successful
+and refused preflight, same-size/mtime blob corruption and legacy restoration.
 
 ## Workspace staging microbenchmark (opt-in)
 

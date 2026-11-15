@@ -54,7 +54,14 @@ fn rooted_snapshot_restores_distinct_roots_absence_and_keeps_caches() {
     fs::create_dir_all(paths["workspace"].join("absent")).unwrap();
     fs::write(paths["workspace"].join("absent/later"), "not historical").unwrap();
     fs::write(paths["state"].join(".agent-home/cache/value"), "new cache").unwrap();
+    let stored = stored_files(&files);
+    files.preflight_roots(&paths, &version).unwrap();
+    assert_eq!(stored_files(&files), stored, "preflight is read-only, even for dirty live files");
+    for path in paths.values() {
+        assert_eq!(fs::read_to_string(path.join("env/value")).unwrap(), "later");
+    }
     files.materialize_roots(&paths, &version).unwrap();
+    assert_eq!(stored_files(&files), stored, "discarded partial bytes are not new history");
     for (label, path) in &paths {
         assert_eq!(fs::read_to_string(path.join("env/value")).unwrap(), *label);
     }
@@ -152,7 +159,11 @@ fn rooted_second_target_failure_preflights_before_first_root_write() {
     fs::create_dir(&outside).unwrap();
     fs::write(outside.join("value"), "outside").unwrap();
     crate::path_safety::directory_link(&outside, &paths["workspace"].join("env"));
+    let stored = stored_files(&files);
+    assert!(files.preflight_roots(&paths, &version).is_err());
+    assert_eq!(stored_files(&files), stored, "refused preflight must not retain first-root partial bytes");
     assert!(files.materialize_roots(&paths, &version).is_err());
+    assert_eq!(stored_files(&files), stored);
     assert_eq!(
         fs::read_to_string(paths["state"].join("env/value")).unwrap(),
         "partial S"
@@ -161,6 +172,94 @@ fn rooted_second_target_failure_preflights_before_first_root_write() {
         fs::read_to_string(outside.join("value")).unwrap(),
         "outside"
     );
+}
+
+#[test]
+fn rooted_corrupt_blob_refuses_read_only_preflight_and_preserves_both_live_roots() {
+    let (_temp, files, paths, layouts) = fixture();
+    let version = Uuid::new_v4().to_string();
+    files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+    let record = files.load(&version).unwrap();
+    let Entry::File { blob, .. } =
+        &record.rooted.unwrap().roots["workspace"].entries["env/value"]
+    else { panic!() };
+    let blob_path = files.blob_path(blob).unwrap();
+    // Preserve size and mtime: neither may authorize skipping byte validation.
+    let modified = fs::metadata(&blob_path).unwrap().modified().unwrap();
+    fs::write(&blob_path, "damaged!!").unwrap();
+    fs::File::options().write(true).open(&blob_path).unwrap()
+        .set_modified(modified).unwrap();
+    for path in paths.values() {
+        fs::write(path.join("env/value"), "keep partial").unwrap();
+    }
+    let stored = stored_files(&files);
+    assert!(files.preflight_roots(&paths, &version).unwrap_err().contains("Damaged workspace file blob"));
+    assert!(files.materialize_roots(&paths, &version).unwrap_err().contains("Damaged workspace file blob"));
+    assert_eq!(stored_files(&files), stored);
+    for path in paths.values() {
+        assert_eq!(fs::read_to_string(path.join("env/value")).unwrap(), "keep partial");
+    }
+}
+
+// This isolates managed restoration's dirty-view cost from project Git/ACL
+// preparation. The real-tool project probe remains separate; no sandbox claim.
+#[test]
+#[ignore = "opt-in managed dirty-view preflight/materialization cost probe"]
+fn managed_recovery_preflight_benchmark() {
+    use std::time::Instant;
+    let store_size = |files: &Files| {
+        let mut count = 0u64;
+        let mut bytes = 0u64;
+        for directory in ["blobs", "versions"] {
+            for entry in fs::read_dir(files.directory.join(directory)).unwrap() {
+                let metadata = entry.unwrap().metadata().unwrap();
+                count += 1;
+                bytes += metadata.len();
+            }
+        }
+        serde_json::json!({"files":count,"logicalBytes":bytes})
+    };
+    let mut samples = Vec::new();
+    for (count, bytes) in [(64, 4096), (512, 4096), (8, 1024 * 1024)] {
+        for sample in 0..3 {
+            let (_temp, files, paths, layouts) = fixture();
+            for (label, path) in &paths {
+                for index in 0..count {
+                    let mut data = vec![b'x'; bytes];
+                    let identity = format!("{label}/{index:04}/recorded");
+                    data[..identity.len()].copy_from_slice(identity.as_bytes());
+                    fs::write(path.join(format!("env/dependency-{index:04}")), data).unwrap();
+                }
+            }
+            let version = Uuid::new_v4().to_string();
+            files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+            for path in paths.values() {
+                for index in 0..count {
+                    let path = path.join(format!("env/dependency-{index:04}"));
+                    let mut data = fs::read(&path).unwrap();
+                    data[0] = b'!';
+                    fs::write(path, data).unwrap();
+                }
+            }
+            let before = store_size(&files);
+            let start = Instant::now();
+            files.preflight_roots(&paths, &version).unwrap();
+            let preflight_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let after_preflight = store_size(&files);
+            // Preflight must leave the dirty live view intact.
+            assert_eq!(fs::read(paths["workspace"].join("env/dependency-0000")).unwrap()[0], b'!');
+            let start = Instant::now();
+            files.materialize_roots(&paths, &version).unwrap();
+            let materialize_ms = start.elapsed().as_secs_f64() * 1000.0;
+            files.verify_roots(&paths, &version).unwrap();
+            samples.push(serde_json::json!({"filesPerRoot":count,"bytesPerFile":bytes,"sample":sample,
+                "preflightMs":preflight_ms,"materializeMs":materialize_ms,"storeBefore":before,
+                "storeAfterPreflight":after_preflight,"storeAfterMaterialize":store_size(&files)}));
+        }
+    }
+    println!("GRAPHER_MANAGED_RECOVERY_PROBE {}", serde_json::json!({"schema":1,
+        "platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"samples":samples,
+        "limits":"warm filesystem cache; test profile; logical bytes; excludes project Git preparation, child resources and native sandbox acceptance"}));
 }
 
 #[test]

@@ -522,6 +522,9 @@ mod platform {
             descriptor: *mut *mut c_void,
         ) -> u32;
         fn GetSecurityDescriptorLength(descriptor: *const c_void) -> u32;
+        fn GetSecurityDescriptorOwner(data: *const c_void, owner: *mut *mut c_void, defaulted: *mut i32) -> i32;
+        fn GetSecurityDescriptorGroup(data: *const c_void, group: *mut *mut c_void, defaulted: *mut i32) -> i32;
+        fn EqualSid(left: *const c_void, right: *const c_void) -> i32;
         fn SetKernelObjectSecurity(handle: *mut c_void, info: u32, data: *const c_void) -> i32;
         fn GetSecurityDescriptorControl(
             data: *const c_void,
@@ -762,6 +765,45 @@ mod platform {
             efs,
         })
     }
+    fn ownership_changes(path: &Path, expected: *const c_void) -> Result<u32, String> {
+        let name = wide(path)?;
+        let handle = unsafe {
+            CreateFileW(name.as_ptr(), 0x0002_0000, 7, std::ptr::null(), 3,
+                0x0220_0000, std::ptr::null_mut())
+        };
+        if handle as isize == -1 {
+            return Err(format!("Cannot inspect project ownership {}: {}", path.display(), std::io::Error::last_os_error()));
+        }
+        let mut owner = std::ptr::null_mut();
+        let mut group = std::ptr::null_mut();
+        let mut actual = std::ptr::null_mut();
+        let status = unsafe {
+            GetSecurityInfo(handle, 1, 3, &mut owner, &mut group, std::ptr::null_mut(),
+                std::ptr::null_mut(), &mut actual)
+        };
+        unsafe { CloseHandle(handle); }
+        let result = (|| {
+            if status != 0 {
+                return Err(format!("Cannot inspect project ownership {}: {}", path.display(), std::io::Error::from_raw_os_error(status as i32)));
+            }
+            let mut expected_owner = std::ptr::null_mut();
+            let mut expected_group = std::ptr::null_mut();
+            let mut defaulted = 0;
+            if unsafe { GetSecurityDescriptorOwner(expected, &mut expected_owner, &mut defaulted) } == 0
+                || unsafe { GetSecurityDescriptorGroup(expected, &mut expected_group, &mut defaulted) } == 0
+            {
+                return Err("Damaged project ownership evidence".into());
+            }
+            let same = |left: *mut c_void, right: *mut c_void| {
+                left == right || !left.is_null() && !right.is_null()
+                    && unsafe { EqualSid(left, right) } != 0
+            };
+            Ok(u32::from(!same(owner, expected_owner)) | (u32::from(!same(group, expected_group)) << 1))
+        })();
+        if !actual.is_null() { unsafe { LocalFree(actual); } }
+        result
+    }
+
     pub(super) fn restore(path: &Path, extra: &Extra, _mode: Option<u32>) -> Result<(), String> {
         let native_path = wide(path)?;
         let expected: BTreeSet<&str> = extra
@@ -799,11 +841,6 @@ mod platform {
                 std::io::Error::last_os_error()
             ));
         }
-        let flags = 7 | if extra.protected {
-            0x8000_0000
-        } else {
-            0x2000_0000
-        };
         let security = String::from_utf8(extra.security.clone()).map_err(|e| e.to_string())?;
         let text: Vec<u16> = security.encode_utf16().chain([0]).collect();
         let mut descriptor = std::ptr::null_mut();
@@ -818,37 +855,30 @@ mod platform {
         {
             return Err("Damaged project ACL evidence".into());
         }
-        // Named-security setters re-inherit ACEs from the destination parent.
-        // Restore the recorded descriptor directly so a different cache parent
-        // cannot silently add permissions or alter the source's ordered ACEs.
-        let handle = unsafe {
-            CreateFileW(
-                native_path.as_ptr(),
-                0x000e_0000,
-                7,
-                std::ptr::null(),
-                3,
-                0x0220_0000,
-                std::ptr::null_mut(),
-            )
-        };
-        let result = handle as isize != -1
-            && unsafe { SetKernelObjectSecurity(handle, flags, descriptor) } != 0;
-        let error = std::io::Error::last_os_error();
-        if handle as isize != -1 {
-            unsafe {
-                CloseHandle(handle);
+        let result = (|| {
+            // WRITE_OWNER is not implied by file modification or WRITE_DAC,
+            // even for the owner. Request it only for an actual owner/group
+            // change; never ignore such changes or substitute a weaker ACL.
+            let ownership = ownership_changes(path, descriptor)?;
+            let flags = 4 | ownership | if extra.protected { 0x8000_0000 } else { 0x2000_0000 };
+            let access = 0x0004_0000 | if ownership != 0 { 0x0008_0000 } else { 0 };
+            // Named-security setters re-inherit ACEs from the destination parent.
+            // Restore the recorded descriptor directly, preserving ordered ACEs.
+            let handle = unsafe {
+                CreateFileW(native_path.as_ptr(), access, 7, std::ptr::null(), 3,
+                    0x0220_0000, std::ptr::null_mut())
+            };
+            let applied = handle as isize != -1
+                && unsafe { SetKernelObjectSecurity(handle, flags, descriptor) } != 0;
+            let error = std::io::Error::last_os_error();
+            if handle as isize != -1 { unsafe { CloseHandle(handle); } }
+            if !applied {
+                return Err(format!("Cannot preserve project ACL {}: {error}", path.display()));
             }
-        }
-        unsafe {
-            LocalFree(descriptor);
-        }
-        if !result {
-            return Err(format!(
-                "Cannot preserve project ACL {}: {error}",
-                path.display()
-            ));
-        }
+            Ok(())
+        })();
+        unsafe { LocalFree(descriptor); }
+        result?;
         set_encrypted(path, extra.efs)?;
         let actual = capture(path)?;
         if actual != *extra {
@@ -1031,6 +1061,53 @@ mod tests {
         }
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn windows_acl_restore_does_not_require_unchanged_ownership_permissions() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        for directory in [false, true] {
+            let path = temp.path().join(if directory { "directory" } else { "file" });
+            if directory {
+                fs::create_dir(&path).unwrap();
+            } else {
+                fs::write(&path, "project bytes").unwrap();
+            }
+            let expected = capture(&path, &fs::symlink_metadata(&path).unwrap()).unwrap();
+            // Owners can still update the DACL without WRITE_OWNER. Model the
+            // ordinary non-elevated permissions of a project outside HOME.
+            let output = std::process::Command::new("icacls.exe")
+                .arg(crate::native::host_path(&path))
+                .args(["/deny", "*S-1-1-0:(WO)"])
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let denied = fs::OpenOptions::new()
+                .access_mode(0x0008_0000)
+                .custom_flags(0x0220_0000)
+                .open(&path).unwrap_err();
+            assert_eq!(denied.raw_os_error(), Some(5));
+            let restricted = capture(&path, &fs::symlink_metadata(&path).unwrap()).unwrap();
+            assert_ne!(restricted, expected);
+            // Genuine ownership changes still require WRITE_OWNER and must
+            // fail before changing the DACL, not be silently omitted.
+            for (field, next) in [("O:", "G:"), ("G:", "D:")] {
+                let mut changed = expected.clone();
+                let mut security = String::from_utf8(changed.security).unwrap();
+                let start = security.find(field).unwrap() + field.len();
+                let end = security.find(next).unwrap();
+                assert_ne!(&security[start..end], "SY");
+                security.replace_range(start..end, "SY");
+                changed.security = security.into_bytes();
+                assert!(restore(&path, &changed).unwrap_err().contains("Cannot preserve project ACL"));
+                assert_eq!(capture(&path, &fs::symlink_metadata(&path).unwrap()).unwrap(), restricted);
+            }
+            restore(&path, &expected).unwrap();
+            assert_eq!(capture(&path, &fs::symlink_metadata(&path).unwrap()).unwrap(), expected);
+            if !directory {
+                assert_eq!(fs::read_to_string(&path).unwrap(), "project bytes");
+            }
+        }
     }
 
     #[test]

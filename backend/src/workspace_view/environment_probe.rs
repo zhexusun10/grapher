@@ -227,6 +227,10 @@ impl Project {
                         command(uv)
                             .args(["run", "--offline", "--no-sync", "--python"])
                             .arg(&python)
+                            // Script dispatch may select bin/python3, a distinct
+                            // copied file under venv --copies on POSIX. Exercise
+                            // uv with the exact interpreter whose bytes we verify.
+                            .arg(&python)
                             .arg("app.py"),
                     ))
                     .unwrap();
@@ -234,7 +238,7 @@ impl Project {
                     assert_eq!(modern["abi"], direct["abi"]);
                     for key in ["python", "prefix", "basePrefix"] {
                         assert!(crate::path_identity::same_path(Path::new(modern[key].as_str().unwrap()), Path::new(direct[key].as_str().unwrap())),
-                            "uv must use the real selected interpreter/prefix, including native path aliases: {key}");
+                            "uv must use the real selected interpreter/prefix, including native path aliases: {key}; direct={direct}, uv={modern}");
                     }
                 }
                 direct
@@ -576,16 +580,23 @@ fn environment_project_baseline() {
     let mut gaps = Vec::new();
     for name in selected.iter().copied() {
         let gap_start = gaps.len();
+        let mut times = serde_json::Map::new();
+        let mut completed_evidence = json!({});
+        let started = Instant::now();
+        // Preserve completed measurements and continue the explicitly selected
+        // profiles after a fixture/tool/permission failure. This is diagnostic
+        // collection only: any failed profile still fails the test below.
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let temp = tempfile::Builder::new()
             .prefix("g-env-probe-")
             .tempdir_in(&parent)
             .unwrap();
         let source = source(&temp);
-        let mut times = serde_json::Map::new();
         let project = timed(&mut times, "fixtureSetup", || {
             Project::prepare(name, &source, files, &mut gaps)
         });
         let tool_versions = project.tool_versions(&source);
+        completed_evidence["toolVersions"] = tool_versions.clone();
         project.patch(&source, "captured-local-patch");
         // Rustup's source default is exercised before redirecting HOME. The
         // Cargo package cache is nevertheless disposable, not the host cache.
@@ -605,6 +616,8 @@ fn environment_project_baseline() {
         });
         assert_eq!(source_output["value"], "captured-local-patch");
         let source_size = size(&source, true);
+        completed_evidence["sourceExecutionEvidence"] = source_output.clone();
+        completed_evidence["sourceProject"] = serde_json::to_value(&source_size).unwrap();
         let source_head = workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap();
         let source_index = bytes(&source.join(".git/index"));
         let graph_directory = workspace::shadow_repo_dir(&source).unwrap();
@@ -617,6 +630,7 @@ fn environment_project_baseline() {
             workspace::snapshot_repository(&source).unwrap()
         });
         let graph_after_base = size(&graph_directory, false);
+        completed_evidence["graphAfterBaseSnapshot"] = serde_json::to_value(&graph_after_base).unwrap();
         let managed = if let Project::Python { .. } = &project {
             let directory = temp.path().join("environment-evidence");
             let files =
@@ -694,6 +708,7 @@ fn environment_project_baseline() {
             managed_report = json!({"snapshotStore":size(directory,false),"restoredViews":{"workspace":size(&restored,false),"state":size(&restored_state,false)},
                 "coverage":"rooted schema 1: W:.venv and S:.agent-home excluding cache; byte materialization, not launcher/editable relocation or cross-slot environment reuse"});
         }
+        completed_evidence["managedEnvironment"] = managed_report.clone();
         let node = slot(&temp, "node");
         timed(&mut times, "workspacePrepare", || {
             workspace::prepare(&source, &node, &base, &[]).unwrap()
@@ -814,7 +829,7 @@ fn environment_project_baseline() {
         let graph_size = size(&graph_directory, false);
         let amplification = (private_size.logical_bytes + graph_size.logical_bytes) as f64
             / source_size.logical_bytes.max(1) as f64;
-        let report = json!({"project":name,"profile":"offline-small-real-tools","toolVersions":tool_versions,"nodeDependencyPaddingFiles":if name == "node" {Some(files)}else{None},
+        let report = json!({"project":name,"profile":"offline-small-real-tools","componentStatus":"completed","toolVersions":tool_versions,"nodeDependencyPaddingFiles":if name == "node" {Some(files)}else{None},
             "timingsMs":times,"sourceProject":source_size,"graphAfterBaseSnapshot":graph_after_base,
             "graphFinal":graph_size,"fivePrivateViewsAndMetadata":private_size,
             "retainedLogicalStorageOverSourceProject":amplification,"concurrentWriters":2,
@@ -824,12 +839,29 @@ fn environment_project_baseline() {
             "explicitProjectRebuild":rebuild,"managedEnvironment":managed_report,"homeDiscovery":home_discovery,"sourceDriftIsolated":true,"mutableBranchSharingDetected":false,"validationGaps":&gaps[gap_start..],
             "nativeSandboxAcceptance":"NOT RUN by this component probe",
             "measurementLimits":"warm OS cache; test profile; logical bytes not allocated blocks; process counters exclude child Git/compiler resources; no publication timing or compatibility claim"});
+        // The owned graph guard and TempDir also run on assertion failures.
+        report
+        }));
+        let mut report = match attempt {
+            Ok(report) => report,
+            Err(error) => {
+                let diagnostic = error.downcast_ref::<String>().cloned()
+                    .or_else(|| error.downcast_ref::<&str>().map(|message| (*message).to_owned()))
+                    .unwrap_or_else(|| "Non-string panic in project baseline".into());
+                json!({"project":name,"profile":"offline-small-real-tools","componentStatus":"failed",
+                    "diagnostic":diagnostic,"timingsMs":times,"completedEvidence":completed_evidence,"validationGaps":&gaps[gap_start..],
+                    "measurementLimits":"completed phases only; failed/incomplete phases have no timing or compatibility evidence",
+                    "nativeSandboxAcceptance":"NOT RUN by this component probe"})
+            }
+        };
+        report["totalAttemptMs"] = json!(started.elapsed().as_secs_f64() * 1000.0);
         println!("GRAPHER_ENVIRONMENT_PROBE {}", report);
         reports.push(report);
-        // The owned graph guard and TempDir also run on assertion failures.
     }
+    let failed: Vec<_> = reports.iter().filter(|report| report["componentStatus"] == "failed")
+        .map(|report| report["project"].as_str().unwrap()).collect();
     let report = json!({"schema":1,"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,
-        "requestedProjects":selected,"profiles":reports,"validationGaps":gaps});
+        "requestedProjects":selected,"profiles":reports,"failedProjects":failed,"validationGaps":gaps});
     if let Some(path) = std::env::var_os("GRAPHER_ENV_PROBE_REPORT") {
         use std::io::Write;
         let mut file = fs::OpenOptions::new()
@@ -841,6 +873,7 @@ fn environment_project_baseline() {
             .unwrap();
     }
     println!("GRAPHER_ENVIRONMENT_PROBE_SUMMARY {}", report);
+    assert!(failed.is_empty(), "Project baseline failed (report retained): {failed:?}");
     assert!(
         std::env::var_os("GRAPHER_ENV_PROBE_REQUIRE_UV").is_none()
             || selected.contains(&"python") && gaps.is_empty(),

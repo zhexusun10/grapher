@@ -11,6 +11,17 @@ fn managed_store(temp: &TempDir, workspace: &Path) -> Files {
     Files::environment(&version_store, &[".venv".into()], &[]).unwrap()
 }
 
+// Small regressions compare the complete immutable store, not just manifests.
+fn stored_files(files: &Files) -> BTreeMap<PathBuf, Vec<u8>> {
+    ["blobs", "versions"].into_iter().flat_map(|directory| {
+        fs::read_dir(files.directory.join(directory)).unwrap().map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        }).collect::<Vec<_>>()
+    }).collect()
+}
+
 #[test]
 fn managed_environment_scopes_remain_versioned_and_independent_of_gitignore() {
     let temp = tempfile::tempdir().unwrap();
@@ -24,9 +35,12 @@ fn managed_environment_scopes_remain_versioned_and_independent_of_gitignore() {
     let version = Uuid::new_v4().to_string();
     files.capture(&workspace, &version, "", &[]).unwrap();
     fs::write(workspace.join(".venv/bin/python"), "mutated environment").unwrap();
+    let stored = stored_files(&files);
     files
         .materialize(&workspace, std::slice::from_ref(&version), None, false)
         .unwrap();
+    assert_eq!(stored_files(&files), stored, "restoration must not snapshot discarded live bytes");
+    files.verify(&workspace, &version, "").unwrap();
 
     assert_eq!(
         fs::read_to_string(workspace.join(".venv/bin/python")).unwrap(),

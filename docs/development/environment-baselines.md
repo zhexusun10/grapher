@@ -72,6 +72,13 @@ rebuild service or proof that manifests reproduce installed dependencies.
 
 JSON reports include native tool versions, setup, source snapshot, prepare, node seal, per-worker
 fork/seal, concurrent wall time, merge preparation and immutable reconstruction.
+Each profile has a `componentStatus`. An unwinding fixture/tool/permission failure
+records its diagnostic, completed phase timings and `completedEvidence`, then
+continues only the other explicitly requested profiles. `failedProjects` is
+retained in the JSON **before the test fails**; this is not a fallback or partial
+pass. Missing timings/fields are not zero-cost or successful phases. A killed or
+aborted test process may still leave no report. Required uv coverage continues
+to fail after reporting if unavailable.
 They include source file/directory/link counts and logical bytes, graph storage,
 five retained private views plus their external metadata/state, and their ratio
 to source project bytes. The Python S reconstruction is included in retained
@@ -118,6 +125,31 @@ proof after execution. Declarations alone cannot authorize compatibility or
 select an environment. There is currently no generic host-config import or
 transparent cross-layout rebuilding API. Business Node options remain excluded
 from engine Node/Git, hook capture and extension/MCP factories.
+
+## Managed dirty-view recovery cost (opt-in)
+
+```sh
+node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib managed_recovery_preflight_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+This focused [component probe](../../backend/src/workspace_files/rooted_tests.rs)
+measures all-root E preflight and materialization for dirty W/S views independently
+of project Git/ACL preparation. It uses three fresh samples for each small-file
+and large-file distribution and prints phase times plus immutable-store file
+counts/logical bytes before preflight, after preflight and after materialization.
+These are synthetic byte distributions, **not** real-tool or native-boundary
+acceptance. Filesystem caches are warm; there are no timing thresholds or
+allocated-block/whole-process-tree resource claims.
+
+Restoration now inspects and hashes the current files without saving them as
+unreferenced blobs. Preflight must not grow or repair the immutable store, even
+when a later root prevents restoration. Every referenced historical blob is
+still fully validated before applying any root, and every materialized file is
+hashed afterwards. Actual capture/sealing still records offline dependencies,
+manifest-less content and local patches; legacy manifests/checksums, cache
+exclusions, root ownership and the existing project delivery path are unchanged.
+This removes discarded-byte retention, not the cost of retaining **recorded**
+dependencies or the need to prove a compatible business environment.
 
 ## Storage/rebuild directions (not implemented)
 

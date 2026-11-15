@@ -389,6 +389,47 @@ fn best_effort_bound_fanout_is_parallel_and_custom_prefixes_never_enter_git() {
 }
 
 #[test]
+fn best_effort_same_slot_path_spelling_keeps_latest_environment() {
+    let (_temp, _source, mut runtime) = setup(
+        graph(&["A", "B", "C"], &[("A", "B", false), ("B", "C", false)]),
+        automatic(),
+        r#"
+if(name!=='A') {
+  const {execFileSync}=await import('node:child_process');
+  const expected=name==='B'?'A':'B';
+  const script="import pathlib,sys; prefix=pathlib.Path(sys.prefix); assert prefix.resolve()==pathlib.Path(sys.argv[1]).resolve(); marker=prefix/'marker'; assert marker.read_text()==sys.argv[2]; marker.write_text(sys.argv[3])";
+  execFileSync('python',['-I','-c',script,process.env.GTEST_STATE+'/business-env',expected,name],{env:process.env});
+}
+"#,
+    );
+    let a = runtime.jobs().unwrap().remove(0);
+    run_created(&mut runtime, &a, "business-env");
+    let first = runtime.state.executions[0].result.clone().unwrap();
+    for (parent, child) in [("A", "B"), ("B", "C")] {
+        let previous = runtime.state.nodes[parent].result.clone().unwrap();
+        let path = Path::new(previous.layout.as_ref().unwrap());
+        let alias = path.parent().unwrap().join(".").join(path.file_name().unwrap());
+        let alias = alias.to_string_lossy().into_owned();
+        assert_ne!(Some(&alias), previous.layout.as_ref());
+        assert!(crate::path_identity::same_path(Path::new(&alias), path));
+        // A recorded current reference may use another spelling of the same
+        // physical slot. Historical execution evidence remains untouched.
+        runtime.state.nodes.get_mut(parent).unwrap().result.as_mut().unwrap().layout = Some(alias);
+        let job = runtime.jobs().unwrap().remove(0);
+        assert_eq!(job.execution.node, child);
+        assert!(crate::path_identity::same_path(Path::new(&job.execution.worktree), path));
+        let input = job.environment_input.as_ref().unwrap();
+        assert_eq!(input.environment_ref, previous.environment_ref, "inherit the latest parent bytes, not the initial baseline");
+        assert_eq!(input.inheritance.as_ref().unwrap().reason, "same-layout");
+        assert!(store(&runtime).load_launch(&input.launch_ref).unwrap().environment.is_some(), "path spelling must not unbind the current interpreter");
+        run(&mut runtime, &job);
+        assert_ne!(runtime.state.nodes[child].result.as_ref().unwrap().environment_ref, previous.environment_ref);
+    }
+    assert_eq!(runtime.state.executions[0].result.as_ref(), Some(&first));
+    assert_eq!(fs::read_to_string(state_of(&runtime, &a.execution.worktree).join("business-env/marker")).unwrap(), "C");
+}
+
+#[test]
 fn best_effort_independent_terminal_environments_publish_and_launch_named_entries() {
     let (_temp, source, mut runtime) = setup(
         graph(&["A", "B"], &[]),
