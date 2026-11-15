@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.9] - 2026-11-15
+
 **Upgrade note:** Rebuild and restart the backend and its Provider/Auth host together with the frontend to enable the new model-visibility operations and command-ID-fenced composer UI protocol. A frontend-only update against an older backend can report `Invalid Provider/Auth Adapter operation`; composer UI requests also require matching frontend/backend versions. This update also adds `NodeInputBound` events, queued-node acceptance metadata and durable detached-cleanup receipts; use the updated backend to reopen Runs written by this version.
 
 ### Added
