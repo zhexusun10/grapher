@@ -97,6 +97,8 @@ After a node reads a steer, you can edit it, even after reload; this branches th
 
 Switching conversations does not stop Runs. Unsent text survives switches only in browser memory, not reload; unsent attachments are not retained. Selecting or removing an attachment does not change project files. Sending uses a unique path without overwriting existing files. For a completed node, the attachment is staged for its follow-up without changing the completed snapshot. If the workspace is unavailable or the backend lacks safe upload support, the draft and attachment remain for retry.
 
+Replies can display web images and workspace-relative screenshots inline. Local previews support PNG, JPEG, GIF, WebP and BMP up to 20 MiB and read the conversation's current workspace (or published source file), not a saved historical image. Missing, deleted or unsupported files show an image-unavailable label; SVG and paths outside the workspace are not previewed.
+
 ### Planner follow-ups and review
 
 Shared-source Planner follow-ups stay in your project and have no workspace-switch tool. With private execution, follow-ups may use a current node workspace alongside its active writer, not a merged view of parallel branches. Check **Planning session details** for the directory used. If the newest workspace is still preparing, the Planner uses the source project, never that partial workspace.

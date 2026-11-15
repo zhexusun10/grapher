@@ -25,6 +25,7 @@ mod composer;
 mod open_file;
 mod project_discovery;
 mod sse;
+mod workspace_images;
 #[path = "workspace_attachments.rs"]
 mod workspace_attachments;
 #[cfg(all(test, windows))]
@@ -453,6 +454,8 @@ pub struct Bootstrap {
 
 const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
 const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
+const PLANNER_REVIEW_RULE: &str =
+    "Once all nodes you assigned have completed, the harness will resume your session so you can review the results.";
 const POST_TASK_REVIEW_PROMPT: &str =
     "All tasks you assigned are completed. Consider your next move.";
 /// Rework semantics shared by the injected Planner status block and the
@@ -463,6 +466,26 @@ const PLANNER_REWORK_NOTE: &str = "Modifying a completed node's task re-runs tha
 const BACKEND_STOPPED_PLANNING_ERROR: &str =
     "Backend stopped during planning. Saved output is preserved; start a new planning attempt.";
 const BACKEND_STOPPED_REVIEW_ERROR: &str = "Backend stopped during post-task Planner review. Saved output is preserved; send a follow-up to continue.";
+
+fn planner_system_prompt(prompt: &str, post_task_review: bool) -> Result<String, String> {
+    if !post_task_review {
+        return Ok(prompt.to_string());
+    }
+    // Preserve the existing inline-or-file override contract when adding rules.
+    let prompt = if std::path::Path::new(prompt).is_file() {
+        fs::read_to_string(prompt)
+            .map_err(|error| format!("Cannot read Planner system prompt: {error}"))?
+    } else {
+        prompt.to_string()
+    };
+    Ok(match prompt.rsplit_once("</rules>") {
+        Some((rules, rest)) => {
+            let separator = if rules.ends_with('\n') { "" } else { "\n" };
+            format!("{rules}{separator}- {PLANNER_REVIEW_RULE}\n</rules>{rest}")
+        }
+        None => format!("{prompt}\n\n<rules>\n- {PLANNER_REVIEW_RULE}\n</rules>"),
+    })
+}
 
 fn post_task_review_task(include_rework_note: bool) -> String {
     if include_rework_note {
@@ -2575,8 +2598,11 @@ fn plan_goal_internal_with_options(
                             if let Some(role) = running.roles.get_mut("planner") {
                                 role.model = planner_config.model.clone();
                             }
-                            let planner_system_prompt = std::env::var("PLANNER_SYSTEM_PROMPT")
-                                .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string());
+                            let planner_system_prompt = planner_system_prompt(
+                                &std::env::var("PLANNER_SYSTEM_PROMPT")
+                                    .unwrap_or_else(|_| PLANNER_PROMPT.trim().to_string()),
+                                planner_config.post_task_review,
+                            )?;
                             let (task, is_followup) = {
                                 let mut runtime =
                                     service.runtime.lock().map_err(|error| error.to_string())?;
@@ -6458,6 +6484,7 @@ fn api_service(
         | "get_execution_output"
         | "get_file_changes"
         | "open_workspace_file"
+        | "get_workspace_image"
         | "get_merger_prompt"
         | "write_workspace_attachment"
         | "delete_workspace_attachment"
@@ -7056,7 +7083,7 @@ fn handle_http_request(
         }
 
         let mut input = String::new();
-        let result = std::io::Read::read_to_string(
+        let parsed = std::io::Read::read_to_string(
             &mut request.as_reader().take(10 * 1024 * 1024 + 1),
             &mut input,
         )
@@ -7068,8 +7095,35 @@ fn handle_http_request(
             let body: serde_json::Value =
                 serde_json::from_str(&input).map_err(|e| e.to_string())?;
             let scoped = api_service(service, command, &body)?;
-            dispatch(&scoped, command, body)
+            Ok((scoped, body))
         });
+        // Raster previews keep the JSON-only POST/Host/Origin boundary. A model
+        // <img src="/api/..."> cannot trigger a filesystem read via a GET.
+        if command == "get_workspace_image" {
+            let result = parsed
+                .and_then(|(scoped, body)| workspace_images::get_workspace_image(&scoped, &body));
+            let (bytes, mime, status) = match result {
+                Ok((bytes, mime)) => (bytes, mime, 200),
+                Err(error) => (
+                    serde_json::json!({"error": error}).to_string().into_bytes(),
+                    "application/json",
+                    400,
+                ),
+            };
+            let mut response = Response::from_data(bytes)
+                .with_status_code(status)
+                .with_header(Header::from_bytes("Content-Type", mime).unwrap())
+                .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
+                .with_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap());
+            if let Some(ref origin) = req_origin {
+                response = response.with_header(
+                    Header::from_bytes("Access-Control-Allow-Origin", origin.as_bytes()).unwrap(),
+                );
+            }
+            let _ = request.respond(response);
+            return;
+        }
+        let result = parsed.and_then(|(scoped, body)| dispatch(&scoped, command, body));
         let (status, body) = match result {
             Ok(value) => (200, serde_json::json!({"result": value})),
             Err(error) => match busy_snapshot_poll(command, &input, &error) {

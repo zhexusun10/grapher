@@ -17,7 +17,16 @@ const livePhaseNames = new Set([
   "launching_result",
 ]);
 
-type WorkSnapshot = Pick<Snapshot, "executions" | "mergers" | "nodes">;
+type WorkSnapshot = Partial<Pick<Snapshot, "executions" | "mergers" | "nodes" | "resultExecution">>;
+
+/** `dirty` is an invalidated result waiting for dispatch, not a live writer. */
+export function runHasActiveExecutions(snapshot?: WorkSnapshot | null): boolean {
+  if (!snapshot) return false;
+  return (snapshot.executions ?? []).some(item => item.status === "running")
+    || (snapshot.mergers ?? []).some(item => item.status === "running")
+    || Object.values(snapshot.nodes ?? {}).some(item => item.status === "running")
+    || snapshot.resultExecution?.status === "running";
+}
 
 /** A Run can leave its phase settled while work is still in flight: a standalone
  * publication Merger keeps `completed` and source-direct work keeps `followup`
@@ -25,8 +34,5 @@ type WorkSnapshot = Pick<Snapshot, "executions" | "mergers" | "nodes">;
  * writers keeps the sidebar card honest instead of trusting the phase alone. */
 export function runHasLiveWork(phase: string, snapshot?: WorkSnapshot | null): boolean {
   if (livePhaseNames.has(phase)) return true;
-  if (!snapshot) return false;
-  return (snapshot.executions ?? []).some(item => item.status === "running")
-    || (snapshot.mergers ?? []).some(item => item.status === "running")
-    || Object.values(snapshot.nodes ?? {}).some(item => item.status === "running" || item.status === "dirty");
+  return runHasActiveExecutions(snapshot);
 }

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import { StreamingMarkdownCache } from "../services/streamingMarkdown";
 import { t } from "../i18n";
+import { useWorkspaceImages } from "./WorkspaceImages";
 
 interface MarkdownRendererProps {
   content: string;
@@ -29,6 +30,7 @@ export function injectStreamingCursor(html: string, cursorHtml: string): string 
 
 export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
   ({ content, className = "", isStreaming = false, streamingCursor = false }) => {
+    const root = useRef<HTMLDivElement>(null);
     const cache = useRef<StreamingMarkdownCache | null>(null);
     const copyTimers = useRef(new Map<HTMLButtonElement, ReturnType<typeof setTimeout>>());
     const copyLabel = t("复制到剪贴板");
@@ -53,6 +55,8 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
           : fallback;
       }
     }, [content, isStreaming, streamingCursor, copyLabel]);
+
+    const imageScopeKey = useWorkspaceImages(root, sanitizedHtml);
 
     const handleCopy = async (event: React.MouseEvent) => {
       const target = event.target;
@@ -80,7 +84,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
     };
 
     return (
-      <div
+      <div key={imageScopeKey} ref={root}
         className={`markdown-content ${isStreaming ? "streaming" : ""} ${className}`}
         dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
         onClick={handleCopy}

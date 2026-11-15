@@ -18,6 +18,7 @@ import {
 import { PromptBox, type PromptBoxSubmitOptions } from "../ui/chatgpt-prompt-input";
 import type { ConfirmModalState } from "../modals/ConfirmModal";
 import { MarkdownRenderer } from "../MarkdownRenderer";
+import { WorkspaceImageProvider } from "../WorkspaceImages";
 import { EditableUserBubble, StreamingAssistantBubble } from "./ChatBubbles";
 import { NodeTaskCard } from "./NodeTaskCard";
 import { CreateNodeForm } from "./CreateNodeForm";
@@ -2788,6 +2789,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   ) : null;
 
   return (
+    <WorkspaceImageProvider runId={state.runId}>
     <section
       // Keep exit animations and split-width transitions within one Conversation.
       key={currentRunKey}
@@ -3782,6 +3784,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         )}
       </AnimatePresence>
     </section>
+    </WorkspaceImageProvider>
   );
 });
 

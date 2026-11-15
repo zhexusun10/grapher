@@ -44,6 +44,7 @@ import { resetPresentedCardIds } from "./services/cardAnimations";
 
 import { graphEdgeId, useGraphElements } from "./hooks/useGraphElements";
 import { plannerEdgeEdits, plannerNodeEdits } from "./lib/plannerGraphEdits";
+import { runHasActiveExecutions } from "./lib/runPhase";
 import { ComposerDrafts } from "./services/composerDrafts";
 import { nodeInstructionText, steerRollbackKey } from "./lib/pendingSteers";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
@@ -310,9 +311,7 @@ export default function App() {
       return { ...previous, [runId]: activity };
     });
   }, []);
-  const hasActiveExecutions = state.executions.some(item => item.status === "running") ||
-    (state.mergers ?? []).some(item => item.status === "running") ||
-    Object.values(state.nodes).some(item => item.status === "running" || item.status === "dirty");
+  const hasActiveExecutions = runHasActiveExecutions(state);
 
   const [dataPath, setDataPath] = useState(() => normalizeWorkspacePath(readStorageString(STORAGE_KEYS.dataPath) || ""));
   const [recoveredPlanning, setRecoveredPlanning] = useState<PlanningSummary | null>(null);

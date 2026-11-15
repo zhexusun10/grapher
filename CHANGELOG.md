@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Markdown replies can preview workspace-relative PNG, JPEG, GIF, WebP and BMP images up to 20 MiB through a Run- and execution-scoped read-only API. Previews use current workspace files, reject unsafe paths and active formats, and release browser resources when the view changes (`backend/src/server/workspace_images.rs`, `src/components/WorkspaceImages.tsx`, `docs/user-guide.md`).
 - Waiting, dirty and blocked Graph nodes now accept FIFO messages without bypassing dependencies, replacing feedback instructions or resuming a paused Run. The selected node remains the target while Planner is running; durable request IDs prevent lost-response retries from duplicating queued input, including after dispatch and restart (`backend/src/runtime.rs`, `backend/src/server.rs`, `src/App.tsx`).
 - Added opt-in, disposable-fixture probes for workspace scanning, view normalization/equality, SHA-256 blob batching, publication staging, cleanup lock contention and file-change persistence (`docs/development/testing.md`).
 - Added **Enable Feedback** (`feedbackEnabled`) under **Settings → Harness settings**, off by default, including for older settings without the field. Disabling it removes the `feedback` field and protocol description from subsequent Planner `edge` tools, including prepared-process launches; the feedback budget is editable only while enabled (`src/components/modals/SettingsModal.tsx`, `backend/resources/planner.ts`, `backend/src/engine.rs`, `engine/prepared-host.ts`).
@@ -22,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- When post-task Planner review is enabled, the Planner system prompt now explains that the harness will resume the session after assigned nodes complete; inline and file-based prompt overrides remain supported (`backend/src/server.rs`).
 - Raised the workspace admission limit from 10 GB to 15 GB. Size growth no longer interrupts an active Run's scheduling, tools, snapshots or publication; background conversations are included when deferring size warnings, and dismissing an unchanged warning no longer reopens it on every poll (`backend/src/workspace.rs`, `backend/src/server.rs`, `src/hooks/useRepositoryStatus.ts`).
 - Reduced private-workspace overhead with dynamically distributed file scans, borrowed view comparisons/checksum projections, reuse of freshly scanned staging inputs, bounded raw SHA-256 blob imports and read-only Git fast paths. Independent node snapshots no longer hold the shared host-ref lock during local staging or view capture; final capture still independently verifies the staged view. Existing view checksums and stored evidence remain compatible (`backend/src/workspace.rs`, `backend/src/workspace_view/`).
 - Publication now builds its private checkout index from changed result entries only and hashes each target once per validation observation. Deletion-only delivery skips checkout; before/after-copy validation, atomic installation, SHA-1/SHA-256 support and interrupted-delivery recovery remain intact (`backend/src/graph_merge/publication/atomic_files.rs`).
@@ -47,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Paused conversation indicators and background polling no longer treat dirty nodes awaiting dispatch as active writers. Running nodes, executions, Mergers and result launches remain watched until they drain (`backend/src/store/conversations.rs`, `src/lib/runPhase.ts`, `src/hooks/useSnapshotPolling.ts`).
 - Legacy conversation snapshots without `feedbackEnabled` and without retained feedback routes now keep the edge legend hidden even when the global default is enabled. Existing feedback routes remain visible; only uncommitted planning without a saved configuration inherits the current default (`src/hooks/useGraphElements.ts`).
 - Graph and Serial transcripts now retain messages queued before a node's first dispatch, including after reload, and place the shared response after every user turn in the claimed batch instead of above the queued input. Exact active-branch claims preserve their text/images without reviving turns from an abandoned conversation (`src/services/conversationBranch.ts`, `src/components/views/GraphWorkbench.tsx`).
 - Opening a running conversation while the workbench loads now keeps the retained landing composer disabled without turning it into a Stop control or exposing interrupt actions for that conversation. Existing drafts survive the handoff (`src/App.tsx`, `scripts/frontend-bundle.test.mjs`).

@@ -320,6 +320,48 @@ test("sidebar keeps the live dot through planning, follow-ups and standalone Mer
   } finally { await context.close(); }
 });
 
+test("paused sidebar cards stop pulsing after writers drain even with dirty descendants", { timeout: 30_000 }, async () => {
+  const paused = { ...fast, runId: "paused", phase: "paused", paused: true, approved: true,
+    graph: { originalGoal: "Paused work", nodes: [{ name: "qa", task: "Review" }], edges: [] },
+    nodes: { qa: { status: "dirty", revision: 2 } } };
+  const running = { id: "worker", node: "qa", status: "running", output: "" };
+  const snapshots = { paused, draining: { ...paused, runId: "draining", executions: [running] } };
+  const summaries = Object.values(snapshots).map(snapshot => ({
+    runId: snapshot.runId, repository, title: snapshot.runId, phase: snapshot.phase,
+    hasActiveExecutions: snapshot.runId === "draining",
+  }));
+  const { context, page, errors, calls } = await app(async (route, command, body) => {
+    let result;
+    if (command === "bootstrap") result = { ...bootstrap, snapshot: empty,
+      conversations: summaries, runs: Object.keys(snapshots) };
+    else if (["load_run", "snapshot", "history"].includes(command)) result = snapshots[body.runId];
+    else if (command === "snapshot_if_changed") {
+      const snapshot = snapshots[body.runId];
+      result = { version: JSON.stringify(snapshot), snapshot };
+    } else return false;
+    await route.fulfill({ headers: { "x-grapher-events": "1" }, json: { result } });
+    return true;
+  }, undefined, undefined, true);
+  try {
+    await page.locator('[data-run-id="draining"] .running-pulse').waitFor();
+    assert.equal(await page.locator('[data-run-id="paused"] .running-pulse').count(), 0,
+      "the summary does not count queued dirty results as writers");
+    await page.locator('[data-run-id="paused"]').click();
+    await page.locator('[data-run-id="paused"][aria-current="true"]').waitFor();
+    assert.equal(await page.locator('[data-run-id="paused"] .running-pulse').count(), 0,
+      "opening the paused snapshot must not turn the pulse back on");
+    snapshots.draining = { ...snapshots.draining, executions: [{ ...running, status: "paused" }] };
+    await page.clock.runFor(2500);
+    await until(async () => await page.locator('[data-run-id="draining"] .running-pulse').count() === 0);
+    const drainPolls = () => calls.filter(call => call.command === "snapshot_if_changed" && call.body.runId === "draining").length;
+    const settledPollCount = drainPolls();
+    assert.ok(settledPollCount > 0, "paused writers remain watched until they drain");
+    await page.clock.runFor(4500);
+    assert.equal(drainPolls(), settledPollCount, "dirty descendants do not keep a settled background Run on the writer watchdog");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("sidebar preserves unavailable cached cards but removes confirmed stale cards", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await app(async (route, command) => {
     if (command !== "bootstrap") return false;

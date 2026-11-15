@@ -4982,6 +4982,55 @@ fn completed_graph_is_published_by_driver() {
 }
 
 #[test]
+fn planner_system_prompt_gates_review_rule() {
+    let base = PLANNER_PROMPT.trim();
+    assert_eq!(planner_system_prompt(base, false).unwrap(), base);
+    let enabled = planner_system_prompt(base, true).unwrap();
+    let rules = enabled
+        .split_once("<rules>")
+        .unwrap()
+        .1
+        .split_once("</rules>")
+        .unwrap()
+        .0;
+    assert!(rules.trim_end().ends_with(&format!("- {PLANNER_REVIEW_RULE}")));
+    assert_eq!(
+        enabled.replace(&format!("- {PLANNER_REVIEW_RULE}\n"), ""),
+        base,
+        "enabling review must preserve the rest of the Planner prompt"
+    );
+}
+
+#[test]
+fn planner_system_prompt_preserves_inline_and_file_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("custom-planner.md");
+    let path_text = path.to_str().unwrap();
+    for custom in [
+        "Custom Planner identity.",
+        "Custom Planner identity.\n<rules>\n- Keep existing guidance.\n</rules>\nSuffix.",
+    ] {
+        fs::write(&path, custom).unwrap();
+        assert_eq!(planner_system_prompt(custom, false).unwrap(), custom);
+        assert_eq!(planner_system_prompt(path_text, false).unwrap(), path_text);
+        let inline = planner_system_prompt(custom, true).unwrap();
+        assert!(inline.contains(&format!("\n- {PLANNER_REVIEW_RULE}\n</rules>")));
+        assert_eq!(inline.matches("<rules>").count(), 1);
+        assert_eq!(planner_system_prompt(path_text, true).unwrap(), inline);
+        assert_eq!(fs::read_to_string(&path).unwrap(), custom);
+        if custom.contains("</rules>") {
+            assert_eq!(inline.replace(&format!("- {PLANNER_REVIEW_RULE}\n"), ""), custom);
+        } else {
+            assert!(inline.starts_with(custom));
+        }
+    }
+    fs::write(&path, [0xff]).unwrap();
+    assert!(planner_system_prompt(path_text, true)
+        .unwrap_err()
+        .contains("Cannot read Planner system prompt"));
+}
+
+#[test]
 fn planning_prompts_separate_user_query_from_system() {
     for template in [PLANNER_PROMPT, PARTITIONER_PROMPT] {
         assert!(!template.contains("{{query}}"));

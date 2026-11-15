@@ -989,6 +989,28 @@ button.transcript-error-toggle {
   margin-bottom: 0;
 }
 
+.markdown-content img {
+  display: block;
+  max-width: 100%;
+  max-height: 560px;
+  height: auto;
+  object-fit: contain;
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+.markdown-content img[data-workspace-path]:not([src]) {
+  min-height: 80px;
+  background: var(--bg-secondary);
+}
+
+.markdown-image-error {
+  display: block;
+  margin: 8px 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
 /* Links are part of the answer, not chrome: keep them visibly distinct from
    prose and give keyboard users the same focus treatment as other controls. */
 .markdown-content a {

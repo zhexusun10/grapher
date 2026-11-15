@@ -193,7 +193,8 @@ fn publish_summary(state: &Snapshot, summaries: &mut HashMap<String, Conversatio
         || state
             .nodes
             .values()
-            .any(|item| item.status == "running" || item.status == "dirty")
+            // Invalidated results wait for dispatch; they do not own a writer.
+            .any(|item| item.status == "running")
         || state
             .result_execution
             .as_ref()

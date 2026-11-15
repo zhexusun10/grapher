@@ -2,6 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { isNodeWorking, nodeDependenciesCompleted } from "../src/lib/nodeWorking.ts";
 import { resolveGraphPhase } from "../src/lib/graphPhase.ts";
+import { runHasActiveExecutions, runHasLiveWork } from "../src/lib/runPhase.ts";
+
+test("run activity counts result launches but not queued dirty nodes", () => {
+  const dirty = { nodes: { task: { status: "dirty" } } } as Parameters<typeof runHasActiveExecutions>[0];
+  assert.equal(runHasActiveExecutions(dirty), false);
+  assert.equal(runHasLiveWork("paused", dirty), false);
+  const launching = { ...dirty, resultExecution: { status: "running" } };
+  assert.equal(runHasActiveExecutions(launching), true);
+  assert.equal(runHasLiveWork("paused", launching), true);
+  assert.equal(runHasActiveExecutions({ ...launching, resultExecution: { status: "completed" } }), false);
+});
 
 test("a submitted node message shows working before the next execution starts", () => {
   const previous = { status: "completed", completedAt: 1 };

@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react";
 import type { Execution, ImageAttachment } from "../types";
 import { runtimeService } from "../services/runtime";
 import { VirtualizedTranscript } from "./VirtualizedTranscript";
+import { WorkspaceImageProvider } from "./WorkspaceImages";
 import { liveOutputDelay, startVisibilityPolling } from "../services/visibilityPolling";
 import { isRuntimeEventsConnected, RUNTIME_EVENTS_OUTPUT_WATCHDOG_MS, subscribeExecutionOutput, subscribeRuntimeEventsStatus } from "../services/runtimeEvents";
 import { cacheTranscriptWindow, executionTranscriptCache, transcriptFromCache } from "../services/transcriptCache";
@@ -34,7 +35,9 @@ type Props = {
 };
 
 export function ExecutionTranscript(props: Props) {
-  return <ExecutionHistory key={`${props.runId}:${props.execution.id}:${props.endOffset ?? "full"}`} {...props} />;
+  return <WorkspaceImageProvider runId={props.runId} executionId={props.execution.id}>
+    <ExecutionHistory key={`${props.runId}:${props.execution.id}:${props.endOffset ?? "full"}`} {...props} />
+  </WorkspaceImageProvider>;
 }
 
 /** Keep pending turns identical to an empty live transcript, including its

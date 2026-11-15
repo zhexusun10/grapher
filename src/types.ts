@@ -168,6 +168,8 @@ export interface Snapshot {
   executions: Execution[];
   supersededExecutionIds?: string[];
   mergers?: Execution[];
+  /** Native result launch can remain active independently of the Run phase. */
+  resultExecution?: { status: string } | null;
   publication?: Publication | null;
   events: GraphEvent[];
   approved: boolean;

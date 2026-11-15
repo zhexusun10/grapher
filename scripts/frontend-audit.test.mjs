@@ -138,6 +138,62 @@ test("Markdown cannot execute HTML handlers or reach local APIs in live or repla
   } finally { await context.close(); }
 });
 
+test("Markdown workspace screenshots load through scoped POSTs, survive streaming and release URLs", { timeout: 30_000 }, async () => {
+  const calls = [];
+  const nextScope = deferred();
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=", "base64");
+  const { context, page, errors } = await fixture("markdownCopy", async (route, command, body) => {
+    if (command !== "get_workspace_image") return false;
+    calls.push({ ...body, method: route.request().method() });
+    if (body.runId === "next-run") await nextScope.promise;
+    if (body.path === "missing.png") await route.fulfill({ status: 400, json: { error: "File no longer exists" } });
+    else await route.fulfill({ contentType: "image/png", body: png });
+    return true;
+  });
+  try {
+    const unexpectedGets = [];
+    page.on("request", request => {
+      if (request.method() === "GET" && new URL(request.url()).pathname.startsWith("/artifacts/")) unexpectedGets.push(request.url());
+    });
+    const markdown = '<img src="artifacts/user-preview-current/中文 space/01-main-menu.png" alt="Screenshot" width="1600">\n\n![Missing](missing.png)';
+    await page.evaluate(markdown => {
+      window.audit.revokedImages = [];
+      const revoke = URL.revokeObjectURL.bind(URL);
+      URL.revokeObjectURL = url => { window.audit.revokedImages.push(url); revoke(url); };
+      window.audit.setImageScope("image-run", "image-execution");
+      window.audit.setMarkdown(markdown, true);
+    }, markdown);
+    await page.waitForFunction(() => document.querySelector('.markdown-content img[src^="blob:"]')?.naturalWidth === 1);
+    await page.getByRole("img", { name: "Unable to load image · Missing", exact: true }).waitFor();
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0], { runId: "image-run", executionId: "image-execution",
+      path: "artifacts/user-preview-current/中文 space/01-main-menu.png", method: "POST" });
+    const firstUrl = await page.locator('.markdown-content img').getAttribute("src");
+    const bounds = await page.locator('.markdown-content img').evaluate(image => ({
+      image: image.getBoundingClientRect().width, container: image.parentElement.getBoundingClientRect().width,
+    }));
+    assert.ok(bounds.image <= bounds.container, "screenshots fit the transcript width");
+    for (const streaming of [true, false]) {
+      await page.evaluate(({ markdown, streaming }) => window.audit.setMarkdown(markdown + "\n\nMore output.", streaming), { markdown, streaming });
+      await page.waitForFunction(() => document.querySelector('.markdown-content img')?.naturalWidth === 1);
+      assert.equal(await page.locator('.markdown-content img').getAttribute("src"), firstUrl);
+    }
+    assert.equal(calls.length, 2, "stream updates reuse mounted image resources");
+    await page.evaluate(() => window.audit.setImageScope("next-run", "next-execution"));
+    await waitFor(() => calls.some(call => call.runId === "next-run"));
+    assert.equal(await page.locator('.markdown-content img[src^="blob:"]').count(), 0, "old scope cannot leak into the next conversation");
+    assert.ok((await page.evaluate(() => window.audit.revokedImages)).includes(firstUrl));
+    nextScope.resolve();
+    await page.waitForFunction(() => document.querySelector('.markdown-content img')?.naturalWidth === 1);
+    const nextUrl = await page.locator('.markdown-content img').getAttribute("src");
+    assert.notEqual(nextUrl, firstUrl);
+    await page.evaluate(() => window.audit.setMarkdownVisible(false));
+    await page.waitForFunction(url => window.audit.revokedImages.includes(url), nextUrl);
+    assert.deepEqual(unexpectedGets, []);
+    assert.deepEqual(errors, []);
+  } finally { nextScope.resolve(); await context.close(); }
+});
+
 test("Markdown tables keep inline code unboxed without changing prose or fenced code", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("markdownCopy");
   try {

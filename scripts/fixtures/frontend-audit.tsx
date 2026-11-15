@@ -12,6 +12,7 @@ import { useAutoTranscriptHistory } from "../../src/hooks/useAutoTranscriptHisto
 import { runtimeService } from "../../src/services/runtime";
 import { ThinkingCard } from "../../src/components/ThinkingCard";
 import { MarkdownRenderer } from "../../src/components/MarkdownRenderer";
+import { WorkspaceImageProvider } from "../../src/components/WorkspaceImages";
 import { ExecutionTimeTookText, PlannerTimeTookText } from "../../src/components/ExecutionTimeTook";
 import { ToolCallCard } from "../../src/components/ToolCallCard";
 import { VirtualizedTranscript } from "../../src/components/VirtualizedTranscript";
@@ -517,8 +518,14 @@ function MarkdownCopyFixture() {
     content: 'Run `pwd` first.\n\n```bash\nprintf "<tag> & 中文"\npwd\n```\n\n```python\nprint("second")\n```',
     streaming: false,
   });
+  const [scope, setScope] = useState({ runId: "", executionId: undefined as string | undefined });
+  const [visible, setVisible] = useState(true);
+  audit.setImageScope = (runId: string, executionId?: string) => setScope({ runId, executionId });
+  audit.setMarkdownVisible = setVisible;
   audit.setMarkdown = (content: string, streaming = false) => setMarkdown({ content, streaming });
-  return <MarkdownRenderer content={markdown.content} isStreaming={markdown.streaming} streamingCursor={markdown.streaming} />;
+  return <WorkspaceImageProvider {...scope}>{visible &&
+    <MarkdownRenderer content={markdown.content} isStreaming={markdown.streaming} streamingCursor={markdown.streaming} />
+  }</WorkspaceImageProvider>;
 }
 
 function TimeTookFixture() {

@@ -509,6 +509,7 @@ export const en: Record<string, string> = {
   "关闭建议": "Close",
   "未找到匹配候选": "No matching suggestions",
   "上传附件预览": "Attachment preview",
+  "无法加载图片": "Unable to load image",
   "移除图片": "Remove image",
   "移除文件": "Remove file",
   "添加文本、代码（.ipynb/.py等）或图片附件": "Attach text, code (.ipynb/.py, etc.), or an image",

@@ -49,6 +49,24 @@ test("Markdown allowlist preserves useful formatting, code, links, images and in
   assert.equal(sanitizeHtml('<input type="text" autofocus onfocus="evil()">'), '<input type="checkbox" disabled />');
 });
 
+test("Workspace Markdown images stay inert until resolved by their conversation", () => {
+  const cache = new StreamingMarkdownCache();
+  const markdown = '![截图](artifacts/user-preview-current/screenshots/01-main-menu.png)\n\n'
+    + '![中文](<./artifacts/中文 space/截图.png>)';
+  for (const streaming of [true, false]) {
+    const output = cache.render(markdown, streaming);
+    assert.match(output, /data-workspace-path="artifacts\/user-preview-current\/screenshots\/01-main-menu\.png"/);
+    assert.match(output, /data-workspace-path="artifacts\/中文 space\/截图\.png"/);
+    assert.doesNotMatch(output, /\ssrc=/, "workspace paths must not generate browser GETs");
+  }
+  for (const src of ['/api/control', '../outside.png', '%2e%2e/outside.png', 'C:\\outside.png',
+    '//evil.test/image.png', 'data:image/svg+xml,evil', 'blob:https://example.test/forged', '.git/image.png', '.grapher/image.png']) {
+    const output = sanitizeHtml(`<img src="${src}" data-workspace-path="forged.png" onerror="evil()" alt="preview">`);
+    assert.doesNotMatch(output, /<img|data-workspace-path|\ssrc=|onerror/, src);
+  }
+  assert.equal(sanitizeHtml('<img data-workspace-path="forged.png" alt="preview">'), '<span>preview</span>');
+});
+
 test("Markdown links open outside the app and cannot be retargeted by model HTML", () => {
   const cache = new StreamingMarkdownCache();
   const output = cache.render('[文档](https://example.com/docs "标题") and [local](/workspace/file.md)', false);

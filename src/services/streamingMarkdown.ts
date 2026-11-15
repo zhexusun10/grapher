@@ -2,6 +2,7 @@ import katex from "katex";
 import { marked, type Token, type Tokens, type TokenizerAndRendererExtension } from "marked";
 import sanitize from "sanitize-html";
 import { shareJson } from "./structuralSharing";
+import { workspaceImagePath } from "./workspaceImages";
 
 // Model output and replayed transcripts are untrusted HTML. Parse with an
 // allowlist rather than trying to recognize executable markup with regexes.
@@ -10,7 +11,7 @@ export function sanitizeHtml(html: string): string {
     allowedTags: [...sanitize.defaults.allowedTags, "img", "details", "summary", "input"],
     allowedAttributes: {
       a: ["href", "title", "target", "rel"],
-      img: ["src", "alt", "title", "width", "height"],
+      img: ["src", "alt", "title", "width", "height", "data-workspace-path", "loading", "decoding", "referrerpolicy"],
       code: ["class"],
       span: ["class"],
       div: ["class"],
@@ -24,6 +25,20 @@ export function sanitizeHtml(html: string): string {
     allowedSchemesByTag: { img: ["http", "https"] },
     allowProtocolRelative: false,
     transformTags: {
+      img: (_tag, attributes) => {
+        // Never retain a model-supplied data attribute or blob/data URL. Local
+        // paths stay inert until the mounted conversation resolves them via a
+        // scoped JSON POST; they cannot issue GETs against the app or its API.
+        const { src = "", alt, title, width, height } = attributes;
+        const attribs = { ...(alt !== undefined ? { alt } : {}), ...(title ? { title } : {}),
+          ...(width ? { width } : {}), ...(height ? { height } : {}) };
+        if (/^https?:\/\//i.test(src)) return { tagName: "img", attribs: {
+          ...attribs, src, loading: "lazy", decoding: "async", referrerpolicy: "no-referrer",
+        } };
+        const path = workspaceImagePath(src);
+        return path ? { tagName: "img", attribs: { ...attribs, "data-workspace-path": path } }
+          : { tagName: "span", attribs: {}, text: alt || "" };
+      },
       // A model link must not navigate the Grapher tab away from the current
       // Run. Open absolute web links outside the app and never trust a
       // model-supplied target/rel pair; a raw-HTML local path is reduced to its

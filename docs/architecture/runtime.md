@@ -524,8 +524,11 @@ stays `completed` for a standalone Merger or is `followup` for source-direct wor
 it suspends timer reads once those writers settle. The sidebar card uses the same
 rule ([runPhase.ts](../../src/lib/runPhase.ts)): it shows the live dot for a
 Planner turn, execution, the approval gate, publication and the native launch
-step, plus any Run whose executions, Mergers or nodes are still writing, so a
+step, plus any Run whose executions, Mergers, nodes or result launch are still active, so a
 settled phase cannot hide work in flight and a settled `followup` cannot fake it.
+A `dirty` node is an invalidated result waiting for dispatch, not a live writer;
+paused Runs stop pulsing once their running executions/Mergers/nodes/result launch drain, even
+if dirty descendants remain queued.
 
 Clicking a row calls `open_workspace_file`, which resolves the path in the owning
 execution's worktree (newest attempt first), a Planner-only workspace, then the

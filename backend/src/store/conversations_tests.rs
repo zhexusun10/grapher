@@ -72,7 +72,7 @@ impl Fixture {
             || loaded
                 .nodes
                 .values()
-                .any(|n| n.status == "running" || n.status == "dirty")
+                .any(|n| n.status == "running")
             || loaded
                 .result_execution
                 .as_ref()
@@ -189,6 +189,8 @@ fn sidebar_status_matches_reducer_including_standalone_mergers_and_dirty_nodes()
             message_sequences: None,
             fresh_restart: false,
         },
+        // Pause intent does not make a draining execution idle.
+        EventKind::Paused { paused: true },
         EventKind::Finished {
             execution_id: "node".into(),
             head: "head".into(),
@@ -196,6 +198,7 @@ fn sidebar_status_matches_reducer_including_standalone_mergers_and_dirty_nodes()
             output_bytes: 0,
             metrics: None,
         },
+        EventKind::Paused { paused: false },
         EventKind::Settled,
         // Completed Run + running standalone Merger must still be watched.
         EventKind::MergerStarted {
@@ -241,6 +244,9 @@ fn sidebar_status_matches_reducer_including_standalone_mergers_and_dirty_nodes()
         fixture.store.append(&mut state, kind).unwrap();
         fixture.check(&state);
     }
+    assert!(state.paused);
+    assert_eq!(state.nodes["worker"].status, "dirty");
+    assert!(!fixture.summaries()[0].has_active_executions);
 }
 
 #[test]
