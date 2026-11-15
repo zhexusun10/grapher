@@ -42,7 +42,7 @@ Optional environment variables:
 | --- | --- |
 | Node | Offline npm installation of a local package, independent installed bytes, ignored `node_modules`, local patch without a dependency declaration/installed package manifest, a Git-tracked dependency, real build script and ignored `.next` output, native Node execution. No dependency regeneration from today's source. |
 | Python | Real `venv --copies`, offline PEP-517 backend/pip installation, patched installed package, actual interpreter/prefix/base-prefix/ABI evidence, source-less `.pyc` import. With uv installed, real `uv run --offline --no-sync --python …` must report the same interpreter/prefix/value. `--no-sync` deliberately does not erase a local package patch. |
-| Cargo | Offline Cargo project with a local path dependency; successful source-default Rustup selection, actual private-HOME default-selection failure, and successful explicit installed Cargo/Rustc/Rustdoc invocation with private Cargo state/target. No download, `rustup default`, host modification or automatic runtime fallback. |
+| Cargo | Offline Cargo project with a local path dependency; successful source-default Rustup selection, an actual private-HOME default query (including host/system fallback when present), and successful explicit installed Cargo/Rustc/Rustdoc invocation with private Cargo state/target. No download, `rustup default <toolchain>` mutation, host modification or automatic runtime fallback. |
 
 Each profile captures the source, changes its live dependency, prepares a node
 from the earlier record, edits the node dependency, seals it, forks/seals two
@@ -108,8 +108,14 @@ or unisolated acceptance.
 
 The Cargo case demonstrates a general failure class: retaining a tool shim on
 PATH does not retain the configuration the shim normally finds through HOME.
-Rustup's private-HOME error says no default is configured, even though the host
-can build. Do **not** follow its suggested download automatically.
+The probe queries `rustup default` with private HOME/RUSTUP_HOME/CARGO_HOME and
+records its exit status, stdout and diagnostic. A missing default is a real
+failure mode even though the host can build; Homebrew's wrapper can instead
+supply system fallback settings, so private HOME alone does not imply an absent
+default. Neither outcome proves installed tools are available in that private
+state. The subsequent build always uses explicitly resolved installed tools;
+the probe never downloads a toolchain or copies host configuration. Do **not**
+follow Rustup's suggested download automatically.
 
 Keep these concerns separate:
 
