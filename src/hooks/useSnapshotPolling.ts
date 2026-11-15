@@ -36,6 +36,7 @@ export function useSnapshotPolling(
   // Keep the latest held Run without resubscribing the poll effect mid-planning.
   const heldRunIdRef = useRef(heldRunId);
   heldRunIdRef.current = heldRunId;
+  const wakeRunRef = useRef<(id: string) => void>(() => {});
   const setBackendStatus = useCallback((status: { runId: string | null; phase: string | null } & Partial<Pick<Snapshot, "executions" | "mergers" | "nodes" | "resultExecution">> & { hasActiveExecutions?: boolean }) => {
     if (!status.runId || !status.phase) return;
     missingRuns.current.delete(status.runId);
@@ -47,6 +48,7 @@ export function useSnapshotPolling(
     notifiedVersions.current.delete(status.runId);
     // Actions supersede polls already in flight, even at the same event sequence.
     revisions.current.set(status.runId, (revisions.current.get(status.runId) ?? 0) + 1);
+    wakeRunRef.current(status.runId);
   }, []);
   if (viewedRunId && !missingRuns.current.has(viewedRunId)) {
     phases.current.set(viewedRunId, viewedPhase);
@@ -74,34 +76,34 @@ export function useSnapshotPolling(
       activeRuns.current.delete(id); writerRuns.current.delete(id);
     }
     if (!ids.length && !viewedRunId) ids.push("");
-    const fallbackDelay = () => activeRuns.current.size > 0 || writerRuns.current.size > 0 || ids.some(id => workingPhases.has(phases.current.get(id) ?? "")) || (viewedRunId && !missingRuns.current.has(viewedRunId) && (phases.current.get(viewedRunId) === "needs_attention" || viewedHasActiveExecutions)) ? 750 : 2500;
-    const nextDelay = () => {
-      if (dirtyRuns.current.size > 0) return 150;
+    const inLane = (id: string, foreground: boolean) => (id === viewedRunId) === foreground;
+    const nextDelay = (foreground: boolean) => {
+      const laneIds = ids.filter(id => inLane(id, foreground) && !missingRuns.current.has(id));
+      if (!laneIds.length) return Infinity;
+      if (laneIds.some(id => dirtyRuns.current.has(id))) return 150;
       // Pushes are an accelerator, not the authority. Re-read durable state on a
       // bounded cadence so one missed notification cannot freeze the view.
       if (isRuntimeEventsConnected()) return RUNTIME_EVENTS_WATCHDOG_MS;
-      return fallbackDelay();
+      return laneIds.some(id => activeRuns.current.has(id) || writerRuns.current.has(id) ||
+        workingPhases.has(phases.current.get(id) ?? "") || (id === viewedRunId &&
+          phases.current.get(id) === "needs_attention")) ? 750 : 2500;
     };
     const watchdogIds = () => ids.filter(id => !phases.current.has(id) || id === viewedRunId || activeRuns.current.has(id) ||
       writerRuns.current.has(id) || workingPhases.has(phases.current.get(id) ?? ""));
-    const poll = async () => {
-      // Pushes carry the changed Run; the watchdog only re-reads Runs that can
-      // still move, so a missed notification cannot freeze the watched view.
-      // The watched Run is always included so a retried background Run cannot
-      // starve it while that Run's mutex stays busy.
+    const poll = async (foreground: boolean) => {
+      // Each lane owns its cadence and in-flight work. A blocked background
+      // batch must not delay the foreground's next watchdog or pushed update.
       const connected = isRuntimeEventsConnected();
-      // Keep the foreground first, even behind many dirty background Runs.
-      // Once SSE disconnects, a retained retry must not suppress normal polls.
       const targetIds = [...new Set([...(connected ? watchdogIds() : ids), ...dirtyRuns.current])]
-        .filter(id => !missingRuns.current.has(id));
-      const requestedDirtyRuns = new Set(dirtyRuns.current);
+        .filter(id => inLane(id, foreground) && !missingRuns.current.has(id));
+      const requestedDirtyRuns = new Set([...dirtyRuns.current].filter(id => inLane(id, foreground)));
       for (const id of requestedDirtyRuns) {
         pendingInvalidations.set(id, revisions.current.get(id) ?? 0);
       }
-      dirtyRuns.current.clear();
+      for (const id of requestedDirtyRuns) dirtyRuns.current.delete(id);
       let retryDelay = 0;
-      // A slow/unavailable background Run cannot serialize the foreground request.
-      await mapWithConcurrency(targetIds, 4, async id => {
+      // Reserve one of the four total slots for the independent foreground.
+      await mapWithConcurrency(targetIds, foreground ? 1 : 3, async id => {
         if (cancelled) return;
         const phase = phases.current.get(id);
         const isViewed = id === viewedRunId;
@@ -115,7 +117,7 @@ export function useSnapshotPolling(
           // The Run mutex was busy, so this response says nothing about state:
           // retry at the dirty cadence instead of waiting for another event.
           if (busy) dirtyRuns.current.add(id);
-          if (snapshot && id && snapshot.runId !== id) return;
+          if (snapshot && id && snapshot.runId !== id) throw new Error("Snapshot Run does not match its requested Run");
           const held = !!heldRunIdRef.current &&
             (id === heldRunIdRef.current || snapshot?.runId === heldRunIdRef.current);
           if (held) {
@@ -131,7 +133,7 @@ export function useSnapshotPolling(
             else writerRuns.current.delete(snapshot.runId);
             observeActivity(snapshot.runId, activity ?? []);
             observeSnapshot(snapshot);
-            setSnapshot(previous => previous.runId === snapshot.runId &&
+            setSnapshot(previous => revision === (revisions.current.get(id) ?? 0) && previous.runId === snapshot.runId &&
               (snapshot.events.at(-1)?.sequence ?? 0) >= (previous.events.at(-1)?.sequence ?? 0)
               ? {
                 ...snapshot,
@@ -169,7 +171,7 @@ export function useSnapshotPolling(
           if (hasRunningWork) writerRuns.current.add(snapshot.runId);
           else writerRuns.current.delete(snapshot.runId);
           observeSnapshot(snapshot);
-          setSnapshot(previous => previous.runId === snapshot.runId &&
+          setSnapshot(previous => revision === (revisions.current.get(id) ?? 0) && previous.runId === snapshot.runId &&
             (snapshot.events.at(-1)?.sequence ?? 0) >= (previous.events.at(-1)?.sequence ?? 0) ? snapshot : previous);
         } catch (error) {
           if (!cancelled && revision === (revisions.current.get(id) ?? 0)) {
@@ -196,9 +198,12 @@ export function useSnapshotPolling(
           pendingInvalidations.delete(id);
         }
       });
-      return cancelled ? null : Math.max(retryDelay, nextDelay());
+      return cancelled ? null : Math.max(retryDelay, nextDelay(foreground));
     };
-    const stopPolling = startVisibilityPolling(poll, nextDelay());
+    const foregroundPolling = startVisibilityPolling(() => poll(true), nextDelay(true));
+    const backgroundPolling = startVisibilityPolling(() => poll(false), nextDelay(false));
+    const wakeRun = (id: string) => (inLane(id, true) ? foregroundPolling : backgroundPolling).wake();
+    wakeRunRef.current = wakeRun;
     const unsubscribeSnapshot = subscribeSnapshotChanges(event => {
       const targetId = event.runId || (ids.includes("") ? "" : viewedRunId);
       if (missingRuns.current.has(targetId)) return;
@@ -210,7 +215,7 @@ export function useSnapshotPolling(
         notifiedVersions.current.set(targetId, event.version);
       }
       dirtyRuns.current.add(targetId);
-      stopPolling.wake();
+      wakeRun(targetId);
     });
     const unsubscribeConnect = subscribeRuntimeEventsStatus(status => {
       // A fallen push channel must hand suspended pollers back to timer polling;
@@ -227,7 +232,8 @@ export function useSnapshotPolling(
           }
         }
       }
-      stopPolling.wake();
+      foregroundPolling.wake();
+      backgroundPolling.wake();
     });
     return () => {
       cancelled = true;
@@ -238,8 +244,14 @@ export function useSnapshotPolling(
           dirtyRuns.current.add(id);
         }
       }
-      unsubscribeSnapshot(); unsubscribeConnect(); stopPolling(); abort.abort();
+      if (wakeRunRef.current === wakeRun) wakeRunRef.current = () => {};
+      unsubscribeSnapshot(); unsubscribeConnect(); foregroundPolling(); backgroundPolling(); abort.abort();
     };
-  }, [observeActivity, observeSnapshot, setSnapshot, runIds, viewedRunId, viewedPhase, viewedHasActiveExecutions, enabled]);
+  }, [observeActivity, observeSnapshot, setSnapshot, runIds, viewedRunId, enabled]);
+  // A phase/writer update changes cadence, not request ownership. Wake the
+  // foreground without aborting either lane's requests or resetting its timer.
+  useEffect(() => {
+    if (enabled) wakeRunRef.current(viewedRunId);
+  }, [viewedRunId, viewedPhase, viewedHasActiveExecutions, enabled]);
   return setBackendStatus;
 }

@@ -65,12 +65,15 @@ test("production entry keeps the graph and Markdown engines out of the initial J
     `${item.fileName} is ${(item.size / 1000).toFixed(1)} kB, exceeding the default Vite warning limit`);
 });
 
-async function setupPage({ planType = "graph", running = false } = {}) {
+async function setupPage({ planType = "graph", running = false, twoRuns = false } = {}) {
   const repository = "/mock/lazy-project";
   const config = { repository, model: "test/model", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const graph = { originalGoal: "Load a conversation", nodes: [{ name: "task", task: "Task" }], edges: [] };
   const snapshot = { runId: "lazy-run", config, planType, phase: running ? "running" : "completed", approved: true, paused: false,
     graph, nodes: { task: { status: running ? "running" : "completed" } }, plan: null, executions: [], events: [], base: "", feedbackCounts: {} };
+  const snapshots = { [snapshot.runId]: snapshot, ...(twoRuns ? {
+    "other-run": { ...snapshot, runId: "other-run", graph: { ...graph, originalGoal: "Other conversation" } },
+  } : {}) };
   const empty = { ...snapshot, runId: "", config: null, phase: "draft", approved: false,
     graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {} };
   const repositoryInfo = { path: repository, name: "Project", branch: "main", head: "", clean: true };
@@ -85,15 +88,17 @@ async function setupPage({ planType = "graph", running = false } = {}) {
     const body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": case "save_config": result = { config, snapshot: empty, runs: [snapshot.runId], repositoryInfo, dataPath: "/mock" }; break;
-      case "history": case "snapshot": result = body.runId === snapshot.runId ? snapshot : empty; break;
-      case "snapshot_if_changed": result = { version: "1", snapshot: body.runId === snapshot.runId ? snapshot : null }; break;
+      case "bootstrap": case "save_config": result = { config, snapshot: empty, runs: Object.keys(snapshots), repositoryInfo, dataPath: "/mock" }; break;
+      case "history": case "snapshot": result = snapshots[body.runId] ?? empty; break;
+      case "snapshot_if_changed": result = { version: "1", snapshot: snapshots[body.runId] ?? null }; break;
       case "repository_status": result = { repository, valid: true, error: null }; break;
       case "detect_repository": result = repositoryInfo; break;
       case "list_plannings": result = []; break;
       case "list_files": result = { files: [] }; break;
       case "list_skills": result = { skills: [] }; break;
       case "provider_auth": result = { providers: [], models: [], warning: null }; break;
+      case "pi_extensions": result = { globalDirectory: "/mock/extensions", extensions: [] }; break;
+      case "environment_capabilities": result = { platform: "windows", arch: "x86_64", nativeWorkspace: true }; break;
       default: result = null;
     }
     try { await route.fulfill({ json: { result } }); } catch { /* Navigation can cancel a request. */ }
@@ -103,6 +108,113 @@ async function setupPage({ planType = "graph", running = false } = {}) {
   page.on("pageerror", error => errors.push(String(error)));
   return { context, page, errors };
 }
+
+test("navigation downloads the workbench while its snapshot is pending without adopting a late Run", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await setupPage();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let metadataPending = false, chunkRequested = false;
+  const outputs = [];
+  page.on("request", request => {
+    if (/\/api\/get_(?:execution|planning)_output$/.test(new URL(request.url()).pathname)) outputs.push(request.url());
+  });
+  await page.route("**/api/snapshot", async route => {
+    metadataPending = true;
+    await gate;
+    await route.fallback().catch(() => {});
+  });
+  await page.route(`**/${workbenchChunk().fileName}`, async route => {
+    chunkRequested = true;
+    await route.continue();
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    assert.equal(chunkRequested, false, "home still does not eagerly download the workbench");
+    await page.locator(".landing-screen textarea").fill("Parallel navigation draft");
+    await page.locator('[data-run-id="lazy-run"]').click();
+    const deadline = Date.now() + 5000;
+    while (!metadataPending || !chunkRequested) {
+      assert.ok(Date.now() < deadline, "component download must not wait for the snapshot response");
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(await page.locator(".workbench").count(), 0, "module prewarming is not foreground adoption");
+    assert.deepEqual(outputs, [], "prewarming does not fan out to transcript history");
+    assert.equal(await page.locator(".landing-screen textarea").isDisabled(), true,
+      "metadata loading must also disable the retained composer, not only module loading");
+    await page.getByRole("button", { name: "New conversation", exact: true }).click();
+    release();
+    await page.waitForTimeout(250);
+    assert.equal(await page.locator(".workbench").count(), 0);
+    assert.equal(await page.locator(".landing-screen textarea").inputValue(), "Parallel navigation draft");
+    assert.equal(await page.locator(".landing-screen textarea").isEnabled(), true);
+    assert.deepEqual(errors, []);
+  } finally { release(); await context.close(); }
+});
+
+test("a pending snapshot makes the retained conversation inert and failure restores its draft", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await setupPage({ twoRuns: true });
+  let release, pending = false;
+  const gate = new Promise(resolve => { release = resolve; });
+  const mutations = [];
+  page.on("request", request => {
+    if (/\/api\/(?:control|plan_goal_stream)$/.test(new URL(request.url()).pathname)) mutations.push(request.url());
+  });
+  await page.route("**/api/snapshot", async route => {
+    if (route.request().postDataJSON().runId !== "other-run") return route.fallback();
+    pending = true;
+    await gate;
+    await route.fulfill({ status: 503, json: { error: "Delayed snapshot failed" } }).catch(() => {});
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="lazy-run"]').click();
+    const composer = page.locator(".pane-bottom-chat textarea");
+    await composer.fill("Draft belongs to the current conversation");
+    await page.locator('[data-run-id="other-run"]').click();
+    const deadline = Date.now() + 5000;
+    while (!pending) { assert.ok(Date.now() < deadline); await new Promise(resolve => setTimeout(resolve, 20)); }
+    assert.equal(await page.locator(".workspace-view-wrapper").getAttribute("inert"), "",
+      "the previous Run must not remain interactive under another card's loading state");
+    assert.equal(await composer.isDisabled(), true);
+    await page.keyboard.press("Enter");
+    release();
+    await page.getByRole("alert").filter({ hasText: "Delayed snapshot failed" }).waitFor();
+    await page.waitForFunction(() => document.querySelector(".pane-bottom-chat textarea")?.disabled === false);
+    assert.equal(await page.locator(".workspace-view-wrapper").getAttribute("inert"), null);
+    assert.equal(await composer.inputValue(), "Draft belongs to the current conversation");
+    assert.deepEqual(mutations, []);
+    assert.deepEqual(errors, []);
+  } finally { release(); await context.close(); }
+});
+
+test("opening Settings supersedes a pending navigation without changing its conversation scope", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await setupPage({ twoRuns: true });
+  let release, pending = false;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route("**/api/snapshot", async route => {
+    if (route.request().postDataJSON().runId !== "other-run") return route.fallback();
+    pending = true;
+    await gate;
+    await route.fallback().catch(() => {});
+  });
+  try {
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator('[data-run-id="lazy-run"]').click();
+    await page.locator(".pane-bottom-chat textarea").fill("Keep this conversation's draft");
+    await page.locator('[data-run-id="other-run"]').click();
+    const deadline = Date.now() + 5000;
+    while (!pending) { assert.ok(Date.now() < deadline); await new Promise(resolve => setTimeout(resolve, 20)); }
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.locator(".settings-modal").waitFor();
+    release();
+    await page.waitForTimeout(200);
+    assert.equal(await page.locator('[data-run-id="lazy-run"].chosen').count(), 1);
+    assert.equal(await page.locator(".workspace-view-wrapper").getAttribute("inert"), null);
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    assert.equal(await page.locator(".pane-bottom-chat textarea").inputValue(), "Keep this conversation's draft");
+    assert.deepEqual(errors, []);
+  } finally { release(); await context.close(); }
+});
 
 test("a slow workbench keeps the landing composer and hands off only after loading", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await setupPage();

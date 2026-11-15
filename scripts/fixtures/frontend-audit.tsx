@@ -168,6 +168,17 @@ function TranscriptOutputFixture() {
   </div>;
 }
 
+function FilteredTranscriptFixture() {
+  const [filters, setFilters] = useState<readonly string[] | undefined>();
+  audit.setTranscriptFilters = setFilters;
+  const output = ["alpha", "beta", "alpha\u0000beta"].map(text => JSON.stringify({
+    type: "message_start", message: { role: "user", content: [{ type: "text", text }] },
+  }) + "\n").join("");
+  return <div className="initial-query-scroll" style={{ height: 400, overflowY: "auto" }}>
+    <VirtualizedTranscript output={output} inline settled showUserTurns userTurnTexts={filters} />
+  </div>;
+}
+
 function HistoryStatusFixture() {
   const [loading, setLoading] = useState(false);
   const [mounted, setMounted] = useState(true);
@@ -242,7 +253,8 @@ function HistoryRegressionFixture() {
     <div style={{ height: headingHeight, flexShrink: 0 }}>Conversation heading and task above the transcript</div>
     {view === "node" && <ExecutionTranscript runId="regression" execution={{ id: "worker", node: "worker", status: running ? "running" : "failed",
       output: "", outputBytes: 0, startedAt: 1, completedAt: running ? null : 2 } as any} onInitialOutputReady={ready} />}
-    {view === "planner" && <PlanningActivity runId="regression" planningIds={planningIds} running={running} showUserTurns onReady={ready} />}
+    {view === "planner" && <PlanningActivity runId="regression" planningIds={planningIds} running={running}
+      livePlanningId={running ? planningIds.at(-1) : undefined} showUserTurns onReady={ready} />}
     {footerHeight > 0 && <div style={{ height: footerHeight }}>Graph summary below the transcript</div>}
   </div>;
 }
@@ -458,7 +470,8 @@ function PollingFixture() {
   };
   audit.removeBroken = () => setIds(["background", "view"]);
   audit.setPollingRuns = setIds;
-  return <output data-viewed-goal>{snapshot.graph.originalGoal}</output>;
+  audit.setPollingPhase = (phase: string) => setSnapshot(previous => ({ ...previous, phase }));
+  return <output data-viewed-goal data-viewed-phase={snapshot.phase}>{snapshot.graph.originalGoal}</output>;
 }
 function ThinkingFixture() {
   const [output, setOutput] = useState("");
@@ -574,7 +587,7 @@ const cases: Record<string, React.ComponentType> = {
   prompt: PromptFixture, compactPrompt: () => <PromptFixture compact uncontrolled />,
   landingPrompt: ModePromptFixture, compactModePrompt: () => <ModePromptFixture compact />,
   interruptPrompt: InterruptPromptFixture, transcript: TranscriptFixture, plannerTranscript: PlannerTranscriptFixture,
-  transcriptOutput: TranscriptOutputFixture, virtualScroll: VirtualScrollFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, heldHistory: HeldHistoryFixture, historyRegression: HistoryRegressionFixture, nodeEntry: NodeEntryFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture, plannerHistoryOrder: PlannerHistoryOrderFixture, plannerScrollRestore: PlannerScrollRestoreFixture,
+  transcriptOutput: TranscriptOutputFixture, filteredTranscript: FilteredTranscriptFixture, virtualScroll: VirtualScrollFixture, polling: PollingFixture, historyStatus: HistoryStatusFixture, heldHistory: HeldHistoryFixture, historyRegression: HistoryRegressionFixture, nodeEntry: NodeEntryFixture, latestScroll: LatestScrollFixture, plannerRoute: PlannerRouteFixture, plannerReview: PlannerReviewFixture, plannerHistoryOrder: PlannerHistoryOrderFixture, plannerScrollRestore: PlannerScrollRestoreFixture,
   thinking: ThinkingFixture, cardPresentation: CardPresentationFixture, unrunNode: UnrunNodeFixture,
   timeTook: TimeTookFixture, markdownCopy: MarkdownCopyFixture, historyBudget: HistoryBudgetFixture,
   promotedHistory: PromotedHistoryFixture,

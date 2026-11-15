@@ -21,7 +21,8 @@ import { ComposerModels, type ComposerScope } from "./services/composerCommands"
 import { applyModelConfig, modelRoles, planningModelRoles, providerIdForModel, roleModelConfig, updateRoleModelConfig } from "./modelConfig";
 import { useRepositoryStatus } from "./hooks/useRepositoryStatus";
 import { deduceRouteType } from "./services/executionRoute";
-import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay, recoveredPlanningForDisplay } from "./services/planningRecovery";
+import { loadWorkbench, preloadWorkbench } from "./services/workbenchLoader";
+import { createPlanningRecovery, hasCurrentPlanningRun, planningRecoveryDelay, recoveredPlanningForDisplay, runningPlanningFromSnapshot } from "./services/planningRecovery";
 import {
   applySelectedVersionToEntries, branchEditedMessageEntries, executionIdForMessage,
   executionIdForVersion, findBranchTargetIndex, nodeConversationExecutions, stripNodePrefix,
@@ -193,6 +194,9 @@ export default function App() {
     return false;
   });
   const [isBootstrapReady, setIsBootstrapReady] = useState(false);
+  // Settings can be ready before compatibility indexing and foreground restore.
+  // Directory discovery must not race either into choosing the startup view.
+  const [isInitialViewReady, setIsInitialViewReady] = useState(false);
   // Session-only mapping from a durable Run ID to the provisional card key it
   // replaced. Persisting it is pointless: pending cards do not survive reload.
   const [runCardKeys, setRunCardKeys] = useState<Record<string, string>>({});
@@ -479,7 +483,8 @@ export default function App() {
   liveWorkRef.current = active || state.phase === "running";
   // A recovered Planner turn must not lock the composer: the user may still
   // steer the live process or send a follow-up once the turn settles.
-  const locked = busy || repositoryBlocked;
+  const navigationPending = loadingRunId !== null && loadingRunId !== state.runId;
+  const locked = busy || repositoryBlocked || navigationPending;
   const persistedRunningPlanning = state.planning?.status === "running";
   const backendPlanning = state.phase === "planning" || persistedRunningPlanning;
   const isAgentWorking = active || isPlanning || backendPlanning;
@@ -500,7 +505,10 @@ export default function App() {
     return [];
   }, [sessionEntries, state.graph.originalGoal, goal, state.planning?.goal, recoveredPlanning?.goal, state.runId, runLabels]);
 
-  const [routeType, setRouteType] = useState<PlanRouteType>(() => deduceRouteType(emptySnapshot));
+  const [routeHint, setRouteType] = useState<PlanRouteType>("undecided");
+  // A polled/restored snapshot can establish the route without an SSE routed
+  // event. Do not leave the workbench stuck on the local initial hint.
+  const routeType = routeHint === "undecided" ? deduceRouteType(state) : routeHint;
 
   // 开始编辑消息
   const handleStartEditMessage = useCallback((msg: ChatMessage) => {
@@ -832,6 +840,7 @@ export default function App() {
   };
 
   const load = useCallback(async () => {
+    setIsInitialViewReady(false);
     const scope = planningRecovery.begin();
     const acceptedAtStart = acceptedSettingsRef.current;
     const data = await runtimeService.bootstrap().catch(error => {
@@ -1115,13 +1124,14 @@ export default function App() {
     const isActivelyRunning = Boolean(
       data.snapshot.runId &&
       data.snapshot.phase === "running" &&
+      runHasActiveExecutions(data.snapshot) &&
       activeRepo &&
       snapshotBelongsToWorkspace(data.snapshot, activeRepo) &&
       currentRuns.includes(data.snapshot.runId)
     );
     const isActivelyPlanning = Boolean(
       data.snapshot.runId &&
-      data.snapshot.phase === "planning" &&
+      (data.snapshot.phase === "planning" || data.snapshot.planning?.status === "running") &&
       activeRepo &&
       snapshotBelongsToWorkspace(data.snapshot, activeRepo)
     );
@@ -1152,12 +1162,15 @@ export default function App() {
     if (targetRepo && isActivelyRunning) {
       void planningRecovery.restore(planningRecovery.begin(targetRepo), data.snapshot);
     }
+    setIsInitialViewReady(true);
   }, [planningRecovery]);
 
   const detachForeground = (repository: string) => {
     const runId = plannerStream.runId || state.runId;
     if (runId && sessionEntries.length) messagesByRunRef.current.set(runId, sessionEntries);
     historyPrefetchRef.current?.abort();
+    historyPrefetchRef.current = null;
+    setLoadingRunId(null);
     foregroundGeneration.current += 1;
     busyOperations.current = 0;
     setBusy(false);
@@ -1501,6 +1514,9 @@ export default function App() {
   // click feel frozen on large conversations. The modal adopts the refreshed
   // config while its draft is still untouched (see SettingsModal).
   const handleOpenSettings = () => {
+    // Settings belongs to the currently validated conversation. Opening it
+    // supersedes an unfinished navigation, not the conversation it displays.
+    if (navigationPending) detachForeground(config.repository);
     const runId = state.runId;
     const generation = foregroundGeneration.current;
     const readGeneration = ++settingsReadGeneration.current;
@@ -2757,81 +2773,83 @@ export default function App() {
 
   const hasCurrentPlan = hasCurrentPlanningRun(state, config.repository);
 
-  // A detached browser can discover the persisted planning identity without
-  // submitting the goal again. Every response is scoped to this repository.
+  // Discover only after bootstrap has chosen the initial foreground. A planning
+  // directory is not authoritative enough to synthesize a Run or its route.
   useEffect(() => {
-    setRecoveredPlanning(null);
-    // Existing conversations also have a current Run. A revision planning
-    // turn is still recoverable when its durable summary is running.
-    if (!autoRecoverPlanning || busy || isPlanning || !config.repository ||
-      (hasCurrentPlan && !persistedRunningPlanning)) return;
+    if (!isInitialViewReady || !autoRecoverPlanning || busy || isPlanning || !config.repository ||
+      (hasCurrentPlan && !persistedRunningPlanning && state.phase !== "planning")) {
+      setRecoveredPlanning(null);
+      return;
+    }
     const repository = config.repository;
+    const runId = state.runId;
+    const scope = planningRecovery.capture(repository);
     const abort = new AbortController();
-    // A background turn never owns the reader's selected conversation in the
-    // Run already on screen; only adopting a different Run resets the view.
-    const selectRunIfSwitched = (runId?: string) => {
-      if (runId && runId !== displayedRunIdRef.current) setSelected("");
+    const current = () => !abort.signal.aborted && planningRecovery.current(scope);
+    const belongsToView = (summary: PlanningSummary) =>
+      workspaceKey(summary.repository || "") === workspaceKey(repository) &&
+      (!runId || (summary.runId ? summary.runId === runId : summary.planningId === state.planningId));
+    const applySnapshot = (snapshot: Snapshot) => {
+      if (!current() || !snapshotBelongsToWorkspace(snapshot, repository) || (runId && snapshot.runId !== runId)) return false;
+      if (snapshot.runId !== displayedRunIdRef.current) setSelected("");
+      setState(previous => {
+        if (!current()) return previous;
+        if (previous.runId === snapshot.runId &&
+          (previous.events.at(-1)?.sequence ?? 0) > (snapshot.events.at(-1)?.sequence ?? 0)) return previous;
+        return snapshot;
+      });
+      markSnapshotRead(snapshot);
+      syncRunLabelFromSnapshot(snapshot);
+      setBackendStatus(snapshot);
+      setGoal(snapshot.graph.originalGoal);
+      setRouteType(deduceRouteType(snapshot));
+      recordRunToWorkspace(snapshot.runId, repository);
+      return true;
     };
     let timer: ReturnType<typeof setTimeout>;
     let planningId: string | undefined;
     let finished = false;
     let idleAttempts = 0;
     const poll = async () => {
-      const scope = planningRecovery.capture(repository);
+      if (!current()) return;
       try {
-        const summary = planningId
+        let summary = planningId
           ? await runtimeService.getPlanning(planningId, abort.signal)
-          : (await runtimeService.listPlannings(repository, abort.signal)).find(item => item.status === "running");
-        if (abort.signal.aborted || !planningRecovery.current(scope)) return;
-        if (summary && summary.repository === repository) {
-          planningId = summary.planningId;
+          : (await runtimeService.listPlannings(repository, abort.signal)).find(item => item.status === "running" && belongsToView(item));
+        if (!current()) return;
+        if (summary && belongsToView(summary)) {
           if (summary.status === "running") {
+            if (summary.runId) {
+              const known = state.runId === summary.runId && state.planningId === summary.planningId &&
+                state.planning?.planningId === summary.planningId && persistedRunningPlanning;
+              const snapshot = known ? state : await runtimeService.snapshotForRun(summary.runId, abort.signal);
+              if (!current()) return;
+              const restored = runningPlanningFromSnapshot(summary, snapshot, repository);
+              if (!restored) {
+                // A stale running file must not resurrect a stopped/newer turn.
+                if (runId === snapshot.runId) applySnapshot(snapshot);
+                const staleId = summary.planningId;
+                setRecoveredPlanning(previous => previous?.planningId === staleId ? null : previous);
+                planningId = undefined;
+                return;
+              }
+              if (!known && !applySnapshot(snapshot)) return;
+              summary = restored;
+            }
+            // Legacy pre-Run planning remains display-only: it has no topology
+            // to restore and must never be grafted onto another Run.
+            planningId = summary.planningId;
             setRecoveredPlanning(summary);
-            selectRunIfSwitched(summary.runId);
-            if (summary.goal) {
-              setGoal(prev => prev || summary.goal!);
-            }
-            if (summary.planType && summary.planType !== "undecided") {
-              setRouteType(summary.planType);
-            }
-            if (summary.runId || summary.goal || summary.planType) {
-              setState(prev => {
-                const nextRunId = summary.runId || prev.runId;
-                const nextGoal = summary.goal || prev.graph.originalGoal;
-                const nextPlanType = (summary.planType && summary.planType !== "undecided") ? summary.planType : prev.planType;
-                if (
-                  prev.runId === nextRunId &&
-                  prev.graph.originalGoal === nextGoal &&
-                  prev.planType === nextPlanType &&
-                  prev.planningId === summary.planningId
-                ) {
-                  return prev;
-                }
-                return {
-                  ...prev,
-                  runId: nextRunId,
-                  planningId: summary.planningId,
-                  planType: nextPlanType,
-                  graph: {
-                    ...prev.graph,
-                    originalGoal: nextGoal,
-                  },
-                };
-              });
-            }
+            const discoveredGoal = summary.goal;
+            if (discoveredGoal) setGoal(previous => previous || discoveredGoal);
+            if (summary.planType && summary.planType !== "undecided") setRouteType(summary.planType);
           } else {
             if (summary.status === "success") {
-              const snapshot = await runtimeService.getPlanningSnapshot(planningId, repository, abort.signal);
-              if (abort.signal.aborted || !planningRecovery.current(scope)) return;
-              selectRunIfSwitched(snapshot.runId);
-              setState(snapshot);
-              syncRunLabelFromSnapshot(snapshot);
-              setGoal(snapshot.graph.originalGoal);
-              setRouteType(deduceRouteType(snapshot));
-              recordRunToWorkspace(snapshot.runId, repository);
+              const snapshot = await runtimeService.getPlanningSnapshot(summary.planningId, repository, abort.signal);
+              if (!current() || (summary.runId && snapshot.runId !== summary.runId) || !applySnapshot(snapshot)) return;
             } else {
               const scope = planningRecovery.begin(repository);
-              void planningRecovery.finish(scope, summary, planningId);
+              void planningRecovery.finish(scope, summary, summary.planningId);
             }
             setRecoveredPlanning(null);
             finished = true;
@@ -2839,9 +2857,9 @@ export default function App() {
           }
         }
       } catch (error) {
-        if (!abort.signal.aborted) console.warn("Planning recovery:", error);
+        if (current()) console.warn("Planning recovery:", error);
       } finally {
-        if (!abort.signal.aborted && !finished) {
+        if (current() && !finished) {
           timer = setTimeout(poll, planningRecoveryDelay(planningId, idleAttempts));
           if (!planningId) idleAttempts++;
         }
@@ -2849,7 +2867,8 @@ export default function App() {
     };
     void poll();
     return () => { abort.abort(); clearTimeout(timer); };
-  }, [autoRecoverPlanning, busy, isPlanning, hasCurrentPlan, persistedRunningPlanning, config.repository, planningRecovery]);
+  }, [isInitialViewReady, autoRecoverPlanning, busy, isPlanning, hasCurrentPlan, persistedRunningPlanning,
+    state.runId, state.planningId, state.phase, config.repository, planningRecovery]);
 
   // The snapshot itself is durable enough to re-attach immediately. This is
   // the fast path after an SSE drop: show the persisted running turn instead
@@ -2955,7 +2974,7 @@ export default function App() {
     if (isLandingView || Workbench) return;
     let active = true;
     setWorkbenchLoadFailed(false);
-    void import("./components/views/AppGraphWorkbench").then(module => {
+    void loadWorkbench().then(module => {
       if (active) setWorkbench(() => module.AppGraphWorkbench);
     }).catch(() => {
       if (active) setWorkbenchLoadFailed(true);
@@ -2967,17 +2986,18 @@ export default function App() {
   // This retained landing input is only a disabled placeholder, not a Stop
   // control for the running conversation whose workbench is still loading.
   const waitingForWorkbench = !isLandingView && !Workbench;
+  const waitingForConversation = navigationPending || waitingForWorkbench;
   const showLandingView = isLandingView || waitingForWorkbench;
   // A warm cache resolves in a frame; announce the wait only once it is real.
   const [showLoadNotice, setShowLoadNotice] = useState(false);
   useEffect(() => {
-    if (!waitingForWorkbench) {
+    if (!waitingForConversation) {
       setShowLoadNotice(false);
       return;
     }
     const timer = setTimeout(() => setShowLoadNotice(true), 150);
     return () => clearTimeout(timer);
-  }, [waitingForWorkbench]);
+  }, [waitingForConversation]);
 
   const handleCopyRunPrompt = async (runId: string, provisionalPrompt?: string) => {
     const request = ++copyPromptRequestRef.current;
@@ -3053,6 +3073,10 @@ export default function App() {
   };
   const handleLoadRun = useStableCallback((id: string) => {
     if (!runs.includes(id)) return;
+    // Download the view while its authoritative snapshot is in flight, without
+    // mounting it or speculatively reading any transcript bytes.
+    setWorkbenchLoadFailed(false);
+    preloadWorkbench();
     if (id.startsWith("pending-")) {
       // The backend has not assigned a durable Run ID yet, so there is no
       // snapshot to fetch. Reopen the local provisional conversation instead of
@@ -3129,8 +3153,9 @@ export default function App() {
         }
         setSelected("");
       } finally {
-        if (generation === foregroundGeneration.current) {
-          setLoadingRunId(null);
+        if (historyPrefetchRef.current === controller) {
+          historyPrefetchRef.current = null;
+          if (generation === foregroundGeneration.current) setLoadingRunId(null);
         }
       }
     })();
@@ -3173,7 +3198,7 @@ export default function App() {
           <main className="main">
             {/* 全局悬浮横幅 (居中于工作区主体，排除侧边栏) */}
             <div className="floating-error-banner-container">
-              {waitingForWorkbench && (showLoadNotice || workbenchLoadFailed) && modal !== "settings" && (
+              {waitingForConversation && (showLoadNotice || workbenchLoadFailed) && modal !== "settings" && (
                 <div className={`workbench-module-status${workbenchLoadFailed ? " is-error" : ""}`}
                   role={workbenchLoadFailed ? "alert" : "status"}>
                   <span>{workbenchLoadFailed
@@ -3225,10 +3250,10 @@ export default function App() {
                   goal={landingGoal}
                   setGoal={handleLandingGoalChange}
                   onPlanGoal={actions.plan}
-                  isBusy={waitingForWorkbench || busy || isPlanning || backendPlanning || repositoryBlocked}
+                  isBusy={waitingForConversation || busy || isPlanning || backendPlanning || repositoryBlocked}
                   planMode={planMode}
                   onPlanModeChange={handlePlanModeChange}
-                  isWorking={!waitingForWorkbench && isAgentWorking}
+                  isWorking={!waitingForConversation && isAgentWorking}
                   onInterrupt={handleInterrupt}
                   repository={config?.repository}
                 />
@@ -3236,6 +3261,8 @@ export default function App() {
                 <motion.div
                   key="workspace-view"
                   className="workspace-view-wrapper"
+                  inert={navigationPending ? true : undefined}
+                  aria-busy={navigationPending || undefined}
                   initial={false}
                   animate={{ opacity: 1 }}
                   // Presence can retain the source while its composer moves.
@@ -3254,7 +3281,7 @@ export default function App() {
                       plannerStream.runId === state.runId && plannerStream.initialPlanMode
                         ? plannerStream.initialPlanMode
                         : (state.approved && state.planType === "graph" && persistedRunningPlanning
-                          ? "graph" : runModes[state.runId])
+                          ? "graph" : runModes[state.runId] ?? (recoveredPlanning?.planType === "undecided" ? "auto" : undefined))
                     }
                     selected={selected}
                     setSelected={setSelected}

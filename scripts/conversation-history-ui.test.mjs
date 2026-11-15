@@ -108,37 +108,100 @@ for (const mode of ["graph", "serial"]) {
   });
 }
 
-test("explicitly expanding an old record works even while the newest request is stalled", { timeout: 30_000 }, async () => {
-  let releaseLatest;
-  const reads = [];
-  const { context, page, errors } = await newPage(async route => {
-    if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
-    const body = route.request().postDataJSON();
-    reads.push(body.executionId);
-    if (body.executionId === "blocked-latest") await new Promise(resolve => { releaseLatest = resolve; });
-    const content = assistant(body.executionId === "old-record" ? "READ_OLD_WITHOUT_WAITING" : "New reply");
-    const bytes = Buffer.byteLength(content);
-    try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content,
-      startOffset: 0, nextOffset: bytes, totalBytes: bytes, complete: true, status: "completed" } } }); } catch {}
+for (const mode of ["graph", "serial", "merger", "node-merger"]) {
+  test(`${mode}: old unsuccessful attempts default closed and explicit expansion survives new turns`, { timeout: 30_000 }, async () => {
+    const reads = [];
+    const content = id => startTool(`${id}-tool`, `Inspect ${id}`) + endTool(`${id}-tool`, `${id} details`) + assistant(`${id} reply`);
+    const attempt = (id, status, index) => ({ id, node: "task", status, output: "", outputBytes: Buffer.byteLength(content(id)),
+      revision: 1, attempt: index + 1, startedAt: index + 1, completedAt: status === "running" ? null : index + 2,
+      sessionId: "session", worktree: "/mock", before: "", after: "" });
+    const executions = ["failed", "paused", "aborted", "cancelled", "completed", "failed"]
+      .map((status, index) => attempt(index === 5 ? "latest-failed" : `old-${status}`, status, index));
+    const { context, page, errors } = await newPage(async route => {
+      if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
+      const body = route.request().postDataJSON();
+      reads.push(body.executionId);
+      const output = content(body.executionId), bytes = Buffer.byteLength(output);
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content: output,
+        startOffset: 0, nextOffset: bytes, totalBytes: bytes, complete: true, status: "completed" } } });
+    });
+    const headers = () => page.locator(".session-label-toggle[aria-expanded]");
+    const expansion = () => headers().evaluateAll(items => items.map(item => item.getAttribute("aria-expanded")));
+    try {
+      await page.goto(`${origin}/__workspace-footer?mode=${mode}&turn=follow-up`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.setExecutions);
+      await page.evaluate(items => window.audit.setExecutions(items), executions);
+      await page.getByText("latest-failed reply", { exact: true }).waitFor();
+      assert.deepEqual(await expansion(), ["false", "false", "false", "false", "true", "true"],
+        "only past unsuccessful attempts default closed; successful history and the newest failure stay open");
+      const scroller = page.locator(".initial-query-scroll");
+      await scroller.evaluate(element => {
+        element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+        element.scrollTop = 0;
+      });
+      await page.waitForTimeout(100);
+      const closedIds = executions.slice(0, 4).map(item => item.id);
+      assert.equal(reads.some(id => closedIds.includes(id)), false, "even visible closed headers must not acquire readers");
+      for (const id of closedIds) assert.equal(await page.locator(`[data-execution-id="${id}"]`).count(), 0);
+
+      await headers().first().click();
+      await page.getByText("old-failed reply", { exact: true }).waitFor();
+      const tool = page.locator('[data-execution-id="old-failed"] .tool-call-header');
+      await tool.click();
+      await page.getByText("old-failed details", { exact: true }).waitFor();
+      await page.evaluate(() => { window.retainedFailedRow = document.querySelector('[data-execution-id="old-failed"]'); });
+      const next = [...executions, attempt("newest-success", "completed", executions.length)];
+      await page.evaluate(items => window.audit.setExecutions(items), next);
+      await page.getByText("newest-success reply", { exact: true }).waitFor();
+      assert.deepEqual(await expansion(), ["true", "false", "false", "false", "true", "false", "true"]);
+      assert.equal(await page.evaluate(() => window.retainedFailedRow === document.querySelector('[data-execution-id="old-failed"]')), true);
+      await page.getByText("old-failed details", { exact: true }).waitFor();
+      assert.equal(reads.filter(id => id === "old-failed").length, 1, "manual expansion keeps its mounted reader and tool state");
+
+      await headers().first().click();
+      await headers().last().click();
+      await page.evaluate(items => window.audit.setExecutions(items), [...next, attempt("newest-live", "running", next.length)]);
+      await page.getByText("newest-live reply", { exact: true }).waitFor();
+      assert.deepEqual(await expansion(), ["false", "false", "false", "false", "true", "false", "false", "true"],
+        "explicit collapse remains in force while the new active attempt opens");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
   });
-  try {
-    await page.goto(`${origin}/__workspace-footer?mode=graph&turn=follow-up`, { waitUntil: "domcontentloaded" });
-    await page.waitForFunction(() => !!window.audit?.setExecutions);
-    await page.evaluate(() => window.audit.setExecutions(["old-record", "blocked-latest"].map((id, index) => ({
-      id, node: "task", status: "completed", output: "", outputBytes: 100,
-      revision: 1, attempt: index + 1, startedAt: index + 1, completedAt: index + 2,
-      sessionId: "session", worktree: "/mock", before: "", after: "",
-    }))));
-    await page.locator(".initial-query-scroll.conversation-ready").waitFor();
-    const header = page.locator(".session-label-toggle").first();
-    await header.click(); // Collapse the deferred placeholder.
-    await header.click(); // An explicit expansion bypasses automatic prioritization.
-    await page.getByText("READ_OLD_WITHOUT_WAITING", { exact: true }).waitFor();
-    assert.equal(reads.filter(id => id === "old-record").length, 1);
-    assert.ok(releaseLatest, "the latest request remains in flight while old output is readable");
-    assert.deepEqual(errors, []);
-  } finally { releaseLatest?.(); await context.close(); }
-});
+}
+
+for (const mode of ["graph", "serial"]) {
+  test(`${mode}: explicitly expanding an old record works even while the newest request is stalled`, { timeout: 30_000 }, async () => {
+    let releaseLatest;
+    const reads = [];
+    const { context, page, errors } = await newPage(async route => {
+      if (!route.request().url().endsWith("/get_execution_output")) return route.fulfill({ json: { result: {} } });
+      const body = route.request().postDataJSON();
+      reads.push(body.executionId);
+      if (body.executionId === "blocked-latest") await new Promise(resolve => { releaseLatest = resolve; });
+      const content = assistant(body.executionId === "old-record" ? "READ_OLD_WITHOUT_WAITING" : "New reply");
+      const bytes = Buffer.byteLength(content);
+      try { await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId, content,
+        startOffset: 0, nextOffset: bytes, totalBytes: bytes, complete: true, status: "completed" } } }); } catch {}
+    });
+    try {
+      await page.goto(`${origin}/__workspace-footer?mode=${mode}&turn=follow-up`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.setExecutions);
+      await page.evaluate(() => window.audit.setExecutions(["old-record", "blocked-latest"].map((id, index) => ({
+        id, node: "task", status: index === 0 ? "failed" : "completed", output: "", outputBytes: 100,
+        revision: 1, attempt: index + 1, startedAt: index + 1, completedAt: index + 2,
+        sessionId: "session", worktree: "/mock", before: "", after: "",
+      }))));
+      await page.locator(".initial-query-scroll.conversation-ready").waitFor();
+      const header = page.locator(".session-label-toggle").first();
+      assert.equal(await header.getAttribute("aria-expanded"), "false");
+      await header.click(); // One explicit expansion bypasses automatic prioritization.
+      await page.getByText("READ_OLD_WITHOUT_WAITING", { exact: true }).waitFor();
+      assert.equal(reads.filter(id => id === "old-record").length, 1);
+      assert.ok(releaseLatest, "the latest request remains in flight while old output is readable");
+      assert.deepEqual(errors, []);
+    } finally { releaseLatest?.(); await context.close(); }
+  });
+}
 
 test("an old record promoted to newest stays mounted when another turn is appended", { timeout: 30_000 }, async () => {
   let reads = 0;
@@ -315,6 +378,9 @@ test("failed node attempts keep their execution record spacing even", { timeout:
     await page.evaluate(executions => window.audit.setExecutions(executions), [
       execution("failed", 1, "failed", failedOutput), execution("retry", 2, "completed", retryOutput),
     ]);
+    const failureHeader = page.locator(".session-label-toggle").first();
+    assert.equal(await failureHeader.getAttribute("aria-expanded"), "false");
+    await failureHeader.click();
     const failureCard = page.locator('[data-execution-id="failed"]').getByTestId("transcript-error-card");
     await failureCard.getByText("Connection failed", { exact: true }).waitFor();
     assert.equal(await failureCard.count(), 1, "the failed attempt retains exactly one error card");
@@ -2517,6 +2583,109 @@ for (const role of ["node", "planner"]) {
     } finally { await context.close(); }
   });
 }
+
+for (const role of ["node", "planner"]) {
+  test(`${role}: returning to a terminal transcript reuses parsing and deletion fences its unmount cache`, { timeout: 30_000 }, async () => {
+    const prefix = startTool("cache-probe", "Inspect cached parse"), split = Buffer.byteLength(prefix);
+    let content = prefix + endTool("cache-probe", "CACHED_PARSE_DETAILS") + assistant("CACHED_PARSE_REPLY");
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON(), bytes = Buffer.from(content);
+      const start = body.before !== undefined ? 0 : body.tail ? split : body.offset ?? 0;
+      const end = body.before ?? bytes.length;
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        planningId: body.planningId, role: "planner", content: bytes.subarray(start, end).toString(), startOffset: start,
+        nextOffset: end, totalBytes: bytes.length, complete: end === bytes.length, status: "completed", running: false } } });
+    });
+    await context.addInitScript(() => {
+      const parse = JSON.parse;
+      window.cacheProbeParses = 0;
+      JSON.parse = function (text, ...args) {
+        if (typeof text === "string" && text.startsWith('{"type":"tool_execution_start"') && text.includes('"cache-probe"')) window.cacheProbeParses++;
+        return parse(text, ...args);
+      };
+    });
+    try {
+      await page.goto(`${origin}/__history?case=historyRegression&heading=0`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.selectHistory);
+      await page.evaluate(role => {
+        window.audit.setRunning(false);
+        window.audit.setPlanningIds(["planner-latest"]);
+        window.audit.selectHistory(role);
+      }, role);
+      await page.getByText("CACHED_PARSE_REPLY", { exact: true }).waitFor();
+      await page.waitForFunction(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.complete === true, role);
+      await page.locator(".tool-call-header").click();
+      await page.getByText("CACHED_PARSE_DETAILS", { exact: true }).waitFor();
+      await page.evaluate(() => window.audit.selectHistory("exit"));
+      await page.waitForFunction(async () => (await import("/src/services/transcriptParseCache.ts")).transcriptParseCache.size > 0);
+      const count = await page.evaluate(() => window.cacheProbeParses);
+      assert.ok(count > 0, "the first mount actually decoded JSONL");
+      await page.evaluate(role => window.audit.selectHistory(role), role);
+      await page.getByText("CACHED_PARSE_REPLY", { exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => window.cacheProbeParses), count, "returning reuses rows rather than decoding the same JSONL again");
+      assert.equal(await page.locator(".tool-call-body").count(), 0, "cached parser rows do not restore another view's expansion state");
+      content += assistant("AFTER_PARSE_CACHE_APPEND");
+      await page.evaluate(() => window.audit.setRunning(true));
+      await page.getByText("AFTER_PARSE_CACHE_APPEND", { exact: true }).waitFor();
+      assert.equal(await page.getByText("CACHED_PARSE_REPLY", { exact: true }).count(), 1);
+      assert.equal(await page.locator(".tool-call-header").count(), 1);
+      assert.equal(await page.evaluate(() => window.cacheProbeParses), count, "forward parsing continues from the restored cursor");
+      await page.evaluate(() => window.audit.setRunning(false));
+      await page.waitForFunction(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.complete === true, role);
+      await page.evaluate(() => window.audit.deleteConversation());
+      await page.evaluate(() => window.audit.selectHistory("exit"));
+      await page.waitForTimeout(600); // Include the deferred, invalidated unmount write.
+      assert.equal(await page.evaluate(async () => (await import("/src/services/transcriptParseCache.ts")).transcriptParseCache.size), 0,
+        "an invalidated mounted parser must not repopulate the cache on unmount");
+      await page.evaluate(role => window.audit.selectHistory(role), role);
+      await page.getByText("CACHED_PARSE_REPLY", { exact: true }).waitFor();
+      await page.waitForFunction(role => (role === "node" ? window.audit.cachedExecution() : window.audit.cachedPlanning())?.complete === true, role);
+      assert.ok(await page.evaluate(() => window.cacheProbeParses) > count, "deleted caches force a fresh parse");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+test("returning to a live Planner reuses terminal revisions but freshly parses its active revision", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await newPage(async route => {
+    const body = route.request().postDataJSON(), id = body.planningId || "worker";
+    const content = startTool(`probe-${id}`, "Inspect revision") + endTool(`probe-${id}`, "done") + assistant(`REPLY_${id}`);
+    const bytes = Buffer.from(content), start = body.offset ?? 0;
+    await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+      planningId: body.planningId, role: "planner", content: bytes.subarray(start).toString(), startOffset: start,
+      nextOffset: bytes.length, totalBytes: bytes.length, complete: true, status: "completed", running: id === "planner-latest" } } });
+  });
+  await context.addInitScript(() => {
+    const parse = JSON.parse;
+    window.revisionParses = {};
+    JSON.parse = function (text, ...args) {
+      if (typeof text === "string" && text.startsWith('{"type":"tool_execution_start"')) {
+        for (const id of ["planner-previous", "planner-latest"]) if (text.includes(`probe-${id}`)) window.revisionParses[id] = (window.revisionParses[id] || 0) + 1;
+      }
+      return parse(text, ...args);
+    };
+  });
+  try {
+    await page.goto(`${origin}/__history?case=historyRegression&heading=0`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!window.audit?.selectHistory);
+    await page.evaluate(() => window.audit.selectHistory("planner"));
+    await page.getByText("REPLY_planner-previous", { exact: true }).waitFor();
+    await page.getByText("REPLY_planner-latest", { exact: true }).waitFor();
+    const before = await page.evaluate(() => ({ ...window.revisionParses }));
+    await page.evaluate(() => window.audit.selectHistory("exit"));
+    await page.waitForFunction(async () => {
+      const cache = (await import("/src/services/transcriptParseCache.ts")).transcriptParseCache;
+      const entry = cache.get(JSON.stringify(["regression:planning", "planner-previous"]));
+      return cache.size === 1 && entry?.state.source === "planner-previous";
+    });
+    await page.evaluate(() => window.audit.selectHistory("planner"));
+    await page.getByText("REPLY_planner-latest", { exact: true }).waitFor();
+    const after = await page.evaluate(() => window.revisionParses);
+    assert.equal(after["planner-previous"], before["planner-previous"]);
+    assert.ok(after["planner-latest"] > before["planner-latest"], "a live segment stays reader-owned rather than entering the shared parse cache");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
 
 test("bounded Node and Planner windows survive navigation; exit cancels readers and deletion clears caches", { timeout: 30_000 }, async () => {
   const requests = [];

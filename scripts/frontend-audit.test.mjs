@@ -79,6 +79,28 @@ async function fixture(name, handler = async () => false, reducedMotion = "reduc
   return { context, page, errors };
 }
 
+test("changing an unrestricted transcript filter to an empty filter hides all user turns", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("filteredTranscript");
+  try {
+    await page.waitForFunction(() => document.querySelectorAll(".chat-message-row.user").length === 3);
+    await page.evaluate(() => window.audit.setTranscriptFilters([]));
+    await page.waitForFunction(() => document.querySelectorAll(".chat-message-row.user").length === 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("transcript filter identity distinguishes embedded separators from multiple messages", { timeout: 30_000 }, async () => {
+  const { context, page, errors } = await fixture("filteredTranscript");
+  try {
+    await page.waitForFunction(() => !!window.audit?.setTranscriptFilters);
+    await page.evaluate(() => window.audit.setTranscriptFilters(["alpha", "beta"]));
+    await page.waitForFunction(() => document.querySelectorAll(".chat-message-row.user").length === 2);
+    await page.evaluate(() => window.audit.setTranscriptFilters(["alpha\u0000beta"]));
+    await page.waitForFunction(() => document.querySelectorAll(".chat-message-row.user").length === 1);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("final-response JSON renders once without empty code bars or feedback tags after history prepends", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await fixture("transcriptOutput");
   try {
@@ -3829,7 +3851,7 @@ test("one unavailable Run cannot starve other polls, and a stale poll cannot ove
     return true;
   });
   try {
-    await waitFor(() => viewedRequests === 1);
+    await waitFor(() => viewedRequests === 1 && backgroundRequests === 1);
     assert.equal(backgroundRequests, 1);
     await page.evaluate(() => window.audit.acceptAction());
     gate.resolve();
@@ -3842,14 +3864,19 @@ test("one unavailable Run cannot starve other polls, and a stale poll cannot ove
   } finally { gate.resolve(); await context.close(); }
 });
 
-for (const version of ["background-v2", "", "deleted-run"]) {
-  const deleted = version === "deleted-run";
+for (const version of ["background-v2", "", "deleted-run", "wrong-run"]) {
+  const deleted = version === "deleted-run", mismatched = version === "wrong-run";
   test(deleted ? "a confirmed missing background Run does not retry its final push forever"
+    : mismatched ? "a mismatched background snapshot retains its unversioned invalidation"
     : `a failed background refresh retains its ${version ? "versioned" : "unversioned"} push invalidation`, { timeout: 30_000 }, async () => {
     let backgroundReads = 0;
     const { context, page, errors } = await fixture("polling", async (route, command, body) => {
       if (command !== "snapshot_if_changed") return false;
       if (body.runId === "background" && ++backgroundReads === 2) {
+        if (mismatched) {
+          await route.fulfill({ json: { result: { version: "foreign-version", snapshot: { runId: "foreign-run" } } } });
+          return true;
+        }
         await route.fulfill({ status: deleted ? 400 : 503, json: { error: deleted ? "Run not found" : "Temporary outage" } });
         return true;
       }
@@ -3874,7 +3901,7 @@ for (const version of ["background-v2", "", "deleted-run"]) {
         events.setRuntimeEventsConnectedForTest(true);
         window.audit.observed = [];
         events.dispatchSnapshotChangedForTest({ runId: "background", version });
-      }, version);
+      }, mismatched ? "" : version);
       await waitFor(() => backgroundReads >= 2);
       if (deleted) {
         await page.waitForTimeout(2300);
@@ -4033,6 +4060,104 @@ test("a burst of slow background invalidations cannot queue the foreground behin
     await context.close();
   }
 });
+
+test("an authoritative action wakes a suspended missing foreground Run without a phase change", { timeout: 30_000 }, async () => {
+  let reads = 0;
+  const { context, page, errors } = await fixture("polling", async (route, command, body) => {
+    if (command !== "snapshot_if_changed") return false;
+    if (body.runId === "view" && ++reads === 1) {
+      await route.fulfill({ status: 404, json: { error: "Run not found" } });
+      return true;
+    }
+    await route.fulfill({ json: { result: { version: "current", snapshot: {
+      runId: body.runId, phase: "running", config: { repository: "/a" }, events: [], nodes: {}, executions: [],
+      graph: { originalGoal: "Reactivated durable state", nodes: [], edges: [] },
+    } } } });
+    return true;
+  });
+  try {
+    await waitFor(() => reads === 1);
+    await page.waitForTimeout(100);
+    await page.evaluate(() => window.audit.acceptAction());
+    await page.waitForFunction(() => document.querySelector("[data-viewed-goal]")?.textContent === "Reactivated durable state");
+    assert.ok(reads >= 2);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("foreground phase changes do not abort and restart background invalidations", { timeout: 30_000 }, async () => {
+  const gate = deferred();
+  let hold = false, backgroundReads = 0, phase = "running";
+  const { context, page, errors } = await fixture("polling", async (route, command, body) => {
+    if (command !== "snapshot_if_changed") return false;
+    if (body.runId === "background") {
+      backgroundReads++;
+      if (hold) await gate.promise;
+    }
+    await route.fulfill({ json: { result: { version: "current", snapshot: {
+      runId: body.runId, phase: body.runId === "view" ? phase : "completed", config: { repository: "/a" },
+      events: [], nodes: {}, executions: [], graph: { originalGoal: "Phase changes", nodes: [], edges: [] },
+    } } } }).catch(() => {});
+    return true;
+  });
+  try {
+    await page.waitForFunction(() => window.audit.observed?.includes("background") &&
+      document.querySelector("[data-viewed-goal]")?.textContent === "Phase changes");
+    hold = true;
+    await page.evaluate(async () => {
+      window.EventSource = class { static CLOSED = 2; addEventListener() {} close() {} };
+      const events = await import("/src/services/runtimeEvents.ts");
+      events.setRuntimeEventsConnectedForTest(true);
+      events.dispatchSnapshotChangedForTest({ runId: "background", version: "pending" });
+    });
+    await waitFor(() => backgroundReads === 2);
+    for (phase of ["paused", "completed", "running"]) {
+      await page.evaluate(value => window.audit.setPollingPhase(value), phase);
+      await page.waitForFunction(value => document.querySelector("[data-viewed-goal]")?.dataset.viewedPhase === value, phase);
+      await page.waitForTimeout(200);
+    }
+    assert.equal(backgroundReads, 2, "changing the foreground's phase must not repeatedly cancel the same slow background read");
+    assert.deepEqual(errors, []);
+  } finally { hold = false; gate.resolve(); await context.close(); }
+});
+
+for (const connected of [false, true]) {
+  test(`foreground keeps refreshing while background reads are blocked (${connected ? "push" : "timer"})`, { timeout: 30_000 }, async () => {
+    const gate = deferred();
+    const backgrounds = ["blocked-a", "blocked-b", "blocked-c"];
+    let slow = false, waiting = 0, viewedReads = 0;
+    const { context, page, errors } = await fixture("polling", async (route, command, body) => {
+      if (command !== "snapshot_if_changed") return false;
+      if (body.runId === "view") viewedReads++;
+      if (slow && backgrounds.includes(body.runId)) { waiting++; await gate.promise; }
+      await route.fulfill({ json: { result: { version: "current", snapshot: {
+        runId: body.runId, phase: "running", config: { repository: "/a" }, events: [], nodes: {}, executions: [],
+        graph: { originalGoal: "Independent foreground", nodes: [], edges: [] },
+      } } } });
+      return true;
+    });
+    try {
+      await page.waitForFunction(() => document.querySelector("[data-viewed-goal]")?.textContent === "Independent foreground");
+      await page.evaluate(ids => window.audit.setPollingRuns(["view", ...ids]), backgrounds);
+      await page.waitForFunction(ids => ids.every(id => window.audit.observed?.includes(id)), backgrounds);
+      slow = true;
+      await page.evaluate(async ({ connected, backgrounds }) => {
+        window.EventSource = class { static CLOSED = 2; addEventListener() {} close() {} };
+        const events = await import("/src/services/runtimeEvents.ts");
+        events.setRuntimeEventsConnectedForTest(connected);
+        for (const runId of backgrounds) events.dispatchSnapshotChangedForTest({ runId, version: "background-change" });
+      }, { connected, backgrounds });
+      await waitFor(() => waiting >= 3);
+      const before = viewedReads;
+      if (connected) await page.evaluate(async () => {
+        (await import("/src/services/runtimeEvents.ts")).dispatchSnapshotChangedForTest({ runId: "view", version: "foreground-change" });
+      });
+      await waitFor(() => viewedReads >= before + 2);
+      assert.equal(waiting, 3, "each background Run has only one request in flight");
+      assert.deepEqual(errors, []);
+    } finally { slow = false; gate.resolve(); await context.close(); }
+  });
+}
 
 for (const busy of [false, true]) {
   test(`a notification older than the durable snapshot settles ${busy ? "after a busy read" : "without a busy read"}`, { timeout: 30_000 }, async () => {
@@ -4429,7 +4554,7 @@ test("recovered planning polls activity before route discovery and opens the com
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
-  const running = { planningId: "recovered-plan", repository: "/a", status: "running", createdAt: Date.now(),
+  const running = { planningId: "recovered-plan", repository: "/a", status: "running", planType: "undecided", createdAt: Date.now(),
     modelDuration: 0, totalPlanningDuration: 0, roles: { partition: {}, planner: {} } };
   const info = { path: "/a", name: "Alpha", branch: "main", head: "", clean: true };
   const bootstrap = { config, snapshot: empty, runs: [], repositoryInfo: info, dataPath: "/mock" };

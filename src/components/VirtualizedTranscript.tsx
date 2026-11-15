@@ -7,6 +7,7 @@ import type { TranscriptRestoreAnchor } from "../services/conversationScroll";
 import { closeThinkingItems } from "../services/thinkingTranscript";
 import { isNestedScrollGesture, notifyTranscriptFinalOutput } from "../services/transcriptScroll";
 import { parseTranscriptChunkLines, type ParseTranscriptChunkState, type TranscriptParseOptions } from "../services/transcriptParser";
+import { finishTranscriptParseCacheLease, invalidateTranscriptParseCache, leaseTranscriptParseCache, readTranscriptParse, writeTranscriptParse } from "../services/transcriptParseCache";
 import { settleInterruptedItems } from "../services/transcriptSettle";
 import { Terminal } from "lucide-react";
 import { shareJson } from "../services/structuralSharing";
@@ -15,8 +16,13 @@ import { TranscriptRow } from "./TranscriptRow";
 import { TRANSCRIPT_VIEWPORT_BUFFER } from "../services/transcriptPaging";
 import type { LiveSteerMarker } from "../lib/pendingSteers";
 
+const hot = (import.meta as ImportMeta & { hot?: { dispose(callback: () => void): void } }).hot;
+hot?.dispose(() => invalidateTranscriptParseCache());
+
 interface VirtualizedTranscriptProps {
   output: string;
+  /** Run-prefixed owner of validated log bytes; never used as authority for content. */
+  parseCacheKey?: string;
   /** Absolute cursor of the first loaded byte (it can start inside a JSONL record). */
   startOffset?: number;
   className?: string;
@@ -211,6 +217,7 @@ function hasNewAssistantText(previous: TranscriptItem[], current: TranscriptItem
 
 export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React.memo(({
   output,
+  parseCacheKey,
   startOffset = 0,
   className = "",
   emptyText = t("工作区就绪，等待节点指令输出…"),
@@ -252,7 +259,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   const byteOffsetRef = useRef(startOffset);
   const leadingFragmentRef = useRef(startOffset > 0);
   const inputStartRef = useRef(startOffset);
-  const userTurnTextsKey = userTurnTexts?.join("\u0000") ?? "";
+  const userTurnTextsKey = JSON.stringify(userTurnTexts ?? null);
   // Divider placement is part of the parse identity: a newly known review turn
   // must rebuild the composed rows even when every loaded segment is unchanged.
   const dividerKey = dividerSources?.size ? `:${[...dividerSources].sort().join("\u0000")}` : "";
@@ -383,8 +390,19 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
         settled || liveSource === undefined || state.source !== liveSource
           ? settleInterruptedItems(state.items) : state.items;
       const parseFresh = (segment: PlanningSegment, segmentOptions: TranscriptParseOptions) => {
+        const cached = readTranscriptParse(parseCacheKey, segment.source, segment.text, segment.startOffset, segmentOptions);
         const state = freshSegmentState(segment);
         states.set(segment.source, state);
+        if (cached) {
+          Object.assign(state, cached.state);
+          state.parsedChars = cached.parsedChars;
+          state.items = annotateSegmentItems(cached.items, [], "fresh", settled, inline,
+            liveThinkingIdsRef.current, liveThinkingKeysRef.current);
+          state.pendingTools = new Map(state.items.filter(item => item.type === "tool_call" && item.status === "running" && item.toolCallId)
+            .map(item => [item.toolCallId!, item]));
+          changed = true;
+          return state;
+        }
         const lastNewline = segment.text.lastIndexOf("\n");
         if (lastNewline !== -1) {
           const lines = segment.text.slice(0, lastNewline).split("\n");
@@ -613,6 +631,30 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
       byteOffsetRef.current = startOffset;
       sourceRef.current = "output";
       leadingFragmentRef.current = startOffset > 0;
+      const cached = readTranscriptParse(parseCacheKey, "output", rawOutput, startOffset, { showUserTurns, skipFirstUser, userTurnTexts });
+      if (cached) {
+        const state = cached.state;
+        lastProcessedPosRef.current = cached.parsedChars;
+        sourceRef.current = state.source;
+        byteOffsetRef.current = state.byteOffset;
+        leadingFragmentRef.current = state.leadingFragment;
+        inTagThinkingRef.current = state.inTagThinking;
+        inFinalResponseRef.current = state.inFinalResponse;
+        finalResponseSuppressedRef.current = state.finalResponseSuppressed;
+        seenFirstUserRef.current = state.seenFirstUser;
+        pendingUserStartRef.current = state.pendingUserStart;
+        assistantStartIndexRef.current = state.assistantStartIndex;
+        userMessageStartsRef.current = state.userMessageStarts;
+        compactingRef.current = state.compacting;
+        itemsRef.current = annotateSegmentItems(cached.items, [], "fresh", settled, inline,
+          liveThinkingIdsRef.current, liveThinkingKeysRef.current);
+        for (const item of itemsRef.current) if (item.type === "thinking" && item.status === "running") {
+          liveThinkingIdsRef.current.add(item.id);
+          if (item.content?.trim()) liveThinkingKeysRef.current.add(`${item.thinkingContentIndex ?? 0}_${item.content.trim()}`);
+        }
+        lastRawOutputRef.current = rawOutput;
+        return true;
+      }
     }
     const unparsed = rawOutput.slice(lastProcessedPosRef.current);
     if (!unparsed) return false;
@@ -700,7 +742,7 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
     itemsRef.current = shareJson(previousItems, currentItems);
     lastRawOutputRef.current = rawOutput;
     return itemsRef.current !== previousItems;
-  }, [showUserTurns, skipFirstUser, userTurnTextsKey, dividerKey, startOffset, settled, liveSource, inline]);
+  }, [showUserTurns, skipFirstUser, userTurnTextsKey, dividerKey, startOffset, settled, liveSource, inline, parseCacheKey]);
 
   const computeCompacting = (): boolean => {
     if (segmentedRef.current) {
@@ -737,6 +779,46 @@ export const VirtualizedTranscript: React.FC<VirtualizedTranscriptProps> = React
   // Parse before deriving rows. A prepend used to measure the old DOM first,
   // then replace it in a nested layout update, breaking the scroll anchor.
   if (parseAvailableOutput(output)) itemsVersionRef.current += 1;
+  // Save only when leaving a mounted view, not on every append/prepend. Readers
+  // own live state; only terminal executions/revisions enter this shared cache.
+  const cacheOwnerRef = useRef(parseCacheKey);
+  cacheOwnerRef.current = parseCacheKey;
+  const saveParseRef = useRef<() => void>(() => {});
+  useLayoutEffect(() => {
+    saveParseRef.current = () => {
+      if (!parseCacheKey || lastRawOutputRef.current !== output || inputStartRef.current !== startOffset ||
+        parseOptionsRef.current !== `${showUserTurns}:${skipFirstUser}:${userTurnTextsKey}${dividerKey}`) return;
+      if (segmentedRef.current) {
+        const first = segmentStartsRef.current.keys().next().value;
+        // Chronological writes keep the newest revisions most recent in LRU.
+        for (const source of segmentStartsRef.current.keys()) {
+          const state = segmentStatesRef.current.get(source);
+          if (!state || (!settled && (!liveSource || source === liveSource))) continue;
+          writeTranscriptParse(parseCacheKey, source, { text: state.text, startOffset: state.startOffset,
+            parsedChars: state.parsedChars, items: state.items, state }, {
+            showUserTurns, skipFirstUser: showUserTurns && skipFirstUser && source === first && state.startOffset === 0, userTurnTexts,
+          });
+        }
+      } else if (settled) {
+        writeTranscriptParse(parseCacheKey, "output", { text: output, startOffset, parsedChars: lastProcessedPosRef.current,
+          items: itemsRef.current, state: {
+            source: sourceRef.current, byteOffset: byteOffsetRef.current, leadingFragment: leadingFragmentRef.current,
+            inTagThinking: inTagThinkingRef.current, inFinalResponse: inFinalResponseRef.current,
+            finalResponseSuppressed: finalResponseSuppressedRef.current, seenFirstUser: seenFirstUserRef.current,
+            pendingUserStart: pendingUserStartRef.current, assistantStartIndex: assistantStartIndexRef.current,
+            userMessageStarts: userMessageStartsRef.current, compacting: compactingRef.current,
+          } }, { showUserTurns, skipFirstUser, userTurnTexts });
+      }
+    };
+  });
+  useLayoutEffect(() => {
+    if (!parseCacheKey) return;
+    const lease = leaseTranscriptParseCache(parseCacheKey);
+    return () => {
+      if (cacheOwnerRef.current !== parseCacheKey) { lease.release(); return; }
+      finishTranscriptParseCacheLease(lease, saveParseRef.current);
+    };
+  }, [parseCacheKey]);
   const itemsVersion = itemsVersionRef.current;
   const liveTextVersion = liveTextVersionRef.current;
   useLayoutEffect(() => {

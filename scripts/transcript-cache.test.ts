@@ -11,6 +11,151 @@ import { planningTranscriptCache } from "../src/components/PlanningActivity.tsx"
 import { BoundedLruCache, utf8Bytes } from "../src/lib/BoundedLruCache.ts";
 import { cachedPlanningOutput, invalidateTranscriptCaches, planningTranscriptKey, registerTranscriptReader } from "../src/services/transcriptCache.ts";
 import type { Execution, TranscriptItem } from "../src/types.ts";
+import { finishTranscriptParseCacheLease, invalidateTranscriptParseCache, leaseTranscriptParseCache, readTranscriptParse, transcriptParseCache, writeTranscriptParse } from "../src/services/transcriptParseCache.ts";
+
+function parseCacheFixture(path = "中文.txt") {
+  const text = JSON.stringify({ type: "tool_execution_start", toolCallId: "cache-tool", toolName: "read", args: { path } }) + "\n";
+  const state: ParseTranscriptChunkState = { source: "output", byteOffset: 0, leadingFragment: false, inTagThinking: false,
+    inFinalResponse: false, finalResponseSuppressed: false, seenFirstUser: false, pendingUserStart: false,
+    assistantStartIndex: 0, userMessageStarts: new Set(), compacting: false };
+  const options = { showUserTurns: false, skipFirstUser: false };
+  const { currentItems: items } = parseTranscriptChunkLines(text.trimEnd().split("\n"), [], new Map(), state, options);
+  return { value: { text, startOffset: 0, parsedChars: text.length, items, state }, options };
+}
+
+test("parsed windows validate owner, source, exact bytes, cursor and parser options", () => {
+  invalidateTranscriptParseCache();
+  const { value, options } = parseCacheFixture();
+  writeTranscriptParse("a:execution:e", "output", value, options);
+  assert.ok(readTranscriptParse("a:execution:e", "output", value.text, 0, options));
+  assert.equal(readTranscriptParse("b:execution:e", "output", value.text, 0, options), undefined);
+  assert.equal(readTranscriptParse("a:execution:e", "other", value.text, 0, options), undefined);
+  assert.equal(readTranscriptParse("a:execution:e", "output", value.text.replace("read", "edit"), 0, options), undefined);
+  assert.equal(readTranscriptParse("a:execution:e", "output", value.text.slice(1), 1, options), undefined);
+  assert.equal(readTranscriptParse("a:execution:e", "output", value.text, 1, options), undefined);
+  assert.equal(readTranscriptParse("a:execution:e", "output", value.text, 0, { ...options, skipFirstUser: true }), undefined);
+  assert.equal(readTranscriptParse("a:execution:e", "output", value.text, 0, { ...options, showUserTurns: true }), undefined);
+  assert.equal(readTranscriptParse("a:execution:e", "output", value.text, 0, { ...options, userTurnTexts: ["one", "two"] }), undefined);
+  invalidateTranscriptParseCache();
+});
+
+test("cached parse state is isolated, resets appearance, and can finish an unfinished tool", () => {
+  const { value, options } = parseCacheFixture();
+  value.items[0].animateAppear = true;
+  value.items[0].defaultExpanded = true;
+  writeTranscriptParse("a:execution:e", "output", value, options);
+  const restored = readTranscriptParse("a:execution:e", "output", value.text, 0, options)!;
+  assert.equal(restored.items[0].animateAppear, undefined);
+  assert.equal(restored.items[0].defaultExpanded, undefined);
+  restored.items[0].args!.path = "changed";
+  restored.state.userMessageStarts.add("changed");
+  const clean = readTranscriptParse("a:execution:e", "output", value.text, 0, options)!;
+  assert.equal(clean.items[0].args!.path, "中文.txt");
+  assert.equal(clean.state.userMessageStarts.size, 0);
+  const result = parseTranscriptChunkLines([JSON.stringify({ type: "tool_execution_end", toolCallId: "cache-tool", toolName: "read",
+    result: { content: [{ type: "text", text: "Finished after restore" }] } })], clean.items,
+    new Map([["cache-tool", clean.items[0]]]), clean.state, options);
+  assert.equal(result.currentItems.length, 1);
+  assert.equal(result.currentItems[0].status, "success");
+  assert.equal(result.currentItems[0].result, "Finished after restore");
+  assert.equal(readTranscriptParse("a:execution:e", "output", value.text, 0, options)!.items[0].status, "running");
+  invalidateTranscriptParseCache();
+});
+
+test("parsed-window LRU is bounded and refuses oversized windows", () => {
+  const { value, options } = parseCacheFixture();
+  for (let index = 0; index < 21; index++) writeTranscriptParse(`run-${index}:execution:e`, "output", value, options);
+  assert.equal(transcriptParseCache.size, 20);
+  assert.equal(readTranscriptParse("run-0:execution:e", "output", value.text, 0, options), undefined);
+  writeTranscriptParse("oversized:execution:e", "output", { ...value, text: "x".repeat(transcriptParseCache.maxBytes / 4 + 1) }, options);
+  assert.equal(transcriptParseCache.size, 20);
+  assert.ok(transcriptParseCache.byteSize <= transcriptParseCache.maxBytes);
+  invalidateTranscriptParseCache();
+});
+
+test("Run deletion invalidates parser leases so unmount cannot resurrect cached output", () => {
+  const { value, options } = parseCacheFixture();
+  const a = leaseTranscriptParseCache("a:execution:e"), b = leaseTranscriptParseCache("b:planning");
+  writeTranscriptParse("a:execution:e", "output", value, options);
+  writeTranscriptParse("b:planning", "turn", value, options);
+  invalidateTranscriptCaches("a");
+  assert.equal(a.current(), false);
+  assert.equal(b.current(), true);
+  assert.equal(readTranscriptParse("a:execution:e", "output", value.text, 0, options), undefined);
+  assert.ok(readTranscriptParse("b:planning", "turn", value.text, 0, options));
+  invalidateTranscriptCaches();
+  assert.equal(b.current(), false);
+  assert.equal(transcriptParseCache.size, 0);
+  a.release(); b.release();
+});
+
+test("deletion also fences parser writes already queued for idle time", async () => {
+  const { value, options } = parseCacheFixture();
+  const lease = leaseTranscriptParseCache("deferred:execution:e");
+  finishTranscriptParseCacheLease(lease, () => writeTranscriptParse("deferred:execution:e", "output", value, options));
+  invalidateTranscriptParseCache("deferred");
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(readTranscriptParse("deferred:execution:e", "output", value.text, 0, options), undefined);
+  assert.equal(transcriptParseCache.size, 0);
+});
+
+test("a failed optional cache clone falls back to parsing without evicting other owners", () => {
+  const { value, options } = parseCacheFixture();
+  writeTranscriptParse("clone-a:execution:e", "output", value, options);
+  writeTranscriptParse("clone-b:execution:e", "output", value, options);
+  const clone = globalThis.structuredClone;
+  try {
+    globalThis.structuredClone = () => { throw new Error("Clone unavailable"); };
+    assert.doesNotThrow(() => assert.equal(readTranscriptParse("clone-a:execution:e", "output", value.text, 0, options), undefined));
+  } finally { globalThis.structuredClone = clone; }
+  assert.ok(readTranscriptParse("clone-b:execution:e", "output", value.text, 0, options));
+  assert.equal(readTranscriptParse("clone-a:execution:e", "output", value.text, 0, options), undefined);
+  invalidateTranscriptParseCache();
+});
+
+test("an older deferred parser save cannot overwrite a newer reader's cache", () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "requestIdleCallback");
+  const queued: IdleRequestCallback[] = [];
+  Object.defineProperty(globalThis, "requestIdleCallback", { configurable: true, value: (callback: IdleRequestCallback) => queued.push(callback) });
+  try {
+    const old = parseCacheFixture("old.txt"), next = parseCacheFixture("new.txt");
+    const first = leaseTranscriptParseCache("ordered:execution:e");
+    finishTranscriptParseCacheLease(first, () => writeTranscriptParse("ordered:execution:e", "output", old.value, old.options));
+    const latest = leaseTranscriptParseCache("ordered:execution:e");
+    finishTranscriptParseCacheLease(latest, () => writeTranscriptParse("ordered:execution:e", "output", next.value, next.options));
+    for (const callback of queued.reverse()) callback({ didTimeout: false, timeRemaining: () => 10 });
+    assert.ok(readTranscriptParse("ordered:execution:e", "output", next.value.text, 0, next.options));
+    assert.equal(readTranscriptParse("ordered:execution:e", "output", old.value.text, 0, old.options), undefined);
+    assert.equal(first.current(), false);
+    assert.equal(latest.current(), false);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "requestIdleCallback", descriptor);
+    else Reflect.deleteProperty(globalThis, "requestIdleCallback");
+    invalidateTranscriptParseCache();
+  }
+});
+
+test("idle scheduling and parser write failures never escape optional cache cleanup", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "requestIdleCallback");
+  try {
+    Object.defineProperty(globalThis, "requestIdleCallback", { configurable: true, value: () => { throw new Error("Idle scheduler unavailable"); } });
+    const fallback = leaseTranscriptParseCache("scheduler:execution:e");
+    let written = false;
+    assert.doesNotThrow(() => finishTranscriptParseCacheLease(fallback, () => { written = true; }));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(written, true);
+    assert.equal(fallback.current(), false);
+    Object.defineProperty(globalThis, "requestIdleCallback", { configurable: true, value: (callback: IdleRequestCallback) => {
+      callback({ didTimeout: false, timeRemaining: () => 10 }); return 0;
+    } });
+    const failing = leaseTranscriptParseCache("writer:execution:e");
+    assert.doesNotThrow(() => finishTranscriptParseCacheLease(failing, () => { throw new Error("Optional write failed"); }));
+    assert.equal(failing.current(), false);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "requestIdleCallback", descriptor);
+    else Reflect.deleteProperty(globalThis, "requestIdleCallback");
+  }
+});
 
 test("LRU uses UTF-8 bytes, touches reads, replaces sizes and refuses oversized entries", () => {
   const cache = new BoundedLruCache<string, string>(utf8Bytes, 2, 12);

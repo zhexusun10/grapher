@@ -1,5 +1,6 @@
 import type { PlanningSummary, Snapshot } from "../types";
 import { workspaceKey } from "./workspaceConversations";
+import { deduceRouteType } from "./executionRoute";
 
 export function hasCurrentPlanningRun(snapshot: Snapshot, repository: string) {
   if (!snapshot.runId || !snapshot.config?.repository || !repository) return false;
@@ -17,6 +18,25 @@ export function hasCurrentPlanningRun(snapshot: Snapshot, repository: string) {
       "merging",
     ].includes(snapshot.phase)
   );
+}
+
+/** Directory summaries are discovery hints, not Run snapshots. A linked turn
+ * must still be current and running in its own repository's durable snapshot. */
+export function runningPlanningFromSnapshot(
+  summary: PlanningSummary,
+  snapshot: Snapshot,
+  repository: string,
+): PlanningSummary | null {
+  if (summary.status !== "running" || !summary.runId || snapshot.runId !== summary.runId ||
+    !snapshot.config?.repository || workspaceKey(snapshot.config.repository) !== workspaceKey(repository) ||
+    workspaceKey(summary.repository || "") !== workspaceKey(repository)) return null;
+  const planning = snapshot.planning;
+  const id = planning?.planningId || snapshot.planningId;
+  if (id !== summary.planningId || (snapshot.planningId && snapshot.planningId !== summary.planningId)) return null;
+  if (planning?.status ? planning.status !== "running" : snapshot.phase !== "planning") return null;
+  const route = deduceRouteType(snapshot);
+  return { ...summary, ...planning, runId: snapshot.runId,
+    planType: route === "undecided" ? planning?.planType ?? summary.planType : route };
 }
 
 export function planningRecoveryDelay(planningId: string | undefined, idleAttempts: number) {

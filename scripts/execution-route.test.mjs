@@ -11,6 +11,23 @@ test('persisted graph route cannot auto-approve a single task node as serial', (
   assert.equal(deduceRouteType({ graph: { ...graph, nodes: [] } }), 'undecided');
 });
 
+test('incomplete recovery uses committed route evidence before legacy node inference', () => {
+  const graph = { originalGoal: 'Existing graph', nodes: [{ name: 'task', task: 'Review' }], edges: [] };
+  assert.equal(deduceRouteType({ graph, events: [{ type: 'routed', plan_type: 'graph' }] }), 'graph');
+  assert.equal(deduceRouteType({ graph, planType: 'undecided', events: [{ type: 'routed', plan_type: 'graph' }] }), 'graph');
+  assert.equal(deduceRouteType({ graph, planning: { planType: 'graph' } }), 'graph');
+  assert.equal(deduceRouteType({ graph: { ...graph, nodes: [{ name: 'a' }, { name: 'b' }] }, planType: 'undecided' }), 'graph');
+  assert.equal(deduceRouteType({ graph, planType: 'serial', events: [{ type: 'routed', plan_type: 'graph' }] }), 'serial',
+    'the persisted route remains authoritative');
+});
+
+test('missing recovery metadata does not falsely claim routing is being evaluated', () => {
+  assert.equal(shouldShowRouteBadge({ routeType: 'undecided' }), false);
+  assert.equal(shouldShowRouteBadge({ state: { planning: { roles: { partition: {} } } }, routeType: 'undecided' }), false);
+  assert.equal(shouldShowRouteBadge({ state: { planning: { planType: 'undecided' } }, routeType: 'undecided' }), true);
+  assert.equal(shouldShowRouteBadge({ state: { events: [{ type: 'planning_started', plan_type: 'graph' }] }, routeType: 'undecided' }), false);
+});
+
 test('shouldShowRouteBadge suppresses badges when user explicitly selects serial or graph mode', () => {
   // When user explicitly selects serial mode in the frontend, the badge is not shown upon entering conversation
   assert.equal(

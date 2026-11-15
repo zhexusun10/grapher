@@ -84,6 +84,151 @@ async function until(check) {
   while (!await check()) { assert.ok(Date.now() < end, "expected request/state did not arrive"); await new Promise(completed => setTimeout(completed, 20)); }
 }
 
+// Sanitized shape of the reported Run: a decided Graph with a later Planner
+// turn, many settled attempts, and an old `running` phase without live workers.
+function recoveryGraph(status = "running") {
+  const runId = "93bf2c6a-df98-4fb5-9146-63c7291f99c2";
+  const planning = { planningId: "graph-followup", runId, repository, status, planType: "graph",
+    createdAt: 2, goal: "Continue the existing graph", roles: {}, modelDuration: 0, totalPlanningDuration: 0 };
+  const graph = { originalGoal: "Existing large graph", nodes: Array.from({ length: 80 }, (_, i) => ({ name: `task-${i}`, task: `Task ${i}` })), edges: [] };
+  return { ...empty, runId, config, phase: "running", planType: "graph", approved: true, graph,
+    planningId: planning.planningId, planning,
+    nodes: Object.fromEntries(graph.nodes.map(node => [node.name, { status: "completed", revision: 2 }])),
+    executions: Array.from({ length: 148 }, (_, i) => ({ id: `attempt-${i}`, node: `task-${i % 80}`, status: "success", output: "", startedAt: 1, endedAt: 2 })),
+    events: [{ type: "planning_started", sequence: 1, plan_type: "graph" }, { type: "routed", sequence: 2, plan_type: "graph" }] };
+}
+
+function planningPage(body, planningId) {
+  const content = body.offset ? "" : JSON.stringify({ type: "message_update", assistantMessageEvent: {
+    type: "text_delta", delta: "Recovered Graph follow-up" } }) + "\n";
+  const totalBytes = Buffer.byteLength(JSON.stringify({ type: "message_update", assistantMessageEvent: {
+    type: "text_delta", delta: "Recovered Graph follow-up" } }) + "\n");
+  return { planningId, role: "planner", content, startOffset: body.offset || 0, nextOffset: totalBytes, totalBytes, complete: true, running: true };
+}
+
+const recoveryBootstrap = snapshot => ({ ...bootstrap, snapshot: empty, runs: [snapshot.runId],
+  conversations: [{ runId: snapshot.runId, repository, title: snapshot.graph.originalGoal, phase: snapshot.phase, hasActiveExecutions: false }] });
+
+test("startup waits for bootstrap and rejects stale running summaries without leaving home", { timeout: 30_000 }, async () => {
+  const settled = recoveryGraph("failed");
+  const { planType: _route, ...stale } = { ...settled.planning, status: "running" };
+  let pendingBootstrap;
+  const { context, page, errors, calls } = await app(async (route, command, body) => {
+    let result;
+    if (command === "bootstrap") { pendingBootstrap = route; return true; }
+    if (command === "list_plannings") result = [stale];
+    else if (command === "get_planning") result = stale;
+    else if (command === "snapshot") result = settled;
+    else if (command === "get_planning_output") result = planningPage(body, stale.planningId);
+    else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  try {
+    await until(() => Boolean(pendingBootstrap));
+    await page.clock.runFor(2500);
+    assert.equal(calls.filter(call => call.command === "list_plannings").length, 0,
+      "a planning directory hint must not choose the foreground before bootstrap");
+    assert.equal(await page.locator(".landing-screen").isVisible(), true);
+    // Even an old running phase cannot make a Run with no writers and a failed
+    // Planner active. The durable snapshot, not the stale file, wins.
+    await pendingBootstrap.fulfill({ json: { result: { ...recoveryBootstrap(settled), snapshot: settled } } });
+    await until(() => calls.some(call => call.command === "snapshot" && call.body.runId === settled.runId));
+    await page.clock.runFor(2500);
+    assert.equal(await page.locator(".landing-screen").isVisible(), true);
+    assert.equal(await page.locator(".route-decision-pill.undecided").count(), 0);
+    assert.equal(calls.filter(call => call.command === "get_planning_output").length, 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("startup restores a running Graph follow-up from its own snapshot without routing evaluation", { timeout: 30_000 }, async () => {
+  const current = recoveryGraph();
+  const { planType: _route, ...hint } = current.planning;
+  const { context, page, errors, calls } = await app(async (route, command, body) => {
+    let result;
+    if (command === "bootstrap") result = recoveryBootstrap(current);
+    else if (command === "list_plannings") result = [hint];
+    else if (command === "get_planning") result = hint;
+    else if (command === "snapshot") result = current;
+    else if (command === "get_planning_output") result = planningPage(body, hint.planningId);
+    else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  try {
+    await page.getByRole("region", { name: "Planning activity" }).getByText("Recovered Graph follow-up", { exact: true }).waitFor();
+    assert.ok(calls.some(call => call.command === "snapshot" && call.body.runId === current.runId),
+      "a linked planning hint must be validated before adopting the Run");
+    assert.equal(await page.locator(".graph-canvas .task-node").count(), 80);
+    assert.equal(await page.locator(".route-decision-pill.undecided").count(), 0);
+    assert.equal(await page.locator(".pane-bottom-chat textarea").isEnabled(), true);
+    await page.clock.runFor(4500);
+    assert.equal(await page.locator(".graph-canvas .task-node").count(), 80);
+    assert.equal(await page.locator(".route-decision-pill.undecided").count(), 0);
+    assert.equal(calls.filter(call => call.command === "get_execution_output").length, 0,
+      "recovering the Planner must not fan out to 148 node histories");
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("authoritative polling resolves a recovered route without a browser routed event", { timeout: 30_000 }, async () => {
+  const graph = recoveryGraph();
+  const { planType: _route, ...hint } = graph.planning;
+  let current = { ...empty, runId: graph.runId, config, phase: "planning", planningId: hint.planningId, planning: hint,
+    events: [{ type: "planning_started", sequence: 1 }] };
+  const { context, page, errors } = await app(async (route, command, body) => {
+    let result;
+    if (command === "bootstrap") result = { ...recoveryBootstrap(current), snapshot: current };
+    else if (command === "list_plannings") result = [hint];
+    else if (command === "get_planning") result = hint;
+    else if (command === "snapshot") result = current;
+    else if (command === "snapshot_if_changed") {
+      const version = current.planType || "pending";
+      result = { version, snapshot: body.version === version ? null : current };
+    } else if (command === "get_planning_output") result = planningPage(body, hint.planningId);
+    else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  try {
+    await page.getByRole("region", { name: "Planning activity" }).getByText("Recovered Graph follow-up", { exact: true }).waitFor();
+    assert.equal(await page.locator(".route-decision-pill.undecided").count(), 1,
+      "a genuinely pending Auto route still shows evaluation");
+    current = { ...graph, approved: false, phase: "awaiting_approval", planning: { ...graph.planning, status: "success" } };
+    await page.clock.runFor(2500);
+    await until(async () => await page.locator(".graph-canvas .task-node").count() === 80);
+    assert.equal(await page.locator(".route-decision-pill.undecided").count(), 0);
+    assert.equal(await page.locator(".pane-bottom-chat textarea").isEnabled(), true);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
+test("new conversation invalidates a delayed startup recovery snapshot", { timeout: 30_000 }, async () => {
+  const current = recoveryGraph();
+  let pendingSnapshot;
+  const { context, page, errors, calls } = await app(async (route, command) => {
+    let result;
+    if (command === "bootstrap") result = recoveryBootstrap(current);
+    else if (command === "list_plannings") result = [current.planning];
+    else if (command === "snapshot") { pendingSnapshot = route; return true; }
+    else return false;
+    await route.fulfill({ json: { result } }); return true;
+  });
+  try {
+    await until(() => Boolean(pendingSnapshot));
+    assert.equal(await page.locator(".landing-screen").isVisible(), true,
+      "the incomplete hint must not open a conversation while metadata is pending");
+    await page.getByRole("button", { name: "New conversation", exact: true }).click();
+    const composer = page.locator(".landing-screen textarea");
+    await composer.fill("Keep this new conversation");
+    await pendingSnapshot.fulfill({ json: { result: current } }).catch(() => {});
+    await page.clock.runFor(4500);
+    assert.equal(await composer.inputValue(), "Keep this new conversation");
+    assert.equal(await page.locator(".landing-screen").isVisible(), true);
+    assert.equal(await page.locator(".route-decision-pill").count(), 0);
+    assert.equal(calls.filter(call => call.command === "get_planning_output").length, 0);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test("corrupt browser hints cannot crash startup or prevent authoritative settings from loading", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await app(async () => false,
     [null, 42, { path: 123 }, { path: repository, name: { invalid: true }, lastOpened: "invalid" }],

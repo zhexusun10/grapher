@@ -24,7 +24,7 @@ import { NodeTaskCard } from "./NodeTaskCard";
 import { CreateNodeForm } from "./CreateNodeForm";
 import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
-import { shouldShowRouteBadge } from "../../services/executionRoute";
+import { deduceRouteType, shouldShowRouteBadge } from "../../services/executionRoute";
 import { activeNodeConversationEvents, nodeConversationExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit, type ConversationExecution } from "../../services/conversationBranch";
 import { captureViewScrollState, resolveViewScroll, calculateExpandedCardScrollDelta, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
 import { isNodeWorking, nodeDependenciesCompleted } from "../../lib/nodeWorking";
@@ -288,6 +288,11 @@ function NodeErrorPanel({ error, paused }: { error: string; paused?: boolean }) 
 function shortCommit(hash: string | null | undefined, empty: string): string {
   if (!hash) return empty;
   return hash.length > 8 ? hash.slice(0, 8) : hash;
+}
+
+function isDefaultAttemptExpanded(execution: Execution, latestId: string | undefined): boolean {
+  return execution.id === latestId || execution.status === "running" ||
+    execution.status === "completed" || execution.status === "success";
 }
 
 function ExecutionRecordHeader({ execution, expanded, onToggle, placeholder = false }: {
@@ -1143,9 +1148,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   }
   const effectiveRouteType = useMemo(() => {
     if (routeType !== "undecided") return routeType;
-    if (state.planType) return state.planType;
-    return "undecided";
-  }, [routeType, state.planType]);
+    return deduceRouteType(state);
+  }, [routeType, state.planType, state.graph, state.events, state.planning]);
 
   const showRouteBadge = useMemo(() => {
     return shouldShowRouteBadge({
@@ -1948,18 +1952,22 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }, 600);
   }, [handleChatScroll, setUserScrolledUp]);
 
-  // New turns must not hide earlier output. Only an explicit user toggle
-  // collapses a record, and that choice stays with its execution id.
-  const isAttemptExpanded = useCallback((execId: string) => {
-    return !showExecutionRecords || !collapsedAttemptIds.has(execId);
-  }, [showExecutionRecords, collapsedAttemptIds]);
+  // Keep successful conversation turns visible, but do not mount readers for
+  // old failed/stopped attempts until requested. Explicit choices win even as
+  // an execution changes from newest to historical.
+  const isAttemptExpanded = useCallback((exec: Execution, latestId: string | undefined) => {
+    if (collapsedAttemptIds.has(exec.id)) return false;
+    return openedAttemptIds.has(exec.id) || isDefaultAttemptExpanded(exec, latestId);
+  }, [collapsedAttemptIds, openedAttemptIds]);
 
-  const handleToggleAttempt = useCallback((execId: string, panelEl?: HTMLElement | null) => {
-    const currentlyExpanded = isAttemptExpanded(execId);
+  const handleToggleAttempt = useCallback((exec: Execution, records: readonly Execution[], panelEl?: HTMLElement | null) => {
+    const execId = exec.id;
+    const latestId = records.at(-1)?.id;
+    const currentlyExpanded = isAttemptExpanded(exec, latestId);
     const willExpand = !currentlyExpanded;
 
-    const attemptIndex = attempts.findIndex(a => a.id === execId);
-    const hasExpandedBelow = attemptIndex >= 0 && attempts.slice(attemptIndex + 1).some(a => isAttemptExpanded(a.id));
+    const attemptIndex = records.findIndex(a => a.id === execId);
+    const hasExpandedBelow = attemptIndex >= 0 && records.slice(attemptIndex + 1).some(a => isAttemptExpanded(a, latestId));
 
     if (willExpand) {
       setOpenedAttemptIds(previous => new Set([...previous, execId]));
@@ -2001,7 +2009,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         }, 260);
       }
     }
-  }, [isAttemptExpanded, attempts, followExecutionExpansion, handleChatScroll]);
+  }, [isAttemptExpanded, followExecutionExpansion, handleChatScroll]);
 
   useLayoutEffect(() => {
     const view = chatScrollRef.current?.parentElement;
@@ -2184,6 +2192,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       .sort((a, b) => a.startedAt - b.startedAt);
   }, [serialNode?.name, state.executions, state.supersededExecutionIds]);
   const serialExecution: Execution | undefined = serialExecutions[serialExecutions.length - 1];
+  // Successful Serial turns remain an uninterrupted conversation. Add record
+  // controls when unsuccessful history needs an explicit way to reopen it.
+  const showSerialExecutionRecords = serialExecutions.some(exec => !isDefaultAttemptExpanded(exec, serialExecution?.id));
   const serialSession = useMemo(() => executionSessionTiming(allExecutions, serialExecution), [allExecutions, serialExecution]);
   const serialUsageThrough = useMemo(() => executionSessionUsageThrough(allExecutions, serialExecution),
     [allExecutions, serialExecution]);
@@ -2948,7 +2959,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                         </div>
                       )}
                       {turn.executions.map((exec) => {
-                        const isExpanded = isAttemptExpanded(exec.id);
+                        const isExpanded = !showExecutionRecords || isAttemptExpanded(exec, attempts.at(-1)?.id);
                         const ownedSteers = executionSteers(exec, turn.steerMessages ?? []);
                         const executionLiveSteers = liveSteers.filter(item => item.executionId === exec.id &&
                           ownedSteers.some(steer => inlineSteerKey(steer) === item.key));
@@ -2971,7 +2982,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               {showExecutionRecords && (
                                 <ExecutionRecordHeader execution={exec} expanded={isExpanded} onToggle={(e) => {
                                   const panel = e.currentTarget.closest<HTMLElement>(".serial-execution-panel");
-                                  handleToggleAttempt(exec.id, panel);
+                                  handleToggleAttempt(exec, attempts, panel);
                                 }} />
                               )}
                               {/* A pending steer that predates the parsed transcript sits
@@ -3184,6 +3195,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                           )}
 
                           {turn.executions.map((exec) => {
+                            const isExpanded = !showSerialExecutionRecords || isAttemptExpanded(exec, serialExecution?.id);
                             const ownedSteers = executionSteers(exec, turn.steerMessages ?? []);
                             const executionLiveSteers = liveSteers.filter(item => item.executionId === exec.id &&
                               ownedSteers.some(steer => inlineSteerKey(steer) === item.key));
@@ -3192,7 +3204,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                               .map(steer => nodeInstructionText(steer.text))
                               .filter(Boolean);
                             const fallbackSteers = exec.historyEndOffset !== undefined ? [] : ownedSteers.map(steer => ({
-                              steer, position: steerFallbackPosition(steer, inlineUserTurns, exec.status === "running", true,
+                              steer, position: steerFallbackPosition(steer, inlineUserTurns, exec.status === "running", isExpanded,
                                 executionLiveSteers.find(item => item.key === inlineSteerKey(steer))),
                             }));
                             return (
@@ -3202,29 +3214,37 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                                     waiting above or below the transcript they steer. */}
                                 {fallbackSteers.filter(item => item.position === "before").map(item => renderSteerBubble(item.steer))}
                                 <motion.div
-                                  className="serial-execution-panel"
+                                  className={`serial-execution-panel${showSerialExecutionRecords ? " execution-record-panel" : ""}`}
                                   initial={false}
                                   animate={{ opacity: 1 }}
                                   transition={{ duration: 0.15 }}
                                 >
-                                  <div style={{ display: "flex", flexDirection: "column", marginTop: 4 }}>
-                                    <ExecutionTranscript
-                                      key={exec.id}
-                                      runId={state.runId}
-                                      execution={exec}
-                                      endOffset={exec.historyEndOffset}
-                                      defer={exec.outputBytes !== undefined && exec.id !== serialExecutions.at(-1)?.id && exec.status !== "running"}
-                                      foregroundReady={isConversationReady && foregroundExecutionReady}
-                                      onUserResize={handleExpandableContentChange}
-                                      onInitialOutputReady={handleExecutionOutputReady}
-                                      onLoadingChange={(loading) => handleExecutionLoadingChange(exec.id, loading)}
-                                      onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
-                                      inlineUserTurnTexts={inlineSteerTexts}
-                                      liveSteers={executionLiveSteers}
-                                      onEditUser={editInlineSteer(exec)}
-                                      onInlineUserTurnsChange={(texts, complete, turns, end) => handleInlineUserTurns(exec.id, texts, complete, turns, end)}
-                                    />
-                                  </div>
+                                  {showSerialExecutionRecords && (
+                                    <ExecutionRecordHeader execution={exec} expanded={isExpanded} onToggle={(e) => {
+                                      const panel = e.currentTarget.closest<HTMLElement>(".serial-execution-panel");
+                                      handleToggleAttempt(exec, serialExecutions, panel);
+                                    }} />
+                                  )}
+                                  {isExpanded && (
+                                    <div style={{ display: "flex", flexDirection: "column", marginTop: showSerialExecutionRecords ? 0 : 4 }}>
+                                      <ExecutionTranscript
+                                        key={exec.id}
+                                        runId={state.runId}
+                                        execution={exec}
+                                        endOffset={exec.historyEndOffset}
+                                        defer={exec.outputBytes !== undefined && exec.id !== serialExecutions.at(-1)?.id && exec.status !== "running" && !openedAttemptIds.has(exec.id)}
+                                        foregroundReady={isConversationReady && foregroundExecutionReady}
+                                        onUserResize={handleExpandableContentChange}
+                                        onInitialOutputReady={handleExecutionOutputReady}
+                                        onLoadingChange={(loading) => handleExecutionLoadingChange(exec.id, loading)}
+                                        onCompactingChange={(compacting) => handleAttemptCompacting(exec.id, compacting)}
+                                        inlineUserTurnTexts={inlineSteerTexts}
+                                        liveSteers={executionLiveSteers}
+                                        onEditUser={editInlineSteer(exec)}
+                                        onInlineUserTurnsChange={(texts, complete, turns, end) => handleInlineUserTurns(exec.id, texts, complete, turns, end)}
+                                      />
+                                    </div>
+                                  )}
                                 </motion.div>
                                 {fallbackSteers.filter(item => item.position === "after").map(item => renderSteerBubble(item.steer))}
                               </React.Fragment>
@@ -3313,7 +3333,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
 
                     {/* 任务路线决策结果或评估中加载状态 */}
-                    {((isPlanning && effectiveRouteType === "undecided") || (showRouteBadge && effectiveRouteType !== "undecided")) && (
+                    {(showRouteBadge && (isPlanning || effectiveRouteType !== "undecided")) && (
                       <motion.div
                         className={`route-decision-pill ${effectiveRouteType}`}
                         initial={isPlanning ? { opacity: 0, scale: 0.96, y: 10 } : false}

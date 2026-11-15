@@ -376,7 +376,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
     <TranscriptHistoryStatus loading={loadingOlder && showOlderLoading} reserve={false} />
     {ready && !error && !output && <p>{t("没有可用的规划输出。")}</p>}
     {output && <div className="planning-activity-output">
-      <VirtualizedTranscript output={activeOutput} inline sourceOrder={planningIds}
+      <VirtualizedTranscript key={runId} parseCacheKey={`${runId}:planning`} output={activeOutput} inline sourceOrder={planningIds}
         onReachTop={hasOlder && !error ? () => {
           // Before reveal, virtual-row measurements can clamp the scroller up.
           // That is not a history request; only the bounded auto-fill owns reads

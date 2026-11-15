@@ -263,6 +263,7 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
       <Loader2 size={14} className="spin" aria-hidden="true" />
     </div> : <div key="output" className="execution-transcript-content" style={{ opacity: announcedRef.current || !settled || initialReady || revealFallback || error ? 1 : 0 }}>
       <VirtualizedTranscript compact output={displayedText} startOffset={window?.start ?? 0} settled={settled}
+      parseCacheKey={`${runId}:execution:${execution.id}:${endOffset ?? "full"}`}
       showUserTurns={!!inlineUserTurnTexts?.length}
       userTurnTexts={inlineUserTurnTexts}
       liveSteers={liveSteers}

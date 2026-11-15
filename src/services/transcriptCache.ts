@@ -1,5 +1,6 @@
 import { BoundedLruCache, utf8Bytes } from "../lib/BoundedLruCache";
 import { renderTranscriptWindow, type TranscriptWindow } from "./transcriptWindow";
+import { invalidateTranscriptParseCache } from "./transcriptParseCache";
 
 export type CachedTranscript = {
   text: string;
@@ -74,6 +75,7 @@ function clearCache(kind: CacheKind, runId?: string): void {
 }
 
 export function invalidateTranscriptCaches(runId?: string): void {
+  invalidateTranscriptParseCache(runId);
   clearCache("execution", runId);
   clearCache("planning", runId);
 }
