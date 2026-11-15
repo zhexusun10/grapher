@@ -3312,6 +3312,11 @@ fn capture_node_view(
                 "Project metadata changed without a new immutable code/view reference".into(),
             );
         }
+        // A sibling can win publication of the same commit/view after this
+        // slot moved HEAD. Shared evidence does not update this slot's gate.
+        if launchable && is_bound(path) {
+            mark_ready(path)?;
+        }
         return Ok(());
     }
     fs::create_dir_all(target.parent().ok_or("Missing project view store")?)

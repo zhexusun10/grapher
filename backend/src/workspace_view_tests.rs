@@ -2059,6 +2059,32 @@ fn hardlinks_keep_alias_semantics_and_counts_without_sharing_source_or_sibling_i
 }
 
 #[test]
+fn existing_immutable_view_refreshes_the_local_ready_gate_without_rewriting_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = source(&temp);
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let node = slot(&temp, "shared-record");
+    workspace::prepare(&source, &node, &base, &[]).unwrap();
+    fs::write(node.join("tracked.txt"), "new project bytes").unwrap();
+    let head = workspace::snapshot_node(&node, &source, "shared-record").unwrap();
+    let record = record_path(&source, &head).unwrap();
+    let original = fs::read(record.join("view.json")).unwrap();
+    // Another slot can publish the same immutable commit before this slot
+    // refreshes its own gate after moving HEAD. Reuse must finish local setup.
+    fs::write(ready(&node).unwrap(), &base).unwrap();
+    assert!(validate_ready(&node, &source).is_err());
+    capture_node_scoped(&node, &source, &head, &[], None).unwrap();
+    validate_ready(&node, &source).unwrap();
+    assert_eq!(fs::read(record.join("view.json")).unwrap(), original);
+
+    fs::write(ready(&node).unwrap(), &base).unwrap();
+    fs::write(record.join("checksum"), "damaged").unwrap();
+    assert!(capture_node_scoped(&node, &source, &head, &[], None).is_err());
+    assert_eq!(fs::read_to_string(ready(&node).unwrap()).unwrap(), base,
+        "corrupt shared evidence must never authorize a launch");
+}
+
+#[test]
 fn prepared_reuse_rejects_corrupt_view_even_with_the_original_checksum() {
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);

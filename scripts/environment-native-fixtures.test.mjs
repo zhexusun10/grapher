@@ -28,7 +28,7 @@ test('venv creation uses the selected bootstrap, not an earlier host Python, wit
     const command = `export PATH=${quote(bashPath(host))}; ${venvCreationCommand(join(selected, 'python'))}; python -V`;
     const result = spawnSync(shell, ['--noprofile', '--norc', '-c', command], { encoding: 'utf8', timeout: 10_000 });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout.replaceAll('\r\n', '\n'), 'SELECTED:-m venv .venv\nHOST:-V\n');
+    assert.equal(result.stdout.replaceAll('\r\n', '\n'), 'SELECTED:-I -m venv .venv\nHOST:-V\n');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

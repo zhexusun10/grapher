@@ -9,9 +9,10 @@ export function venvCreationCommand(python, prefix = '.venv') {
   const directory = dirname(python).replaceAll('\\', '/');
   const bin = process.platform === 'win32'
     ? `"$(/usr/bin/cygpath -u ${quote(directory)})"` : quote(directory);
-  // The unbound default entry is Bash, whose directory can precede the CI
-  // Python on PATH. Select the probed bootstrap for this observed call only.
-  return `PATH=${bin}:"$PATH" python -m venv ${prefix}`;
+  // Select the probed bootstrap for this observed call only. Automatic
+  // unbound launches retain business PYTHONHOME/PYTHONPATH; this fixture's
+  // deliberately poisoned values must not redirect creation of its first venv.
+  return `PATH=${bin}:"$PATH" python -I -m venv ${prefix}`;
 }
 
 export async function startBackgroundWriter(cwd, signal, venvDir = join(cwd, '.venv')) {
