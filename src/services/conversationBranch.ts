@@ -10,10 +10,13 @@ export function findBranchTargetIndex(
   targetMsg: Pick<ChatMessage, "id" | "text">,
   cleanExisting?: string,
 ): number {
+  // Equal text can belong to distinct turns. Resolve identity before the
+  // legacy text fallback used by replayed events with different local IDs.
+  const identityIndex = targetMsg.id ? entries.findIndex(entry => entry.id === targetMsg.id) : -1;
+  if (identityIndex >= 0) return identityIndex;
   const cleanTarget = stripNodePrefix(cleanExisting || targetMsg.text);
   const strippedRaw = stripNodePrefix(targetMsg.text);
   return entries.findIndex(entry =>
-    (targetMsg.id && entry.id === targetMsg.id) ||
     stripNodePrefix(entry.text) === cleanTarget ||
     stripNodePrefix(entry.text) === strippedRaw
   );

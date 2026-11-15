@@ -11,6 +11,9 @@ Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`:
 .grapher/
   events.sqlite          # Events, log chunks, ownership and durable cleanup tasks
   runtime.lock           # One backend writer per data directory
+  config.json            # Saved defaults shared by Run services
+  file-changes/          # Versioned per-Run derived changes.json sidecars
+  attachment-inputs/     # Immutable Run/node-scoped inputs awaiting delivery
   planning/              # Planning attempts and JSONL output
   sessions/              # Node Pi sessions
   planner-sessions/      # Planner history for Runs without a prior planning attempt

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Clarified provisional untracked-file line-count limits and documented saved defaults, file-change sidecars and staged attachment inputs in the runtime data layout (`docs/architecture/runtime.md`, `docs/architecture/storage.md`).
+
+### Fixed
+
+- Local message edits and version selection now prefer the matching message ID over earlier identical text, preserving preceding turns and selecting the intended branch (`src/services/conversationBranch.ts`, `scripts/conversation-branch.test.ts`).
+- Live untracked-file summaries no longer count binary bytes as text or drop non-UTF-8 text lines. Symlinks count their link text rather than referenced contents, and regular-file reads remain bounded even when files grow (`backend/src/file_changes.rs`, `backend/src/file_changes/git_diff.rs`).
+- File-change API tests now retry only explicit display-cache contention responses, avoiding intermittent failures when parallel tests hold the shared cache while preserving validation and routing failures (`backend/src/file_changes_api_tests.rs`).
+
 ## [1.8.9] - 2026-11-15
 
 **Upgrade note:** Rebuild and restart the backend and its Provider/Auth host together with the frontend to enable the new model-visibility operations and command-ID-fenced composer UI protocol. A frontend-only update against an older backend can report `Invalid Provider/Auth Adapter operation`; composer UI requests also require matching frontend/backend versions. This update also adds `NodeInputBound` events, queued-node acceptance metadata and durable detached-cleanup receipts; use the updated backend to reopen Runs written by this version.

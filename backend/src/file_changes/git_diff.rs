@@ -222,6 +222,77 @@ mod tests {
     }
 
     #[test]
+    fn live_untracked_counts_match_git_for_binary_and_non_utf8_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| crate::workspace::git(repo, args).unwrap();
+        git(&["init", "-q"]);
+        git(&["config", "core.autocrlf", "false"]);
+        git(&["commit", "--allow-empty", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        for (path, bytes) in [
+            ("binary.bin", b"\0first\nsecond\n".as_slice()),
+            ("legacy.txt", b"\xfffirst\nsecond".as_slice()),
+            ("empty.txt", b"".as_slice()),
+            ("crlf.txt", b"first\r\nsecond\r\n".as_slice()),
+        ] {
+            fs::write(repo.join(path), bytes).unwrap();
+        }
+        let live = super::super::compute_git_changes(repo, &base, None, "node", "exec").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "files"]);
+        let after = git(&["rev-parse", "HEAD"]);
+        let committed = super::super::compute_git_changes(repo, &base, Some(&after), "node", "exec").unwrap();
+        assert_eq!(committed.files.iter().map(|file| (file.path.as_str(), file.additions)).collect::<Vec<_>>(),
+            [("binary.bin", 0), ("crlf.txt", 2), ("empty.txt", 0), ("legacy.txt", 2)]);
+        assert_eq!(live, committed, "staging must not invent binary lines or lose non-UTF-8 text lines");
+    }
+
+    #[test]
+    fn live_untracked_counts_keep_the_read_budget_and_default_binary_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        fs::write(&file, vec![b'\n'; 256 * 1024]).unwrap();
+        assert_eq!(super::super::untracked_additions(&file), Some(256 * 1024));
+        fs::OpenOptions::new().write(true).open(&file).unwrap().set_len(256 * 1024 + 1).unwrap();
+        assert_eq!(super::super::untracked_additions(&file), None);
+
+        let mut bytes = vec![b'x'; 8001];
+        bytes[7999] = 0;
+        fs::write(&file, &bytes).unwrap();
+        assert_eq!(super::super::untracked_additions(&file), Some(0));
+        bytes[7999] = b'x';
+        bytes[8000] = 0;
+        fs::write(&file, &bytes).unwrap();
+        assert_eq!(super::super::untracked_additions(&file), Some(1));
+        assert_eq!(super::super::untracked_additions(&temp.path().join("missing")), None);
+        assert_eq!(super::super::untracked_additions(temp.path()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_untracked_symlinks_count_link_text_not_target_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| crate::workspace::git(&repo, args).unwrap();
+        git(&["init", "-q"]);
+        git(&["commit", "--allow-empty", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        fs::write(temp.path().join("outside.txt"), "one\ntwo\nthree\n").unwrap();
+        std::os::unix::fs::symlink("../outside.txt", repo.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink("../missing.txt", repo.join("dangling.txt")).unwrap();
+        let live = super::super::compute_git_changes(&repo, &base, None, "node", "exec").unwrap();
+        assert!(live.files.iter().all(|file| file.additions == 1));
+        fs::write(temp.path().join("outside.txt"), "different target contents\n").unwrap();
+        assert_eq!(live, super::super::compute_git_changes(&repo, &base, None, "node", "exec").unwrap());
+        git(&["add", "."]);
+        git(&["commit", "-qm", "links"]);
+        let after = git(&["rev-parse", "HEAD"]);
+        assert_eq!(live, super::super::compute_git_changes(&repo, &base, Some(&after), "node", "exec").unwrap());
+    }
+
+    #[test]
     fn malformed_raw_headers_and_counts_are_not_accepted_as_git_records() {
         for header in [
             ":wrong 100644 a b M", ":100644 100644 not-an-oid b M",

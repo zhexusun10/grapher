@@ -1036,6 +1036,34 @@ pub fn parse_jsonl_file_changes(
 
 mod git_diff;
 
+/// Best-effort live counts before an untracked path has a Git blob. Read link
+/// text, never its target, and bound regular-file reads even if the file grows.
+fn untracked_additions(path: &Path) -> Option<usize> {
+    use std::io::Read;
+    const LIMIT: u64 = 256 * 1024;
+    let metadata = fs::symlink_metadata(path).ok()?;
+    let bytes = if crate::workspace_symlinks::is_link(&metadata) {
+        fs::read_link(path).ok()?.as_os_str().as_encoded_bytes().to_vec()
+    } else {
+        if !metadata.is_file() || metadata.len() > LIMIT {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(path).ok()?.take(LIMIT + 1).read_to_end(&mut bytes).ok()?;
+        bytes
+    };
+    if bytes.len() as u64 > LIMIT {
+        return None;
+    }
+    // Git's default binary probe examines the first 8,000 bytes. Text does not
+    // have to be UTF-8; count byte newlines and a final unterminated line.
+    if bytes.iter().take(8000).any(|byte| *byte == 0) {
+        return Some(0);
+    }
+    Some(bytes.iter().filter(|byte| **byte == b'\n').count()
+        + usize::from(!bytes.is_empty() && bytes.last() != Some(&b'\n')))
+}
+
 /// Read status and line counts from one Git diff between commits or a working
 /// tree, so completion does not run comparison/rename detection twice.
 pub fn compute_git_changes(
@@ -1116,12 +1144,7 @@ pub fn compute_git_changes(
             }
             if !items_map.contains_key(&path) {
                 let full = repo_or_worktree.join(&path);
-                let additions = fs::metadata(&full)
-                    .ok()
-                    .filter(|m| m.is_file() && m.len() <= 256 * 1024)
-                    .and_then(|_| fs::read_to_string(&full).ok())
-                    .map(|content| content.lines().count())
-                    .unwrap_or(0);
+                let additions = untracked_additions(&full).unwrap_or(0);
                 items_map.insert(
                     path.clone(),
                     FileChangeItem {

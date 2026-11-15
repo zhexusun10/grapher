@@ -212,6 +212,30 @@ test('message versions survive reload and nested edits', () => {
     ['original', 'replacement', 'third']);
 });
 
+test('editing and restoring a repeated turn prefers its message ID over earlier matching text', () => {
+  const entries: ChatMessage[] = [
+    { id: 'first', role: 'user', text: '[@task] same request', timestamp: 10 },
+    { id: 'second', role: 'user', text: '[@task] same request', timestamp: 20 },
+    { id: 'third', role: 'user', text: 'later request', timestamp: 30 },
+  ];
+  const target = entries[1];
+  assert.equal(findBranchTargetIndex(entries, target, 'same request'), 1);
+  const branched = branchEditedMessageEntries(entries, target, 'same request', 'revised request', undefined);
+  assert.deepEqual(branched.previousEntries, [entries[0]]);
+  assert.deepEqual(branched.rolledBackEntries.map(entry => entry.id), ['first', 'second']);
+  assert.deepEqual(branched.updatedMsg.versions?.[0].subsequentEntries, [entries[2]]);
+
+  // Version selection must use the same identity rule, even when the displayed
+  // text is stale or equal to another turn's text.
+  const restored = applySelectedVersionToEntries(
+    entries, target, 'same request', { ...target, text: 'selected version' }, [entries[2]],
+  );
+  assert.deepEqual(restored.map(entry => [entry.id, entry.text]), [
+    ['first', '[@task] same request'], ['second', 'selected version'], ['third', 'later request'],
+  ]);
+  assert.deepEqual(entries.map(entry => entry.text), ['[@task] same request', '[@task] same request', 'later request']);
+});
+
 test('message rollback matches stripped node prefixes and rolls back subsequent turns', () => {
   const baseEntries: ChatMessage[] = [
     { id: 'msg-1', role: 'user', text: '[@merge:06_feature_qa] continue solve the conflict', timestamp: 10 },

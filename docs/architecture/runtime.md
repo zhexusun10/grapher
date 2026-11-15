@@ -501,8 +501,12 @@ text stream or another Run's event commit. Git status and line counts come from
 one NUL-delimited `--raw --numstat` diff, so completion does not run comparison
 and rename detection twice; literal paths and rename destinations retain their
 matching counts. Untracked/ignored listings preserve the same literal spelling
-(including leading spaces and Unix backslashes), so staging a file does not
-change its displayed path or line counts. A failed or malformed diff is
+(including leading spaces and Unix backslashes). Before staging, line counts are
+best-effort: regular-file reads are capped at 256 KiB, use Git's default NUL-byte
+binary probe and count text lines without requiring UTF-8. Symlinks count their
+link text, not the referenced file. Larger/unreadable files retain their rows
+with zero provisional line counts; Git attributes or filters can also make the
+later Git diff differ from this estimate. A failed or malformed diff is
 unavailable data, not an empty diff. Empty Git/Planner results are cache hits too, rather than reasons to
 repeat cold work on every poll.
 

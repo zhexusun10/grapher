@@ -1,5 +1,21 @@
 use super::*;
 
+// Other tests deliberately hold the process-wide display cache. Like the UI,
+// retry only its explicit contention response, not validation or routing errors.
+fn read_changes(mut query: impl FnMut() -> Result<serde_json::Value, String>) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match query() {
+            Ok(value) => return value,
+            Err(error) => {
+                assert_eq!(error, "File-change cache is busy; retry the read");
+                assert!(std::time::Instant::now() < deadline, "file-change cache stayed busy");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+}
+
 #[test]
 fn file_changes_api_unions_scoped_paths_before_capping_and_preserves_empty_scope() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -109,7 +125,7 @@ fn file_changes_api_unions_scoped_paths_before_capping_and_preserves_empty_scope
     let query = |fields: serde_json::Value| {
         let mut body = fields;
         body["runId"] = serde_json::json!(run);
-        get_file_changes(&body, &service).unwrap()
+        read_changes(|| get_file_changes(&body, &service))
     };
     let scoped = query(serde_json::json!({ "executionIds": ["first", "second", "first"] }));
     assert_eq!(
@@ -226,12 +242,11 @@ fn empty_run_id_file_changes_reads_the_active_run() {
         &serde_json::json!({ "runId": "" }),
     )
     .unwrap();
-    let value = dispatch(
+    let value = read_changes(|| dispatch(
         &scoped,
         "get_file_changes",
         serde_json::json!({ "runId": "" }),
-    )
-    .unwrap();
+    ));
     assert_eq!(value["runId"], active);
     assert_eq!(value["summary"]["totalFiles"], 1);
 }
@@ -336,12 +351,11 @@ fn historical_run_routes_to_its_own_projection_while_the_active_run_is_busy() {
         &serde_json::json!({ "runId": historical_id }),
     )
     .unwrap();
-    let value = dispatch(
+    let value = read_changes(|| dispatch(
         &scoped,
         "get_file_changes",
         serde_json::json!({ "runId": historical_id }),
-    )
-    .unwrap();
+    ));
     drop(active_guard);
     invalidate_service_cache(temp.path(), None);
     assert_eq!(value["runId"], historical_id);
