@@ -3,6 +3,7 @@
 // reload the idle Runtime. This never imports a historical Run or omits scope.
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 
 export async function privateGraph(api, data, { graph, config }) {
@@ -24,4 +25,11 @@ export async function privateGraph(api, data, { graph, config }) {
   assert.equal(state.isolatedWorkspaces, true);
   assert.deepEqual([...state.privateBatch].sort(), graph.nodes.map(node => node.id).sort());
   return state;
+}
+
+export async function readCurrentLaunch(path) {
+  const record = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(record.schema, 1, 'native launch records use the current envelope');
+  assert.ok(record.launch && Array.isArray(record.launch.ownedScopes), 'native launch ownership is explicit');
+  return record.launch;
 }

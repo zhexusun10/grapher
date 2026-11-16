@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, copyFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, stat, copyFile, chmod, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname, basename, delimiter } from 'node:path';
 import { createServer, type ServerResponse } from 'node:http';
@@ -13,7 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { venvCreationCommand } from './fixtures/environment-native.mjs';
 import { removeSandboxMasks } from './fixtures/sandbox-masks.mjs';
-import { privateGraph } from './fixtures/current-run.mjs';
+import { privateGraph, readCurrentLaunch } from './fixtures/current-run.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -53,7 +53,7 @@ function nativeShell() {
   return join(resolve(git, '../../..'), 'bin/bash.exe');
 }
 
-test('legacy native managed environment: install once, real Pi tools, editable/launchers, current follow-up, result startup and drain', { timeout: 1800000 }, async t => {
+test('native managed environment: install once, real Pi tools, editable/launchers, result recovery, source follow-up and drain', { timeout: 1800000 }, async t => {
   const started = Date.now();
   const mlManifestPath = process.env.GRAPHER_ENV_TEST_ML_MANIFEST;
   const ml = mlManifestPath ? JSON.parse(await readFile(mlManifestPath, 'utf8')) : undefined;
@@ -108,11 +108,16 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
   await mkdir(parent, { recursive: true });
   const directory = await mkdtemp(join(parent, 'ge-中 space-'));
   const source = join(directory, 'source 中文 space');
-  // Explicitly short disposable ML test layout: Conda's packaged test data can
-  // exceed MAX_PATH even when the ordinary venv fixture fits. No Runtime path
-  // rewrite, registry change, node-slot change or failed-layout repair is used.
-  const workspaceParent = ml || conda ? await mkdtemp(join(parent, 'w中 -')) : join(directory, 'workspaces');
+  // Native Windows installers need a short disposable workspace parent, even
+  // when the Python runtime itself supports long paths. Keep Unicode and spaces
+  // while avoiding deep pip/Conda scratch paths; Runtime does not rewrite them.
+  const shortWorkspace = process.platform === 'win32' || ml || conda;
+  const workspaceParent = shortWorkspace ? await mkdtemp(join(parent, 'w中 -')) : join(directory, 'workspaces');
   const data = join(directory, 'data'); const agent = join(directory, 'agent');
+  const installerScratch = join(directory, 'pip-tmp');
+  const pipEnvironment = process.platform === 'win32'
+    ? ['TMPDIR', 'TMP', 'TEMP'].map(key => `${key}=${quote(installerScratch.replaceAll('\\', '/'))}`).join(' ') + ' '
+    : '';
   const shell = nativeShell(); const python = nativePython(ml);
   let cudaDevice: { backend: 'cuda'; ids: string[]; probe: string } | undefined;
   let cudaDeviceName: string | undefined;
@@ -169,13 +174,12 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
         const activate = ml ? '' : conda ? `eval "$(conda shell.bash hook)" && conda activate ${venv} && ` : `source ${venvActivate} && `;
         const create = ml ? '' : conda ? `eval "$(conda shell.bash hook)" && conda create --prefix ${venv} --offline --yes --copy ${condaPackages.map(quote).join(' ')} && ` : venvCreationCommand(python, venv) + ' && ';
         if (prompt.includes('RETRY_BACKGROUND') || prompt.includes('B_AFTER_RETRY')) command = 'python -c ' + quote("import pathlib,os; assert (pathlib.Path(os.environ['HOME']).parent/'.venv/background-partial').read_text()=='partial'; print('RETRY_KEPT_CREATED_ENV')");
+        else if (prompt.includes('SOURCE_FOLLOWUP')) command = 'node -e ' + quote("require('node:fs').writeFileSync('source-followup.json',JSON.stringify({cwd:process.cwd()})); console.log('SOURCE_FOLLOWUP_COMPLETED')");
         else if (prompt.includes('NO_ENVIRONMENT')) command = 'node -e ' + quote("require('node:fs').writeFileSync('.env','ORDINARY=1'); require('node:fs').writeFileSync('environment.yml','name: declaration-only\\n'); console.log('NO_ENVIRONMENT_NEEDED')");
         else if (prompt.includes('BACKGROUND_WRITER')) command = create + activate + 'python -c ' + quote("import sys; print('BACKGROUND_ENV_CREATED',sys.executable)");
-        else if (prompt.includes('A_CREATE')) command = create + activate + 'python -m pip install --no-index --no-build-isolation -e . && pip --version && python -c ' + quote("import sys,pathlib,os; assert sys.prefix == str(pathlib.Path(os.environ['HOME']).parent/'.venv'); assert not os.environ.get('PYTHONHOME'); assert 'outer-poison' not in os.environ.get('PATH',''); print(sys.executable)");
+        else if (prompt.includes('A_CREATE')) command = create + activate + pipEnvironment + 'python -m pip install --no-index --no-build-isolation -e . && pip --version && python -c ' + quote("import sys,pathlib,os; assert sys.prefix == str(pathlib.Path(os.environ['HOME']).parent/'.venv'); assert not os.environ.get('PYTHONHOME'); assert 'outer-poison' not in os.environ.get('PATH',''); print(sys.executable)");
         else if (prompt.includes('B_USE')) command = 'envcheck && python -c ' + quote("import sysconfig,pathlib; pathlib.Path(sysconfig.get_paths()['purelib'],'native_dependency.py').write_text('VERSION=2\\n')");
         else if (prompt.includes('C_USE')) command = 'envcheck && python -c ' + quote("import native_dependency,pathlib,json,sys; assert native_dependency.VERSION==2; pathlib.Path('reports').mkdir(exist_ok=True); pathlib.Path('reports/C.json').write_text(json.dumps({'version':2,'prefix':sys.prefix}))");
-        else if (prompt.includes('FOLLOWUP_2')) command = 'envcheck && python -c ' + quote("import native_dependency,pathlib; assert native_dependency.VERSION==3; assert pathlib.Path('reports/C.json').exists(); print('CURRENT_VIEW_RESTORED')");
-        else if (prompt.includes('FOLLOWUP_A')) command = 'envcheck && python -c ' + quote("import native_dependency,ml_probe,sysconfig,pathlib; assert native_dependency.VERSION==2; assert ml_probe.VALUE=='C'; assert pathlib.Path('reports/C.json').exists(); pathlib.Path(sysconfig.get_paths()['purelib'],'native_dependency.py').write_text('VERSION=3\\n')");
         else throw new Error(`Unexpected prompt ${prompt}`);
         commands.push(command); tool = { name: 'bash', arguments: { command } };
       } else if (step === 1 && prompt.includes('BACKGROUND_WRITER') && !writerStarted) {
@@ -204,7 +208,7 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
     }
   };
   try {
-    await mkdir(source); await mkdir(agent);
+    await mkdir(source); await mkdir(agent); await mkdir(join(directory, 'profile')); await mkdir(installerScratch);
     await writeFile(join(source, '.gitignore'), '.venv/\n.agent-home/\n.runtime-cache/\nreports/\n');
     await writeFile(join(source, 'ml_probe.py'), code('source'));
     await writeFile(join(source, 'editable_backend.py'), backendCode);
@@ -226,7 +230,8 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
       GRAPHER_ISOLATED_PI_MODELS: '1', GRAPHER_NATIVE_RUNTIME_PARENT: join(directory, 'engine-cache'), GRAPHER_WORKSPACE_PARENT: workspaceParent,
       GRAPHER_GLOBAL_PI_AGENT_DIR: join(directory, 'global-agent'), NODE_AGENT_MODEL: 'environment-test/native', NODE_AGENT_THINKING: 'off',
       VIRTUAL_ENV: 'outer-poison', CONDA_PREFIX: 'outer-poison', PYTHONPATH: 'outer-poison', PYTHONHOME: 'outer-poison', BASH_ENV: 'outer-poison',
-      LOCALAPPDATA: join(directory, 'local-app-data'), USERPROFILE: join(directory, 'profile'),
+      PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8',
+      LOCALAPPDATA: join(directory, 'local-app-data'), USERPROFILE: join(directory, 'profile'), HOME: join(directory, 'profile'),
       ...(conda ? { PATH: [dirname(conda.conda), process.env.PATH].join(delimiter) } : {}) };
     const profile = ml ? 'release' : 'debug';
     const built = join(target, profile, process.platform === 'win32' ? 'grapher.exe' : 'grapher');
@@ -282,8 +287,8 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
     // harness; here it would reach the environment actuator model, which only
     // understands environment tasks, so this Run opts out of it explicitly.
     const config = { repository: source, model: 'environment-test/native', thinkingLevel: 'off', maxParallel: 4, maxFeedback: 1, postTaskReview: false, ...(ml ? { environment } : {}) };
-    // Retained private Runs keep E/L inheritance across single-node dispatches;
-    // new adaptive Runs deliberately switch such batches back to source.
+    // The controlled current batch keeps its dependency chain private so E/L
+    // inheritance is exercised before ordinary source follow-ups begin.
     const saved = await privateGraph(api, data, { graph, config });
     if (!ml) assert.equal(saved.environmentPolicy, 'automatic-pending');
     const runId = saved.runId;
@@ -312,7 +317,7 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
     }
     const workspace = initial.executions[0].worktree;
     if (!ml) {
-      const launch = (ref: string) => readFile(join(data, 'environments', runId, 'launches', `${ref}.json`), 'utf8').then(JSON.parse);
+      const launch = (ref: string) => readCurrentLaunch(join(data, 'environments', runId, 'launches', `${ref}.json`));
       assert.equal((await launch(initial.executions[0].input.launchRef)).environment, undefined, 'A starts empty');
       assert.equal((await launch(initial.executions[0].result.launchRef)).environment.kind, conda ? 'conda' : 'venv');
     }
@@ -334,15 +339,11 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
       }
     }
     const old = initial.executions.map((execution: any) => execution.result);
-    await api('control', { runId, action: 'intervene', node: 'A', instruction: 'FOLLOWUP_A' });
-    const followup = await settled();
-    const last = followup.executions.at(-1);
-    assert.equal(last.worktree, workspace); assert.equal(last.sessionId, initial.executions[0].sessionId);
-    assert.equal(last.input.environmentRef, old[2].environmentRef);
-    assert.equal(last.before, last.after, 'environment-only follow-up leaves Git head unchanged');
-    for (const name of ['A', 'B', 'C']) { assert.equal(followup.nodes[name].status, 'completed'); assert.deepEqual(followup.nodes[name].result, last.result); }
-    for (let i = 0; i < 3; i++) assert.deepEqual(followup.executions[i].result, old[i]);
     const callsBeforeResult = modelCalls;
+    const modified = await api('launch_result', { runId, args: ['-c', "import native_dependency,ml_probe,sysconfig,pathlib; assert native_dependency.VERSION==2; assert ml_probe.VALUE=='C'; assert pathlib.Path('reports/C.json').exists(); pathlib.Path(sysconfig.get_paths()['purelib'],'native_dependency.py').write_text('VERSION=3\\n'); print('CURRENT_ENVIRONMENT_UPDATED')"] });
+    assert.match(modified.output, /CURRENT_ENVIRONMENT_UPDATED/);
+    const current = await settled();
+    for (let i = 0; i < 3; i++) assert.deepEqual(current.executions[i].result, old[i]);
     const resultArgs = ml ? ['-c', "import json,torch; assert torch.cuda.is_available() and torch.version.cuda and torch.version.hip is None; x=torch.arange(4096,device='cuda',dtype=torch.float32); w=torch.tensor(0.25,device='cuda',requires_grad=True); loss=(x*w).sin().mean(); loss.backward(); torch.cuda.synchronize(); assert w.grad is not None; print(json.dumps({'device':torch.cuda.get_device_name(0),'cuda':torch.version.cuda,'loss':loss.item(),'gradient':w.grad.item()}))"]
       : ['-c', "import native_dependency,ml_probe; assert native_dependency.VERSION==3; ml_probe.main()"];
     stage('result-launch-start');
@@ -353,8 +354,10 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
     // Rebuild the CURRENT terminal composite result at its fixed native path.
     const restoreStarted = Date.now();
     await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-    await api('control', { runId, action: 'intervene', node: 'A', instruction: 'FOLLOWUP_2' });
-    const rebuilt = await settled(); assert.equal(rebuilt.executions.at(-1).worktree, workspace);
+    const restored = await api('launch_result', { runId, args: resultArgs }, ml ? 1_200_000 : 120_000);
+    assert.match(restored.output, ml ? /"device"/ : /"value": "C"/);
+    assert.equal(modelCalls, callsBeforeResult);
+    const rebuilt = await settled();
     const restoredFollowupWallMs = Date.now() - restoreStarted;
     const workingEnvironmentBytes = await bytes(venvPath(workspace)) + await bytes(join(dirname(venvPath(workspace)), '.agent-home'));
     const retainedEnvironmentBytes = await bytes(join(data, 'environments', runId));
@@ -377,6 +380,12 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
     assert.deepEqual(failed.nodes.C.result, stateBeforeCancel);
     const retry = await api('launch_result', { runId, args: ['-c', "import pathlib; assert pathlib.Path('reports/result-started').read_text()=='partial'; print('RETRY_KEPT_PARTIAL')"] });
     assert.match(retry.output, /RETRY_KEPT_PARTIAL/); await settled();
+    await api('control', { runId, action: 'intervene', node: 'A', instruction: 'SOURCE_FOLLOWUP' });
+    const followup = await settled();
+    assert.equal(await realpath(followup.executions.at(-1).worktree), await realpath(source));
+    assert.ok(followup.executions.at(-1).result == null, 'source follow-up does not adopt private E/L');
+    assert.equal(await realpath(JSON.parse(await readFile(join(source, 'source-followup.json'), 'utf8')).cwd), await realpath(source));
+    for (let i = 0; i < 3; i++) assert.deepEqual(followup.executions[i].result, old[i]);
     const backgroundRun = async (task: string) => {
       const run = await privateGraph(api, data, { graph: { originalGoal: 'native drain boundary', nodes: [{ id: 'writer', task }, { id: 'downstream', task: 'B_AFTER_RETRY' }], edges: [{ from: 'writer', to: 'downstream', feedback: false }] }, config });
       await api('control', { runId: run.runId, action: 'approve' });
@@ -463,7 +472,7 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
     assert.deepEqual(downstreamResult, recovered.nodes.downstream.result, 'downstream completion comes from its own execution');
     assert.notDeepEqual(downstreamResult, retried.result, 'Environment recovery does not invent business completion');
     if (!ml) {
-      const launch = JSON.parse(await readFile(join(data, 'environments', background.runId, 'launches', `${retried.result.launchRef}.json`), 'utf8'));
+      const launch = await readCurrentLaunch(join(data, 'environments', background.runId, 'launches', `${retried.result.launchRef}.json`));
       assert.equal(launch.environment.kind, conda ? 'conda' : 'venv');
     }
     if (!ml) {
@@ -481,7 +490,7 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
       }, 'plain project without an environment');
       const input = completed.executions[0].input; const result = completed.executions[0].result;
       assert.equal(result.launchRef, input.launchRef, 'Declarations and .env do not change L');
-      const launch = JSON.parse(await readFile(join(data, 'environments', empty.runId, 'launches', `${result.launchRef}.json`), 'utf8'));
+      const launch = await readCurrentLaunch(join(data, 'environments', empty.runId, 'launches', `${result.launchRef}.json`));
       assert.equal(launch.environment, undefined);
       await assert.rejects(stat(venvPath(completed.executions[0].worktree)), /ENOENT/);
       const calls = modelCalls;
@@ -497,6 +506,6 @@ test('legacy native managed environment: install once, real Pi tools, editable/l
     await stop(); await new Promise<void>(completed => modelServer.close(() => completed()));
     removeSandboxMasks(join(directory, 'engine-cache'));
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-    if (ml) await rm(workspaceParent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    if (shortWorkspace) await rm(workspaceParent, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });

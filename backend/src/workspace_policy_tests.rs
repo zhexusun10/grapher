@@ -2803,3 +2803,40 @@ fn approval_is_filesystem_only_and_native_admission_waits_for_a_private_batch() 
         .all(|job| job.config.environment.is_some() && job.environment_input.is_some()));
     assert!(jobs.iter().all(|job| job.environment_sources.is_empty()));
 }
+
+#[cfg(not(feature = "fixture"))]
+#[test]
+fn restored_private_selection_initializes_native_inputs_before_dispatch() {
+    let (_temp, _source, mut runtime) = adaptive(true, graph(&["a"], &[]), true, 1);
+    assert!(runtime.state.environment_baseline.is_none());
+    runtime
+        .emit_outputs(vec![
+            EventKind::WorkspaceIsolationSelected { isolated: true },
+            EventKind::PrivateBatchSelected {
+                nodes: vec!["a".into()],
+            },
+        ])
+        .unwrap();
+    let root = runtime.root.clone();
+    drop(runtime);
+    let mut restored = Runtime::open(&root).unwrap();
+    restored.resume_scheduling().unwrap();
+    let job = restored.jobs().unwrap().remove(0);
+    assert!(!job.source_direct);
+    assert!(job.config.environment.is_some());
+    assert!(job.environment_input.is_some());
+    assert!(restored.state.environment_baseline.is_some());
+    let initialized = restored
+        .state
+        .events
+        .iter()
+        .find(|event| matches!(event.kind, EventKind::EnvironmentInitialized { .. }))
+        .unwrap();
+    let started = restored
+        .state
+        .events
+        .iter()
+        .find(|event| matches!(event.kind, EventKind::Started { .. }))
+        .unwrap();
+    assert!(initialized.sequence < started.sequence);
+}

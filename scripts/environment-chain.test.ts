@@ -15,7 +15,7 @@ import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { venvCreationCommand } from './fixtures/environment-native.mjs';
 import { removeSandboxMasks } from './fixtures/sandbox-masks.mjs';
-import { privateGraph } from './fixtures/current-run.mjs';
+import { privateGraph, readCurrentLaunch } from './fixtures/current-run.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -182,8 +182,8 @@ test('legacy environment discovery binds one private venv across a parallel Grap
     // The post-task Planner review is accepted by its own harness; this deterministic
     // local model only speaks this Run's chain tasks, so opt the review out.
     const config = { repository: source, model: 'environment-chain/chain', thinkingLevel: 'off', maxParallel: 4, maxFeedback: 1, postTaskReview: false };
-    // Replay the pre-batch private contract, which retains E/L through a serial
-    // chain. New adaptive one/two-node batches intentionally execute in source.
+    // Select a current private scope across the topology to exercise E/L
+    // inheritance; ordinary adaptive one/two-node batches execute in source.
     const saved = await privateGraph(api, data, { graph, config });
     assert.equal(saved.environmentPolicy, 'automatic-pending', 'no client environment policy is supplied');
     const runId = saved.runId;
@@ -214,7 +214,7 @@ test('legacy environment discovery binds one private venv across a parallel Grap
     assert.notEqual(byNode.left.worktree, byNode.right.worktree, 'parallel roots use independent slots');
     assert.ok(Math.min(byNode.left.completedAt, byNode.right.completedAt) >= Math.max(byNode.left.startedAt, byNode.right.startedAt), 'left and right executions overlap in time');
     assert.ok(byNode.create.startedAt >= Math.max(byNode.left.completedAt, byNode.right.completedAt), 'the serial chain waits for both parallel roots');
-    const launch = (ref: string) => readFile(join(data, 'environments', runId, 'launches', `${ref}.json`), 'utf8').then(JSON.parse);
+    const launch = (ref: string) => readCurrentLaunch(join(data, 'environments', runId, 'launches', `${ref}.json`));
     assert.equal((await launch(byNode.left.result.launchRef)).environment, undefined, 'ordinary parallel roots stay unbound');
     assert.equal((await launch(byNode.create.input.launchRef)).environment, undefined, 'the chain starts from the unbound baseline');
     assert.equal((await launch(byNode.create.result.launchRef)).environment.kind, 'venv');
@@ -286,7 +286,7 @@ test('legacy environment discovery binds one private venv across a parallel Grap
       return check.phase === 'completed' && check;
     }, 'isolation Run');
     const execution = plain.executions[0];
-    const isolatedLaunch = (ref: string) => readFile(join(data, 'environments', isolated.runId, 'launches', `${ref}.json`), 'utf8').then(JSON.parse);
+    const isolatedLaunch = (ref: string) => readCurrentLaunch(join(data, 'environments', isolated.runId, 'launches', `${ref}.json`));
     assert.equal((await isolatedLaunch(execution.input.launchRef)).environment, undefined, 'a new Run is unbound at start');
     assert.equal((await isolatedLaunch(execution.result.launchRef)).environment, undefined, 'an isolated no-op Run never adopts another Run environment');
     assert.notEqual(execution.input.environmentRef, byNode.create.result.environmentRef);
@@ -308,7 +308,7 @@ test('legacy environment discovery binds one private venv across a parallel Grap
     }, 'bound fan-out and independent publication');
     const forked = await forkSettled();
     const forkNodes: Record<string, any> = Object.fromEntries(forked.executions.map((execution: any) => [execution.node, execution]));
-    const forkLaunch = (ref: string) => readFile(join(data, 'environments', fork.runId, 'launches', `${ref}.json`), 'utf8').then(JSON.parse);
+    const forkLaunch = (ref: string) => readCurrentLaunch(join(data, 'environments', fork.runId, 'launches', `${ref}.json`));
     assert.equal(forked.executions.length, 3, 'no added environment Agent');
     assert.equal(forked.mergers.length, 0, 'environment differences do not dispatch a Merger');
     assert.notEqual(forkNodes.left.worktree, forkNodes.right.worktree);

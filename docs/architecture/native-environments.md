@@ -28,7 +28,9 @@ the first private [execution batch](workspace-snapshots-and-feedback.md#adaptive
 after Planner's source writes. Shared batches never initialize/load private E/L
 bindings or require private completion seals; existing private evidence remains
 owned by the Run for later batches and recovery. Admission
-requires the current initialization events. The execution contract is backend-owned, not a user environment choice:
+requires the current initialization events. A restored private selection without
+an environment baseline passes through the same native admission and initialization
+as a new private batch before any worker starts. The execution contract is backend-owned, not a user environment choice:
 
 - Standard Git Graph projects start with **no business environment binding**
   (`automatic-lazy`), irrespective of language or ML declarations. No venv,

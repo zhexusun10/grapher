@@ -289,6 +289,33 @@ impl Runtime {
         Ok(())
     }
 
+    fn private_environment_events(&self, repository: &Path) -> Result<Vec<EventKind>, String> {
+        let config = self.state.config.as_ref().ok_or("Missing config")?;
+        let mut events = Vec::new();
+        let environment = if config.environment.is_none() && self.state.environment_policy.is_some()
+        {
+            let (environment, reason) = crate::environment_automatic::resolve(repository, false)?;
+            events.push(EventKind::EnvironmentPolicyResolved {
+                environment: environment.clone(),
+                reason,
+            });
+            environment
+        } else {
+            config.environment.clone()
+        };
+        if let Some(policy) = &environment {
+            if self.state.environment_baseline.is_none() {
+                policy.validate()?;
+                let store =
+                    crate::environment::Environments::new(&self.root, &self.state.run_id, policy)?;
+                events.push(EventKind::EnvironmentInitialized {
+                    result: store.initialize(repository)?,
+                });
+            }
+        }
+        Ok(events)
+    }
+
     /// Shared source workers may refill free slots without draining siblings.
     /// Private writers must all succeed before delivery or workspace switching.
     /// Explicit retries preserve unfinished work privately, never publish it.
@@ -407,6 +434,7 @@ impl Runtime {
                     }
                 }
             }
+            self.emit_outputs(self.private_environment_events(&repository)?)?;
             if self.state.private_batch.is_empty() {
                 self.emit(EventKind::PrivateBatchSelected {
                     nodes: self.private_batch_scope(
@@ -522,30 +550,7 @@ impl Runtime {
         if isolated {
             #[cfg(not(feature = "fixture"))]
             crate::native::require_graph_execution()?;
-            let environment =
-                if config.environment.is_none() && self.state.environment_policy.is_some() {
-                    let (environment, reason) =
-                        crate::environment_automatic::resolve(&repository, false)?;
-                    events.push(EventKind::EnvironmentPolicyResolved {
-                        environment: environment.clone(),
-                        reason,
-                    });
-                    environment
-                } else {
-                    config.environment.clone()
-                };
-            if let Some(policy) = &environment {
-                if self.state.environment_baseline.is_none() {
-                    policy.validate()?;
-                    let store = crate::environment::Environments::new(
-                        &self.root,
-                        &self.state.run_id,
-                        policy,
-                    )?;
-                    let result = store.initialize(&repository)?;
-                    events.push(EventKind::EnvironmentInitialized { result });
-                }
-            }
+            events.extend(self.private_environment_events(&repository)?);
         }
         if isolated {
             events.push(EventKind::PrivateBatchSelected {
