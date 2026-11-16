@@ -342,6 +342,9 @@ mod tests {
         std::fs::create_dir_all(&own).unwrap();
         std::fs::create_dir_all(global.join("extensions")).unwrap();
         std::fs::create_dir_all(&project).unwrap();
+        let project_alias = directory.path().join("project-alias");
+        crate::path_safety::directory_link(&project, &project_alias);
+        let project = project_alias;
         std::fs::write(global.join("extensions/probe.ts"), "export default function(pi) { pi.registerCommand('custom-settings', { handler: async (_args, ctx) => ctx.ui.notify(ctx.cwd, 'info') }); }").unwrap();
         let root = crate::native::installation_root();
         let transport = Transport::new();
@@ -378,7 +381,11 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(complete);
-        assert!(messages.iter().any(|event| event["message"].as_str() == project.to_str()));
+        assert!(messages.iter().any(|event| {
+            event["method"] == "notify" && event["message"].as_str().is_some_and(|message| {
+                crate::path_identity::same_path(std::path::Path::new(message), &project)
+            })
+        }), "selected project notification missing: {messages:?}");
         assert!(!own.join("sessions").exists());
         transport.shutdown();
     }

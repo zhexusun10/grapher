@@ -143,7 +143,9 @@ jobs:
       # NTFS root/alias/link and real-interpreter recovery regression coverage.
       - name: Verify Windows root-qualified environment capture and recovery
         if: runner.os == 'Windows' && github.event_name == 'push'
-        timeout-minutes: 4
+        # The real-interpreter cases can exceed four minutes on hosted NTFS;
+        # retain the full sequential coverage with room for native tool I/O.
+        timeout-minutes: 10
         run: node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib rooted_ -- --test-threads=1
       # The broader library suites cover protocol/legacy/runtime-input units
       # elsewhere. Windows pushes need them explicitly beside real W/S recovery.
@@ -234,30 +236,29 @@ jobs:
           parent="$(mktemp -d "$RUNNER_TEMP/grapher-apfs.XXXXXX")"
           image="$parent/filesystem.sparseimage"
           volume="$parent/mount"
+          device="$volume"
           attached=0
           cleanup() {
             local result=$?
             trap - EXIT
             if [ "$attached" = 1 ]; then
-              sync
-              if ! hdiutil detach "$volume"; then
-                # APFS can keep the helper process alive briefly after the
-                # last child exits. Force the volume unmount and image detach,
-                # but preserve the actual test result if the host cleanup
-                # remains busy.
-                diskutil unmount force "$volume" >/dev/null 2>&1 || true
-                hdiutil detach -force "$volume" >/dev/null 2>&1 || \
-                  hdiutil detach -force "$image" >/dev/null 2>&1 || true
+              # A partial detach can unmount the volume before ejecting its
+              # image fails. Retry the image device, which is still addressable
+              # after its mountpoint disappears.
+              if ! hdiutil detach "$device"; then
+                if diskutil info "$device" >/dev/null 2>&1 && ! hdiutil detach -force "$device"; then
+                  result=1
+                fi
               fi
             fi
-            rm -rf "$parent" || true
             exit "$result"
           }
           trap cleanup EXIT
           mkdir "$volume"
           hdiutil create -size 2g -type SPARSE -fs "Case-sensitive APFS" -volname GrapherCaseSensitive "$image"
-          hdiutil attach -nobrowse -owners on -mountpoint "$volume" "$image"
+          hdiutil attach -nobrowse -owners on -mountpoint "$volume" -plist "$image" > "$parent/attached.plist"
           attached=1
+          device="$(/usr/libexec/PlistBuddy -c 'Print :system-entities:0:dev-entry' "$parent/attached.plist")"
           mkdir "$volume/tmp"
           touch "$volume/tmp/CaseProbe"
           if [ -e "$volume/tmp/caseprobe" ]; then
