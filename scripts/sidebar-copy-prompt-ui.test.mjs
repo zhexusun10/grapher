@@ -62,6 +62,7 @@ async function openApp(handler, language = "en", reducedMotion = "reduce") {
       provider_auth: { providers: [{ id: "test", name: "Test", configured: true, methods: [] }], models: [], warning: null },
       pi_extensions: { globalDirectory: "mock", extensions: [] },
       environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true },
+      get_file_changes: { runId: body.runId, executionId: null, executionIds: null, summary: { files: [], totalFiles: 0, addedCount: 0, modifiedCount: 0, deletedCount: 0, renamedCount: 0, totalAdditions: 0, totalDeletions: 0, isRunning: false } },
     };
     if (!Object.hasOwn(defaults, command)) errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ json: { result: defaults[command] ?? null } });

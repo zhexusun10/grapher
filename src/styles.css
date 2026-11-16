@@ -1283,8 +1283,8 @@ a,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: normal;
-  overflow-wrap: break-word;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  word-break: normal;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
