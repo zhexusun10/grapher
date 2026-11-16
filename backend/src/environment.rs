@@ -11,10 +11,10 @@ use std::{
 };
 use uuid::Uuid;
 
-#[path = "environment_snapshots.rs"]
-mod snapshots;
 #[path = "environment_forks.rs"]
 mod forks;
+#[path = "environment_snapshots.rs"]
+mod snapshots;
 
 /// Ownership evidence is independent of which environment is currently active.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -312,22 +312,39 @@ fn reserved(key: &str) -> bool {
 /// directory links. Root aliases are accepted; external/relative paths and
 /// dotted paths retain native semantics instead of guessing another layout.
 pub(crate) fn project_path_template(path: &Path, source: &Path) -> Option<String> {
-    if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir)) {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
         return None;
     }
-    let relative = path.ancestors().find_map(|ancestor| {
-        crate::path_identity::same_path(ancestor, source)
-            .then(|| path.strip_prefix(ancestor).ok().map(Path::to_path_buf)).flatten()
-    }).or_else(|| {
-        let actual = crate::path_identity::actual_path(path).ok()?;
-        actual.ancestors().find_map(|ancestor| {
+    let relative = path
+        .ancestors()
+        .find_map(|ancestor| {
             crate::path_identity::same_path(ancestor, source)
-                .then(|| actual.strip_prefix(ancestor).ok().map(Path::to_path_buf)).flatten()
+                .then(|| path.strip_prefix(ancestor).ok().map(Path::to_path_buf))
+                .flatten()
         })
-    })?;
+        .or_else(|| {
+            let actual = crate::path_identity::actual_path(path).ok()?;
+            actual.ancestors().find_map(|ancestor| {
+                crate::path_identity::same_path(ancestor, source)
+                    .then(|| actual.strip_prefix(ancestor).ok().map(Path::to_path_buf))
+                    .flatten()
+            })
+        })?;
     let suffix = relative.to_str()?;
-    let suffix = if cfg!(windows) { suffix.replace('\\', "/") } else { suffix.to_string() };
-    Some(if suffix.is_empty() { "{workspace}".into() } else { format!("{{workspace}}/{suffix}") })
+    let suffix = if cfg!(windows) {
+        suffix.replace('\\', "/")
+    } else {
+        suffix.to_string()
+    };
+    Some(if suffix.is_empty() {
+        "{workspace}".into()
+    } else {
+        format!("{{workspace}}/{suffix}")
+    })
 }
 
 /// NODE_PATH and PYTHONPATH use literal native-delimiter lists, not Windows
@@ -339,7 +356,9 @@ fn rebind_project_module_path(
     workspace: &Path,
     variable: &str,
 ) -> Result<String, String> {
-    let workspace = native::host_path(workspace).to_string_lossy().replace('\\', "/");
+    let workspace = native::host_path(workspace)
+        .to_string_lossy()
+        .replace('\\', "/");
     let delimiter = if cfg!(windows) { ';' } else { ':' };
     let paths = value.split(delimiter).map(|value| {
         if let Some(mapped) = project_path_template(Path::new(value), source) {
@@ -362,9 +381,12 @@ impl LaunchConfig {
         {
             return Err("Launch needs an explicit entry, complete PATH and an existing absolute native Bash shell".into());
         }
-        let absolute = |path: &str| Path::new(path).is_absolute()
-            || matches!(path, "{workspace}" | "{state}")
-            || path.starts_with("{workspace}/") || path.starts_with("{state}/");
+        let absolute = |path: &str| {
+            Path::new(path).is_absolute()
+                || matches!(path, "{workspace}" | "{state}")
+                || path.starts_with("{workspace}/")
+                || path.starts_with("{state}/")
+        };
         if self.entry.contains('\0') || !absolute(&self.entry) {
             return Err("Launch entry must be absolute, workspace-bound or state-bound".into());
         }
@@ -414,7 +436,8 @@ impl LaunchConfig {
             self.path.clone_from(path);
         } else {
             // Preserve the frozen behavior of older explicit launch records.
-            self.path.retain(|path| !path.starts_with("{workspace}/") && !path.starts_with("{state}/"));
+            self.path
+                .retain(|path| !path.starts_with("{workspace}/") && !path.starts_with("{state}/"));
         }
     }
 
@@ -431,7 +454,9 @@ impl LaunchConfig {
         let mut left = self.clone();
         let mut right = other.clone();
         for launch in [&mut left, &mut right] {
-            if let Some(binding) = &mut launch.environment { binding.runtime_evidence = None; }
+            if let Some(binding) = &mut launch.environment {
+                binding.runtime_evidence = None;
+            }
         }
         left == right
     }
@@ -461,7 +486,10 @@ impl LaunchConfig {
         Self {
             entry: expand(&self.entry),
             path: self.path.iter().map(|v| expand(v)).collect(),
-            unbound_path: self.unbound_path.as_ref().map(|path| path.iter().map(|v| expand(v)).collect()),
+            unbound_path: self
+                .unbound_path
+                .as_ref()
+                .map(|path| path.iter().map(|v| expand(v)).collect()),
             shell: self.shell.clone(),
             variables: self
                 .variables
@@ -727,9 +755,14 @@ impl Environments {
         version: &str,
     ) -> Result<(), String> {
         if let Some(layouts) = self.snapshot_layouts(launch, version)? {
-            self.files.verify_roots(&self.snapshot_targets(path, &layouts)?, version)
+            self.files
+                .verify_roots(&self.snapshot_targets(path, &layouts)?, version)
         } else {
-            self.scoped_files(launch)?.verify(&self.environment_root_for(path, launch)?, version, "")
+            self.scoped_files(launch)?.verify(
+                &self.environment_root_for(path, launch)?,
+                version,
+                "",
+            )
         }
     }
 
@@ -781,10 +814,11 @@ impl Environments {
         probe
             .variables
             .retain(|_, value| !value.contains("{workspace}") && !value.contains("{state}"));
-        probe
-            .path
-            .retain(|value| Path::new(value).is_absolute()
-                && !value.contains("{workspace}") && !value.contains("{state}"));
+        probe.path.retain(|value| {
+            Path::new(value).is_absolute()
+                && !value.contains("{workspace}")
+                && !value.contains("{state}")
+        });
         clean_command(&mut command, &probe, None)?;
         command.env("PYTHONDONTWRITEBYTECODE", "1");
         let output = controlled_output(command)?;
@@ -941,9 +975,11 @@ impl Environments {
         // Layout spelling is not physical-slot identity (separators, root
         // aliases and redundant components may differ in persisted references).
         // Reuse still needs the current slot's exact E/L, never a sibling's.
-        let same_layout = |input: &CompositeResult| input.layout.as_deref().is_some_and(|layout| {
-            crate::path_identity::same_path(Path::new(layout), Path::new(path))
-        });
+        let same_layout = |input: &CompositeResult| {
+            input.layout.as_deref().is_some_and(|layout| {
+                crate::path_identity::same_path(Path::new(layout), Path::new(path))
+            })
+        };
         let local_current = current.filter(|input| same_layout(input));
         let local: Vec<_> = inputs
             .iter()
@@ -962,7 +998,9 @@ impl Environments {
         // keep their own current state; this never authorizes a partial reset.
         let home_fork = if reusable.is_none() && local_current.is_none() {
             self.select_home_fork(inputs)?
-        } else { None };
+        } else {
+            None
+        };
         let reason = if reusable.is_some() {
             "same-layout"
         } else if home_fork.is_some() {
@@ -1038,10 +1076,18 @@ impl Environments {
         history_edit: bool,
     ) -> Result<CompositeResult, String> {
         self.validate_result_metadata(selected)?;
-        let root_layouts = self.snapshot_layouts(&selected.launch_ref, &selected.environment_ref)?;
-        let project_exclusions = if root_layouts.is_some() { self.exclusions(&selected.launch_ref)? } else { Vec::new() };
+        let root_layouts =
+            self.snapshot_layouts(&selected.launch_ref, &selected.environment_ref)?;
+        let project_exclusions = if root_layouts.is_some() {
+            self.exclusions(&selected.launch_ref)?
+        } else {
+            Vec::new()
+        };
         let project_guard = if self.config.launch.state_bound() {
-            Some(crate::workspace_view::preparation_guard(path, &project_exclusions)?)
+            Some(crate::workspace_view::preparation_guard(
+                path,
+                &project_exclusions,
+            )?)
         } else {
             None
         };
@@ -1090,9 +1136,17 @@ impl Environments {
                 // Materialization validates every root's bytes and destinations
                 // before applying any root. Legacy records keep their own format.
                 if let Some(layouts) = &root_layouts {
-                    self.files.materialize_roots(&self.snapshot_targets(path, layouts)?, &selected.environment_ref)?;
+                    self.files.materialize_roots(
+                        &self.snapshot_targets(path, layouts)?,
+                        &selected.environment_ref,
+                    )?;
                 } else {
-                    scoped.materialize(&state, std::slice::from_ref(&selected.environment_ref), None, false)?;
+                    scoped.materialize(
+                        &state,
+                        std::slice::from_ref(&selected.environment_ref),
+                        None,
+                        false,
+                    )?;
                 }
             }
         } else {
@@ -1134,7 +1188,13 @@ impl Environments {
                 return Err("Native environment preparation modified the project view; no agent may see runtime-injected files".into());
             }
         }
-        self.finalize_input(path, retained_home.as_ref().unwrap_or(selected), generation, head, resources)
+        self.finalize_input(
+            path,
+            retained_home.as_ref().unwrap_or(selected),
+            generation,
+            head,
+            resources,
+        )
     }
 
     /// Seal the current workspace view as this execution's input composite.
@@ -1203,17 +1263,19 @@ impl Environments {
                 if self.config.launch.state_bound() && captured_root != "state" {
                     return Err("Historical rollback lacks state-root byte evidence (including private HOME); refusing unsafe partial scope restoration".into());
                 }
-                if let Some(scope) = launch.owned_scopes.as_ref().and_then(|scopes| {
-                    scopes.iter().find(|scope| scope.root != captured_root)
-                }) {
+                if let Some(scope) = launch
+                    .owned_scopes
+                    .as_ref()
+                    .and_then(|scopes| scopes.iter().find(|scope| scope.root != captured_root))
+                {
                     return Err(format!("Historical rollback has ownership only, not captured bytes, for {}:{}; refusing unsafe partial scope restoration", scope.root, scope.path));
                 }
             }
             let target_scopes = self.scope_paths(selected)?;
             if self.scope_paths(previous)?.iter().any(|previous| {
-                !target_scopes.iter().any(|scope| {
-                    workspace::scope_contains(Path::new(previous), Path::new(scope))
-                })
+                !target_scopes
+                    .iter()
+                    .any(|scope| workspace::scope_contains(Path::new(previous), Path::new(scope)))
             }) {
                 return Err("Historical rollback drops a dynamic environment scope outside the frozen roots; refusing unsafe partial scope restoration".into());
             }
@@ -1230,7 +1292,8 @@ impl Environments {
         if self.config.launch.state_bound() {
             let launch = self.load_launch(reference)?;
             if let Some(scopes) = &launch.owned_scopes {
-                let mut paths: Vec<_> = scopes.iter()
+                let mut paths: Vec<_> = scopes
+                    .iter()
                     .filter(|scope| scope.root == "workspace")
                     .map(|scope| scope.path.clone())
                     .collect();
@@ -1270,12 +1333,20 @@ impl Environments {
     }
 
     fn scope_root<'a>(&self, launch: &'a LaunchConfig) -> &'a str {
-        launch.environment.as_ref().and_then(|binding| binding.root.as_deref())
-            .unwrap_or(if self.config.launch.state_bound() { "state" } else { "workspace" })
+        launch
+            .environment
+            .as_ref()
+            .and_then(|binding| binding.root.as_deref())
+            .unwrap_or(if self.config.launch.state_bound() {
+                "state"
+            } else {
+                "workspace"
+            })
     }
 
     fn uses_project_scopes(&self, launch: &LaunchConfig) -> bool {
-        self.config.launch.state_bound() && launch.owned_scopes.is_some()
+        self.config.launch.state_bound()
+            && launch.owned_scopes.is_some()
             && self.scope_root(launch) == "workspace"
     }
 
@@ -1286,14 +1357,23 @@ impl Environments {
         let mut paths: Vec<_> = if self.uses_project_scopes(&launch) {
             Vec::new()
         } else {
-            self.config.scopes.iter().chain(&self.config.caches).cloned().collect()
+            self.config
+                .scopes
+                .iter()
+                .chain(&self.config.caches)
+                .cloned()
+                .collect()
         };
         if let Some(binding) = &launch.environment {
             paths.push(binding.prefix.clone());
         }
         if let Some(scopes) = &launch.owned_scopes {
-            paths.extend(scopes.iter().filter(|scope| scope.root == self.scope_root(&launch))
-                .map(|scope| scope.path.clone()));
+            paths.extend(
+                scopes
+                    .iter()
+                    .filter(|scope| scope.root == self.scope_root(&launch))
+                    .map(|scope| scope.path.clone()),
+            );
         } else {
             paths.extend(launch.managed_scopes);
         }
@@ -1304,18 +1384,32 @@ impl Environments {
 
     pub(crate) fn scoped_files(&self, reference: &str) -> Result<Files, String> {
         let launch = self.load_launch(reference)?;
-        let caches = if self.uses_project_scopes(&launch) { &[][..] } else { &self.config.caches };
-        let scopes: Vec<_> = self.scope_paths(reference)?.into_iter()
-            .filter(|scope| !caches.contains(scope)).collect();
-        Ok(Files::environment(&self.directory.join("files"), &scopes, caches)?
-            .with_project_index(!self.config.launch.state_bound()))
+        let caches = if self.uses_project_scopes(&launch) {
+            &[][..]
+        } else {
+            &self.config.caches
+        };
+        let scopes: Vec<_> = self
+            .scope_paths(reference)?
+            .into_iter()
+            .filter(|scope| !caches.contains(scope))
+            .collect();
+        Ok(
+            Files::environment(&self.directory.join("files"), &scopes, caches)?
+                .with_project_index(!self.config.launch.state_bound()),
+        )
     }
 
     fn capture_scoped(&self, path: &Path, parent: &str, reference: &str) -> Result<String, String> {
         if let Some(layouts) = self.root_layouts_for_launch(&self.load_launch(reference)?)? {
-            self.files.capture_roots_reusing(&self.snapshot_targets(path, &layouts)?, &layouts, parent)
+            self.files.capture_roots_reusing(
+                &self.snapshot_targets(path, &layouts)?,
+                &layouts,
+                parent,
+            )
         } else {
-            self.scoped_files(reference)?.capture_reusing(&self.environment_root_for(path, reference)?, parent)
+            self.scoped_files(reference)?
+                .capture_reusing(&self.environment_root_for(path, reference)?, parent)
         }
     }
 
@@ -1351,17 +1445,26 @@ impl Environments {
             };
             for scope in &exclusions {
                 real_child_path(path, &path.join(scope), false)?;
-                if let Some(name) = tracked.split('\0').filter(|name| !name.is_empty()).find(|name| {
-                    workspace::scope_contains(Path::new(name), Path::new(scope))
-                        || workspace::scope_contains(Path::new(scope), Path::new(name))
-                }) {
-                    return Err(format!("Managed environment/cache conflicts with tracked file: {name}"));
+                if let Some(name) =
+                    tracked
+                        .split('\0')
+                        .filter(|name| !name.is_empty())
+                        .find(|name| {
+                            workspace::scope_contains(Path::new(name), Path::new(scope))
+                                || workspace::scope_contains(Path::new(scope), Path::new(name))
+                        })
+                {
+                    return Err(format!(
+                        "Managed environment/cache conflicts with tracked file: {name}"
+                    ));
                 }
             }
         } else {
             let mut policy = self.config.clone();
-            policy.scopes = exclusions.into_iter()
-                .filter(|scope| !policy.caches.contains(scope)).collect();
+            policy.scopes = exclusions
+                .into_iter()
+                .filter(|scope| !policy.caches.contains(scope))
+                .collect();
             policy.check_tracked(path)?;
         }
         Ok(CompositeResult {
@@ -1571,7 +1674,11 @@ fn clean_command_with_environment(
     let node_variable = |key: &std::ffi::OsStr| {
         let key = key.to_string_lossy();
         matches!(key.as_ref(), "NODE_OPTIONS" | "NODE_PATH")
-            || cfg!(windows) && matches!(key.to_ascii_uppercase().as_str(), "NODE_OPTIONS" | "NODE_PATH")
+            || cfg!(windows)
+                && matches!(
+                    key.to_ascii_uppercase().as_str(),
+                    "NODE_OPTIONS" | "NODE_PATH"
+                )
     };
     let mut loaders = BTreeMap::<String, String>::new();
     let mut business_node = BTreeMap::<String, String>::new();
@@ -1579,9 +1686,13 @@ fn clean_command_with_environment(
         .get_envs()
         .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
         .collect();
-    let root = |name: &str| overrides.iter().find_map(|(key, value)| {
-        (key == name).then(|| value.as_ref().map(PathBuf::from)).flatten()
-    });
+    let root = |name: &str| {
+        overrides.iter().find_map(|(key, value)| {
+            (key == name)
+                .then(|| value.as_ref().map(PathBuf::from))
+                .flatten()
+        })
+    };
     let project_roots = root("GRAPHER_ORIGINAL_ROOT").zip(root("GRAPHER_WORKSPACE_ROOT"));
     command.env_clear();
     let mut inherited = BTreeMap::new();
@@ -1589,8 +1700,13 @@ fn clean_command_with_environment(
         for (key, value) in &ambient {
             let upper = key.to_string_lossy().to_ascii_uppercase();
             if binding.is_some() && node_variable(key) {
-                business_node.insert(upper, value.clone().into_string()
-                    .map_err(|_| "Non-UTF-8 business Node binding")?);
+                business_node.insert(
+                    upper,
+                    value
+                        .clone()
+                        .into_string()
+                        .map_err(|_| "Non-UTF-8 business Node binding")?,
+                );
                 continue;
             }
             // Keep business configuration and credentials, not an outer Agent's
@@ -1616,10 +1732,16 @@ fn clean_command_with_environment(
         "TMPDIR",
         "LANG",
         "LC_ALL",
-    ].into_iter().chain(launch.inherit.iter().map(String::as_str)) {
+    ]
+    .into_iter()
+    .chain(launch.inherit.iter().map(String::as_str))
+    {
         if let Some((name, value)) = ambient.iter().find(|(name, _)| {
-            if cfg!(windows) { name.to_string_lossy().eq_ignore_ascii_case(key) }
-            else { name.as_os_str() == std::ffi::OsStr::new(key) }
+            if cfg!(windows) {
+                name.to_string_lossy().eq_ignore_ascii_case(key)
+            } else {
+                name.as_os_str() == std::ffi::OsStr::new(key)
+            }
         }) {
             inherited.insert(name.clone(), value.clone());
         }
@@ -1628,18 +1750,34 @@ fn clean_command_with_environment(
         // These are activation metadata, not arbitrary strings or secrets.
         // Match project PATH rebinding without adopting/relocating an environment.
         let value = if launch.unbound_path.is_some()
-            && matches!(key.to_string_lossy().to_ascii_uppercase().as_str(),
-                "VIRTUAL_ENV" | "CONDA_PREFIX" | "CONDA_DEFAULT_ENV")
-        {
-            project_roots.as_ref().and_then(|(source, workspace)| {
-                let mapped = project_path_template(Path::new(value.to_str()?), source)?;
-                Some(std::ffi::OsString::from(mapped.replace("{workspace}",
-                    &native::host_path(workspace).to_string_lossy().replace('\\', "/"))))
-            }).unwrap_or(value)
-        } else { value };
+            && matches!(
+                key.to_string_lossy().to_ascii_uppercase().as_str(),
+                "VIRTUAL_ENV" | "CONDA_PREFIX" | "CONDA_DEFAULT_ENV"
+            ) {
+            project_roots
+                .as_ref()
+                .and_then(|(source, workspace)| {
+                    let mapped = project_path_template(Path::new(value.to_str()?), source)?;
+                    Some(std::ffi::OsString::from(
+                        mapped.replace(
+                            "{workspace}",
+                            &native::host_path(workspace)
+                                .to_string_lossy()
+                                .replace('\\', "/"),
+                        ),
+                    ))
+                })
+                .unwrap_or(value)
+        } else {
+            value
+        };
         if binding.is_some() && loader_variable(&key.to_string_lossy()) {
-            loaders.insert(key.to_string_lossy().into(), value.into_string()
-                .map_err(|_| "Non-UTF-8 loader binding")?);
+            loaders.insert(
+                key.to_string_lossy().into(),
+                value
+                    .into_string()
+                    .map_err(|_| "Non-UTF-8 loader binding")?,
+            );
         } else {
             command.env(key, value);
         }
@@ -1650,19 +1788,31 @@ fn clean_command_with_environment(
         if binding.is_some() && node_variable(&key) {
             business_node.remove(&upper);
             if let Some(value) = value {
-                business_node.insert(upper, value.into_string()
-                    .map_err(|_| "Non-UTF-8 business Node binding")?);
+                business_node.insert(
+                    upper,
+                    value
+                        .into_string()
+                        .map_err(|_| "Non-UTF-8 business Node binding")?,
+                );
             }
             command.env_remove(key);
             continue;
         }
         if binding.is_some() && loader_variable(&key.to_string_lossy()) {
-            loaders.retain(|name, _| if cfg!(windows) {
-                !name.eq_ignore_ascii_case(&key.to_string_lossy())
-            } else { name != &key.to_string_lossy() });
+            loaders.retain(|name, _| {
+                if cfg!(windows) {
+                    !name.eq_ignore_ascii_case(&key.to_string_lossy())
+                } else {
+                    name != &key.to_string_lossy()
+                }
+            });
             if let Some(value) = value {
-                loaders.insert(key.to_string_lossy().into(), value.into_string()
-                    .map_err(|_| "Non-UTF-8 loader binding")?);
+                loaders.insert(
+                    key.to_string_lossy().into(),
+                    value
+                        .into_string()
+                        .map_err(|_| "Non-UTF-8 loader binding")?,
+                );
             }
             command.env_remove(key);
             continue;
@@ -1684,7 +1834,10 @@ fn clean_command_with_environment(
             command.env(key, value);
         }
     }
-    if let Some((source, workspace)) = project_roots.as_ref().filter(|_| launch.unbound_path.is_some()) {
+    if let Some((source, workspace)) = project_roots
+        .as_ref()
+        .filter(|_| launch.unbound_path.is_some())
+    {
         if let Some(value) = business_node.get("NODE_PATH") {
             let value = rebind_project_module_path(value, source, workspace, "NODE_PATH")?;
             business_node.insert("NODE_PATH".into(), value);
@@ -1692,24 +1845,44 @@ fn clean_command_with_environment(
         // Use effective values AFTER explicit overrides/removals and frozen
         // launch variables. These known business paths stay transient, not new
         // L. Startup/config files are paths, not contents to parse or rewrite.
-        let business_paths: Vec<_> = command.get_envs().filter_map(|(key, value)| {
-            let name = key.to_str()?;
-            // npm treats its config-variable names case-insensitively on every
-            // host (including npm's own lowercase variables in script children).
-            let name = if cfg!(windows) || name.eq_ignore_ascii_case("NPM_CONFIG_USERCONFIG") {
-                name.to_ascii_uppercase()
-            } else { name.to_string() };
-            if !matches!(name.as_str(), "PYTHONPATH" | "BASH_ENV" | "ENV" | "PIP_CONFIG_FILE" | "NPM_CONFIG_USERCONFIG") { return None; }
-            Some((key.to_os_string(), name, value?.to_str()?.to_string()))
-        }).collect();
+        let business_paths: Vec<_> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                let name = key.to_str()?;
+                // npm treats its config-variable names case-insensitively on every
+                // host (including npm's own lowercase variables in script children).
+                let name = if cfg!(windows) || name.eq_ignore_ascii_case("NPM_CONFIG_USERCONFIG") {
+                    name.to_ascii_uppercase()
+                } else {
+                    name.to_string()
+                };
+                if !matches!(
+                    name.as_str(),
+                    "PYTHONPATH" | "BASH_ENV" | "ENV" | "PIP_CONFIG_FILE" | "NPM_CONFIG_USERCONFIG"
+                ) {
+                    return None;
+                }
+                Some((key.to_os_string(), name, value?.to_str()?.to_string()))
+            })
+            .collect();
         for (key, name, value) in business_paths {
             let mapped = if name == "PYTHONPATH" {
-                Some(rebind_project_module_path(&value, source, workspace, &name)?)
+                Some(rebind_project_module_path(
+                    &value, source, workspace, &name,
+                )?)
             } else {
-                project_path_template(Path::new(&value), source).map(|mapped| mapped.replace("{workspace}",
-                    &native::host_path(workspace).to_string_lossy().replace('\\', "/")))
+                project_path_template(Path::new(&value), source).map(|mapped| {
+                    mapped.replace(
+                        "{workspace}",
+                        &native::host_path(workspace)
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    )
+                })
             };
-            if let Some(value) = mapped { command.env(key, value); }
+            if let Some(value) = mapped {
+                command.env(key, value);
+            }
         }
     }
     // Business loader variables must not inject code into bubblewrap/Seatbelt
@@ -1722,8 +1895,10 @@ fn clean_command_with_environment(
         );
         // Apply only to business children, never the trusted Node, its build
         // bootstrap, activation capture, extension/MCP factories or probes.
-        command.env("GRAPHER_BUSINESS_NODE_ENV",
-            serde_json::to_string(&business_node).map_err(|e| e.to_string())?);
+        command.env(
+            "GRAPHER_BUSINESS_NODE_ENV",
+            serde_json::to_string(&business_node).map_err(|e| e.to_string())?,
+        );
     }
     if let Some(path) = binding {
         command.env("GRAPHER_LAUNCH_BINDING", native::host_path(path));
@@ -1908,9 +2083,14 @@ pub(crate) fn bind_command(
     if config.discovery {
         // Read only the launcher's explicit source binding, never a model
         // argument or an inherited outer Agent's environment variable.
-        let source = command.get_envs().find_map(|(key, value)| {
-            (key == "GRAPHER_ORIGINAL_ROOT").then(|| value.map(PathBuf::from)).flatten()
-        }).ok_or("Missing source binding for native environment observation")?;
+        let source = command
+            .get_envs()
+            .find_map(|(key, value)| {
+                (key == "GRAPHER_ORIGINAL_ROOT")
+                    .then(|| value.map(PathBuf::from))
+                    .flatten()
+            })
+            .ok_or("Missing source binding for native environment observation")?;
         let context = crate::environment_discovery::context_with_source(
             path,
             state.as_deref(),

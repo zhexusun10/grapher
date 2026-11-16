@@ -62,7 +62,10 @@ pub(super) fn project_event(event: &mut Value) {
     if let Some(message) = event.get_mut("message") {
         project_message(message);
     }
-    if let Some(message) = event.get_mut("entry").and_then(|entry| entry.get_mut("message")) {
+    if let Some(message) = event
+        .get_mut("entry")
+        .and_then(|entry| entry.get_mut("message"))
+    {
         project_message(message);
     }
     if let Some(messages) = event.get_mut("messages").and_then(Value::as_array_mut) {
@@ -85,10 +88,19 @@ mod tests {
         let stored = format!("{raw}\n\n[Image: original 3000x2000, displayed at 2000x1333.]");
         assert!(identifies(&stored, &id));
         assert!(!identifies(&stored, &other));
-        assert!(!identifies(&format!("{raw}{}", prompt("other turn", Some(&other))), &id));
+        assert!(!identifies(
+            &format!("{raw}{}", prompt("other turn", Some(&other))),
+            &id
+        ));
         assert!(!identifies("review screenshot", &id));
-        assert_eq!(strip(&stored), "review screenshot\n\n[Image: original 3000x2000, displayed at 2000x1333.]");
-        assert_eq!(strip("literal\n\n<grapher-feedback-id>not-an-id</grapher-feedback-id>"), "literal\n\n<grapher-feedback-id>not-an-id</grapher-feedback-id>");
+        assert_eq!(
+            strip(&stored),
+            "review screenshot\n\n[Image: original 3000x2000, displayed at 2000x1333.]"
+        );
+        assert_eq!(
+            strip("literal\n\n<grapher-feedback-id>not-an-id</grapher-feedback-id>"),
+            "literal\n\n<grapher-feedback-id>not-an-id</grapher-feedback-id>"
+        );
     }
 
     #[test]

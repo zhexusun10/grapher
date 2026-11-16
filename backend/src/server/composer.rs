@@ -1,8 +1,8 @@
 use super::*;
 use crate::engine::composer as rpc;
 use crate::model::RecalledMessage;
-use std::collections::BTreeMap;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 pub(super) fn models(body: &Value, service: &Arc<Service>) -> Result<Value, String> {
     let run: String = argument(body, "runId")?;
@@ -129,7 +129,9 @@ fn target(body: &Value, service: &Arc<Service>) -> Result<String, String> {
 
 pub(super) fn command(body: &Value, service: &Arc<Service>) -> Result<Value, String> {
     let operation: String = argument(body, "operation")?;
-    if operation == "withdraw" { return withdraw(body, service); }
+    if operation == "withdraw" {
+        return withdraw(body, service);
+    }
     let target = target(body, service)?;
     if operation == "catalog" {
         let instance = rpc::session(&target)?;
@@ -161,10 +163,16 @@ pub(super) fn command(body: &Value, service: &Arc<Service>) -> Result<Value, Str
     }
 }
 
-fn withdrawal_reply(body: &Value, state: &Snapshot, messages: &[RecalledMessage]) -> Result<Value, String> {
+fn withdrawal_reply(
+    body: &Value,
+    state: &Snapshot,
+    messages: &[RecalledMessage],
+) -> Result<Value, String> {
     let snapshot = if body["detail"] == "metadata" {
         crate::snapshot_view::snapshot_metadata(state)?
-    } else { serde_json::to_value(state).map_err(|e| e.to_string())? };
+    } else {
+        serde_json::to_value(state).map_err(|e| e.to_string())?
+    };
     Ok(json!({"messages":messages, "snapshot":snapshot}))
 }
 
@@ -173,28 +181,47 @@ fn withdraw(body: &Value, service: &Arc<Service>) -> Result<Value, String> {
     let node: Option<String> = argument(body, "node")?;
     let request_id: String = argument::<Option<String>>(body, "requestId")?
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    if Uuid::parse_str(&request_id).map(|id| id.to_string() != request_id).unwrap_or(true) {
+    if Uuid::parse_str(&request_id)
+        .map(|id| id.to_string() != request_id)
+        .unwrap_or(true)
+    {
         return Err("Invalid withdrawal request ID".into());
     }
     // A lost HTTP response must not make a retry clear newly queued messages.
     // Serialize only recalls, never hold the Run mutex while awaiting Pi. Weak
     // entries keep completed/deleted conversations out of a permanent registry.
-    static LOCKS: std::sync::OnceLock<Mutex<BTreeMap<String, std::sync::Weak<Mutex<()>>>>> = std::sync::OnceLock::new();
+    static LOCKS: std::sync::OnceLock<Mutex<BTreeMap<String, std::sync::Weak<Mutex<()>>>>> =
+        std::sync::OnceLock::new();
     let lock = {
-        let mut locks = LOCKS.get_or_init(Default::default).lock().map_err(|e| e.to_string())?;
+        let mut locks = LOCKS
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|e| e.to_string())?;
         locks.retain(|_, lock| lock.strong_count() > 0);
-        let lock = locks.get(&run).and_then(std::sync::Weak::upgrade).unwrap_or_else(|| Arc::new(Mutex::new(())));
+        let lock = locks
+            .get(&run)
+            .and_then(std::sync::Weak::upgrade)
+            .unwrap_or_else(|| Arc::new(Mutex::new(())));
         locks.insert(run.clone(), Arc::downgrade(&lock));
         lock
     };
     let _guard = lock.lock().map_err(|e| e.to_string())?;
     {
         let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-        if runtime.state.run_id != run { return Err("Run changed while withdrawing messages".into()); }
+        if runtime.state.run_id != run {
+            return Err("Run changed while withdrawing messages".into());
+        }
         for event in &runtime.state.events {
-            if let EventKind::QueueWithdrawalRecorded { request_id: id, node: owner, messages } = &event.kind {
+            if let EventKind::QueueWithdrawalRecorded {
+                request_id: id,
+                node: owner,
+                messages,
+            } = &event.kind
+            {
                 if id == &request_id {
-                    if owner != &node { return Err("Withdrawal request ID belongs to another conversation".into()); }
+                    if owner != &node {
+                        return Err("Withdrawal request ID belongs to another conversation".into());
+                    }
                     return withdrawal_reply(body, &runtime.state, messages);
                 }
             }
@@ -206,14 +233,24 @@ fn withdraw(body: &Value, service: &Arc<Service>) -> Result<Value, String> {
     let instance = rpc::session(&target)?;
     let (events, pending) = {
         let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-        if runtime.state.run_id != run { return Err("Run changed while withdrawing messages".into()); }
+        if runtime.state.run_id != run {
+            return Err("Run changed while withdrawing messages".into());
+        }
         let pending = rpc::start_request(&target, &instance, json!({"type":"clear_queue"}))?;
         (runtime.state.events.clone(), pending)
     };
     let cleared = pending.wait()?;
     let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-    if runtime.state.run_id != run { return Err("Run changed while withdrawing messages".into()); }
-    let messages = record_withdrawal(&mut runtime, &target, &events, &cleared, Some((request_id, node)))?;
+    if runtime.state.run_id != run {
+        return Err("Run changed while withdrawing messages".into());
+    }
+    let messages = record_withdrawal(
+        &mut runtime,
+        &target,
+        &events,
+        &cleared,
+        Some((request_id, node)),
+    )?;
     withdrawal_reply(body, &runtime.state, &messages)
 }
 
@@ -230,49 +267,112 @@ struct WithdrawnQueueEntry {
 // The adapter reports only objects removed from the actual unread queues.
 // Resolve their stable IDs against acceptance at pipe-write time, never text:
 // extensions may rewrite different submissions to the same instruction.
-fn record_withdrawal(runtime: &mut Runtime, target: &str, events: &[crate::model::Event], cleared: &Value,
-    receipt: Option<(String, Option<String>)>) -> Result<Vec<RecalledMessage>, String> {
-    let withdrawn: BTreeSet<i64> = events.iter().flat_map(|event| match &event.kind {
-        EventKind::SteersWithdrawn { message_sequences, .. } => message_sequences.clone(),
-        _ => vec![],
-    }).collect();
+fn record_withdrawal(
+    runtime: &mut Runtime,
+    target: &str,
+    events: &[crate::model::Event],
+    cleared: &Value,
+    receipt: Option<(String, Option<String>)>,
+) -> Result<Vec<RecalledMessage>, String> {
+    let withdrawn: BTreeSet<i64> = events
+        .iter()
+        .flat_map(|event| match &event.kind {
+            EventKind::SteersWithdrawn {
+                message_sequences, ..
+            } => message_sequences.clone(),
+            _ => vec![],
+        })
+        .collect();
     let mut sequences = BTreeSet::new();
     let mut kinds = Vec::new();
     let mut messages = Vec::new();
     let queued: Vec<WithdrawnQueueEntry> = if let Some(entries) = cleared.get("messages") {
-        serde_json::from_value(entries.clone()).map_err(|e| format!("Invalid queue withdrawal receipt: {e}"))?
+        serde_json::from_value(entries.clone())
+            .map_err(|e| format!("Invalid queue withdrawal receipt: {e}"))?
     } else {
         // Older adapters can only correlate Planner's existing UUID envelope.
         // Unmarked legacy Node input is returned without guessing a card ID.
-        ["steering", "followUp"].iter().flat_map(|key| cleared[*key].as_array().into_iter().flatten()
-            .filter_map(Value::as_str).map(|text| {
-                let request_id = text.rsplit_once("\n\n<grapher-steer-id>")
-                    .and_then(|(_, tail)| tail.strip_suffix("</grapher-steer-id>"))
-                    .filter(|id| Uuid::parse_str(id).is_ok()).map(str::to_owned);
-                WithdrawnQueueEntry { request_id, text: text.into(), images: None }
-            })).collect()
+        ["steering", "followUp"]
+            .iter()
+            .flat_map(|key| {
+                cleared[*key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|text| {
+                        let request_id = text
+                            .rsplit_once("\n\n<grapher-steer-id>")
+                            .and_then(|(_, tail)| tail.strip_suffix("</grapher-steer-id>"))
+                            .filter(|id| Uuid::parse_str(id).is_ok())
+                            .map(str::to_owned);
+                        WithdrawnQueueEntry {
+                            request_id,
+                            text: text.into(),
+                            images: None,
+                        }
+                    })
+            })
+            .collect()
     };
     let mut seen = BTreeSet::new();
     for entry in queued {
         if let Some(id) = entry.request_id.as_deref() {
-            if !seen.insert(id.to_string()) { continue; }
+            if !seen.insert(id.to_string()) {
+                continue;
+            }
             if let Some(event) = events.iter().find(|event| match &event.kind {
-                EventKind::Steered { request_id: Some(request_id), execution_id, .. } =>
-                    request_id == id && execution_id == target,
-                EventKind::PlannerSteerSubmitted { request_id, .. } => target.starts_with("planner:") && request_id == id,
+                EventKind::Steered {
+                    request_id: Some(request_id),
+                    execution_id,
+                    ..
+                } => request_id == id && execution_id == target,
+                EventKind::PlannerSteerSubmitted { request_id, .. } => {
+                    target.starts_with("planner:") && request_id == id
+                }
                 _ => false,
             }) {
                 match &event.kind {
-                    EventKind::Steered { instruction, images, .. } => {
-                        if withdrawn.contains(&event.sequence) { continue; }
+                    EventKind::Steered {
+                        instruction,
+                        images,
+                        ..
+                    } => {
+                        if withdrawn.contains(&event.sequence) {
+                            continue;
+                        }
                         sequences.insert(event.sequence);
-                        messages.push(RecalledMessage { text: instruction.clone(), images: images.clone() });
+                        messages.push(RecalledMessage {
+                            text: instruction.clone(),
+                            images: images.clone(),
+                        });
                     }
-                    EventKind::PlannerSteerSubmitted { planning_id, request_id, instruction, images } => {
-                        if planner_steer_status(&runtime.state, planning_id, request_id).is_some_and(|status|
-                            matches!(status.as_str(), "consumed" | "withdrawn" | "handled" | "failed")) { continue; }
-                        kinds.push(EventKind::PlannerSteerStatus { planning_id: planning_id.clone(), request_id: request_id.clone(), status: "withdrawn".into(), error: None });
-                        messages.push(RecalledMessage { text: instruction.clone(), images: images.clone() });
+                    EventKind::PlannerSteerSubmitted {
+                        planning_id,
+                        request_id,
+                        instruction,
+                        images,
+                    } => {
+                        if planner_steer_status(&runtime.state, planning_id, request_id)
+                            .is_some_and(|status| {
+                                matches!(
+                                    status.as_str(),
+                                    "consumed" | "withdrawn" | "handled" | "failed"
+                                )
+                            })
+                        {
+                            continue;
+                        }
+                        kinds.push(EventKind::PlannerSteerStatus {
+                            planning_id: planning_id.clone(),
+                            request_id: request_id.clone(),
+                            status: "withdrawn".into(),
+                            error: None,
+                        });
+                        messages.push(RecalledMessage {
+                            text: instruction.clone(),
+                            images: images.clone(),
+                        });
                     }
                     _ => unreachable!(),
                 }
@@ -281,13 +381,23 @@ fn record_withdrawal(runtime: &mut Runtime, target: &str, events: &[crate::model
         }
         // Extension-owned or legacy input has no provable Grapher identity.
         // Return the removed content, but never suppress a same-text card.
-        messages.push(RecalledMessage { text: entry.text, images: entry.images });
+        messages.push(RecalledMessage {
+            text: entry.text,
+            images: entry.images,
+        });
     }
     if !sequences.is_empty() {
-        kinds.push(EventKind::SteersWithdrawn { execution_id: target.into(), message_sequences: sequences.into_iter().collect() });
+        kinds.push(EventKind::SteersWithdrawn {
+            execution_id: target.into(),
+            message_sequences: sequences.into_iter().collect(),
+        });
     }
     if let Some((request_id, node)) = receipt {
-        kinds.push(EventKind::QueueWithdrawalRecorded { request_id, node, messages: messages.clone() });
+        kinds.push(EventKind::QueueWithdrawalRecorded {
+            request_id,
+            node,
+            messages: messages.clone(),
+        });
     }
     runtime.emit_outputs(kinds)?;
     Ok(messages)
@@ -304,26 +414,56 @@ mod tests {
         runtime.state.run_id = Uuid::new_v4().to_string();
         let ids: Vec<String> = (0..4).map(|_| Uuid::new_v4().to_string()).collect();
         for (index, execution) in ["worker", "worker", "other"].iter().enumerate() {
-            runtime.emit(EventKind::Steered { execution_id: (*execution).into(), node: (*execution).into(),
-                instruction: if index == 1 { "original draft" } else { "same" }.into(),
-                request_id: Some(ids[index].clone()), images: None }).unwrap();
+            runtime
+                .emit(EventKind::Steered {
+                    execution_id: (*execution).into(),
+                    node: (*execution).into(),
+                    instruction: if index == 1 { "original draft" } else { "same" }.into(),
+                    request_id: Some(ids[index].clone()),
+                    images: None,
+                })
+                .unwrap();
         }
         let events = runtime.state.events.clone();
         let latest = events[1].sequence;
         // A later identical send is outside the clear_queue pipe boundary.
-        runtime.emit(EventKind::Steered { execution_id: "worker".into(), node: "worker".into(),
-            instruction: "same".into(), request_id: Some(ids[3].clone()), images: None }).unwrap();
+        runtime
+            .emit(EventKind::Steered {
+                execution_id: "worker".into(),
+                node: "worker".into(),
+                instruction: "same".into(),
+                request_id: Some(ids[3].clone()),
+                images: None,
+            })
+            .unwrap();
         // An extension rewrote the queued draft to the already-read text.
-        let removed = record_withdrawal(&mut runtime, "worker", &events,
-            &json!({"messages":[{"requestId":ids[1], "text":"same"}]}), None).unwrap();
+        let removed = record_withdrawal(
+            &mut runtime,
+            "worker",
+            &events,
+            &json!({"messages":[{"requestId":ids[1], "text":"same"}]}),
+            None,
+        )
+        .unwrap();
         assert_eq!(removed[0].text, "original draft");
         assert!(matches!(&runtime.state.events.last().unwrap().kind,
             EventKind::SteersWithdrawn { execution_id, message_sequences } if execution_id == "worker" && message_sequences == &vec![latest]));
         let count = runtime.state.events.len();
         let events = runtime.state.events.clone();
-        assert!(record_withdrawal(&mut runtime, "worker", &events,
-            &json!({"steering":[], "followUp":[]}), None).unwrap().is_empty());
-        assert_eq!(runtime.state.events.len(), count, "an empty queue never recalls a consumed turn");
+        assert!(record_withdrawal(
+            &mut runtime,
+            "worker",
+            &events,
+            &json!({"steering":[], "followUp":[]}),
+            None
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            runtime.state.events.len(),
+            count,
+            "an empty queue never recalls a consumed turn"
+        );
         let replay = runtime.store.load(&runtime.state.run_id).unwrap();
         assert!(matches!(&replay.events.last().unwrap().kind,
             EventKind::SteersWithdrawn { message_sequences, .. } if message_sequences == &vec![latest]));
@@ -336,24 +476,65 @@ mod tests {
             let mut runtime = Runtime::open(temp.path()).unwrap();
             runtime.state.run_id = Uuid::new_v4().to_string();
             let ids: Vec<String> = (0..4).map(|_| Uuid::new_v4().to_string()).collect();
-            for (index, instruction) in ["same", "first original", "second original", "same"].iter().enumerate() {
-                runtime.emit(EventKind::Steered { execution_id: if index == 3 { "unrelated" } else { target }.into(),
-                    node: target.into(), instruction: (*instruction).into(), request_id: Some(ids[index].clone()),
-                    images: Some(vec![crate::model::ImageAttachment { r#type: "image".into(), mime_type: "image/png".into(), data: index.to_string(), name: None }]),
-                }).unwrap();
+            for (index, instruction) in ["same", "first original", "second original", "same"]
+                .iter()
+                .enumerate()
+            {
+                runtime
+                    .emit(EventKind::Steered {
+                        execution_id: if index == 3 { "unrelated" } else { target }.into(),
+                        node: target.into(),
+                        instruction: (*instruction).into(),
+                        request_id: Some(ids[index].clone()),
+                        images: Some(vec![crate::model::ImageAttachment {
+                            r#type: "image".into(),
+                            mime_type: "image/png".into(),
+                            data: index.to_string(),
+                            name: None,
+                        }]),
+                    })
+                    .unwrap();
             }
             let events = runtime.state.events.clone();
-            let removed = record_withdrawal(&mut runtime, target, &events, &json!({"messages":[
-                {"requestId":ids[1],"text":"same"}, {"requestId":ids[2],"text":"same"},
-                {"text":"same"}, {"requestId":ids[3],"text":"same"}
-            ]}), None).unwrap();
-            assert_eq!(removed.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(),
-                ["first original", "second original", "same", "same"]);
+            let removed = record_withdrawal(
+                &mut runtime,
+                target,
+                &events,
+                &json!({"messages":[
+                    {"requestId":ids[1],"text":"same"}, {"requestId":ids[2],"text":"same"},
+                    {"text":"same"}, {"requestId":ids[3],"text":"same"}
+                ]}),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                removed
+                    .iter()
+                    .map(|item| item.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["first original", "second original", "same", "same"]
+            );
             assert_eq!(removed[0].images.as_ref().unwrap()[0].data, "1");
             assert_eq!(removed[1].images.as_ref().unwrap()[0].data, "2");
-            assert_eq!(runtime.state.withdrawn_steer_sequences(), BTreeSet::from([events[1].sequence, events[2].sequence]));
-            assert!(!runtime.state.withdrawn_steer_sequences().contains(&events[0].sequence), "already-read turn survives");
-            assert_eq!(runtime.store.load(&runtime.state.run_id).unwrap().withdrawn_steer_sequences(), runtime.state.withdrawn_steer_sequences());
+            assert_eq!(
+                runtime.state.withdrawn_steer_sequences(),
+                BTreeSet::from([events[1].sequence, events[2].sequence])
+            );
+            assert!(
+                !runtime
+                    .state
+                    .withdrawn_steer_sequences()
+                    .contains(&events[0].sequence),
+                "already-read turn survives"
+            );
+            assert_eq!(
+                runtime
+                    .store
+                    .load(&runtime.state.run_id)
+                    .unwrap()
+                    .withdrawn_steer_sequences(),
+                runtime.state.withdrawn_steer_sequences()
+            );
         }
     }
 
@@ -364,20 +545,38 @@ mod tests {
         runtime.state.run_id = Uuid::new_v4().to_string();
         let ids = [Uuid::new_v4().to_string(), Uuid::new_v4().to_string()];
         for id in &ids {
-            runtime.emit(EventKind::PlannerSteerSubmitted { planning_id: "plan".into(), request_id: id.clone(),
-                instruction: "same".into(), images: Some(vec![crate::model::ImageAttachment {
-                    r#type: "image".into(), mime_type: "image/png".into(), data: "image-data".into(), name: None,
-                }]) }).unwrap();
+            runtime
+                .emit(EventKind::PlannerSteerSubmitted {
+                    planning_id: "plan".into(),
+                    request_id: id.clone(),
+                    instruction: "same".into(),
+                    images: Some(vec![crate::model::ImageAttachment {
+                        r#type: "image".into(),
+                        mime_type: "image/png".into(),
+                        data: "image-data".into(),
+                        name: None,
+                    }]),
+                })
+                .unwrap();
         }
         let events = runtime.state.events.clone();
         let removed = record_withdrawal(&mut runtime, "planner:plan", &events,
             &json!({"messages":[{"requestId":ids[1], "text":"extension replaced the entire input"}]}), None).unwrap();
         assert_eq!(removed[0].text, "same");
         assert_eq!(removed[0].images.as_ref().unwrap()[0].data, "image-data");
-        assert_eq!(planner_steer_status(&runtime.state, "plan", &ids[0]).as_deref(), Some("submitted"));
-        assert_eq!(planner_steer_status(&runtime.state, "plan", &ids[1]).as_deref(), Some("withdrawn"));
+        assert_eq!(
+            planner_steer_status(&runtime.state, "plan", &ids[0]).as_deref(),
+            Some("submitted")
+        );
+        assert_eq!(
+            planner_steer_status(&runtime.state, "plan", &ids[1]).as_deref(),
+            Some("withdrawn")
+        );
         let replay = runtime.store.load(&runtime.state.run_id).unwrap();
-        assert_eq!(planner_steer_status(&replay, "plan", &ids[1]).as_deref(), Some("withdrawn"));
+        assert_eq!(
+            planner_steer_status(&replay, "plan", &ids[1]).as_deref(),
+            Some("withdrawn")
+        );
     }
 
     #[test]
@@ -388,18 +587,43 @@ mod tests {
         let run = runtime.state.run_id.clone();
         let id = Uuid::new_v4().to_string();
         let message_id = Uuid::new_v4().to_string();
-        runtime.emit(EventKind::Steered { execution_id: "old-attempt".into(), node: "worker".into(),
-            instruction: "recall this".into(), request_id: Some(message_id.clone()), images: None }).unwrap();
+        runtime
+            .emit(EventKind::Steered {
+                execution_id: "old-attempt".into(),
+                node: "worker".into(),
+                instruction: "recall this".into(),
+                request_id: Some(message_id.clone()),
+                images: None,
+            })
+            .unwrap();
         let events = runtime.state.events.clone();
-        record_withdrawal(&mut runtime, "old-attempt", &events,
-            &json!({"messages":[{"requestId":message_id,"text":"rewritten"}]}), Some((id.clone(), Some("worker".into())))).unwrap();
-        runtime.emit(EventKind::Steered { execution_id: "new-attempt".into(), node: "worker".into(),
-            instruction: "keep this queued".into(), request_id: Some(Uuid::new_v4().to_string()), images: None }).unwrap();
+        record_withdrawal(
+            &mut runtime,
+            "old-attempt",
+            &events,
+            &json!({"messages":[{"requestId":message_id,"text":"rewritten"}]}),
+            Some((id.clone(), Some("worker".into()))),
+        )
+        .unwrap();
+        runtime
+            .emit(EventKind::Steered {
+                execution_id: "new-attempt".into(),
+                node: "worker".into(),
+                instruction: "keep this queued".into(),
+                request_id: Some(Uuid::new_v4().to_string()),
+                images: None,
+            })
+            .unwrap();
         // Restart from durable evidence; no Pi process exists in this test.
         runtime.state = runtime.store.load(&run).unwrap();
         let count = runtime.state.events.len();
-        let service = Arc::new(Service { runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
-            drive_signal: (Mutex::new(0), Condvar::new()), planning: AtomicBool::new(false), extension: temp.path().join("unused") });
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(false),
+            drive_signal: (Mutex::new(0), Condvar::new()),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("unused"),
+        });
         let body = json!({"runId":run,"node":"worker","requestId":id,"operation":"withdraw","detail":"metadata"});
         for _ in 0..2 {
             let reply = command(&body, &service).unwrap();
@@ -408,11 +632,24 @@ mod tests {
         }
         let mut wrong_node = body.clone();
         wrong_node["node"] = json!("other");
-        assert!(command(&wrong_node, &service).unwrap_err().contains("another conversation"));
+        assert!(command(&wrong_node, &service)
+            .unwrap_err()
+            .contains("another conversation"));
         let mut wrong_run = body.clone();
         wrong_run["runId"] = json!("other-run");
-        assert!(command(&wrong_run, &service).unwrap_err().contains("Run changed"));
-        assert_eq!(service.runtime.lock().unwrap().state.withdrawn_steer_sequences().len(), 1);
+        assert!(command(&wrong_run, &service)
+            .unwrap_err()
+            .contains("Run changed"));
+        assert_eq!(
+            service
+                .runtime
+                .lock()
+                .unwrap()
+                .state
+                .withdrawn_steer_sequences()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -482,29 +719,61 @@ mod tests {
         let config: Config = serde_json::from_value(json!({
             "repository":temp.path(), "model":"old/model", "thinkingLevel":"low",
             "roleModels":{"partitioner":{"model":"explicit/partitioner","thinkingLevel":"minimal"}}
-        })).unwrap();
+        }))
+        .unwrap();
         runtime.save_default_config(&config).unwrap();
         let defaults = fs::read(temp.path().join("config.json")).unwrap();
         runtime.state.run_id = Uuid::new_v4().to_string();
         let run = runtime.state.run_id.clone();
-        runtime.emit(EventKind::Created {
-            graph: Graph { original_goal:"test".into(), nodes:vec![Node{id:"a".into(),task:"test".into()}], edges:vec![] },
-            config, planning_id:None, planning:None,
-        }).unwrap();
-        let service = Arc::new(Service { runtime:Mutex::new(runtime), driving:AtomicBool::new(false),
-            drive_signal:(Mutex::new(0),Condvar::new()), planning:AtomicBool::new(false), extension:temp.path().join("extension.ts") });
+        runtime
+            .emit(EventKind::Created {
+                graph: Graph {
+                    original_goal: "test".into(),
+                    nodes: vec![Node {
+                        id: "a".into(),
+                        task: "test".into(),
+                    }],
+                    edges: vec![],
+                },
+                config,
+                planning_id: None,
+                planning: None,
+            })
+            .unwrap();
+        let service = Arc::new(Service {
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(false),
+            drive_signal: (Mutex::new(0), Condvar::new()),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("extension.ts"),
+        });
         models(&json!({"runId":run,"role":"nodeAgent","settings":{"model":"new/model","thinkingLevel":"high"}}), &service).unwrap();
         {
             let runtime = service.runtime.lock().unwrap();
             for state in [&runtime.state, &runtime.store.load(&run).unwrap()] {
                 let effective = state.effective_config().unwrap();
-                assert_eq!(effective.model, "new/model", "unspecified roles inherit the new Node Agent model");
+                assert_eq!(
+                    effective.model, "new/model",
+                    "unspecified roles inherit the new Node Agent model"
+                );
                 assert_eq!(effective.thinking_level, "high");
                 assert_eq!(effective.node_agent_settings().model, effective.model);
                 assert!(!effective.role_models.contains_key("planner"));
-                assert_eq!(effective.role_models["partitioner"].model, "explicit/partitioner");
-                assert_eq!(effective.role_models["partitioner"].thinking_level.as_deref(), Some("minimal"));
-                assert_eq!(state.config.as_ref().unwrap().model, "old/model", "creation config stays immutable");
+                assert_eq!(
+                    effective.role_models["partitioner"].model,
+                    "explicit/partitioner"
+                );
+                assert_eq!(
+                    effective.role_models["partitioner"]
+                        .thinking_level
+                        .as_deref(),
+                    Some("minimal")
+                );
+                assert_eq!(
+                    state.config.as_ref().unwrap().model,
+                    "old/model",
+                    "creation config stays immutable"
+                );
             }
         }
         models(&json!({"runId":run,"node":"a","role":"nodeAgent","settings":{"model":"node/only","thinkingLevel":"off"}}), &service).unwrap();
@@ -513,7 +782,14 @@ mod tests {
         let effective = runtime.state.effective_config().unwrap();
         assert_eq!(effective.model, "new/model");
         assert_eq!(effective.thinking_level, "high");
-        assert_eq!(runtime.state.nodes["a"].model_config.as_ref().unwrap().model, "node/only");
+        assert_eq!(
+            runtime.state.nodes["a"]
+                .model_config
+                .as_ref()
+                .unwrap()
+                .model,
+            "node/only"
+        );
         assert_eq!(fs::read(temp.path().join("config.json")).unwrap(), defaults);
     }
 
@@ -550,8 +826,16 @@ mod tests {
         });
         assert!(rename(&json!({"runId":"wrong", "title":"Renamed"}), &service).is_err());
         assert!(rename(&json!({"runId":run_id, "title":"   "}), &service).is_err());
-        assert!(rename(&json!({"runId":run_id, "node":"a", "title":"Renamed"}), &service).is_err());
-        let renamed = rename(&json!({"runId":run_id, "title":"  Renamed card  ", "detail":"metadata"}), &service).unwrap();
+        assert!(rename(
+            &json!({"runId":run_id, "node":"a", "title":"Renamed"}),
+            &service
+        )
+        .is_err());
+        let renamed = rename(
+            &json!({"runId":run_id, "title":"  Renamed card  ", "detail":"metadata"}),
+            &service,
+        )
+        .unwrap();
         assert_eq!(renamed["title"], "Renamed card");
         assert_eq!(renamed["graph"]["originalGoal"], "Original user prompt");
         let events_before = service.runtime.lock().unwrap().state.events.len();

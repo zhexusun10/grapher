@@ -14,10 +14,10 @@ use std::{
 };
 use uuid::Uuid;
 
-#[path = "workspace_policy.rs"]
-mod workspace_policy;
 #[path = "feedback_continuation.rs"]
 mod feedback_continuation;
+#[path = "workspace_policy.rs"]
+mod workspace_policy;
 
 /// Confirmation is tied to the completed result the user actually reviewed.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -390,7 +390,10 @@ impl Runtime {
         let temporary = self.root.join(format!(".config-{}.tmp", Uuid::new_v4()));
         let result = (|| -> std::io::Result<()> {
             use std::io::Write;
-            let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             drop(file);
@@ -416,16 +419,25 @@ impl Runtime {
     }
 
     /// All graph ingress paths gate new routes, not retained historical work.
-    fn validate_feedback_additions(graph: &Graph, previous: Option<&Graph>, enabled: bool) -> Result<(), String> {
+    fn validate_feedback_additions(
+        graph: &Graph,
+        previous: Option<&Graph>,
+        enabled: bool,
+    ) -> Result<(), String> {
         if enabled {
             return Ok(());
         }
-        let retained: BTreeSet<_> = previous.into_iter()
+        let retained: BTreeSet<_> = previous
+            .into_iter()
             .flat_map(|old| old.edges.iter())
             .filter(|edge| edge.feedback)
             .map(|edge| (&edge.from, &edge.to))
             .collect();
-        if graph.edges.iter().any(|edge| edge.feedback && !retained.contains(&(&edge.from, &edge.to))) {
+        if graph
+            .edges
+            .iter()
+            .any(|edge| edge.feedback && !retained.contains(&(&edge.from, &edge.to)))
+        {
             return Err("Enable Feedback in Settings before adding a feedback edge".into());
         }
         Ok(())
@@ -433,7 +445,10 @@ impl Runtime {
 
     pub(crate) fn validate_feedback_revision(&self, graph: &Graph) -> Result<(), String> {
         let enabled = self.feedback_enabled(
-            self.state.config.as_ref().is_some_and(|config| config.feedback_enabled),
+            self.state
+                .config
+                .as_ref()
+                .is_some_and(|config| config.feedback_enabled),
         )?;
         Self::validate_feedback_additions(graph, Some(&self.state.graph), enabled)
     }
@@ -446,10 +461,13 @@ impl Runtime {
     /// layer clones/serializes it after releasing the Run mutex.
     pub(crate) fn browser_metadata(&self) -> Result<Arc<serde_json::Value>, String> {
         if let Some((run, revision, value)) = self.browser_metadata.borrow().as_ref() {
-            if run == &self.state.run_id && *revision == self.revision { return Ok(value.clone()); }
+            if run == &self.state.run_id && *revision == self.revision {
+                return Ok(value.clone());
+            }
         }
         let value = Arc::new(crate::snapshot_view::snapshot_metadata(&self.state)?);
-        *self.browser_metadata.borrow_mut() = Some((self.state.run_id.clone(), self.revision, value.clone()));
+        *self.browser_metadata.borrow_mut() =
+            Some((self.state.run_id.clone(), self.revision, value.clone()));
         Ok(value)
     }
 
@@ -832,8 +850,13 @@ impl Runtime {
             Some(published_head) => {
                 let heads =
                     Self::undelivered_heads(&self.state.published_heads, &publication.heads);
-                if heads.is_empty() && self.state.batch_handoff.as_ref()
-                    .is_none_or(|handoff| handoff.recovery_execution_ids.is_empty()) {
+                if heads.is_empty()
+                    && self
+                        .state
+                        .batch_handoff
+                        .as_ref()
+                        .is_none_or(|handoff| handoff.recovery_execution_ids.is_empty())
+                {
                     // Nothing new to deliver: restore the completed phase and mark
                     // the record successful without touching reclaimed Git state.
                     return self.emit_outputs(vec![EventKind::PublicationCompleted {
@@ -1011,8 +1034,8 @@ impl Runtime {
                 head: head.to_string(),
             })?;
         }
-        let source_based = job.execution.before.is_empty()
-            || job.execution.before == job.expected_source_head;
+        let source_based =
+            job.execution.before.is_empty() || job.execution.before == job.expected_source_head;
         job.expected_source_head = head.to_string();
         // A history edit or feedback repair pins its own base (the anchor or the
         // feedback source). The freshly collected source snapshot must not
@@ -1252,7 +1275,12 @@ impl Runtime {
         // it is not a frontend environment choice.
         let automatic = config.environment.is_none() && !cfg!(feature = "fixture");
         let mut events = vec![
-            EventKind::Created { graph, config, planning_id, planning },
+            EventKind::Created {
+                graph,
+                config,
+                planning_id,
+                planning,
+            },
             // Enable batch policy; no workspace is allocated before dispatch.
             EventKind::WorkspaceIsolationSelected { isolated: false },
         ];
@@ -1356,7 +1384,11 @@ impl Runtime {
                 // New private batches capture current source after the prior
                 // handoff. A suspended batch retains its original baseline:
                 // source edits during a pause must not change prepared inputs.
-                EventKind::ExecutionBatchStarted { isolated: true, resumed: false, .. } => Some(""),
+                EventKind::ExecutionBatchStarted {
+                    isolated: true,
+                    resumed: false,
+                    ..
+                } => Some(""),
                 EventKind::Approved { base } => Some(base.as_str()),
                 _ => None,
             })
@@ -1462,13 +1494,19 @@ impl Runtime {
         if Self::same_workspace_path(workspace, &repository) {
             return Ok(None);
         }
-        let selected = self.state.executions.iter()
+        let selected = self
+            .state
+            .executions
+            .iter()
             .find(|execution| Some(execution.id.as_str()) == execution_id)
             .ok_or("The Planner workspace execution is missing")?;
         if !Self::same_workspace_path(workspace, Path::new(&selected.worktree)) {
-            return Err("The retained Planner workspace differs from its recorded execution".into());
+            return Err(
+                "The retained Planner workspace differs from its recorded execution".into(),
+            );
         }
-        let owner = self.planner_workspace_owner(selected)
+        let owner = self
+            .planner_workspace_owner(selected)
             .ok_or("Planner workspace no longer has a recorded physical owner")?;
         let root = PathBuf::from(workspace::normalize_workspace_display_path(
             &self.run_workspace_root(),
@@ -1554,10 +1592,17 @@ impl Runtime {
                 }
                 _ => None,
             })
-            .chain(self.state.executions.iter().filter(|execution|
-                self.batch_workspaces() && execution.status == "failed"
-                    && !self.batch_recovery_was_delivered(execution)
-            ).map(|execution| execution.id.as_str()))
+            .chain(
+                self.state
+                    .executions
+                    .iter()
+                    .filter(|execution| {
+                        self.batch_workspaces()
+                            && execution.status == "failed"
+                            && !self.batch_recovery_was_delivered(execution)
+                    })
+                    .map(|execution| execution.id.as_str()),
+            )
             .collect();
 
         // A Planner may explicitly ask to move to another existing node
@@ -1803,10 +1848,17 @@ impl Runtime {
                 }
                 _ => None,
             })
-            .chain(self.state.executions.iter().filter(|execution|
-                self.batch_workspaces() && execution.status == "failed"
-                    && !self.batch_recovery_was_delivered(execution)
-            ).map(|execution| execution.id.as_str()))
+            .chain(
+                self.state
+                    .executions
+                    .iter()
+                    .filter(|execution| {
+                        self.batch_workspaces()
+                            && execution.status == "failed"
+                            && !self.batch_recovery_was_delivered(execution)
+                    })
+                    .map(|execution| execution.id.as_str()),
+            )
             .collect();
         for requested in self.state.executions.iter().rev() {
             if requested.node != node
@@ -2053,7 +2105,10 @@ impl Runtime {
         }
         if self.state.environment_policy.as_deref() == Some("automatic-pending") {
             let (environment, reason) = if self.batch_workspaces() {
-                (None, "Native admission is deferred to each dispatch batch".into())
+                (
+                    None,
+                    "Native admission is deferred to each dispatch batch".into(),
+                )
             } else {
                 crate::environment_automatic::resolve(&repository, self.is_serial())?
             };
@@ -2063,7 +2118,11 @@ impl Runtime {
             })?;
         }
         let config = self.state.config.as_ref().ok_or("No graph")?;
-        if let Some(environment) = config.environment.as_ref().filter(|_| !self.batch_workspaces()) {
+        if let Some(environment) = config
+            .environment
+            .as_ref()
+            .filter(|_| !self.batch_workspaces())
+        {
             if self.is_serial() {
                 return Err("Managed environments require explicit Graph mode; Planner/Serial keep native source semantics".into());
             }
@@ -2089,7 +2148,10 @@ impl Runtime {
         }
         // Approval is immutable. Serial/shared Graphs create no snapshot.
         // Private Git sources capture here; plain folders defer to the worker.
-        let base = if self.is_serial() || self.batch_workspaces() || !workspace::is_standard_git(&repository) {
+        let base = if self.is_serial()
+            || self.batch_workspaces()
+            || !workspace::is_standard_git(&repository)
+        {
             String::new()
         } else {
             workspace::verify(&repository)?;
@@ -2107,7 +2169,11 @@ impl Runtime {
             return Err("Only an unapproved graph draft can be edited in place".into());
         }
         config.feedback_enabled = self.feedback_enabled(config.feedback_enabled)?;
-        Self::validate_feedback_additions(&graph, Some(&self.state.graph), config.feedback_enabled)?;
+        Self::validate_feedback_additions(
+            &graph,
+            Some(&self.state.graph),
+            config.feedback_enabled,
+        )?;
         let previous = self.state.config.as_ref().ok_or("Missing config")?;
         if config.repository != previous.repository {
             return Err("Cannot move a draft to another repository".into());
@@ -2259,7 +2325,10 @@ impl Runtime {
         }
         // Settings gate new routes, not replay or delivery of committed work.
         let feedback_enabled = self.feedback_enabled(
-            self.state.config.as_ref().is_some_and(|config| config.feedback_enabled),
+            self.state
+                .config
+                .as_ref()
+                .is_some_and(|config| config.feedback_enabled),
         )?;
         if request.feedback && !feedback_enabled {
             return Err("Enable Feedback in Settings before adding a feedback edge".into());
@@ -2355,7 +2424,8 @@ impl Runtime {
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
         )?;
-        let source_head = if !self.state.approved || self.batch_workspaces()
+        let source_head = if !self.state.approved
+            || self.batch_workspaces()
             || (!workspace::is_standard_git(&repository)
                 && workspace::shadow_repo_if_exists(&repository)?.is_none())
         {
@@ -2420,13 +2490,15 @@ impl Runtime {
             return (false, false, false);
         };
         let inputs = |g: &Graph| {
-            g.edges.iter()
+            g.edges
+                .iter()
                 .filter(|edge| edge.to == id && !edge.feedback)
                 .map(|edge| edge.from.clone())
                 .collect::<BTreeSet<_>>()
         };
         let reviews = |g: &Graph| {
-            g.edges.iter()
+            g.edges
+                .iter()
                 .filter(|edge| edge.from == id && edge.feedback)
                 .map(|edge| edge.to.clone())
                 .collect::<BTreeSet<_>>()
@@ -2501,8 +2573,9 @@ impl Runtime {
         // Plain directories that were never materialized (no node dispatched
         // yet) have no snapshot to record; the eventual first dispatch will
         // materialize from the current source files instead.
-        let source_head = if self.batch_workspaces() || (!workspace::is_standard_git(&repository)
-            && workspace::shadow_repo_if_exists(&repository)?.is_none())
+        let source_head = if self.batch_workspaces()
+            || (!workspace::is_standard_git(&repository)
+                && workspace::shadow_repo_if_exists(&repository)?.is_none())
         {
             None
         } else {
@@ -2679,11 +2752,19 @@ impl Runtime {
                     // In batch Runs a standalone follow-up may have used a
                     // private cwd. Retrying it must retain its no-review intent,
                     // independently of the next batch's directory choice.
-                    return self.batch_workspaces() && continuation_nodes.contains(&execution.node)
-                        && self.state.events[..index].iter().rev().find_map(|event| match &event.kind {
-                            EventKind::Started { execution: previous, .. } if previous.node == execution.node => Some(previous),
-                            _ => None,
-                        }).is_some_and(|previous| self.execution_was_source_direct(previous));
+                    return self.batch_workspaces()
+                        && continuation_nodes.contains(&execution.node)
+                        && self.state.events[..index]
+                            .iter()
+                            .rev()
+                            .find_map(|event| match &event.kind {
+                                EventKind::Started {
+                                    execution: previous,
+                                    ..
+                                } if previous.node == execution.node => Some(previous),
+                                _ => None,
+                            })
+                            .is_some_and(|previous| self.execution_was_source_direct(previous));
                 }
                 EventKind::Started {
                     execution: previous,
@@ -2731,11 +2812,12 @@ impl Runtime {
         // Record that ownership so replay does not turn its retry into a Graph
         // workspace or publish the source-direct turn a second time.
         let source_direct_nodes = if !self.is_serial()
-            && (self.batch_workspaces() || self
-                .state
-                .config
-                .as_ref()
-                .is_some_and(|config| config.environment.is_none()))
+            && (self.batch_workspaces()
+                || self
+                    .state
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| config.environment.is_none()))
         {
             let repository = resolve_repository(&self.root, self.state.config.as_ref().unwrap())?;
             roots
@@ -3426,17 +3508,29 @@ impl Runtime {
                     execution_id,
                     instruction,
                     ..
-                } if executions.contains(execution_id.as_str()) && !withdrawn.contains(&event.sequence) => parts.push(instruction.clone()),
+                } if executions.contains(execution_id.as_str())
+                    && !withdrawn.contains(&event.sequence) =>
+                {
+                    parts.push(instruction.clone())
+                }
                 _ => {}
             }
         }
         for event in &self.state.events {
             match &event.kind {
-                EventKind::Invalidated { target, instruction, .. }
-                | EventKind::NodeMessaged { node: target, instruction, queued: true, .. }
-                    if target == node && sequences.contains(&event.sequence) => {
-                        parts.push(instruction.clone());
-                    }
+                EventKind::Invalidated {
+                    target,
+                    instruction,
+                    ..
+                }
+                | EventKind::NodeMessaged {
+                    node: target,
+                    instruction,
+                    queued: true,
+                    ..
+                } if target == node && sequences.contains(&event.sequence) => {
+                    parts.push(instruction.clone());
+                }
                 _ => {}
             }
         }
@@ -3445,53 +3539,115 @@ impl Runtime {
 
     /// Only callers that proved the previous input was unstarted may use this
     /// binding. Started/Prepared by themselves are not consumption receipts.
-    fn bound_node_input(&self, previous: &Execution) -> Option<(String, Option<Vec<ImageAttachment>>)> {
-        self.state.events.iter().rev().find_map(|event| match &event.kind {
-            EventKind::NodeInputBound { execution_id, instruction, images }
-                if execution_id == &previous.id => Some((instruction.clone(), images.clone())),
-            _ => None,
-        })
+    fn bound_node_input(
+        &self,
+        previous: &Execution,
+    ) -> Option<(String, Option<Vec<ImageAttachment>>)> {
+        self.state
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::NodeInputBound {
+                    execution_id,
+                    instruction,
+                    images,
+                } if execution_id == &previous.id => Some((instruction.clone(), images.clone())),
+                _ => None,
+            })
     }
 
     /// Legacy dispatches have no complete input binding. Rebuild both active
     /// follow-ups and passive additions by claim identity, never by equal text.
     fn claimed_node_messages(&self, previous: &Execution) -> Vec<PendingNodeMessage> {
-        let attempts: BTreeSet<_> = self.state.executions.iter().rev()
-            .filter(|execution| execution.node == previous.node
-                && !self.state.superseded_execution_ids.contains(&execution.id))
+        let attempts: BTreeSet<_> = self
+            .state
+            .executions
+            .iter()
+            .rev()
+            .filter(|execution| {
+                execution.node == previous.node
+                    && !self.state.superseded_execution_ids.contains(&execution.id)
+            })
             .skip_while(|execution| execution.id != previous.id)
-            .take_while(|execution| matches!(execution.status.as_str(), "failed" | "resolved")
-                && execution.pid.is_none() && execution.output_bytes == 0)
-            .map(|execution| execution.id.as_str()).collect();
-        let sequences: BTreeSet<_> = self.state.events.iter().filter_map(|event| match &event.kind {
-            EventKind::Started { execution, message_sequences, .. }
-                if attempts.contains(execution.id.as_str()) => message_sequences.as_ref(),
-            _ => None,
-        }).flatten().copied().collect();
-        self.state.events.iter().filter_map(|event| match &event.kind {
-            EventKind::NodeMessaged { node, instruction, images, queued: true, .. }
-            | EventKind::Invalidated { target: node, instruction, images, human: true, .. }
-                if node == &previous.node && sequences.contains(&event.sequence) => Some(PendingNodeMessage {
-                    sequence: event.sequence, instruction: instruction.clone(), images: images.clone(),
-                    source_direct: false, shared_workspace: false,
-                }),
-            _ => None,
-        }).collect()
+            .take_while(|execution| {
+                matches!(execution.status.as_str(), "failed" | "resolved")
+                    && execution.pid.is_none()
+                    && execution.output_bytes == 0
+            })
+            .map(|execution| execution.id.as_str())
+            .collect();
+        let sequences: BTreeSet<_> = self
+            .state
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::Started {
+                    execution,
+                    message_sequences,
+                    ..
+                } if attempts.contains(execution.id.as_str()) => message_sequences.as_ref(),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        self.state
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::NodeMessaged {
+                    node,
+                    instruction,
+                    images,
+                    queued: true,
+                    ..
+                }
+                | EventKind::Invalidated {
+                    target: node,
+                    instruction,
+                    images,
+                    human: true,
+                    ..
+                } if node == &previous.node && sequences.contains(&event.sequence) => {
+                    Some(PendingNodeMessage {
+                        sequence: event.sequence,
+                        instruction: instruction.clone(),
+                        images: images.clone(),
+                        source_direct: false,
+                        shared_workspace: false,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// A node's instruction slot outlives the turn that used it. Once dispatched,
     /// it belongs to that attempt, not every later passive message. Dispatch is
     /// not consumption: a proven unstarted retry restores its bound input below.
     fn instruction_delivery(&self, node: &str, messages: &[PendingNodeMessage]) -> (bool, bool) {
-        let Some(directive) = self.state.events.iter().rev().find(|event| match &event.kind {
-            EventKind::Invalidated { target, instruction, .. } => target == node && !instruction.is_empty(),
-            EventKind::ConversationEdited { target, .. } => target == node,
-            EventKind::FeedbackContinuationQueued { node: target, .. } => target == node,
-            _ => false,
-        }) else {
+        let Some(directive) = self
+            .state
+            .events
+            .iter()
+            .rev()
+            .find(|event| match &event.kind {
+                EventKind::Invalidated {
+                    target,
+                    instruction,
+                    ..
+                } => target == node && !instruction.is_empty(),
+                EventKind::ConversationEdited { target, .. } => target == node,
+                EventKind::FeedbackContinuationQueued { node: target, .. } => target == node,
+                _ => false,
+            })
+        else {
             return (false, false);
         };
-        let queued = messages.iter().any(|message| message.sequence == directive.sequence);
+        let queued = messages
+            .iter()
+            .any(|message| message.sequence == directive.sequence);
         let dispatched = self.state.events.iter().any(|event| event.sequence > directive.sequence
             && matches!(&event.kind, EventKind::Started { execution, .. }
                 if execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)));
@@ -3513,12 +3669,13 @@ impl Runtime {
             return true;
         }
         !self.is_serial()
-            && (self.batch_workspaces() || self
-                .state
-                .config
-                .as_ref()
-                .and_then(|config| config.environment.as_ref())
-                .is_none())
+            && (self.batch_workspaces()
+                || self
+                    .state
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.environment.as_ref())
+                    .is_none())
             && matches!(self.state.phase.as_str(), "completed" | "followup")
             && self
                 .state
@@ -3530,7 +3687,11 @@ impl Runtime {
     /// Refuses an update while a downstream node is still running, because a
     /// changed result would make that run stale. The result comparison itself
     /// happens when the target finishes.
-    fn validate_invalidation(&self, node: &str, allow_disjoint_publication: bool) -> Result<(), String> {
+    fn validate_invalidation(
+        &self,
+        node: &str,
+        allow_disjoint_publication: bool,
+    ) -> Result<(), String> {
         if self
             .state
             .result_execution
@@ -3566,7 +3727,10 @@ impl Runtime {
             &self.root,
             self.state.config.as_ref().ok_or("Missing config")?,
         )?;
-        if !self.is_serial() && !self.shared_source_workspace() && !workspace::is_standard_git(&repository) {
+        if !self.is_serial()
+            && !self.shared_source_workspace()
+            && !workspace::is_standard_git(&repository)
+        {
             // Explicit node updates must not be blocked by live user edits;
             // they only require the recorded source snapshot to still exist.
             workspace::check_shadow_base(&repository, self.latest_source_head())?;
@@ -3594,7 +3758,10 @@ impl Runtime {
             .cloned()
             .ok_or("No workspace to resolve")?;
         let path = Path::new(&execution.worktree);
-        let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
+        let repository = resolve_repository(
+            &self.root,
+            self.state.config.as_ref().ok_or("Missing config")?,
+        )?;
         if Self::same_workspace_path(path, &repository) {
             return Err("Source-native nodes have no private Git composition to resolve; retry the node instead".into());
         }
@@ -3604,13 +3771,19 @@ impl Runtime {
         // Never substitute that ref for a nonempty recorded preparation head.
         let base = if execution.before.is_empty() {
             if !workspace::has_private_git(path)
-                || self.planner_workspace_owner(&execution)
+                || self
+                    .planner_workspace_owner(&execution)
                     .is_none_or(|owner| owner.id != execution.id)
             {
                 return Err("Cannot resolve workspace: its private preparation evidence is missing or reassigned".into());
             }
-            workspace::git(path, &["rev-parse", "--verify", "refs/grapher/base^{commit}"])
-                .map_err(|error| format!("Cannot resolve workspace without its recorded preparation base: {error}"))?
+            workspace::git(
+                path,
+                &["rev-parse", "--verify", "refs/grapher/base^{commit}"],
+            )
+            .map_err(|error| {
+                format!("Cannot resolve workspace without its recorded preparation base: {error}")
+            })?
         } else {
             execution.before.clone()
         };
@@ -3740,7 +3913,10 @@ impl Runtime {
         let publishing = matches!(self.state.phase.as_str(), "publishing" | "merging");
         if !self.state.approved
             || self.state.paused
-            || matches!(self.state.phase.as_str(), "publication_failed" | "completed")
+            || matches!(
+                self.state.phase.as_str(),
+                "publication_failed" | "completed"
+            )
         {
             return Ok(Vec::new());
         }
@@ -3802,7 +3978,10 @@ impl Runtime {
         // revisions, feedback invalidation or completed worker returns.
         let mut dependencies: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for edge in self.state.graph.edges.iter().filter(|edge| !edge.feedback) {
-            dependencies.entry(edge.to.clone()).or_default().push(edge.from.clone());
+            dependencies
+                .entry(edge.to.clone())
+                .or_default()
+                .push(edge.from.clone());
         }
         loop {
             let blocked: Vec<_> = self
@@ -3817,9 +3996,12 @@ impl Runtime {
                             "waiting" | "dirty"
                         )
                         && dependencies.get(&node.id).is_some_and(|parents| {
-                            parents.iter().any(|parent| matches!(
-                                self.state.nodes[parent].status.as_str(), "failed" | "blocked"
-                            ))
+                            parents.iter().any(|parent| {
+                                matches!(
+                                    self.state.nodes[parent].status.as_str(),
+                                    "failed" | "blocked"
+                                )
+                            })
                         })
                 })
                 .map(|node| node.id.clone())
@@ -3834,7 +4016,10 @@ impl Runtime {
                 })?;
             }
         }
-        let running_nodes: BTreeSet<_> = self.state.executions.iter()
+        let running_nodes: BTreeSet<_> = self
+            .state
+            .executions
+            .iter()
             .filter(|execution| execution.status == "running")
             .map(|execution| execution.node.as_str())
             .collect();
@@ -3851,7 +4036,9 @@ impl Runtime {
                     )
                     && !running_nodes.contains(node.id.as_str())
                     && dependencies.get(&node.id).is_none_or(|parents| {
-                        parents.iter().all(|parent| self.state.nodes[parent].status == "completed")
+                        parents
+                            .iter()
+                            .all(|parent| self.state.nodes[parent].status == "completed")
                     })
             })
             .cloned()
@@ -3862,29 +4049,47 @@ impl Runtime {
         // Unfinished private members retry before delivery or new dispatch.
         // Select retries before the slot cap so newly ready nodes cannot
         // displace a failed or paused member of the retained batch.
-        if ready.iter().any(|node| self.retained_private_continuation(&node.id).is_some()) {
+        if ready
+            .iter()
+            .any(|node| self.retained_private_continuation(&node.id).is_some())
+        {
             ready.retain(|node| self.retained_private_continuation(&node.id).is_some());
         }
         // Shared mode keeps dependency-driven refill. Private mode binds a
         // whole visible topology batch before applying the worker cap.
         if let Some(plan) = &self.state.plan {
-            ready.sort_by_key(|node| plan.execution_batches.iter()
-                .position(|layer| layer.contains(&node.id)).unwrap_or(usize::MAX));
+            ready.sort_by_key(|node| {
+                plan.execution_batches
+                    .iter()
+                    .position(|layer| layer.contains(&node.id))
+                    .unwrap_or(usize::MAX)
+            });
         }
         if !publishing && batch_workspaces {
             if !self.state.private_batch.is_empty() {
-                ready.retain(|node| self.state.private_batch.contains(&node.id)
-                    || self.retained_private_continuation(&node.id).is_some());
+                ready.retain(|node| {
+                    self.state.private_batch.contains(&node.id)
+                        || self.retained_private_continuation(&node.id).is_some()
+                });
                 // A held batch may need an earlier source-native parent to
                 // recover. Never mix its source dispatch with private peers.
-                if ready.iter().any(|node| self.source_batch_recovery(&node.id)) {
+                if ready
+                    .iter()
+                    .any(|node| self.source_batch_recovery(&node.id))
+                {
                     ready.retain(|node| self.source_batch_recovery(&node.id));
                 }
             } else if self.starts_private_batch(ready.len().min(available))
-                && !ready.iter().any(|node| self.retained_private_continuation(&node.id).is_some())
+                && !ready
+                    .iter()
+                    .any(|node| self.retained_private_continuation(&node.id).is_some())
             {
                 let batch = self.topology_batch(&[ready[0].id.clone()]);
-                let count = ready.iter().filter(|node| batch.contains(&node.id)).count().min(available);
+                let count = ready
+                    .iter()
+                    .filter(|node| batch.contains(&node.id))
+                    .count()
+                    .min(available);
                 // Do not turn a mixed ready group into a smaller shared group
                 // by applying a private-only restriction before mode selection.
                 if self.starts_private_batch(count) {
@@ -3902,7 +4107,9 @@ impl Runtime {
         };
         let resolved_repository = match resolved_repository {
             Some(repository) => repository,
-            None => match self.prepare_execution_batch(&ready, allow_publication && pending_sources.is_empty())? {
+            None => match self
+                .prepare_execution_batch(&ready, allow_publication && pending_sources.is_empty())?
+            {
                 Some(repository) => repository,
                 None => return Ok(Vec::new()),
             },
@@ -3914,17 +4121,23 @@ impl Runtime {
             config.environment = None;
         }
         let mut jobs = Vec::new();
-        let source_direct_run = shared_source || (!batch_workspaces
-            && (self.state.phase == "followup" || self.state.nodes.values().any(|node| {
-                node.pending_messages.first().is_some_and(|message| message.source_direct)
-            })));
+        let source_direct_run = shared_source
+            || (!batch_workspaces
+                && (self.state.phase == "followup"
+                    || self.state.nodes.values().any(|node| {
+                        node.pending_messages
+                            .first()
+                            .is_some_and(|message| message.source_direct)
+                    })));
         let materialize_source = !source_direct_run
             && !self.is_serial()
-            && (!workspace::is_standard_git(&resolved_repository) || self.latest_source_head().is_empty())
+            && (!workspace::is_standard_git(&resolved_repository)
+                || self.latest_source_head().is_empty())
             && self.job_source_is_fresh(&resolved_repository)?;
         for node in ready {
             let source_direct_run = source_direct_run
-                || (!batch_workspaces && self.state.nodes[&node.id].continuation
+                || (!batch_workspaces
+                    && self.state.nodes[&node.id].continuation
                     && self.state.nodes[&node.id].source_direct_recovery);
             let id = Uuid::new_v4().to_string();
             // Dependency nodes normally take over their parent's physical workspace.
@@ -3944,7 +4157,8 @@ impl Runtime {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             if batch_workspaces {
-                parent_heads.retain(|head| !head.is_empty() && !self.state.published_heads.contains(head));
+                parent_heads
+                    .retain(|head| !head.is_empty() && !self.state.published_heads.contains(head));
             }
             let mut before = if self.is_serial() || source_direct_run {
                 String::new()
@@ -3952,20 +4166,27 @@ impl Runtime {
                 self.state.nodes[&node.id]
                     .head
                     .clone()
-                    .filter(|head| !head.is_empty() && (!batch_workspaces
-                        || self.state.nodes[&node.id].edit_execution_id.is_some()
-                        || !self.state.published_heads.contains(head)))
+                    .filter(|head| {
+                        !head.is_empty()
+                            && (!batch_workspaces
+                                || self.state.nodes[&node.id].edit_execution_id.is_some()
+                                || !self.state.published_heads.contains(head))
+                    })
                     .unwrap_or_else(|| source_head.clone())
             };
             let feedback_undelivered = undelivered_feedback_turns.contains(&node.id);
             let mut queued_messages = self.state.nodes[&node.id].pending_messages.clone();
-            let message_sequences = queued_messages.iter()
+            let message_sequences = queued_messages
+                .iter()
                 .map(|message| message.sequence)
                 .collect::<Vec<_>>();
-            let resolved_private = self.retained_private_continuation(&node.id)
+            let resolved_private = self
+                .retained_private_continuation(&node.id)
                 .is_some_and(|previous| previous.status == "resolved");
-            let feedback_rebase = self.state.nodes[&node.id].feedback_continuation
-                .as_ref().is_some_and(|input| !input.dispatched);
+            let feedback_rebase = self.state.nodes[&node.id]
+                .feedback_continuation
+                .as_ref()
+                .is_some_and(|input| !input.dispatched);
             let pending_followup = self.state.node_has_pending_followup(&node.id);
             let continuation = !feedback_rebase
                 && (self.state.nodes[&node.id].continuation || resolved_private)
@@ -3976,16 +4197,27 @@ impl Runtime {
             // directory empty, so there is no conversation to resume.
             let session_missing = |previous: &Execution| self.node_session_missing(previous);
             let resume = if feedback_rebase {
-                let anchor = &self.state.nodes[&node.id].feedback_continuation
-                    .as_ref().expect("feedback continuation").anchor_execution_id;
-                Some(self.state.executions.iter().find(|execution| {
-                    execution.id == *anchor && execution.node == node.id
-                        && !self.state.superseded_execution_ids.contains(&execution.id)
-                }).ok_or("Feedback continuation history is unavailable")?)
+                let anchor = &self.state.nodes[&node.id]
+                    .feedback_continuation
+                    .as_ref()
+                    .expect("feedback continuation")
+                    .anchor_execution_id;
+                Some(
+                    self.state
+                        .executions
+                        .iter()
+                        .find(|execution| {
+                            execution.id == *anchor
+                                && execution.node == node.id
+                                && !self.state.superseded_execution_ids.contains(&execution.id)
+                        })
+                        .ok_or("Feedback continuation history is unavailable")?,
+                )
             } else if continuation {
                 self.state.executions.iter().rev().find(|execution| {
                     execution.node == node.id
-                        && (execution.status == "failed" || (resolved_private && execution.status == "resolved"))
+                        && (execution.status == "failed"
+                            || (resolved_private && execution.status == "resolved"))
                         && execution.completed_at.is_some()
                         && !self.state.superseded_execution_ids.contains(&execution.id)
                 })
@@ -4087,10 +4319,15 @@ impl Runtime {
                     execution.node == previous.node
                         && !self.state.superseded_execution_ids.contains(&execution.id)
                         && (execution.status == "completed"
-                            || self.state.nodes[&node.id].feedback_continuation.as_ref()
-                                .is_some_and(|input| input.anchor_execution_id == execution.id
-                                    && (execution.pid.is_some() || execution.output_bytes > 0
-                                        || !session_missing(execution))))
+                            || self.state.nodes[&node.id]
+                                .feedback_continuation
+                                .as_ref()
+                                .is_some_and(|input| {
+                                    input.anchor_execution_id == execution.id
+                                        && (execution.pid.is_some()
+                                            || execution.output_bytes > 0
+                                            || !session_missing(execution))
+                                }))
                 })
             };
             // A feedback or source-direct follow-up can fail before its fork
@@ -4149,18 +4386,22 @@ impl Runtime {
                             EventKind::NodeInputBound { execution_id, .. } if execution_id == &previous.id))
                 });
             // Legacy turns without a binding retain their conservative checks.
-            let unstarted_followup = feedback_undelivered || unstarted_bound_input || (continuation
-                && self.state.nodes[&node.id].feedback_continuation.as_ref()
-                    .is_none_or(|input| input.delivery_id.is_none())
-                && self.state.nodes[&node.id].human_instruction
-                && !self.state.nodes[&node.id].instruction.is_empty()
-                && resume.is_some_and(|previous| {
-                    !session_missing(previous)
-                        && self.state.execution_is_preparation_only(previous)
-                        && no_unfinished_activity(previous)
-                        && (has_completed_history(previous)
-                            || self.state.nodes[&node.id].feedback_continuation.is_some())
-                }));
+            let unstarted_followup = feedback_undelivered
+                || unstarted_bound_input
+                || (continuation
+                    && self.state.nodes[&node.id]
+                        .feedback_continuation
+                        .as_ref()
+                        .is_none_or(|input| input.delivery_id.is_none())
+                    && self.state.nodes[&node.id].human_instruction
+                    && !self.state.nodes[&node.id].instruction.is_empty()
+                    && resume.is_some_and(|previous| {
+                        !session_missing(previous)
+                            && self.state.execution_is_preparation_only(previous)
+                            && no_unfinished_activity(previous)
+                            && (has_completed_history(previous)
+                                || self.state.nodes[&node.id].feedback_continuation.is_some())
+                    }));
             let failed_before_session = self.state.nodes[&node.id].human_instruction
                 && resume.is_some_and(|previous| {
                     previous.status == "failed"
@@ -4214,13 +4455,20 @@ impl Runtime {
             // Feedback descendants have their own Pi delivery boundary. Other
             // unstarted turns recover the complete dispatch, including feedback
             // target instructions, edits and every already-claimed user input.
-            let recover_input = (initial_recovery || fallback_anchor.is_some() || unstarted_followup)
-                && !feedback_rebase
-                && self.state.nodes[&node.id].feedback_continuation.is_none()
-                && self.state.nodes[&node.id].edit_execution_id.is_none();
-            let input_previous = recover_input.then(|| self.state.executions.iter().rev().find(|execution| {
-                execution.node == node.id && !self.state.superseded_execution_ids.contains(&execution.id)
-            })).flatten().filter(|execution| matches!(execution.status.as_str(), "failed" | "resolved"));
+            let recover_input =
+                (initial_recovery || fallback_anchor.is_some() || unstarted_followup)
+                    && !feedback_rebase
+                    && self.state.nodes[&node.id].feedback_continuation.is_none()
+                    && self.state.nodes[&node.id].edit_execution_id.is_none();
+            let input_previous = recover_input
+                .then(|| {
+                    self.state.executions.iter().rev().find(|execution| {
+                        execution.node == node.id
+                            && !self.state.superseded_execution_ids.contains(&execution.id)
+                    })
+                })
+                .flatten()
+                .filter(|execution| matches!(execution.status.as_str(), "failed" | "resolved"));
             let retry_input = input_previous.and_then(|previous| self.bound_node_input(previous));
             if retry_input.is_none() {
                 if let Some(previous) = input_previous {
@@ -4308,7 +4556,9 @@ impl Runtime {
             let shared_terminal = (!feedback_rebase && self.state.nodes[&node.id].shared_workspace)
                 .then(|| self.terminal_workspace_for(&node.id))
                 .flatten()
-                .filter(|execution| !Self::same_workspace_path(Path::new(&execution.worktree), &resolved_repository));
+                .filter(|execution| {
+                    !Self::same_workspace_path(Path::new(&execution.worktree), &resolved_repository)
+                });
             let mut inherit_workspace = false;
             let mut workspace_lineage = BTreeSet::new();
             let worktree = if let Some(input) = &feedback_workspace {
@@ -4400,7 +4650,12 @@ impl Runtime {
                 let parent_executions: Vec<_> = parent_names
                     .iter()
                     .filter_map(|parent| self.latest_node_execution(parent))
-                    .filter(|execution| !Self::same_workspace_path(Path::new(&execution.worktree), &resolved_repository))
+                    .filter(|execution| {
+                        !Self::same_workspace_path(
+                            Path::new(&execution.worktree),
+                            &resolved_repository,
+                        )
+                    })
                     .collect();
                 let inherited_parent = parent_executions.iter().find(|execution| {
                     let path = Path::new(&execution.worktree);
@@ -4485,13 +4740,15 @@ impl Runtime {
                 None
             };
             workspace_lineage.insert(node.id.clone());
-            if !shared_source && self.state.executions.iter().any(|execution| {
-                execution.status == "running"
-                    && Self::same_workspace_path(
-                        Path::new(&execution.worktree),
-                        Path::new(&worktree),
-                    )
-            }) {
+            if !shared_source
+                && self.state.executions.iter().any(|execution| {
+                    execution.status == "running"
+                        && Self::same_workspace_path(
+                            Path::new(&execution.worktree),
+                            Path::new(&worktree),
+                        )
+                })
+            {
                 continue;
             }
             let workspace_lineage: Vec<_> = workspace_lineage.into_iter().collect();
@@ -4516,8 +4773,7 @@ impl Runtime {
                         .executions
                         .iter()
                         .find(|execution| {
-                            execution.node == node.id
-                                && execution.session_id == previous.session_id
+                            execution.node == node.id && execution.session_id == previous.session_id
                         })
                         .map(|execution| execution.id.clone())
                         .unwrap_or_else(|| previous.id.clone());
@@ -4572,10 +4828,17 @@ impl Runtime {
             // Legacy synchronized overrides are only a fallback when no Run
             // selection exists. Dispatched jobs keep immutable config/metrics.
             let node_state = &self.state.nodes[&node.id];
-            let node_settings = node_state.model_config.as_ref()
+            let node_settings = node_state
+                .model_config
+                .as_ref()
                 .filter(|_| node_state.model_override)
                 .cloned()
-                .or_else(|| self.state.model_config.as_ref().map(RunModelConfig::node_agent_settings))
+                .or_else(|| {
+                    self.state
+                        .model_config
+                        .as_ref()
+                        .map(RunModelConfig::node_agent_settings)
+                })
                 .or_else(|| node_state.model_config.clone())
                 .or_else(|| self.state.config.as_ref().map(Config::node_agent_settings));
             if let Some(settings) = &node_settings {
@@ -4606,24 +4869,38 @@ impl Runtime {
                     })
                     .is_some_and(|first| first.id == anchor.id)
             });
-            let (instruction_queued, instruction_dispatched) = self.instruction_delivery(&node.id, &queued_messages);
-            let include_instruction = !instruction_queued && (!instruction_dispatched || recover_input);
-            let delivered_feedback = state.feedback_continuation.as_ref()
-                .is_some_and(|input| input.delivery_id.is_some()) && !feedback_undelivered && !feedback_rebase;
+            let (instruction_queued, instruction_dispatched) =
+                self.instruction_delivery(&node.id, &queued_messages);
+            let include_instruction =
+                !instruction_queued && (!instruction_dispatched || recover_input);
+            let delivered_feedback = state
+                .feedback_continuation
+                .as_ref()
+                .is_some_and(|input| input.delivery_id.is_some())
+                && !feedback_undelivered
+                && !feedback_rebase;
             let retained_images = if let Some((_, images)) = &retry_input {
                 images.clone()
             } else if feedback_rebase || feedback_undelivered {
-                state.feedback_continuation.as_ref().and_then(|input| input.images.clone())
+                state
+                    .feedback_continuation
+                    .as_ref()
+                    .and_then(|input| input.images.clone())
             } else if include_instruction && !delivered_feedback {
                 state.instruction_images.clone()
             } else {
                 None
-            }.unwrap_or_default();
-            let queued_prompt = NodeState { pending_messages: queued_messages, ..Default::default() }
-                .pending_prompt_after_images(retained_images.len());
+            }
+            .unwrap_or_default();
+            let queued_prompt = NodeState {
+                pending_messages: queued_messages,
+                ..Default::default()
+            }
+            .pending_prompt_after_images(retained_images.len());
             let instruction_with_queue = || match &queued_prompt {
-                Some((prompt, _)) if !state.instruction.is_empty() && include_instruction =>
-                    format!("{}\n\n{prompt}", state.instruction),
+                Some((prompt, _)) if !state.instruction.is_empty() && include_instruction => {
+                    format!("{}\n\n{prompt}", state.instruction)
+                }
                 Some((prompt, _)) => prompt.clone(),
                 None => state.instruction.clone(),
             };
@@ -4631,12 +4908,16 @@ impl Runtime {
                 match &queued_prompt {
                     // Preserve the initial-task/follow-up layout used before
                     // complete input bindings were recorded.
-                    Some((prompt, _)) if failed_before_session => format!("{instruction}\n{prompt}"),
+                    Some((prompt, _)) if failed_before_session => {
+                        format!("{instruction}\n{prompt}")
+                    }
                     Some((prompt, _)) => format!("{instruction}\n\n{prompt}"),
                     None => instruction.clone(),
                 }
             } else if feedback_rebase || feedback_undelivered {
-                let notice = state.feedback_continuation.as_ref()
+                let notice = state
+                    .feedback_continuation
+                    .as_ref()
                     .and_then(|input| input.instruction.as_deref())
                     .ok_or("Feedback continuation message is not configured")?;
                 let prompt = if let Some((prompt, _)) = &queued_prompt {
@@ -4649,8 +4930,12 @@ impl Runtime {
                 } else {
                     prompt
                 }
-            } else if state.feedback_continuation.as_ref().is_some_and(|input| input.delivery_id.is_some())
-                && queued_prompt.is_some() {
+            } else if state
+                .feedback_continuation
+                .as_ref()
+                .is_some_and(|input| input.delivery_id.is_some())
+                && queued_prompt.is_some()
+            {
                 // The previous bound turn is already in Pi. Only append the
                 // new human turns, not the last feedback notice again.
                 queued_prompt.as_ref().unwrap().0.clone()
@@ -4702,7 +4987,11 @@ impl Runtime {
                 task.clone()
             };
             let mut images = retained_images;
-            images.extend(queued_prompt.and_then(|(_, images)| images).unwrap_or_default());
+            images.extend(
+                queued_prompt
+                    .and_then(|(_, images)| images)
+                    .unwrap_or_default(),
+            );
             let images = (!images.is_empty()).then_some(images);
             let feedback_source = self
                 .state
@@ -4713,28 +5002,14 @@ impl Runtime {
             let history_edit = state.edit_execution_id.is_some();
             // No environment binding can consume historical layout evidence in
             // source mode. Do not walk/re-resolve private E/L history there.
-            let environment_previous = config.environment.as_ref().and_then(|_| self
-                .state
-                .executions
-                .iter()
-                .rev()
-                .filter(|previous| previous.status == "completed")
-                .find(|previous| {
-                    previous.result.as_ref().is_some_and(|result| {
-                        result.layout.as_deref().is_some_and(|layout| {
-                            Self::same_workspace_path(
-                                Path::new(layout),
-                                Path::new(&execution.worktree),
-                            )
-                        })
-                    })
-                })
-                .and_then(|previous| {
-                    self.state
-                        .nodes
-                        .get(&previous.node)
-                        .and_then(|node| node.result.as_ref())
-                        .filter(|result| {
+            let environment_previous = config.environment.as_ref().and_then(|_| {
+                self.state
+                    .executions
+                    .iter()
+                    .rev()
+                    .filter(|previous| previous.status == "completed")
+                    .find(|previous| {
+                        previous.result.as_ref().is_some_and(|result| {
                             result.layout.as_deref().is_some_and(|layout| {
                                 Self::same_workspace_path(
                                     Path::new(layout),
@@ -4742,9 +5017,24 @@ impl Runtime {
                                 )
                             })
                         })
-                        .or(previous.result.as_ref())
-                })
-                .cloned());
+                    })
+                    .and_then(|previous| {
+                        self.state
+                            .nodes
+                            .get(&previous.node)
+                            .and_then(|node| node.result.as_ref())
+                            .filter(|result| {
+                                result.layout.as_deref().is_some_and(|layout| {
+                                    Self::same_workspace_path(
+                                        Path::new(layout),
+                                        Path::new(&execution.worktree),
+                                    )
+                                })
+                            })
+                            .or(previous.result.as_ref())
+                    })
+                    .cloned()
+            });
             let mut environment_input = None;
             let mut environment_sources = Vec::new();
             let preserve_failed_environment = !history_edit
@@ -4782,12 +5072,18 @@ impl Runtime {
                     {
                         return Err("Failed partial environment view is missing or cannot be reused; refusing to silently restore old input".into());
                     }
-                    let source_resume = workspace_resume.is_some_and(|previous|
-                        Self::same_workspace_path(Path::new(&previous.worktree), &resolved_repository));
+                    let source_resume = workspace_resume.is_some_and(|previous| {
+                        Self::same_workspace_path(
+                            Path::new(&previous.worktree),
+                            &resolved_repository,
+                        )
+                    });
                     let selected = if let Some(input) = &feedback_workspace {
                         store.load_record_metadata(&input.source_execution_id, "after")?
                     } else if source_resume {
-                        self.state.environment_baseline.clone()
+                        self.state
+                            .environment_baseline
+                            .clone()
                             .ok_or("Environment baseline is missing")?
                     } else if history_edit {
                         resume
@@ -4819,7 +5115,12 @@ impl Runtime {
                             .iter()
                             // Shared-source parents are already in the new
                             // source baseline; they have no private E/L record.
-                            .filter(|name| self.state.nodes[*name].head.as_ref().is_some_and(|head| !head.is_empty()))
+                            .filter(|name| {
+                                self.state.nodes[*name]
+                                    .head
+                                    .as_ref()
+                                    .is_some_and(|head| !head.is_empty())
+                            })
                             .map(|name| {
                                 Ok((
                                     name.clone(),
@@ -4874,11 +5175,12 @@ impl Runtime {
                             .as_ref()
                             .is_none_or(|input| !input.additional_sources.is_empty())
                         && store.requires_fixed_layout(&selected.launch_ref)?
-                        && selected
-                            .layout
-                            .as_ref()
-                            .is_some_and(|path| !Self::same_workspace_path(
-                                Path::new(path), Path::new(&execution.worktree)))
+                        && selected.layout.as_ref().is_some_and(|path| {
+                            !Self::same_workspace_path(
+                                Path::new(path),
+                                Path::new(&execution.worktree),
+                            )
+                        })
                     {
                         environment_sources.push(selected.clone());
                         selected = store.select_for_workspace(
@@ -4893,11 +5195,12 @@ impl Runtime {
                         )?;
                     }
                     if store.requires_fixed_layout(&selected.launch_ref)?
-                        && selected
-                            .layout
-                            .as_ref()
-                            .is_some_and(|path| !Self::same_workspace_path(
-                                Path::new(path), Path::new(&execution.worktree)))
+                        && selected.layout.as_ref().is_some_and(|path| {
+                            !Self::same_workspace_path(
+                                Path::new(path),
+                                Path::new(&execution.worktree),
+                            )
+                        })
                     {
                         return Err("Workspace composition blocked: fixed environment cannot move to another physical slot; no silent path repair/serialization".into());
                     }
@@ -4945,11 +5248,15 @@ impl Runtime {
             let mut started = Vec::new();
             if !continuation {
                 started.push(EventKind::NodeInputBound {
-                    execution_id: execution.id.clone(), instruction: task.clone(), images: images.clone(),
+                    execution_id: execution.id.clone(),
+                    instruction: task.clone(),
+                    images: images.clone(),
                 });
             }
             if feedback_delivery_id.is_some() {
-                let mut input = self.state.nodes[&node.id].feedback_continuation.clone()
+                let mut input = self.state.nodes[&node.id]
+                    .feedback_continuation
+                    .clone()
                     .expect("feedback continuation");
                 // Bind the entire accepted text/image turn and its delivery
                 // identity atomically with Started. A failed fork retries that
@@ -4958,7 +5265,8 @@ impl Runtime {
                 input.images = images.clone();
                 input.delivery_id = feedback_delivery_id.clone();
                 started.push(EventKind::FeedbackContinuationQueued {
-                    node: node.id.clone(), continuation: input,
+                    node: node.id.clone(),
+                    continuation: input,
                 });
             }
             started.push(EventKind::Started {
@@ -5060,7 +5368,8 @@ impl Runtime {
             // A source-direct follow-up settles the Run instead of publishing:
             // the user's directory already holds the result.
             if self.state.phase != "followup"
-                && !self.is_serial() && !batch_workspaces
+                && !self.is_serial()
+                && !batch_workspaces
                 && self
                     .state
                     .nodes
@@ -5439,15 +5748,25 @@ impl Runtime {
         // A borrowed slot is still live after its node finishes. A failed
         // Planner also retains its cwd for explicit retry, including the gap
         // between continuation preflight and publishing the next selection.
-        if let Some(planning) = self.state.planning.as_ref().filter(|planning| {
-            matches!(planning.status.as_deref(), Some("running" | "failed"))
-        }) {
-            let visited = self.state.events.iter().filter_map(|event| match &event.kind {
-                EventKind::PlannerWorkspaceSelected { planning: selected }
-                    if planning.status.as_deref() == Some("running")
-                        && selected.planning_id == planning.planning_id => selected.worktree.as_deref(),
-                _ => None,
-            });
+        if let Some(planning) = self
+            .state
+            .planning
+            .as_ref()
+            .filter(|planning| matches!(planning.status.as_deref(), Some("running" | "failed")))
+        {
+            let visited = self
+                .state
+                .events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::PlannerWorkspaceSelected { planning: selected }
+                        if planning.status.as_deref() == Some("running")
+                            && selected.planning_id == planning.planning_id =>
+                    {
+                        selected.worktree.as_deref()
+                    }
+                    _ => None,
+                });
             // Running processes may still write in earlier switch targets;
             // retain all of them until the process tree drains and capture ends.
             for worktree in planning.worktree.as_deref().into_iter().chain(visited) {
@@ -5630,10 +5949,12 @@ impl Runtime {
                 // partial metrics must never become a durable successful result.
                 let recovered;
                 let transcript = if live.output.len() != previous_bytes {
-                    self.store.ensure_legacy_logs(&self.state.run_id, &execution.id)?;
-                    recovered = self.store.execution_log_page(
-                        &self.state.run_id, &execution.id, 0, usize::MAX,
-                    )?.content;
+                    self.store
+                        .ensure_legacy_logs(&self.state.run_id, &execution.id)?;
+                    recovered = self
+                        .store
+                        .execution_log_page(&self.state.run_id, &execution.id, 0, usize::MAX)?
+                        .content;
                     if recovered.len() != previous_bytes {
                         return Err(format!(
                             "Completion log for {} has {} bytes; expected {previous_bytes}; refusing incomplete terminal evidence",
@@ -6116,10 +6437,18 @@ impl Runtime {
         if self.state.batch_handoff.is_some()
             && (!self.state.pending_feedback.is_empty()
                 || self.state.nodes.values().any(|node| {
-                    node.status != "completed" || node.head.as_ref().is_some_and(|head|
-                        !head.is_empty() && !self.state.published_heads.contains(head)
-                            && self.state.publication.as_ref().is_none_or(|p| !p.heads.contains(head)))
-                })) {
+                    node.status != "completed"
+                        || node.head.as_ref().is_some_and(|head| {
+                            !head.is_empty()
+                                && !self.state.published_heads.contains(head)
+                                && self
+                                    .state
+                                    .publication
+                                    .as_ref()
+                                    .is_none_or(|p| !p.heads.contains(head))
+                        })
+                }))
+        {
             // A disjoint writer may have finished after this handoff pinned
             // its heads. Its result belongs to a later delivery, not this seal.
             return Ok(None);
@@ -6180,11 +6509,16 @@ impl Runtime {
         if !self.batch_workspaces() {
             return Ok(());
         }
-        let current = self.state.events.iter().rev().find_map(|event| match &event.kind {
-            EventKind::ResultPublished { .. } => Some(true),
-            EventKind::ExecutionBatchStarted { .. } => Some(false),
-            _ => None,
-        });
+        let current = self
+            .state
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ResultPublished { .. } => Some(true),
+                EventKind::ExecutionBatchStarted { .. } => Some(false),
+                _ => None,
+            });
         if current == Some(false) {
             return Err("The latest batch has no current managed result; a retained private result cannot represent source or newer batch work".into());
         }
@@ -6445,9 +6779,11 @@ impl PublicationJob {
                 // Both existing recovery checks must precede code reconstruction,
                 // not discover unsupported coverage or bad native inputs after
                 // creating W. This reorders the same check already in prepare.
-                self.store.validate_history_result(selected, &selected.launch_ref)?;
+                self.store
+                    .validate_history_result(selected, &selected.launch_ref)?;
                 self.store.preflight_runtime_evidence(path, selected)?;
-                self.store.preflight_project_runtime_evidence(&self.repository, head, selected)?;
+                self.store
+                    .preflight_project_runtime_evidence(&self.repository, head, selected)?;
             }
             if present {
                 // Other entries still hold the previous publication after one
@@ -6635,9 +6971,16 @@ pub(crate) fn perform_result(
                     &job.descriptor.result,
                 )?;
                 if !present {
-                    store.validate_history_result(&job.descriptor.result, &job.descriptor.result.launch_ref)?;
+                    store.validate_history_result(
+                        &job.descriptor.result,
+                        &job.descriptor.result.launch_ref,
+                    )?;
                     store.preflight_runtime_evidence(path, &job.descriptor.result)?;
-                    store.preflight_project_runtime_evidence(&repository, &job.descriptor.result.code_ref, &job.descriptor.result)?;
+                    store.preflight_project_runtime_evidence(
+                        &repository,
+                        &job.descriptor.result.code_ref,
+                        &job.descriptor.result,
+                    )?;
                     workspace::prepare_with_merger_expected_for_run_scoped(
                         &repository,
                         path,
@@ -7095,10 +7438,7 @@ fn perform_with_merger_inner(
     // through the server worker's lazy materialization. Reuse the existing
     // snapshot or create it once. Production workers already did this under
     // the per-source lock and passed the commit in through the Job.
-    let materialized_base = if job.materialize_source
-        && !source_tree
-        && !job.source_direct
-    {
+    let materialized_base = if job.materialize_source && !source_tree && !job.source_direct {
         Some(collect_source_snapshot(
             &repository,
             &exclusions,

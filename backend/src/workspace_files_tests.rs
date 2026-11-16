@@ -21,13 +21,19 @@ fn managed_store(temp: &TempDir, workspace: &Path) -> Files {
 
 // Small regressions compare the complete immutable store, not just manifests.
 fn stored_files(files: &Files) -> BTreeMap<PathBuf, Vec<u8>> {
-    ["blobs", "versions"].into_iter().flat_map(|directory| {
-        fs::read_dir(files.directory.join(directory)).unwrap().map(|entry| {
-            let path = entry.unwrap().path();
-            let bytes = fs::read(&path).unwrap();
-            (path, bytes)
-        }).collect::<Vec<_>>()
-    }).collect()
+    ["blobs", "versions"]
+        .into_iter()
+        .flat_map(|directory| {
+            fs::read_dir(files.directory.join(directory))
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 #[test]
@@ -47,7 +53,11 @@ fn managed_environment_scopes_remain_versioned_and_independent_of_gitignore() {
     files
         .materialize(&workspace, std::slice::from_ref(&version), None, false)
         .unwrap();
-    assert_eq!(stored_files(&files), stored, "restoration must not snapshot discarded live bytes");
+    assert_eq!(
+        stored_files(&files),
+        stored,
+        "restoration must not snapshot discarded live bytes"
+    );
     files.verify(&workspace, &version, "").unwrap();
 
     assert_eq!(
@@ -108,13 +118,18 @@ fn legacy_sealing_reuses_only_fully_verified_unchanged_bytes() {
     assert_ne!(changed, base);
     assert_eq!(files.load(&changed).unwrap().parents, [base.clone()]);
     files.verify(&workspace, &changed, "").unwrap();
-    let Entry::File { blob, .. } = &files.load(&base).unwrap().entries[".venv/package"] else { panic!() };
+    let Entry::File { blob, .. } = &files.load(&base).unwrap().entries[".venv/package"] else {
+        panic!()
+    };
     let blob = files.blob_path(blob).unwrap();
     fs::remove_file(&blob).unwrap();
     // Today's matching bytes cannot repair missing historical evidence.
     fs::write(workspace.join(".venv/package"), "offline patched bytes").unwrap();
     let damaged = stored_files(&files);
-    assert!(files.capture_reusing(&workspace, &base).unwrap_err().contains("Missing workspace file blob"));
+    assert!(files
+        .capture_reusing(&workspace, &base)
+        .unwrap_err()
+        .contains("Missing workspace file blob"));
     assert!(!blob.exists());
     assert_eq!(stored_files(&files), damaged);
 }
@@ -154,7 +169,9 @@ fn legacy_predecessor_does_not_delete_or_traverse_a_skipped_live_link() {
     files.capture(&workspace, &previous, "", &[]).unwrap();
     fs::remove_dir_all(workspace.join(".venv/nested")).unwrap();
     let target = Uuid::new_v4().to_string();
-    files.capture(&workspace, &target, "", std::slice::from_ref(&previous)).unwrap();
+    files
+        .capture(&workspace, &target, "", std::slice::from_ref(&previous))
+        .unwrap();
 
     let outside = temp.path().join("unavailable-target");
     fs::create_dir(&outside).unwrap();
@@ -163,10 +180,23 @@ fn legacy_predecessor_does_not_delete_or_traverse_a_skipped_live_link() {
     fs::remove_dir(&outside).unwrap();
     fs::write(workspace.join(".venv/package"), "partial package").unwrap();
     let stored = stored_files(&files);
-    files.materialize(&workspace, std::slice::from_ref(&target), Some(&previous), false).unwrap();
+    files
+        .materialize(
+            &workspace,
+            std::slice::from_ref(&target),
+            Some(&previous),
+            false,
+        )
+        .unwrap();
     files.verify(&workspace, &target, "").unwrap();
-    assert_eq!(fs::read_to_string(workspace.join(".venv/package")).unwrap(), "recorded package");
-    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(
+        fs::read_to_string(workspace.join(".venv/package")).unwrap(),
+        "recorded package"
+    );
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert_eq!(stored_files(&files), stored);
 }
 

@@ -221,7 +221,17 @@ impl Transport {
         if body["version"] != 1
             || !matches!(
                 body["operation"].as_str(),
-                Some("catalog" | "model_visibility" | "set_model_visibility" | "login" | "poll" | "respond" | "cancel" | "logout" | "extension_command")
+                Some(
+                    "catalog"
+                        | "model_visibility"
+                        | "set_model_visibility"
+                        | "login"
+                        | "poll"
+                        | "respond"
+                        | "cancel"
+                        | "logout"
+                        | "extension_command"
+                )
             )
         {
             return Err("Invalid Provider/Auth Adapter operation".into());
@@ -348,25 +358,47 @@ mod tests {
         std::fs::write(global.join("extensions/probe.ts"), "export default function(pi) { pi.registerCommand('custom-settings', { handler: async (_args, ctx) => ctx.ui.notify(ctx.cwd, 'info') }); }").unwrap();
         let root = crate::native::installation_root();
         let transport = Transport::new();
-        let request = |command: Value| serde_json::json!({
-            "version": 1, "operation": "extension_command", "command": command,
-        });
-        let catalog = transport.request_with(request(serde_json::json!({"operation": "catalog", "repository": project})), || {
-            let mut command = Command::new("node");
-            command.arg("--import").arg("./pi/packages/coding-agent/src/experimental/source-resolver.ts")
-                .arg(crate::native::host_path(&root.join("engine/provider-host.ts")))
-                .current_dir(&root).env("PI_CODING_AGENT_DIR", &own)
-                .env("GRAPHER_GLOBAL_PI_AGENT_DIR", &global)
-                .env("GRAPHER_ISOLATED_PI_MODELS", "1").env("GRAPHER_ISOLATED_PI_SEARCH", "1").env("PI_OFFLINE", "1")
-                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-            Bridge::spawn(&mut command)
-        }).unwrap();
-        assert!(catalog["commands"].as_array().unwrap().iter().any(|command| command["name"] == "custom-settings"));
+        let request = |command: Value| {
+            serde_json::json!({
+                "version": 1, "operation": "extension_command", "command": command,
+            })
+        };
+        let catalog = transport
+            .request_with(
+                request(serde_json::json!({"operation": "catalog", "repository": project})),
+                || {
+                    let mut command = Command::new("node");
+                    command
+                        .arg("--import")
+                        .arg("./pi/packages/coding-agent/src/experimental/source-resolver.ts")
+                        .arg(crate::native::host_path(
+                            &root.join("engine/provider-host.ts"),
+                        ))
+                        .current_dir(&root)
+                        .env("PI_CODING_AGENT_DIR", &own)
+                        .env("GRAPHER_GLOBAL_PI_AGENT_DIR", &global)
+                        .env("GRAPHER_ISOLATED_PI_MODELS", "1")
+                        .env("GRAPHER_ISOLATED_PI_SEARCH", "1")
+                        .env("PI_OFFLINE", "1")
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped());
+                    Bridge::spawn(&mut command)
+                },
+            )
+            .unwrap();
+        assert!(catalog["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command["name"] == "custom-settings"));
         let command_id = uuid::Uuid::new_v4().to_string();
-        let fields = |operation: &str| serde_json::json!({
-            "operation": operation, "instance": catalog["instance"], "commandId": command_id,
-            "repository": project, "text": "/custom-settings",
-        });
+        let fields = |operation: &str| {
+            serde_json::json!({
+                "operation": operation, "instance": catalog["instance"], "commandId": command_id,
+                "repository": project, "text": "/custom-settings",
+            })
+        };
         transport.request(request(fields("execute"))).unwrap();
         let mut complete = false;
         let mut messages = Vec::new();
@@ -381,11 +413,15 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(complete);
-        assert!(messages.iter().any(|event| {
-            event["method"] == "notify" && event["message"].as_str().is_some_and(|message| {
-                crate::path_identity::same_path(std::path::Path::new(message), &project)
-            })
-        }), "selected project notification missing: {messages:?}");
+        assert!(
+            messages.iter().any(|event| {
+                event["method"] == "notify"
+                    && event["message"].as_str().is_some_and(|message| {
+                        crate::path_identity::same_path(std::path::Path::new(message), &project)
+                    })
+            }),
+            "selected project notification missing: {messages:?}"
+        );
         assert!(!own.join("sessions").exists());
         transport.shutdown();
     }

@@ -1,5 +1,8 @@
 use super::*;
-use std::{path::Path, time::{Duration, Instant}};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 fn wait(service: &Arc<Service>, predicate: impl Fn(&Snapshot) -> bool) -> Snapshot {
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -30,7 +33,11 @@ fn setup(enabled: bool, auto: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>
     setup_with_isolation(enabled, auto, true)
 }
 
-fn setup_with_isolation(enabled: bool, auto: bool, isolate: bool) -> (tempfile::TempDir, PathBuf, Arc<Service>) {
+fn setup_with_isolation(
+    enabled: bool,
+    auto: bool,
+    isolate: bool,
+) -> (tempfile::TempDir, PathBuf, Arc<Service>) {
     let temp = tempfile::tempdir().unwrap();
     let repo = crate::fixture::repository(temp.path()).unwrap();
     let script = temp.path().join("agent.mjs");
@@ -116,11 +123,22 @@ fn planner_review_binds_latest_feedback_setting_instead_of_stale_run_config() {
         }
         fs::write(repo.join("release-review"), "go").unwrap();
         drive(service.clone());
-        wait(&service, |state| state.phase == "completed" && state.nodes.len() == 2
-            && state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerReviewFinished { .. })).count() == 2);
+        wait(&service, |state| {
+            state.phase == "completed"
+                && state.nodes.len() == 2
+                && state
+                    .events
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::PlannerReviewFinished { .. }))
+                    .count()
+                    == 2
+        });
         wait_for_driver_exit(&service);
         let bindings: Vec<String> = fs::read_to_string(temp.path().join("feedback-enabled.jsonl"))
-            .unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert_eq!(bindings, vec![enabled.to_string(); 2]);
     }
 }
@@ -133,20 +151,49 @@ fn shared_review_promotes_new_parallel_nodes_only_when_isolation_is_enabled() {
         fs::write(repo.join("release-review"), "go").unwrap();
         drive(service.clone());
         let completed = wait(&service, |state| {
-            state.phase == "completed" && state.nodes.len() == 5
-                && state.events.iter().filter(|event| matches!(event.kind, EventKind::PlannerReviewFinished { .. })).count() == 2
+            state.phase == "completed"
+                && state.nodes.len() == 5
+                && state
+                    .events
+                    .iter()
+                    .filter(|event| matches!(event.kind, EventKind::PlannerReviewFinished { .. }))
+                    .count()
+                    == 2
         });
         wait_for_driver_exit(&service);
         assert_eq!(completed.executions.len(), 5);
-        assert!(crate::path_identity::same_path(Path::new(&completed.executions[0].worktree), &repo));
+        assert!(crate::path_identity::same_path(
+            Path::new(&completed.executions[0].worktree),
+            &repo
+        ));
         assert_eq!(completed.isolated_workspaces, Some(isolate));
         for execution in &completed.executions[1..] {
-            assert_eq!(crate::path_identity::same_path(Path::new(&execution.worktree), &repo), !isolate);
+            assert_eq!(
+                crate::path_identity::same_path(Path::new(&execution.worktree), &repo),
+                !isolate
+            );
         }
-        assert_eq!(completed.events.iter().filter(|event| matches!(event.kind, EventKind::PublicationCompleted { .. })).count(), usize::from(isolate));
-        assert_eq!(fs::read_to_string(repo.join("second.txt")).unwrap(), "continued");
+        assert_eq!(
+            completed
+                .events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::PublicationCompleted { .. }))
+                .count(),
+            usize::from(isolate)
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("second.txt")).unwrap(),
+            "continued"
+        );
         let runtime = service.runtime.lock().unwrap();
-        assert_eq!(runtime.store.load(&completed.run_id).unwrap().isolated_workspaces, Some(isolate));
+        assert_eq!(
+            runtime
+                .store
+                .load(&completed.run_id)
+                .unwrap()
+                .isolated_workspaces,
+            Some(isolate)
+        );
     }
 }
 
@@ -642,28 +689,44 @@ fn post_task_review_rejects_header_only_history_and_preserves_failure_after_rest
     let (root, run_id, graph, config) = {
         let mut runtime = service.runtime.lock().unwrap();
         let graph = runtime.state.graph.clone();
-        runtime.revise_graph(graph.clone(), PlanningSummary {
-            planning_id: planning_id.clone(),
-            status: Some("success".into()),
-            plan_type: Some("graph".into()),
-            ..Default::default()
-        }).unwrap();
+        runtime
+            .revise_graph(
+                graph.clone(),
+                PlanningSummary {
+                    planning_id: planning_id.clone(),
+                    status: Some("success".into()),
+                    plan_type: Some("graph".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         (
-            runtime.root.clone(), runtime.state.run_id.clone(), graph,
+            runtime.root.clone(),
+            runtime.state.run_id.clone(),
+            graph,
             runtime.state.effective_config().unwrap(),
         )
     };
-    let session_dir = root.join("planning").join(&planning_id).join("planner-session");
+    let session_dir = root
+        .join("planning")
+        .join(&planning_id)
+        .join("planner-session");
     fs::create_dir_all(&session_dir).unwrap();
     let session_file = session_dir.join(format!("original_{planning_id}.jsonl"));
-    let header = format!("{}\n", serde_json::json!({
-        "type": "session", "version": 3, "id": planning_id,
-        "cwd": crate::native::host_path(&repo)
-    }));
-    let turn = format!("{}\n", serde_json::json!({
-        "type": "message", "id": "original", "parentId": null,
-        "message": { "role": "user", "content": "Original user goal" }
-    }));
+    let header = format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "session", "version": 3, "id": planning_id,
+            "cwd": crate::native::host_path(&repo)
+        })
+    );
+    let turn = format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "message", "id": "original", "parentId": null,
+            "message": { "role": "user", "content": "Original user goal" }
+        })
+    );
     let history = format!("{header}{turn}");
     let expected_history = format!(
         "{}\n{turn}",
@@ -675,19 +738,33 @@ fn post_task_review_rejects_header_only_history_and_preserves_failure_after_rest
     fs::write(&session_file, &header).unwrap();
 
     drive(service.clone());
-    let failed = wait(&service, |state| state.events.iter().any(|event|
-        matches!(event.kind, EventKind::PlannerReviewFinished { .. })));
+    let failed = wait(&service, |state| {
+        state
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::PlannerReviewFinished { .. }))
+    });
     wait_for_driver_exit(&service);
     let planning = failed.planning.as_ref().unwrap();
     assert_eq!(planning.status.as_deref(), Some("failed"));
-    assert!(planning.error.as_deref().unwrap().contains("original user turn"));
+    assert!(planning
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("original user turn"));
     assert_eq!(failed.phase, "completed");
     assert_eq!(failed.graph, graph);
     assert_eq!(failed.nodes["first"].status, "completed");
     assert_eq!(failed.executions.len(), 1);
     assert!(failed.review_graph.is_none());
-    assert_eq!(fs::read_to_string(repo.join("first.txt")).unwrap(), "published");
-    assert!(!temp.path().join("planner-tasks.jsonl").exists(), "review must not launch Pi");
+    assert_eq!(
+        fs::read_to_string(repo.join("first.txt")).unwrap(),
+        "published"
+    );
+    assert!(
+        !temp.path().join("planner-tasks.jsonl").exists(),
+        "review must not launch Pi"
+    );
     assert_eq!(fs::read_to_string(&session_file).unwrap(), header);
     let failed_id = planning.planning_id.clone();
     drop(service);
@@ -708,23 +785,51 @@ fn post_task_review_rejects_header_only_history_and_preserves_failure_after_rest
         assert_eq!(replay.graph, graph);
         assert_eq!(replay.executions.len(), 1);
         assert_eq!(replay.planning.as_ref().unwrap().planning_id, failed_id);
-        assert_eq!(replay.planning.as_ref().unwrap().status.as_deref(), Some("failed"));
-        assert_eq!(replay.events.iter().filter(|event|
-            matches!(event.kind, EventKind::PlannerReviewFinished { .. })).count(), 1);
+        assert_eq!(
+            replay.planning.as_ref().unwrap().status.as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            replay
+                .events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::PlannerReviewFinished { .. }))
+                .count(),
+            1
+        );
     }
-    assert!(!temp.path().join("planner-tasks.jsonl").exists(), "restart must not retry review");
+    assert!(
+        !temp.path().join("planner-tasks.jsonl").exists(),
+        "restart must not retry review"
+    );
 
     // A real retained user turn still permits an explicit review of this Run.
     fs::write(&session_file, &history).unwrap();
     let reviewed = plan_goal_internal_with_started(
-        POST_TASK_REVIEW_PROMPT.into(), config, Some("graph"), None,
-        Some(run_id), &service, true, |_| {}, |_| {}, |_| {}, |_| {},
-    ).unwrap();
+        POST_TASK_REVIEW_PROMPT.into(),
+        config,
+        Some("graph"),
+        None,
+        Some(run_id),
+        &service,
+        true,
+        |_| {},
+        |_| {},
+        |_| {},
+        |_| {},
+    )
+    .unwrap();
     wait_for_driver_exit(&service);
-    assert_eq!(reviewed.planning.as_ref().unwrap().status.as_deref(), Some("success"));
+    assert_eq!(
+        reviewed.planning.as_ref().unwrap().status.as_deref(),
+        Some("success")
+    );
     assert_eq!(reviewed.graph, graph);
     assert_eq!(reviewed.executions.len(), 1);
-    assert_eq!(planner_tasks(&temp), vec![POST_TASK_REVIEW_PROMPT.to_string()]);
+    assert_eq!(
+        planner_tasks(&temp),
+        vec![POST_TASK_REVIEW_PROMPT.to_string()]
+    );
     assert_eq!(fs::read_to_string(&session_file).unwrap(), expected_history);
 }
 

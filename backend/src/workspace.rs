@@ -1555,9 +1555,7 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
         ["--git-dir", dir, "--work-tree", _, rest @ ..] if Path::new(dir).is_absolute() => {
             (Some(*dir), rest)
         }
-        ["--git-dir", dir, rest @ ..] if Path::new(dir).is_absolute() => {
-            (Some(*dir), rest)
-        }
+        ["--git-dir", dir, rest @ ..] if Path::new(dir).is_absolute() => (Some(*dir), rest),
         _ => (None, args),
     };
     let supported = matches!(
@@ -1585,8 +1583,8 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
             }
             _ => false,
         };
-        let slot_conflicts = explicit.is_none()
-            && args == ["diff", "--name-only", "--diff-filter=U"];
+        let slot_conflicts =
+            explicit.is_none() && args == ["diff", "--name-only", "--diff-filter=U"];
         if !direct_ref && !slot_conflicts {
             return None;
         }
@@ -1600,7 +1598,8 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
             &[] as &[&std::ffi::OsStr],
         ),
         None => git2::Repository::open(cwd),
-    }.ok()?;
+    }
+    .ok()?;
     // Git status/diff invoked from a subdirectory are scoped to that path;
     // libgit2 reports repository-wide results unless a pathspec is supplied.
     if matches!(
@@ -1618,7 +1617,10 @@ fn git_read(cwd: &Path, args: &[&str]) -> Option<Result<String, String>> {
         let (verify, spec) = match args {
             ["rev-parse", "HEAD"] | ["rev-parse", "--verify", "HEAD"] => (true, "HEAD"),
             ["rev-parse", spec] | ["rev-parse", "--verify", spec]
-                if spec.starts_with("refs/grapher/") => (true, *spec),
+                if spec.starts_with("refs/grapher/") =>
+            {
+                (true, *spec)
+            }
             _ => (false, ""),
         };
         if verify {
@@ -1870,8 +1872,13 @@ pub(crate) fn git_bytes(
 /// infrastructure errors, rather than instructions for an agent to bypass Git.
 pub(crate) fn check_staged_patch(cwd: &Path, paths: &[String]) -> Result<Option<String>, String> {
     let mut args = vec![
-        "--literal-pathspecs", "diff", "--cached", "--check", "--no-ext-diff",
-        "--no-textconv", "--",
+        "--literal-pathspecs",
+        "diff",
+        "--cached",
+        "--check",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--",
     ];
     args.extend(paths.iter().map(String::as_str));
     let (output, code) = run_git_bytes_allowing(cwd, &args, None, None, false, &[2])?;
@@ -2751,7 +2758,9 @@ fn snapshot_slot_to_ref_scoped(
         crate::workspace_view::stage_node_snapshot(&canonical_path, &canonical_repo, exclusions)?;
     let current = git(&canonical_path, &["rev-parse", "HEAD"])?;
     let changed_view = match view_identity.as_deref() {
-        Some(identity) => !crate::workspace_view::record_matches(&canonical_repo, &current, identity)?,
+        Some(identity) => {
+            !crate::workspace_view::record_matches(&canonical_repo, &current, identity)?
+        }
         None => false,
     };
     // A head that already exists without a view record (an explicit human or
@@ -2952,7 +2961,9 @@ pub(crate) fn collection_excluded(
     // over the reserved-name convention.
     // Most entries are ordinary project files. Check the cheap name predicate
     // before allocating a normalized path and searching the tracked set.
-    if relative.file_name().and_then(|name| name.to_str())
+    if relative
+        .file_name()
+        .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix(".grapher-publish-"))
         .and_then(|name| name.strip_suffix(".tmp"))
         .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))

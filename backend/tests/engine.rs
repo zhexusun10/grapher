@@ -249,14 +249,8 @@ exit 1
 "#,
     );
     let err = result.unwrap_err();
-    assert!(
-        err.contains("Insufficient Balance"),
-        "{err}"
-    );
-    assert!(
-        !err.starts_with("Pi exited with"),
-        "{err}"
-    );
+    assert!(err.contains("Insufficient Balance"), "{err}");
+    assert!(!err.starts_with("Pi exited with"), "{err}");
 }
 
 #[test]
@@ -308,7 +302,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         auto_approve: false,
         thinking_level: "medium".into(),
         role_models: Default::default(),
-        isolate_parallel_nodes: true, post_task_review: false,
+        isolate_parallel_nodes: true,
+        post_task_review: false,
         feedback_enabled: false,
         planner_write_tools: true,
     };
@@ -419,7 +414,9 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
     assert!(!planner_out.contains("--no-skills"));
     assert!(!planner_out.contains("--no-extensions"));
     assert!(planner_out.contains("--no-approve"));
-    assert!(planner_out.contains("--exclude-tools ls,find,grep") && !planner_out.contains("--tools"));
+    assert!(
+        planner_out.contains("--exclude-tools ls,find,grep") && !planner_out.contains("--tools")
+    );
     assert!(planner_out.contains("PLANNER_WRITE_TOOLS: true"));
     assert!(planner_out.contains("FEEDBACK_ENABLED: false"));
     // Config excludes file tools without hiding extension tools.
@@ -595,7 +592,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         pi_command: "/bin/sh".into(),
         pi_args: vec![script.to_string_lossy().into()],
         model: "test-model".into(),
-        isolate_parallel_nodes: true, thinking_level: "medium".into(),
+        isolate_parallel_nodes: true,
+        thinking_level: "medium".into(),
         max_parallel: 2,
         max_feedback: 3,
         auto_approve: false,
@@ -663,7 +661,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
         pi_args: vec![script_path.to_string_lossy().into()],
-        isolate_parallel_nodes: true, model: "internal-grapher-model".into(),
+        isolate_parallel_nodes: true,
+        model: "internal-grapher-model".into(),
         role_models: Default::default(),
         thinking_level: "medium".into(),
         max_parallel: 2,

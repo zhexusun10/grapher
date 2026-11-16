@@ -6,35 +6,57 @@ use std::path::Path;
 /// passes its Job.task unchanged, and Merger continuations retain their own chat.
 pub(super) fn merger_query(state: &Snapshot) -> String {
     let withdrawn = state.withdrawn_steer_sequences();
-    let planner_statuses: std::collections::BTreeMap<_, _> = state.events.iter()
+    let planner_statuses: std::collections::BTreeMap<_, _> = state
+        .events
+        .iter()
         .filter_map(|event| match &event.kind {
-            EventKind::PlannerSteerStatus { planning_id, request_id, status, .. } =>
-                Some(((planning_id.as_str(), request_id.as_str()), status.as_str())),
+            EventKind::PlannerSteerStatus {
+                planning_id,
+                request_id,
+                status,
+                ..
+            } => Some(((planning_id.as_str(), request_id.as_str()), status.as_str())),
             _ => None,
-        }).collect();
-    let requests: Vec<String> = state.events.iter()
+        })
+        .collect();
+    let requests: Vec<String> = state
+        .events
+        .iter()
         .filter(|event| !withdrawn.contains(&event.sequence))
         .filter_map(|event| match &event.kind {
-            EventKind::Steered { execution_id, instruction, .. }
-                if !state.superseded_execution_ids.contains(execution_id)
-                    && !instruction.trim().is_empty() =>
+            EventKind::Steered {
+                execution_id,
+                instruction,
+                ..
+            } if !state.superseded_execution_ids.contains(execution_id)
+                && !instruction.trim().is_empty() =>
             {
                 Some(instruction.clone())
             }
-            EventKind::PlannerSteerSubmitted { planning_id, request_id, instruction, .. }
-                if !instruction.trim().is_empty()
-                    && !matches!(planner_statuses.get(&(planning_id.as_str(), request_id.as_str())),
-                        Some(&"failed" | &"withdrawn" | &"handled")) =>
+            EventKind::PlannerSteerSubmitted {
+                planning_id,
+                request_id,
+                instruction,
+                ..
+            } if !instruction.trim().is_empty()
+                && !matches!(
+                    planner_statuses.get(&(planning_id.as_str(), request_id.as_str())),
+                    Some(&"failed" | &"withdrawn" | &"handled")
+                ) =>
             {
                 Some(instruction.clone())
             }
             _ => None,
-        }).collect();
+        })
+        .collect();
     if requests.is_empty() {
         state.graph.original_goal.clone()
     } else {
-        format!("{}\n\n<user further request>\n{}\n</user further request>",
-            state.graph.original_goal, requests.join("\n\n"))
+        format!(
+            "{}\n\n<user further request>\n{}\n</user further request>",
+            state.graph.original_goal,
+            requests.join("\n\n")
+        )
     }
 }
 
@@ -52,17 +74,31 @@ pub(super) fn publish_batch(
     crate::process_control::with_owner(run_id, || -> Result<(), String> {
         let recoveries = {
             let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-            runtime.state.batch_handoff.as_ref().into_iter()
+            runtime
+                .state
+                .batch_handoff
+                .as_ref()
+                .into_iter()
                 .flat_map(|handoff| &handoff.recovery_execution_ids)
-                .map(|id| runtime.state.executions.iter().find(|execution| execution.id == *id)
-                    .cloned().ok_or_else(|| "Missing batch recovery execution".to_string()))
+                .map(|id| {
+                    runtime
+                        .state
+                        .executions
+                        .iter()
+                        .find(|execution| execution.id == *id)
+                        .cloned()
+                        .ok_or_else(|| "Missing batch recovery execution".to_string())
+                })
                 .collect::<Result<Vec<_>, _>>()?
         };
         if !recoveries.is_empty() {
-            let heads = recoveries.iter().map(|execution| {
-                Runtime::capture_batch_recovery(root, run_id, &config, execution)
-                    .map(|head| (execution.id.clone(), head))
-            }).collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+            let heads = recoveries
+                .iter()
+                .map(|execution| {
+                    Runtime::capture_batch_recovery(root, run_id, &config, execution)
+                        .map(|head| (execution.id.clone(), head))
+                })
+                .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
             let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
             if runtime.state.run_id != run_id {
                 return Err("Run changed during batch recovery capture".into());
@@ -82,18 +118,46 @@ pub(super) fn publish_batch(
         }
     }
     let (head, descriptor) = crate::process_control::with_owner(run_id, || {
-        let exclusions = service.runtime.lock().map_err(|e| e.to_string())?.exclusions()?;
+        let exclusions = service
+            .runtime
+            .lock()
+            .map_err(|e| e.to_string())?
+            .exclusions()?;
         let publication_path = crate::workspace::workspaces_parent(root)
-            .join(".grapher-worktrees").join(run_id).join(
+            .join(".grapher-worktrees")
+            .join(run_id)
+            .join(
                 crate::graph_merge::publication_workspace(&repository, &publication.heads)?
-                    .file_name().ok_or("Invalid publication workspace")?);
+                    .file_name()
+                    .ok_or("Invalid publication workspace")?,
+            );
         let head = crate::graph_merge::merge_graph_scoped_at(
-            &repository, &publication.heads, &exclusions, &publication_path,
+            &repository,
+            &publication.heads,
+            &exclusions,
+            &publication_path,
             |publication_workspace| {
-                let attempt = service.runtime.lock().map_err(|e| e.to_string())?.state.mergers.len() + 1;
+                let attempt = service
+                    .runtime
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .state
+                    .mergers
+                    .len()
+                    + 1;
                 crate::graph_merge::resolve_with_merger(
-                    publication_workspace, &query, &config, root, attempt,
-                    |event| service.runtime.lock().map_err(|e| e.to_string())?.emit(event),
+                    publication_workspace,
+                    &query,
+                    &config,
+                    root,
+                    attempt,
+                    |event| {
+                        service
+                            .runtime
+                            .lock()
+                            .map_err(|e| e.to_string())?
+                            .emit(event)
+                    },
                 )
             },
         )?;
@@ -116,8 +180,9 @@ pub(super) fn publish_batch(
     let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
     if runtime.state.run_id != run_id
         || !matches!(runtime.state.phase.as_str(), "publishing" | "merging")
-        || runtime.state.publication.as_ref().is_none_or(|current|
-            current.heads != publication.heads || current.repository != publication.repository)
+        || runtime.state.publication.as_ref().is_none_or(|current| {
+            current.heads != publication.heads || current.repository != publication.repository
+        })
     {
         return Err("Stale publication worker cannot commit to this Run".into());
     }
@@ -136,21 +201,43 @@ pub(super) fn publish_batch(
     }
     drop(runtime);
     crate::file_changes::record_publication_git_changes(
-        run_id, &repository, &base_commit, &published_commit,
+        run_id,
+        &repository,
+        &base_commit,
+        &published_commit,
     );
     reclaim_source_snapshot(service, &repository);
     if !batch_workspaces {
         let review = {
             let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-            runtime.state.effective_config().filter(|config| config.post_task_review)
-                .filter(|_| runtime.state.plan_type.as_deref() == Some("graph")
-                    && runtime.state.phase == "completed" && !runtime.state.stop_requested
-                    && runtime.state.nodes.values().all(|node| node.status == "completed"))
+            runtime
+                .state
+                .effective_config()
+                .filter(|config| config.post_task_review)
+                .filter(|_| {
+                    runtime.state.plan_type.as_deref() == Some("graph")
+                        && runtime.state.phase == "completed"
+                        && !runtime.state.stop_requested
+                        && runtime
+                            .state
+                            .nodes
+                            .values()
+                            .all(|node| node.status == "completed")
+                })
         };
         if let Some(config) = review {
             if let Err((error, _)) = plan_goal_internal_with_started(
-                POST_TASK_REVIEW_PROMPT.into(), config, Some("graph"), None,
-                Some(run_id.to_string()), service, true, |_| {}, |_| {}, |_| {}, |_| {},
+                POST_TASK_REVIEW_PROMPT.into(),
+                config,
+                Some("graph"),
+                None,
+                Some(run_id.to_string()),
+                service,
+                true,
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
             ) {
                 eprintln!("Post-task Planner review failed: {error}");
             }
@@ -166,29 +253,47 @@ mod tests {
 
     fn steer(execution: &str, node: &str, instruction: &str) -> EventKind {
         EventKind::Steered {
-            execution_id: execution.into(), node: node.into(), instruction: instruction.into(),
-            request_id: None, images: None,
+            execution_id: execution.into(),
+            node: node.into(),
+            instruction: instruction.into(),
+            request_id: None,
+            images: None,
         }
     }
 
     fn planner_steer(id: &str, instruction: &str) -> EventKind {
         EventKind::PlannerSteerSubmitted {
-            planning_id: "plan".into(), request_id: id.into(), instruction: instruction.into(), images: None,
+            planning_id: "plan".into(),
+            request_id: id.into(),
+            instruction: instruction.into(),
+            images: None,
         }
     }
 
     fn planner_status(id: &str, status: &str) -> EventKind {
         EventKind::PlannerSteerStatus {
-            planning_id: "plan".into(), request_id: id.into(), status: status.into(), error: None,
+            planning_id: "plan".into(),
+            request_id: id.into(),
+            status: status.into(),
+            error: None,
         }
     }
 
     fn state(events: Vec<EventKind>) -> Snapshot {
         Snapshot {
-            graph: Graph { original_goal: "Refactor login".into(), ..Default::default() },
-            events: events.into_iter().enumerate().map(|(index, kind)| Event {
-                sequence: index as i64 + 1, timestamp: 0, kind,
-            }).collect(),
+            graph: Graph {
+                original_goal: "Refactor login".into(),
+                ..Default::default()
+            },
+            events: events
+                .into_iter()
+                .enumerate()
+                .map(|(index, kind)| Event {
+                    sequence: index as i64 + 1,
+                    timestamp: 0,
+                    kind,
+                })
+                .collect(),
             ..Default::default()
         }
     }
@@ -206,20 +311,29 @@ mod tests {
         let query = merger_query(&state);
         assert_eq!(query, "Refactor login\n\n<user further request>\nKeep the old API\n\n不要修改数据库 schema\n\nPreserve the source-side validation\n</user further request>");
         assert_eq!(state.graph.original_goal, "Refactor login");
-        let prompt = crate::graph_merge::merger_prompt(&query, crate::graph_merge::MergerConflicts::GIT);
+        let prompt =
+            crate::graph_merge::merger_prompt(&query, crate::graph_merge::MergerConflicts::GIT);
         assert!(prompt.contains(&query));
         assert!(prompt.contains("context, not a task to execute"));
         // Node preparation still gets only its own Job.task, even in a Run with steers.
-        let node_prompt = crate::graph_merge::merger_prompt("Prepare node C", crate::graph_merge::MergerConflicts::GIT);
+        let node_prompt = crate::graph_merge::merger_prompt(
+            "Prepare node C",
+            crate::graph_merge::MergerConflicts::GIT,
+        );
         assert!(!node_prompt.contains("<user further request>"));
-        assert!(node_prompt.contains("<workspace_objective>\nPrepare node C\n</workspace_objective>"));
+        assert!(
+            node_prompt.contains("<workspace_objective>\nPrepare node C\n</workspace_objective>")
+        );
     }
 
     #[test]
     fn publication_steer_context_excludes_withdrawn_failed_and_superseded_requests() {
         let mut state = state(vec![
             steer("a-1", "a", "withdrawn node request"),
-            EventKind::SteersWithdrawn { execution_id: "a-1".into(), message_sequences: vec![1] },
+            EventKind::SteersWithdrawn {
+                execution_id: "a-1".into(),
+                message_sequences: vec![1],
+            },
             steer("old-a", "a", "superseded node request"),
             planner_steer("failed", "failed Planner request"),
             planner_status("failed", "failed"),
@@ -229,26 +343,43 @@ mod tests {
             planner_steer("handled", "extension command"),
             planner_status("handled", "handled"),
             steer("a-1", "a", "  "),
-            EventKind::Output { execution_id: "a-1".into(), text: "assistant output".into() },
+            EventKind::Output {
+                execution_id: "a-1".into(),
+                text: "assistant output".into(),
+            },
         ]);
         state.superseded_execution_ids.push("old-a".into());
         assert_eq!(merger_query(&state), state.graph.original_goal);
-        state.events.push(Event { sequence: 13, timestamp: 0, kind: steer("a-2", "a", "Keep this request") });
-        assert!(merger_query(&state).ends_with("<user further request>\nKeep this request\n</user further request>"));
+        state.events.push(Event {
+            sequence: 13,
+            timestamp: 0,
+            kind: steer("a-2", "a", "Keep this request"),
+        });
+        assert!(merger_query(&state)
+            .ends_with("<user further request>\nKeep this request\n</user further request>"));
     }
 
     #[test]
     fn publication_steer_context_survives_replay_without_duplicate_requests() {
         let temp = tempfile::TempDir::new().unwrap();
         let mut runtime = Runtime::open(temp.path()).unwrap();
-        runtime.emit(EventKind::Created {
-            graph: Graph { original_goal: "Refactor login".into(), ..Default::default() },
-            config: serde_json::from_value(serde_json::json!({
-                "repository": temp.path(), "model": "fixture",
-            })).unwrap(),
-            planning_id: None, planning: None,
-        }).unwrap();
-        runtime.emit(planner_steer("first", "Keep the old API")).unwrap();
+        runtime
+            .emit(EventKind::Created {
+                graph: Graph {
+                    original_goal: "Refactor login".into(),
+                    ..Default::default()
+                },
+                config: serde_json::from_value(serde_json::json!({
+                    "repository": temp.path(), "model": "fixture",
+                }))
+                .unwrap(),
+                planning_id: None,
+                planning: None,
+            })
+            .unwrap();
+        runtime
+            .emit(planner_steer("first", "Keep the old API"))
+            .unwrap();
         runtime.emit(planner_status("first", "consumed")).unwrap();
         runtime.emit(steer("a-1", "a", "Keep the schema")).unwrap();
         let before = merger_query(&runtime.state);

@@ -69,10 +69,7 @@ impl Fixture {
             .iter()
             .chain(&loaded.mergers)
             .any(|e| e.status == "running")
-            || loaded
-                .nodes
-                .values()
-                .any(|n| n.status == "running")
+            || loaded.nodes.values().any(|n| n.status == "running")
             || loaded
                 .result_execution
                 .as_ref()

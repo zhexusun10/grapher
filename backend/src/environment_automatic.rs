@@ -13,15 +13,19 @@ fn text(path: &Path) -> String {
     native::host_path(path).to_string_lossy().replace('\\', "/")
 }
 pub(crate) fn business_path(source: &Path, value: &std::ffi::OsStr) -> Result<Vec<String>, String> {
-    std::env::split_paths(value).map(|path| {
-        if let Some(mapped) = environment::project_path_template(&path, source) {
-            return Ok(mapped);
-        }
-        // Missing, relative and empty entries are meaningful native PATH
-        // entries. Keep their spelling/order; do not resolve toolchain shims.
-        native::host_path(&path).into_os_string().into_string()
-            .map_err(|_| "Business PATH must be UTF-8; refusing lossy tool selection".into())
-    }).collect()
+    std::env::split_paths(value)
+        .map(|path| {
+            if let Some(mapped) = environment::project_path_template(&path, source) {
+                return Ok(mapped);
+            }
+            // Missing, relative and empty entries are meaningful native PATH
+            // entries. Keep their spelling/order; do not resolve toolchain shims.
+            native::host_path(&path)
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "Business PATH must be UTF-8; refusing lossy tool selection".into())
+        })
+        .collect()
 }
 pub(crate) fn resolve(
     source: &Path,
@@ -40,8 +44,10 @@ pub(crate) fn resolve(
         .canonicalize()
         .map(|path| native::host_path(&path))
         .map_err(|e| e.to_string())?;
-    let mut path = business_path(&source,
-        &std::env::var_os("PATH").ok_or("Native bootstrap PATH unavailable")?)?;
+    let mut path = business_path(
+        &source,
+        &std::env::var_os("PATH").ok_or("Native bootstrap PATH unavailable")?,
+    )?;
     let node = native::trusted_node()?;
     if workspace::scope_contains(&node, &source) {
         return Err("Trusted Node must be outside the business project".into());
@@ -77,13 +83,20 @@ pub(crate) fn resolve(
         text(node.parent().ok_or("Missing Node directory")?),
     ];
     if cfg!(windows) {
-        let root = shell.parent().and_then(Path::parent).ok_or("Missing Git root")?;
+        let root = shell
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("Missing Git root")?;
         bootstrap.extend([text(&root.join("usr/bin")), text(&root.join("mingw64/bin"))]);
     }
     for directory in bootstrap {
-        if !path.iter().any(|existing| if cfg!(windows) {
-            existing.eq_ignore_ascii_case(&directory)
-        } else { existing == &directory }) {
+        if !path.iter().any(|existing| {
+            if cfg!(windows) {
+                existing.eq_ignore_ascii_case(&directory)
+            } else {
+                existing == &directory
+            }
+        }) {
             path.push(directory);
         }
     }
@@ -235,11 +248,19 @@ mod tests {
         assert!(!policy.launch.requires_entry_first());
         assert_eq!(policy.launch.owned_scopes, Some(vec![]));
         let expected: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-            .map(|directory| environment::project_path_template(&directory, source.path())
-                .unwrap_or_else(|| native::host_path(&directory).to_string_lossy().into_owned()))
+            .map(|directory| {
+                environment::project_path_template(&directory, source.path())
+                    .unwrap_or_else(|| native::host_path(&directory).to_string_lossy().into_owned())
+            })
             .collect();
-        assert!(policy.launch.path.starts_with(&expected), "bootstrap bins must not outrank host tools");
-        assert_eq!(policy.launch.unbound_path.as_ref(), Some(&policy.launch.path));
+        assert!(
+            policy.launch.path.starts_with(&expected),
+            "bootstrap bins must not outrank host tools"
+        );
+        assert_eq!(
+            policy.launch.unbound_path.as_ref(),
+            Some(&policy.launch.path)
+        );
         assert!(Path::new(&policy.launch.shell).is_absolute());
         assert!(policy.launch.environment.is_none());
     }
@@ -259,17 +280,33 @@ mod tests {
         crate::path_safety::directory_link(&external, &external_alias);
         crate::path_safety::directory_link(&external, &source.join("linked-external"));
         let paths = vec![
-            source.join("tools"), alias.join("tools"), subdir_alias,
-            source.clone(), source.join("future/bin"),
-            PathBuf::from("relative-bin"), PathBuf::from(""), PathBuf::from("../shared-bin"),
-            external_alias.clone(), external.join("not-installed-yet"),
-            source.join("linked-external/bin"), source.join("../external"),
+            source.join("tools"),
+            alias.join("tools"),
+            subdir_alias,
+            source.clone(),
+            source.join("future/bin"),
+            PathBuf::from("relative-bin"),
+            PathBuf::from(""),
+            PathBuf::from("../shared-bin"),
+            external_alias.clone(),
+            external.join("not-installed-yet"),
+            source.join("linked-external/bin"),
+            source.join("../external"),
         ];
         let path = business_path(&source, &std::env::join_paths(&paths).unwrap()).unwrap();
-        assert_eq!(&path[..8], [
-            "{workspace}/tools", "{workspace}/tools", "{workspace}/tools",
-            "{workspace}", "{workspace}/future/bin", "relative-bin", "", "../shared-bin",
-        ]);
+        assert_eq!(
+            &path[..8],
+            [
+                "{workspace}/tools",
+                "{workspace}/tools",
+                "{workspace}/tools",
+                "{workspace}",
+                "{workspace}/future/bin",
+                "relative-bin",
+                "",
+                "../shared-bin",
+            ]
+        );
         assert_eq!(Path::new(&path[8]), external_alias);
         assert_eq!(Path::new(&path[9]), external.join("not-installed-yet"));
         assert_eq!(path[10], "{workspace}/linked-external/bin");
@@ -282,18 +319,27 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let tools = data.path().join("native;tools");
         fs::create_dir_all(&tools).unwrap();
-        let python = tools.join(if cfg!(windows) { "python.exe" } else { "python" });
+        let python = tools.join(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        });
         // The bootstrap inventory hashes these bytes; it must never execute
         // this deliberately non-executable fixture as a Python interpreter.
         fs::write(&python, "native-probe-before").unwrap();
         let mut policy = resolve(source.path(), false).unwrap().0.unwrap();
         policy.launch.path.insert(0, text(&tools));
         policy.launch.unbound_path = Some(policy.launch.path.clone());
-        let store = environment::Environments::new(data.path(), &uuid::Uuid::new_v4().to_string(), &policy).unwrap();
+        let store =
+            environment::Environments::new(data.path(), &uuid::Uuid::new_v4().to_string(), &policy)
+                .unwrap();
         let before = store.baseline().unwrap();
         fs::write(&python, "native-probe-after!").unwrap();
         let after = store.baseline().unwrap();
-        assert_ne!(before.baseline, after.baseline, "a quoted PATH component must not disappear from bootstrap evidence");
+        assert_ne!(
+            before.baseline, after.baseline,
+            "a quoted PATH component must not disappear from bootstrap evidence"
+        );
         assert_eq!(before.policy, after.policy);
     }
 

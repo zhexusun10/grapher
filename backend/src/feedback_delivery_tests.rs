@@ -5,13 +5,17 @@ fn ready_rechecks() -> (TempDir, Runtime, Job, Job) {
     ready_rechecks_with_images(None)
 }
 
-fn ready_rechecks_with_images(images: Option<Vec<ImageAttachment>>) -> (TempDir, Runtime, Job, Job) {
+fn ready_rechecks_with_images(
+    images: Option<Vec<ImageAttachment>>,
+) -> (TempDir, Runtime, Job, Job) {
     let (temp, _source, mut runtime) = configured(true);
     let (_, review, _) = invalidate(&mut runtime, false);
     let repair = runtime.jobs().unwrap().remove(0);
     finish(&mut runtime, &repair, "repaired");
     if images.is_some() {
-        runtime.intervene_with_images("review", "Review this screenshot", images).unwrap();
+        runtime
+            .intervene_with_images("review", "Review this screenshot", images)
+            .unwrap();
     }
     let jobs = runtime.jobs().unwrap();
     let recheck = jobs
@@ -76,14 +80,21 @@ fn deliver_text(runtime: &Runtime, job: &Job, text: &str) {
 #[test]
 fn feedback_delivery_image_normalization_survives_retry_and_restart() {
     for restart in [false, true] {
-        let (_temp, mut runtime, _review, recheck) = ready_rechecks_with_images(Some(vec![image("screenshot")]));
+        let (_temp, mut runtime, _review, recheck) =
+            ready_rechecks_with_images(Some(vec![image("screenshot")]));
         assert_eq!(recheck.images.as_ref().unwrap().len(), 1);
-        let prompt = engine::feedback_input::prompt(&recheck.task, recheck.feedback_delivery_id.as_deref());
+        let prompt =
+            engine::feedback_input::prompt(&recheck.task, recheck.feedback_delivery_id.as_deref());
         // Pinned Pi appends normalization hints to the user text before it is
         // stored, even though the original instruction was accepted unchanged.
         let normalized = format!("{prompt}\n\n[Image: original 3000x2000, displayed at 2000x1333. Multiply coordinates by 1.50 to map to original image.]");
         deliver_text(&runtime, &recheck, &normalized);
-        runtime.finish(&recheck.execution, Err("provider stopped after input".into())).unwrap();
+        runtime
+            .finish(
+                &recheck.execution,
+                Err("provider stopped after input".into()),
+            )
+            .unwrap();
         if restart {
             runtime.jobs().unwrap();
             let root = runtime.root.clone();
@@ -94,7 +105,10 @@ fn feedback_delivery_image_normalization_survives_retry_and_restart() {
             runtime.resume_node("review").unwrap();
         }
         let retry = runtime.jobs().unwrap().remove(0);
-        assert!(retry.continuation && retry.task.is_empty(), "a normalized but delivered turn must not be resent");
+        assert!(
+            retry.continuation && retry.task.is_empty(),
+            "a normalized but delivered turn must not be resent"
+        );
         assert!(retry.feedback_delivery_id.is_none());
     }
 }
@@ -103,8 +117,10 @@ fn feedback_delivery_image_normalization_survives_retry_and_restart() {
 fn feedback_delivery_requires_the_current_identity_and_retains_legacy_boundaries() {
     for mode in ["missing", "wrong", "ambiguous", "legacy"] {
         let (_temp, mut runtime, _review, recheck) = ready_rechecks();
-        let current = engine::feedback_input::prompt(&recheck.task, recheck.feedback_delivery_id.as_deref());
-        let wrong = engine::feedback_input::prompt(&recheck.task, Some(&Uuid::new_v4().to_string()));
+        let current =
+            engine::feedback_input::prompt(&recheck.task, recheck.feedback_delivery_id.as_deref());
+        let wrong =
+            engine::feedback_input::prompt(&recheck.task, Some(&Uuid::new_v4().to_string()));
         let text = match mode {
             "wrong" => wrong,
             "ambiguous" => format!("{current}\n{wrong}"),
@@ -112,20 +128,38 @@ fn feedback_delivery_requires_the_current_identity_and_retains_legacy_boundaries
         };
         deliver_text(&runtime, &recheck, &text);
         if mode == "legacy" {
-            let receipt = runtime.root.join("sessions").join(&recheck.execution.id).join("feedback-input.json");
-            let mut boundary: serde_json::Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+            let receipt = runtime
+                .root
+                .join("sessions")
+                .join(&recheck.execution.id)
+                .join("feedback-input.json");
+            let mut boundary: serde_json::Value =
+                serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
             boundary.as_object_mut().unwrap().remove("delivery_marker");
             fs::write(receipt, boundary.to_string()).unwrap();
         }
-        runtime.finish(&recheck.execution, Err("provider stopped".into())).unwrap();
+        runtime
+            .finish(&recheck.execution, Err("provider stopped".into()))
+            .unwrap();
         runtime.resume_node("review").unwrap();
         if mode == "legacy" {
             let retry = runtime.jobs().unwrap().remove(0);
             assert!(retry.continuation && retry.task.is_empty());
         } else {
             let count = runtime.state.executions.len();
-            assert!(runtime.jobs().err().unwrap().contains("differs from the recorded turn"), "{mode}");
-            assert_eq!(runtime.state.executions.len(), count, "uncertain input cannot become a duplicate turn");
+            assert!(
+                runtime
+                    .jobs()
+                    .err()
+                    .unwrap()
+                    .contains("differs from the recorded turn"),
+                "{mode}"
+            );
+            assert_eq!(
+                runtime.state.executions.len(),
+                count,
+                "uncertain input cannot become a duplicate turn"
+            );
         }
     }
 }

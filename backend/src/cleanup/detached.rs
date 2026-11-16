@@ -1,11 +1,16 @@
 //! Retire a workspace under its Run lock; delete only its unique detached path
 //! outside that lock. Receipts survive both Run deletion and path reuse.
-use super::{Target, Store};
+use super::{Store, Target};
 use crate::path_safety::real_child_path;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap, fs, path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, Weak, atomic::{AtomicBool, Ordering}},
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock, Weak,
+    },
 };
 use uuid::Uuid;
 
@@ -29,7 +34,9 @@ impl Record {
             return Err("Invalid detached workspace receipt".into());
         }
         let (root, original) = self.target.location(data, &self.run_id)?;
-        let destination = original.parent().ok_or("Missing workspace parent")?
+        let destination = original
+            .parent()
+            .ok_or("Missing workspace parent")?
             .join(format!(".grapher-cleanup-{}", self.id));
         Ok((root, destination))
     }
@@ -40,24 +47,41 @@ static TICKETS: OnceLock<Mutex<Tickets>> = OnceLock::new();
 static WAKE: AtomicBool = AtomicBool::new(false);
 
 fn ticket(root: &Path, id: &str) -> Result<Arc<Mutex<()>>, String> {
-    let mut tickets = TICKETS.get_or_init(Default::default).lock().map_err(|e| e.to_string())?;
+    let mut tickets = TICKETS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|e| e.to_string())?;
     tickets.retain(|_, weak| weak.strong_count() > 0);
     let key = (crate::path_identity::path_key(root), id.to_string());
-    if let Some(guard) = tickets.get(&key).and_then(Weak::upgrade) { return Ok(guard); }
+    if let Some(guard) = tickets.get(&key).and_then(Weak::upgrade) {
+        return Ok(guard);
+    }
     let guard = Arc::new(Mutex::new(()));
     tickets.insert(key, Arc::downgrade(&guard));
     Ok(guard)
 }
 
-pub(crate) fn take_wakeup() -> bool { WAKE.swap(false, Ordering::SeqCst) }
+pub(crate) fn take_wakeup() -> bool {
+    WAKE.swap(false, Ordering::SeqCst)
+}
 
 /// Caller already validated ownership, sharing, source protection and event
 /// generation under the Run mutex. A receipt is committed before rename; the
 /// detached bit is committed before any recursive deletion is permitted.
-pub(super) fn retire(root: &Path, store: &Store, run_id: &str, target: &Target) -> Result<(), String> {
-    let Some(original) = target.resolve(root, run_id)? else { return Ok(()); };
+pub(super) fn retire(
+    root: &Path,
+    store: &Store,
+    run_id: &str,
+    target: &Target,
+) -> Result<(), String> {
+    let Some(original) = target.resolve(root, run_id)? else {
+        return Ok(());
+    };
     let mut record = Record {
-        id: Uuid::new_v4().to_string(), run_id: run_id.into(), target: target.clone(), detached: false,
+        id: Uuid::new_v4().to_string(),
+        run_id: run_id.into(),
+        target: target.clone(),
+        detached: false,
     };
     let lock = ticket(root, &record.id)?;
     let guard = lock.lock().map_err(|e| e.to_string())?;
@@ -67,8 +91,14 @@ pub(super) fn retire(root: &Path, store: &Store, run_id: &str, target: &Target) 
     }
     // Use the existing, checked physical parent. Rename stays on this volume;
     // no project bytes are copied while the Run is locked.
-    let destination = original.parent().ok_or("Missing physical workspace parent")?
-        .join(destination.file_name().ok_or("Missing detached workspace name")?);
+    let destination = original
+        .parent()
+        .ok_or("Missing physical workspace parent")?
+        .join(
+            destination
+                .file_name()
+                .ok_or("Missing detached workspace name")?,
+        );
     store.save_detached_workspace(&record)?;
     let result = (|| {
         fs::rename(&original, &destination)
@@ -107,14 +137,22 @@ fn purge(root: &Path, store: &Store, mut record: Record) -> Result<(), String> {
         record.detached = true;
         store.save_detached_workspace(&record)?;
     }
-    if store.cleanup_sources()?.iter().any(|source| source.starts_with(&path)) {
+    if store
+        .cleanup_sources()?
+        .iter()
+        .any(|source| source.starts_with(&path))
+    {
         return Err("Detached workspace contains a protected source project".into());
     }
     // Delete exactly the receipt's unique path. `remove_paths` also removes
     // an empty legacy Planner owner directory; that live parent is not owned
     // by this receipt and may have been adopted or reserved by another actor.
-    crate::workspace_cleanup::remove_tree(&path)
-        .map_err(|error| format!("Cannot remove detached workspace {}: {error}", path.display()))?;
+    crate::workspace_cleanup::remove_tree(&path).map_err(|error| {
+        format!(
+            "Cannot remove detached workspace {}: {error}",
+            path.display()
+        )
+    })?;
     store.forget_detached_workspace(&record.id)
 }
 
@@ -131,7 +169,9 @@ pub(crate) fn drain(root: &Path, store: &Store) -> Result<(), String> {
             Err(error) => return Err(error.to_string()),
         };
         if let Err(error) = purge(root, store, record) {
-            if first_error.is_none() { first_error = Some(error); }
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
         }
     }
     first_error.map_or(Ok(()), Err)

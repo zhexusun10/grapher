@@ -32,8 +32,12 @@ impl Batch {
         let mark = self.pending.len() + 1;
         // Only numeric marks and length-delimited raw data enter this protocol.
         // Filenames belong to the existing NUL-delimited index-info channel.
-        write!(&mut self.input, "blob\nmark :{mark}\ndata {}\n", bytes.len())
-            .map_err(|e| e.to_string())?;
+        write!(
+            &mut self.input,
+            "blob\nmark :{mark}\ndata {}\n",
+            bytes.len()
+        )
+        .map_err(|e| e.to_string())?;
         self.input.extend_from_slice(bytes);
         write!(&mut self.input, "\nget-mark :{mark}\n").map_err(|e| e.to_string())?;
         self.bytes += bytes.len();
@@ -54,11 +58,11 @@ impl Batch {
         let text = std::str::from_utf8(&output).map_err(|e| e.to_string())?;
         let ids: Vec<_> = text.lines().collect();
         if ids.len() != self.pending.len()
-            || ids
-                .iter()
-                .any(|id| id.len() != 64
+            || ids.iter().any(|id| {
+                id.len() != 64
                     || !id.bytes().all(|b| b.is_ascii_hexdigit())
-                    || id.bytes().all(|b| b == b'0'))
+                    || id.bytes().all(|b| b == b'0')
+            })
         {
             return Err("Invalid SHA-256 blob import response".into());
         }
@@ -89,18 +93,29 @@ fn verify_file(file: &Path, blob: &str) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn executable_paths(path: &Path, prefix: &[&str]) -> Result<std::collections::BTreeSet<Vec<u8>>, String> {
+fn executable_paths(
+    path: &Path,
+    prefix: &[&str],
+) -> Result<std::collections::BTreeSet<Vec<u8>>, String> {
     let mut args = prefix.to_vec();
     args.extend(["ls-files", "--stage", "-z"]);
     let output = workspace::git_bytes(path, &args, None, None)?;
     let mut paths = std::collections::BTreeSet::new();
-    for record in output.split(|byte| *byte == 0).filter(|record| !record.is_empty()) {
-        let tab = record.iter().position(|byte| *byte == b'\t').ok_or("Invalid graph index entry")?;
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or("Invalid graph index entry")?;
         let mut fields = record[..tab].split(|byte| *byte == b' ');
         let mode = fields.next().ok_or("Missing graph index mode")?;
         let _oid = fields.next().ok_or("Missing graph index object")?;
         let stage = fields.next().ok_or("Missing graph index stage")?;
-        if fields.next().is_some() { return Err("Invalid graph index fields".into()); }
+        if fields.next().is_some() {
+            return Err("Invalid graph index fields".into());
+        }
         // Match the SHA-1 path: only a stage-zero, byte-exact path owns the bit.
         // Keep raw bytes so unrelated non-UTF-8 index names cannot be rewritten.
         if mode == b"100755" && stage == b"0" {
@@ -185,9 +200,13 @@ fn stage_with(
                     mode & 0o111 != 0
                 } else {
                     #[cfg(windows)]
-                    { old_executables.contains(name.as_bytes()) }
+                    {
+                        old_executables.contains(name.as_bytes())
+                    }
                     #[cfg(not(windows))]
-                    { false }
+                    {
+                        false
+                    }
                 };
                 let mode = if executable { "100755" } else { "100644" };
                 let buffered = if batchable
@@ -207,7 +226,11 @@ fn stage_with(
                     continue;
                 };
                 (
-                    Pending { name, mode, file_check: Some((file, blob)) },
+                    Pending {
+                        name,
+                        mode,
+                        file_check: Some((file, blob)),
+                    },
                     bytes,
                 )
             }
@@ -216,15 +239,23 @@ fn stage_with(
                     batch.flush(&mut index, &mut import)?;
                     let mut args = prefix.to_vec();
                     args.extend(["hash-object", "-w", "--no-filters", "--stdin"]);
-                    let oid = workspace::git_bytes(path, &args, None, Some(target.value.as_bytes()))?;
+                    let oid =
+                        workspace::git_bytes(path, &args, None, Some(target.value.as_bytes()))?;
                     let oid = String::from_utf8(oid).map_err(|e| e.to_string())?;
                     crate::workspace_git_index::append_index_info(
-                        &mut index, "120000", oid.trim(), &name,
+                        &mut index,
+                        "120000",
+                        oid.trim(),
+                        &name,
                     );
                     continue;
                 }
                 (
-                    Pending { name, mode: "120000", file_check: None },
+                    Pending {
+                        name,
+                        mode: "120000",
+                        file_check: None,
+                    },
                     target.value.into_bytes(),
                 )
             }

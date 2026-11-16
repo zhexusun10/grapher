@@ -21,10 +21,20 @@ impl Topology {
     /// comparison; ordinary topology equality and materialization stay strict.
     pub(crate) fn eq_for_view_identity(&self, other: &Self) -> bool {
         let Self { aliases, outside } = self;
-        aliases.iter().filter(|(name, _)| name.as_str() != "security")
-            .eq(other.aliases.iter().filter(|(name, _)| name.as_str() != "security"))
-            && outside.iter().filter(|(name, _)| name.as_str() != "security")
-                .eq(other.outside.iter().filter(|(name, _)| name.as_str() != "security"))
+        aliases
+            .iter()
+            .filter(|(name, _)| name.as_str() != "security")
+            .eq(other
+                .aliases
+                .iter()
+                .filter(|(name, _)| name.as_str() != "security"))
+            && outside
+                .iter()
+                .filter(|(name, _)| name.as_str() != "security")
+                .eq(other
+                    .outside
+                    .iter()
+                    .filter(|(name, _)| name.as_str() != "security"))
     }
 
     /// A nonempty topology needs physical reconstruction and verification.

@@ -64,7 +64,10 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
             planning: None,
         })
         .unwrap();
-    runtime.store.select_run(Some(&runtime.state.run_id)).unwrap();
+    runtime
+        .store
+        .select_run(Some(&runtime.state.run_id))
+        .unwrap();
     runtime.approve().unwrap();
     for job in runtime.jobs().unwrap() {
         runtime

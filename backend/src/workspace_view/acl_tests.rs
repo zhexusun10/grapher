@@ -17,13 +17,17 @@ fn source(temp: &tempfile::TempDir) -> PathBuf {
 }
 
 fn slot(temp: &tempfile::TempDir, name: &str) -> PathBuf {
-    temp.path().join(".grapher-worktrees")
-        .join("48b8e1d1-2428-42a2-9b28-9d90f631f9d1").join(name)
+    temp.path()
+        .join(".grapher-worktrees")
+        .join("48b8e1d1-2428-42a2-9b28-9d90f631f9d1")
+        .join(name)
 }
 
 fn acl(path: &Path) -> serde_json::Value {
     let metadata = fs::symlink_metadata(path).unwrap();
-    serde_json::to_value(crate::workspace_metadata::capture(path, &metadata).unwrap()).unwrap()["security"].clone()
+    serde_json::to_value(crate::workspace_metadata::capture(path, &metadata).unwrap()).unwrap()
+        ["security"]
+        .clone()
 }
 
 fn change_acl(path: &Path, rule: &str) {
@@ -32,9 +36,15 @@ fn change_acl(path: &Path, rule: &str) {
         let mut command = Command::new("icacls.exe");
         command.arg(crate::native::host_path(path));
         match rule {
-            "read" => { command.args(["/grant:r", "*S-1-1-0:(R)"]); }
-            "execute" => { command.args(["/grant:r", "*S-1-1-0:(RX)"]); }
-            "inherit-read" => { command.args(["/grant:r", "*S-1-1-0:(OI)(CI)(R)"]); }
+            "read" => {
+                command.args(["/grant:r", "*S-1-1-0:(R)"]);
+            }
+            "execute" => {
+                command.args(["/grant:r", "*S-1-1-0:(RX)"]);
+            }
+            "inherit-read" => {
+                command.args(["/grant:r", "*S-1-1-0:(OI)(CI)(R)"]);
+            }
             _ => unreachable!(),
         }
         command
@@ -43,15 +53,23 @@ fn change_acl(path: &Path, rule: &str) {
     let mut command = {
         let mut command = Command::new("/bin/chmod");
         match rule {
-            "read" => { command.args(["+a", "everyone allow read"]); }
-            "execute" => { command.args(["+a", "everyone allow read,execute"]); }
+            "read" => {
+                command.args(["+a", "everyone allow read"]);
+            }
+            "execute" => {
+                command.args(["+a", "everyone allow read,execute"]);
+            }
             _ => unreachable!(),
         }
         command.arg(path);
         command
     };
     let output = command.output().unwrap();
-    assert!(output.status.success(), "native ACL edit failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "native ACL edit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -63,8 +81,10 @@ fn acl_only_edits_advance_snapshots_and_survive_fork_publication_and_removal() {
     // explicitly rather than assuming the test owns every rule for this SID.
     change_acl(&source_file, "read");
     let original_metadata = crate::workspace_metadata::capture(
-        &source_file, &fs::symlink_metadata(&source_file).unwrap(),
-    ).unwrap();
+        &source_file,
+        &fs::symlink_metadata(&source_file).unwrap(),
+    )
+    .unwrap();
     let original = acl(&source_file);
     let user_head = workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap();
     let user_index = fs::read(source.join(".git/index")).unwrap();
@@ -76,16 +96,30 @@ fn acl_only_edits_advance_snapshots_and_survive_fork_publication_and_removal() {
     let edited = acl(&node.join("file"));
     assert_ne!(edited, original);
     let result = workspace::snapshot_node(&node, &source, "acl").unwrap();
-    assert_ne!(before, result, "ACL-only work needs a distinct immutable reference");
+    assert_ne!(
+        before, result,
+        "ACL-only work needs a distinct immutable reference"
+    );
     let fork = slot(&temp, "acl-fork");
     workspace::prepare(&source, &fork, &result, &[]).unwrap();
     assert_eq!(acl(&fork.join("file")), edited);
-    assert_eq!(acl(&source_file), original, "fork must not change source permissions");
-    let published = crate::graph_merge::merge_graph(&source, &[result.clone()], || panic!("no content conflict")).unwrap();
+    assert_eq!(
+        acl(&source_file),
+        original,
+        "fork must not change source permissions"
+    );
+    let published = crate::graph_merge::merge_graph(&source, &[result.clone()], || {
+        panic!("no content conflict")
+    })
+    .unwrap();
     let published_fork = slot(&temp, "acl-published");
     workspace::prepare(&source, &published_fork, &published, &[]).unwrap();
     assert_eq!(acl(&published_fork.join("file")), edited);
-    assert_eq!(acl(&source_file), original, "files-only delivery keeps source ACLs");
+    assert_eq!(
+        acl(&source_file),
+        original,
+        "files-only delivery keeps source ACLs"
+    );
 
     // Remove only our change, not pre-existing Everyone grants. Dropping all
     // rules for that SID would create a real conflict with unchanged source.
@@ -98,13 +132,21 @@ fn acl_only_edits_advance_snapshots_and_survive_fork_publication_and_removal() {
     let child = slot(&temp, "acl-removed");
     workspace::prepare(&source, &child, &removal, &[]).unwrap();
     assert_eq!(acl(&child.join("file")), removed);
-    let published = crate::graph_merge::merge_graph(&source, &[removal], || panic!("no content conflict")).unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &[removal], || panic!("no content conflict"))
+            .unwrap();
     let published_child = slot(&temp, "acl-removal-published");
     workspace::prepare(&source, &published_child, &published, &[]).unwrap();
     assert_eq!(acl(&published_child.join("file")), removed);
     assert_eq!(acl(&source_file), original);
-    assert_eq!(fs::read(&source_file).unwrap(), b"unchanged project bytes\n");
-    assert_eq!(workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(), user_head);
+    assert_eq!(
+        fs::read(&source_file).unwrap(),
+        b"unchanged project bytes\n"
+    );
+    assert_eq!(
+        workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+        user_head
+    );
     assert_eq!(fs::read(source.join(".git/index")).unwrap(), user_index);
 }
 
@@ -123,7 +165,11 @@ fn source_inherited_acls_survive_a_different_cache_parent_and_new_private_files(
     let node = slot(&temp, "inherited-acls");
     workspace::prepare(&source, &node, &base, &[]).unwrap();
     for relative in ["", "file", "nested", "nested/file"] {
-        assert_eq!(acl(&node.join(relative)), acl(&source.join(relative)), "{relative}");
+        assert_eq!(
+            acl(&node.join(relative)),
+            acl(&source.join(relative)),
+            "{relative}"
+        );
     }
     fs::write(node.join("private-new"), "private bytes").unwrap();
     let inherited = acl(&node.join("private-new"));
@@ -155,6 +201,7 @@ fn conflicting_acl_only_parents_are_refused_and_completed_acl_edits_are_detected
     assert!(error.contains("metadata composition conflict"), "{error}");
     let node = slot(&temp, "read");
     change_acl(&node.join("file"), "execute");
-    assert!(verify_result(&node, &source, &results[0]).unwrap_err()
+    assert!(verify_result(&node, &source, &results[0])
+        .unwrap_err()
         .contains("metadata changed outside"));
 }

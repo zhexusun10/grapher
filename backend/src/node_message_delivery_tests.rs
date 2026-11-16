@@ -6,43 +6,89 @@ fn node_message_delivery_waiting_input_only_queues_even_during_planning() {
     let repository = crate::fixture::repository(temp.path()).unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": repository, "model": "mock/model", "engine": "pi", "postTaskReview": false,
-    })).unwrap();
+    }))
+    .unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     runtime.state.run_id = Uuid::new_v4().to_string();
-    runtime.emit(EventKind::Created {
-        graph: Graph { original_goal: "original".into(), nodes: vec![Node { id: "task".into(), task: "original".into() }], edges: vec![] },
-        config, planning_id: None, planning: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::Created {
+            graph: Graph {
+                original_goal: "original".into(),
+                nodes: vec![Node {
+                    id: "task".into(),
+                    task: "original".into(),
+                }],
+                edges: vec![],
+            },
+            config,
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
     runtime.approve().unwrap();
     runtime.pause(true).unwrap();
     let run_id = runtime.state.run_id.clone();
     let service = Arc::new(Service {
-        runtime: Mutex::new(runtime), driving: AtomicBool::new(false),
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(false),
         drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-        planning: AtomicBool::new(true), extension: temp.path().join("unused.ts"),
+        planning: AtomicBool::new(true),
+        extension: temp.path().join("unused.ts"),
     });
-    assert!(control("intervene".into(), Some("task".into()), Some("wrong Run".into()),
-        Some("stale".into()), None, None, &service).is_err());
+    assert!(control(
+        "intervene".into(),
+        Some("task".into()),
+        Some("wrong Run".into()),
+        Some("stale".into()),
+        None,
+        None,
+        &service
+    )
+    .is_err());
     for planning in [true, false] {
         service.planning.store(planning, Ordering::SeqCst);
-        let snapshot = control("intervene".into(), Some("task".into()), Some("extra input".into()),
-            Some(run_id.clone()), None, None, &service).unwrap();
+        let snapshot = control(
+            "intervene".into(),
+            Some("task".into()),
+            Some("extra input".into()),
+            Some(run_id.clone()),
+            None,
+            None,
+            &service,
+        )
+        .unwrap();
         assert!(snapshot.paused && snapshot.executions.is_empty());
         assert_eq!(snapshot.nodes["task"].status, "waiting");
         assert_eq!(snapshot.nodes["task"].instruction, "");
-        assert!(matches!(snapshot.events.last().unwrap().kind, EventKind::NodeMessaged { queued: true, .. }));
+        assert!(matches!(
+            snapshot.events.last().unwrap().kind,
+            EventKind::NodeMessaged { queued: true, .. }
+        ));
         assert!(!service.driving.load(Ordering::SeqCst));
         assert_eq!(*service.drive_signal.0.lock().unwrap(), 0);
     }
-    assert_eq!(service.runtime.lock().unwrap().state.nodes["task"].pending_messages.len(), 2);
+    assert_eq!(
+        service.runtime.lock().unwrap().state.nodes["task"]
+            .pending_messages
+            .len(),
+        2
+    );
 
     // A lost HTTP response may be retried before or after dispatch/restart.
     // Request identity, not equal text, distinguishes a retry from a new turn.
     let id = Uuid::new_v4().to_string();
-    let send = |id: &str, text: &str, images| control_with_request_id(
-        "intervene".into(), Some("task".into()), Some(text.into()),
-        Some(run_id.clone()), None, images, Some(id.into()), &service,
-    );
+    let send = |id: &str, text: &str, images| {
+        control_with_request_id(
+            "intervene".into(),
+            Some("task".into()),
+            Some(text.into()),
+            Some(run_id.clone()),
+            None,
+            images,
+            Some(id.into()),
+            &service,
+        )
+    };
     assert!(send("invalid-id", "extra input", None).is_err());
     let accepted = send(&id, "extra input", Some(vec![])).unwrap();
     let replay = send(&id, "extra input", None).unwrap();
@@ -77,45 +123,83 @@ fn node_message_delivery_followup_retries_keep_identity_before_and_after_dispatc
         let repository = crate::fixture::repository(temp.path()).unwrap();
         let config = serde_json::from_value(serde_json::json!({
             "repository": repository, "model": "mock/model", "postTaskReview": false,
-        })).unwrap();
+        }))
+        .unwrap();
         let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
         runtime.state.run_id = Uuid::new_v4().to_string();
-        runtime.emit(EventKind::Created {
-            graph: Graph { original_goal: "original".into(), nodes: vec![Node {
-                id: "task".into(), task: "original".into(),
-            }], edges: vec![] },
-            config, planning_id: None, planning: None,
-        }).unwrap();
+        runtime
+            .emit(EventKind::Created {
+                graph: Graph {
+                    original_goal: "original".into(),
+                    nodes: vec![Node {
+                        id: "task".into(),
+                        task: "original".into(),
+                    }],
+                    edges: vec![],
+                },
+                config,
+                planning_id: None,
+                planning: None,
+            })
+            .unwrap();
         runtime.approve().unwrap();
         let first = runtime.jobs().unwrap().remove(0).execution;
         runtime.pause(true).unwrap();
         if outcome == "failed" {
-            runtime.finish(&first, Err("provider failed".into())).unwrap();
+            runtime
+                .finish(&first, Err("provider failed".into()))
+                .unwrap();
         } else {
-            runtime.emit(EventKind::Finished {
-                execution_id: first.id, head: runtime.state.base.clone(), output: String::new(),
-                output_bytes: 0, metrics: None,
-            }).unwrap();
+            runtime
+                .emit(EventKind::Finished {
+                    execution_id: first.id,
+                    head: runtime.state.base.clone(),
+                    output: String::new(),
+                    output_bytes: 0,
+                    metrics: None,
+                })
+                .unwrap();
             if outcome == "published" {
-                runtime.emit(EventKind::PublicationCompleted { head: runtime.state.base.clone() }).unwrap();
+                runtime
+                    .emit(EventKind::PublicationCompleted {
+                        head: runtime.state.base.clone(),
+                    })
+                    .unwrap();
             }
         }
         let run = runtime.state.run_id.clone();
         let service = Arc::new(Service {
-            runtime: Mutex::new(runtime), driving: AtomicBool::new(true),
+            runtime: Mutex::new(runtime),
+            driving: AtomicBool::new(true),
             drive_signal: (Mutex::new(0), Condvar::new()),
-            planning: AtomicBool::new(false), extension: temp.path().join("unused"),
+            planning: AtomicBool::new(false),
+            extension: temp.path().join("unused"),
         });
         let request = Uuid::new_v4().to_string();
-        let send = |id: &str, text: &str, data: &str| control_with_request_id(
-            "intervene".into(), Some("task".into()), Some(text.into()), Some(run.clone()),
-            None, Some(vec![ImageAttachment {
-                r#type: "image".into(), mime_type: "image/png".into(), data: data.into(), name: None,
-            }]), Some(id.into()), &service,
-        );
+        let send = |id: &str, text: &str, data: &str| {
+            control_with_request_id(
+                "intervene".into(),
+                Some("task".into()),
+                Some(text.into()),
+                Some(run.clone()),
+                None,
+                Some(vec![ImageAttachment {
+                    r#type: "image".into(),
+                    mime_type: "image/png".into(),
+                    data: data.into(),
+                    name: None,
+                }]),
+                Some(id.into()),
+                &service,
+            )
+        };
         let accepted = send(&request, "follow-up", "first").unwrap();
         let retried = send(&request, "follow-up", "first").unwrap();
-        assert_eq!(retried.events.len(), accepted.events.len(), "{outcome}: retry is not another turn");
+        assert_eq!(
+            retried.events.len(),
+            accepted.events.len(),
+            "{outcome}: retry is not another turn"
+        );
         assert_eq!(retried.nodes["task"].pending_messages.len(), 1);
         assert!(send(&request, "different payload", "first").is_err());
         assert!(send(&request, "follow-up", "different image").is_err());
@@ -250,16 +334,41 @@ sys.stdin.read()
         );
         assert_eq!(snapshot.executions.len(), 1);
         assert!(snapshot.nodes["task"].pending_messages.is_empty());
-        let request_id = snapshot.events.iter().rev().find_map(|event| match &event.kind {
-            EventKind::Steered { request_id, .. } => request_id.clone(), _ => None,
-        }).unwrap();
+        let request_id = snapshot
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::Steered { request_id, .. } => request_id.clone(),
+                _ => None,
+            })
+            .unwrap();
         Uuid::parse_str(&request_id).unwrap();
         // An HTTP retry of Alt+S must neither abort again nor enqueue twice.
-        let retried = control_with_request_id("interrupt_steer".into(), Some("task".into()), Some(text.into()),
-            Some(run_id.clone()), Some(execution_id.clone()), Some(vec![crate::model::ImageAttachment {
-                r#type: "image".into(), mime_type: "image/png".into(), data: index.to_string(), name: None,
-            }]), Some(request_id), &service).unwrap();
-        assert_eq!(retried.events.iter().filter(|event| matches!(event.kind, EventKind::Steered { .. })).count(), index + 1);
+        let retried = control_with_request_id(
+            "interrupt_steer".into(),
+            Some("task".into()),
+            Some(text.into()),
+            Some(run_id.clone()),
+            Some(execution_id.clone()),
+            Some(vec![crate::model::ImageAttachment {
+                r#type: "image".into(),
+                mime_type: "image/png".into(),
+                data: index.to_string(),
+                name: None,
+            }]),
+            Some(request_id),
+            &service,
+        )
+        .unwrap();
+        assert_eq!(
+            retried
+                .events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::Steered { .. }))
+                .count(),
+            index + 1
+        );
     }
     assert_eq!(worker.join().unwrap().unwrap(), "all received");
     let (first_request_id, event_count) = {
@@ -267,21 +376,52 @@ sys.stdin.read()
         runtime.state.executions[0].status = "completed".into();
         runtime.state.nodes.get_mut("task").unwrap().status = "completed".into();
         runtime.state.paused = true;
-        let id = runtime.state.events.iter().find_map(|event| match &event.kind {
-            EventKind::Steered { request_id, .. } => request_id.clone(), _ => None,
-        }).unwrap();
+        let id = runtime
+            .state
+            .events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::Steered { request_id, .. } => request_id.clone(),
+                _ => None,
+            })
+            .unwrap();
         (id, runtime.state.events.len())
     };
     // The original stale-browser action was intervene. Retrying it after the
     // writer settles must replay the receipt, not enqueue a new execution.
-    let replay = control_with_request_id("intervene".into(), Some("task".into()), Some("stale browser message".into()),
-        Some(run_id.clone()), None, Some(vec![crate::model::ImageAttachment {
-            r#type: "image".into(), mime_type: "image/png".into(), data: "0".into(), name: None,
-        }]), Some(first_request_id.clone()), &service).unwrap();
-    assert_eq!(replay.events.len(), event_count, "the original action remains idempotent after settlement");
+    let replay = control_with_request_id(
+        "intervene".into(),
+        Some("task".into()),
+        Some("stale browser message".into()),
+        Some(run_id.clone()),
+        None,
+        Some(vec![crate::model::ImageAttachment {
+            r#type: "image".into(),
+            mime_type: "image/png".into(),
+            data: "0".into(),
+            name: None,
+        }]),
+        Some(first_request_id.clone()),
+        &service,
+    )
+    .unwrap();
+    assert_eq!(
+        replay.events.len(),
+        event_count,
+        "the original action remains idempotent after settlement"
+    );
     assert!(replay.nodes["task"].pending_messages.is_empty());
-    assert!(control_with_request_id("intervene".into(), Some("task".into()), Some("different instruction".into()),
-        Some(run_id.clone()), None, None, Some(first_request_id), &service).is_err());
+    assert!(control_with_request_id(
+        "intervene".into(),
+        Some("task".into()),
+        Some("different instruction".into()),
+        Some(run_id.clone()),
+        None,
+        None,
+        Some(first_request_id),
+        &service
+    )
+    .is_err());
     let runtime = service.runtime.lock().unwrap();
     let replayed = runtime.store.load(&run_id).unwrap();
     let messages = replayed

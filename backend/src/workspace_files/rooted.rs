@@ -216,7 +216,8 @@ impl Files {
             self.load(parent)?;
         }
         let checked = RefCell::default();
-        let value = self.capture_roots_value(paths, layouts, parents, Collection::Capture(&checked))?;
+        let value =
+            self.capture_roots_value(paths, layouts, parents, Collection::Capture(&checked))?;
         self.save_version(version, value)
     }
 
@@ -229,7 +230,12 @@ impl Files {
         let previous = self.load(parent)?;
         let checked = RefCell::default();
         self.validate_value(&previous, &checked)?;
-        let value = self.capture_roots_value(paths, layouts, &[parent.into()], Collection::Capture(&checked))?;
+        let value = self.capture_roots_value(
+            paths,
+            layouts,
+            &[parent.into()],
+            Collection::Capture(&checked),
+        )?;
         self.save_changed(value, parent, &previous)
     }
 
@@ -241,10 +247,19 @@ impl Files {
         parent: &str,
     ) -> Result<String, String> {
         self.load(parent)?;
-        let value = self.capture_roots_value(paths, layouts, &[parent.into()], Collection::CaptureUnbatched)?;
+        let value = self.capture_roots_value(
+            paths,
+            layouts,
+            &[parent.into()],
+            Collection::CaptureUnbatched,
+        )?;
         let version = Uuid::new_v4().to_string();
         self.save_version(&version, value)?;
-        if self.same_contents(parent, &version)? { Ok(parent.into()) } else { Ok(version) }
+        if self.same_contents(parent, &version)? {
+            Ok(parent.into())
+        } else {
+            Ok(version)
+        }
     }
 
     fn capture_roots_value(
@@ -308,7 +323,12 @@ impl Files {
                 .map_err(|error| error.to_string())?;
             let mut current = Entries::new();
             for child in files.scoped_paths(&path)? {
-                files.collect(&path, &child, &mut current, Collection::Verify(&root.entries, &checked))?;
+                files.collect(
+                    &path,
+                    &child,
+                    &mut current,
+                    Collection::Verify(&root.entries, &checked),
+                )?;
             }
             if current != root.entries {
                 return Err(format!(

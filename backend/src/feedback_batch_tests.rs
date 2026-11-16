@@ -218,8 +218,14 @@ fn batch_conflict_blocks_repair_preserves_sources_and_can_retry_with_merger() {
     let (temp, _source, mut runtime) = configured(&["owner", "review_one", "review_two"], 1);
     let script = temp.path().join("agent.sh");
     let original = fs::read_to_string(&script).unwrap();
-    fs::write(&script, original.replace("echo evidence > reports/audit.json",
-        "echo evidence > reports/audit.json\n    echo \"$name\" > reports/conflict.txt")).unwrap();
+    fs::write(
+        &script,
+        original.replace(
+            "echo evidence > reports/audit.json",
+            "echo evidence > reports/audit.json\n    echo \"$name\" > reports/conflict.txt",
+        ),
+    )
+    .unwrap();
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
     history(&runtime, &owner, "OWNER HISTORY");
@@ -263,7 +269,10 @@ fi
         )
         .unwrap();
     assert_eq!(runtime.state.nodes["owner"].status, "blocked");
-    assert!(runtime.jobs().unwrap().is_empty(), "passive input must not unblock failed composition");
+    assert!(
+        runtime.jobs().unwrap().is_empty(),
+        "passive input must not unblock failed composition"
+    );
     runtime.resume_node("owner").unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
     run(&mut runtime, &retry).unwrap();

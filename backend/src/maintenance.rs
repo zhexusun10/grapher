@@ -2,8 +2,8 @@
 pub(crate) mod paused_batch;
 pub use paused_batch::restore_paused_batch;
 mod publication_file;
-pub use publication_file::repair_publication_file;
 use crate::{model::Snapshot, path_safety::real_child_path, store::Store};
+pub use publication_file::repair_publication_file;
 use std::{
     collections::BTreeSet,
     fs,

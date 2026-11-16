@@ -53,8 +53,16 @@ fn setup(git: bool, graph: Graph) -> (TempDir, PathBuf, Runtime) {
     .unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
     fs::create_dir_all(runtime.root.join("prompts")).unwrap();
-    fs::write(runtime.root.join("prompts/feedback-returned.md"), "{{node}}\n[fixture: feedback returned from {{target}}]").unwrap();
-    fs::write(runtime.root.join("prompts/feedback-updated.md"), "{{node}}\n[fixture: upstream {{target}} updated]").unwrap();
+    fs::write(
+        runtime.root.join("prompts/feedback-returned.md"),
+        "{{node}}\n[fixture: feedback returned from {{target}}]",
+    )
+    .unwrap();
+    fs::write(
+        runtime.root.join("prompts/feedback-updated.md"),
+        "{{node}}\n[fixture: upstream {{target}} updated]",
+    )
+    .unwrap();
     // These scheduler/replay tests synthesize results without native E/L seals.
     // Seed a legacy Created record instead of admitting a new managed Run.
     runtime.state.run_id = Uuid::new_v4().to_string();
@@ -130,7 +138,10 @@ fn new_graph_runs_require_composite_evidence_and_retain_managed_workspaces() {
     config.max_parallel = 0;
     let mut graph = single();
     for name in ["parallel-a", "parallel-b"] {
-        graph.nodes.push(Node { id: name.into(), task: name.into() });
+        graph.nodes.push(Node {
+            id: name.into(),
+            task: name.into(),
+        });
     }
     runtime.create(graph, config).unwrap();
     assert_eq!(
@@ -141,12 +152,17 @@ fn new_graph_runs_require_composite_evidence_and_retain_managed_workspaces() {
     runtime.approve().unwrap();
     assert!(runtime.state.environment_baseline.is_none());
     let mut jobs = runtime.jobs().unwrap();
-    assert_eq!(runtime.state.environment_policy.as_deref(), Some("automatic-lazy"));
+    assert_eq!(
+        runtime.state.environment_policy.as_deref(),
+        Some("automatic-lazy")
+    );
     assert!(runtime.state.environment_baseline.is_some());
     let mut job = jobs.remove(0);
     attach(&mut runtime, &mut job);
     for other in jobs {
-        runtime.finish(&other.execution, Err("test admission only".into())).unwrap();
+        runtime
+            .finish(&other.execution, Err("test admission only".into()))
+            .unwrap();
     }
     let checkout = Path::new(&job.execution.worktree);
     workspace::prepare(&source, checkout, &job.execution.before, &[]).unwrap();
@@ -546,7 +562,14 @@ fn node_workers_respect_per_run_limit_and_keep_scheduling_as_slots_open() {
         edges: vec![],
     };
     for (max_parallel, limit) in [
-        (0, 20), (1, 1), (2, 2), (8, 8), (20, 20), (24, 24), (40, 40), (100, 40),
+        (0, 20),
+        (1, 1),
+        (2, 2),
+        (8, 8),
+        (20, 20),
+        (24, 24),
+        (40, 40),
+        (100, 40),
     ] {
         let (_temp, _source, mut runtime) = setup(true, graph.clone());
         let mut config = runtime.state.config.clone().unwrap();
@@ -3608,7 +3631,10 @@ fn planner_revision_warning_matches_runtime_invalidation() {
     let (updated, original) = context.invalidated_completed_by_task(&task_change);
     assert_eq!(updated, vec!["build"]);
     assert_eq!(original, vec!["consumer", "review"]);
-    assert_eq!(updated.len() + original.len(), context.invalidated_completed(&task_change).len());
+    assert_eq!(
+        updated.len() + original.len(),
+        context.invalidated_completed(&task_change).len()
+    );
     // A changed downstream task belongs to the updated-task group too.
     task_change.nodes[1].task = "PRIVATE_REVIEW_TASK".into();
     let (updated, original) = context.invalidated_completed_by_task(&task_change);

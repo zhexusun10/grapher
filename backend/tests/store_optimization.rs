@@ -957,27 +957,53 @@ fn runtime_completion_recovers_the_log_prefix_missing_from_live_metadata() {
         runtime.state.run_id = "run".into();
         runtime.emit(created("repo", None, None)).unwrap();
         let exec = execution("completed");
-        runtime.emit(EventKind::Started {
-            execution: exec.clone(), message_sequences: None, fresh_restart: false,
-        }).unwrap();
-        runtime.emit_outputs(vec![EventKind::Output {
-            execution_id: exec.id.clone(), text: stream[..split].into(),
-        }]).unwrap();
+        runtime
+            .emit(EventKind::Started {
+                execution: exec.clone(),
+                message_sequences: None,
+                fresh_restart: false,
+            })
+            .unwrap();
+        runtime
+            .emit_outputs(vec![EventKind::Output {
+                execution_id: exec.id.clone(),
+                text: stream[..split].into(),
+            }])
+            .unwrap();
         runtime.state = runtime.store.load("run").unwrap();
         assert!(runtime.state.executions[0].output.is_empty());
         if split < stream.len() {
-            runtime.emit_outputs(vec![EventKind::Output {
-                execution_id: exec.id.clone(), text: stream[split..].into(),
-            }]).unwrap();
+            runtime
+                .emit_outputs(vec![EventKind::Output {
+                    execution_id: exec.id.clone(),
+                    text: stream[split..].into(),
+                }])
+                .unwrap();
         }
         let output = "完成𠀀";
-        runtime.finish(&exec, Ok(("head".into(), output.into()))).unwrap();
+        runtime
+            .finish(&exec, Ok(("head".into(), output.into())))
+            .unwrap();
         let expected = format!("{stream}\n── Final response ──\n{output}\n");
         let completed = &runtime.state.executions[0];
-        assert_eq!(completed.metrics.as_ref().unwrap(), &parse_execution_metrics(&expected, exec.started_at, 0), "split={split}");
+        assert_eq!(
+            completed.metrics.as_ref().unwrap(),
+            &parse_execution_metrics(&expected, exec.started_at, 0),
+            "split={split}"
+        );
         assert_eq!(completed.output_bytes, expected.len());
-        assert_eq!(runtime.store.execution_log_page("run", &exec.id, 0, usize::MAX).unwrap().content, expected);
-        assert_eq!(runtime.store.load("run").unwrap().executions[0].metrics, completed.metrics);
+        assert_eq!(
+            runtime
+                .store
+                .execution_log_page("run", &exec.id, 0, usize::MAX)
+                .unwrap()
+                .content,
+            expected
+        );
+        assert_eq!(
+            runtime.store.load("run").unwrap().executions[0].metrics,
+            completed.metrics
+        );
     }
 }
 
@@ -989,26 +1015,64 @@ fn runtime_completion_rejects_an_incomplete_recovered_log_before_writing_its_tai
         runtime.state.run_id = "run".into();
         runtime.emit(created("repo", None, None)).unwrap();
         let exec = execution("completed");
-        runtime.emit(EventKind::Started {
-            execution: exec.clone(), message_sequences: None, fresh_restart: false,
-        }).unwrap();
-        runtime.emit_outputs(vec![EventKind::Output {
-            execution_id: exec.id.clone(), text: "committed 中文 prefix\n".into(),
-        }]).unwrap();
+        runtime
+            .emit(EventKind::Started {
+                execution: exec.clone(),
+                message_sequences: None,
+                fresh_restart: false,
+            })
+            .unwrap();
+        runtime
+            .emit_outputs(vec![EventKind::Output {
+                execution_id: exec.id.clone(),
+                text: "committed 中文 prefix\n".into(),
+            }])
+            .unwrap();
         runtime.state = runtime.store.load("run").unwrap();
         let db = Connection::open(temp.path().join("events.sqlite")).unwrap();
         match damage {
-            "missing" => { db.execute("DELETE FROM execution_logs", []).unwrap(); }
-            "truncated" => { db.execute("UPDATE execution_logs SET text='x',bytes=1", []).unwrap(); }
-            _ => { runtime.state.executions[0].output_bytes += 1; }
+            "missing" => {
+                db.execute("DELETE FROM execution_logs", []).unwrap();
+            }
+            "truncated" => {
+                db.execute("UPDATE execution_logs SET text='x',bytes=1", [])
+                    .unwrap();
+            }
+            _ => {
+                runtime.state.executions[0].output_bytes += 1;
+            }
         }
         let before = serde_json::to_value(&runtime.state).unwrap();
-        let text = runtime.store.execution_log_page("run", &exec.id, 0, usize::MAX).unwrap().content;
-        let error = runtime.finish(&exec, Ok(("head".into(), "must not commit".into()))).unwrap_err();
-        assert!(error.contains("incomplete terminal evidence"), "{damage}: {error}");
+        let text = runtime
+            .store
+            .execution_log_page("run", &exec.id, 0, usize::MAX)
+            .unwrap()
+            .content;
+        let error = runtime
+            .finish(&exec, Ok(("head".into(), "must not commit".into())))
+            .unwrap_err();
+        assert!(
+            error.contains("incomplete terminal evidence"),
+            "{damage}: {error}"
+        );
         assert_eq!(serde_json::to_value(&runtime.state).unwrap(), before);
-        assert_eq!(runtime.store.execution_log_page("run", &exec.id, 0, usize::MAX).unwrap().content, text);
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM events WHERE kind='finished'", [], |row| row.get::<_, usize>(0)).unwrap(), 0);
+        assert_eq!(
+            runtime
+                .store
+                .execution_log_page("run", &exec.id, 0, usize::MAX)
+                .unwrap()
+                .content,
+            text
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='finished'",
+                [],
+                |row| row.get::<_, usize>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
 }
 

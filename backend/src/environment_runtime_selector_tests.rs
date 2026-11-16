@@ -74,10 +74,16 @@ fn rooted_runtime_external_selector_retarget_is_caught_before_restore() {
     let cfg = fs::read_to_string(path.join(".venv/pyvenv.cfg"))
         .unwrap()
         .replace('\\', "/");
-    let host_home = host_python.parent().unwrap().to_string_lossy().replace('\\', "/");
+    let host_home = host_python
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
     let alias_home = alias.to_string_lossy().replace('\\', "/");
-    assert!(cfg.contains(&alias_home) || cfg.contains(&host_home),
-        "venv must retain a usable selected bootstrap home: {cfg}");
+    assert!(
+        cfg.contains(&alias_home) || cfg.contains(&host_home),
+        "venv must retain a usable selected bootstrap home: {cfg}"
+    );
     env.preflight_history_result(path, &result, &result.launch_ref)
         .unwrap();
     fs::write(path.join("partial-code"), "retain W").unwrap();

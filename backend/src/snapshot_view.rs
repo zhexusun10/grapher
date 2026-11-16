@@ -177,16 +177,17 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
     });
     // Keep legacy persisted failure events/checkpoints compatible while exposing
     // interruption as a distinct UI state. Ordinary provider errors stay failed.
-    let running_merge_targets: std::collections::BTreeSet<_> = state.mergers.iter()
+    let running_merge_targets: std::collections::BTreeSet<_> = state
+        .mergers
+        .iter()
         .filter(|merger| merger.status == "running")
-        .filter_map(|merger| merger.node.strip_prefix("merge:")).collect();
+        .filter_map(|merger| merger.node.strip_prefix("merge:"))
+        .collect();
     for (name, node) in &state.nodes {
         metadata["nodes"][name]["canResume"] = json!(resumable.contains(name));
         if node.is_user_paused() {
             metadata["nodes"][name]["status"] = json!("paused");
-        } else if node.status == "running"
-            && running_merge_targets.contains(name.as_str())
-        {
+        } else if node.status == "running" && running_merge_targets.contains(name.as_str()) {
             // While a node-composition merger is resolving conflicts for `name`,
             // the node's own execution has not started yet; expose it as waiting
             // until the merger settles and preparation advances to the node.
@@ -249,13 +250,31 @@ mod tests {
 
     #[test]
     fn batched_recovery_matches_individual_checks_for_mixed_nodes_and_mergers() {
-        let mut state = Snapshot { run_id: "recovery-projection".into(), approved: true,
-            phase: "needs_attention".into(), ..Default::default() };
+        let mut state = Snapshot {
+            run_id: "recovery-projection".into(),
+            approved: true,
+            phase: "needs_attention".into(),
+            ..Default::default()
+        };
         for index in 0..64 {
             let name = format!("node-{index}");
-            let status = match index % 4 { 0 => "running", 1 => "failed", 2 => "blocked", _ => "completed" };
-            state.graph.nodes.push(crate::model::Node { id: name.clone(), task: name.clone() });
-            state.nodes.insert(name.clone(), crate::model::NodeState { status: status.into(), ..Default::default() });
+            let status = match index % 4 {
+                0 => "running",
+                1 => "failed",
+                2 => "blocked",
+                _ => "completed",
+            };
+            state.graph.nodes.push(crate::model::Node {
+                id: name.clone(),
+                task: name.clone(),
+            });
+            state.nodes.insert(
+                name.clone(),
+                crate::model::NodeState {
+                    status: status.into(),
+                    ..Default::default()
+                },
+            );
             state.executions.push(serde_json::from_value(json!({
                 "id":format!("exec-{index}"),"node":name,"revision":1,"attempt":1,
                 "sessionId":name,"worktree":format!("/work/{index}"),"before":"","after":null,
@@ -266,22 +285,49 @@ mod tests {
                 let error = format!("blocked-{index}");
                 state.nodes.get_mut(&name).unwrap().error = Some(error.clone());
                 if index % 3 == 0 {
-                    state.events.push(Event { sequence: state.events.len() as i64 + 1, timestamp: 1,
-                        kind: EventKind::Prepared { execution_id: format!("exec-{index}"), head: "head".into() } });
+                    state.events.push(Event {
+                        sequence: state.events.len() as i64 + 1,
+                        timestamp: 1,
+                        kind: EventKind::Prepared {
+                            execution_id: format!("exec-{index}"),
+                            head: "head".into(),
+                        },
+                    });
                 }
-                state.events.push(Event { sequence: state.events.len() as i64 + 1, timestamp: 2,
-                    kind: EventKind::Failed { node: name.clone(), execution_id: Some(format!("exec-{index}")),
-                        error: "different preparation error".into(), output_bytes: 0, metrics: None } });
-                state.events.push(Event { sequence: state.events.len() as i64 + 1, timestamp: 2,
-                    kind: EventKind::Blocked { node: name.clone(), error } });
+                state.events.push(Event {
+                    sequence: state.events.len() as i64 + 1,
+                    timestamp: 2,
+                    kind: EventKind::Failed {
+                        node: name.clone(),
+                        execution_id: Some(format!("exec-{index}")),
+                        error: "different preparation error".into(),
+                        output_bytes: 0,
+                        metrics: None,
+                    },
+                });
+                state.events.push(Event {
+                    sequence: state.events.len() as i64 + 1,
+                    timestamp: 2,
+                    kind: EventKind::Blocked {
+                        node: name.clone(),
+                        error,
+                    },
+                });
             }
             if index > 0 {
-                state.graph.edges.push(serde_json::from_value(json!({"from":format!("node-{}",index-1),"to":name,"feedback":false})).unwrap());
+                state.graph.edges.push(
+                    serde_json::from_value(
+                        json!({"from":format!("node-{}",index-1),"to":name,"feedback":false}),
+                    )
+                    .unwrap(),
+                );
             }
         }
         state.superseded_execution_ids.push("exec-5".into());
         let mut merger = state.executions[1].clone();
-        merger.id = "merge".into(); merger.node = "merge:node-9".into(); merger.status = "running".into();
+        merger.id = "merge".into();
+        merger.node = "merge:node-9".into();
+        merger.status = "running".into();
         state.mergers.push(merger);
         let managed_config: crate::model::Config = serde_json::from_value(json!({
             "repository":"/work", "model":"test/model", "maxParallel":1,
@@ -290,10 +336,18 @@ mod tests {
         })).unwrap();
         for managed in [false, true] {
             state.config = managed.then(|| managed_config.clone());
-            for phase in ["running", "needs_attention", "completed", "publishing", "paused"] {
+            for phase in [
+                "running",
+                "needs_attention",
+                "completed",
+                "publishing",
+                "paused",
+            ] {
                 for isolated in [None, Some(false), Some(true)] {
                     for paused in [false, true] {
-                        state.phase = phase.into(); state.isolated_workspaces = isolated; state.paused = paused;
+                        state.phase = phase.into();
+                        state.isolated_workspaces = isolated;
+                        state.paused = paused;
                         let (run_hint, batched) = state.recovery_hints();
                         assert_eq!(run_hint, state.can_resume());
                         for name in state.nodes.keys() {
@@ -308,42 +362,79 @@ mod tests {
 
     #[test]
     fn indexed_recovery_preserves_preparation_session_and_merger_failure_evidence() {
-        let mut state = Snapshot { approved: true, phase: "needs_attention".into(), ..Default::default() };
-        state.graph.nodes.push(crate::model::Node { id: "task".into(), task: "test".into() });
-        state.nodes.insert("task".into(), crate::model::NodeState { status: "blocked".into(),
-            error: Some("Workspace composition blocked: Merger failed: conflict".into()), ..Default::default() });
+        let mut state = Snapshot {
+            approved: true,
+            phase: "needs_attention".into(),
+            ..Default::default()
+        };
+        state.graph.nodes.push(crate::model::Node {
+            id: "task".into(),
+            task: "test".into(),
+        });
+        state.nodes.insert(
+            "task".into(),
+            crate::model::NodeState {
+                status: "blocked".into(),
+                error: Some("Workspace composition blocked: Merger failed: conflict".into()),
+                ..Default::default()
+            },
+        );
         let execution: crate::model::Execution = serde_json::from_value(json!({
             "id":"attempt","node":"task","revision":1,"attempt":1,"sessionId":"session",
             "worktree":"/work","before":"","after":null,"status":"failed",
             "startedAt":1,"completedAt":2,"output":"","outputBytes":0
-        })).unwrap();
+        }))
+        .unwrap();
         let mut merger = execution.clone();
-        merger.id = "merge-attempt".into(); merger.node = "merge:task".into();
+        merger.id = "merge-attempt".into();
+        merger.node = "merge:task".into();
         state.executions.push(execution);
         state.mergers.push(merger);
         let check = |state: &Snapshot| {
             let (run, nodes) = state.recovery_hints();
             assert_eq!(run, state.can_resume());
-            for name in state.nodes.keys() { assert_eq!(nodes.contains(name), state.can_resume_node(name)); }
+            for name in state.nodes.keys() {
+                assert_eq!(nodes.contains(name), state.can_resume_node(name));
+            }
         };
         check(&state);
         assert!(state.resumable_nodes().contains("task"));
-        state.events.push(Event { sequence: 1, timestamp: 1,
-            kind: EventKind::Prepared { execution_id: "attempt".into(), head: "head".into() } });
+        state.events.push(Event {
+            sequence: 1,
+            timestamp: 1,
+            kind: EventKind::Prepared {
+                execution_id: "attempt".into(),
+                head: "head".into(),
+            },
+        });
         check(&state);
         assert!(state.resumable_nodes().is_empty());
         // Session-open failures remain preparation-only even after Prepared.
-        state.events.push(Event { sequence: 2, timestamp: 2, kind: EventKind::Failed {
-            node: "task".into(), execution_id: Some("attempt".into()), error: "Cannot open node session: missing".into(),
-            output_bytes: 0, metrics: None,
-        } });
+        state.events.push(Event {
+            sequence: 2,
+            timestamp: 2,
+            kind: EventKind::Failed {
+                node: "task".into(),
+                execution_id: Some("attempt".into()),
+                error: "Cannot open node session: missing".into(),
+                output_bytes: 0,
+                metrics: None,
+            },
+        });
         check(&state);
         assert!(state.resumable_nodes().contains("task"));
         // Only the newest failure explains the current preparation state.
-        state.events.push(Event { sequence: 3, timestamp: 3, kind: EventKind::Failed {
-            node: "task".into(), execution_id: Some("attempt".into()), error: "ordinary error".into(),
-            output_bytes: 0, metrics: None,
-        } });
+        state.events.push(Event {
+            sequence: 3,
+            timestamp: 3,
+            kind: EventKind::Failed {
+                node: "task".into(),
+                execution_id: Some("attempt".into()),
+                error: "ordinary error".into(),
+                output_bytes: 0,
+                metrics: None,
+            },
+        });
         check(&state);
         assert!(state.resumable_nodes().is_empty());
         state.superseded_execution_ids.push("attempt".into());
@@ -354,22 +445,47 @@ mod tests {
     #[test]
     fn large_failed_graph_projects_recovery_without_per_card_global_rescans() {
         let count = 2000;
-        let mut state = Snapshot { run_id: "large-recovery".into(), approved: true,
-            phase: "needs_attention".into(), ..Default::default() };
+        let mut state = Snapshot {
+            run_id: "large-recovery".into(),
+            approved: true,
+            phase: "needs_attention".into(),
+            ..Default::default()
+        };
         for index in 0..count {
             let name = format!("task-{index}");
-            state.graph.nodes.push(crate::model::Node { id: name.clone(), task: name.clone() });
-            let blocked = index % 2 == 0;
-            state.nodes.insert(name.clone(), crate::model::NodeState {
-                status: if blocked { "blocked" } else { "failed" }.into(),
-                error: blocked.then(|| "preparation failed".into()), ..Default::default()
+            state.graph.nodes.push(crate::model::Node {
+                id: name.clone(),
+                task: name.clone(),
             });
+            let blocked = index % 2 == 0;
+            state.nodes.insert(
+                name.clone(),
+                crate::model::NodeState {
+                    status: if blocked { "blocked" } else { "failed" }.into(),
+                    error: blocked.then(|| "preparation failed".into()),
+                    ..Default::default()
+                },
+            );
             if blocked {
-                state.events.push(Event { sequence: state.events.len() as i64 + 1, timestamp: 1,
-                    kind: EventKind::Failed { node: name.clone(), execution_id: Some(name.clone()),
-                        error: "preparation failed".into(), output_bytes: 0, metrics: None } });
-                state.events.push(Event { sequence: state.events.len() as i64 + 1, timestamp: 1,
-                    kind: EventKind::Blocked { node: name.clone(), error: "preparation failed".into() } });
+                state.events.push(Event {
+                    sequence: state.events.len() as i64 + 1,
+                    timestamp: 1,
+                    kind: EventKind::Failed {
+                        node: name.clone(),
+                        execution_id: Some(name.clone()),
+                        error: "preparation failed".into(),
+                        output_bytes: 0,
+                        metrics: None,
+                    },
+                });
+                state.events.push(Event {
+                    sequence: state.events.len() as i64 + 1,
+                    timestamp: 1,
+                    kind: EventKind::Blocked {
+                        node: name.clone(),
+                        error: "preparation failed".into(),
+                    },
+                });
             }
             state.executions.push(serde_json::from_value(json!({
                 "id":name,"node":name,"revision":1,"attempt":1,"sessionId":name,
@@ -379,14 +495,22 @@ mod tests {
         }
         let metadata = snapshot_metadata(&state).unwrap();
         assert_eq!(metadata["nodes"].as_object().unwrap().len(), count);
-        assert!(metadata["nodes"].as_object().unwrap().values().all(|node| node["canResume"] == true));
+        assert!(metadata["nodes"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|node| node["canResume"] == true));
         assert_eq!(metadata["canResume"], true);
         // A run-wide Continue may clear the pause, but node-specific Continue
         // must still respect it even when both hints share the same indexes.
         state.paused = true;
         let paused = snapshot_metadata(&state).unwrap();
         assert_eq!(paused["canResume"], true);
-        assert!(paused["nodes"].as_object().unwrap().values().all(|node| node["canResume"] == false));
+        assert!(paused["nodes"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|node| node["canResume"] == false));
     }
 
     #[test]
@@ -584,21 +708,31 @@ mod tests {
     #[test]
     fn metadata_omits_recovery_input_without_mutating_durable_events() {
         let event = Event {
-            sequence: 1, timestamp: 42,
+            sequence: 1,
+            timestamp: 42,
             kind: EventKind::NodeInputBound {
-                execution_id: "worker".into(), instruction: "complete recovery input".into(),
+                execution_id: "worker".into(),
+                instruction: "complete recovery input".into(),
                 images: Some(vec![crate::model::ImageAttachment {
-                    r#type: "image".into(), mime_type: "image/png".into(),
-                    data: "a".repeat(8192), name: None,
+                    r#type: "image".into(),
+                    mime_type: "image/png".into(),
+                    data: "a".repeat(8192),
+                    name: None,
                 }]),
             },
         };
         let durable = serde_json::to_value(&event).unwrap();
-        let state = Snapshot { events: vec![event], ..Default::default() };
+        let state = Snapshot {
+            events: vec![event],
+            ..Default::default()
+        };
         let metadata = snapshot_metadata(&state).unwrap();
-        assert_eq!(metadata["events"], json!([{
-            "type": "node_input_bound", "execution_id": "worker", "sequence": 1, "timestamp": 42,
-        }]));
+        assert_eq!(
+            metadata["events"],
+            json!([{
+                "type": "node_input_bound", "execution_id": "worker", "sequence": 1, "timestamp": 42,
+            }])
+        );
         assert_eq!(serde_json::to_value(&state.events[0]).unwrap(), durable);
         assert_eq!(durable["instruction"], "complete recovery input");
         assert_eq!(durable["images"][0]["data"].as_str().unwrap().len(), 8192);

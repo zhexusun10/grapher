@@ -541,7 +541,12 @@ fn protected_shadow_objects(store: &Store, excluded: &str) -> Result<BTreeSet<St
 /// A matching event sequence proves freshness, not that recovery/result files
 /// are disposable. Retrying an older queued task must honor today's policy.
 pub(crate) fn retains_workspaces(state: &Snapshot) -> bool {
-    if state.config.as_ref().and_then(|config| config.environment.as_ref()).is_some() {
+    if state
+        .config
+        .as_ref()
+        .and_then(|config| config.environment.as_ref())
+        .is_some()
+    {
         return true;
     }
     // Preserve Runtime's recorded route and legacy single-task fallback.
@@ -549,15 +554,17 @@ pub(crate) fn retains_workspaces(state: &Snapshot) -> bool {
         Some(mode) => mode == "serial",
         None => state.graph.nodes.len() == 1 && state.graph.nodes[0].id == "task",
     };
-    !serial && state.isolated_workspaces.is_some()
+    !serial
+        && state.isolated_workspaces.is_some()
         && (!state.pending_feedback.is_empty()
             || state.nodes.values().any(|node| node.status != "completed")
             || state.executions.iter().any(|execution| {
                 execution.status == "completed"
                     && state.nodes.contains_key(&execution.node)
                     && !state.superseded_execution_ids.contains(&execution.id)
-                    && execution.after.as_ref().is_some_and(|head|
-                        !head.is_empty() && !state.published_heads.contains(head))
+                    && execution.after.as_ref().is_some_and(|head| {
+                        !head.is_empty() && !state.published_heads.contains(head)
+                    })
             }))
 }
 
@@ -590,10 +597,19 @@ fn execute_inner(root: &Path, store: &Store, task: &Task, detach: bool) -> Resul
             if state.events.last().map_or(0, |event| event.sequence) != sequence {
                 return store.finish_cleanup(&task.run_id);
             }
-            if matches!(state.phase.as_str(), "planning" | "publishing" | "merging" | "launching_result")
-                || state.nodes.values().any(|node| node.status == "running")
-                || state.executions.iter().chain(&state.mergers).any(|execution| execution.status == "running")
-                || state.result_execution.as_ref().is_some_and(|execution| execution.status == "running")
+            if matches!(
+                state.phase.as_str(),
+                "planning" | "publishing" | "merging" | "launching_result"
+            ) || state.nodes.values().any(|node| node.status == "running")
+                || state
+                    .executions
+                    .iter()
+                    .chain(&state.mergers)
+                    .any(|execution| execution.status == "running")
+                || state
+                    .result_execution
+                    .as_ref()
+                    .is_some_and(|execution| execution.status == "running")
             {
                 return Err("Run is active; workspace cleanup is deferred".into());
             }
@@ -693,7 +709,10 @@ fn execute_inner(root: &Path, store: &Store, task: &Task, detach: bool) -> Resul
         // Retire only the top-level targets; a parent's receipt owns its entire
         // tree, including any legacy Planner checkout listed separately.
         for (target, path) in &detached_targets {
-            if paths.iter().any(|parent| parent != path && path.starts_with(parent)) {
+            if paths
+                .iter()
+                .any(|parent| parent != path && path.starts_with(parent))
+            {
                 continue;
             }
             detached::retire(root, store, &task.run_id, target)?;

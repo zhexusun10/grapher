@@ -159,7 +159,15 @@ pub(crate) fn deliver_prepared(
     workspace: &Path,
     preserve_partial_work: bool,
 ) -> Result<(), String> {
-    deliver_prepared_from(root, run, node, task, workspace, preserve_partial_work, None)
+    deliver_prepared_from(
+        root,
+        run,
+        node,
+        task,
+        workspace,
+        preserve_partial_work,
+        None,
+    )
 }
 
 /// The scheduler proved that this node's failed private work was captured and
@@ -228,16 +236,23 @@ fn deliver_prepared_from(
         let receipt = directory.join("delivered").join(workspace_key);
         if let Some(previous) = previous {
             let key = hash(
-                previous.canonicalize().map_err(|error| error.to_string())?
-                    .to_string_lossy().as_bytes(),
+                previous
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?
+                    .to_string_lossy()
+                    .as_bytes(),
             )?;
-            if let Some(proof) = real_child_path(root, &directory.join("delivered").join(key), true)? {
+            if let Some(proof) =
+                real_child_path(root, &directory.join("delivered").join(key), true)?
+            {
                 if fs::read(proof).map_err(|error| error.to_string())? != input.hash.as_bytes() {
                     return Err("Attachment delivery receipt is damaged".into());
                 }
                 ensure_directory(
                     root,
-                    receipt.parent().ok_or("Missing attachment receipt directory")?,
+                    receipt
+                        .parent()
+                        .ok_or("Missing attachment receipt directory")?,
                 )?;
                 immutable_file(root, &receipt, input.hash.as_bytes())?;
             }

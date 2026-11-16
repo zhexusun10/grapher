@@ -203,7 +203,10 @@ fn legacy_truncated_addition_is_reported_without_overwriting_unrecorded_work() {
     fs::write(journal.join("applying"), "checkout\n").unwrap();
     fs::write(source.join("large.exe"), []).unwrap();
     let error = publish(&source, &heads, |_| panic!()).unwrap_err();
-    assert!(error.contains("large.exe") && error.contains("interrupted legacy file write"), "{error}");
+    assert!(
+        error.contains("large.exe") && error.contains("interrupted legacy file write"),
+        "{error}"
+    );
     assert_eq!(fs::metadata(source.join("large.exe")).unwrap().len(), 0);
 }
 
@@ -229,8 +232,14 @@ fn atomic_delivery_recovers_mixed_file_directory_transitions() {
     fs::remove_dir(source.join("was_file")).unwrap();
     fs::write(source.join("was_file"), "old file").unwrap();
     assert_eq!(publish(&source, &heads, |_| panic!()).unwrap(), result);
-    assert_eq!(fs::read_to_string(source.join("was_dir")).unwrap(), "new file");
-    assert_eq!(fs::read_to_string(source.join("was_file/child")).unwrap(), "new child");
+    assert_eq!(
+        fs::read_to_string(source.join("was_dir")).unwrap(),
+        "new file"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("was_file/child")).unwrap(),
+        "new child"
+    );
 }
 
 #[test]
@@ -484,13 +493,23 @@ fn sha256_delivery_keeps_all_new_objects_private() {
     fs::write(path.join("file.txt"), "sha256\n").unwrap();
     // Cross the blob batch boundary; unpackLimit=0 forces packed objects.
     for index in 0..130 {
-        fs::write(path.join(format!("batch-{index:04}.bin")), format!("unique bytes {index}\0\r\n")).unwrap();
+        fs::write(
+            path.join(format!("batch-{index:04}.bin")),
+            format!("unique bytes {index}\0\r\n"),
+        )
+        .unwrap();
     }
     let heads = [workspace::snapshot_node(&path, &source, "worker").unwrap()];
     let metadata = PathBuf::from(git(&path, &["rev-parse", "--absolute-git-dir"]));
-    assert!(fs::read_dir(metadata.join("objects/pack")).unwrap().any(|entry| {
-        entry.unwrap().path().extension().is_some_and(|extension| extension == "pack")
-    }));
+    assert!(fs::read_dir(metadata.join("objects/pack"))
+        .unwrap()
+        .any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "pack")
+        }));
     let result = publish(&source, &heads, |_| panic!()).unwrap();
     assert_eq!(result.len(), 64);
     for index in 0..130 {

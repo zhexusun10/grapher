@@ -14,20 +14,46 @@ fn equal_with_security(left: &View, right: &View, security: bool) -> bool {
     // Exhaustive destructuring makes new View fields a compile-time reminder
     // to update this projection, rather than silently ignoring new evidence.
     let View {
-        schema, source, root_mode, root_extra, entries, hardlinks, repositories,
-        git_entries, git_file, git_file_metadata, git_link, git_link_metadata,
-        git_config, git_files, git_global,
+        schema,
+        source,
+        root_mode,
+        root_extra,
+        entries,
+        hardlinks,
+        repositories,
+        git_entries,
+        git_file,
+        git_file_metadata,
+        git_link,
+        git_link_metadata,
+        git_config,
+        git_files,
+        git_global,
     } = left;
     *schema == right.schema
         && source == &right.source
         && *root_mode == right.root_mode
         && root_extra.eq_for_view_identity(&right.root_extra, security)
-        && map_equal(entries, &right.entries, false, security, |a, b| entry_equal(a, b, security))
-        && if security { hardlinks == &right.hardlinks } else { hardlinks.eq_for_view_identity(&right.hardlinks) }
-        && map_equal(repositories, &right.repositories, false, security, |a, b| equal_with_security(a, b, security))
+        && map_equal(entries, &right.entries, false, security, |a, b| {
+            entry_equal(a, b, security)
+        })
+        && if security {
+            hardlinks == &right.hardlinks
+        } else {
+            hardlinks.eq_for_view_identity(&right.hardlinks)
+        }
+        && map_equal(
+            repositories,
+            &right.repositories,
+            false,
+            security,
+            |a, b| equal_with_security(a, b, security),
+        )
         && match (git_entries, &right.git_entries) {
             (None, None) => true,
-            (Some(a), Some(b)) => map_equal(a, b, true, security, |a, b| entry_equal(a, b, security)),
+            (Some(a), Some(b)) => {
+                map_equal(a, b, true, security, |a, b| entry_equal(a, b, security))
+            }
             _ => false,
         }
         && *git_file == right.git_file
@@ -58,7 +84,11 @@ fn map_equal<T>(
     }
 }
 
-fn metadata_equal(left: &Option<(u32, Extra)>, right: &Option<(u32, Extra)>, security: bool) -> bool {
+fn metadata_equal(
+    left: &Option<(u32, Extra)>,
+    right: &Option<(u32, Extra)>,
+    security: bool,
+) -> bool {
     match (left, right) {
         (None, None) => true,
         (Some((am, a)), Some((bm, b))) => am == bm && a.eq_for_view_identity(b, security),
@@ -67,7 +97,11 @@ fn metadata_equal(left: &Option<(u32, Extra)>, right: &Option<(u32, Extra)>, sec
 }
 
 fn link_equal(left: &Link, right: &Link) -> bool {
-    let Link { value, project_absolute, kind } = left;
+    let Link {
+        value,
+        project_absolute,
+        kind,
+    } = left;
     value == &right.value && *project_absolute == right.project_absolute && kind == &right.kind
 }
 
@@ -81,7 +115,12 @@ fn entry_equal(left: &Entry, right: &Entry, security: bool) -> bool {
         Entry::File { mode, blob, extra } => matches!(right,
             Entry::File { mode: other_mode, blob: other_blob, extra: other_extra }
                 if mode == other_mode && blob == other_blob && extra.eq_for_view_identity(other_extra, security)),
-        Entry::Special { special, mode, device, extra } => matches!(right,
+        Entry::Special {
+            special,
+            mode,
+            device,
+            extra,
+        } => matches!(right,
             Entry::Special { special: other_special, mode: other_mode, device: other_device, extra: other_extra }
                 if special == other_special && mode == other_mode && device == other_device
                     && extra.eq_for_view_identity(other_extra, security)),

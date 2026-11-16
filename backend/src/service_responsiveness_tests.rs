@@ -47,17 +47,33 @@ fn hot_run_lookup_and_deletion_checks_do_not_wait_for_an_unrelated_primary() {
         let temp = tempfile::tempdir().unwrap();
         let primary = primary(temp.path());
         let hot = service_for_run(&primary, "hot-conversation", true).unwrap();
-        hot.runtime.lock().unwrap().emit(EventKind::Created {
-            graph: Graph::default(), config: serde_json::from_value(serde_json::json!({
-                "repository":temp.path(), "model":"test/model", "maxParallel":1
-            })).unwrap(), planning_id: None, planning: None,
-        }).unwrap();
-        if deleted { hot.runtime.lock().unwrap().store.delete_run("hot-conversation").unwrap(); }
+        hot.runtime
+            .lock()
+            .unwrap()
+            .emit(EventKind::Created {
+                graph: Graph::default(),
+                config: serde_json::from_value(serde_json::json!({
+                    "repository":temp.path(), "model":"test/model", "maxParallel":1
+                }))
+                .unwrap(),
+                planning_id: None,
+                planning: None,
+            })
+            .unwrap();
+        if deleted {
+            hot.runtime
+                .lock()
+                .unwrap()
+                .store
+                .delete_run("hot-conversation")
+                .unwrap();
+        }
         let held = primary.runtime.lock().unwrap();
         let reader = primary.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
-            tx.send(service_for_run(&reader, "hot-conversation", false)).unwrap();
+            tx.send(service_for_run(&reader, "hot-conversation", false))
+                .unwrap();
         });
         let result = rx.recv_timeout(Duration::from_secs(2));
         drop(held);
@@ -65,7 +81,11 @@ fn hot_run_lookup_and_deletion_checks_do_not_wait_for_an_unrelated_primary() {
         invalidate_service_cache(temp.path(), None);
         let result = result.expect("a hot Run lookup must not wait for the primary Run lock");
         if deleted {
-            assert_eq!(result.err().as_deref(), Some("Run not found"), "a cached owner cannot resurrect a deleted Run");
+            assert_eq!(
+                result.err().as_deref(),
+                Some("Run not found"),
+                "a cached owner cannot resurrect a deleted Run"
+            );
         } else {
             assert!(Arc::ptr_eq(&result.unwrap(), &hot));
         }
@@ -81,7 +101,10 @@ fn remembered_service_roots_do_not_keep_runtime_leases_alive() {
     drop(child);
     drop(service);
     let reopened = Runtime::open_lazy(temp.path());
-    assert!(reopened.is_ok(), "root memoization must retain only weak Service ownership");
+    assert!(
+        reopened.is_ok(),
+        "root memoization must retain only weak Service ownership"
+    );
 }
 
 #[test]
@@ -96,17 +119,24 @@ fn repository_status_does_not_wait_for_a_busy_primary_runtime() {
     let scanned = Arc::new(AtomicBool::new(false));
     let scan = scanned.clone();
     let worker = thread::spawn(move || {
-        tx.send(repository_status(&other_primary, source.to_string_lossy().into_owned(), |_| {
-            scan.store(true, Ordering::SeqCst);
-            Err("size warning".into())
-        })).unwrap();
+        tx.send(repository_status(
+            &other_primary,
+            source.to_string_lossy().into_owned(),
+            |_| {
+                scan.store(true, Ordering::SeqCst);
+                Err("size warning".into())
+            },
+        ))
+        .unwrap();
     });
     let result = rx.recv_timeout(Duration::from_secs(2));
     // Release and join before asserting so the old blocking implementation
     // fails without leaking a deadlocked test thread or poisoning its mutex.
     drop(held);
     worker.join().unwrap();
-    let status = result.expect("read-only binding status must not wait for the Run lock").unwrap();
+    let status = result
+        .expect("read-only binding status must not wait for the Run lock")
+        .unwrap();
     assert_eq!(status["valid"], true);
     assert_eq!(status["sizeLimitExceeded"], false);
     assert!(!scanned.load(Ordering::SeqCst));

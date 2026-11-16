@@ -1,5 +1,5 @@
-use super::*;
 use super::super::{legacy_normalized_bytes, load, normalization, normalized_bytes, save};
+use super::*;
 use serde_json::{json, Value};
 
 fn fixture(nested: bool) -> View {
@@ -38,13 +38,17 @@ fn fixture(nested: bool) -> View {
 }
 
 fn check_normalization(view: &View) {
-    assert_eq!(normalization::bytes(view).unwrap(), legacy_normalized_bytes(view).unwrap());
+    assert_eq!(
+        normalization::bytes(view).unwrap(),
+        legacy_normalized_bytes(view).unwrap()
+    );
 }
 
 fn check(left: &View, right: &View) {
     check_normalization(left);
     check_normalization(right);
-    let expected = legacy_normalized_bytes(left).unwrap() == legacy_normalized_bytes(right).unwrap();
+    let expected =
+        legacy_normalized_bytes(left).unwrap() == legacy_normalized_bytes(right).unwrap();
     assert_eq!(equal(left, right), expected);
     assert_eq!(equal(right, left), expected);
     assert_eq!(left == right, expected);
@@ -67,7 +71,14 @@ fn scalar_changes(value: &Value, path: &str, changes: &mut Vec<(String, Value)>)
         Value::String(value) => changes.push((path.into(), json!(format!("{value} changed")))),
         Value::Number(value) => {
             let value = value.as_u64().unwrap();
-            changes.push((path.into(), json!(if value == u64::MAX || value == 255 { 0 } else { value + 1 })));
+            changes.push((
+                path.into(),
+                json!(if value == u64::MAX || value == 255 {
+                    0
+                } else {
+                    value + 1
+                }),
+            ));
         }
         Value::Null => {}
     }
@@ -78,7 +89,9 @@ fn every_serialized_scalar_matches_versioned_normalized_equality() {
     for schema in [5, super::super::VIEW_SCHEMA] {
         let mut original = fixture(true);
         original.schema = schema;
-        for child in original.repositories.values_mut() { child.schema = schema; }
+        for child in original.repositories.values_mut() {
+            child.schema = schema;
+        }
         check_normalization(&original);
         let value = serde_json::to_value(&original).unwrap();
         let mut changes = Vec::new();
@@ -91,14 +104,18 @@ fn every_serialized_scalar_matches_versioned_normalized_equality() {
             // variants and optional/map shapes are exercised separately below.
             if let Ok(other) = serde_json::from_value::<View>(changed) {
                 check_normalization(&other);
-                let expected = legacy_normalized_bytes(&original).unwrap() == legacy_normalized_bytes(&other).unwrap();
+                let expected = legacy_normalized_bytes(&original).unwrap()
+                    == legacy_normalized_bytes(&other).unwrap();
                 assert_eq!(equal(&original, &other), expected, "{path}");
                 assert_eq!(equal(&other, &original), expected, "reverse {path}");
                 assert_eq!(original == other, expected, "View equality at {path}");
                 checked += 1;
             }
         }
-        assert!(checked > 200, "the fixture must exercise all evidence fields: {checked}");
+        assert!(
+            checked > 200,
+            "the fixture must exercise all evidence fields: {checked}"
+        );
     }
 }
 
@@ -107,18 +124,36 @@ fn ignored_keys_optional_fields_and_entry_variants_keep_legacy_equality() {
     let original = fixture(true);
     let value = serde_json::to_value(&original).unwrap();
     for (container, key) in [
-        ("/entries", "security"), ("/entries", "index"), ("/entries", "file"),
-        ("/git_entries", "security"), ("/git_entries", "index"), ("/git_entries", "nested/index"),
-        ("/repositories", "security"), ("/repositories", "child"),
+        ("/entries", "security"),
+        ("/entries", "index"),
+        ("/entries", "file"),
+        ("/git_entries", "security"),
+        ("/git_entries", "index"),
+        ("/git_entries", "nested/index"),
+        ("/repositories", "security"),
+        ("/repositories", "child"),
         ("/repositories/child/git_entries", "index"),
-        ("/hardlinks/aliases", "security"), ("/hardlinks/aliases", "to-security"),
-        ("/hardlinks/outside", "security"), ("/git_files", "security"),
+        ("/hardlinks/aliases", "security"),
+        ("/hardlinks/aliases", "to-security"),
+        ("/hardlinks/outside", "security"),
+        ("/git_files", "security"),
     ] {
         let mut changed = value.clone();
-        changed.pointer_mut(container).unwrap().as_object_mut().unwrap().remove(key);
+        changed
+            .pointer_mut(container)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
         check(&original, &serde_json::from_value(changed).unwrap());
     }
-    for path in ["/git_entries", "/git_file_metadata", "/git_link_metadata", "/root_extra/owner", "/repositories/child/root_extra/owner"] {
+    for path in [
+        "/git_entries",
+        "/git_file_metadata",
+        "/git_link_metadata",
+        "/root_extra/owner",
+        "/repositories/child/root_extra/owner",
+    ] {
         let mut changed = value.clone();
         *changed.pointer_mut(path).unwrap() = Value::Null;
         check(&original, &serde_json::from_value(changed).unwrap());
@@ -137,7 +172,10 @@ fn ignored_keys_optional_fields_and_entry_variants_keep_legacy_equality() {
     empty.git_entries = Some(BTreeMap::new());
     let mut ignored = empty.clone();
     let entry = original.entries["file"].clone();
-    ignored.git_entries = Some(BTreeMap::from([("index".into(), entry.clone()), ("security".into(), entry)]));
+    ignored.git_entries = Some(BTreeMap::from([
+        ("index".into(), entry.clone()),
+        ("security".into(), entry),
+    ]));
     check(&empty, &ignored);
     assert!(equal(&empty, &ignored));
     empty.git_entries = None;
@@ -149,14 +187,24 @@ fn ignored_keys_optional_fields_and_entry_variants_keep_legacy_equality() {
 fn stored_evidence_and_checksum_stay_unchanged() {
     let original = fixture(true);
     check_normalization(&original);
-    let checksum = git2::Oid::hash_object(git2::ObjectType::Blob, &normalized_bytes(&original).unwrap())
-        .unwrap().to_string();
+    let checksum = git2::Oid::hash_object(
+        git2::ObjectType::Blob,
+        &normalized_bytes(&original).unwrap(),
+    )
+    .unwrap()
+    .to_string();
     // Captured from the pre-optimization serializer, not the new comparator.
     assert_eq!(checksum, "91aefc90e6a3ad6da9df0a64f4bf7ee4260bb1e9");
     let temp = tempfile::tempdir().unwrap();
     save(temp.path(), &original).unwrap();
-    assert_eq!(std::fs::read_to_string(temp.path().join("checksum")).unwrap(), checksum);
-    assert_eq!(std::fs::read(temp.path().join("view.json")).unwrap(), serde_json::to_vec(&original).unwrap());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("checksum")).unwrap(),
+        checksum
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("view.json")).unwrap(),
+        serde_json::to_vec(&original).unwrap()
+    );
     let loaded = load(temp.path()).unwrap();
     let mut portable = original.clone();
     portable.strip_system_managed();
@@ -170,10 +218,14 @@ fn current_view_identity_tracks_acl_changes_and_security_named_paths() {
     original.strip_system_managed();
     let value = serde_json::to_value(&original).unwrap();
     for path in [
-        "/root_extra/security", "/entries/file/extra/security",
-        "/entries/security/extra/security", "/git_entries/HEAD/extra/security",
-        "/git_file_metadata/1/security", "/git_link_metadata/1/security",
-        "/repositories/child/root_extra/security", "/repositories/security/root_extra/security",
+        "/root_extra/security",
+        "/entries/file/extra/security",
+        "/entries/security/extra/security",
+        "/git_entries/HEAD/extra/security",
+        "/git_file_metadata/1/security",
+        "/git_link_metadata/1/security",
+        "/repositories/child/root_extra/security",
+        "/repositories/security/root_extra/security",
     ] {
         let mut changed = value.clone();
         *changed.pointer_mut(path).unwrap() = json!([4, 5, 6]);
@@ -181,12 +233,27 @@ fn current_view_identity_tracks_acl_changes_and_security_named_paths() {
         check(&original, &other);
         assert_ne!(original, other, "ACL change at {path} must affect identity");
     }
-    for container in ["/entries", "/git_entries", "/repositories", "/hardlinks/aliases", "/hardlinks/outside", "/git_files"] {
+    for container in [
+        "/entries",
+        "/git_entries",
+        "/repositories",
+        "/hardlinks/aliases",
+        "/hardlinks/outside",
+        "/git_files",
+    ] {
         let mut changed = value.clone();
-        changed.pointer_mut(container).unwrap().as_object_mut().unwrap().remove("security");
+        changed
+            .pointer_mut(container)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("security");
         let other: View = serde_json::from_value(changed).unwrap();
         check(&original, &other);
-        assert_ne!(original, other, "project path in {container} must affect identity");
+        assert_ne!(
+            original, other,
+            "project path in {container} must affect identity"
+        );
     }
 }
 
@@ -212,8 +279,13 @@ fn loading_rejects_unknown_nested_schema_before_in_memory_upgrade() {
         let temp = tempfile::tempdir().unwrap();
         save(temp.path(), &view).unwrap();
         let before = std::fs::read(temp.path().join("view.json")).unwrap();
-        assert!(load(temp.path()).unwrap_err().contains("Unsupported project-view schema"));
-        assert_eq!(std::fs::read(temp.path().join("view.json")).unwrap(), before);
+        assert!(load(temp.path())
+            .unwrap_err()
+            .contains("Unsupported project-view schema"));
+        assert_eq!(
+            std::fs::read(temp.path().join("view.json")).unwrap(),
+            before
+        );
     }
 }
 
@@ -226,15 +298,30 @@ fn current_checksums_reject_acl_corruption_and_legacy_records_remain_immutable()
     let original_checksum = std::fs::read(temp.path().join("checksum")).unwrap();
     let current = load(temp.path()).unwrap();
     assert_eq!(current.schema, super::super::VIEW_SCHEMA);
-    assert!(current.repositories.values().all(|view| view.schema == current.schema));
-    assert_eq!(std::fs::read(temp.path().join("view.json")).unwrap(), original_json);
-    assert_eq!(std::fs::read(temp.path().join("checksum")).unwrap(), original_checksum);
+    assert!(current
+        .repositories
+        .values()
+        .all(|view| view.schema == current.schema));
+    assert_eq!(
+        std::fs::read(temp.path().join("view.json")).unwrap(),
+        original_json
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("checksum")).unwrap(),
+        original_checksum
+    );
 
     save(temp.path(), &current).unwrap();
     let mut damaged = serde_json::to_value(&current).unwrap();
     damaged["entries"]["file"]["extra"]["security"] = json!([9, 8, 7]);
-    std::fs::write(temp.path().join("view.json"), serde_json::to_vec(&damaged).unwrap()).unwrap();
-    assert!(load(temp.path()).unwrap_err().contains("Damaged project-view evidence"));
+    std::fs::write(
+        temp.path().join("view.json"),
+        serde_json::to_vec(&damaged).unwrap(),
+    )
+    .unwrap();
+    assert!(load(temp.path())
+        .unwrap_err()
+        .contains("Damaged project-view evidence"));
 }
 
 #[test]
@@ -242,44 +329,69 @@ fn normalization_matches_legacy_for_generated_nested_views_without_mutating_evid
     // Deterministic shape coverage, independent of the single-scalar fixture:
     // combine optional fields, entry variants, escaped keys and nested maps.
     fn next(seed: &mut u64) -> u64 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *seed ^ (*seed >> 32)
     }
     const NAMES: &[&str] = &[
-        "security", "index", "Security", "nested/security", "nested/index",
-        "", "quote\"slash\\", "tab\tand\nnewline", "中文/é", "nul\0value",
+        "security",
+        "index",
+        "Security",
+        "nested/security",
+        "nested/index",
+        "",
+        "quote\"slash\\",
+        "tab\tand\nnewline",
+        "中文/é",
+        "nul\0value",
     ];
     fn name(seed: &mut u64) -> String {
         NAMES[next(seed) as usize % NAMES.len()].into()
     }
     fn extra(seed: &mut u64) -> Extra {
-        let attributes: Vec<_> = (0..next(seed) % 4).map(|_| {
-            let key = name(seed);
-            let data: Vec<_> = (0..next(seed) % 12).map(|_| next(seed) as u8).collect();
-            (key, data)
-        }).collect();
+        let attributes: Vec<_> = (0..next(seed) % 4)
+            .map(|_| {
+                let key = name(seed);
+                let data: Vec<_> = (0..next(seed) % 12).map(|_| next(seed) as u8).collect();
+                (key, data)
+            })
+            .collect();
         let security: Vec<_> = (0..next(seed) % 24).map(|_| next(seed) as u8).collect();
         let owner = (next(seed) & 1 != 0).then(|| (next(seed) as u32, next(seed) as u32));
         serde_json::from_value(json!({
             "attributes": attributes, "security": security, "owner": owner,
             "protected": next(seed) & 1 != 0, "flags": next(seed) as u32,
             "efs": next(seed) & 1 != 0,
-        })).unwrap()
+        }))
+        .unwrap()
     }
     fn entries(seed: &mut u64) -> BTreeMap<String, Entry> {
         let mut entries = BTreeMap::new();
         for path in NAMES {
-            if next(seed) % 3 == 0 { continue; }
+            if next(seed) % 3 == 0 {
+                continue;
+            }
             let extra = extra(seed);
             let mode = next(seed) as u32;
             let entry = match next(seed) % 4 {
                 0 => Entry::Directory { mode, extra },
-                1 => Entry::File { mode, extra, blob: name(seed) },
-                2 => Entry::Special { mode, extra, special: name(seed), device: next(seed) },
+                1 => Entry::File {
+                    mode,
+                    extra,
+                    blob: name(seed),
+                },
+                2 => Entry::Special {
+                    mode,
+                    extra,
+                    special: name(seed),
+                    device: next(seed),
+                },
                 _ => Entry::Link {
                     extra,
                     target: Link {
-                        value: name(seed), project_absolute: next(seed) & 1 != 0,
+                        value: name(seed),
+                        project_absolute: next(seed) & 1 != 0,
                         kind: match next(seed) % 3 {
                             0 => crate::workspace_symlinks::Kind::SymbolicFile,
                             1 => crate::workspace_symlinks::Kind::SymbolicDirectory,
@@ -303,15 +415,24 @@ fn normalization_matches_legacy_for_generated_nested_views_without_mutating_evid
         view.git_link = next(seed) & 1 != 0;
         view.git_file_metadata = (next(seed) & 1 != 0).then(|| (next(seed) as u32, extra(seed)));
         view.git_link_metadata = (next(seed) & 1 != 0).then(|| (next(seed) as u32, extra(seed)));
-        view.git_config = (0..next(seed) % 5).map(|_| (name(seed), name(seed))).collect();
+        view.git_config = (0..next(seed) % 5)
+            .map(|_| (name(seed), name(seed)))
+            .collect();
         view.git_global = (0..next(seed) % 32).map(|_| next(seed) as u8).collect();
-        view.git_files = NAMES.iter().map(|key| ((*key).into(), (name(seed), next(seed) & 1 != 0))).collect();
+        view.git_files = NAMES
+            .iter()
+            .map(|key| ((*key).into(), (name(seed), next(seed) & 1 != 0)))
+            .collect();
         let aliases: BTreeMap<_, _> = NAMES.iter().map(|key| (*key, name(seed))).collect();
         let outside: BTreeMap<_, _> = NAMES.iter().map(|key| (*key, next(seed))).collect();
-        view.hardlinks = serde_json::from_value(json!({"aliases": aliases, "outside": outside})).unwrap();
+        view.hardlinks =
+            serde_json::from_value(json!({"aliases": aliases, "outside": outside})).unwrap();
         if depth != 0 {
             for key in ["child", "security", "index"] {
-                if next(seed) & 1 != 0 { view.repositories.insert(key.into(), generated_view(seed, depth - 1)); }
+                if next(seed) & 1 != 0 {
+                    view.repositories
+                        .insert(key.into(), generated_view(seed, depth - 1));
+                }
             }
         }
         view
@@ -348,15 +469,24 @@ fn view_normalization_benchmark() {
         let extra: Extra = serde_json::from_value(json!({
             "attributes":[["user.data", [0, 1, 2, 3]]], "security":vec![42u8; security_bytes],
             "protected":false, "flags":0, "owner":null, "efs":false,
-        })).unwrap();
-        let entry = Entry::File { mode: 420, blob: "a".repeat(40), extra };
+        }))
+        .unwrap();
+        let entry = Entry::File {
+            mode: 420,
+            blob: "a".repeat(40),
+            extra,
+        };
         view.entries.clear();
         view.git_entries = Some(BTreeMap::new());
         for i in 0..files {
-            view.entries.insert(format!("src/file-{i:05}.rs"), entry.clone());
+            view.entries
+                .insert(format!("src/file-{i:05}.rs"), entry.clone());
         }
         for i in 0..git_files {
-            view.git_entries.as_mut().unwrap().insert(format!("objects/{i:05}"), entry.clone());
+            view.git_entries
+                .as_mut()
+                .unwrap()
+                .insert(format!("objects/{i:05}"), entry.clone());
         }
         let expected = legacy_normalized_bytes(&view).unwrap();
         assert_eq!(normalization::bytes(&view).unwrap(), expected);
@@ -368,7 +498,8 @@ fn view_normalization_benchmark() {
                     0 => legacy_normalized_bytes(&view),
                     1 => normalization::buffered_bytes(&view),
                     _ => normalization::bytes(&view),
-                }.unwrap();
+                }
+                .unwrap();
                 let elapsed = started.elapsed();
                 assert_eq!(bytes, expected);
                 times[strategy].push(elapsed);
@@ -387,14 +518,23 @@ fn view_equality_benchmark() {
     let extra: Extra = serde_json::from_value(json!({
         "attributes":[["user.data", [0, 1, 2, 3]]], "security":vec![42u8; 128],
         "protected":false, "flags":0, "owner":null, "efs":false,
-    })).unwrap();
-    let entry = Entry::File { mode: 420, blob: "a".repeat(40), extra };
+    }))
+    .unwrap();
+    let entry = Entry::File {
+        mode: 420,
+        blob: "a".repeat(40),
+        extra,
+    };
     left.entries.clear();
     left.git_entries = Some(BTreeMap::new());
     for i in 0..5000 {
-        left.entries.insert(format!("src/file-{i:05}.rs"), entry.clone());
+        left.entries
+            .insert(format!("src/file-{i:05}.rs"), entry.clone());
         if i < 1000 {
-            left.git_entries.as_mut().unwrap().insert(format!("objects/{i:05}"), entry.clone());
+            left.git_entries
+                .as_mut()
+                .unwrap()
+                .insert(format!("objects/{i:05}"), entry.clone());
         }
     }
     let mut right = left.clone();
@@ -410,10 +550,15 @@ fn view_equality_benchmark() {
                 let matches = if fast {
                     equal(std::hint::black_box(&left), std::hint::black_box(&right))
                 } else {
-                    legacy_normalized_bytes(&left).unwrap() == legacy_normalized_bytes(&right).unwrap()
+                    legacy_normalized_bytes(&left).unwrap()
+                        == legacy_normalized_bytes(&right).unwrap()
                 };
                 let elapsed = start.elapsed();
-                if fast { borrowed += elapsed; } else { legacy += elapsed; }
+                if fast {
+                    borrowed += elapsed;
+                } else {
+                    legacy += elapsed;
+                }
                 assert_eq!(matches, !changed);
             }
         }

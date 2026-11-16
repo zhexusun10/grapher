@@ -36,32 +36,58 @@ pub struct PendingRequest {
 
 impl PendingRequest {
     pub fn wait(self) -> Result<Value, String> {
-        self.response.recv_timeout(Duration::from_secs(self.timeout))
+        self.response
+            .recv_timeout(Duration::from_secs(self.timeout))
             .map_err(|_| "Pi command timed out; verify its result before retrying".to_string())?
     }
 }
 
 impl Drop for PendingRequest {
     fn drop(&mut self) {
-        if let Ok(mut pending) = self.rpc.pending.lock() { pending.remove(&self.id); }
+        if let Ok(mut pending) = self.rpc.pending.lock() {
+            pending.remove(&self.id);
+        }
     }
 }
 
 fn request_timeout(command: &Value) -> u64 {
-    if matches!(command["type"].as_str(), Some("prompt" | "compact" | "abort" | "clear_queue")) { 300 } else { 10 }
+    if matches!(
+        command["type"].as_str(),
+        Some("prompt" | "compact" | "abort" | "clear_queue")
+    ) {
+        300
+    } else {
+        10
+    }
 }
 
 // Register before writing so callers can serialize pipe order with durable
 // acceptance, then release the Run mutex before waiting for the reader.
-pub fn start_request(id: &str, instance: &str, mut command: Value) -> Result<PendingRequest, String> {
+pub fn start_request(
+    id: &str,
+    instance: &str,
+    mut command: Value,
+) -> Result<PendingRequest, String> {
     let rpc = lookup(id, Some(instance))?;
     let request_id = uuid::Uuid::new_v4().to_string();
     command["id"] = Value::String(request_id.clone());
     let timeout = request_timeout(&command);
     let (tx, response) = mpsc::channel();
-    rpc.pending.lock().map_err(|e| e.to_string())?.insert(request_id.clone(), tx);
-    let pending = PendingRequest { rpc, id: request_id, response, timeout };
-    pending.rpc.sender.send(command.to_string()).map_err(|_| "Pi RPC input closed".to_string())?;
+    rpc.pending
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(request_id.clone(), tx);
+    let pending = PendingRequest {
+        rpc,
+        id: request_id,
+        response,
+        timeout,
+    };
+    pending
+        .rpc
+        .sender
+        .send(command.to_string())
+        .map_err(|_| "Pi RPC input closed".to_string())?;
     Ok(pending)
 }
 
@@ -72,7 +98,12 @@ pub fn request(id: &str, instance: &str, command: Value) -> Result<Value, String
 /// One UI-capable invocation owns a process until its real RPC acknowledgement.
 /// Timeouts remove HTTP waiters, but cannot authorize a concurrent invocation.
 /// The reader independently retires ownership when Pi eventually responds.
-pub fn execute_owned(id: &str, instance: &str, command_id: &str, mut command: Value) -> Result<Value, String> {
+pub fn execute_owned(
+    id: &str,
+    instance: &str,
+    command_id: &str,
+    mut command: Value,
+) -> Result<Value, String> {
     let rpc = lookup(id, Some(instance))?;
     let request_id = uuid::Uuid::new_v4().to_string();
     command["id"] = Value::String(request_id.clone());
@@ -80,12 +111,24 @@ pub fn execute_owned(id: &str, instance: &str, command_id: &str, mut command: Va
     ui.begin(command_id, &request_id, &rpc.sender)?;
     let result = (|| {
         let (tx, response) = mpsc::channel();
-        rpc.pending.lock().map_err(|error| error.to_string())?.insert(request_id.clone(), tx);
-        let pending = PendingRequest { rpc:rpc.clone(), id:request_id.clone(), response, timeout:request_timeout(&command) };
-        rpc.sender.send(command.to_string()).map_err(|_| "Pi RPC input closed".to_string())?;
+        rpc.pending
+            .lock()
+            .map_err(|error| error.to_string())?
+            .insert(request_id.clone(), tx);
+        let pending = PendingRequest {
+            rpc: rpc.clone(),
+            id: request_id.clone(),
+            response,
+            timeout: request_timeout(&command),
+        };
+        rpc.sender
+            .send(command.to_string())
+            .map_err(|_| "Pi RPC input closed".to_string())?;
         Ok::<_, String>(pending)
     })();
-    if result.is_err() { ui.completed(&request_id); }
+    if result.is_err() {
+        ui.completed(&request_id);
+    }
     drop(ui);
     result?.wait()
 }
@@ -97,8 +140,16 @@ pub fn interrupt_then<T>(id: &str, work: impl FnOnce() -> Result<T, String>) -> 
     let instance = rpc.instance.clone();
     let lease_id = uuid::Uuid::new_v4().to_string();
     let (tx, response) = mpsc::channel();
-    rpc.pending.lock().map_err(|e| e.to_string())?.insert(lease_id.clone(), tx);
-    let _lease = PendingRequest { rpc, id: lease_id, response, timeout: 300 };
+    rpc.pending
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(lease_id.clone(), tx);
+    let _lease = PendingRequest {
+        rpc,
+        id: lease_id,
+        response,
+        timeout: 300,
+    };
     request(id, &instance, serde_json::json!({"type":"abort"}))?;
     work()
 }
@@ -162,7 +213,11 @@ pub fn command_request(text: &str, commands: &Value) -> Result<Value, String> {
         {
             // Pi splits extension names on a literal space, not arbitrary
             // whitespace. Preserve multiline arguments after that separator.
-            let message = if args.is_empty() { format!("/{name}") } else { format!("/{name} {args}") };
+            let message = if args.is_empty() {
+                format!("/{name}")
+            } else {
+                format!("/{name} {args}")
+            };
             Ok(serde_json::json!({"type":"prompt", "message":message, "streamingBehavior":"steer"}))
         }
         _ => Err(format!("Unknown or unavailable Pi command: /{name}")),
@@ -206,21 +261,41 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         let (sender, receiver) = mpsc::channel::<String>();
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        NODE_RPC.get_or_init(Default::default).lock().unwrap().insert(id.clone(), NodeRpc {
-            sender, pending: pending.clone(), instance: "test".into(), ui: Arc::new(Mutex::new(CommandUi::default())),
-            run_id: None, revision_run_id: None,
-        });
+        NODE_RPC
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(
+                id.clone(),
+                NodeRpc {
+                    sender,
+                    pending: pending.clone(),
+                    instance: "test".into(),
+                    ui: Arc::new(Mutex::new(CommandUi::default())),
+                    run_id: None,
+                    revision_run_id: None,
+                },
+            );
         let reader = thread::spawn({
             let pending = pending.clone();
             move || {
                 let command: Value = serde_json::from_str(&receiver.recv().unwrap()).unwrap();
                 assert_eq!(command["type"], "abort");
-                pending.lock().unwrap().remove(command["id"].as_str().unwrap()).unwrap()
-                    .send(Err("abort rejected".into())).unwrap();
+                pending
+                    .lock()
+                    .unwrap()
+                    .remove(command["id"].as_str().unwrap())
+                    .unwrap()
+                    .send(Err("abort rejected".into()))
+                    .unwrap();
             }
         });
         let mut sent = false;
-        assert!(interrupt_then(&id, || { sent = true; Ok(()) }).is_err());
+        assert!(interrupt_then(&id, || {
+            sent = true;
+            Ok(())
+        })
+        .is_err());
         assert!(!sent);
         assert!(pending.lock().unwrap().is_empty());
         reader.join().unwrap();
@@ -342,30 +417,73 @@ sys.stdin.read()
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(execute_owned(&id, &instance, &uuid::Uuid::new_v4().to_string(), serde_json::json!({"type":"prompt","message":"/extension"}))
-            .unwrap_err().contains("still running"));
+        assert!(execute_owned(
+            &id,
+            &instance,
+            &uuid::Uuid::new_v4().to_string(),
+            serde_json::json!({"type":"prompt","message":"/extension"})
+        )
+        .unwrap_err()
+        .contains("still running"));
         respond(&id, &instance, &command_id, serde_json::json!({"type":"extension_ui_response","id":"dialog","value":"secret-value"})).unwrap();
         assert_eq!(command.join().unwrap().unwrap()["disposition"], "handled");
         let errors = poll(&id, &instance, &command_id).unwrap();
-        assert_eq!(errors[0]["error"], "invalid secret-value", "command errors reach their UI owner, not the durable log");
-        let compact = command_request("/compact keep tests", &serde_json::json!({"commands":[{"name":"compact"}]})).unwrap();
-        assert_eq!(execute_owned(&id, &instance, &uuid::Uuid::new_v4().to_string(), compact).unwrap()["disposition"], "handled");
+        assert_eq!(
+            errors[0]["error"], "invalid secret-value",
+            "command errors reach their UI owner, not the durable log"
+        );
+        let compact = command_request(
+            "/compact keep tests",
+            &serde_json::json!({"commands":[{"name":"compact"}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            execute_owned(&id, &instance, &uuid::Uuid::new_v4().to_string(), compact).unwrap()
+                ["disposition"],
+            "handled"
+        );
         let mcp_id = uuid::Uuid::new_v4().to_string();
-        execute_owned(&id, &instance, &mcp_id, serde_json::json!({"type":"prompt", "message":"/mcp"})).unwrap();
+        execute_owned(
+            &id,
+            &instance,
+            &mcp_id,
+            serde_json::json!({"type":"prompt", "message":"/mcp"}),
+        )
+        .unwrap();
         thread::sleep(Duration::from_millis(100));
-        assert!(poll(&id, &instance, &command_id).unwrap().is_empty(), "the old poll cannot steal MCP notifications");
+        assert!(
+            poll(&id, &instance, &command_id).unwrap().is_empty(),
+            "the old poll cannot steal MCP notifications"
+        );
         let notifications = poll(&id, &instance, &mcp_id).unwrap();
-        assert_eq!(notifications[0]["message"], "demo: connected", "a command-only reply remains readable after a settled turn");
+        assert_eq!(
+            notifications[0]["message"], "demo: connected",
+            "a command-only reply remains readable after a settled turn"
+        );
         interrupt_then(&id, || {
             thread::sleep(Duration::from_millis(800));
-            assert!(session(&id).is_ok(), "abort must not release the process before the replacement send");
+            assert!(
+                session(&id).is_ok(),
+                "abort must not release the process before the replacement send"
+            );
             super::super::steer_nowait(&id, "replacement", None)
-        }).unwrap();
+        })
+        .unwrap();
         let (result, output) = worker.join().unwrap();
-        assert_eq!(result.unwrap(), "replacement complete", "interruption must continue in the same process");
-        assert!(output.contains("original turn complete"), "compaction preserves the original response");
+        assert_eq!(
+            result.unwrap(),
+            "replacement complete",
+            "interruption must continue in the same process"
+        );
+        assert!(
+            output.contains("original turn complete"),
+            "compaction preserves the original response"
+        );
         assert!(output.contains("Aborted"));
-        assert!(output.contains("background hook failed"), "ordinary extension failures survive without a composer poll");
+        assert!(
+            output.contains("background hook failed"),
+            "ordinary extension failures survive without a composer poll"
+        );
         assert!(output.contains("extension_error"));
         assert!(!output.contains("secret-value"));
         assert!(!output.contains("extension_ui_request"));
@@ -386,14 +504,25 @@ sys.stdin.read()
             command_request("/extension a b", &commands).unwrap()["message"],
             "/extension a b"
         );
-        assert_eq!(command_request("/mcp reconnect demo", &commands).unwrap()["message"], "/mcp reconnect demo");
+        assert_eq!(
+            command_request("/mcp reconnect demo", &commands).unwrap()["message"],
+            "/mcp reconnect demo"
+        );
         let compact = command_request("/compact keep tests", &commands).unwrap();
         assert_eq!(compact["type"], "prompt");
         assert_eq!(compact["message"], "/compact keep tests");
         assert_eq!(request_timeout(&compact), 300);
-        assert_eq!(request_timeout(&command_request("/stats", &commands).unwrap()), 10);
-        assert_eq!(command_request("/compact\nkeep tests", &commands).unwrap()["message"], "/compact keep tests");
-        assert!(command_request("/compact", &serde_json::json!({"commands":[]})).is_err(),
-            "an older process must not fall back to the destructive raw RPC");
+        assert_eq!(
+            request_timeout(&command_request("/stats", &commands).unwrap()),
+            10
+        );
+        assert_eq!(
+            command_request("/compact\nkeep tests", &commands).unwrap()["message"],
+            "/compact keep tests"
+        );
+        assert!(
+            command_request("/compact", &serde_json::json!({"commands":[]})).is_err(),
+            "an older process must not fall back to the destructive raw RPC"
+        );
     }
 }

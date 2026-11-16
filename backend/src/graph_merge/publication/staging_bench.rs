@@ -18,14 +18,16 @@ fn delta_index_staging() {
         let blob = repository.blob(contents).unwrap();
         let mut builder = repository.treebuilder(None).unwrap();
         for i in 0..count {
-            builder.insert(format!("file-{i:05}.txt"), blob, 0o100644).unwrap();
+            builder
+                .insert(format!("file-{i:05}.txt"), blob, 0o100644)
+                .unwrap();
         }
         let tree = builder.write().unwrap().to_string();
-        let result = repository_git(&source, &["commit-tree", &tree, "-m", "staging fixture"])
-            .unwrap();
+        let result =
+            repository_git(&source, &["commit-tree", &tree, "-m", "staging fixture"]).unwrap();
         let path = "file-00000.txt";
-        let selected_paths: BTreeSet<_> = (0..changed)
-            .map(|i| format!("file-{i:05}.txt")).collect();
+        let selected_paths: BTreeSet<_> =
+            (0..changed).map(|i| format!("file-{i:05}.txt")).collect();
         let paths: Vec<_> = selected_paths.iter().map(String::as_str).collect();
         let selected = entries(&source, &result, &selected_paths).unwrap();
         let full = temp.path().join("full-index");
@@ -57,7 +59,10 @@ fn delta_index_staging() {
         }
         let indexed_count = |journal: &Path| {
             private_index_git(&source, &journal.join("staging-index"), &["ls-files", "-z"])
-                .unwrap().split('\0').filter(|name| !name.is_empty()).count()
+                .unwrap()
+                .split('\0')
+                .filter(|name| !name.is_empty())
+                .count()
         };
         assert_eq!(indexed_count(&full), count);
         assert_eq!(indexed_count(&delta), changed);

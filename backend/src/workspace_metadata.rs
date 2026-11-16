@@ -37,7 +37,14 @@ pub(crate) struct ForViewIdentity<'a>(pub(crate) &'a Extra, pub(crate) bool);
 impl Serialize for ForViewIdentity<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let Extra { attributes, security, protected, flags, owner, efs } = self.0;
+        let Extra {
+            attributes,
+            security,
+            protected,
+            flags,
+            owner,
+            efs,
+        } = self.0;
         let mut map = serializer.serialize_map(None)?;
         // Match serde_json::Value's sorted object keys without building a DOM.
         map.serialize_entry("attributes", attributes)?;
@@ -45,7 +52,9 @@ impl Serialize for ForViewIdentity<'_> {
         map.serialize_entry("flags", flags)?;
         map.serialize_entry("owner", owner)?;
         map.serialize_entry("protected", protected)?;
-        if self.1 { map.serialize_entry("security", security)?; }
+        if self.1 {
+            map.serialize_entry("security", security)?;
+        }
         map.end()
     }
 }
@@ -54,7 +63,14 @@ impl Extra {
     /// Match the selected checksum format. Unlike portable equality, legacy
     /// owner fields count until load validates and normalizes their evidence.
     pub(crate) fn eq_for_view_identity(&self, other: &Self, security: bool) -> bool {
-        let Self { attributes, security: acl, protected, flags, owner, efs } = self;
+        let Self {
+            attributes,
+            security: acl,
+            protected,
+            flags,
+            owner,
+            efs,
+        } = self;
         attributes == &other.attributes
             && (!security || acl == &other.security)
             && *protected == other.protected
@@ -94,7 +110,9 @@ impl Extra {
 fn normalize_empty_acl(security: &mut Vec<u8>) {
     // acl_to_text represents an empty ACL by a header; legacy captures may
     // instead contain no bytes (ENOENT/ENOTSUP). Both mean no extended rules.
-    if security.trim_ascii() == b"!#acl 1" { security.clear(); }
+    if security.trim_ascii() == b"!#acl 1" {
+        security.clear();
+    }
 }
 
 fn is_system_managed(name: &str) -> bool {
@@ -418,7 +436,11 @@ mod platform {
             // An empty recorded ACL must clear inherited/stale destination
             // rules, not leave them behind as the old conditional did.
             let acl = unsafe {
-                if extra.security.is_empty() { acl_init(0) } else { acl_from_text(text.as_ptr()) }
+                if extra.security.is_empty() {
+                    acl_init(0)
+                } else {
+                    acl_from_text(text.as_ptr())
+                }
             };
             if acl.is_null() {
                 return Err("Damaged macOS project ACL evidence".into());
@@ -522,8 +544,16 @@ mod platform {
             descriptor: *mut *mut c_void,
         ) -> u32;
         fn GetSecurityDescriptorLength(descriptor: *const c_void) -> u32;
-        fn GetSecurityDescriptorOwner(data: *const c_void, owner: *mut *mut c_void, defaulted: *mut i32) -> i32;
-        fn GetSecurityDescriptorGroup(data: *const c_void, group: *mut *mut c_void, defaulted: *mut i32) -> i32;
+        fn GetSecurityDescriptorOwner(
+            data: *const c_void,
+            owner: *mut *mut c_void,
+            defaulted: *mut i32,
+        ) -> i32;
+        fn GetSecurityDescriptorGroup(
+            data: *const c_void,
+            group: *mut *mut c_void,
+            defaulted: *mut i32,
+        ) -> i32;
         fn EqualSid(left: *const c_void, right: *const c_void) -> i32;
         fn SetKernelObjectSecurity(handle: *mut c_void, info: u32, data: *const c_void) -> i32;
         fn GetSecurityDescriptorControl(
@@ -768,39 +798,72 @@ mod platform {
     fn ownership_changes(path: &Path, expected: *const c_void) -> Result<u32, String> {
         let name = wide(path)?;
         let handle = unsafe {
-            CreateFileW(name.as_ptr(), 0x0002_0000, 7, std::ptr::null(), 3,
-                0x0220_0000, std::ptr::null_mut())
+            CreateFileW(
+                name.as_ptr(),
+                0x0002_0000,
+                7,
+                std::ptr::null(),
+                3,
+                0x0220_0000,
+                std::ptr::null_mut(),
+            )
         };
         if handle as isize == -1 {
-            return Err(format!("Cannot inspect project ownership {}: {}", path.display(), std::io::Error::last_os_error()));
+            return Err(format!(
+                "Cannot inspect project ownership {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
         }
         let mut owner = std::ptr::null_mut();
         let mut group = std::ptr::null_mut();
         let mut actual = std::ptr::null_mut();
         let status = unsafe {
-            GetSecurityInfo(handle, 1, 3, &mut owner, &mut group, std::ptr::null_mut(),
-                std::ptr::null_mut(), &mut actual)
+            GetSecurityInfo(
+                handle,
+                1,
+                3,
+                &mut owner,
+                &mut group,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut actual,
+            )
         };
-        unsafe { CloseHandle(handle); }
+        unsafe {
+            CloseHandle(handle);
+        }
         let result = (|| {
             if status != 0 {
-                return Err(format!("Cannot inspect project ownership {}: {}", path.display(), std::io::Error::from_raw_os_error(status as i32)));
+                return Err(format!(
+                    "Cannot inspect project ownership {}: {}",
+                    path.display(),
+                    std::io::Error::from_raw_os_error(status as i32)
+                ));
             }
             let mut expected_owner = std::ptr::null_mut();
             let mut expected_group = std::ptr::null_mut();
             let mut defaulted = 0;
-            if unsafe { GetSecurityDescriptorOwner(expected, &mut expected_owner, &mut defaulted) } == 0
-                || unsafe { GetSecurityDescriptorGroup(expected, &mut expected_group, &mut defaulted) } == 0
+            if unsafe { GetSecurityDescriptorOwner(expected, &mut expected_owner, &mut defaulted) }
+                == 0
+                || unsafe {
+                    GetSecurityDescriptorGroup(expected, &mut expected_group, &mut defaulted)
+                } == 0
             {
                 return Err("Damaged project ownership evidence".into());
             }
             let same = |left: *mut c_void, right: *mut c_void| {
-                left == right || !left.is_null() && !right.is_null()
-                    && unsafe { EqualSid(left, right) } != 0
+                left == right
+                    || !left.is_null() && !right.is_null() && unsafe { EqualSid(left, right) } != 0
             };
-            Ok(u32::from(!same(owner, expected_owner)) | (u32::from(!same(group, expected_group)) << 1))
+            Ok(u32::from(!same(owner, expected_owner))
+                | (u32::from(!same(group, expected_group)) << 1))
         })();
-        if !actual.is_null() { unsafe { LocalFree(actual); } }
+        if !actual.is_null() {
+            unsafe {
+                LocalFree(actual);
+            }
+        }
         result
     }
 
@@ -860,24 +923,46 @@ mod platform {
             // even for the owner. Request it only for an actual owner/group
             // change; never ignore such changes or substitute a weaker ACL.
             let ownership = ownership_changes(path, descriptor)?;
-            let flags = 4 | ownership | if extra.protected { 0x8000_0000 } else { 0x2000_0000 };
+            let flags = 4
+                | ownership
+                | if extra.protected {
+                    0x8000_0000
+                } else {
+                    0x2000_0000
+                };
             let access = 0x0004_0000 | if ownership != 0 { 0x0008_0000 } else { 0 };
             // Named-security setters re-inherit ACEs from the destination parent.
             // Restore the recorded descriptor directly, preserving ordered ACEs.
             let handle = unsafe {
-                CreateFileW(native_path.as_ptr(), access, 7, std::ptr::null(), 3,
-                    0x0220_0000, std::ptr::null_mut())
+                CreateFileW(
+                    native_path.as_ptr(),
+                    access,
+                    7,
+                    std::ptr::null(),
+                    3,
+                    0x0220_0000,
+                    std::ptr::null_mut(),
+                )
             };
             let applied = handle as isize != -1
                 && unsafe { SetKernelObjectSecurity(handle, flags, descriptor) } != 0;
             let error = std::io::Error::last_os_error();
-            if handle as isize != -1 { unsafe { CloseHandle(handle); } }
+            if handle as isize != -1 {
+                unsafe {
+                    CloseHandle(handle);
+                }
+            }
             if !applied {
-                return Err(format!("Cannot preserve project ACL {}: {error}", path.display()));
+                return Err(format!(
+                    "Cannot preserve project ACL {}: {error}",
+                    path.display()
+                ));
             }
             Ok(())
         })();
-        unsafe { LocalFree(descriptor); }
+        unsafe {
+            LocalFree(descriptor);
+        }
         result?;
         set_encrypted(path, extra.efs)?;
         let actual = capture(path)?;
@@ -997,11 +1082,24 @@ mod macos_tests {
         fs::write(&target, "project bytes").unwrap();
         let expected = capture(&source, &fs::symlink_metadata(&source).unwrap()).unwrap();
         let output = std::process::Command::new("/bin/chmod")
-            .args(["+a", "everyone allow read"]).arg(&target).output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert_ne!(capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap(), expected);
+            .args(["+a", "everyone allow read"])
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_ne!(
+            capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap(),
+            expected
+        );
         restore(&target, &expected).unwrap();
-        assert_eq!(capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap(), expected);
+        assert_eq!(
+            capture(&target, &fs::symlink_metadata(&target).unwrap()).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -1068,7 +1166,9 @@ mod tests {
         use std::os::windows::fs::OpenOptionsExt;
         let temp = tempfile::tempdir().unwrap();
         for directory in [false, true] {
-            let path = temp.path().join(if directory { "directory" } else { "file" });
+            let path = temp
+                .path()
+                .join(if directory { "directory" } else { "file" });
             if directory {
                 fs::create_dir(&path).unwrap();
             } else {
@@ -1080,12 +1180,18 @@ mod tests {
             let output = std::process::Command::new("icacls.exe")
                 .arg(crate::native::host_path(&path))
                 .args(["/deny", "*S-1-1-0:(WO)"])
-                .output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             let denied = fs::OpenOptions::new()
                 .access_mode(0x0008_0000)
                 .custom_flags(0x0220_0000)
-                .open(&path).unwrap_err();
+                .open(&path)
+                .unwrap_err();
             assert_eq!(denied.raw_os_error(), Some(5));
             let restricted = capture(&path, &fs::symlink_metadata(&path).unwrap()).unwrap();
             assert_ne!(restricted, expected);
@@ -1099,11 +1205,19 @@ mod tests {
                 assert_ne!(&security[start..end], "SY");
                 security.replace_range(start..end, "SY");
                 changed.security = security.into_bytes();
-                assert!(restore(&path, &changed).unwrap_err().contains("Cannot preserve project ACL"));
-                assert_eq!(capture(&path, &fs::symlink_metadata(&path).unwrap()).unwrap(), restricted);
+                assert!(restore(&path, &changed)
+                    .unwrap_err()
+                    .contains("Cannot preserve project ACL"));
+                assert_eq!(
+                    capture(&path, &fs::symlink_metadata(&path).unwrap()).unwrap(),
+                    restricted
+                );
             }
             restore(&path, &expected).unwrap();
-            assert_eq!(capture(&path, &fs::symlink_metadata(&path).unwrap()).unwrap(), expected);
+            assert_eq!(
+                capture(&path, &fs::symlink_metadata(&path).unwrap()).unwrap(),
+                expected
+            );
             if !directory {
                 assert_eq!(fs::read_to_string(&path).unwrap(), "project bytes");
             }

@@ -60,11 +60,25 @@ fn create_private(runtime: &mut Runtime, graph: Graph, config: Config) {
     // Enable fixture rechecks without production continuation prompts.
     fs::create_dir_all(runtime.root.join("prompts")).unwrap();
     for name in ["feedback-returned.md", "feedback-updated.md"] {
-        fs::write(runtime.root.join("prompts").join(name), "{{node}}\n[fixture: recheck after {{target}}]").unwrap();
+        fs::write(
+            runtime.root.join("prompts").join(name),
+            "{{node}}\n[fixture: recheck after {{target}}]",
+        )
+        .unwrap();
     }
     runtime.state.run_id = uuid::Uuid::new_v4().to_string();
-    runtime.emit(EventKind::Created { graph, config, planning_id: None, planning: None }).unwrap();
-    runtime.store.select_run(Some(&runtime.state.run_id)).unwrap();
+    runtime
+        .emit(EventKind::Created {
+            graph,
+            config,
+            planning_id: None,
+            planning: None,
+        })
+        .unwrap();
+    runtime
+        .store
+        .select_run(Some(&runtime.state.run_id))
+        .unwrap();
 }
 
 fn runtime(root: &Path) -> Runtime {
@@ -320,7 +334,10 @@ fn compiler_reports_each_transitive_dependency() {
         },
     );
     assert_eq!(historical.graph, candidate);
-    assert!(historical.plan.is_none(), "Replay uses the same strict compiler as new graphs");
+    assert!(
+        historical.plan.is_none(),
+        "Replay uses the same strict compiler as new graphs"
+    );
     candidate
         .edges
         .retain(|edge| !(edge.to == "acceptance" && (edge.from == "server" || edge.from == "web")));
@@ -379,18 +396,34 @@ fn compiler_changed_advisories_compare_candidate_facts_without_history() {
         original_goal: "Advisory projection".into(),
         nodes: [("a", "Same"), ("b", "Same"), ("review", "Use <FEEDBACK>")]
             .into_iter()
-            .map(|(name, task)| Node { id: name.into(), task: task.into() })
+            .map(|(name, task)| Node {
+                id: name.into(),
+                task: task.into(),
+            })
             .collect(),
-        edges: vec![Edge { from: "a".into(), to: "review".into(), feedback: false }],
+        edges: vec![Edge {
+            from: "a".into(),
+            to: "review".into(),
+            feedback: false,
+        }],
     };
     let codes = |warnings: Vec<grapher::compiler::Diagnostic>| {
-        warnings.into_iter().map(|warning| warning.code).collect::<Vec<_>>()
+        warnings
+            .into_iter()
+            .map(|warning| warning.code)
+            .collect::<Vec<_>>()
     };
-    assert_eq!(codes(changed_advisories(&Graph::default(), &before)), ["W301", "W302"]);
+    assert_eq!(
+        codes(changed_advisories(&Graph::default(), &before)),
+        ["W301", "W302"]
+    );
     assert!(changed_advisories(&before, &before).is_empty());
     let mut unrelated = before.clone();
     unrelated.nodes.reverse();
-    unrelated.nodes.push(Node { id: "docs".into(), task: "Documentation".into() });
+    unrelated.nodes.push(Node {
+        id: "docs".into(),
+        task: "Documentation".into(),
+    });
     assert!(changed_advisories(&before, &unrelated).is_empty());
     // A changed duplicate group is reported, but its unrelated unrouted marker is not.
     unrelated.nodes.last_mut().unwrap().task = "Same".into();
@@ -404,12 +437,23 @@ fn compiler_changed_advisories_compare_candidate_facts_without_history() {
     assert_eq!(codes(changed_advisories(&before, &new_task)), ["W301"]);
     let mut repaired = before.clone();
     repaired.nodes[1].task = "Different".into();
-    repaired.edges.push(Edge { from: "review".into(), to: "a".into(), feedback: true });
+    repaired.edges.push(Edge {
+        from: "review".into(),
+        to: "a".into(),
+        feedback: true,
+    });
     assert!(changed_advisories(&before, &repaired).is_empty());
     // Resolved then reintroduced facts reappear, regardless of earlier calls.
-    assert_eq!(codes(changed_advisories(&repaired, &before)), ["W301", "W302"]);
+    assert_eq!(
+        codes(changed_advisories(&repaired, &before)),
+        ["W301", "W302"]
+    );
     assert_eq!(compile(&before, true).unwrap().warnings.len(), 2);
-    assert!(compile(&repaired, true).unwrap().warnings.iter().all(|warning| warning.starts_with("W303:")));
+    assert!(compile(&repaired, true)
+        .unwrap()
+        .warnings
+        .iter()
+        .all(|warning| warning.starts_with("W303:")));
 }
 
 #[test]
@@ -1077,7 +1121,10 @@ fn pause_drains_and_intervention_preserves_history() {
     assert_eq!(runtime.state.nodes["spec"].instruction, "Use Svelte");
     let replay = runtime.store.load(&runtime.state.run_id).unwrap();
     assert!(replay.paused);
-    assert_eq!(replay.nodes["frontend"].pending_messages[0].instruction, "Use Svelte");
+    assert_eq!(
+        replay.nodes["frontend"].pending_messages[0].instruction,
+        "Use Svelte"
+    );
     assert_eq!(
         replay.nodes["spec"]
             .pending_messages
@@ -1100,10 +1147,22 @@ fn pause_drains_and_intervention_preserves_history() {
         Some(job.execution.id.as_str())
     );
     assert_eq!(runtime.state.nodes["frontend"].pending_messages.len(), 1);
-    assert!(runtime.jobs().unwrap().is_empty(), "frontend cannot bypass the running spec");
-    runtime.finish(&follow_up.execution, Ok(("spec-head".into(), "completed".into()))).unwrap();
-    let frontend = runtime.jobs().unwrap().into_iter()
-        .find(|job| job.execution.node == "frontend").unwrap();
+    assert!(
+        runtime.jobs().unwrap().is_empty(),
+        "frontend cannot bypass the running spec"
+    );
+    runtime
+        .finish(
+            &follow_up.execution,
+            Ok(("spec-head".into(), "completed".into())),
+        )
+        .unwrap();
+    let frontend = runtime
+        .jobs()
+        .unwrap()
+        .into_iter()
+        .find(|job| job.execution.node == "frontend")
+        .unwrap();
     assert!(frontend.task.starts_with("Implement frontend"));
     assert!(frontend.task.contains("Use Svelte"));
     assert!(!frontend.task.contains("Switch to React"));
@@ -1191,7 +1250,14 @@ fn steer_attachments_survive_replay_and_legacy_events_remain_readable() {
         "type": "steered", "execution_id": "old", "node": "spec", "instruction": "old turn"
     }))
     .unwrap();
-    assert!(matches!(legacy, EventKind::Steered { images: None, request_id: None, .. }));
+    assert!(matches!(
+        legacy,
+        EventKind::Steered {
+            images: None,
+            request_id: None,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -1456,16 +1522,16 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
     let mut runtime = Runtime::open(&root).unwrap();
     create_private(
         &mut runtime,
-            Graph {
-                original_goal: "Resolve a composed workspace".into(),
-                nodes: vec![Node {
-                    id: "worker".into(),
-                    task: "Complete the work".into(),
-                }],
-                edges: Vec::new(),
-            },
-            config(),
-        );
+        Graph {
+            original_goal: "Resolve a composed workspace".into(),
+            nodes: vec![Node {
+                id: "worker".into(),
+                task: "Complete the work".into(),
+            }],
+            edges: Vec::new(),
+        },
+        config(),
+    );
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     let repository = grapher::fixture::repository(&root).unwrap();

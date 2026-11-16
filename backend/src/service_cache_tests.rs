@@ -122,7 +122,11 @@ fn workspace_size_warning_waits_for_background_runs_without_stopping_them() {
     let active = service_for_run(&primary, &ids[1], false).unwrap();
     let unrelated = service_for_run(&primary, &ids[2], false).unwrap();
     unrelated.driving.store(true, Ordering::SeqCst);
-    let repository = source.join("child").join("..").to_string_lossy().into_owned();
+    let repository = source
+        .join("child")
+        .join("..")
+        .to_string_lossy()
+        .into_owned();
     let oversized = |path: &std::path::Path| crate::workspace::check_workspace_size(path, 0);
 
     // Use a tiny limit rather than allocating a 15GB fixture. A matching
@@ -133,13 +137,17 @@ fn workspace_size_warning_waits_for_background_runs_without_stopping_them() {
         let before = serde_json::to_value(&active.runtime.lock().unwrap().state).unwrap();
         let status = repository_status(&primary, repository.clone(), |_| {
             panic!("size scanning must wait for the active Run");
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(status["valid"], true);
         assert_eq!(status["sizeLimitExceeded"], false);
         assert!(status["error"].is_null());
         assert_eq!(active.planning.load(Ordering::SeqCst), planning);
         assert_eq!(active.driving.load(Ordering::SeqCst), !planning);
-        assert_eq!(serde_json::to_value(&active.runtime.lock().unwrap().state).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(&active.runtime.lock().unwrap().state).unwrap(),
+            before
+        );
     }
     active.planning.store(false, Ordering::SeqCst);
     active.driving.store(false, Ordering::SeqCst);
@@ -147,11 +155,19 @@ fn workspace_size_warning_waits_for_background_runs_without_stopping_them() {
         let mut runtime = active.runtime.lock().unwrap();
         std::mem::replace(&mut runtime.state.phase, "publishing".into())
     };
-    assert_eq!(repository_status(&primary, repository.clone(), |_| {
-        panic!("publication must finish before size validation");
-    }).unwrap()["valid"], true);
-    assert!(detect_repository(Some(repository.clone()), &primary).unwrap().is_some(),
-        "switching to an active workspace still refreshes its metadata");
+    assert_eq!(
+        repository_status(&primary, repository.clone(), |_| {
+            panic!("publication must finish before size validation");
+        })
+        .unwrap()["valid"],
+        true
+    );
+    assert!(
+        detect_repository(Some(repository.clone()), &primary)
+            .unwrap()
+            .is_some(),
+        "switching to an active workspace still refreshes its metadata"
+    );
     active.runtime.lock().unwrap().state.phase = phase;
     // An unrelated busy workspace must not suppress this workspace's warning.
     // Size is admission policy, not a binding failure that disables Continue
@@ -162,14 +178,21 @@ fn workspace_size_warning_waits_for_background_runs_without_stopping_them() {
     assert_eq!(status["missing"], false);
     assert!(status["error"].as_str().unwrap().contains("15GB"));
     assert!(crate::workspace::validate_binding(std::path::Path::new(&repository)).is_ok());
-    assert!(crate::workspace::detect_with_size_check(Some(std::path::Path::new(&repository)), oversized).is_err(),
-        "a new binding must still enforce the size limit");
+    assert!(
+        crate::workspace::detect_with_size_check(
+            Some(std::path::Path::new(&repository)),
+            oversized
+        )
+        .is_err(),
+        "a new binding must still enforce the size limit"
+    );
 
     // A Run starting during an in-flight scan also defers the warning.
     let status = repository_status(&primary, repository.clone(), |path| {
         active.driving.store(true, Ordering::SeqCst);
         oversized(path)
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(status["valid"], true);
     assert_eq!(status["sizeLimitExceeded"], false);
 

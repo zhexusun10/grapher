@@ -284,8 +284,8 @@ impl Store {
     }
 
     fn open_existing(path: &Path, flags: rusqlite::OpenFlags) -> Result<Self, String> {
-        let connection = Connection::open_with_flags(path, flags)
-            .map_err(|error| error.to_string())?;
+        let connection =
+            Connection::open_with_flags(path, flags).map_err(|error| error.to_string())?;
         connection
             .busy_timeout(std::time::Duration::from_secs(10))
             .map_err(|error| error.to_string())?;

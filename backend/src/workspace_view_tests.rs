@@ -60,7 +60,10 @@ fn parallel_project_collection_survives_snapshot_and_fork() {
     workspace::prepare(&source, &child, &base, &[head]).unwrap();
     assert_eq!(bytes(&child.join("file-0000.txt")), b"after!\n");
     for index in 1..299 {
-        assert_eq!(bytes(&child.join(format!("file-{index:04}.txt"))), b"before\n");
+        assert_eq!(
+            bytes(&child.join(format!("file-{index:04}.txt"))),
+            b"before\n"
+        );
     }
     assert!(!child.join("file-0299.txt").exists());
     assert_eq!(bytes(&child.join("- new 中文.txt")), b"raw\0bytes\xff\r\n");
@@ -214,7 +217,10 @@ fn node_snapshot_staging_matches_fresh_scan_and_refreshes_between_attempts() {
         fs::write(source.join(".gitignore"), "ignored/\n").unwrap();
         fs::write(source.join(".gitattributes"), "*.txt text eol=lf\n").unwrap();
         if format != "plain" {
-            let result = workspace::git(&source, &["init", "-q", &format!("--object-format={format}")]);
+            let result = workspace::git(
+                &source,
+                &["init", "-q", &format!("--object-format={format}")],
+            );
             if format == "sha256" && result.is_err() {
                 continue; // Older system Git lacks SHA-256 support.
             }
@@ -234,14 +240,27 @@ fn node_snapshot_staging_matches_fresh_scan_and_refreshes_between_attempts() {
         fs::write(node.join("ignored/raw.bin"), b"\0raw\r\n\xff").unwrap();
 
         let first_identity = stage_node_snapshot(&node, &source, &[]).unwrap().unwrap();
-        assert_eq!(Some(first_identity.clone()), node_identity_scoped(&node, &source, &[]).unwrap());
+        assert_eq!(
+            Some(first_identity.clone()),
+            node_identity_scoped(&node, &source, &[]).unwrap()
+        );
         let first_tree = workspace::git(&node, &["write-tree"]).unwrap();
         // The independent collector is the reference for the exact graph tree,
         // including raw bytes, ignored files, deletions and index modes.
         stage_project(&node, &metadata).unwrap();
-        assert_eq!(workspace::git(&node, &["write-tree"]).unwrap(), first_tree, "{format}");
-        assert_eq!(workspace::git_bytes(&node, &["show", ":tracked.txt"], None, None).unwrap(), b"first\r\n");
-        assert_eq!(workspace::git_bytes(&node, &["show", ":ignored/raw.bin"], None, None).unwrap(), b"\0raw\r\n\xff");
+        assert_eq!(
+            workspace::git(&node, &["write-tree"]).unwrap(),
+            first_tree,
+            "{format}"
+        );
+        assert_eq!(
+            workspace::git_bytes(&node, &["show", ":tracked.txt"], None, None).unwrap(),
+            b"first\r\n"
+        );
+        assert_eq!(
+            workspace::git_bytes(&node, &["show", ":ignored/raw.bin"], None, None).unwrap(),
+            b"\0raw\r\n\xff"
+        );
         assert!(workspace::git(&node, &["show", ":removed.txt"]).is_err());
 
         // A later capture must read current bytes, even for a same-size edit:
@@ -257,7 +276,9 @@ fn node_snapshot_staging_matches_fresh_scan_and_refreshes_between_attempts() {
 
         let head = workspace::snapshot_node(&node, &source, "node").unwrap();
         verify_result(&node, &source, &head).unwrap();
-        assert!(load(&record_path(&source, &head).unwrap()).unwrap().entries
+        assert!(load(&record_path(&source, &head).unwrap())
+            .unwrap()
+            .entries
             .contains_key("ignored/empty"));
     }
 }
@@ -288,12 +309,19 @@ fn check_node_index_executable_bits(sha256: bool) {
     workspace::prepare(&source, &node, &base, &[]).unwrap();
     let mode = |name: &str| {
         let output = workspace::git(&node, &["ls-files", "--stage", "-z"]).unwrap();
-        let header = output.split('\0').filter_map(|entry| entry.split_once('\t'))
-            .find_map(|(header, path)| (path == name).then_some(header)).unwrap();
+        let header = output
+            .split('\0')
+            .filter_map(|entry| entry.split_once('\t'))
+            .find_map(|(header, path)| (path == name).then_some(header))
+            .unwrap();
         u32::from_str_radix(header.split_whitespace().next().unwrap(), 8).unwrap()
     };
     if sha256 {
-        assert_eq!(mode("script.sh"), 0o100755, "source capture must retain its tracked executable bit");
+        assert_eq!(
+            mode("script.sh"),
+            0o100755,
+            "source capture must retain its tracked executable bit"
+        );
     }
     // Windows permissions cannot express this bit. The graph's previous
     // index, not the default mode of a newly built index, owns it.
@@ -327,13 +355,21 @@ fn node_snapshot_staging_keeps_scoped_removal_and_live_environment_files() {
     // Simulate an agent accidentally staging its managed environment.
     workspace::git(&node, &["add", "-f", "--", ".venv/runtime"]).unwrap();
     assert!(workspace::git(&node, &["show", ":.venv/runtime"]).is_ok());
-    stage_node_snapshot(&node, &source, &exclusions).unwrap().unwrap();
+    stage_node_snapshot(&node, &source, &exclusions)
+        .unwrap()
+        .unwrap();
     let tree = workspace::git(&node, &["write-tree"]).unwrap();
     workspace::stage_scoped_local(&node, &exclusions).unwrap();
     assert_eq!(workspace::git(&node, &["write-tree"]).unwrap(), tree);
     assert!(workspace::git(&node, &["show", ":.venv/runtime"]).is_err());
-    assert_eq!(workspace::git(&node, &["show", ":result.txt"]).unwrap(), "result");
-    assert_eq!(bytes(&node.join(".venv/runtime")), b"must remain live, not in Git");
+    assert_eq!(
+        workspace::git(&node, &["show", ":result.txt"]).unwrap(),
+        "result"
+    );
+    assert_eq!(
+        bytes(&node.join(".venv/runtime")),
+        b"must remain live, not in Git"
+    );
     let head = workspace::snapshot_node_scoped(&node, &source, "node", None, &exclusions).unwrap();
     verify_result_scoped(&node, &source, &head, &exclusions).unwrap();
 }
@@ -646,9 +682,19 @@ fn fan_in_and_publication_keep_deleted_intent_to_add_without_recreating_files() 
     let intent_names = ["missing intent", "Missing intent"];
     for name in intent_names {
         fs::write(a.join(name), "unfinished\n").unwrap();
-        workspace::project_git(&a, &[
-            "-c", "core.ignorecase=false", "add", "-N", "--chmod=+x", "--", name,
-        ]).unwrap();
+        workspace::project_git(
+            &a,
+            &[
+                "-c",
+                "core.ignorecase=false",
+                "add",
+                "-N",
+                "--chmod=+x",
+                "--",
+                name,
+            ],
+        )
+        .unwrap();
         fs::remove_file(a.join(name)).unwrap();
     }
     fs::write(b.join("other.txt"), "other staged work\n").unwrap();
@@ -657,16 +703,39 @@ fn fan_in_and_publication_keep_deleted_intent_to_add_without_recreating_files() 
     let bh = workspace::snapshot_node(&b, &source, "intent-b").unwrap();
     let target = slot(&temp, "intent-join");
     workspace::prepare(&source, &target, &base, &[ah.clone(), bh.clone()]).unwrap();
-    let published = crate::graph_merge::merge_graph(&source, &[ah, bh], || panic!("no conflict")).unwrap();
+    let published =
+        crate::graph_merge::merge_graph(&source, &[ah, bh], || panic!("no conflict")).unwrap();
     let follow = slot(&temp, "intent-follow");
     workspace::prepare(&source, &follow, &published, &[]).unwrap();
     for path in [&target, &follow] {
         let staged = workspace::project_git(path, &["ls-files", "--stage"]).unwrap();
-        let visible = workspace::project_git(path, &["diff", "--cached", "--ita-visible-in-index", "--name-only", "-z"]).unwrap();
-        let invisible = workspace::project_git(path, &["diff", "--cached", "--ita-invisible-in-index", "--name-only", "-z"]).unwrap();
+        let visible = workspace::project_git(
+            path,
+            &[
+                "diff",
+                "--cached",
+                "--ita-visible-in-index",
+                "--name-only",
+                "-z",
+            ],
+        )
+        .unwrap();
+        let invisible = workspace::project_git(
+            path,
+            &[
+                "diff",
+                "--cached",
+                "--ita-invisible-in-index",
+                "--name-only",
+                "-z",
+            ],
+        )
+        .unwrap();
         for name in intent_names {
             assert!(fs::symlink_metadata(path.join(name)).is_err());
-            assert!(staged.contains(&format!("100755 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 0\t{name}")));
+            assert!(staged.contains(&format!(
+                "100755 e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 0\t{name}"
+            )));
             assert!(visible.split('\0').any(|candidate| candidate == name));
             assert!(!invisible.split('\0').any(|candidate| candidate == name));
         }
@@ -731,11 +800,18 @@ fn metadata_only_changes_get_an_immutable_reference_and_survive_fork() {
 fn git_inspection_keeps_effective_path_scopes_and_git_path_expansion() {
     fn check(project: &Path, name: &str, key: &str, local: bool) {
         let file = workspace::project_git(project, &["config", "--path", "--get", key]).unwrap();
-        let scope = workspace::project_git(project, &["config", "--null", "--show-scope", "--get", key]).unwrap();
-        assert_eq!(matches!(scope.split('\0').next(), Some("local" | "worktree")), local);
+        let scope =
+            workspace::project_git(project, &["config", "--null", "--show-scope", "--get", key])
+                .unwrap();
+        assert_eq!(
+            matches!(scope.split('\0').next(), Some("local" | "worktree")),
+            local
+        );
         let files = inspect_git(project).unwrap().4;
         if Path::new(&file).is_absolute() {
-            let expected = crate::native::host_path(Path::new(&file)).to_string_lossy().replace('\\', "/");
+            let expected = crate::native::host_path(Path::new(&file))
+                .to_string_lossy()
+                .replace('\\', "/");
             assert_eq!(files.get(name), Some(&(expected, local)));
         } else {
             assert!(!files.contains_key(name));
@@ -744,20 +820,45 @@ fn git_inspection_keeps_effective_path_scopes_and_git_path_expansion() {
     let temp = tempfile::tempdir().unwrap();
     let source = source(&temp);
     let external = crate::native::host_path(&temp.path().join("path with spaces"))
-        .to_string_lossy().replace('\\', "/");
+        .to_string_lossy()
+        .replace('\\', "/");
     workspace::project_git(&source, &["config", "core.excludesfile", &external]).unwrap();
-    workspace::project_git(&source, &["config", "core.attributesfile", "relative attrs"]).unwrap();
+    workspace::project_git(
+        &source,
+        &["config", "core.attributesfile", "relative attrs"],
+    )
+    .unwrap();
     check(&source, "excludes", "core.excludesfile", true);
     check(&source, "attributes", "core.attributesfile", true);
 
     let include = crate::native::host_path(&temp.path().join("paths.inc"))
-        .to_string_lossy().replace('\\', "/");
-    workspace::project_git(&source, &["config", "--file", &include, "core.attributesfile", &external]).unwrap();
+        .to_string_lossy()
+        .replace('\\', "/");
+    workspace::project_git(
+        &source,
+        &[
+            "config",
+            "--file",
+            &include,
+            "core.attributesfile",
+            &external,
+        ],
+    )
+    .unwrap();
     workspace::project_git(&source, &["config", "--add", "include.path", &include]).unwrap();
     check(&source, "attributes", "core.attributesfile", true);
     workspace::project_git(&source, &["config", "extensions.worktreeConfig", "true"]).unwrap();
     let worktree_path = format!("{external}-worktree");
-    workspace::project_git(&source, &["config", "--worktree", "core.attributesfile", &worktree_path]).unwrap();
+    workspace::project_git(
+        &source,
+        &[
+            "config",
+            "--worktree",
+            "core.attributesfile",
+            &worktree_path,
+        ],
+    )
+    .unwrap();
     check(&source, "attributes", "core.attributesfile", true);
 
     // Use a slot-owned HOME/global config, never mutate the host's settings.
@@ -766,7 +867,16 @@ fn git_inspection_keeps_effective_path_scopes_and_git_path_expansion() {
     let base = workspace::snapshot_repository(&source).unwrap();
     let node = slot(&other, "config-paths");
     workspace::prepare(&source, &node, &base, &[]).unwrap();
-    workspace::project_git(&node, &["config", "--global", "core.excludesfile", "~/ignore with spaces"]).unwrap();
+    workspace::project_git(
+        &node,
+        &[
+            "config",
+            "--global",
+            "core.excludesfile",
+            "~/ignore with spaces",
+        ],
+    )
+    .unwrap();
     check(&node, "excludes", "core.excludesfile", false);
 }
 
@@ -1151,15 +1261,25 @@ fn runtime_artifacts_are_collected_but_rebuildable_caches_still_require_tracking
         fs::write(source.join(path), value).unwrap();
     }
     // A generated-looking file that the user committed is authored content.
-    fs::write(source.join("committed.tsbuildinfo"), "tracked compiler state\n").unwrap();
+    fs::write(
+        source.join("committed.tsbuildinfo"),
+        "tracked compiler state\n",
+    )
+    .unwrap();
     workspace::git(&source, &["add", "-f", "committed.tsbuildinfo"]).unwrap();
     workspace::git(&source, &["commit", "-qm", "commit compiler state"]).unwrap();
 
     let assert_collected = |target: &Path| {
         assert_eq!(bytes(&target.join("node_modules/pkg/index.js")), b"dep\n");
         assert_eq!(bytes(&target.join(".next/build-id")), b"build\n");
-        assert_eq!(bytes(&target.join("standalone.pyc")), b"sourceless module\n");
-        assert_eq!(bytes(&target.join("standalone.pyo")), b"legacy sourceless module\n");
+        assert_eq!(
+            bytes(&target.join("standalone.pyc")),
+            b"sourceless module\n"
+        );
+        assert_eq!(
+            bytes(&target.join("standalone.pyo")),
+            b"legacy sourceless module\n"
+        );
         assert!(
             !target.join("src/__pycache__").exists(),
             "__pycache__ must not be collected"
@@ -1170,7 +1290,10 @@ fn runtime_artifacts_are_collected_but_rebuildable_caches_still_require_tracking
         );
         // An ambiguous authored directory and a committed generated file stay.
         assert_eq!(bytes(&target.join("dist/authored.txt")), b"authored\n");
-        assert_eq!(bytes(&target.join("committed.tsbuildinfo")), b"tracked compiler state\n");
+        assert_eq!(
+            bytes(&target.join("committed.tsbuildinfo")),
+            b"tracked compiler state\n"
+        );
     };
 
     // Default snapshot (scanned/staged project view).
@@ -1201,47 +1324,99 @@ fn offline_dependencies_and_runnable_output_survive_snapshots_forks_and_source_d
             fs::write(source.join(".gitignore"), "node_modules/\n.next/\n").unwrap();
             fs::create_dir_all(source.join("node_modules/offline-local")).unwrap();
             fs::create_dir_all(source.join(".next/server")).unwrap();
-            fs::write(source.join("node_modules/offline-local/index.js"), "exports.value='captured';\n").unwrap();
-            fs::write(source.join(".next/server/value.cjs"), "module.exports='build';\n").unwrap();
+            fs::write(
+                source.join("node_modules/offline-local/index.js"),
+                "exports.value='captured';\n",
+            )
+            .unwrap();
+            fs::write(
+                source.join(".next/server/value.cjs"),
+                "module.exports='build';\n",
+            )
+            .unwrap();
             fs::write(source.join("app.cjs"), "console.log(require('offline-local').value+':'+require('./.next/server/value.cjs'));\n").unwrap();
             // No manifest/lockfile or registry access: the installed bytes are
             // the only available dependency, as with offline/local patches.
             let index = project_git.then(|| bytes(&source.join(".git/index")));
-            let head = project_git.then(|| workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap());
-            let exclusions = if scoped { vec!["managed-env".into()] } else { vec![] };
+            let head = project_git
+                .then(|| workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap());
+            let exclusions = if scoped {
+                vec!["managed-env".into()]
+            } else {
+                vec![]
+            };
             let base = workspace::snapshot_repository_scoped(&source, &exclusions).unwrap();
             let run = |root: &Path| {
                 let output = std::process::Command::new(crate::native::trusted_node().unwrap())
-                    .arg("app.cjs").current_dir(root).env_remove("NODE_PATH").env_remove("NODE_OPTIONS")
-                    .output().unwrap();
-                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                    .arg("app.cjs")
+                    .current_dir(root)
+                    .env_remove("NODE_PATH")
+                    .env_remove("NODE_OPTIONS")
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
                 String::from_utf8(output.stdout).unwrap().trim().to_string()
             };
             // A recorded base is authoritative. Preparing a node must not
             // refresh a dependency from today's live source directory.
-            fs::write(source.join("node_modules/offline-local/index.js"), "exports.value='source-later';\n").unwrap();
+            fs::write(
+                source.join("node_modules/offline-local/index.js"),
+                "exports.value='source-later';\n",
+            )
+            .unwrap();
             let node = slot(&temp, "offline-dependencies");
             workspace::prepare(&source, &node, &base, &[]).unwrap();
             assert_eq!(run(&node), "captured:build");
             assert_eq!(run(&source), "source-later:build");
-            fs::write(node.join("node_modules/offline-local/index.js"), "exports.value='node-patch';\n").unwrap();
-            assert!(workspace::repository_status(&node, &exclusions).unwrap().contains("node_modules/offline-local/index.js"));
-            let result = workspace::snapshot_node_scoped(&node, &source, "offline", None, &exclusions).unwrap();
+            fs::write(
+                node.join("node_modules/offline-local/index.js"),
+                "exports.value='node-patch';\n",
+            )
+            .unwrap();
+            assert!(workspace::repository_status(&node, &exclusions)
+                .unwrap()
+                .contains("node_modules/offline-local/index.js"));
+            let result =
+                workspace::snapshot_node_scoped(&node, &source, "offline", None, &exclusions)
+                    .unwrap();
             verify_result(&node, &source, &result).unwrap();
             let child = slot(&temp, "offline-fork");
             workspace::prepare(&source, &child, &base, &[result.clone()]).unwrap();
             assert_eq!(run(&child), "node-patch:build");
             verify_result(&child, &source, &result).unwrap();
-            fs::write(child.join("node_modules/offline-local/index.js"), "exports.value='child-only';\n").unwrap();
+            fs::write(
+                child.join("node_modules/offline-local/index.js"),
+                "exports.value='child-only';\n",
+            )
+            .unwrap();
             assert_eq!(run(&node), "node-patch:build");
             assert_eq!(run(&source), "source-later:build");
-            assert!(verify_result(&child, &source, &result).is_err(), "dependency edits must be observable");
+            assert!(
+                verify_result(&child, &source, &result).is_err(),
+                "dependency edits must be observable"
+            );
             fs::create_dir_all(child.join("node_modules/new-local")).unwrap();
-            fs::write(child.join("node_modules/new-local/index.js"), "module.exports=1;\n").unwrap();
-            assert!(workspace::repository_status(&child, &exclusions).unwrap().contains("node_modules/new-local/index.js"), "new ignored dependencies must not be hidden from private status");
+            fs::write(
+                child.join("node_modules/new-local/index.js"),
+                "module.exports=1;\n",
+            )
+            .unwrap();
+            assert!(
+                workspace::repository_status(&child, &exclusions)
+                    .unwrap()
+                    .contains("node_modules/new-local/index.js"),
+                "new ignored dependencies must not be hidden from private status"
+            );
             if let (Some(index), Some(head)) = (index, head) {
                 assert_eq!(bytes(&source.join(".git/index")), index);
-                assert_eq!(workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(), head);
+                assert_eq!(
+                    workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+                    head
+                );
             } else {
                 assert!(!source.join(".git").exists());
             }
@@ -1309,18 +1484,33 @@ fn reused_slot_keeps_unrecorded_project_content() {
 #[test]
 fn git_metadata_scan_keeps_generated_looking_entries_but_not_runtime_locks() {
     let temp = tempfile::tempdir().unwrap();
-    for file in ["HEAD", "node_modules/pkg/cache.tsbuildinfo", "index.lock", "refs/heads/topic.lock", "worktrees/other/state"] {
+    for file in [
+        "HEAD",
+        "node_modules/pkg/cache.tsbuildinfo",
+        "index.lock",
+        "refs/heads/topic.lock",
+        "worktrees/other/state",
+    ] {
         let path = temp.path().join(file);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "metadata bytes").unwrap();
     }
     let mut entries = BTreeMap::new();
     scan(temp.path(), Path::new(""), &mut entries, true).unwrap();
-    let blob = git2::Oid::hash_object(git2::ObjectType::Blob, b"metadata bytes").unwrap().to_string();
+    let blob = git2::Oid::hash_object(git2::ObjectType::Blob, b"metadata bytes")
+        .unwrap()
+        .to_string();
     for name in ["HEAD", "node_modules/pkg/cache.tsbuildinfo"] {
-        assert!(matches!(entries.get(name), Some(Entry::File { blob: actual, .. }) if actual == &blob));
+        assert!(
+            matches!(entries.get(name), Some(Entry::File { blob: actual, .. }) if actual == &blob)
+        );
     }
-    for name in ["index.lock", "refs/heads/topic.lock", "worktrees", "worktrees/other/state"] {
+    for name in [
+        "index.lock",
+        "refs/heads/topic.lock",
+        "worktrees",
+        "worktrees/other/state",
+    ] {
         assert!(!entries.contains_key(name), "{name}");
     }
 }
@@ -1328,7 +1518,9 @@ fn git_metadata_scan_keeps_generated_looking_entries_but_not_runtime_locks() {
 #[test]
 fn in_place_generated_filter_matches_cloning_for_nested_views_and_hardlinks() {
     fn cloning_reference(view: &View, tracked: &std::collections::BTreeSet<String>) -> View {
-        let keep = |name: &str| !workspace::is_generated_artifact(Path::new(name)) || tracked.contains(name);
+        let keep = |name: &str| {
+            !workspace::is_generated_artifact(Path::new(name)) || tracked.contains(name)
+        };
         let mut view = view.clone();
         view.entries.retain(|name, _| keep(name));
         view.hardlinks.retain(keep);
@@ -1341,9 +1533,16 @@ fn in_place_generated_filter_matches_cloning_for_nested_views_and_hardlinks() {
     let temp = tempfile::tempdir().unwrap();
     let mut view = inspect(temp.path()).unwrap();
     let entry = Entry::File {
-        mode: 0o644, blob: "a".repeat(40), extra: Default::default(),
+        mode: 0o644,
+        blob: "a".repeat(40),
+        extra: Default::default(),
     };
-    for name in ["keep.txt", "alias.txt", "untracked.tsbuildinfo", "tracked.TSBUILDINFO"] {
+    for name in [
+        "keep.txt",
+        "alias.txt",
+        "untracked.tsbuildinfo",
+        "tracked.TSBUILDINFO",
+    ] {
         view.entries.insert(name.into(), entry.clone());
     }
     // Git evidence is not project-generated content and must remain untouched.
@@ -1354,18 +1553,26 @@ fn in_place_generated_filter_matches_cloning_for_nested_views_and_hardlinks() {
     })).unwrap();
     let mut nested = view.clone();
     nested.repositories.insert("child".into(), view.clone());
-    view.repositories.insert("node_modules".into(), nested.clone());
-    view.repositories.insert("__pycache__".into(), nested.clone());
+    view.repositories
+        .insert("node_modules".into(), nested.clone());
+    view.repositories
+        .insert("__pycache__".into(), nested.clone());
     view.repositories.insert("nested".into(), nested);
     for tracked in [
         std::collections::BTreeSet::new(),
-        std::collections::BTreeSet::from(["tracked.TSBUILDINFO".to_string(), "__pycache__".to_string()]),
+        std::collections::BTreeSet::from([
+            "tracked.TSBUILDINFO".to_string(),
+            "__pycache__".to_string(),
+        ]),
     ] {
         let expected = cloning_reference(&view, &tracked);
         let mut actual = view.clone();
         strip_generated(&mut actual, &tracked);
         // Compare every serialized field, not the weaker normalized equality.
-        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
     }
 }
 
@@ -2080,15 +2287,30 @@ fn existing_immutable_view_refreshes_the_local_ready_gate_without_rewriting_evid
     fs::write(ready(&node).unwrap(), &base).unwrap();
     fs::write(record.join("checksum"), "damaged").unwrap();
     assert!(capture_node_scoped(&node, &source, &head, &[], None).is_err());
-    assert_eq!(fs::read_to_string(ready(&node).unwrap()).unwrap(), base,
-        "corrupt shared evidence must never authorize a launch");
+    assert_eq!(
+        fs::read_to_string(ready(&node).unwrap()).unwrap(),
+        base,
+        "corrupt shared evidence must never authorize a launch"
+    );
 }
 
 #[test]
 fn snapshot_readiness_recovery_refuses_unproven_or_changed_work_without_mutation() {
-    for damage in ["dirty", "dirty-recorded", "checksum", "missing-checksum", "missing-view",
-        "unknown-commit", "wrong-tree", "discarded-history", "missing-gate", "invalid-gate",
-        "binding", "git-binding", "merge"] {
+    for damage in [
+        "dirty",
+        "dirty-recorded",
+        "checksum",
+        "missing-checksum",
+        "missing-view",
+        "unknown-commit",
+        "wrong-tree",
+        "discarded-history",
+        "missing-gate",
+        "invalid-gate",
+        "binding",
+        "git-binding",
+        "merge",
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let source = source(&temp);
         let base = workspace::snapshot_repository(&source).unwrap();
@@ -2100,20 +2322,36 @@ fn snapshot_readiness_recovery_refuses_unproven_or_changed_work_without_mutation
         workspace::git(&node, &["commit", "-m", &message]).unwrap();
         let snapshot = workspace::git(&node, &["rev-parse", "HEAD"]).unwrap();
         let immutable = record_path(&source, &snapshot).unwrap();
-        if matches!(damage, "dirty-recorded" | "checksum" | "missing-checksum" | "missing-view") {
+        if matches!(
+            damage,
+            "dirty-recorded" | "checksum" | "missing-checksum" | "missing-view"
+        ) {
             capture_node_scoped(&node, &source, &snapshot, &[], None).unwrap();
             fs::write(ready(&node).unwrap(), &prepared).unwrap();
         }
         match damage {
-            "dirty" | "dirty-recorded" => fs::write(node.join("tracked.txt"), "later unfinished work\n").unwrap(),
+            "dirty" | "dirty-recorded" => {
+                fs::write(node.join("tracked.txt"), "later unfinished work\n").unwrap()
+            }
             "checksum" => fs::write(immutable.join("checksum"), "damaged").unwrap(),
             "missing-checksum" => fs::remove_file(immutable.join("checksum")).unwrap(),
             "missing-view" => fs::remove_file(immutable.join("view.json")).unwrap(),
-            "unknown-commit" => { workspace::git(&node, &["commit", "--allow-empty", "-m", "not a host snapshot"]).unwrap(); }
+            "unknown-commit" => {
+                workspace::git(
+                    &node,
+                    &["commit", "--allow-empty", "-m", "not a host snapshot"],
+                )
+                .unwrap();
+            }
             "wrong-tree" | "discarded-history" => {
-                let tree = workspace::git(&node, &["rev-parse", &format!("{prepared}^{{tree}}")]).unwrap();
+                let tree =
+                    workspace::git(&node, &["rev-parse", &format!("{prepared}^{{tree}}")]).unwrap();
                 let head = if damage == "wrong-tree" {
-                    workspace::git(&node, &["commit-tree", &tree, "-p", &snapshot, "-m", &message]).unwrap()
+                    workspace::git(
+                        &node,
+                        &["commit-tree", &tree, "-p", &snapshot, "-m", &message],
+                    )
+                    .unwrap()
                 } else {
                     workspace::git(&node, &["commit-tree", &tree, "-m", &message]).unwrap()
                 };
@@ -2122,8 +2360,20 @@ fn snapshot_readiness_recovery_refuses_unproven_or_changed_work_without_mutation
             "missing-gate" => fs::remove_file(ready(&node).unwrap()).unwrap(),
             "invalid-gate" => fs::write(ready(&node).unwrap(), "invalid").unwrap(),
             "binding" => fs::write(binding(&node).unwrap(), "another source").unwrap(),
-            "git-binding" => { workspace::project_git(&node, &["config", "core.worktree", source.to_str().unwrap()]).unwrap(); }
-            "merge" => fs::write(workspace::private_git_dir(&node).unwrap().join("MERGE_HEAD"), &prepared).unwrap(),
+            "git-binding" => {
+                workspace::project_git(
+                    &node,
+                    &["config", "core.worktree", source.to_str().unwrap()],
+                )
+                .unwrap();
+            }
+            "merge" => fs::write(
+                workspace::private_git_dir(&node)
+                    .unwrap()
+                    .join("MERGE_HEAD"),
+                &prepared,
+            )
+            .unwrap(),
             _ => unreachable!(),
         }
         let head = workspace::git(&node, &["rev-parse", "HEAD"]).unwrap();
@@ -2132,15 +2382,36 @@ fn snapshot_readiness_recovery_refuses_unproven_or_changed_work_without_mutation
         let project = bytes(&node.join("tracked.txt"));
         let evidence = fs::read(immutable.join("view.json")).ok();
         let checksum = fs::read(immutable.join("checksum")).ok();
-        let error = workspace::recover_snapshot_readiness(&node, &source, &prepared, &[]).unwrap_err();
+        let error =
+            workspace::recover_snapshot_readiness(&node, &source, &prepared, &[]).unwrap_err();
         assert!(!error.is_empty(), "{damage}");
         assert_eq!(fs::read(ready(&node).unwrap()).ok(), gate, "{damage}");
-        assert_eq!(workspace::git(&node, &["rev-parse", "HEAD"]).unwrap(), head, "{damage}");
-        assert_eq!(fs::read(workspace::private_git_dir(&node).unwrap().join("index")).unwrap(), index, "{damage}");
+        assert_eq!(
+            workspace::git(&node, &["rev-parse", "HEAD"]).unwrap(),
+            head,
+            "{damage}"
+        );
+        assert_eq!(
+            fs::read(workspace::private_git_dir(&node).unwrap().join("index")).unwrap(),
+            index,
+            "{damage}"
+        );
         assert_eq!(bytes(&node.join("tracked.txt")), project, "{damage}");
-        assert_eq!(fs::read(immutable.join("view.json")).ok(), evidence, "{damage}");
-        assert_eq!(fs::read(immutable.join("checksum")).ok(), checksum, "{damage}");
-        assert_eq!(bytes(&source.join("tracked.txt")), b"committed\n", "{damage}");
+        assert_eq!(
+            fs::read(immutable.join("view.json")).ok(),
+            evidence,
+            "{damage}"
+        );
+        assert_eq!(
+            fs::read(immutable.join("checksum")).ok(),
+            checksum,
+            "{damage}"
+        );
+        assert_eq!(
+            bytes(&source.join("tracked.txt")),
+            b"committed\n",
+            "{damage}"
+        );
     }
 }
 
@@ -2156,7 +2427,10 @@ fn snapshot_readiness_seal_reuse_finishes_only_the_local_gate() {
     let record = record_path(&source, &head).unwrap();
     let original = bytes(&record.join("view.json"));
     fs::write(ready(&node).unwrap(), &prepared).unwrap();
-    assert_eq!(seal_prepared_scoped(&node, &source, &[], None).unwrap(), head);
+    assert_eq!(
+        seal_prepared_scoped(&node, &source, &[], None).unwrap(),
+        head
+    );
     validate_ready(&node, &source).unwrap();
     assert_eq!(bytes(&record.join("view.json")), original);
     fs::write(ready(&node).unwrap(), &prepared).unwrap();
@@ -2175,13 +2449,19 @@ fn prepared_reuse_rejects_corrupt_view_even_with_the_original_checksum() {
     let head = workspace::snapshot_node(&node, &source, "corrupt-reuse").unwrap();
     let record = record_path(&source, &head).unwrap();
     let checksum = fs::read(record.join("checksum")).unwrap();
-    let mut damaged: serde_json::Value = serde_json::from_slice(&fs::read(record.join("view.json")).unwrap()).unwrap();
+    let mut damaged: serde_json::Value =
+        serde_json::from_slice(&fs::read(record.join("view.json")).unwrap()).unwrap();
     damaged["entries"]["tracked.txt"]["extra"]["security"] = serde_json::json!([9, 8, 7]);
-    fs::write(record.join("view.json"), serde_json::to_vec(&damaged).unwrap()).unwrap();
+    fs::write(
+        record.join("view.json"),
+        serde_json::to_vec(&damaged).unwrap(),
+    )
+    .unwrap();
 
     let error = seal_prepared_scoped(&node, &source, &[], None).unwrap_err();
     assert!(error.contains("Damaged project-view evidence"), "{error}");
-    assert!(workspace::snapshot_node(&node, &source, "corrupt-reuse").unwrap_err()
+    assert!(workspace::snapshot_node(&node, &source, "corrupt-reuse")
+        .unwrap_err()
         .contains("Damaged project-view evidence"));
     assert_eq!(workspace::git(&node, &["rev-parse", "HEAD"]).unwrap(), head);
     assert_eq!(fs::read(record.join("checksum")).unwrap(), checksum);
@@ -2203,8 +2483,15 @@ fn snapshot_does_not_repair_bad_checksum_or_partial_evidence_from_live_files() {
             "missing-view" => fs::remove_file(record.join("view.json")).unwrap(),
             _ => unreachable!(),
         }
-        assert!(workspace::snapshot_node(&node, &source, "partial-record").is_err(), "{damage}");
-        assert_eq!(workspace::git(&node, &["rev-parse", "HEAD"]).unwrap(), head, "{damage}");
+        assert!(
+            workspace::snapshot_node(&node, &source, "partial-record").is_err(),
+            "{damage}"
+        );
+        assert_eq!(
+            workspace::git(&node, &["rev-parse", "HEAD"]).unwrap(),
+            head,
+            "{damage}"
+        );
     }
 }
 

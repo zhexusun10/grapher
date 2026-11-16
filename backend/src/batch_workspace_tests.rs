@@ -16,7 +16,11 @@ fn compiled_launch_adapter(root: &Path) -> PathBuf {
     // match the Rust binary rather than an independently edited live checkout.
     let directory = root.join("compiled-launch-adapter");
     fs::create_dir_all(&directory).unwrap();
-    fs::write(directory.join("path-identity.mjs"), include_str!("../../engine/path-identity.mjs")).unwrap();
+    fs::write(
+        directory.join("path-identity.mjs"),
+        include_str!("../../engine/path-identity.mjs"),
+    )
+    .unwrap();
     let adapter = directory.join("launch-binding.mjs");
     fs::write(&adapter, include_str!("../../engine/launch-binding.mjs")).unwrap();
     adapter
@@ -278,22 +282,37 @@ fn compiled_launch_adapter_survives_an_update_between_parallel_process_starts() 
     let source = temp.path().join("source");
     fs::create_dir(&source).unwrap();
     crate::workspace::git(&source, &["init", "-q"]).unwrap();
-    let mut launch = crate::environment_automatic::resolve(&source, false).unwrap().0.unwrap().launch;
+    let mut launch = crate::environment_automatic::resolve(&source, false)
+        .unwrap()
+        .0
+        .unwrap()
+        .launch;
     launch.variables.clear();
     let business_first = temp.path().join("business-first");
     fs::create_dir(&business_first).unwrap();
-    launch.path.insert(0, crate::native::host_path(&business_first).to_string_lossy().into_owned());
+    launch.path.insert(
+        0,
+        crate::native::host_path(&business_first)
+            .to_string_lossy()
+            .into_owned(),
+    );
     launch.unbound_path = Some(launch.path.clone());
     let binding = temp.path().join("launch.json");
     fs::write(&binding, serde_json::to_vec(&launch).unwrap()).unwrap();
     let live = temp.path().join("live-adapter.mjs");
     fs::write(&live, include_str!("../../engine/launch-binding.mjs")).unwrap();
-    fs::write(temp.path().join("path-identity.mjs"), include_str!("../../engine/path-identity.mjs")).unwrap();
+    fs::write(
+        temp.path().join("path-identity.mjs"),
+        include_str!("../../engine/path-identity.mjs"),
+    )
+    .unwrap();
     // Spaces/Unicode/URL-special characters exercise the same URL conversion
     // the batch fixture needs, independently of the checkout's spelling.
     let pinned = compiled_launch_adapter(&temp.path().join("pinned 空格#%"));
     let consumer = temp.path().join("consumer.mjs");
-    fs::write(&consumer, r#"
+    fs::write(
+        &consumer,
+        r#"
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
 const [adapter,ready,release]=process.argv.slice(2);
@@ -303,15 +322,23 @@ const module=await import(pathToFileURL(adapter));
 module.applyLaunchBinding();
 if(!module.managedLaunch()) throw Error('managed binding missing');
 console.log('managed binding ready');
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let release = temp.path().join("release");
     let mut children = Vec::new();
     for (pinned, adapter) in [(false, &live), (true, &pinned)] {
         for index in 0..4 {
             let ready = temp.path().join(format!("ready-{pinned}-{index}"));
             let mut command = Command::new(crate::native::trusted_node().unwrap());
-            command.arg(&consumer).arg(adapter).arg(&ready).arg(&release)
-                .current_dir(&source).stdout(Stdio::piped()).stderr(Stdio::piped());
+            command
+                .arg(&consumer)
+                .arg(adapter)
+                .arg(&ready)
+                .arg(&release)
+                .current_dir(&source)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
             crate::environment::clean_command(&mut command, &launch, Some(&binding)).unwrap();
             crate::process_control::configure_command(&mut command);
             let mut child = command.spawn().unwrap();
@@ -325,7 +352,11 @@ console.log('managed binding ready');
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     while !children.iter().all(|(_, ready, _, _)| ready.is_file()) {
-        if Instant::now() >= deadline || children.iter_mut().any(|(_, _, child, _)| child.try_wait().unwrap().is_some()) {
+        if Instant::now() >= deadline
+            || children
+                .iter_mut()
+                .any(|(_, _, child, _)| child.try_wait().unwrap().is_some())
+        {
             for (_, _, child, tree) in &mut children {
                 tree.terminate();
                 let _ = child.wait();
@@ -348,16 +379,24 @@ export function applyLaunchBinding(){
 export function managedLaunch(){return launch;}
 "#).unwrap();
     fs::write(&release, "go").unwrap();
-    let results: Vec<_> = children.into_iter().map(|(pinned, _, child, _tree)|
-        (pinned, child.wait_with_output().unwrap())).collect();
+    let results: Vec<_> = children
+        .into_iter()
+        .map(|(pinned, _, child, _tree)| (pinned, child.wait_with_output().unwrap()))
+        .collect();
     for (pinned, output) in results {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if pinned {
             assert!(output.status.success(), "{stderr}");
-            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "managed binding ready");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                "managed binding ready"
+            );
         } else {
             assert!(!output.status.success());
-            assert!(stderr.contains("Error: Declared default entry/PATH"), "{stderr}");
+            assert!(
+                stderr.contains("Error: Declared default entry/PATH"),
+                "{stderr}"
+            );
         }
     }
 }
@@ -378,14 +417,26 @@ fn managed_startup_failure_keeps_its_cause_and_holds_private_delivery() {
         let node = &state.nodes[name];
         assert_eq!(node.status, "failed");
         let error = node.error.as_deref().unwrap();
-        assert!(error.contains("managed startup diagnostic sentinel"), "{name}: {error}");
-        let execution = state.executions.iter().find(|execution| execution.node == name).unwrap();
+        assert!(
+            error.contains("managed startup diagnostic sentinel"),
+            "{name}: {error}"
+        );
+        let execution = state
+            .executions
+            .iter()
+            .find(|execution| execution.node == name)
+            .unwrap();
         assert!(Path::new(&execution.worktree).is_dir());
-        assert!(!crate::path_identity::same_path(Path::new(&execution.worktree), &repo));
+        assert!(!crate::path_identity::same_path(
+            Path::new(&execution.worktree),
+            &repo
+        ));
         assert!(!repo.join(format!("{name}.txt")).exists());
     }
-    assert!(state.events.iter().all(|event|
-        !matches!(event.kind, EventKind::PublicationStarted { .. })));
+    assert!(state
+        .events
+        .iter()
+        .all(|event| !matches!(event.kind, EventKind::PublicationStarted { .. })));
 }
 
 #[test]
@@ -400,8 +451,11 @@ fn source_nodes_accept_external_edits_before_and_during_execution() {
         for node in ["root", "join"] {
             let deadline = Instant::now() + Duration::from_secs(120);
             while !temp.path().join(format!("active-{node}")).exists() {
-                assert!(Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
-                    "source writer did not start: {:?}", service.runtime.lock().unwrap().state.nodes);
+                assert!(
+                    Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
+                    "source writer did not start: {:?}",
+                    service.runtime.lock().unwrap().state.nodes
+                );
                 thread::sleep(Duration::from_millis(20));
             }
             fs::write(repo.join("base.txt"), format!("during {node}")).unwrap();
@@ -415,15 +469,31 @@ fn source_nodes_accept_external_edits_before_and_during_execution() {
         }
         let state = wait_for_idle(&service);
         assert_eq!(state.phase, "completed", "{:?}", state.nodes);
-        assert!(state.executions.iter().all(|execution| execution.status == "completed"));
+        assert!(state
+            .executions
+            .iter()
+            .all(|execution| execution.status == "completed"));
         for node in ["root", "join"] {
-            let execution = state.executions.iter().find(|execution| execution.node == node).unwrap();
-            assert!(crate::path_identity::same_path(Path::new(&execution.worktree), &repo));
+            let execution = state
+                .executions
+                .iter()
+                .find(|execution| execution.node == node)
+                .unwrap();
+            assert!(crate::path_identity::same_path(
+                Path::new(&execution.worktree),
+                &repo
+            ));
             assert_eq!(execution.after.as_deref(), Some(""));
             assert!(execution.input.is_none() && execution.result.is_none());
         }
-        assert_eq!(fs::read_to_string(repo.join("base.txt")).unwrap(), "during join");
-        assert_eq!(fs::read_to_string(repo.join("external.txt")).unwrap(), "external join");
+        assert_eq!(
+            fs::read_to_string(repo.join("base.txt")).unwrap(),
+            "during join"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("external.txt")).unwrap(),
+            "external join"
+        );
         assert!(!repo.join("removed.txt").exists());
         assert_eq!(fs::read(repo.join(".git/index")).unwrap(), index);
     }
@@ -436,16 +506,31 @@ fn driver_dispatches_ready_child_before_unrelated_shared_worker_finishes() {
     {
         let mut runtime = service.runtime.lock().unwrap();
         let mut graph = runtime.state.graph.clone();
-        graph.edges = [("root", "a"), ("root", "b"), ("root", "d"), ("a", "c"), ("b", "join"), ("c", "join"), ("d", "join")]
-            .into_iter()
-            .map(|(from, to)| Edge { from: from.into(), to: to.into(), feedback: false })
-            .collect();
-        runtime.revise_graph(graph, PlanningSummary::default()).unwrap();
+        graph.edges = [
+            ("root", "a"),
+            ("root", "b"),
+            ("root", "d"),
+            ("a", "c"),
+            ("b", "join"),
+            ("c", "join"),
+            ("d", "join"),
+        ]
+        .into_iter()
+        .map(|(from, to)| Edge {
+            from: from.into(),
+            to: to.into(),
+            feedback: false,
+        })
+        .collect();
+        runtime
+            .revise_graph(graph, PlanningSummary::default())
+            .unwrap();
     }
     drive(service.clone());
     let deadline = Instant::now() + Duration::from_secs(30);
     while !(temp.path().join("audit-c.json").exists() && temp.path().join("active-b").exists())
-        && Instant::now() < deadline && service.driving.load(Ordering::SeqCst)
+        && Instant::now() < deadline
+        && service.driving.load(Ordering::SeqCst)
     {
         thread::sleep(Duration::from_millis(20));
     }
@@ -454,15 +539,24 @@ fn driver_dispatches_ready_child_before_unrelated_shared_worker_finishes() {
     // Release even on a regression so no fixture worker survives the assertion.
     fs::write(temp.path().join("release-b"), "release").unwrap();
     let completed = wait_for_idle(&service);
-    assert!(child_ran, "ready child stalled behind b: {:?}", during.nodes);
+    assert!(
+        child_ran,
+        "ready child stalled behind b: {:?}",
+        during.nodes
+    );
     assert_eq!(during.nodes["b"].status, "running");
     assert_eq!(during.nodes["join"].status, "waiting");
     assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
     assert_eq!(completed.executions.len(), 6);
-    assert!(completed.executions.iter().all(|execution|
-        execution.status == "completed" && crate::path_identity::same_path(Path::new(&execution.worktree), &repo)));
-    assert!(!completed.events.iter().any(|event|
-        matches!(event.kind, EventKind::PublicationStarted { .. })));
+    assert!(completed
+        .executions
+        .iter()
+        .all(|execution| execution.status == "completed"
+            && crate::path_identity::same_path(Path::new(&execution.worktree), &repo)));
+    assert!(!completed
+        .events
+        .iter()
+        .any(|event| matches!(event.kind, EventKind::PublicationStarted { .. })));
 }
 
 #[test]
@@ -472,14 +566,22 @@ fn driver_drains_active_workers_before_reporting_invalid_source_binding() {
     {
         let mut runtime = service.runtime.lock().unwrap();
         let mut graph = runtime.state.graph.clone();
-        graph.edges.retain(|edge|
-            !(edge.from == "root" && edge.to == "c" || edge.from == "a" && edge.to == "join"));
-        graph.edges.push(Edge { from: "a".into(), to: "c".into(), feedback: false });
-        runtime.revise_graph(graph, PlanningSummary::default()).unwrap();
+        graph.edges.retain(|edge| {
+            !(edge.from == "root" && edge.to == "c" || edge.from == "a" && edge.to == "join")
+        });
+        graph.edges.push(Edge {
+            from: "a".into(),
+            to: "c".into(),
+            feedback: false,
+        });
+        runtime
+            .revise_graph(graph, PlanningSummary::default())
+            .unwrap();
     }
     drive(service.clone());
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !temp.path().join("active-b").exists() && Instant::now() < deadline
+    while !temp.path().join("active-b").exists()
+        && Instant::now() < deadline
         && service.driving.load(Ordering::SeqCst)
     {
         thread::sleep(Duration::from_millis(20));
@@ -488,17 +590,33 @@ fn driver_drains_active_workers_before_reporting_invalid_source_binding() {
     if active {
         // Simulate binding loss without renaming a live process's cwd (which
         // Windows forbids). Already-dispatched jobs keep their original cwd.
-        service.runtime.lock().unwrap().state.config.as_mut().unwrap().repository =
-            temp.path().join("missing-source").to_string_lossy().into_owned();
+        service
+            .runtime
+            .lock()
+            .unwrap()
+            .state
+            .config
+            .as_mut()
+            .unwrap()
+            .repository = temp
+            .path()
+            .join("missing-source")
+            .to_string_lossy()
+            .into_owned();
         drive(service.clone());
     }
     fs::write(temp.path().join("release-b"), "release").unwrap();
     let paused = wait_for_idle(&service);
     assert!(active, "shared fixture never started: {:?}", paused.nodes);
     assert!(paused.paused);
-    assert!(paused.executions.iter().all(|execution|
-        execution.status == "completed" && execution.output_bytes > 0),
-        "admission failure must retain worker completion and logs: {:?}", paused.nodes);
+    assert!(
+        paused
+            .executions
+            .iter()
+            .all(|execution| execution.status == "completed" && execution.output_bytes > 0),
+        "admission failure must retain worker completion and logs: {:?}",
+        paused.nodes
+    );
     assert_eq!(paused.nodes["b"].status, "completed");
     assert!(temp.path().join("audit-b.json").exists());
     assert_eq!(paused.nodes["join"].status, "waiting");
@@ -510,7 +628,11 @@ fn driver_drains_active_workers_before_reporting_invalid_source_binding() {
     drive(service.clone());
     let completed = wait_for_idle(&service);
     assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
-    assert_eq!(completed.executions.len(), 6, "repair never reruns completed workers");
+    assert_eq!(
+        completed.executions.len(),
+        6,
+        "repair never reruns completed workers"
+    );
 }
 
 #[test]
@@ -529,12 +651,33 @@ fn driver_drains_unrelated_worker_before_reporting_missing_feedback_template() {
         let mut settings = runtime.state.config.clone().unwrap();
         settings.feedback_enabled = true;
         runtime.save_default_config(&settings).unwrap();
-        runtime.revise_graph(Graph {
-            original_goal: "feedback admission drain".into(),
-            nodes: ["root", "a", "b"].into_iter().map(|name| Node { id: name.into(), task: name.into() }).collect(),
-            edges: vec![Edge { from: "root".into(), to: "a".into(), feedback: false },
-                Edge { from: "a".into(), to: "root".into(), feedback: true }],
-        }, PlanningSummary::default()).unwrap();
+        runtime
+            .revise_graph(
+                Graph {
+                    original_goal: "feedback admission drain".into(),
+                    nodes: ["root", "a", "b"]
+                        .into_iter()
+                        .map(|name| Node {
+                            id: name.into(),
+                            task: name.into(),
+                        })
+                        .collect(),
+                    edges: vec![
+                        Edge {
+                            from: "root".into(),
+                            to: "a".into(),
+                            feedback: false,
+                        },
+                        Edge {
+                            from: "a".into(),
+                            to: "root".into(),
+                            feedback: true,
+                        },
+                    ],
+                },
+                PlanningSummary::default(),
+            )
+            .unwrap();
         // Bundled notices are valid defaults. Explicitly make the override
         // unusable so the test exercises admission failure, not a recheck turn.
         fs::create_dir_all(runtime.root.join("prompts")).unwrap();
@@ -544,26 +687,44 @@ fn driver_drains_unrelated_worker_before_reporting_missing_feedback_template() {
     let deadline = Instant::now() + Duration::from_secs(120);
     let reached = loop {
         let state = service.runtime.lock().unwrap().state.clone();
-        if state.executions.iter().any(|execution|
-            execution.node == "root" && execution.attempt == 2 && execution.status == "completed") {
+        if state.executions.iter().any(|execution| {
+            execution.node == "root" && execution.attempt == 2 && execution.status == "completed"
+        }) {
             break true;
         }
-        if Instant::now() > deadline || !service.driving.load(Ordering::SeqCst) { break false; }
+        if Instant::now() > deadline || !service.driving.load(Ordering::SeqCst) {
+            break false;
+        }
         thread::sleep(Duration::from_millis(20));
     };
     // Always release the fixture before assertions, including on regression.
     fs::write(temp.path().join("release-b"), "release").unwrap();
     let paused = wait_for_idle(&service);
-    assert!(reached, "repair did not reach admission: {:?}", paused.nodes);
+    assert!(
+        reached,
+        "repair did not reach admission: {:?}",
+        paused.nodes
+    );
     assert!(paused.paused);
-    let unrelated = paused.executions.iter().find(|execution| execution.node == "b").unwrap();
-    assert_eq!(unrelated.status, "completed", "driver must retain completion despite the missing template");
+    let unrelated = paused
+        .executions
+        .iter()
+        .find(|execution| execution.node == "b")
+        .unwrap();
+    assert_eq!(
+        unrelated.status, "completed",
+        "driver must retain completion despite the missing template"
+    );
     assert!(unrelated.output_bytes > 0);
     assert_eq!(paused.nodes["a"].status, "dirty");
     {
         let mut runtime = service.runtime.lock().unwrap();
         fs::create_dir_all(runtime.root.join("prompts")).unwrap();
-        fs::write(runtime.root.join("prompts/feedback-returned.md"), "{{node}}").unwrap();
+        fs::write(
+            runtime.root.join("prompts/feedback-returned.md"),
+            "{{node}}",
+        )
+        .unwrap();
         fs::write(temp.path().join("allow-accept"), "accept").unwrap();
         runtime.pause(false).unwrap();
     }
@@ -571,7 +732,14 @@ fn driver_drains_unrelated_worker_before_reporting_missing_feedback_template() {
     let completed = wait_for_idle(&service);
     assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
     assert_eq!(completed.executions.len(), 5);
-    assert_eq!(completed.executions.iter().filter(|execution| execution.node == "b").count(), 1);
+    assert_eq!(
+        completed
+            .executions
+            .iter()
+            .filter(|execution| execution.node == "b")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -600,11 +768,17 @@ fn assert_driver_resumes_private_node(pause_run: bool, followup: bool) {
         loop {
             let state = service.runtime.lock().unwrap().state.clone();
             if temp.path().join("active-a").exists()
-                && ["b", "c", "d"].iter().all(|node| state.nodes[*node].status == "completed") {
+                && ["b", "c", "d"]
+                    .iter()
+                    .all(|node| state.nodes[*node].status == "completed")
+            {
                 break;
             }
-            assert!(Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
-                "private workers did not reach pause boundary: {:?}", state.nodes);
+            assert!(
+                Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
+                "private workers did not reach pause boundary: {:?}",
+                state.nodes
+            );
             thread::sleep(Duration::from_millis(20));
         }
         {
@@ -626,7 +800,10 @@ fn assert_driver_resumes_private_node(pause_run: bool, followup: bool) {
             assert!(paused.can_resume_node("a"));
         }
         for name in ["b.txt", "c.txt"] {
-            assert!(!repo.join(name).exists(), "a node stop must not trigger sibling publication");
+            assert!(
+                !repo.join(name).exists(),
+                "a node stop must not trigger sibling publication"
+            );
         }
         assert!(!repo.join("partial-a.txt").exists());
         fs::write(repo.join("external.txt"), "edited while paused").unwrap();
@@ -644,28 +821,64 @@ fn assert_driver_resumes_private_node(pause_run: bool, followup: bool) {
         }
         drive(service.clone());
         let completed = wait_for_idle(&service);
-        assert_eq!(completed.phase, "completed", "{:?} {:?}", completed.nodes, completed.publication);
+        assert_eq!(
+            completed.phase, "completed",
+            "{:?} {:?}",
+            completed.nodes, completed.publication
+        );
         let resumed = completed.executions.last().unwrap();
         assert_eq!(resumed.node, "a");
         assert_eq!(resumed.worktree, original.worktree);
         assert_eq!(resumed.session_id, original.session_id);
         assert_eq!(resumed.attempt, original.attempt + usize::from(followup));
-        assert_eq!(fs::read_to_string(repo.join("partial-a.txt")).unwrap(), "recovered");
-        assert_eq!(fs::read_to_string(repo.join("external.txt")).unwrap(), "edited while paused");
-        assert_eq!(completed.events.iter().filter(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. })).count(),
-            paused.events.iter().filter(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. })).count(),
-            "resuming the private batch must not refresh its source baseline");
-        let audit: serde_json::Value = serde_json::from_slice(
-            &fs::read(temp.path().join("audit-a.json")).unwrap(),
-        ).unwrap();
+        assert_eq!(
+            fs::read_to_string(repo.join("partial-a.txt")).unwrap(),
+            "recovered"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("external.txt")).unwrap(),
+            "edited while paused"
+        );
+        assert_eq!(
+            completed
+                .events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. }))
+                .count(),
+            paused
+                .events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. }))
+                .count(),
+            "resuming the private batch must not refresh its source baseline"
+        );
+        let audit: serde_json::Value =
+            serde_json::from_slice(&fs::read(temp.path().join("audit-a.json")).unwrap()).unwrap();
         assert_eq!(audit["continuation"], !followup);
         assert_eq!(audit["followup"], followup);
         assert_eq!(audit["managed"], managed);
-        assert_eq!(audit["externalFilePresent"], false, "the resumed agent must keep its original project view");
-        assert!(!completed.events.iter().any(|event| matches!(event.kind, EventKind::BatchRecoveryCaptured { .. })));
-        assert_eq!(completed.executions.len(), 5, "resume must succeed without another failed attempt");
-        assert_eq!(completed.events.iter().filter(|event| matches!(event.kind, EventKind::PublicationCompleted { .. })).count(),
-            1, "publish the batch only after the stopped task finishes");
+        assert_eq!(
+            audit["externalFilePresent"], false,
+            "the resumed agent must keep its original project view"
+        );
+        assert!(!completed
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BatchRecoveryCaptured { .. })));
+        assert_eq!(
+            completed.executions.len(),
+            5,
+            "resume must succeed without another failed attempt"
+        );
+        assert_eq!(
+            completed
+                .events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::PublicationCompleted { .. }))
+                .count(),
+            1,
+            "publish the batch only after the stopped task finishes"
+        );
     }
 }
 
@@ -680,17 +893,23 @@ fn publication_merger_follows_saved_node_models_and_retry_after_restart() {
     let wait_for = |marker: &str| {
         let deadline = Instant::now() + Duration::from_secs(120);
         while !temp.path().join(marker).exists() {
-            assert!(Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
-                "worker never reached {marker}");
+            assert!(
+                Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
+                "worker never reached {marker}"
+            );
             thread::sleep(Duration::from_millis(20));
         }
     };
     let save = |model: &str, thinking: &str| {
         let mut runtime = service.runtime.lock().unwrap();
         let mut config = runtime.state.effective_config().unwrap();
-        config.role_models.insert("nodeAgent".into(), crate::model::RoleModelConfig {
-            model: model.into(), thinking_level: Some(thinking.into()),
-        });
+        config.role_models.insert(
+            "nodeAgent".into(),
+            crate::model::RoleModelConfig {
+                model: model.into(),
+                thinking_level: Some(thinking.into()),
+            },
+        );
         runtime.update_node_models(&config).unwrap();
     };
     let checks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -705,24 +924,39 @@ fn publication_merger_follows_saved_node_models_and_retry_after_restart() {
         fs::write(temp.path().join(marker), "release").unwrap();
     }
     let failed = wait_for_idle(&service);
-    if let Err(panic) = checks { std::panic::resume_unwind(panic); }
+    if let Err(panic) = checks {
+        std::panic::resume_unwind(panic);
+    }
     assert_eq!(failed.phase, "publication_failed");
     let selections = || -> Vec<(String, String)> {
-        fs::read_to_string(temp.path().join("merger-args.jsonl")).unwrap().lines().map(|line| {
-            let args: Vec<String> = serde_json::from_str(line).unwrap();
-            let value = |key| args.windows(2).find(|pair| pair[0] == key).unwrap()[1].clone();
-            (value("--model"), value("--thinking"))
-        }).collect()
+        fs::read_to_string(temp.path().join("merger-args.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let args: Vec<String> = serde_json::from_str(line).unwrap();
+                let value = |key| args.windows(2).find(|pair| pair[0] == key).unwrap()[1].clone();
+                (value("--model"), value("--thinking"))
+            })
+            .collect()
     };
-    assert_eq!(selections(), vec![("replacement/merger".into(), "high".into())]);
+    assert_eq!(
+        selections(),
+        vec![("replacement/merger".into(), "high".into())]
+    );
     let root = service.runtime.lock().unwrap().root.clone();
     let deadline = Instant::now() + Duration::from_secs(10);
     while Arc::strong_count(&service) != 1 {
-        assert!(Instant::now() < deadline, "publication driver did not release its runtime");
+        assert!(
+            Instant::now() < deadline,
+            "publication driver did not release its runtime"
+        );
         thread::sleep(Duration::from_millis(10));
     }
     drop(service);
-    let recovered = Runtime::open(&root).unwrap().open_run(&failed.run_id).unwrap();
+    let recovered = Runtime::open(&root)
+        .unwrap()
+        .open_run(&failed.run_id)
+        .unwrap();
     let service = Arc::new(Service {
         runtime: Mutex::new(recovered),
         driving: AtomicBool::new(false),
@@ -731,16 +965,35 @@ fn publication_merger_follows_saved_node_models_and_retry_after_restart() {
         extension: temp.path().join("unused.ts"),
     });
     fs::remove_file(temp.path().join("fail-merger")).unwrap();
-    control("retry_publication".into(), None, None, Some(failed.run_id), None, None, &service).unwrap();
+    control(
+        "retry_publication".into(),
+        None,
+        None,
+        Some(failed.run_id),
+        None,
+        None,
+        &service,
+    )
+    .unwrap();
     let completed = wait_for_idle(&service);
     assert_eq!(completed.phase, "completed", "{:?}", completed.publication);
-    assert_eq!(selections(), vec![
-        ("replacement/merger".into(), "high".into()),
-        ("replacement/retry".into(), "off".into()),
-    ]);
+    assert_eq!(
+        selections(),
+        vec![
+            ("replacement/merger".into(), "high".into()),
+            ("replacement/retry".into(), "off".into()),
+        ]
+    );
     assert_eq!(completed.config.as_ref().unwrap().model, "test/batches");
-    assert_eq!(completed.executions.len(), 4, "publication retry does not rerun nodes");
-    assert_eq!(fs::read_to_string(repo.join("base.txt")).unwrap(), "merged siblings");
+    assert_eq!(
+        completed.executions.len(),
+        4,
+        "publication retry does not rerun nodes"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("base.txt")).unwrap(),
+        "merged siblings"
+    );
 }
 
 #[test]
@@ -762,8 +1015,17 @@ fn assert_private_followup_during_publication(fail_publication: bool) {
     loop {
         let state = service.runtime.lock().unwrap().state.clone();
         if temp.path().join("active-a").exists()
-            && ["b", "c", "d"].iter().all(|node| state.nodes[*node].status == "completed") { break; }
-        assert!(Instant::now() < deadline, "workers never became ready: {:?}", state.nodes);
+            && ["b", "c", "d"]
+                .iter()
+                .all(|node| state.nodes[*node].status == "completed")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "workers never became ready: {:?}",
+            state.nodes
+        );
         thread::sleep(Duration::from_millis(20));
     }
     {
@@ -775,34 +1037,72 @@ fn assert_private_followup_during_publication(fail_publication: bool) {
     {
         let mut runtime = service.runtime.lock().unwrap();
         // Existing Runs may already have entered this handoff before the fix.
-        let heads = runtime.state.executions.iter().filter_map(|e| e.after.clone()).collect();
-        runtime.emit_outputs(vec![
-            EventKind::BatchHandoffRequested { recovery_execution_ids: vec![] },
-            EventKind::PublicationStarted { repository: repo.to_string_lossy().into(), heads },
-        ]).unwrap();
+        let heads = runtime
+            .state
+            .executions
+            .iter()
+            .filter_map(|e| e.after.clone())
+            .collect();
+        runtime
+            .emit_outputs(vec![
+                EventKind::BatchHandoffRequested {
+                    recovery_execution_ids: vec![],
+                },
+                EventKind::PublicationStarted {
+                    repository: repo.to_string_lossy().into(),
+                    heads,
+                },
+            ])
+            .unwrap();
     }
     drive(service.clone());
     let deadline = Instant::now() + Duration::from_secs(120);
     while !temp.path().join("active-merger").exists() {
-        assert!(Instant::now() < deadline && service.driving.load(Ordering::SeqCst), "publication did not reach merger");
+        assert!(
+            Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
+            "publication did not reach merger"
+        );
         thread::sleep(Duration::from_millis(20));
     }
     fs::remove_file(temp.path().join("fail-a")).unwrap();
-    let before = service.runtime.lock().unwrap().state.publication.clone().unwrap();
-    control("intervene".into(), Some("a".into()), Some("finish a".into()),
-        Some(paused.run_id.clone()), None, None, &service).unwrap();
+    let before = service
+        .runtime
+        .lock()
+        .unwrap()
+        .state
+        .publication
+        .clone()
+        .unwrap();
+    control(
+        "intervene".into(),
+        Some("a".into()),
+        Some("finish a".into()),
+        Some(paused.run_id.clone()),
+        None,
+        None,
+        &service,
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let state = service.runtime.lock().unwrap().state.clone();
-        if state.nodes["a"].status == "completed" { break; }
-        assert!(Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
-            "private follow-up was blocked by unrelated publication: {:?}", state.nodes);
+        if state.nodes["a"].status == "completed" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline && service.driving.load(Ordering::SeqCst),
+            "private follow-up was blocked by unrelated publication: {:?}",
+            state.nodes
+        );
         thread::sleep(Duration::from_millis(20));
     }
     {
         let runtime = service.runtime.lock().unwrap();
         assert_eq!(runtime.state.phase, "merging");
-        assert_eq!(runtime.state.publication.as_ref().unwrap().heads, before.heads);
+        assert_eq!(
+            runtime.state.publication.as_ref().unwrap().heads,
+            before.heads
+        );
         let resumed = runtime.state.executions.last().unwrap();
         assert_eq!(resumed.worktree, original.worktree);
         assert_eq!(resumed.session_id, original.session_id);
@@ -813,7 +1113,10 @@ fn assert_private_followup_during_publication(fail_publication: bool) {
     let mut completed = wait_for_idle(&service);
     if fail_publication {
         assert_eq!(completed.phase, "publication_failed");
-        assert_eq!(completed.nodes["a"].status, "completed", "publication failure cannot discard the independent result");
+        assert_eq!(
+            completed.nodes["a"].status, "completed",
+            "publication failure cannot discard the independent result"
+        );
         assert!(Path::new(&original.worktree).is_dir());
         let runtime = service.runtime.lock().unwrap();
         let replayed = runtime.store.load(&completed.run_id).unwrap();
@@ -821,14 +1124,40 @@ fn assert_private_followup_during_publication(fail_publication: bool) {
         assert_eq!(replayed.nodes["a"].head, completed.nodes["a"].head);
         drop(runtime);
         fs::remove_file(temp.path().join("fail-merger")).unwrap();
-        control("retry_publication".into(), None, None, Some(completed.run_id.clone()), None, None, &service).unwrap();
+        control(
+            "retry_publication".into(),
+            None,
+            None,
+            Some(completed.run_id.clone()),
+            None,
+            None,
+            &service,
+        )
+        .unwrap();
         completed = wait_for_idle(&service);
     }
     assert_eq!(completed.phase, "completed", "{:?}", completed.publication);
-    assert_eq!(completed.executions.len(), 5, "publication retry must not rerun the independent node");
-    assert_eq!(fs::read_to_string(repo.join("partial-a.txt")).unwrap(), "recovered");
-    assert_eq!(fs::read_to_string(repo.join("base.txt")).unwrap(), "merged siblings");
-    assert_eq!(completed.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 2);
+    assert_eq!(
+        completed.executions.len(),
+        5,
+        "publication retry must not rerun the independent node"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("partial-a.txt")).unwrap(),
+        "recovered"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("base.txt")).unwrap(),
+        "merged siblings"
+    );
+    assert_eq!(
+        completed
+            .events
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. }))
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -840,14 +1169,30 @@ fn driver_retries_private_node_before_its_independent_sibling_finishes() {
     let checks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         loop {
             let state = service.runtime.lock().unwrap().state.clone();
-            if state.nodes["a"].status == "failed" && state.nodes["c"].status == "completed"
-                && temp.path().join("active-b").exists() { break; }
-            assert!(Instant::now() < deadline, "initial private workers did not settle");
+            if state.nodes["a"].status == "failed"
+                && state.nodes["c"].status == "completed"
+                && temp.path().join("active-b").exists()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "initial private workers did not settle"
+            );
             thread::sleep(Duration::from_millis(20));
         }
         fs::remove_file(temp.path().join("fail-a")).unwrap();
         let run_id = service.runtime.lock().unwrap().state.run_id.clone();
-        control("resume_node".into(), Some("a".into()), None, Some(run_id), None, None, &service).unwrap();
+        control(
+            "resume_node".into(),
+            Some("a".into()),
+            None,
+            Some(run_id),
+            None,
+            None,
+            &service,
+        )
+        .unwrap();
         loop {
             let state = service.runtime.lock().unwrap().state.clone();
             if state.nodes["a"].status == "completed" {
@@ -856,15 +1201,27 @@ fn driver_retries_private_node_before_its_independent_sibling_finishes() {
                 assert!(!repo.join("partial-a.txt").exists());
                 break;
             }
-            assert!(Instant::now() < deadline, "private retry waited for an unrelated writer");
+            assert!(
+                Instant::now() < deadline,
+                "private retry waited for an unrelated writer"
+            );
             thread::sleep(Duration::from_millis(20));
         }
     }));
     fs::write(temp.path().join("release-b"), "release").unwrap();
     let completed = wait_for_idle(&service);
-    if let Err(error) = checks { std::panic::resume_unwind(error); }
+    if let Err(error) = checks {
+        std::panic::resume_unwind(error);
+    }
     assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
-    assert_eq!(completed.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 1);
+    assert_eq!(
+        completed
+            .events
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. }))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -878,9 +1235,18 @@ fn driver_publishes_the_whole_visible_private_batch_not_each_worker_group() {
         config.max_parallel = 4;
         let graph = Graph {
             original_goal: "whole private batch".into(),
-            nodes: ["a", "b", "c", "d", "e", "child"].into_iter()
-                .map(|name| Node { id: name.into(), task: name.into() }).collect(),
-            edges: vec![crate::model::Edge { from: "a".into(), to: "child".into(), feedback: false }],
+            nodes: ["a", "b", "c", "d", "e", "child"]
+                .into_iter()
+                .map(|name| Node {
+                    id: name.into(),
+                    task: name.into(),
+                })
+                .collect(),
+            edges: vec![crate::model::Edge {
+                from: "a".into(),
+                to: "child".into(),
+                feedback: false,
+            }],
         };
         runtime.create(graph, config).unwrap();
         runtime.set_route("graph").unwrap();
@@ -888,26 +1254,43 @@ fn driver_publishes_the_whole_visible_private_batch_not_each_worker_group() {
     }
     drive(service.clone());
     let deadline = Instant::now() + Duration::from_secs(120);
-    let checks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        loop {
-            let state = service.runtime.lock().unwrap().state.clone();
-            if temp.path().join("active-e").exists() && state.nodes["d"].status == "completed" {
-                assert_eq!(state.private_batch, state.plan.as_ref().unwrap().execution_batches[0]);
-                assert_eq!(state.nodes["child"].status, "waiting");
-                assert!(state.publication.is_none());
-                for name in ["a", "b", "c", "d"] { assert!(!repo.join(format!("{name}.txt")).exists()); }
-                break;
+    let checks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
+        let state = service.runtime.lock().unwrap().state.clone();
+        if temp.path().join("active-e").exists() && state.nodes["d"].status == "completed" {
+            assert_eq!(
+                state.private_batch,
+                state.plan.as_ref().unwrap().execution_batches[0]
+            );
+            assert_eq!(state.nodes["child"].status, "waiting");
+            assert!(state.publication.is_none());
+            for name in ["a", "b", "c", "d"] {
+                assert!(!repo.join(format!("{name}.txt")).exists());
             }
-            assert!(Instant::now() < deadline, "the capped private batch did not refill");
-            thread::sleep(Duration::from_millis(20));
+            break;
         }
+        assert!(
+            Instant::now() < deadline,
+            "the capped private batch did not refill"
+        );
+        thread::sleep(Duration::from_millis(20));
     }));
     fs::write(temp.path().join("release-e"), "release").unwrap();
     let completed = wait_for_idle(&service);
-    if let Err(error) = checks { std::panic::resume_unwind(error); }
+    if let Err(error) = checks {
+        std::panic::resume_unwind(error);
+    }
     assert_eq!(completed.phase, "completed", "{:?}", completed.nodes);
-    assert_eq!(completed.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 1);
-    for name in ["a", "b", "c", "d", "e", "child"] { assert!(repo.join(format!("{name}.txt")).exists()); }
+    assert_eq!(
+        completed
+            .events
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. }))
+            .count(),
+        1
+    );
+    for name in ["a", "b", "c", "d", "e", "child"] {
+        assert!(repo.join(format!("{name}.txt")).exists());
+    }
 }
 
 #[test]
@@ -921,29 +1304,53 @@ fn driver_recovers_source_prerequisite_without_publishing_or_relocating_the_held
             let mut runtime = service.runtime.lock().unwrap();
             let mut config = runtime.state.config.clone().unwrap();
             config.max_parallel = 4;
-            runtime.create(Graph {
-                original_goal: "source prerequisite recovery".into(),
-                nodes: ["a", "b", "a1", "a2", "a3", "a4", "b1"].into_iter()
-                    .map(|name| Node { id: name.into(), task: name.into() }).collect(),
-                edges: [("a", "a1"), ("a", "a2"), ("a", "a3"), ("a", "a4"), ("b", "b1")].into_iter()
-                    .map(|(from, to)| crate::model::Edge { from: from.into(), to: to.into(), feedback: false }).collect(),
-            }, config).unwrap();
+            runtime
+                .create(
+                    Graph {
+                        original_goal: "source prerequisite recovery".into(),
+                        nodes: ["a", "b", "a1", "a2", "a3", "a4", "b1"]
+                            .into_iter()
+                            .map(|name| Node {
+                                id: name.into(),
+                                task: name.into(),
+                            })
+                            .collect(),
+                        edges: [
+                            ("a", "a1"),
+                            ("a", "a2"),
+                            ("a", "a3"),
+                            ("a", "a4"),
+                            ("b", "b1"),
+                        ]
+                        .into_iter()
+                        .map(|(from, to)| crate::model::Edge {
+                            from: from.into(),
+                            to: to.into(),
+                            feedback: false,
+                        })
+                        .collect(),
+                    },
+                    config,
+                )
+                .unwrap();
             runtime.set_route("graph").unwrap();
             runtime.approve().unwrap();
         }
         drive(service.clone());
         let deadline = Instant::now() + Duration::from_secs(120);
-        let ready = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            loop {
-                let state = service.runtime.lock().unwrap().state.clone();
-                if state.nodes["b"].status == "failed" && temp.path().join("active-source-a").exists() { break; }
-                assert!(Instant::now() < deadline, "source failure was not recorded");
-                thread::sleep(Duration::from_millis(20));
+        let ready = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
+            let state = service.runtime.lock().unwrap().state.clone();
+            if state.nodes["b"].status == "failed" && temp.path().join("active-source-a").exists() {
+                break;
             }
+            assert!(Instant::now() < deadline, "source failure was not recorded");
+            thread::sleep(Duration::from_millis(20));
         }));
         fs::write(temp.path().join("release-source-a"), "release").unwrap();
         let held = wait_for_idle(&service);
-        if let Err(error) = ready { std::panic::resume_unwind(error); }
+        if let Err(error) = ready {
+            std::panic::resume_unwind(error);
+        }
         assert_eq!(held.phase, "needs_attention", "{:?}", held.nodes);
         assert_eq!(held.nodes["a1"].status, "completed");
         assert_eq!(held.nodes["b1"].status, "blocked");
@@ -951,19 +1358,52 @@ fn driver_recovers_source_prerequisite_without_publishing_or_relocating_the_held
         let original = held.executions.iter().find(|e| e.node == "b").unwrap();
         fs::remove_file(temp.path().join("fail-b")).unwrap();
         fs::write(temp.path().join("recover-b"), "b").unwrap();
-        control("resume_node".into(), Some("b".into()), None, Some(held.run_id.clone()), None, None, &service).unwrap();
+        control(
+            "resume_node".into(),
+            Some("b".into()),
+            None,
+            Some(held.run_id.clone()),
+            None,
+            None,
+            &service,
+        )
+        .unwrap();
         let completed = wait_for_idle(&service);
-        assert_eq!(completed.phase, "completed", "{:?} {:?}", completed.nodes, completed.publication);
-        let retry = completed.executions.iter().rev().find(|e| e.node == "b").unwrap();
+        assert_eq!(
+            completed.phase, "completed",
+            "{:?} {:?}",
+            completed.nodes, completed.publication
+        );
+        let retry = completed
+            .executions
+            .iter()
+            .rev()
+            .find(|e| e.node == "b")
+            .unwrap();
         assert_eq!(retry.worktree, original.worktree);
         assert_eq!(retry.session_id, original.session_id);
         assert_eq!(completed.executions.len(), 8);
-        assert_eq!(completed.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 1);
-        let audit: serde_json::Value = serde_json::from_slice(&fs::read(temp.path().join("audit-b.json")).unwrap()).unwrap();
-        assert_eq!(audit["managed"], false, "source recovery must not load the held private environment");
-        let audit: serde_json::Value = serde_json::from_slice(&fs::read(temp.path().join("audit-b1.json")).unwrap()).unwrap();
+        assert_eq!(
+            completed
+                .events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. }))
+                .count(),
+            1
+        );
+        let audit: serde_json::Value =
+            serde_json::from_slice(&fs::read(temp.path().join("audit-b.json")).unwrap()).unwrap();
+        assert_eq!(
+            audit["managed"], false,
+            "source recovery must not load the held private environment"
+        );
+        let audit: serde_json::Value =
+            serde_json::from_slice(&fs::read(temp.path().join("audit-b1.json")).unwrap()).unwrap();
         assert_eq!(audit["managed"], managed);
-        assert_eq!(fs::read_to_string(repo.join("partial-b.txt")).unwrap(), "recovered");
+        assert_eq!(
+            fs::read_to_string(repo.join("partial-b.txt")).unwrap(),
+            "recovered"
+        );
         assert!(repo.join("a1.txt").exists() && repo.join("b1.txt").exists());
     }
 }
@@ -982,9 +1422,14 @@ fn driver_retries_private_failure_in_place_and_delivers_the_complete_batch() {
             .unwrap();
         assert!(failed.publication.is_none() && failed.batch_handoff.is_none());
         for file in ["partial-a.txt", "b.txt", "c.txt"] {
-            assert!(!repo.join(file).exists(), "failed batch must not deliver even its successful siblings");
+            assert!(
+                !repo.join(file).exists(),
+                "failed batch must not deliver even its successful siblings"
+            );
         }
-        assert!(Path::new(&original.worktree).join("partial-a.txt").is_file());
+        assert!(Path::new(&original.worktree)
+            .join("partial-a.txt")
+            .is_file());
         fs::remove_file(temp.path().join("fail-a")).unwrap();
         service.runtime.lock().unwrap().resume_node("a").unwrap();
         drive(service.clone());
@@ -1003,9 +1448,19 @@ fn driver_retries_private_failure_in_place_and_delivers_the_complete_batch() {
         assert_eq!(retry.session_id, original.session_id);
         assert_eq!(retry.worktree, original.worktree);
         assert_eq!(retry.attempt, original.attempt + 1);
-        assert_eq!(completed.executions.len(), 5, "completed siblings must not rerun");
-        assert_eq!(completed.events.iter().filter(|event|
-            matches!(event.kind, EventKind::PublicationCompleted { .. })).count(), 1);
+        assert_eq!(
+            completed.executions.len(),
+            5,
+            "completed siblings must not rerun"
+        );
+        assert_eq!(
+            completed
+                .events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::PublicationCompleted { .. }))
+                .count(),
+            1
+        );
         assert_eq!(completed.executions[0].status, "failed");
         let audit: serde_json::Value =
             serde_json::from_slice(&fs::read(temp.path().join("audit-a.json")).unwrap()).unwrap();

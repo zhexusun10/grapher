@@ -849,7 +849,10 @@ impl NodeState {
         self.pending_prompt_after_images(0)
     }
 
-    pub fn pending_prompt_after_images(&self, image_offset: usize) -> Option<(String, Option<Vec<ImageAttachment>>)> {
+    pub fn pending_prompt_after_images(
+        &self,
+        image_offset: usize,
+    ) -> Option<(String, Option<Vec<ImageAttachment>>)> {
         if self.pending_messages.is_empty() {
             return None;
         }
@@ -1007,7 +1010,9 @@ pub enum EventKind {
     WorkspaceIsolationRequested,
     /// Whole topology layer retained across slot-capped private dispatches.
     /// Empty nodes retire a delivered or explicitly superseded batch.
-    PrivateBatchSelected { nodes: Vec<String> },
+    PrivateBatchSelected {
+        nodes: Vec<String>,
+    },
     /// Records a slot-capped ready group, including shared-source replenishment.
     ExecutionBatchStarted {
         nodes: Vec<String>,
@@ -1736,10 +1741,15 @@ impl Snapshot {
     }
 
     pub(crate) fn withdrawn_steer_sequences(&self) -> BTreeSet<i64> {
-        self.events.iter().flat_map(|event| match &event.kind {
-            EventKind::SteersWithdrawn { message_sequences, .. } => message_sequences.iter().copied(),
-            _ => [].iter().copied(),
-        }).collect()
+        self.events
+            .iter()
+            .flat_map(|event| match &event.kind {
+                EventKind::SteersWithdrawn {
+                    message_sequences, ..
+                } => message_sequences.iter().copied(),
+                _ => [].iter().copied(),
+            })
+            .collect()
     }
 
     fn record_planning_turn(&mut self, planning: &PlanningSummary) {
@@ -2034,19 +2044,46 @@ impl Snapshot {
     /// never bypass a global pause and accidentally dispatch other nodes.
     pub fn can_resume_node(&self, name: &str) -> bool {
         self.approved
-            && !matches!(self.phase.as_str(), "completed" | "publishing" | "merging" | "publication_failed")
+            && !matches!(
+                self.phase.as_str(),
+                "completed" | "publishing" | "merging" | "publication_failed"
+            )
             && (!self.paused || self.graph.nodes.len() == 1)
-            && !self.executions.iter().any(|execution| execution.node == name && execution.status == "running")
-            && !self.mergers.iter().any(|merger| merger.status == "running"
-                && (self.isolated_workspaces != Some(true)
-                    || merger.node == format!("merge:{name}")
-                    || self.executions.iter().rev().find(|execution| execution.node == name)
-                        .is_some_and(|execution| crate::path_identity::same_path(
-                            std::path::Path::new(&execution.worktree), std::path::Path::new(&merger.worktree)))))
-            && self.graph.edges.iter().filter(|edge| !edge.feedback && edge.to == name)
-                .all(|edge| self.nodes.get(&edge.from).is_some_and(|parent| parent.status == "completed"))
+            && !self
+                .executions
+                .iter()
+                .any(|execution| execution.node == name && execution.status == "running")
+            && !self.mergers.iter().any(|merger| {
+                merger.status == "running"
+                    && (self.isolated_workspaces != Some(true)
+                        || merger.node == format!("merge:{name}")
+                        || self
+                            .executions
+                            .iter()
+                            .rev()
+                            .find(|execution| execution.node == name)
+                            .is_some_and(|execution| {
+                                crate::path_identity::same_path(
+                                    std::path::Path::new(&execution.worktree),
+                                    std::path::Path::new(&merger.worktree),
+                                )
+                            }))
+            })
+            && self
+                .graph
+                .edges
+                .iter()
+                .filter(|edge| !edge.feedback && edge.to == name)
+                .all(|edge| {
+                    self.nodes
+                        .get(&edge.from)
+                        .is_some_and(|parent| parent.status == "completed")
+                })
             && (self.failed_retry_nodes().iter().any(|node| node == name)
-                || self.preparation_failed_nodes().iter().any(|node| node == name))
+                || self
+                    .preparation_failed_nodes()
+                    .iter()
+                    .any(|node| node == name))
     }
 
     /// Backend-owned recovery hint; neither a retry nor a completion claim.
@@ -2566,17 +2603,25 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.publication = None;
             state.phase = "running".into();
         }
-        EventKind::BatchHandoffRequested { recovery_execution_ids } => {
+        EventKind::BatchHandoffRequested {
+            recovery_execution_ids,
+        } => {
             state.batch_handoff = Some(BatchHandoff {
                 recovery_execution_ids: recovery_execution_ids.clone(),
             });
         }
         EventKind::BatchRecoveryCaptured { heads } => {
             if let Some(handoff) = &mut state.batch_handoff {
-                handoff.recovery_execution_ids.retain(|id| !heads.contains_key(id));
+                handoff
+                    .recovery_execution_ids
+                    .retain(|id| !heads.contains_key(id));
             }
             for (id, head) in heads {
-                if let Some(execution) = state.executions.iter().find(|execution| execution.id == *id) {
+                if let Some(execution) = state
+                    .executions
+                    .iter()
+                    .find(|execution| execution.id == *id)
+                {
                     if let Some(node) = state.nodes.get_mut(&execution.node) {
                         node.head = Some(head.clone());
                     }
@@ -2826,7 +2871,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 // A failed multi-source repair has a queued user continuation
                 // that duplicates the node instruction. Claim it so the retry
                 // keeps the feedback batch input and cannot re-batch the text.
-                if pending_followup && node.pending_messages.len() == 1
+                if pending_followup
+                    && node.pending_messages.len() == 1
                     && node.human_instruction
                     && node.pending_messages[0].instruction == node.instruction
                     && node
@@ -2934,7 +2980,13 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         | EventKind::NodeInputBound { .. }
         | EventKind::SteersWithdrawn { .. }
         | EventKind::QueueWithdrawalRecorded { .. } => {}
-        EventKind::NodeMessaged { node, instruction, images, queued, .. } => {
+        EventKind::NodeMessaged {
+            node,
+            instruction,
+            images,
+            queued,
+            ..
+        } => {
             if *queued {
                 // Passive input must not replace feedback/history directives,
                 // bump a revision, revive blocked work, or unpause the Run.
@@ -2967,7 +3019,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::EnvironmentPolicyResolved { environment, .. } => {
             if (state.environment_policy.as_deref() == Some("automatic-pending") && !state.approved)
                 || (state.isolated_workspaces.is_some()
-                    && !state.executions.iter().any(|execution| execution.status == "running"))
+                    && !state
+                        .executions
+                        .iter()
+                        .any(|execution| execution.status == "running"))
             {
                 if let Some(config) = state.config.as_mut() {
                     config.environment = environment.clone();
@@ -3286,7 +3341,10 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.phase = if state.paused { "paused" } else { "running" }.into();
         }
         EventKind::FeedbackContinuationQueued { node, continuation } => {
-            let node = state.nodes.get_mut(node).expect("validated feedback descendant");
+            let node = state
+                .nodes
+                .get_mut(node)
+                .expect("validated feedback descendant");
             node.feedback_continuation = Some(continuation.clone());
             node.instruction = continuation.instruction.clone().unwrap_or_default();
             node.instruction_images = continuation.images.clone();
@@ -3453,12 +3511,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 if state.plan_type.as_deref() == Some("serial") {
                     state.graph.original_goal = instruction.clone();
                 }
-                if let Some(node) = state
-                    .graph
-                    .nodes
-                    .iter_mut()
-                    .find(|node| node.id == *target)
-                {
+                if let Some(node) = state.graph.nodes.iter_mut().find(|node| node.id == *target) {
                     node.task = instruction.clone();
                 }
             }

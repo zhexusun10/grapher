@@ -17,8 +17,13 @@ impl Runtime {
 
     /// One decision for both ready-group filtering and actual dispatch.
     pub(super) fn starts_private_batch(&self, count: usize) -> bool {
-        !self.active() && count > SHARED_SOURCE_BATCH_LIMIT
-            && self.state.config.as_ref().is_some_and(|config| config.isolate_parallel_nodes)
+        !self.active()
+            && count > SHARED_SOURCE_BATCH_LIMIT
+            && self
+                .state
+                .config
+                .as_ref()
+                .is_some_and(|config| config.isolate_parallel_nodes)
     }
 
     /// Recycling a slot and visiting it with Planner are different rights.
@@ -26,16 +31,16 @@ impl Runtime {
     pub(super) fn allocation_workspace_reserved(&self, path: &Path, owner: Option<&str>) -> bool {
         (self.batch_workspaces()
             && self.state.executions.iter().any(|execution| {
-                (execution.status == "failed" || (execution.status == "completed"
-                    && execution.after.as_ref().is_some_and(|head|
-                        !head.is_empty() && !self.state.published_heads.contains(head))))
+                (execution.status == "failed"
+                    || (execution.status == "completed"
+                        && execution.after.as_ref().is_some_and(|head| {
+                            !head.is_empty() && !self.state.published_heads.contains(head)
+                        })))
                     && Some(execution.node.as_str()) != owner
                     && !self.state.superseded_execution_ids.contains(&execution.id)
-                    && self
-                        .state
-                        .nodes
-                        .get(&execution.node)
-                        .is_some_and(|node| node.status != "completed" || execution.status == "completed")
+                    && self.state.nodes.get(&execution.node).is_some_and(|node| {
+                        node.status != "completed" || execution.status == "completed"
+                    })
                     && Self::same_workspace_path(Path::new(&execution.worktree), path)
             }))
             || self.workspace_reserved(path, owner)
@@ -53,8 +58,7 @@ impl Runtime {
                 } = &event.kind
                 {
                     skip_above = Some(
-                        skip_above
-                            .map_or(*handoff_sequence, |low: i64| low.min(*handoff_sequence)),
+                        skip_above.map_or(*handoff_sequence, |low: i64| low.min(*handoff_sequence)),
                     );
                     return None;
                 }
@@ -77,24 +81,37 @@ impl Runtime {
             return None;
         }
         let state = self.state.nodes.get(node)?;
-        if state.feedback_continuation.as_ref().is_some_and(|input| !input.dispatched) {
+        if state
+            .feedback_continuation
+            .as_ref()
+            .is_some_and(|input| !input.dispatched)
+        {
             return None; // old partial files were invalidated, only history survives
         }
         let previous = self.state.executions.iter().rev().find(|execution| {
             execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)
         })?;
-        let queued = state.continuation
-            || (state.human_instruction && !state.pending_messages.is_empty());
+        let queued =
+            state.continuation || (state.human_instruction && !state.pending_messages.is_empty());
         let failed = previous.status == "failed"
-            && (queued || state.status == "failed"
+            && (queued
+                || state.status == "failed"
                 || (state.status == "blocked" && self.state.node_has_own_blocked_failure(node)));
         let resolved = previous.status == "resolved"
-            && self.state.events.iter().rev().find_map(|event| match &event.kind {
-                EventKind::WorkspaceResolved { execution_id, head, .. }
-                    if execution_id == &previous.id => Some(head),
-                _ => None,
-            }).is_some_and(|head| state.head.as_ref() == Some(head)
-                && !self.state.published_heads.contains(head));
+            && self
+                .state
+                .events
+                .iter()
+                .rev()
+                .find_map(|event| match &event.kind {
+                    EventKind::WorkspaceResolved {
+                        execution_id, head, ..
+                    } if execution_id == &previous.id => Some(head),
+                    _ => None,
+                })
+                .is_some_and(|head| {
+                    state.head.as_ref() == Some(head) && !self.state.published_heads.contains(head)
+                });
         // Ordinary completed/running source nodes have no private recovery to
         // validate. Reject them before touching the source binding or paths.
         if state.edit_execution_id.is_some() || !(failed || resolved) {
@@ -103,7 +120,7 @@ impl Runtime {
         let repository = resolve_repository(&self.root, self.state.config.as_ref()?).ok()?;
         (!Self::same_workspace_path(Path::new(&previous.worktree), &repository)
             && !self.batch_recovery_was_delivered(previous))
-            .then_some(previous)
+        .then_some(previous)
     }
 
     /// Recovery and new human turns stay private, even with only one member
@@ -111,8 +128,10 @@ impl Runtime {
     pub(super) fn retained_private_continuation(&self, node: &str) -> Option<&Execution> {
         let previous = self.unfinished_private_execution(node)?;
         let state = self.state.nodes.get(node)?;
-        (state.continuation || (state.human_instruction && !state.pending_messages.is_empty())
-            || previous.status == "resolved").then_some(previous)
+        (state.continuation
+            || (state.human_instruction && !state.pending_messages.is_empty())
+            || previous.status == "resolved")
+            .then_some(previous)
     }
 
     /// A retained unfinished writer may run beside an already-started handoff
@@ -126,48 +145,87 @@ impl Runtime {
             return false;
         }
         let (Some(publication), Some(handoff), Some(previous), Some(state)) = (
-            self.state.publication.as_ref(), self.state.batch_handoff.as_ref(),
-            self.unfinished_private_execution(node), self.state.nodes.get(node),
-        ) else { return false; };
+            self.state.publication.as_ref(),
+            self.state.batch_handoff.as_ref(),
+            self.unfinished_private_execution(node),
+            self.state.nodes.get(node),
+        ) else {
+            return false;
+        };
         state.head.is_none()
             && state.feedback_workspace.is_none()
             && Path::new(&previous.worktree).is_dir()
             && !self.path_is_running(Path::new(&previous.worktree))
-            && self.planner_workspace_owner(previous).is_some_and(|owner| owner.id == previous.id)
+            && self
+                .planner_workspace_owner(previous)
+                .is_some_and(|owner| owner.id == previous.id)
             && !self.state.executions.iter().any(|execution| {
-                Self::same_workspace_path(Path::new(&execution.worktree), Path::new(&previous.worktree))
-                    && (execution.status == "running"
-                        || handoff.recovery_execution_ids.contains(&execution.id)
-                        || execution.after.as_ref().is_some_and(|head| publication.heads.contains(head)))
+                Self::same_workspace_path(
+                    Path::new(&execution.worktree),
+                    Path::new(&previous.worktree),
+                ) && (execution.status == "running"
+                    || handoff.recovery_execution_ids.contains(&execution.id)
+                    || execution
+                        .after
+                        .as_ref()
+                        .is_some_and(|head| publication.heads.contains(head)))
             })
-            && self.state.events.iter().any(|event| matches!(&event.kind,
-                EventKind::Prepared { execution_id, .. } if execution_id == &previous.id))
+            && self.state.events.iter().any(|event| {
+                matches!(&event.kind,
+                EventKind::Prepared { execution_id, .. } if execution_id == &previous.id)
+            })
     }
 
     /// Use the same complete topology layers as the overview, not the worker
     /// cap's subset. Legacy groups spanning layers also retain the intervening
     /// layers, so an unstarted dependency cannot be excluded from their scope.
     pub(super) fn topology_batch(&self, nodes: &[String]) -> Vec<String> {
-        let Some(plan) = &self.state.plan else { return nodes.to_vec(); };
-        let layers: Vec<_> = plan.execution_batches.iter().enumerate()
+        let Some(plan) = &self.state.plan else {
+            return nodes.to_vec();
+        };
+        let layers: Vec<_> = plan
+            .execution_batches
+            .iter()
+            .enumerate()
             .filter(|(_, layer)| layer.iter().any(|name| nodes.contains(name)))
-            .map(|(index, _)| index).collect();
-        let (Some(first), Some(last)) = (layers.first(), layers.last()) else { return nodes.to_vec(); };
-        plan.execution_batches[*first..=*last].iter().flatten().cloned().collect()
+            .map(|(index, _)| index)
+            .collect();
+        let (Some(first), Some(last)) = (layers.first(), layers.last()) else {
+            return nodes.to_vec();
+        };
+        plan.execution_batches[*first..=*last]
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
     }
 
     /// Keep unfinished prerequisite layers schedulable: a whole layer can
     /// contain blocked peers whose parents are outside the original dispatch.
     fn private_batch_scope(&self, nodes: &[String]) -> Vec<String> {
-        let mut scope: Vec<_> = nodes.iter().filter(|name| self.state.nodes.contains_key(*name)).cloned().collect();
+        let mut scope: Vec<_> = nodes
+            .iter()
+            .filter(|name| self.state.nodes.contains_key(*name))
+            .cloned()
+            .collect();
         loop {
             let mut required: BTreeSet<_> = scope.iter().cloned().collect();
             for name in &scope {
-                required.extend(self.dependency_ancestors(name).into_iter().filter(|parent|
-                    self.state.nodes.get(parent).is_some_and(|node| node.status != "completed")));
+                required.extend(
+                    self.dependency_ancestors(name)
+                        .into_iter()
+                        .filter(|parent| {
+                            self.state
+                                .nodes
+                                .get(parent)
+                                .is_some_and(|node| node.status != "completed")
+                        }),
+                );
             }
             let next = self.topology_batch(&required.into_iter().collect::<Vec<_>>());
-            if next == scope { return scope; }
+            if next == scope {
+                return scope;
+            }
             scope = next;
         }
     }
@@ -176,29 +234,66 @@ impl Runtime {
     /// into a private slot just because its consumers have a held batch. Prove
     /// its mode from the dispatch event; a matching path alone grants nothing.
     pub(super) fn source_batch_recovery(&self, node: &str) -> bool {
-        if !self.state.private_batch.iter().any(|name| name == node) { return false; }
-        let Some(state) = self.state.nodes.get(node) else { return false; };
+        if !self.state.private_batch.iter().any(|name| name == node) {
+            return false;
+        }
+        let Some(state) = self.state.nodes.get(node) else {
+            return false;
+        };
         if !state.continuation && !(state.human_instruction && !state.pending_messages.is_empty()) {
             return false;
         }
-        if state.edit_execution_id.is_some() || state.feedback_workspace.is_some()
-            || state.feedback_continuation.as_ref().is_some_and(|input| !input.dispatched) { return false; }
-        let Some(previous) = self.state.executions.iter().rev().find(|execution|
-            execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)) else { return false; };
-        if previous.status != "failed" { return false; }
-        let Some(config) = &self.state.config else { return false; };
-        let Ok(repository) = resolve_repository(&self.root, config) else { return false; };
-        if !Self::same_workspace_path(Path::new(&previous.worktree), &repository) { return false; }
-        let Some(start) = self.state.events.iter().position(|event| matches!(&event.kind,
-            EventKind::Started { execution, .. } if execution.id == previous.id)) else { return false; };
-        self.state.events[..start].iter().rev().find_map(|event| match &event.kind {
-            EventKind::ExecutionBatchStarted { nodes, isolated, .. } => Some(!isolated && nodes.iter().any(|name| name == node)),
-            _ => None,
-        }).unwrap_or(false)
+        if state.edit_execution_id.is_some()
+            || state.feedback_workspace.is_some()
+            || state
+                .feedback_continuation
+                .as_ref()
+                .is_some_and(|input| !input.dispatched)
+        {
+            return false;
+        }
+        let Some(previous) = self.state.executions.iter().rev().find(|execution| {
+            execution.node == node && !self.state.superseded_execution_ids.contains(&execution.id)
+        }) else {
+            return false;
+        };
+        if previous.status != "failed" {
+            return false;
+        }
+        let Some(config) = &self.state.config else {
+            return false;
+        };
+        let Ok(repository) = resolve_repository(&self.root, config) else {
+            return false;
+        };
+        if !Self::same_workspace_path(Path::new(&previous.worktree), &repository) {
+            return false;
+        }
+        let Some(start) = self.state.events.iter().position(|event| {
+            matches!(&event.kind,
+            EventKind::Started { execution, .. } if execution.id == previous.id)
+        }) else {
+            return false;
+        };
+        self.state.events[..start]
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ExecutionBatchStarted {
+                    nodes, isolated, ..
+                } => Some(!isolated && nodes.iter().any(|name| name == node)),
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 
     pub(super) fn restore_private_batch(&mut self) -> Result<(), String> {
-        if !self.batch_workspaces() || matches!(self.state.phase.as_str(), "publishing" | "merging" | "publication_failed") {
+        if !self.batch_workspaces()
+            || matches!(
+                self.state.phase.as_str(),
+                "publishing" | "merging" | "publication_failed"
+            )
+        {
             return Ok(());
         }
         if !self.state.private_batch.is_empty() {
@@ -206,12 +301,19 @@ impl Runtime {
             if scope != self.state.private_batch {
                 self.emit(EventKind::PrivateBatchSelected { nodes: scope })?;
             }
-            if self.state.private_batch.is_empty() { return Ok(()); }
+            if self.state.private_batch.is_empty() {
+                return Ok(());
+            }
             // Unchanged/no-op results can already be delivered. Do not strand
             // subsequent work behind a batch with no publication left to do.
-            if self.state.private_batch.iter().all(|name| self.state.nodes.get(name).is_none_or(|node|
-                node.status == "completed" && node.head.as_ref().is_none_or(|head|
-                    head.is_empty() || self.state.published_heads.contains(head)))) {
+            if self.state.private_batch.iter().all(|name| {
+                self.state.nodes.get(name).is_none_or(|node| {
+                    node.status == "completed"
+                        && node.head.as_ref().is_none_or(|head| {
+                            head.is_empty() || self.state.published_heads.contains(head)
+                        })
+                })
+            }) {
                 self.emit(EventKind::PrivateBatchSelected { nodes: vec![] })?;
             }
             return Ok(());
@@ -219,16 +321,31 @@ impl Runtime {
         // Adopt an older in-flight private dispatch without moving its writers
         // or refreshing source. Graph revisions reconcile the surviving scope;
         // explicit feedback/history branching still retires the old scope.
-        let previous = self.state.events.iter().rev().find_map(|event| match &event.kind {
-            EventKind::ExecutionBatchStarted { nodes, isolated, .. } => Some((*isolated).then_some(nodes.clone())),
-            EventKind::PublicationCompleted { .. } | EventKind::ConversationEdited { .. }
-                | EventKind::PrivateBatchSelected { .. } | EventKind::Invalidated { human: false, .. } => Some(None),
-            _ => None,
-        }).flatten();
+        let previous = self
+            .state
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ExecutionBatchStarted {
+                    nodes, isolated, ..
+                } => Some((*isolated).then_some(nodes.clone())),
+                EventKind::PublicationCompleted { .. }
+                | EventKind::ConversationEdited { .. }
+                | EventKind::PrivateBatchSelected { .. }
+                | EventKind::Invalidated { human: false, .. } => Some(None),
+                _ => None,
+            })
+            .flatten();
         if let Some(nodes) = previous {
-            if self.state.isolated_workspaces == Some(true) && self.state.executions.iter().any(|e|
-                nodes.contains(&e.node) && !self.state.superseded_execution_ids.contains(&e.id)) {
-                self.emit(EventKind::PrivateBatchSelected { nodes: self.private_batch_scope(&nodes) })?;
+            if self.state.isolated_workspaces == Some(true)
+                && self.state.executions.iter().any(|e| {
+                    nodes.contains(&e.node) && !self.state.superseded_execution_ids.contains(&e.id)
+                })
+            {
+                self.emit(EventKind::PrivateBatchSelected {
+                    nodes: self.private_batch_scope(&nodes),
+                })?;
             }
         }
         Ok(())
@@ -245,42 +362,73 @@ impl Runtime {
         allow_delivery: bool,
     ) -> Result<Option<PathBuf>, String> {
         if matches!(self.state.phase.as_str(), "publishing" | "merging") {
-            if ready.is_empty() || !ready.iter().all(|node|
-                self.private_continuation_during_publication(&node.id)) {
+            if ready.is_empty()
+                || !ready
+                    .iter()
+                    .all(|node| self.private_continuation_during_publication(&node.id))
+            {
                 return Ok(None);
             }
-            return resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?).map(Some);
+            return resolve_repository(
+                &self.root,
+                self.state.config.as_ref().ok_or("Missing config")?,
+            )
+            .map(Some);
         }
         let active = self.active();
-        let source_recovery = !ready.is_empty() && ready.iter().all(|node|
-            self.source_batch_recovery(&node.id));
+        let source_recovery = !ready.is_empty()
+            && ready
+                .iter()
+                .all(|node| self.source_batch_recovery(&node.id));
         if source_recovery {
-            if active && (!self.shared_source_workspace()
-                || self.state.result_execution.as_ref().is_some_and(|e| e.status == "running")
-                || self.state.mergers.iter().any(|e| e.status == "running")) {
+            if active
+                && (!self.shared_source_workspace()
+                    || self
+                        .state
+                        .result_execution
+                        .as_ref()
+                        .is_some_and(|e| e.status == "running")
+                    || self.state.mergers.iter().any(|e| e.status == "running"))
+            {
                 return Ok(None);
             }
-            let repository = resolve_repository(&self.root, self.state.config.as_ref().ok_or("Missing config")?)?;
-            if self.state.executions.iter().any(|e| e.status == "running"
-                && !Self::same_workspace_path(Path::new(&e.worktree), &repository)) {
+            let repository = resolve_repository(
+                &self.root,
+                self.state.config.as_ref().ok_or("Missing config")?,
+            )?;
+            if self.state.executions.iter().any(|e| {
+                e.status == "running"
+                    && !Self::same_workspace_path(Path::new(&e.worktree), &repository)
+            }) {
                 return Ok(None);
             }
             // Keep the pending private delivery group. `resumed` on a source
             // dispatch records this temporary recovery, not a new shared batch.
             self.emit(EventKind::ExecutionBatchStarted {
-                nodes: ready.iter().map(|node| node.id.clone()).collect(), isolated: false, resumed: true,
+                nodes: ready.iter().map(|node| node.id.clone()).collect(),
+                isolated: false,
+                resumed: true,
             })?;
             return Ok(Some(repository));
         }
-        let retained = !ready.is_empty() && ready.iter().all(|node|
-            self.retained_private_continuation(&node.id).is_some());
-        let private_dispatch = retained || (!self.state.private_batch.is_empty() && !ready.is_empty());
-        if active && (ready.is_empty()
-            || (!private_dispatch && !self.shared_source_workspace())
-            || (private_dispatch && self.shared_source_workspace())
-            || (!private_dispatch && self.state.mergers.iter().any(|e| e.status == "running"))
-            || self.state.phase == "launching_result"
-            || self.state.result_execution.as_ref().is_some_and(|e| e.status == "running")) {
+        let retained = !ready.is_empty()
+            && ready
+                .iter()
+                .all(|node| self.retained_private_continuation(&node.id).is_some());
+        let private_dispatch =
+            retained || (!self.state.private_batch.is_empty() && !ready.is_empty());
+        if active
+            && (ready.is_empty()
+                || (!private_dispatch && !self.shared_source_workspace())
+                || (private_dispatch && self.shared_source_workspace())
+                || (!private_dispatch && self.state.mergers.iter().any(|e| e.status == "running"))
+                || self.state.phase == "launching_result"
+                || self
+                    .state
+                    .result_execution
+                    .as_ref()
+                    .is_some_and(|e| e.status == "running"))
+        {
             return Ok(None);
         }
         let config = self.state.config.as_ref().ok_or("Missing config")?;
@@ -291,11 +439,17 @@ impl Runtime {
             Err(_) if active => return Ok(None),
             result => result?,
         };
-        if active && (private_dispatch && self.path_is_running(&repository)
-            || !private_dispatch && self.state.executions.iter().any(|execution| {
-                execution.status == "running"
-                    && !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
-            })) {
+        if active
+            && (private_dispatch && self.path_is_running(&repository)
+                || !private_dispatch
+                    && self.state.executions.iter().any(|execution| {
+                        execution.status == "running"
+                            && !Self::same_workspace_path(
+                                Path::new(&execution.worktree),
+                                &repository,
+                            )
+                    }))
+        {
             return Ok(None);
         }
         // Private siblings may refill slots and retry independently. Only a
@@ -304,7 +458,10 @@ impl Runtime {
         if private_dispatch {
             for node in ready {
                 if let Some(previous) = self.retained_private_continuation(&node.id) {
-                    if self.planner_workspace_owner(previous).is_none_or(|owner| owner.id != previous.id) {
+                    if self
+                        .planner_workspace_owner(previous)
+                        .is_none_or(|owner| owner.id != previous.id)
+                    {
                         return Err("Retained unfinished workspace was reassigned; refusing to resume another execution's files".into());
                     }
                     if self.path_is_running(Path::new(&previous.worktree)) {
@@ -314,13 +471,24 @@ impl Runtime {
             }
             if self.state.private_batch.is_empty() {
                 self.emit(EventKind::PrivateBatchSelected {
-                    nodes: self.private_batch_scope(&ready.iter().map(|node| node.id.clone()).collect::<Vec<_>>()),
+                    nodes: self.private_batch_scope(
+                        &ready.iter().map(|node| node.id.clone()).collect::<Vec<_>>(),
+                    ),
                 })?;
             }
-            let recovered_source = self.shared_source_workspace() && self.state.events.iter().rev().find_map(|event| match &event.kind {
-                EventKind::ExecutionBatchStarted { isolated, resumed, .. } => Some(!isolated && *resumed),
-                _ => None,
-            }).unwrap_or(false);
+            let recovered_source = self.shared_source_workspace()
+                && self
+                    .state
+                    .events
+                    .iter()
+                    .rev()
+                    .find_map(|event| match &event.kind {
+                        EventKind::ExecutionBatchStarted {
+                            isolated, resumed, ..
+                        } => Some(!isolated && *resumed),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
             self.emit(EventKind::ExecutionBatchStarted {
                 nodes: ready.iter().map(|node| node.id.clone()).collect(),
                 isolated: true,
@@ -332,9 +500,17 @@ impl Runtime {
         }
         // Unstarted/blocked peers left behind by the worker cap also belong to
         // this batch. An idle subset is never permission for partial delivery.
-        if self.state.private_batch.iter().any(|name|
-                self.state.nodes.get(name).is_some_and(|node| node.status != "completed"))
-            || self.state.nodes.keys().any(|node| self.unfinished_private_execution(node).is_some()) {
+        if self.state.private_batch.iter().any(|name| {
+            self.state
+                .nodes
+                .get(name)
+                .is_some_and(|node| node.status != "completed")
+        }) || self
+            .state
+            .nodes
+            .keys()
+            .any(|node| self.unfinished_private_execution(node).is_some())
+        {
             if !active && allow_delivery && self.state.phase != "needs_attention" {
                 self.emit(EventKind::Settled)?;
             }
@@ -344,12 +520,17 @@ impl Runtime {
         for execution in &self.state.executions {
             // Source results have empty heads. Check that cheap evidence before
             // resolving any physical workspace identity in historical records.
-            let Some(head) = execution.after.as_ref()
+            let Some(head) = execution
+                .after
+                .as_ref()
                 .filter(|head| !head.is_empty() && !self.state.published_heads.contains(head))
-            else { continue; };
+            else {
+                continue;
+            };
             if execution.status == "completed"
                 && self.state.nodes.contains_key(&execution.node)
-                && (self.state.private_batch.is_empty() || self.state.private_batch.contains(&execution.node))
+                && (self.state.private_batch.is_empty()
+                    || self.state.private_batch.contains(&execution.node))
                 && !self.state.superseded_execution_ids.contains(&execution.id)
                 && !Self::same_workspace_path(Path::new(&execution.worktree), &repository)
             {
@@ -430,7 +611,9 @@ impl Runtime {
         }
         if isolated {
             events.push(EventKind::PrivateBatchSelected {
-                nodes: self.private_batch_scope(&ready.iter().map(|node| node.id.clone()).collect::<Vec<_>>()),
+                nodes: self.private_batch_scope(
+                    &ready.iter().map(|node| node.id.clone()).collect::<Vec<_>>(),
+                ),
             });
         }
         events.push(EventKind::ExecutionBatchStarted {

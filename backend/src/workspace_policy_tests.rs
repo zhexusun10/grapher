@@ -145,55 +145,127 @@ fn deliver_batch(runtime: &mut Runtime) {
 /// and capture failed work before retry. New scheduling must never emit this.
 #[cfg(feature = "fixture")]
 fn legacy_handoff(runtime: &mut Runtime, recovery_nodes: &[&str]) {
-    let recovery_execution_ids = recovery_nodes.iter().map(|name| {
-        runtime.state.executions.iter().rev().find(|e| e.node == *name).unwrap().id.clone()
-    }).collect();
-    let heads = runtime.state.executions.iter().filter_map(|execution|
-        execution.after.as_ref().filter(|head|
-            !head.is_empty() && !runtime.state.published_heads.contains(head)).cloned()).collect();
-    runtime.emit_outputs(vec![
-        EventKind::BatchHandoffRequested { recovery_execution_ids },
-        EventKind::PublicationStarted { repository: runtime.state.config.as_ref().unwrap().repository.clone(), heads },
-    ]).unwrap();
+    let recovery_execution_ids = recovery_nodes
+        .iter()
+        .map(|name| {
+            runtime
+                .state
+                .executions
+                .iter()
+                .rev()
+                .find(|e| e.node == *name)
+                .unwrap()
+                .id
+                .clone()
+        })
+        .collect();
+    let heads = runtime
+        .state
+        .executions
+        .iter()
+        .filter_map(|execution| {
+            execution
+                .after
+                .as_ref()
+                .filter(|head| !head.is_empty() && !runtime.state.published_heads.contains(head))
+                .cloned()
+        })
+        .collect();
+    runtime
+        .emit_outputs(vec![
+            EventKind::BatchHandoffRequested {
+                recovery_execution_ids,
+            },
+            EventKind::PublicationStarted {
+                repository: runtime.state.config.as_ref().unwrap().repository.clone(),
+                heads,
+            },
+        ])
+        .unwrap();
 }
 
 #[test]
 fn capped_dispatch_prioritizes_waiting_peers_without_blocking_ready_descendants() {
     // Deliberately put the child first: planner insertion order is not priority.
-    let (_temp, _source, mut runtime) = adaptive(false,
-        graph(&["child", "a", "b", "overflow"], &[("a", "child")]), false, 2);
+    let (_temp, _source, mut runtime) = adaptive(
+        false,
+        graph(&["child", "a", "b", "overflow"], &[("a", "child")]),
+        false,
+        2,
+    );
     let first = runtime.jobs().unwrap();
-    assert_eq!(first.iter().map(|j| j.execution.node.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+    assert_eq!(
+        first
+            .iter()
+            .map(|j| j.execution.node.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
     finish_shared(&mut runtime, &first[0], "done");
     let refill = runtime.jobs().unwrap();
     assert_eq!(refill.len(), 1);
-    assert_eq!(refill[0].execution.node, "overflow", "already-ready peer must not be displaced by the child");
+    assert_eq!(
+        refill[0].execution.node, "overflow",
+        "already-ready peer must not be displaced by the child"
+    );
     finish_shared(&mut runtime, &first[1], "done");
     let child = runtime.jobs().unwrap();
     assert_eq!(child.len(), 1);
-    assert_eq!(child[0].execution.node, "child", "layers must not block independent ready work");
+    assert_eq!(
+        child[0].execution.node, "child",
+        "layers must not block independent ready work"
+    );
 }
 
 #[test]
 fn adopting_a_legacy_multilayer_private_batch_keeps_intervening_dependencies() {
-    let (_temp, _source, runtime) = adaptive(false,
-        graph(&["a", "b", "middle", "deep"], &[("a", "middle"), ("middle", "deep")]), true, 3);
-    assert_eq!(runtime.topology_batch(&["b".into(), "deep".into()]), ["a", "b", "middle", "deep"]);
+    let (_temp, _source, runtime) = adaptive(
+        false,
+        graph(
+            &["a", "b", "middle", "deep"],
+            &[("a", "middle"), ("middle", "deep")],
+        ),
+        true,
+        3,
+    );
+    assert_eq!(
+        runtime.topology_batch(&["b".into(), "deep".into()]),
+        ["a", "b", "middle", "deep"]
+    );
 }
 
 #[cfg(feature = "fixture")]
 #[test]
 fn private_topology_batch_refills_slots_and_delivers_all_peers_together_across_restart() {
     for restart in [false, true] {
-        let (_temp, source, mut runtime) = adaptive(false,
-            graph(&["child", "a", "b", "c", "d", "overflow1", "overflow2"], &[("a", "child")]), true, 4);
+        let (_temp, source, mut runtime) = adaptive(
+            false,
+            graph(
+                &["child", "a", "b", "c", "d", "overflow1", "overflow2"],
+                &[("a", "child")],
+            ),
+            true,
+            4,
+        );
         let mut first = runtime.jobs().unwrap();
         assert_eq!(first.len(), 4);
         let members = runtime.state.plan.as_ref().unwrap().execution_batches[0].clone();
         assert_eq!(runtime.state.private_batch, members);
-        assert_eq!(crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["privateBatch"], serde_json::json!(members));
-        for job in &mut first { prepare_private(&mut runtime, job); }
-        for job in &first[..3] { finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done"); }
+        assert_eq!(
+            crate::snapshot_view::snapshot_metadata(&runtime.state).unwrap()["privateBatch"],
+            serde_json::json!(members)
+        );
+        for job in &mut first {
+            prepare_private(&mut runtime, job);
+        }
+        for job in &first[..3] {
+            finish_private(
+                &mut runtime,
+                job,
+                &format!("{}.txt", job.execution.node),
+                "done",
+            );
+        }
         let baseline = runtime.latest_source_head().to_owned();
         if restart {
             finish_private(&mut runtime, &first[3], "d.txt", "done");
@@ -203,18 +275,39 @@ fn private_topology_batch_refills_slots_and_delivers_all_peers_together_across_r
             assert_eq!(runtime.state.private_batch, members);
             runtime.resume_scheduling().unwrap();
         }
-        fs::write(source.join("external.txt"), "source edit during private batch").unwrap();
+        fs::write(
+            source.join("external.txt"),
+            "source edit during private batch",
+        )
+        .unwrap();
         let mut next = runtime.jobs().unwrap();
-        assert_eq!(next.iter().map(|j| j.execution.node.as_str()).collect::<Vec<_>>(), ["overflow1", "overflow2"]);
+        assert_eq!(
+            next.iter()
+                .map(|j| j.execution.node.as_str())
+                .collect::<Vec<_>>(),
+            ["overflow1", "overflow2"]
+        );
         assert!(runtime.state.publication.is_none());
         assert_eq!(runtime.state.nodes["child"].status, "waiting");
         for job in &mut next {
             assert!(!job.source_direct && !job.materialize_source);
             assert_eq!(job.expected_source_head, baseline);
-            assert!(first.iter().all(|old| old.execution.worktree != job.execution.worktree), "unpublished sibling slots are not recyclable");
+            assert!(
+                first
+                    .iter()
+                    .all(|old| old.execution.worktree != job.execution.worktree),
+                "unpublished sibling slots are not recyclable"
+            );
             prepare_private(&mut runtime, job);
-            assert!(!Path::new(&job.execution.worktree).join("external.txt").exists());
-            finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+            assert!(!Path::new(&job.execution.worktree)
+                .join("external.txt")
+                .exists());
+            finish_private(
+                &mut runtime,
+                job,
+                &format!("{}.txt", job.execution.node),
+                "done",
+            );
         }
         if !restart {
             assert!(runtime.jobs().unwrap().is_empty());
@@ -223,14 +316,29 @@ fn private_topology_batch_refills_slots_and_delivers_all_peers_together_across_r
         }
         assert!(runtime.jobs().unwrap().is_empty());
         assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 6);
-        for name in &members { assert!(!source.join(format!("{name}.txt")).exists()); }
+        for name in &members {
+            assert!(!source.join(format!("{name}.txt")).exists());
+        }
         deliver_batch(&mut runtime);
         assert!(runtime.state.private_batch.is_empty());
-        for name in &members { assert!(source.join(format!("{name}.txt")).is_file()); }
-        assert_eq!(runtime.state.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 1);
+        for name in &members {
+            assert!(source.join(format!("{name}.txt")).is_file());
+        }
+        assert_eq!(
+            runtime
+                .state
+                .events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. }))
+                .count(),
+            1
+        );
         let child = runtime.jobs().unwrap().remove(0);
         assert_eq!(child.execution.node, "child");
-        assert!(child.source_direct, "shared/private selection for a new small group remains unchanged");
+        assert!(
+            child.source_direct,
+            "shared/private selection for a new small group remains unchanged"
+        );
     }
 }
 
@@ -238,35 +346,81 @@ fn private_topology_batch_refills_slots_and_delivers_all_peers_together_across_r
 #[test]
 fn independent_private_retry_does_not_wait_for_running_siblings() {
     for stopped in [false, true] {
-        let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 4);
+        let (_temp, source, mut runtime) =
+            adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 4);
         let mut first = runtime.jobs().unwrap();
-        for job in &mut first { prepare_private(&mut runtime, job); }
-        let original = first[0].execution.clone();
-        fs::write(Path::new(&original.worktree).join("partial.txt"), "retained").unwrap();
-        if stopped { runtime.request_execution_stop(Some("a")).unwrap(); }
-        runtime.finish(&original, Err("provider failed or user stopped".into())).unwrap();
-        for job in &first[2..] {
-            finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+        for job in &mut first {
+            prepare_private(&mut runtime, job);
         }
-        let merger = Execution { id: Uuid::new_v4().to_string(), node: "merge:b".into(), ..first[1].execution.clone() };
+        let original = first[0].execution.clone();
+        fs::write(
+            Path::new(&original.worktree).join("partial.txt"),
+            "retained",
+        )
+        .unwrap();
+        if stopped {
+            runtime.request_execution_stop(Some("a")).unwrap();
+        }
+        runtime
+            .finish(&original, Err("provider failed or user stopped".into()))
+            .unwrap();
+        for job in &first[2..] {
+            finish_private(
+                &mut runtime,
+                job,
+                &format!("{}.txt", job.execution.node),
+                "done",
+            );
+        }
+        let merger = Execution {
+            id: Uuid::new_v4().to_string(),
+            node: "merge:b".into(),
+            ..first[1].execution.clone()
+        };
         let mut alias = runtime.state.clone();
-        alias.mergers.push(Execution { worktree: original.worktree.clone(), ..merger.clone() });
-        assert!(!alias.can_resume_node("a"), "even a differently named Merger cannot overlap the retained directory");
-        runtime.emit(EventKind::MergerStarted { execution: merger.clone() }).unwrap();
-        assert!(runtime.state.can_resume_node("a"), "an unrelated private Merger must not disable Continue");
+        alias.mergers.push(Execution {
+            worktree: original.worktree.clone(),
+            ..merger.clone()
+        });
+        assert!(
+            !alias.can_resume_node("a"),
+            "even a differently named Merger cannot overlap the retained directory"
+        );
+        runtime
+            .emit(EventKind::MergerStarted {
+                execution: merger.clone(),
+            })
+            .unwrap();
+        assert!(
+            runtime.state.can_resume_node("a"),
+            "an unrelated private Merger must not disable Continue"
+        );
         runtime.resume_node("a").unwrap();
         let mut retry = runtime.jobs().unwrap().remove(0);
         assert_eq!(runtime.state.nodes["b"].status, "running");
         assert_eq!(retry.execution.worktree, original.worktree);
         assert_eq!(retry.execution.session_id, original.session_id);
-        assert_eq!(retry.execution.attempt, original.attempt + usize::from(!stopped));
+        assert_eq!(
+            retry.execution.attempt,
+            original.attempt + usize::from(!stopped)
+        );
         prepare_private(&mut runtime, &mut retry);
-        assert_eq!(fs::read_to_string(Path::new(&retry.execution.worktree).join("partial.txt")).unwrap(), "retained");
+        assert_eq!(
+            fs::read_to_string(Path::new(&retry.execution.worktree).join("partial.txt")).unwrap(),
+            "retained"
+        );
         finish_private(&mut runtime, &retry, "a.txt", "done");
         assert!(runtime.jobs().unwrap().is_empty());
         assert!(runtime.state.publication.is_none());
         assert!(!source.join("a.txt").exists() && !source.join("c.txt").exists());
-        runtime.emit(EventKind::MergerFinished { execution_id: merger.id, head: merger.before, output_bytes: 0, metrics: None }).unwrap();
+        runtime
+            .emit(EventKind::MergerFinished {
+                execution_id: merger.id,
+                head: merger.before,
+                output_bytes: 0,
+                metrics: None,
+            })
+            .unwrap();
         finish_private(&mut runtime, &first[1], "b.txt", "done");
         runtime.jobs().unwrap();
         assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 4);
@@ -287,21 +441,31 @@ fn resolved_private_inputs_wait_for_task_success_before_batch_delivery_across_re
                 // emitted Prepared or admitted an agent/session.
                 attach(&mut runtime, &mut job);
                 workspace::prepare(
-                    &source, Path::new(&job.execution.worktree), &job.execution.before, &[],
-                ).unwrap();
+                    &source,
+                    Path::new(&job.execution.worktree),
+                    &job.execution.before,
+                    &[],
+                )
+                .unwrap();
             } else {
                 prepare_private(&mut runtime, &mut job);
             }
             if job.execution.node == "a" {
                 let path = Path::new(&job.execution.worktree);
                 fs::write(path.join("resolved-input.txt"), "manual resolution").unwrap();
-                workspace::snapshot_node_for_run(
-                    path, &source, "a", Some(&runtime.state.run_id),
-                ).unwrap();
-                runtime.finish(&job.execution, Err("Workspace composition blocked".into())).unwrap();
+                workspace::snapshot_node_for_run(path, &source, "a", Some(&runtime.state.run_id))
+                    .unwrap();
+                runtime
+                    .finish(&job.execution, Err("Workspace composition blocked".into()))
+                    .unwrap();
                 resolved_id = job.execution.id.clone();
             } else {
-                finish_private(&mut runtime, &job, &format!("{}.txt", job.execution.node), "done");
+                finish_private(
+                    &mut runtime,
+                    &job,
+                    &format!("{}.txt", job.execution.node),
+                    "done",
+                );
             }
         }
         assert!(runtime.jobs().unwrap().is_empty());
@@ -309,11 +473,22 @@ fn resolved_private_inputs_wait_for_task_success_before_batch_delivery_across_re
         let root = runtime.root.clone();
         drop(runtime);
         let mut runtime = Runtime::open(&root).unwrap();
-        let previous = runtime.state.executions.iter()
-            .find(|execution| execution.id == resolved_id).unwrap();
+        let previous = runtime
+            .state
+            .executions
+            .iter()
+            .find(|execution| execution.id == resolved_id)
+            .unwrap();
         assert_eq!(previous.before.is_empty(), !prepared);
-        assert_eq!(runtime.state.events.iter().any(|event| matches!(&event.kind,
-            EventKind::Prepared { execution_id, .. } if execution_id == &resolved_id)), prepared);
+        assert_eq!(
+            runtime
+                .state
+                .events
+                .iter()
+                .any(|event| matches!(&event.kind,
+            EventKind::Prepared { execution_id, .. } if execution_id == &resolved_id)),
+            prepared
+        );
         runtime.resolved("a").unwrap();
         let resolved_head = runtime.state.nodes["a"].head.clone().unwrap();
         drop(runtime);
@@ -322,25 +497,47 @@ fn resolved_private_inputs_wait_for_task_success_before_batch_delivery_across_re
         let mut retry = runtime.jobs().unwrap().remove(0);
         assert!(runtime.state.publication.is_none() && runtime.state.batch_handoff.is_none());
         assert!(!source.join("resolved-input.txt").exists() && !source.join("b.txt").exists());
-        let previous = runtime.state.executions.iter().find(|execution| execution.id == resolved_id).unwrap();
+        let previous = runtime
+            .state
+            .executions
+            .iter()
+            .find(|execution| execution.id == resolved_id)
+            .unwrap();
         assert_eq!(previous.status, "resolved");
-        assert!(previous.after.is_none(), "acknowledging a repair must not manufacture a result");
+        assert!(
+            previous.after.is_none(),
+            "acknowledging a repair must not manufacture a result"
+        );
         assert_eq!(retry.execution.worktree, previous.worktree);
         assert_eq!(retry.execution.session_id, previous.session_id);
         assert!(!retry.source_direct && !retry.materialize_source);
         assert!(retry.preserved_workspace.is_some());
         assert_eq!(retry.execution.before, resolved_head);
         prepare_private(&mut runtime, &mut retry);
-        assert_eq!(fs::read_to_string(Path::new(&retry.execution.worktree).join("resolved-input.txt")).unwrap(), "manual resolution");
+        assert_eq!(
+            fs::read_to_string(Path::new(&retry.execution.worktree).join("resolved-input.txt"))
+                .unwrap(),
+            "manual resolution"
+        );
         finish_private(&mut runtime, &retry, "a.txt", "done");
         runtime.jobs().unwrap();
         assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 4);
         deliver_batch(&mut runtime);
-        assert_eq!(fs::read_to_string(source.join("resolved-input.txt")).unwrap(), "manual resolution");
+        assert_eq!(
+            fs::read_to_string(source.join("resolved-input.txt")).unwrap(),
+            "manual resolution"
+        );
         runtime.jobs().unwrap();
         assert_eq!(runtime.state.phase, "completed");
-        assert_eq!(runtime.state.events.iter().filter(|event|
-            matches!(event.kind, EventKind::PublicationCompleted { .. })).count(), 1);
+        assert_eq!(
+            runtime
+                .state
+                .events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::PublicationCompleted { .. }))
+                .count(),
+            1
+        );
     }
 }
 
@@ -357,10 +554,16 @@ fn resolved_rejects_missing_or_rewritten_preparation_evidence() {
             } else {
                 attach(&mut runtime, &mut job);
                 workspace::prepare(
-                    &source, Path::new(&job.execution.worktree), &job.execution.before, &[],
-                ).unwrap();
+                    &source,
+                    Path::new(&job.execution.worktree),
+                    &job.execution.before,
+                    &[],
+                )
+                .unwrap();
             }
-            runtime.finish(&job.execution, Err("Workspace composition blocked".into())).unwrap();
+            runtime
+                .finish(&job.execution, Err("Workspace composition blocked".into()))
+                .unwrap();
             if job.execution.node == "a" {
                 target = Some(job.execution);
             }
@@ -377,7 +580,8 @@ fn resolved_rejects_missing_or_rewritten_preparation_evidence() {
             }
             _ => {
                 let tree = workspace::git(path, &["rev-parse", "HEAD^{tree}"]).unwrap();
-                let head = workspace::git(path, &["commit-tree", &tree, "-m", "unrelated history"]).unwrap();
+                let head = workspace::git(path, &["commit-tree", &tree, "-m", "unrelated history"])
+                    .unwrap();
                 workspace::git(path, &["update-ref", "HEAD", &head]).unwrap();
                 if damage == "recorded" {
                     // A valid but different local ref must not override the
@@ -392,15 +596,32 @@ fn resolved_rejects_missing_or_rewritten_preparation_evidence() {
         let index = fs::read(&index_path).unwrap();
         runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
         let error = runtime.resolved("a").unwrap_err();
-        assert!(error.contains("preparation base") || error.contains("prepared Git history"),
-            "{damage}: {error}");
+        assert!(
+            error.contains("preparation base") || error.contains("prepared Git history"),
+            "{damage}: {error}"
+        );
         assert_eq!(runtime.state.nodes["a"].status, "blocked");
-        assert_eq!(runtime.state.executions.iter().find(|execution| execution.id == target.id).unwrap().status, "failed");
-        assert!(!runtime.state.events.iter().any(|event|
-            matches!(event.kind, EventKind::WorkspaceResolved { .. })));
+        assert_eq!(
+            runtime
+                .state
+                .executions
+                .iter()
+                .find(|execution| execution.id == target.id)
+                .unwrap()
+                .status,
+            "failed"
+        );
+        assert!(!runtime
+            .state
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::WorkspaceResolved { .. })));
         assert_eq!(workspace::git(path, &["rev-parse", "HEAD"]).unwrap(), head);
         assert_eq!(fs::read(index_path).unwrap(), index);
-        assert_eq!(fs::read_to_string(path.join("repair.txt")).unwrap(), "retain uncommitted manual work");
+        assert_eq!(
+            fs::read_to_string(path.join("repair.txt")).unwrap(),
+            "retain uncommitted manual work"
+        );
         assert!(!source.join("repair.txt").exists());
     }
 }
@@ -472,11 +693,22 @@ fn shared_source_dispatches_ready_children_while_unrelated_sibling_runs() {
             let (_temp, source, mut runtime) = adaptive(
                 git,
                 graph(
-                    &["foundation", "agent-runtime", "landing", "streaming-chat", "workspace-shell", "integration"],
                     &[
-                        ("foundation", "agent-runtime"), ("foundation", "landing"),
-                        ("agent-runtime", "streaming-chat"), ("agent-runtime", "workspace-shell"),
-                        ("landing", "integration"), ("streaming-chat", "integration"), ("workspace-shell", "integration"),
+                        "foundation",
+                        "agent-runtime",
+                        "landing",
+                        "streaming-chat",
+                        "workspace-shell",
+                        "integration",
+                    ],
+                    &[
+                        ("foundation", "agent-runtime"),
+                        ("foundation", "landing"),
+                        ("agent-runtime", "streaming-chat"),
+                        ("agent-runtime", "workspace-shell"),
+                        ("landing", "integration"),
+                        ("streaming-chat", "integration"),
+                        ("workspace-shell", "integration"),
                     ],
                 ),
                 isolate,
@@ -486,25 +718,51 @@ fn shared_source_dispatches_ready_children_while_unrelated_sibling_runs() {
             finish_shared(&mut runtime, &foundation, "done");
             let first = runtime.jobs().unwrap();
             assert_eq!(first.len(), 2);
-            finish_shared(&mut runtime, first.iter().find(|job| job.execution.node == "agent-runtime").unwrap(), "done");
+            finish_shared(
+                &mut runtime,
+                first
+                    .iter()
+                    .find(|job| job.execution.node == "agent-runtime")
+                    .unwrap(),
+                "done",
+            );
             // Replay while landing is still live, rather than inventing readiness
             // in memory or waiting for the whole displayed topology layer.
             runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
             let children = runtime.jobs().unwrap();
-            assert_eq!(children.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(),
-                ["streaming-chat", "workspace-shell"]);
+            assert_eq!(
+                children
+                    .iter()
+                    .map(|job| job.execution.node.as_str())
+                    .collect::<Vec<_>>(),
+                ["streaming-chat", "workspace-shell"]
+            );
             assert_eq!(runtime.state.nodes["landing"].status, "running");
             assert_eq!(runtime.state.nodes["integration"].status, "waiting");
             assert_eq!(runtime.state.isolated_workspaces, Some(false));
             assert!(children.iter().all(|job| job.source_direct
                 && Path::new(&job.execution.worktree) == source
-                && job.config.environment.is_none() && job.environment_input.is_none()));
-            assert!(runtime.jobs().unwrap().is_empty(), "never dispatch a live node twice");
+                && job.config.environment.is_none()
+                && job.environment_input.is_none()));
+            assert!(
+                runtime.jobs().unwrap().is_empty(),
+                "never dispatch a live node twice"
+            );
             for job in &children {
                 finish_shared(&mut runtime, job, "done");
             }
-            assert!(runtime.jobs().unwrap().is_empty(), "integration still requires landing");
-            finish_shared(&mut runtime, first.iter().find(|job| job.execution.node == "landing").unwrap(), "done");
+            assert!(
+                runtime.jobs().unwrap().is_empty(),
+                "integration still requires landing"
+            );
+            finish_shared(
+                &mut runtime,
+                first
+                    .iter()
+                    .find(|job| job.execution.node == "landing")
+                    .unwrap(),
+                "done",
+            );
             let integration = runtime.jobs().unwrap().remove(0);
             assert_eq!(integration.execution.node, "integration");
             finish_shared(&mut runtime, &integration, "done");
@@ -512,8 +770,11 @@ fn shared_source_dispatches_ready_children_while_unrelated_sibling_runs() {
             assert_eq!(runtime.state.phase, "completed");
             assert!(runtime.state.environment_baseline.is_none());
             assert!(!runtime.run_workspace_root().exists());
-            assert!(!runtime.state.events.iter().any(|event|
-                matches!(event.kind, EventKind::PublicationStarted { .. })));
+            assert!(!runtime
+                .state
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::PublicationStarted { .. })));
         }
     }
 }
@@ -521,18 +782,33 @@ fn shared_source_dispatches_ready_children_while_unrelated_sibling_runs() {
 #[test]
 fn shared_dispatch_reuses_admission_but_revalidates_before_worker_launch() {
     for git in [false, true] {
-        let (_temp, source, mut runtime) = adaptive(git,
-            graph(&["root", "a", "b", "c", "join"], &[
-                ("root", "a"), ("root", "b"), ("root", "c"),
-                ("a", "join"), ("b", "join"), ("c", "join"),
-            ]), true, 3);
+        let (_temp, source, mut runtime) = adaptive(
+            git,
+            graph(
+                &["root", "a", "b", "c", "join"],
+                &[
+                    ("root", "a"),
+                    ("root", "b"),
+                    ("root", "c"),
+                    ("a", "join"),
+                    ("b", "join"),
+                    ("c", "join"),
+                ],
+            ),
+            true,
+            3,
+        );
         let dispatch = |runtime: &mut Runtime| {
             REPOSITORY_RESOLUTIONS.with(|count| count.set(0));
             let jobs = runtime.jobs().unwrap();
-            assert_eq!(REPOSITORY_RESOLUTIONS.with(|count| count.get()), 1,
-                "one source admission per dispatch, not per node or completed ancestor");
+            assert_eq!(
+                REPOSITORY_RESOLUTIONS.with(|count| count.get()),
+                1,
+                "one source admission per dispatch, not per node or completed ancestor"
+            );
             assert!(jobs.iter().all(|job| job.source_direct
-                && Path::new(&job.execution.worktree) == source && !job.materialize_source));
+                && Path::new(&job.execution.worktree) == source
+                && !job.materialize_source));
             jobs
         };
         let root = dispatch(&mut runtime).remove(0);
@@ -544,9 +820,15 @@ fn shared_dispatch_reuses_admission_but_revalidates_before_worker_launch() {
             finish_shared(&mut runtime, job, "done");
         }
         REPOSITORY_RESOLUTIONS.with(|count| count.set(0));
-        assert!(runtime.jobs().unwrap().is_empty(), "join still needs its last parent");
-        assert_eq!(REPOSITORY_RESOLUTIONS.with(|count| count.get()), 0,
-            "blocked dispatch must not revalidate completed source history");
+        assert!(
+            runtime.jobs().unwrap().is_empty(),
+            "join still needs its last parent"
+        );
+        assert_eq!(
+            REPOSITORY_RESOLUTIONS.with(|count| count.get()),
+            0,
+            "blocked dispatch must not revalidate completed source history"
+        );
         finish_shared(&mut runtime, &peers[2], "done");
         runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
         let join = dispatch(&mut runtime).remove(0);
@@ -557,25 +839,36 @@ fn shared_dispatch_reuses_admission_but_revalidates_before_worker_launch() {
         let moved = source.with_file_name("moved-source");
         fs::rename(&source, &moved).unwrap();
         REPOSITORY_RESOLUTIONS.with(|count| count.set(0));
-        let result = perform(&join, &runtime.root, &[], |_| {}, |_| {
-            panic!("invalid source reached Prepared")
-        });
+        let result = perform(
+            &join,
+            &runtime.root,
+            &[],
+            |_| {},
+            |_| panic!("invalid source reached Prepared"),
+        );
         fs::rename(&moved, &source).unwrap();
         assert_eq!(REPOSITORY_RESOLUTIONS.with(|count| count.get()), 1);
         let error = result.unwrap_err();
         assert!(error.contains("绑定"), "{error}");
         runtime.finish(&join.execution, Err(error)).unwrap();
         assert_eq!(runtime.state.nodes["join"].status, "failed");
-        assert!(runtime.state.events.iter().all(|event|
-            !matches!(event.kind, EventKind::PublicationStarted { .. })));
+        assert!(runtime
+            .state
+            .events
+            .iter()
+            .all(|event| !matches!(event.kind, EventKind::PublicationStarted { .. })));
     }
 }
 
 #[test]
 fn shared_dispatch_keeps_historical_environment_evidence_inert_after_replay() {
     for isolate in [false, true] {
-        let (_temp, source, mut runtime) = adaptive(false,
-            graph(&["root", "child"], &[("root", "child")]), isolate, 3);
+        let (_temp, source, mut runtime) = adaptive(
+            false,
+            graph(&["root", "child"], &[("root", "child")]),
+            isolate,
+            3,
+        );
         let root = runtime.jobs().unwrap().remove(0);
         finish_shared(&mut runtime, &root, "done");
         // Legacy/source-bound E/L evidence remains historical even if its
@@ -586,15 +879,28 @@ fn shared_dispatch_keeps_historical_environment_evidence_inert_after_replay() {
             "codeRef":"historical", "environmentRef":"unavailable", "launchRef":"unavailable",
             "resourceRefs":[], "layout":source, "generation":"historical",
         })).unwrap();
-        runtime.emit(EventKind::ExecutionResultRecorded {
-            execution_id: root.execution.id.clone(), result: historical.clone(),
-        }).unwrap();
+        runtime
+            .emit(EventKind::ExecutionResultRecorded {
+                execution_id: root.execution.id.clone(),
+                result: historical.clone(),
+            })
+            .unwrap();
         runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
         let child = runtime.jobs().unwrap().remove(0);
         assert!(child.source_direct && child.config.environment.is_none());
         assert!(child.environment_previous.is_none());
         assert!(child.environment_input.is_none() && child.environment_sources.is_empty());
-        assert_eq!(runtime.state.executions.iter().find(|e| e.id == root.execution.id).unwrap().result.as_ref(), Some(&historical));
+        assert_eq!(
+            runtime
+                .state
+                .executions
+                .iter()
+                .find(|e| e.id == root.execution.id)
+                .unwrap()
+                .result
+                .as_ref(),
+            Some(&historical)
+        );
         finish_shared(&mut runtime, &child, "done");
         runtime.jobs().unwrap();
         assert_eq!(runtime.state.phase, "completed");
@@ -608,33 +914,66 @@ fn shared_replenishment_pins_source_and_respects_available_worker_slots() {
     for limit in [0, 2, 3, 4] {
         // Keep at least one queued child beyond the available slots regardless
         // of the configured default; the assertion tests capacity, not 8 names.
-        let children: Vec<_> = (0..DEFAULT_MAX_PARALLEL.max(limit)).map(|i| format!("child-{i}")).collect();
-        let names: Vec<_> = ["slow", "fast"].into_iter().chain(children.iter().map(String::as_str)).collect();
-        let edges: Vec<_> = children.iter().map(|name| ("fast", name.as_str())).collect();
-        let (_temp, source, mut runtime) = adaptive(
-            false,
-            graph(&names, &edges),
-            true,
-            limit,
-        );
+        let children: Vec<_> = (0..DEFAULT_MAX_PARALLEL.max(limit))
+            .map(|i| format!("child-{i}"))
+            .collect();
+        let names: Vec<_> = ["slow", "fast"]
+            .into_iter()
+            .chain(children.iter().map(String::as_str))
+            .collect();
+        let edges: Vec<_> = children
+            .iter()
+            .map(|name| ("fast", name.as_str()))
+            .collect();
+        let (_temp, source, mut runtime) = adaptive(false, graph(&names, &edges), true, limit);
         let first = runtime.jobs().unwrap();
         assert_eq!(first.len(), 2);
-        finish_shared(&mut runtime, first.iter().find(|job| job.execution.node == "fast").unwrap(), "done");
-        let capacity = if limit == 0 { DEFAULT_MAX_PARALLEL } else { limit };
+        finish_shared(
+            &mut runtime,
+            first
+                .iter()
+                .find(|job| job.execution.node == "fast")
+                .unwrap(),
+            "done",
+        );
+        let capacity = if limit == 0 {
+            DEFAULT_MAX_PARALLEL
+        } else {
+            limit
+        };
         let next = runtime.jobs().unwrap();
         assert_eq!(next.len(), capacity - 1);
         assert!(next.iter().all(|job| job.source_direct
-            && Path::new(&job.execution.worktree) == source && !job.materialize_source));
-        assert_eq!(runtime.state.isolated_workspaces, Some(false),
-            "even a replenishment larger than three cannot switch live source writers to private");
+            && Path::new(&job.execution.worktree) == source
+            && !job.materialize_source));
+        assert_eq!(
+            runtime.state.isolated_workspaces,
+            Some(false),
+            "even a replenishment larger than three cannot switch live source writers to private"
+        );
         assert!(runtime.state.environment_baseline.is_none());
         assert!(runtime.jobs().unwrap().is_empty());
-        finish_shared(&mut runtime, first.iter().find(|job| job.execution.node == "slow").unwrap(), "done");
+        finish_shared(
+            &mut runtime,
+            first
+                .iter()
+                .find(|job| job.execution.node == "slow")
+                .unwrap(),
+            "done",
+        );
         runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
         let refill = runtime.jobs().unwrap();
         assert_eq!(refill.len(), 1);
         assert!(refill[0].source_direct);
-        assert_eq!(runtime.state.nodes.values().filter(|node| node.status == "running").count(), capacity);
+        assert_eq!(
+            runtime
+                .state
+                .nodes
+                .values()
+                .filter(|node| node.status == "running")
+                .count(),
+            capacity
+        );
         assert!(runtime.jobs().unwrap().is_empty());
     }
 }
@@ -642,8 +981,12 @@ fn shared_replenishment_pins_source_and_respects_available_worker_slots() {
 #[test]
 fn active_shared_batches_do_not_validate_source_without_dispatchable_work() {
     for full in [false, true] {
-        let (_temp, source, mut runtime) = adaptive(false,
-            graph(&["a", "b", "child"], &[("a", "child"), ("b", "child")]), true, 2);
+        let (_temp, source, mut runtime) = adaptive(
+            false,
+            graph(&["a", "b", "child"], &[("a", "child"), ("b", "child")]),
+            true,
+            2,
+        );
         let first = runtime.jobs().unwrap();
         if !full {
             finish_shared(&mut runtime, &first[0], "done");
@@ -654,24 +997,39 @@ fn active_shared_batches_do_not_validate_source_without_dispatchable_work() {
         // abandon its in-flight completion channel just to recheck admission.
         assert!(runtime.jobs().unwrap().is_empty());
         fs::rename(&moved, &source).unwrap();
-        assert!(runtime.state.nodes.values().any(|node| node.status == "running"));
+        assert!(runtime
+            .state
+            .nodes
+            .values()
+            .any(|node| node.status == "running"));
     }
 }
 
 #[test]
 fn invalid_source_defers_shared_replenishment_error_until_existing_workers_drain() {
-    let (_temp, source, mut runtime) = adaptive(false,
-        graph(&["a", "b", "child"], &[("a", "child")]), true, 3);
+    let (_temp, source, mut runtime) = adaptive(
+        false,
+        graph(&["a", "b", "child"], &[("a", "child")]),
+        true,
+        3,
+    );
     let first = runtime.jobs().unwrap();
     finish_shared(&mut runtime, &first[0], "done");
     let moved = source.with_file_name("moved-source");
     fs::rename(&source, &moved).unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.nodes["child"].status, "waiting");
-    assert_eq!(runtime.state.executions.len(), 2, "invalid binding never admits a child");
+    assert_eq!(
+        runtime.state.executions.len(),
+        2,
+        "invalid binding never admits a child"
+    );
     finish_shared(&mut runtime, &first[1], "done");
     runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
-    assert!(runtime.jobs().is_err(), "an idle Run must surface invalid admission explicitly");
+    assert!(
+        runtime.jobs().is_err(),
+        "an idle Run must surface invalid admission explicitly"
+    );
     assert_eq!(runtime.state.phase, "running");
     assert_eq!(runtime.state.executions.len(), 2);
     fs::rename(&moved, &source).unwrap();
@@ -684,8 +1042,12 @@ fn invalid_source_defers_shared_replenishment_error_until_existing_workers_drain
 
 #[test]
 fn restart_during_invalid_source_wait_keeps_completed_and_unstarted_work_distinct() {
-    let (_temp, source, mut runtime) = adaptive(false,
-        graph(&["a", "b", "child"], &[("a", "child")]), true, 2);
+    let (_temp, source, mut runtime) = adaptive(
+        false,
+        graph(&["a", "b", "child"], &[("a", "child")]),
+        true,
+        2,
+    );
     let first = runtime.jobs().unwrap();
     finish_shared(&mut runtime, &first[0], "done");
     let moved = source.with_file_name("moved-source");
@@ -702,7 +1064,13 @@ fn restart_during_invalid_source_wait_keeps_completed_and_unstarted_work_distinc
     fs::rename(&moved, &source).unwrap();
     runtime.pause(false).unwrap();
     let recovered = runtime.jobs().unwrap();
-    assert_eq!(recovered.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), ["b", "child"]);
+    assert_eq!(
+        recovered
+            .iter()
+            .map(|job| job.execution.node.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "child"]
+    );
     let resumed = &recovered[0].execution;
     assert_eq!(resumed.session_id, first[1].execution.session_id);
     // Crash recovery advances the attempt; only an explicit user-stop request
@@ -714,25 +1082,49 @@ fn restart_during_invalid_source_wait_keeps_completed_and_unstarted_work_distinc
     }
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.phase, "completed");
-    assert_eq!(runtime.state.executions.iter().filter(|e| e.node == "a").count(), 1);
+    assert_eq!(
+        runtime
+            .state
+            .executions
+            .iter()
+            .filter(|e| e.node == "a")
+            .count(),
+        1
+    );
 }
 
 #[test]
 fn standalone_merger_excludes_shared_replenishment_until_it_finishes() {
-    let (_temp, _source, mut runtime) = adaptive(false,
-        graph(&["a", "b", "child"], &[("a", "child")]), true, 3);
+    let (_temp, _source, mut runtime) = adaptive(
+        false,
+        graph(&["a", "b", "child"], &[("a", "child")]),
+        true,
+        3,
+    );
     let first = runtime.jobs().unwrap();
     finish_shared(&mut runtime, &first[0], "done");
     let mut merger = first[0].execution.clone();
     merger.id = Uuid::new_v4().to_string();
     merger.session_id = merger.id.clone();
     merger.node = "merge:child".into();
-    runtime.emit(EventKind::MergerStarted { execution: merger.clone() }).unwrap();
-    assert_eq!(runtime.state.phase, "running", "standalone Mergers do not enter publication");
+    runtime
+        .emit(EventKind::MergerStarted {
+            execution: merger.clone(),
+        })
+        .unwrap();
+    assert_eq!(
+        runtime.state.phase, "running",
+        "standalone Mergers do not enter publication"
+    );
     assert!(runtime.jobs().unwrap().is_empty());
-    runtime.emit(EventKind::MergerFinished {
-        execution_id: merger.id, head: String::new(), output_bytes: 0, metrics: None,
-    }).unwrap();
+    runtime
+        .emit(EventKind::MergerFinished {
+            execution_id: merger.id,
+            head: String::new(),
+            output_bytes: 0,
+            metrics: None,
+        })
+        .unwrap();
     let child = runtime.jobs().unwrap().remove(0);
     assert_eq!(child.execution.node, "child");
     assert_eq!(runtime.state.nodes["b"].status, "running");
@@ -741,27 +1133,49 @@ fn standalone_merger_excludes_shared_replenishment_until_it_finishes() {
 #[test]
 fn shared_failure_retry_and_feedback_repair_can_refill_beside_unrelated_work() {
     for feedback in [false, true] {
-        let mut plan = graph(&["owner", "other", "review", "related"],
-            &[("owner", "review"), ("owner", "related")]);
+        let mut plan = graph(
+            &["owner", "other", "review", "related"],
+            &[("owner", "review"), ("owner", "related")],
+        );
         if feedback {
-            plan.edges.push(Edge { from: "review".into(), to: "owner".into(), feedback: true });
+            plan.edges.push(Edge {
+                from: "review".into(),
+                to: "owner".into(),
+                feedback: true,
+            });
         }
         let (_temp, source, mut runtime) = adaptive(false, plan, true, 4);
         let first = runtime.jobs().unwrap();
-        let owner = first.iter().find(|job| job.execution.node == "owner").unwrap();
+        let owner = first
+            .iter()
+            .find(|job| job.execution.node == "owner")
+            .unwrap();
         if feedback {
             finish_shared(&mut runtime, owner, "done");
             let reviews = runtime.jobs().unwrap();
             assert_eq!(reviews.len(), 2);
-            let review = reviews.iter().find(|job| job.execution.node == "review").unwrap();
+            let review = reviews
+                .iter()
+                .find(|job| job.execution.node == "review")
+                .unwrap();
             finish_shared(&mut runtime, review, "correct the owner\n<FEEDBACK>");
-            assert!(runtime.jobs().unwrap().is_empty(), "repair must drain its affected running scope");
+            assert!(
+                runtime.jobs().unwrap().is_empty(),
+                "repair must drain its affected running scope"
+            );
             assert_eq!(runtime.state.pending_feedback.len(), 1);
-            let related = reviews.iter().find(|job| job.execution.node == "related").unwrap();
-            runtime.finish(&related.execution, Err("stopped for feedback".into())).unwrap();
+            let related = reviews
+                .iter()
+                .find(|job| job.execution.node == "related")
+                .unwrap();
+            runtime
+                .finish(&related.execution, Err("stopped for feedback".into()))
+                .unwrap();
         } else {
             fs::write(source.join("partial.txt"), "retain this work").unwrap();
-            runtime.finish(&owner.execution, Err("provider failed".into())).unwrap();
+            runtime
+                .finish(&owner.execution, Err("provider failed".into()))
+                .unwrap();
             runtime.jobs().unwrap();
             assert_eq!(runtime.state.nodes["review"].status, "blocked");
             runtime.resume_node("owner").unwrap();
@@ -772,14 +1186,20 @@ fn shared_failure_retry_and_feedback_repair_can_refill_beside_unrelated_work() {
         assert_eq!(retry.execution.attempt, 2);
         assert!(retry.source_direct && Path::new(&retry.execution.worktree) == source);
         assert_eq!(runtime.state.nodes["other"].status, "running");
-        assert_eq!(runtime.state.nodes["review"].status, if feedback { "dirty" } else { "waiting" });
+        assert_eq!(
+            runtime.state.nodes["review"].status,
+            if feedback { "dirty" } else { "waiting" }
+        );
         if feedback {
             assert_eq!(retry.task, "Feedback:\ncorrect the owner");
             assert_eq!(runtime.state.feedback_counts["review->owner"], 1);
             assert!(runtime.state.pending_feedback.is_empty());
         } else {
             assert_eq!(retry.execution.session_id, owner.execution.session_id);
-            assert_eq!(fs::read_to_string(source.join("partial.txt")).unwrap(), "retain this work");
+            assert_eq!(
+                fs::read_to_string(source.join("partial.txt")).unwrap(),
+                "retain this work"
+            );
         }
         assert!(runtime.jobs().unwrap().is_empty());
     }
@@ -788,8 +1208,12 @@ fn shared_failure_retry_and_feedback_repair_can_refill_beside_unrelated_work() {
 #[cfg(feature = "fixture")]
 #[test]
 fn active_private_batches_do_not_validate_source_before_the_drain_barrier() {
-    let (_temp, source, mut runtime) = adaptive(false,
-        graph(&["a", "b", "c", "d", "child"], &[("a", "child")]), true, 0);
+    let (_temp, source, mut runtime) = adaptive(
+        false,
+        graph(&["a", "b", "c", "d", "child"], &[("a", "child")]),
+        true,
+        0,
+    );
     let mut first = runtime.jobs().unwrap();
     prepare_private(&mut runtime, &mut first[0]);
     finish_private(&mut runtime, &first[0], "a.txt", "done");
@@ -804,19 +1228,48 @@ fn active_private_batches_do_not_validate_source_before_the_drain_barrier() {
 
 #[test]
 fn shared_replenishment_respects_pending_feedback_scope() {
-    let mut plan = graph(&["owner", "review", "consumer", "other", "after-other"],
-        &[("owner", "review"), ("review", "consumer"), ("other", "after-other")]);
-    plan.edges.push(Edge { from: "review".into(), to: "owner".into(), feedback: true });
+    let mut plan = graph(
+        &["owner", "review", "consumer", "other", "after-other"],
+        &[
+            ("owner", "review"),
+            ("review", "consumer"),
+            ("other", "after-other"),
+        ],
+    );
+    plan.edges.push(Edge {
+        from: "review".into(),
+        to: "owner".into(),
+        feedback: true,
+    });
     let (_temp, _source, mut runtime) = adaptive(false, plan, true, 4);
     let first = runtime.jobs().unwrap();
     assert_eq!(first.len(), 2);
-    finish_shared(&mut runtime, first.iter().find(|job| job.execution.node == "owner").unwrap(), "done");
+    finish_shared(
+        &mut runtime,
+        first
+            .iter()
+            .find(|job| job.execution.node == "owner")
+            .unwrap(),
+        "done",
+    );
     let review = runtime.jobs().unwrap().remove(0);
     assert_eq!(review.execution.node, "review");
     finish_shared(&mut runtime, &review, "<ACCEPT>");
-    assert!(runtime.jobs_with_pending_feedback(true, &["review"]).unwrap().is_empty());
-    finish_shared(&mut runtime, first.iter().find(|job| job.execution.node == "other").unwrap(), "done");
-    let unrelated = runtime.jobs_with_pending_feedback(true, &["review"]).unwrap();
+    assert!(runtime
+        .jobs_with_pending_feedback(true, &["review"])
+        .unwrap()
+        .is_empty());
+    finish_shared(
+        &mut runtime,
+        first
+            .iter()
+            .find(|job| job.execution.node == "other")
+            .unwrap(),
+        "done",
+    );
+    let unrelated = runtime
+        .jobs_with_pending_feedback(true, &["review"])
+        .unwrap();
     assert_eq!(unrelated.len(), 1);
     assert_eq!(unrelated[0].execution.node, "after-other");
     assert_eq!(runtime.state.nodes["consumer"].status, "waiting");
@@ -828,10 +1281,18 @@ fn shared_replenishment_respects_pending_feedback_scope() {
 
 #[test]
 fn shared_replenishment_respects_pause_and_restart_recovery() {
-    let (_temp, source, mut runtime) = adaptive(false,
-        graph(&["a", "b", "c", "d"], &[("b", "c"), ("b", "d")]), true, 2);
+    let (_temp, source, mut runtime) = adaptive(
+        false,
+        graph(&["a", "b", "c", "d"], &[("b", "c"), ("b", "d")]),
+        true,
+        2,
+    );
     let first = runtime.jobs().unwrap();
-    finish_shared(&mut runtime, first.iter().find(|job| job.execution.node == "b").unwrap(), "done");
+    finish_shared(
+        &mut runtime,
+        first.iter().find(|job| job.execution.node == "b").unwrap(),
+        "done",
+    );
     runtime.pause(true).unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     runtime.resume_scheduling().unwrap();
@@ -841,12 +1302,23 @@ fn shared_replenishment_respects_pause_and_restart_recovery() {
     drop(runtime);
     let mut runtime = Runtime::open(&root).unwrap();
     assert!(runtime.state.paused);
-    assert!(runtime.jobs().unwrap().is_empty(), "restart never auto-dispatches");
+    assert!(
+        runtime.jobs().unwrap().is_empty(),
+        "restart never auto-dispatches"
+    );
     assert_eq!(runtime.state.nodes["b"].status, "completed");
     runtime.pause(false).unwrap();
     let recovered = runtime.jobs().unwrap();
-    assert_eq!(recovered.iter().map(|job| job.execution.node.as_str()).collect::<Vec<_>>(), ["a", "c"]);
-    assert!(recovered.iter().all(|job| job.source_direct && Path::new(&job.execution.worktree) == source));
+    assert_eq!(
+        recovered
+            .iter()
+            .map(|job| job.execution.node.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "c"]
+    );
+    assert!(recovered
+        .iter()
+        .all(|job| job.source_direct && Path::new(&job.execution.worktree) == source));
     assert_eq!(runtime.state.nodes["d"].status, "waiting");
     for job in &recovered {
         finish_shared(&mut runtime, job, "done");
@@ -861,8 +1333,15 @@ fn shared_replenishment_respects_pause_and_restart_recovery() {
 #[cfg(feature = "fixture")]
 #[test]
 fn private_writers_drain_before_delivering_to_ready_descendants() {
-    let (_temp, source, mut runtime) = adaptive(false,
-        graph(&["fast", "slow", "other", "fourth", "child"], &[("fast", "child")]), true, 0);
+    let (_temp, source, mut runtime) = adaptive(
+        false,
+        graph(
+            &["fast", "slow", "other", "fourth", "child"],
+            &[("fast", "child")],
+        ),
+        true,
+        0,
+    );
     let mut first = runtime.jobs().unwrap();
     assert_eq!(first.len(), 4);
     for job in &mut first {
@@ -874,7 +1353,12 @@ fn private_writers_drain_before_delivering_to_ready_descendants() {
     assert!(runtime.state.batch_handoff.is_none());
     assert!(!source.join("fast.txt").exists());
     for job in &first[1..] {
-        finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+        finish_private(
+            &mut runtime,
+            job,
+            &format!("{}.txt", job.execution.node),
+            "done",
+        );
     }
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.phase, "publishing");
@@ -888,16 +1372,34 @@ fn private_writers_drain_before_delivering_to_ready_descendants() {
 #[cfg(feature = "fixture")]
 #[test]
 fn legacy_private_recovery_waits_for_live_source_writers_before_resuming_in_place() {
-    let (_temp, source, mut runtime) = adaptive(false,
-        graph(&["a", "b", "c", "d", "slow"], &[("b", "slow"), ("c", "slow")]), true, 0);
+    let (_temp, source, mut runtime) = adaptive(
+        false,
+        graph(
+            &["a", "b", "c", "d", "slow"],
+            &[("b", "slow"), ("c", "slow")],
+        ),
+        true,
+        0,
+    );
     let mut first = runtime.jobs().unwrap();
     for job in &mut first {
         prepare_private(&mut runtime, job);
         if job.execution.node == "a" {
-            fs::write(Path::new(&job.execution.worktree).join("partial.txt"), "retained work").unwrap();
-            runtime.finish(&job.execution, Err("provider failed".into())).unwrap();
+            fs::write(
+                Path::new(&job.execution.worktree).join("partial.txt"),
+                "retained work",
+            )
+            .unwrap();
+            runtime
+                .finish(&job.execution, Err("provider failed".into()))
+                .unwrap();
         } else {
-            finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+            finish_private(
+                &mut runtime,
+                job,
+                &format!("{}.txt", job.execution.node),
+                "done",
+            );
         }
     }
     runtime.jobs().unwrap();
@@ -905,21 +1407,39 @@ fn legacy_private_recovery_waits_for_live_source_writers_before_resuming_in_plac
     deliver_batch(&mut runtime);
     // An older scheduler could already have dispatched the next source batch.
     let slow = Execution {
-        id: Uuid::new_v4().to_string(), node: "slow".into(),
-        session_id: Uuid::new_v4().to_string(), worktree: source.to_string_lossy().into(),
-        before: String::new(), workspace_lineage: vec!["slow".into()],
+        id: Uuid::new_v4().to_string(),
+        node: "slow".into(),
+        session_id: Uuid::new_v4().to_string(),
+        worktree: source.to_string_lossy().into(),
+        before: String::new(),
+        workspace_lineage: vec!["slow".into()],
         ..first[0].execution.clone()
     };
-    runtime.emit_outputs(vec![
-        EventKind::ExecutionBatchStarted { nodes: vec!["slow".into()], isolated: false, resumed: false },
-        EventKind::Started { execution: slow.clone(), message_sequences: Some(vec![]), fresh_restart: true },
-    ]).unwrap();
+    runtime
+        .emit_outputs(vec![
+            EventKind::ExecutionBatchStarted {
+                nodes: vec!["slow".into()],
+                isolated: false,
+                resumed: false,
+            },
+            EventKind::Started {
+                execution: slow.clone(),
+                message_sequences: Some(vec![]),
+                fresh_restart: true,
+            },
+        ])
+        .unwrap();
     runtime.resume_node("a").unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
-    assert_eq!(runtime.state.phase, "running", "never publish into an active source writer");
+    assert_eq!(
+        runtime.state.phase, "running",
+        "never publish into an active source writer"
+    );
     assert!(runtime.state.batch_handoff.is_none());
     assert!(!source.join("partial.txt").exists());
-    runtime.finish(&slow, Ok((String::new(), "done".into()))).unwrap();
+    runtime
+        .finish(&slow, Ok((String::new(), "done".into())))
+        .unwrap();
     let mut retry = runtime.jobs().unwrap().remove(0);
     assert_eq!(retry.execution.node, "a");
     assert!(!retry.source_direct);
@@ -929,7 +1449,10 @@ fn legacy_private_recovery_waits_for_live_source_writers_before_resuming_in_plac
     finish_private(&mut runtime, &retry, "a.txt", "done");
     runtime.jobs().unwrap();
     deliver_batch(&mut runtime);
-    assert_eq!(fs::read_to_string(source.join("partial.txt")).unwrap(), "retained work");
+    assert_eq!(
+        fs::read_to_string(source.join("partial.txt")).unwrap(),
+        "retained work"
+    );
 }
 
 #[test]
@@ -1060,9 +1583,9 @@ fn batches_switch_shared_private_shared_private_and_deliver_before_dependents_ru
             .events
             .iter()
             .filter_map(|event| match &event.kind {
-                EventKind::ExecutionBatchStarted { nodes, isolated, .. } => {
-                    Some((nodes.len(), *isolated))
-                }
+                EventKind::ExecutionBatchStarted {
+                    nodes, isolated, ..
+                } => Some((nodes.len(), *isolated)),
                 _ => None,
             })
             .collect();
@@ -1088,16 +1611,29 @@ fn resumed_batch_retains_source_baseline_on_replay_and_legacy_batches_refresh_it
     let (_temp, source, mut runtime) = adaptive(true, graph(&["a", "b", "c"], &[]), true, 0);
     let legacy: EventKind = serde_json::from_value(serde_json::json!({
         "type": "execution_batch_started", "nodes": ["a", "b", "c"], "isolated": true,
-    })).unwrap();
-    assert!(matches!(&legacy, EventKind::ExecutionBatchStarted { resumed: false, .. }));
+    }))
+    .unwrap();
+    assert!(matches!(
+        &legacy,
+        EventKind::ExecutionBatchStarted { resumed: false, .. }
+    ));
     runtime.emit(legacy.clone()).unwrap();
     let head = workspace::snapshot_repository(&source).unwrap();
-    runtime.emit(EventKind::SourceSnapshotted { head: head.clone() }).unwrap();
-    runtime.emit(EventKind::ExecutionBatchStarted {
-        nodes: vec!["a".into()], isolated: true, resumed: true,
-    }).unwrap();
+    runtime
+        .emit(EventKind::SourceSnapshotted { head: head.clone() })
+        .unwrap();
+    runtime
+        .emit(EventKind::ExecutionBatchStarted {
+            nodes: vec!["a".into()],
+            isolated: true,
+            resumed: true,
+        })
+        .unwrap();
     assert_eq!(runtime.latest_source_head(), head);
-    assert_eq!(runtime.store.load(&runtime.state.run_id).unwrap().phase, "running");
+    assert_eq!(
+        runtime.store.load(&runtime.state.run_id).unwrap().phase,
+        "running"
+    );
     let root = runtime.root.clone();
     drop(runtime);
     runtime = Runtime::open(&root).unwrap();
@@ -1106,7 +1642,11 @@ fn resumed_batch_retains_source_baseline_on_replay_and_legacy_batches_refresh_it
     assert!(runtime.state.paused, "restart retains the scheduling pause");
     runtime.resume_scheduling().unwrap();
     runtime.emit(legacy).unwrap();
-    assert_eq!(runtime.latest_source_head(), "", "new batches must still refresh source");
+    assert_eq!(
+        runtime.latest_source_head(),
+        "",
+        "new batches must still refresh source"
+    );
 }
 
 #[cfg(feature = "fixture")]
@@ -1116,8 +1656,17 @@ fn paused_private_nodes_resume_in_place_before_delivery_or_new_work() {
         let (_temp, source, mut runtime) = adaptive(
             git,
             graph(
-                &["done", "child", "child2", "child3", "child4", "child5", "failed", "a", "b", "c"],
-                &[("done", "child"), ("done", "child2"), ("done", "child3"), ("done", "child4"), ("done", "child5")],
+                &[
+                    "done", "child", "child2", "child3", "child4", "child5", "failed", "a", "b",
+                    "c",
+                ],
+                &[
+                    ("done", "child"),
+                    ("done", "child2"),
+                    ("done", "child3"),
+                    ("done", "child4"),
+                    ("done", "child5"),
+                ],
             ),
             true,
             5,
@@ -1139,9 +1688,16 @@ fn paused_private_nodes_resume_in_place_before_delivery_or_new_work() {
                 }
                 paused.push(job.execution);
             } else if job.execution.node == "failed" {
-                runtime.finish(&job.execution, Err("provider failed".into())).unwrap();
+                runtime
+                    .finish(&job.execution, Err("provider failed".into()))
+                    .unwrap();
             } else {
-                finish_private(&mut runtime, &job, &format!("{}.txt", job.execution.node), "done");
+                finish_private(
+                    &mut runtime,
+                    &job,
+                    &format!("{}.txt", job.execution.node),
+                    "done",
+                );
             }
         }
         let source_head = runtime.latest_source_head().to_owned();
@@ -1159,7 +1715,11 @@ fn paused_private_nodes_resume_in_place_before_delivery_or_new_work() {
             }
             runtime.pause(false).unwrap();
             let mut resumed = runtime.jobs().unwrap();
-            assert_eq!(resumed.len(), paused_count, "Continue must dispatch paused nodes, not publish them");
+            assert_eq!(
+                resumed.len(),
+                paused_count,
+                "Continue must dispatch paused nodes, not publish them"
+            );
             assert!(runtime.state.batch_handoff.is_none());
             assert!(runtime.state.publication.is_none());
             assert_eq!(runtime.state.nodes["child"].status, "waiting");
@@ -1167,7 +1727,10 @@ fn paused_private_nodes_resume_in_place_before_delivery_or_new_work() {
             assert!(!source.join("done.txt").exists());
             assert!(!source.join("partial.txt").exists());
             for job in &mut resumed {
-                let previous = paused.iter().find(|e| e.node == job.execution.node).unwrap();
+                let previous = paused
+                    .iter()
+                    .find(|e| e.node == job.execution.node)
+                    .unwrap();
                 assert_ne!(job.execution.id, previous.id);
                 assert_eq!(job.execution.attempt, previous.attempt);
                 assert_eq!(job.execution.session_id, previous.session_id);
@@ -1183,26 +1746,53 @@ fn paused_private_nodes_resume_in_place_before_delivery_or_new_work() {
                 let staged = workspace::git(&path, &["diff", "--cached"]).unwrap();
                 prepare_private(&mut runtime, job);
                 assert_eq!(workspace::git(&path, &["rev-parse", "HEAD"]).unwrap(), head);
-                assert_eq!(workspace::git(&path, &["diff", "--cached"]).unwrap(), staged);
-                assert_eq!(fs::read_to_string(path.join("partial.txt")).unwrap(), "unfinished untracked work");
+                assert_eq!(
+                    workspace::git(&path, &["diff", "--cached"]).unwrap(),
+                    staged
+                );
+                assert_eq!(
+                    fs::read_to_string(path.join("partial.txt")).unwrap(),
+                    "unfinished untracked work"
+                );
                 assert!(!path.join("deleted.txt").exists());
-                assert!(!path.join("external.txt").exists(), "source edits must not enter the retained batch");
-                assert!(!job.materialize_source, "resume must not collect a new source baseline");
+                assert!(
+                    !path.join("external.txt").exists(),
+                    "source edits must not enter the retained batch"
+                );
+                assert!(
+                    !job.materialize_source,
+                    "resume must not collect a new source baseline"
+                );
                 assert_eq!(job.expected_source_head, source_head);
             }
             assert_eq!(runtime.latest_source_head(), source_head);
-            assert_eq!(fs::read_to_string(source.join("external.txt")).unwrap(), format!("source edit {round}"));
-            assert!(runtime.jobs().unwrap().is_empty(), "new work waits for the resumed private batch");
+            assert_eq!(
+                fs::read_to_string(source.join("external.txt")).unwrap(),
+                format!("source edit {round}")
+            );
+            assert!(
+                runtime.jobs().unwrap().is_empty(),
+                "new work waits for the resumed private batch"
+            );
             paused = resumed.into_iter().map(|job| job.execution).collect();
         }
         for execution in &paused {
             let head = workspace::snapshot_node_for_run(
-                Path::new(&execution.worktree), &source, &execution.node, Some(&runtime.state.run_id),
-            ).unwrap();
-            runtime.finish(execution, Ok((head, "done".into()))).unwrap();
+                Path::new(&execution.worktree),
+                &source,
+                &execution.node,
+                Some(&runtime.state.run_id),
+            )
+            .unwrap();
+            runtime
+                .finish(execution, Ok((head, "done".into())))
+                .unwrap();
         }
         assert!(runtime.jobs().unwrap().is_empty());
-        assert_eq!(runtime.state.phase, "needs_attention", "the unrelated failed member still holds the batch");
+        assert_eq!(
+            runtime.state.phase, "needs_attention",
+            "the unrelated failed member still holds the batch"
+        );
         assert!(runtime.state.publication.is_none());
         runtime.resume_node("failed").unwrap();
         let mut failed_retry = runtime.jobs().unwrap().remove(0);
@@ -1210,32 +1800,62 @@ fn paused_private_nodes_resume_in_place_before_delivery_or_new_work() {
         prepare_private(&mut runtime, &mut failed_retry);
         finish_private(&mut runtime, &failed_retry, "failed.txt", "done");
         assert!(runtime.jobs().unwrap().is_empty());
-        assert_eq!(runtime.state.phase, "publishing", "only the complete batch may deliver");
-        assert!(runtime.state.batch_handoff.as_ref().unwrap().recovery_execution_ids.is_empty());
+        assert_eq!(
+            runtime.state.phase, "publishing",
+            "only the complete batch may deliver"
+        );
+        assert!(runtime
+            .state
+            .batch_handoff
+            .as_ref()
+            .unwrap()
+            .recovery_execution_ids
+            .is_empty());
         deliver_batch(&mut runtime);
         let mut children = runtime.jobs().unwrap();
         assert_eq!(children.len(), 5);
         assert_eq!(children[0].execution.node, "child");
         assert!(children.iter().all(|job| !job.source_direct));
         assert!(source.join("partial.txt").is_file());
-        assert_eq!(fs::read_to_string(source.join("external.txt")).unwrap(), "source edit 1");
+        assert_eq!(
+            fs::read_to_string(source.join("external.txt")).unwrap(),
+            "source edit 1"
+        );
         prepare_private(&mut runtime, &mut children[0]);
-        assert_eq!(fs::read_to_string(Path::new(&children[0].execution.worktree).join("external.txt")).unwrap(),
-            "source edit 1", "a genuinely new private batch must still collect current source files");
+        assert_eq!(
+            fs::read_to_string(Path::new(&children[0].execution.worktree).join("external.txt"))
+                .unwrap(),
+            "source edit 1",
+            "a genuinely new private batch must still collect current source files"
+        );
     }
 }
 
 #[cfg(feature = "fixture")]
 #[test]
 fn paused_private_node_stop_holds_delivery_until_followup_finishes() {
-    for (git, has_session, restart) in [(true, true, false), (false, true, true), (false, false, true)] {
-        let (_temp, source, mut runtime) = adaptive(git,
-            graph(&["a", "b", "c", "d", "later"], &[("b", "later")]), true, 0);
+    for (git, has_session, restart) in [
+        (true, true, false),
+        (false, true, true),
+        (false, false, true),
+    ] {
+        let (_temp, source, mut runtime) = adaptive(
+            git,
+            graph(&["a", "b", "c", "d", "later"], &[("b", "later")]),
+            true,
+            0,
+        );
         let mut jobs = runtime.jobs().unwrap();
         for job in &mut jobs {
             prepare_private(&mut runtime, job);
         }
-        let original = runtime.state.executions.iter().find(|e| e.node == "a").unwrap().clone();
+        let original = runtime
+            .state
+            .executions
+            .iter()
+            .find(|e| e.node == "a")
+            .unwrap()
+            .clone();
         let path = Path::new(&original.worktree);
         fs::write(path.join("tracked.txt"), "paused staged edit").unwrap();
         workspace::git(path, &["add", "tracked.txt"]).unwrap();
@@ -1250,13 +1870,24 @@ fn paused_private_node_stop_holds_delivery_until_followup_finishes() {
         }
         runtime.request_execution_stop(Some("a")).unwrap();
         runtime.finish(&original, Err("stopped".into())).unwrap();
-        assert!(!runtime.state.paused, "node stop must not interrupt sibling workers");
+        assert!(
+            !runtime.state.paused,
+            "node stop must not interrupt sibling workers"
+        );
         assert!(runtime.jobs().unwrap().is_empty());
         for job in jobs.iter().filter(|j| j.execution.node != "a") {
-            finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+            finish_private(
+                &mut runtime,
+                job,
+                &format!("{}.txt", job.execution.node),
+                "done",
+            );
         }
         assert!(runtime.jobs().unwrap().is_empty());
-        assert!(runtime.state.publication.is_none(), "stopping the last writer is not permission to publish siblings");
+        assert!(
+            runtime.state.publication.is_none(),
+            "stopping the last writer is not permission to publish siblings"
+        );
         assert!(runtime.state.batch_handoff.is_none());
         assert_eq!(runtime.state.phase, "needs_attention");
         assert!(runtime.state.can_resume_node("a"));
@@ -1270,9 +1901,15 @@ fn paused_private_node_stop_holds_delivery_until_followup_finishes() {
             assert!(runtime.jobs().unwrap().is_empty());
             assert!(runtime.state.publication.is_none());
         }
-        runtime.intervene("a", "finish the unfinished work").unwrap();
+        runtime
+            .intervene("a", "finish the unfinished work")
+            .unwrap();
         runtime.intervene("a", "keep the staged changes").unwrap();
-        let sequences: Vec<_> = runtime.state.nodes["a"].pending_messages.iter().map(|m| m.sequence).collect();
+        let sequences: Vec<_> = runtime.state.nodes["a"]
+            .pending_messages
+            .iter()
+            .map(|m| m.sequence)
+            .collect();
         if restart {
             drop(runtime);
             runtime = Runtime::open(&root).unwrap();
@@ -1281,17 +1918,28 @@ fn paused_private_node_stop_holds_delivery_until_followup_finishes() {
         runtime.resume_after_intervention().unwrap();
         fs::write(source.join("external.txt"), "source edit during pause").unwrap();
         let mut resumed = runtime.jobs().unwrap();
-        assert_eq!(resumed.len(), 1, "a follow-up must resume the paused writer before any handoff");
+        assert_eq!(
+            resumed.len(),
+            1,
+            "a follow-up must resume the paused writer before any handoff"
+        );
         let job = &mut resumed[0];
         assert_eq!(job.execution.node, "a");
         assert_eq!(job.execution.worktree, original.worktree);
         assert_eq!(job.execution.session_id, original.session_id);
-        assert_eq!(job.execution.attempt, original.attempt + 1, "a new human turn still advances the logical attempt");
+        assert_eq!(
+            job.execution.attempt,
+            original.attempt + 1,
+            "a new human turn still advances the logical attempt"
+        );
         assert!(job.session_fork.is_none() && job.recovered_workspace.is_none());
         assert!(job.preserved_workspace.is_some());
         assert!(!job.source_direct && !job.continuation && !job.materialize_source);
         assert_eq!(job.initial_recovery, !has_session);
-        assert!(job.task.contains("finish the unfinished work") && job.task.contains("keep the staged changes"));
+        assert!(
+            job.task.contains("finish the unfinished work")
+                && job.task.contains("keep the staged changes")
+        );
         assert!(runtime.state.nodes["a"].pending_messages.is_empty());
         assert!(runtime.state.events.iter().any(|e| matches!(&e.kind,
             EventKind::Started { execution, message_sequences: Some(claim), .. }
@@ -1299,16 +1947,28 @@ fn paused_private_node_stop_holds_delivery_until_followup_finishes() {
         prepare_private(&mut runtime, job);
         assert_eq!(job.expected_source_head, original.before);
         assert_eq!(workspace::git(path, &["diff", "--cached"]).unwrap(), staged);
-        assert_eq!(fs::read_to_string(path.join("partial.txt")).unwrap(), "unfinished work");
+        assert_eq!(
+            fs::read_to_string(path.join("partial.txt")).unwrap(),
+            "unfinished work"
+        );
         assert!(!path.join("deleted.txt").exists() && !path.join("external.txt").exists());
         assert!(runtime.jobs().unwrap().is_empty());
         assert!(runtime.state.publication.is_none());
         finish_private(&mut runtime, job, "a.txt", "done");
         assert!(runtime.jobs().unwrap().is_empty());
-        assert!(runtime.state.batch_handoff.as_ref().unwrap().recovery_execution_ids.is_empty());
+        assert!(runtime
+            .state
+            .batch_handoff
+            .as_ref()
+            .unwrap()
+            .recovery_execution_ids
+            .is_empty());
         deliver_batch(&mut runtime);
         assert!(source.join("partial.txt").is_file() && source.join("b.txt").is_file());
-        assert_eq!(fs::read_to_string(source.join("external.txt")).unwrap(), "source edit during pause");
+        assert_eq!(
+            fs::read_to_string(source.join("external.txt")).unwrap(),
+            "source edit during pause"
+        );
         assert_eq!(runtime.jobs().unwrap()[0].execution.node, "later");
     }
 }
@@ -1317,29 +1977,65 @@ fn paused_private_node_stop_holds_delivery_until_followup_finishes() {
 #[test]
 fn private_followup_runs_beside_disjoint_publication_without_changing_its_inputs() {
     for (finish_first, restart) in [(false, false), (true, false), (false, true)] {
-        let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
+        let (_temp, source, mut runtime) =
+            adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
         let mut jobs = runtime.jobs().unwrap();
         for job in &mut jobs {
             prepare_private(&mut runtime, job);
             if job.execution.node != "a" {
-                finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+                finish_private(
+                    &mut runtime,
+                    job,
+                    &format!("{}.txt", job.execution.node),
+                    "done",
+                );
             }
         }
-        let original = runtime.state.executions.iter().find(|e| e.node == "a").unwrap().clone();
-        fs::write(Path::new(&original.worktree).join("partial.txt"), "unfinished").unwrap();
+        let original = runtime
+            .state
+            .executions
+            .iter()
+            .find(|e| e.node == "a")
+            .unwrap()
+            .clone();
+        fs::write(
+            Path::new(&original.worktree).join("partial.txt"),
+            "unfinished",
+        )
+        .unwrap();
         runtime.request_execution_stop(Some("a")).unwrap();
         runtime.finish(&original, Err("stopped".into())).unwrap();
         // A handoff already started by an older scheduler, as in the reported Run.
-        let heads: Vec<_> = runtime.state.executions.iter().filter_map(|e| e.after.clone()).collect();
-        runtime.emit_outputs(vec![
-            EventKind::BatchHandoffRequested { recovery_execution_ids: vec![original.id.clone()] },
-            EventKind::PublicationStarted { repository: source.to_string_lossy().into(), heads: heads.clone() },
-        ]).unwrap();
+        let heads: Vec<_> = runtime
+            .state
+            .executions
+            .iter()
+            .filter_map(|e| e.after.clone())
+            .collect();
+        runtime
+            .emit_outputs(vec![
+                EventKind::BatchHandoffRequested {
+                    recovery_execution_ids: vec![original.id.clone()],
+                },
+                EventKind::PublicationStarted {
+                    repository: source.to_string_lossy().into(),
+                    heads: heads.clone(),
+                },
+            ])
+            .unwrap();
         assert!(runtime.intervene("a", "unsafe capture race").is_err());
         assert!(runtime.intervene("b", "unsafe input writer").is_err());
-        runtime.emit(EventKind::BatchHandoffRequested { recovery_execution_ids: vec![] }).unwrap();
-        assert!(runtime.edit_node_message("a", &original.id, "a", "rewrite history", None).is_err(),
-            "history edits cannot borrow the disjoint follow-up exception");
+        runtime
+            .emit(EventKind::BatchHandoffRequested {
+                recovery_execution_ids: vec![],
+            })
+            .unwrap();
+        assert!(
+            runtime
+                .edit_node_message("a", &original.id, "a", "rewrite history", None)
+                .is_err(),
+            "history edits cannot borrow the disjoint follow-up exception"
+        );
         runtime.intervene("a", "finish independently").unwrap();
         runtime.intervene("a", "second turn").unwrap();
         assert_eq!(runtime.state.phase, "publishing");
@@ -1348,7 +2044,11 @@ fn private_followup_runs_beside_disjoint_publication_without_changing_its_inputs
         assert_eq!(replay.phase, "publishing");
         assert_eq!(replay.nodes["a"].pending_messages.len(), 2);
         let mut resumed = runtime.jobs().unwrap();
-        assert_eq!(resumed.len(), 1, "independent private follow-up must not wait for publication");
+        assert_eq!(
+            resumed.len(),
+            1,
+            "independent private follow-up must not wait for publication"
+        );
         let job = &mut resumed[0];
         assert_eq!(job.execution.worktree, original.worktree);
         assert!(!job.source_direct && !job.materialize_source);
@@ -1364,7 +2064,10 @@ fn private_followup_runs_beside_disjoint_publication_without_changing_its_inputs
             assert!(runtime.state.paused);
             assert_eq!(runtime.state.publication.as_ref().unwrap().heads, heads);
             assert_eq!(runtime.state.nodes["a"].status, "failed");
-            assert!(runtime.state.nodes["a"].pending_messages.is_empty(), "claimed turns must not be resent after a crash");
+            assert!(
+                runtime.state.nodes["a"].pending_messages.is_empty(),
+                "claimed turns must not be resent after a crash"
+            );
             assert!(runtime.jobs().unwrap().is_empty());
             assert!(Path::new(&original.worktree).join("partial.txt").is_file());
             assert!(!source.join("partial.txt").exists());
@@ -1377,7 +2080,10 @@ fn private_followup_runs_beside_disjoint_publication_without_changing_its_inputs
         }
         deliver_batch(&mut runtime);
         runtime.cleanup_worktrees().unwrap();
-        assert!(Path::new(&original.worktree).is_dir(), "first delivery cannot reclaim a live or undelivered result");
+        assert!(
+            Path::new(&original.worktree).is_dir(),
+            "first delivery cannot reclaim a live or undelivered result"
+        );
         assert!(!source.join("partial.txt").exists());
         if !finish_first {
             finish_private(&mut runtime, job, "a.txt", "done");
@@ -1398,8 +2104,18 @@ fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_re
             git,
             graph(
                 &["a", "b", "c", "d", "later", "x", "y", "z", "w"],
-                &[("b", "later"), ("c", "later"), ("a", "x"), ("a", "y"), ("a", "z"), ("a", "w"),
-                    ("later", "x"), ("later", "y"), ("later", "z"), ("later", "w")],
+                &[
+                    ("b", "later"),
+                    ("c", "later"),
+                    ("a", "x"),
+                    ("a", "y"),
+                    ("a", "z"),
+                    ("a", "w"),
+                    ("later", "x"),
+                    ("later", "y"),
+                    ("later", "z"),
+                    ("later", "w"),
+                ],
             ),
             true,
             0,
@@ -1408,10 +2124,21 @@ fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_re
         for job in &mut jobs {
             prepare_private(&mut runtime, job);
             if job.execution.node != "a" {
-                finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+                finish_private(
+                    &mut runtime,
+                    job,
+                    &format!("{}.txt", job.execution.node),
+                    "done",
+                );
             }
         }
-        let original = runtime.state.executions.iter().find(|e| e.node == "a").unwrap().clone();
+        let original = runtime
+            .state
+            .executions
+            .iter()
+            .find(|e| e.node == "a")
+            .unwrap()
+            .clone();
         let path = Path::new(&original.worktree);
         fs::write(path.join("tracked.txt"), "paused staged edit").unwrap();
         workspace::git(path, &["add", "tracked.txt"]).unwrap();
@@ -1426,17 +2153,32 @@ fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_re
         }
         runtime.request_execution_stop(Some("a")).unwrap();
         runtime.finish(&original, Err("stopped".into())).unwrap();
-        assert!(!runtime.state.paused, "stopping one node must not pause its siblings");
+        assert!(
+            !runtime.state.paused,
+            "stopping one node must not pause its siblings"
+        );
         assert!(runtime.jobs().unwrap().is_empty());
         assert!(runtime.state.publication.is_none());
         // Replay compatibility: older schedulers delivered completed siblings
         // immediately after a node-only stop. New scheduling holds that handoff,
         // but an already-recorded delivery must still preserve paused inputs.
-        let heads = runtime.state.executions.iter().filter_map(|e| e.after.clone()).collect();
-        runtime.emit_outputs(vec![
-            EventKind::BatchHandoffRequested { recovery_execution_ids: vec![] },
-            EventKind::PublicationStarted { repository: source.to_string_lossy().into(), heads },
-        ]).unwrap();
+        let heads = runtime
+            .state
+            .executions
+            .iter()
+            .filter_map(|e| e.after.clone())
+            .collect();
+        runtime
+            .emit_outputs(vec![
+                EventKind::BatchHandoffRequested {
+                    recovery_execution_ids: vec![],
+                },
+                EventKind::PublicationStarted {
+                    repository: source.to_string_lossy().into(),
+                    heads,
+                },
+            ])
+            .unwrap();
         deliver_batch(&mut runtime);
         let delivered = runtime.state.published_head.clone().unwrap();
         assert_ne!(delivered, original.before);
@@ -1445,17 +2187,32 @@ fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_re
         // Retain an older source-native dispatch too; new scheduling would
         // wait for the stopped private writer before switching workspaces.
         let later = Execution {
-            id: Uuid::new_v4().to_string(), node: "later".into(),
-            session_id: Uuid::new_v4().to_string(), worktree: source.to_string_lossy().into(),
-            before: String::new(), workspace_lineage: vec!["later".into()],
+            id: Uuid::new_v4().to_string(),
+            node: "later".into(),
+            session_id: Uuid::new_v4().to_string(),
+            worktree: source.to_string_lossy().into(),
+            before: String::new(),
+            workspace_lineage: vec!["later".into()],
             ..original.clone()
         };
-        runtime.emit_outputs(vec![
-            EventKind::ExecutionBatchStarted { nodes: vec!["later".into()], isolated: false, resumed: false },
-            EventKind::Started { execution: later.clone(), message_sequences: Some(vec![]), fresh_restart: true },
-        ]).unwrap();
+        runtime
+            .emit_outputs(vec![
+                EventKind::ExecutionBatchStarted {
+                    nodes: vec!["later".into()],
+                    isolated: false,
+                    resumed: false,
+                },
+                EventKind::Started {
+                    execution: later.clone(),
+                    message_sequences: Some(vec![]),
+                    fresh_restart: true,
+                },
+            ])
+            .unwrap();
         fs::write(source.join("later.txt"), "new shared work").unwrap();
-        runtime.finish(&later, Ok((String::new(), "done".into()))).unwrap();
+        runtime
+            .finish(&later, Ok((String::new(), "done".into())))
+            .unwrap();
         assert!(runtime.jobs().unwrap().is_empty());
         let root = runtime.root.clone();
         drop(runtime);
@@ -1465,7 +2222,12 @@ fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_re
         // in this same session, not adopt the intervening publication's inputs.
         let unprepared = runtime.jobs().unwrap().remove(0);
         runtime.request_execution_stop(Some("a")).unwrap();
-        runtime.finish(&unprepared.execution, Err("stopped before preparation".into())).unwrap();
+        runtime
+            .finish(
+                &unprepared.execution,
+                Err("stopped before preparation".into()),
+            )
+            .unwrap();
         assert!(runtime.jobs().unwrap().is_empty());
         drop(runtime);
         runtime = Runtime::open(&root).unwrap();
@@ -1480,12 +2242,22 @@ fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_re
         prepare_private(&mut runtime, &mut resumed);
         assert_eq!(resumed.expected_source_head, original.before);
         assert!(!resumed.materialize_source);
-        assert_eq!(runtime.latest_source_head(), delivered, "do not rewind the Run's current source baseline");
+        assert_eq!(
+            runtime.latest_source_head(),
+            delivered,
+            "do not rewind the Run's current source baseline"
+        );
         assert_eq!(workspace::git(path, &["diff", "--cached"]).unwrap(), staged);
-        assert_eq!(fs::read_to_string(path.join("partial.txt")).unwrap(), "paused untracked edit");
+        assert_eq!(
+            fs::read_to_string(path.join("partial.txt")).unwrap(),
+            "paused untracked edit"
+        );
         assert!(!path.join("deleted.txt").exists());
         for name in ["b.txt", "c.txt", "later.txt"] {
-            assert!(!path.join(name).exists(), "later results must not enter the retained node view");
+            assert!(
+                !path.join(name).exists(),
+                "later results must not enter the retained node view"
+            );
         }
         assert!(!source.join("partial.txt").exists());
         finish_private(&mut runtime, &resumed, "a.txt", "done");
@@ -1495,10 +2267,16 @@ fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_re
         assert_eq!(next.len(), 4);
         prepare_private(&mut runtime, &mut next[0]);
         for name in ["a.txt", "b.txt", "c.txt", "later.txt", "partial.txt"] {
-            assert!(Path::new(&next[0].execution.worktree).join(name).is_file(),
-                "the next private batch must include all delivered and shared work: {name}");
+            assert!(
+                Path::new(&next[0].execution.worktree).join(name).is_file(),
+                "the next private batch must include all delivered and shared work: {name}"
+            );
         }
-        assert!(!runtime.state.events.iter().any(|event| matches!(event.kind, EventKind::BatchRecoveryCaptured { .. })));
+        assert!(!runtime
+            .state
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BatchRecoveryCaptured { .. })));
     }
 }
 
@@ -1511,7 +2289,12 @@ fn offline_paused_batch_restoration_is_guarded_replayable_and_stays_paused() {
     for job in &mut jobs {
         prepare_private(&mut runtime, job);
         if job.execution.node != "a" {
-            finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+            finish_private(
+                &mut runtime,
+                job,
+                &format!("{}.txt", job.execution.node),
+                "done",
+            );
         }
     }
     let paused = &jobs[0].execution;
@@ -1520,7 +2303,10 @@ fn offline_paused_batch_restoration_is_guarded_replayable_and_stays_paused() {
     let session = runtime.root.join("sessions").join(&paused.id);
     fs::create_dir_all(&session).unwrap();
     let session_file = session.join(format!("test_{}.jsonl", paused.session_id));
-    let session_bytes = format!("{}\n", serde_json::json!({"type":"session", "id":paused.session_id, "cwd":paused.worktree}));
+    let session_bytes = format!(
+        "{}\n",
+        serde_json::json!({"type":"session", "id":paused.session_id, "cwd":paused.worktree})
+    );
     fs::write(&session_file, &session_bytes).unwrap();
     runtime.pause(true).unwrap();
     runtime.request_execution_stop(None).unwrap();
@@ -1528,19 +2314,51 @@ fn offline_paused_batch_restoration_is_guarded_replayable_and_stays_paused() {
     let original_node = serde_json::to_value(&runtime.state.nodes["a"]).unwrap();
     runtime.pause(false).unwrap();
     // Emulate the older scheduler's erroneous handoff, not the fixed dispatch.
-    let heads = runtime.state.executions.iter().filter_map(|e| e.after.clone()).collect();
-    runtime.emit_outputs(vec![
-        EventKind::BatchHandoffRequested { recovery_execution_ids: vec![paused.id.clone()] },
-        EventKind::PublicationStarted { repository: source.to_string_lossy().into_owned(), heads },
-    ]).unwrap();
-    let captured = Runtime::capture_batch_recovery(&runtime.root, &runtime.state.run_id,
-        runtime.state.config.as_ref().unwrap(), paused).unwrap();
-    runtime.record_batch_recoveries([(paused.id.clone(), captured.clone())].into_iter().collect()).unwrap();
+    let heads = runtime
+        .state
+        .executions
+        .iter()
+        .filter_map(|e| e.after.clone())
+        .collect();
+    runtime
+        .emit_outputs(vec![
+            EventKind::BatchHandoffRequested {
+                recovery_execution_ids: vec![paused.id.clone()],
+            },
+            EventKind::PublicationStarted {
+                repository: source.to_string_lossy().into_owned(),
+                heads,
+            },
+        ])
+        .unwrap();
+    let captured = Runtime::capture_batch_recovery(
+        &runtime.root,
+        &runtime.state.run_id,
+        runtime.state.config.as_ref().unwrap(),
+        paused,
+    )
+    .unwrap();
+    runtime
+        .record_batch_recoveries(
+            [(paused.id.clone(), captured.clone())]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
     let publication = runtime.state.publication.as_ref().unwrap();
     let default = crate::graph_merge::publication_workspace(&source, &publication.heads).unwrap();
-    let journal = path.parent().unwrap().join(default.file_name().unwrap()).with_extension("publication").join("00000000");
+    let journal = path
+        .parent()
+        .unwrap()
+        .join(default.file_name().unwrap())
+        .with_extension("publication")
+        .join("00000000");
     fs::create_dir_all(&journal).unwrap();
-    fs::write(journal.join("input.json"), serde_json::to_vec(&(String::new(), paused.before.clone())).unwrap()).unwrap();
+    fs::write(
+        journal.join("input.json"),
+        serde_json::to_vec(&(String::new(), paused.before.clone())).unwrap(),
+    )
+    .unwrap();
     for marker in ["prepared.json", "applying", "installed"] {
         fs::write(journal.join(marker), "evidence").unwrap();
         let error = restoration(&runtime.root, &runtime.state).unwrap_err();
@@ -1553,8 +2371,13 @@ fn offline_paused_batch_restoration_is_guarded_replayable_and_stays_paused() {
     let mut changed = runtime.state.clone();
     changed.published_heads.push(captured);
     assert!(restoration(&runtime.root, &changed).is_err());
-    let event = Event { sequence: changed.events.last().unwrap().sequence + 1, timestamp: now(),
-        kind: EventKind::PublicationCompleted { head: "delivered".into() } };
+    let event = Event {
+        sequence: changed.events.last().unwrap().sequence + 1,
+        timestamp: now(),
+        kind: EventKind::PublicationCompleted {
+            head: "delivered".into(),
+        },
+    };
     apply(&mut changed, &event);
     assert!(restoration(&runtime.root, &changed).is_err());
     let mut active = runtime.state.clone();
@@ -1568,33 +2391,76 @@ fn offline_paused_batch_restoration_is_guarded_replayable_and_stays_paused() {
     let id = runtime.state.run_id.clone();
     let sequence = runtime.state.events.last().unwrap().sequence;
     let backup = _temp.path().join("recovery-backup");
-    assert!(restore_paused_batch_at(&root, vec![id.clone()]).unwrap_err().contains("owns this runtime"));
+    assert!(restore_paused_batch_at(&root, vec![id.clone()])
+        .unwrap_err()
+        .contains("owns this runtime"));
     drop(runtime);
     restore_paused_batch_at(&root, vec![id.clone()]).unwrap();
-    let mut args = vec![id.clone(), "--apply".into(), "--backup".into(), backup.to_string_lossy().into_owned(), "--expect-sequence".into(), (sequence - 1).to_string()];
-    assert!(restore_paused_batch_at(&root, args.clone()).unwrap_err().contains("Run changed"));
+    let mut args = vec![
+        id.clone(),
+        "--apply".into(),
+        "--backup".into(),
+        backup.to_string_lossy().into_owned(),
+        "--expect-sequence".into(),
+        (sequence - 1).to_string(),
+    ];
+    assert!(restore_paused_batch_at(&root, args.clone())
+        .unwrap_err()
+        .contains("Run changed"));
     assert!(!backup.exists());
     *args.last_mut().unwrap() = sequence.to_string();
     restore_paused_batch_at(&root, args).unwrap();
-    assert_eq!(crate::store::Store::open_reader(&backup.join("events.sqlite")).unwrap().load(&id).unwrap().events.len(), previous_events);
+    assert_eq!(
+        crate::store::Store::open_reader(&backup.join("events.sqlite"))
+            .unwrap()
+            .load(&id)
+            .unwrap()
+            .events
+            .len(),
+        previous_events
+    );
     runtime = Runtime::open(&root).unwrap();
     assert_eq!(runtime.state.events.len(), previous_events + 1);
-    assert_eq!(serde_json::to_value(&runtime.state.executions).unwrap(), history);
-    let mut replay = Snapshot { run_id: runtime.state.run_id.clone(), ..Default::default() };
-    for event in &runtime.state.events { apply(&mut replay, event); }
-    for state in [&runtime.state, &runtime.store.load(&runtime.state.run_id).unwrap(), &replay] {
+    assert_eq!(
+        serde_json::to_value(&runtime.state.executions).unwrap(),
+        history
+    );
+    let mut replay = Snapshot {
+        run_id: runtime.state.run_id.clone(),
+        ..Default::default()
+    };
+    for event in &runtime.state.events {
+        apply(&mut replay, event);
+    }
+    for state in [
+        &runtime.state,
+        &runtime.store.load(&runtime.state.run_id).unwrap(),
+        &replay,
+    ] {
         assert!(state.paused);
         assert_eq!(state.phase, "paused");
         assert!(state.publication.is_none() && state.batch_handoff.is_none());
-        assert_eq!(serde_json::to_value(&state.nodes["a"]).unwrap(), original_node);
+        assert_eq!(
+            serde_json::to_value(&state.nodes["a"]).unwrap(),
+            original_node
+        );
         assert_eq!(state.nodes["b"].status, "completed");
         assert!(state.can_resume());
-        assert_eq!(crate::snapshot_view::snapshot_metadata(state).unwrap()["nodes"]["a"]["status"], "paused");
+        assert_eq!(
+            crate::snapshot_view::snapshot_metadata(state).unwrap()["nodes"]["a"]["status"],
+            "paused"
+        );
     }
     assert!(runtime.jobs().unwrap().is_empty());
-    assert!(restoration(&runtime.root, &runtime.state).is_err(), "repeated apply must not append another restoration");
+    assert!(
+        restoration(&runtime.root, &runtime.state).is_err(),
+        "repeated apply must not append another restoration"
+    );
     assert_eq!(fs::read_to_string(&session_file).unwrap(), session_bytes);
-    assert_eq!(fs::read_to_string(path.join("partial.txt")).unwrap(), "unfinished");
+    assert_eq!(
+        fs::read_to_string(path.join("partial.txt")).unwrap(),
+        "unfinished"
+    );
     assert!(!source.join("partial.txt").exists());
     let root = runtime.root.clone();
     drop(runtime);
@@ -1612,17 +2478,36 @@ fn offline_paused_batch_restoration_is_guarded_replayable_and_stays_paused() {
 #[cfg(feature = "fixture")]
 #[test]
 fn failed_private_retries_keep_partial_work_and_successful_siblings_private_across_restart() {
-    for (git, has_session, recovery) in [(true, true, "node"), (false, true, "run"), (false, false, "message")] {
-        let (_temp, source, mut runtime) = adaptive(git,
-            graph(&["a", "b", "c", "d", "child"], &[("b", "child")]), true, 0);
+    for (git, has_session, recovery) in [
+        (true, true, "node"),
+        (false, true, "run"),
+        (false, false, "message"),
+    ] {
+        let (_temp, source, mut runtime) = adaptive(
+            git,
+            graph(&["a", "b", "c", "d", "child"], &[("b", "child")]),
+            true,
+            0,
+        );
         let mut jobs = runtime.jobs().unwrap();
         for job in &mut jobs {
             prepare_private(&mut runtime, job);
             if job.execution.node != "a" {
-                finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+                finish_private(
+                    &mut runtime,
+                    job,
+                    &format!("{}.txt", job.execution.node),
+                    "done",
+                );
             }
         }
-        let original = runtime.state.executions.iter().find(|e| e.node == "a").unwrap().clone();
+        let original = runtime
+            .state
+            .executions
+            .iter()
+            .find(|e| e.node == "a")
+            .unwrap()
+            .clone();
         let path = Path::new(&original.worktree);
         fs::write(path.join("committed.txt"), "agent commit before failure").unwrap();
         workspace::git(path, &["add", "committed.txt"]).unwrap();
@@ -1641,7 +2526,9 @@ fn failed_private_retries_keep_partial_work_and_successful_siblings_private_acro
             fs::write(session.join(format!("test_{}.jsonl", original.session_id)),
                 format!("{}\n", serde_json::json!({"type":"session", "id":original.session_id, "cwd":original.worktree}))).unwrap();
         }
-        runtime.finish(&original, Err("unknown provider failure".into())).unwrap();
+        runtime
+            .finish(&original, Err("unknown provider failure".into()))
+            .unwrap();
         let root = runtime.root.clone();
         let mut previous = original.clone();
         for round in 0..2 {
@@ -1650,8 +2537,17 @@ fn failed_private_retries_keep_partial_work_and_successful_siblings_private_acro
             assert!(runtime.state.publication.is_none() && runtime.state.batch_handoff.is_none());
             assert_eq!(runtime.state.nodes["child"].status, "waiting");
             assert_eq!(runtime.state.nodes["b"].status, "completed");
-            for file in ["b.txt", "c.txt", "partial.txt", "committed.txt", "ignored.txt"] {
-                assert!(!source.join(file).exists(), "a failed batch must not leak any member to source");
+            for file in [
+                "b.txt",
+                "c.txt",
+                "partial.txt",
+                "committed.txt",
+                "ignored.txt",
+            ] {
+                assert!(
+                    !source.join(file).exists(),
+                    "a failed batch must not leak any member to source"
+                );
             }
             assert!(source.join("deleted.txt").exists());
             drop(runtime);
@@ -1660,7 +2556,9 @@ fn failed_private_retries_keep_partial_work_and_successful_siblings_private_acro
                 "node" => runtime.resume_node("a").unwrap(),
                 "run" => runtime.pause(false).unwrap(),
                 _ => {
-                    runtime.intervene("a", "finish the task before delivery").unwrap();
+                    runtime
+                        .intervene("a", "finish the task before delivery")
+                        .unwrap();
                     runtime.resume_after_intervention().unwrap();
                 }
             }
@@ -1679,7 +2577,10 @@ fn failed_private_retries_keep_partial_work_and_successful_siblings_private_acro
             assert!(retry.preserved_workspace.is_some());
             assert_eq!(retry.initial_recovery, !has_session);
             prepare_private(&mut runtime, &mut retry);
-            assert_eq!(retry.expected_source_head, if round == 0 { &original.before } else { &head }.as_str());
+            assert_eq!(
+                retry.expected_source_head,
+                if round == 0 { &original.before } else { &head }.as_str()
+            );
             assert_eq!(workspace::git(path, &["rev-parse", "HEAD"]).unwrap(), head);
             assert_eq!(workspace::git(path, &["diff", "--cached"]).unwrap(), staged);
             assert!(path.join("partial.txt").exists() && path.join("ignored.txt").exists());
@@ -1688,22 +2589,61 @@ fn failed_private_retries_keep_partial_work_and_successful_siblings_private_acro
             assert!(runtime.state.publication.is_none());
             previous = retry.execution.clone();
             if round == 0 {
-                runtime.finish(&retry.execution, Err("protocol failure on retry".into())).unwrap();
+                runtime
+                    .finish(&retry.execution, Err("protocol failure on retry".into()))
+                    .unwrap();
             } else {
                 finish_private(&mut runtime, &retry, "a.txt", "done");
             }
         }
         assert!(runtime.jobs().unwrap().is_empty());
         assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 4);
-        assert!(runtime.state.batch_handoff.as_ref().unwrap().recovery_execution_ids.is_empty());
+        assert!(runtime
+            .state
+            .batch_handoff
+            .as_ref()
+            .unwrap()
+            .recovery_execution_ids
+            .is_empty());
         deliver_batch(&mut runtime);
-        for file in ["a.txt", "b.txt", "c.txt", "partial.txt", "committed.txt", "ignored.txt", "external.txt"] {
-            assert!(source.join(file).exists(), "completed batch must deliver every successful member: {file}");
+        for file in [
+            "a.txt",
+            "b.txt",
+            "c.txt",
+            "partial.txt",
+            "committed.txt",
+            "ignored.txt",
+            "external.txt",
+        ] {
+            assert!(
+                source.join(file).exists(),
+                "completed batch must deliver every successful member: {file}"
+            );
         }
         assert!(!source.join("deleted.txt").exists());
-        assert!(!runtime.state.events.iter().any(|e| matches!(e.kind, EventKind::BatchRecoveryCaptured { .. })));
-        assert_eq!(runtime.state.events.iter().filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. })).count(), 1);
-        assert_eq!(runtime.state.executions.iter().filter(|e| e.node == "b" || e.node == "c").count(), 2);
+        assert!(!runtime
+            .state
+            .events
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::BatchRecoveryCaptured { .. })));
+        assert_eq!(
+            runtime
+                .state
+                .events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::PublicationCompleted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .state
+                .executions
+                .iter()
+                .filter(|e| e.node == "b" || e.node == "c")
+                .count(),
+            2
+        );
         assert_eq!(runtime.jobs().unwrap()[0].execution.node, "child");
     }
 }
@@ -1712,18 +2652,36 @@ fn failed_private_retries_keep_partial_work_and_successful_siblings_private_acro
 #[test]
 fn failed_private_retry_rejects_missing_or_rewritten_work_without_borrowing_sibling_slots() {
     for missing in [true, false] {
-        let (temp, source, mut runtime) = adaptive(true, graph(&["a", "b", "c", "d"], &[]), true, 0);
+        let (temp, source, mut runtime) =
+            adaptive(true, graph(&["a", "b", "c", "d"], &[]), true, 0);
         let mut jobs = runtime.jobs().unwrap();
         for job in &mut jobs {
             prepare_private(&mut runtime, job);
             if job.execution.node == "a" {
-                fs::write(Path::new(&job.execution.worktree).join("partial.txt"), "preserve me").unwrap();
-                runtime.finish(&job.execution, Err("provider failed".into())).unwrap();
+                fs::write(
+                    Path::new(&job.execution.worktree).join("partial.txt"),
+                    "preserve me",
+                )
+                .unwrap();
+                runtime
+                    .finish(&job.execution, Err("provider failed".into()))
+                    .unwrap();
             } else {
-                finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+                finish_private(
+                    &mut runtime,
+                    job,
+                    &format!("{}.txt", job.execution.node),
+                    "done",
+                );
             }
         }
-        let original = runtime.state.executions.iter().find(|e| e.node == "a").unwrap().clone();
+        let original = runtime
+            .state
+            .executions
+            .iter()
+            .find(|e| e.node == "a")
+            .unwrap()
+            .clone();
         let path = Path::new(&original.worktree);
         let head = workspace::git(path, &["rev-parse", "HEAD"]).unwrap();
         let parked = temp.path().join("parked");
@@ -1731,7 +2689,8 @@ fn failed_private_retry_rejects_missing_or_rewritten_work_without_borrowing_sibl
             fs::rename(path, &parked).unwrap();
         } else {
             let tree = workspace::git(path, &["rev-parse", "HEAD^{tree}"]).unwrap();
-            let rewritten = workspace::git(path, &["commit-tree", &tree, "-m", "unrelated root"]).unwrap();
+            let rewritten =
+                workspace::git(path, &["commit-tree", &tree, "-m", "unrelated root"]).unwrap();
             workspace::git(path, &["reset", "--soft", &rewritten]).unwrap();
         }
         for _ in 0..2 {
@@ -1739,10 +2698,23 @@ fn failed_private_retry_rejects_missing_or_rewritten_work_without_borrowing_sibl
             assert!(runtime.state.publication.is_none());
             runtime.resume_node("a").unwrap();
             let retry = runtime.jobs().unwrap().remove(0);
-            assert_eq!(retry.execution.worktree, original.worktree, "damaged recovery must never adopt a sibling's slot");
-            let error = perform_with_merger(&retry, &runtime.root, &[], |_| {}, |_| Ok(()),
-                |_| Err("unexpected merger".into())).unwrap_err();
-            assert!(error.contains("missing or reassigned") || error.contains("prepared Git history"), "{error}");
+            assert_eq!(
+                retry.execution.worktree, original.worktree,
+                "damaged recovery must never adopt a sibling's slot"
+            );
+            let error = perform_with_merger(
+                &retry,
+                &runtime.root,
+                &[],
+                |_| {},
+                |_| Ok(()),
+                |_| Err("unexpected merger".into()),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("missing or reassigned") || error.contains("prepared Git history"),
+                "{error}"
+            );
             runtime.finish(&retry.execution, Err(error)).unwrap();
             assert!(!source.join("partial.txt").exists() && !source.join("b.txt").exists());
             let root = runtime.root.clone();
@@ -1750,12 +2722,18 @@ fn failed_private_retry_rejects_missing_or_rewritten_work_without_borrowing_sibl
             runtime = Runtime::open(&root).unwrap();
             runtime.resume_scheduling().unwrap();
         }
-        if missing { fs::rename(parked, path).unwrap(); }
-        else { workspace::git(path, &["reset", "--soft", &head]).unwrap(); }
+        if missing {
+            fs::rename(parked, path).unwrap();
+        } else {
+            workspace::git(path, &["reset", "--soft", &head]).unwrap();
+        }
         runtime.resume_node("a").unwrap();
         let mut retry = runtime.jobs().unwrap().remove(0);
         prepare_private(&mut runtime, &mut retry);
-        assert_eq!(fs::read_to_string(path.join("partial.txt")).unwrap(), "preserve me");
+        assert_eq!(
+            fs::read_to_string(path.join("partial.txt")).unwrap(),
+            "preserve me"
+        );
         finish_private(&mut runtime, &retry, "a.txt", "done");
         runtime.jobs().unwrap();
         deliver_batch(&mut runtime);
@@ -1772,7 +2750,12 @@ fn crash_before_private_preparation_holds_successful_siblings_and_retries_in_the
     assert_eq!(original.node, "a");
     for job in &mut jobs[1..] {
         prepare_private(&mut runtime, job);
-        finish_private(&mut runtime, job, &format!("{}.txt", job.execution.node), "done");
+        finish_private(
+            &mut runtime,
+            job,
+            &format!("{}.txt", job.execution.node),
+            "done",
+        );
     }
     let root = runtime.root.clone();
     drop(runtime);
@@ -1810,7 +2793,12 @@ fn failed_private_batch_holds_ready_children_until_every_retry_succeeds() {
         prepare_private(&mut runtime, &mut job);
         if job.execution.node != "b" {
             failed.push(job.execution.clone());
-            fs::write(Path::new(&job.execution.worktree).join(format!("partial-{}.txt", job.execution.node)), "retained").unwrap();
+            fs::write(
+                Path::new(&job.execution.worktree)
+                    .join(format!("partial-{}.txt", job.execution.node)),
+                "retained",
+            )
+            .unwrap();
             runtime
                 .finish(&job.execution, Err("provider failed".into()))
                 .unwrap();
@@ -1834,8 +2822,19 @@ fn failed_private_batch_holds_ready_children_until_every_retry_succeeds() {
         assert_eq!(retry.execution.node, previous.node);
         assert_eq!(retry.execution.worktree, previous.worktree);
         prepare_private(&mut runtime, &mut retry);
-        assert_eq!(fs::read_to_string(Path::new(&retry.execution.worktree).join(format!("partial-{}.txt", previous.node))).unwrap(), "retained");
-        finish_private(&mut runtime, &retry, &format!("{}.txt", previous.node), "done");
+        assert_eq!(
+            fs::read_to_string(
+                Path::new(&retry.execution.worktree).join(format!("partial-{}.txt", previous.node))
+            )
+            .unwrap(),
+            "retained"
+        );
+        finish_private(
+            &mut runtime,
+            &retry,
+            &format!("{}.txt", previous.node),
+            "done",
+        );
     }
     assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 4);
@@ -1855,7 +2854,10 @@ fn retry_of_a_private_standalone_followup_does_not_trigger_graph_review() {
     finish_shared(&mut runtime, &root, "done");
     runtime.jobs().unwrap();
     runtime
-        .revise_graph(graph(&["root", "a", "b", "c"], &[]), PlanningSummary::default())
+        .revise_graph(
+            graph(&["root", "a", "b", "c"], &[]),
+            PlanningSummary::default(),
+        )
         .unwrap();
     for job in runtime.jobs().unwrap() {
         finish_shared(&mut runtime, &job, "done");
@@ -2084,7 +3086,12 @@ fn batch_conflict_blocks_next_batch_until_publication_retry_resolves_it() {
 fn private_feedback_is_delivered_before_the_single_source_repair() {
     let mut plan = graph(
         &["owner", "r1", "r2", "r3", "r4"],
-        &[("owner", "r1"), ("owner", "r2"), ("owner", "r3"), ("owner", "r4")],
+        &[
+            ("owner", "r1"),
+            ("owner", "r2"),
+            ("owner", "r3"),
+            ("owner", "r4"),
+        ],
     );
     for name in ["r1", "r2", "r3", "r4"] {
         plan.edges.push(Edge {
@@ -2129,10 +3136,22 @@ fn private_feedback_is_delivered_before_the_single_source_repair() {
         let anchor = job.session_fork.as_ref().unwrap();
         assert_eq!(anchor.node, job.execution.node);
         assert!(!job.preserve_failed_environment && job.preserved_workspace.is_none());
-        assert!(job.task.contains(if job.execution.node == "r1" { "feedback returned" } else { "upstream owner updated" }));
+        assert!(job.task.contains(if job.execution.node == "r1" {
+            "feedback returned"
+        } else {
+            "upstream owner updated"
+        }));
         prepare_private(&mut runtime, &mut job);
-        assert_eq!(fs::read_to_string(Path::new(&job.execution.worktree).join("repair.txt")).unwrap(), "fresh feedback input");
-        finish_private(&mut runtime, &job, &format!("{}.txt", job.execution.node), "<ACCEPT>");
+        assert_eq!(
+            fs::read_to_string(Path::new(&job.execution.worktree).join("repair.txt")).unwrap(),
+            "fresh feedback input"
+        );
+        finish_private(
+            &mut runtime,
+            &job,
+            &format!("{}.txt", job.execution.node),
+            "<ACCEPT>",
+        );
     }
 }
 

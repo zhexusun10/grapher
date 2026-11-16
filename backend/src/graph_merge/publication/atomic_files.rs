@@ -104,7 +104,9 @@ fn matches_entries(
             true
         }
     });
-    let Some(entry) = candidates.next() else { return Ok(false) };
+    let Some(entry) = candidates.next() else {
+        return Ok(false);
+    };
     let blob = if is_link {
         let link = crate::workspace_symlinks::capture(repository, &path, &metadata)?;
         if entry.blob.len() == 40 {
@@ -368,9 +370,17 @@ fn stage_entries(
     for (path, entry) in entries {
         validate_relative(path)?;
         if !matches!(entry.mode.as_str(), "100644" | "100755" | "120000") {
-            return Err(format!("Unsupported publication entry mode: {}", entry.mode));
+            return Err(format!(
+                "Unsupported publication entry mode: {}",
+                entry.mode
+            ));
         }
-        crate::workspace_git_index::append_index_info(&mut index_info, &entry.mode, &entry.blob, path);
+        crate::workspace_git_index::append_index_info(
+            &mut index_info,
+            &entry.mode,
+            &entry.blob,
+            path,
+        );
         paths.push(path.as_str());
     }
     stage_files_with_index(repository, journal, &paths, |index| {
@@ -386,7 +396,8 @@ fn stage_entries(
             index,
             &["update-index", "-z", "--index-info"],
             Some(&index_info),
-        ).map(|_| ())
+        )
+        .map(|_| ())
     })
 }
 
@@ -610,12 +621,10 @@ mod tests {
                     mode: "100755".into(),
                     blob: old["file.txt"].blob.clone(),
                 };
-                assert!(matches_entries(
-                    &source,
-                    "file.txt",
-                    &[candidates[0], Some(&executable)],
-                )
-                .unwrap());
+                assert!(
+                    matches_entries(&source, "file.txt", &[candidates[0], Some(&executable)],)
+                        .unwrap()
+                );
             }
             fs::remove_file(&file).unwrap();
             assert!(!matches_entries(&source, "file.txt", &candidates).unwrap());
@@ -693,7 +702,10 @@ mod tests {
         assert!(install(&source, &journal, &input, &result)
             .unwrap_err()
             .contains("Source files changed"));
-        assert_eq!(fs::read_to_string(source.join("file.txt")).unwrap(), "user edit");
+        assert_eq!(
+            fs::read_to_string(source.join("file.txt")).unwrap(),
+            "user edit"
+        );
         fs::write(source.join("file.txt"), "original").unwrap();
         install(&source, &journal, &input, &result).unwrap();
         // An interrupted deletion can be replayed without rebuilding an index.
@@ -790,8 +802,13 @@ mod tests {
         for path in paths {
             assert_eq!(fs::read_to_string(source.join(path)).unwrap(), "published");
         }
-        let indexed = private_index_git(&source, &journal.join("staging-index"), &["ls-files", "-z"]).unwrap();
-        let indexed: BTreeSet<_> = indexed.split('\0').filter(|name| !name.is_empty()).collect();
+        let indexed =
+            private_index_git(&source, &journal.join("staging-index"), &["ls-files", "-z"])
+                .unwrap();
+        let indexed: BTreeSet<_> = indexed
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .collect();
         assert_eq!(indexed, paths.into_iter().collect());
     }
 
@@ -810,7 +827,9 @@ mod tests {
         // A legacy/repair checkout may have populated a full cached index.
         stage_files(&source, &journal, &result, &["a.txt"]).unwrap();
         assert!(private_index_git(&source, &index, &["ls-files", "-z"])
-            .unwrap().split('\0').any(|name| name == "file.txt"));
+            .unwrap()
+            .split('\0')
+            .any(|name| name == "file.txt"));
         let selected = entries(&source, &result, &BTreeSet::from(["b.txt".into()])).unwrap();
         for corrupt in [false, true] {
             if corrupt {
@@ -818,7 +837,10 @@ mod tests {
             }
             fs::write(index.with_extension("lock"), "stopped index update").unwrap();
             let staged = stage_entries(&source, &journal, &selected).unwrap();
-            assert_eq!(private_index_git(&source, &index, &["ls-files", "-z"]).unwrap(), "b.txt\0");
+            assert_eq!(
+                private_index_git(&source, &index, &["ls-files", "-z"]).unwrap(),
+                "b.txt\0"
+            );
             assert_eq!(fs::read(staged.join("b.txt")).unwrap(), b"b.txt");
             assert!(!index.with_extension("lock").exists());
             assert_eq!(fs::read(source.join(".git/index")).unwrap(), original);
@@ -851,7 +873,11 @@ mod tests {
             let journal = temp.path().join("journal");
             fs::create_dir_all(source.join("nested")).unwrap();
             fs::create_dir(&journal).unwrap();
-            git(&source, &["init", "-q", &format!("--object-format={format}")]).unwrap();
+            git(
+                &source,
+                &["init", "-q", &format!("--object-format={format}")],
+            )
+            .unwrap();
             fs::write(source.join(".gitattributes"), "*.txt text eol=crlf\n").unwrap();
             fs::write(source.join("unchanged.txt"), "unchanged\n").unwrap();
             let name = "nested/- [literal] 中文.txt";
@@ -873,12 +899,21 @@ mod tests {
             };
             let result = workspace::snapshot_repository(&source).unwrap();
             let selected = entries(&source, &result, &paths).unwrap();
-            assert_eq!(selected[name].blob.len(), if format == "sha1" { 40 } else { 64 });
+            assert_eq!(
+                selected[name].blob.len(),
+                if format == "sha1" { 40 } else { 64 }
+            );
             let original_index = fs::read(source.join(".git/index")).ok();
             let staged = stage_entries(&source, &journal, &selected).unwrap();
             assert_eq!(fs::read(staged.join(name)).unwrap(), bytes);
-            let indexed = private_index_git(&source, &journal.join("staging-index"), &["ls-files", "-z"]).unwrap();
-            let indexed: BTreeSet<_> = indexed.split('\0').filter(|name| !name.is_empty()).map(str::to_string).collect();
+            let indexed =
+                private_index_git(&source, &journal.join("staging-index"), &["ls-files", "-z"])
+                    .unwrap();
+            let indexed: BTreeSet<_> = indexed
+                .split('\0')
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect();
             assert_eq!(indexed, paths);
             assert!(!staged.join(".gitattributes").exists());
             assert!(!staged.join("unchanged.txt").exists());
@@ -886,8 +921,18 @@ mod tests {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                assert_ne!(fs::metadata(staged.join(name)).unwrap().permissions().mode() & 0o111, 0);
-                assert_eq!(fs::read_link(staged.join("link")).unwrap(), PathBuf::from(name));
+                assert_ne!(
+                    fs::metadata(staged.join(name))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o111,
+                    0
+                );
+                assert_eq!(
+                    fs::read_link(staged.join("link")).unwrap(),
+                    PathBuf::from(name)
+                );
                 for special in ["tab\tand\nnewline", "back\\slash"] {
                     assert_eq!(fs::read(staged.join(special)).unwrap(), bytes);
                 }

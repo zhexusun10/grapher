@@ -9,7 +9,10 @@ fn read_changes(mut query: impl FnMut() -> Result<serde_json::Value, String>) ->
             Ok(value) => return value,
             Err(error) => {
                 assert_eq!(error, "File-change cache is busy; retry the read");
-                assert!(std::time::Instant::now() < deadline, "file-change cache stayed busy");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "file-change cache stayed busy"
+                );
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
@@ -242,11 +245,13 @@ fn empty_run_id_file_changes_reads_the_active_run() {
         &serde_json::json!({ "runId": "" }),
     )
     .unwrap();
-    let value = read_changes(|| dispatch(
-        &scoped,
-        "get_file_changes",
-        serde_json::json!({ "runId": "" }),
-    ));
+    let value = read_changes(|| {
+        dispatch(
+            &scoped,
+            "get_file_changes",
+            serde_json::json!({ "runId": "" }),
+        )
+    });
     assert_eq!(value["runId"], active);
     assert_eq!(value["summary"]["totalFiles"], 1);
 }
@@ -351,11 +356,13 @@ fn historical_run_routes_to_its_own_projection_while_the_active_run_is_busy() {
         &serde_json::json!({ "runId": historical_id }),
     )
     .unwrap();
-    let value = read_changes(|| dispatch(
-        &scoped,
-        "get_file_changes",
-        serde_json::json!({ "runId": historical_id }),
-    ));
+    let value = read_changes(|| {
+        dispatch(
+            &scoped,
+            "get_file_changes",
+            serde_json::json!({ "runId": historical_id }),
+        )
+    });
     drop(active_guard);
     invalidate_service_cache(temp.path(), None);
     assert_eq!(value["runId"], historical_id);

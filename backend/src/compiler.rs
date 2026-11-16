@@ -55,13 +55,20 @@ fn advisories(graph: &Graph) -> Vec<Advisory<'_>> {
     for node in &graph.nodes {
         task_nodes.entry(&node.task).or_default().insert(&node.id);
     }
-    let mut warnings: Vec<_> = task_nodes.into_iter()
+    let mut warnings: Vec<_> = task_nodes
+        .into_iter()
         .filter(|(_, nodes)| nodes.len() > 1)
-        .map(|(task, nodes)| Advisory::DuplicateTask { task, nodes: nodes.into_iter().collect() })
+        .map(|(task, nodes)| Advisory::DuplicateTask {
+            task,
+            nodes: nodes.into_iter().collect(),
+        })
         .collect();
     for node in &graph.nodes {
         if node.task.contains("<FEEDBACK>")
-            && !graph.edges.iter().any(|edge| edge.feedback && edge.from == node.id)
+            && !graph
+                .edges
+                .iter()
+                .any(|edge| edge.feedback && edge.from == node.id)
         {
             warnings.push(Advisory::MissingFeedback { node: &node.id });
         }
@@ -73,7 +80,8 @@ fn advisories(graph: &Graph) -> Vec<Advisory<'_>> {
 /// unchanged. Compare the saved candidate, not the runtime's committed graph.
 pub fn changed_advisories(before: &Graph, after: &Graph) -> Vec<Diagnostic> {
     let previous: BTreeSet<_> = advisories(before).into_iter().collect();
-    advisories(after).into_iter()
+    advisories(after)
+        .into_iter()
         .filter(|warning| !previous.contains(warning))
         .map(|warning| Diagnostic {
             code: warning.code().into(),
@@ -232,8 +240,7 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
         }
         if !names.insert(node.id.clone()) {
             add("E202", format!("Duplicate node: {}", node.id));
-        } else if let Some(previous) =
-            folded_names.insert(node.id.to_lowercase(), node.id.clone())
+        } else if let Some(previous) = folded_names.insert(node.id.to_lowercase(), node.id.clone())
         {
             add("E202", format!(
                 "Node ids '{previous}' and '{}' differ only by case and would collide on case-insensitive filesystems",
@@ -382,7 +389,8 @@ pub fn compile(graph: &Graph, final_check: bool) -> Result<Plan, Vec<Diagnostic>
     if !errors.is_empty() {
         return Err(errors);
     }
-    let mut warnings: Vec<_> = advisories(graph).into_iter()
+    let mut warnings: Vec<_> = advisories(graph)
+        .into_iter()
         .map(|warning| format!("{}: {}", warning.code(), warning.message(false)))
         .collect();
     for edge in graph.edges.iter().filter(|edge| edge.feedback) {

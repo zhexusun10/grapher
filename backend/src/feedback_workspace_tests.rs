@@ -179,15 +179,32 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
         } else {
             assert_eq!(job.execution.worktree, repair.execution.worktree);
         }
-        let previous = if job.execution.node == "related" { related } else { review };
+        let previous = if job.execution.node == "related" {
+            related
+        } else {
+            review
+        };
         assert_eq!(job.session_fork.as_ref().unwrap().id, previous.execution.id);
         assert!(job.preserved_workspace.is_none());
         execute(&mut runtime, job);
-        let retained = fs::read_to_string(runtime.root.join("sessions").join(&job.execution.id)
-            .join(format!("grapher_{}.jsonl", job.execution.session_id))).unwrap();
-        assert!(retained.contains(if job.execution.node == "related" { "RELATED PRIVATE HISTORY" } else { "REVIEW PRIVATE HISTORY" }));
+        let retained = fs::read_to_string(
+            runtime
+                .root
+                .join("sessions")
+                .join(&job.execution.id)
+                .join(format!("grapher_{}.jsonl", job.execution.session_id)),
+        )
+        .unwrap();
+        assert!(retained.contains(if job.execution.node == "related" {
+            "RELATED PRIVATE HISTORY"
+        } else {
+            "REVIEW PRIVATE HISTORY"
+        }));
         assert!(!retained.contains("OWNER PRIVATE HISTORY"));
-        assert!(!runtime.state.superseded_execution_ids.contains(&previous.execution.id));
+        assert!(!runtime
+            .state
+            .superseded_execution_ids
+            .contains(&previous.execution.id));
         assert_eq!(
             fs::read_to_string(Path::new(&job.execution.worktree).join(".cache/owner"))
                 .unwrap()
@@ -1194,7 +1211,10 @@ fn feedback_descendant_keeps_its_previous_attempts() {
     let recomputed = runtime.jobs().unwrap().remove(0);
     assert_eq!(recomputed.execution.node, "review");
     assert_eq!(recomputed.execution.attempt, 2);
-    assert_eq!(recomputed.session_fork.as_ref().unwrap().id, review.execution.id);
+    assert_eq!(
+        recomputed.session_fork.as_ref().unwrap().id,
+        review.execution.id
+    );
     assert!(!runtime
         .state
         .superseded_execution_ids
@@ -1221,15 +1241,28 @@ fn feedback_recheck_retry_retains_prepared_files_when_its_session_fork_failed() 
     execute(&mut runtime, &repair);
     let recheck = runtime.jobs().unwrap().remove(0);
     let root = runtime.root.clone();
-    let result = perform(&recheck, &root, &[], |_| {}, |head| {
-        runtime.emit(EventKind::Prepared { execution_id: recheck.execution.id.clone(), head })?;
-        Err("failed before conversation fork".into())
-    });
+    let result = perform(
+        &recheck,
+        &root,
+        &[],
+        |_| {},
+        |head| {
+            runtime.emit(EventKind::Prepared {
+                execution_id: recheck.execution.id.clone(),
+                head,
+            })?;
+            Err("failed before conversation fork".into())
+        },
+    );
     runtime.finish(&recheck.execution, result).unwrap();
     assert!(runtime.jobs().unwrap().is_empty());
     // A local repair after the failed preparation must survive rebuilding Pi's
     // session, too; history and physical ownership are independent identities.
-    fs::write(Path::new(&recheck.execution.worktree).join("retained.txt"), "local repair").unwrap();
+    fs::write(
+        Path::new(&recheck.execution.worktree).join("retained.txt"),
+        "local repair",
+    )
+    .unwrap();
     drop(runtime);
     let mut runtime = Runtime::open(&root).unwrap();
     runtime.pause(false).unwrap();
@@ -1239,7 +1272,10 @@ fn feedback_recheck_retry_retains_prepared_files_when_its_session_fork_failed() 
     assert_eq!(retry.task, recheck.task);
     assert!(!retry.continuation && !retry.initial_recovery);
     execute(&mut runtime, &retry);
-    assert_eq!(fs::read_to_string(Path::new(&retry.execution.worktree).join("retained.txt")).unwrap(), "local repair");
+    assert_eq!(
+        fs::read_to_string(Path::new(&retry.execution.worktree).join("retained.txt")).unwrap(),
+        "local repair"
+    );
 }
 
 #[cfg(feature = "fixture")]

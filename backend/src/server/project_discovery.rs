@@ -82,7 +82,10 @@ pub(super) fn parse_skill_markdown(path: &Path) -> Option<(String, String)> {
     Some((skill_name, skill_desc))
 }
 
-pub(super) fn resolve_repo_path(service: &Arc<Service>, repository_param: Option<String>) -> PathBuf {
+pub(super) fn resolve_repo_path(
+    service: &Arc<Service>,
+    repository_param: Option<String>,
+) -> PathBuf {
     if let Some(repo) = repository_param.filter(|s| !s.trim().is_empty()) {
         return PathBuf::from(repo);
     }

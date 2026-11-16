@@ -1057,13 +1057,21 @@ fn untracked_additions(path: &Path) -> Option<usize> {
     const LIMIT: u64 = 256 * 1024;
     let metadata = fs::symlink_metadata(path).ok()?;
     let bytes = if crate::workspace_symlinks::is_link(&metadata) {
-        fs::read_link(path).ok()?.as_os_str().as_encoded_bytes().to_vec()
+        fs::read_link(path)
+            .ok()?
+            .as_os_str()
+            .as_encoded_bytes()
+            .to_vec()
     } else {
         if !metadata.is_file() || metadata.len() > LIMIT {
             return None;
         }
         let mut bytes = Vec::new();
-        fs::File::open(path).ok()?.take(LIMIT + 1).read_to_end(&mut bytes).ok()?;
+        fs::File::open(path)
+            .ok()?
+            .take(LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
         bytes
     };
     if bytes.len() as u64 > LIMIT {
@@ -1074,8 +1082,10 @@ fn untracked_additions(path: &Path) -> Option<usize> {
     if bytes.iter().take(8000).any(|byte| *byte == 0) {
         return Some(0);
     }
-    Some(bytes.iter().filter(|byte| **byte == b'\n').count()
-        + usize::from(!bytes.is_empty() && bytes.last() != Some(&b'\n')))
+    Some(
+        bytes.iter().filter(|byte| **byte == b'\n').count()
+            + usize::from(!bytes.is_empty() && bytes.last() != Some(&b'\n')),
+    )
 }
 
 /// Read status and line counts from one Git diff between commits or a working
@@ -2007,7 +2017,11 @@ mod tests {
             ("/repo/i\u{307}/file.txt", "/REPO/İ", "file.txt"),
             ("/repo/İ", "/repo/İ", ""),
         ] {
-            assert_eq!(strip_root_prefix(path, root).as_deref(), Some(expected), "{path}");
+            assert_eq!(
+                strip_root_prefix(path, root).as_deref(),
+                Some(expected),
+                "{path}"
+            );
         }
         assert_eq!(strip_root_prefix("/repo/İ-other/file.txt", "/repo/İ"), None);
     }
@@ -2016,27 +2030,55 @@ mod tests {
     fn tool_changes_only_report_paths_inside_the_workspace() {
         let mut log = String::new();
         for (index, path) in [
-            "/elsewhere/secret.txt", "../outside.txt", "/repo/../outside.txt",
-            "nested/../../outside.txt", "C:/elsewhere/secret.txt", "C:secret.txt",
-            "tmp/result.txt", "dev/config.txt", "proc/output.txt", "src/../inside.txt",
+            "/elsewhere/secret.txt",
+            "../outside.txt",
+            "/repo/../outside.txt",
+            "nested/../../outside.txt",
+            "C:/elsewhere/secret.txt",
+            "C:secret.txt",
+            "tmp/result.txt",
+            "dev/config.txt",
+            "proc/output.txt",
+            "src/../inside.txt",
             "/repo/nested/../absolute.txt",
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let tool = if index % 2 == 0 { "write" } else { "edit" };
             log.push_str(&serde_json::json!({
                 "type": "tool_execution_start", "toolCallId": index.to_string(), "toolName": tool,
                 "args": {"path": path, "content": "new", "oldText": "old", "newText": "new"},
             }).to_string());
             log.push('\n');
-            log.push_str(&serde_json::json!({
-                "type": "tool_execution_end", "toolCallId": index.to_string(), "toolName": tool,
-                "isError": false,
-            }).to_string());
+            log.push_str(
+                &serde_json::json!({
+                    "type": "tool_execution_end", "toolCallId": index.to_string(), "toolName": tool,
+                    "isError": false,
+                })
+                .to_string(),
+            );
             log.push('\n');
         }
         let summary = parse_jsonl_file_changes(&log, "worker", "exec", "/repo", "/repo", false);
-        assert_eq!(summary.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(),
-            ["absolute.txt", "dev/config.txt", "inside.txt", "proc/output.txt", "tmp/result.txt"]);
-        assert!(summary.files.iter().all(|file| file.nodes == ["worker"] && file.execution_ids == ["exec"]));
+        assert_eq!(
+            summary
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "absolute.txt",
+                "dev/config.txt",
+                "inside.txt",
+                "proc/output.txt",
+                "tmp/result.txt"
+            ]
+        );
+        assert!(summary
+            .files
+            .iter()
+            .all(|file| file.nodes == ["worker"] && file.execution_ids == ["exec"]));
     }
 
     #[test]
@@ -2398,7 +2440,11 @@ mod tests {
         crate::workspace::git(&repo, &["config", "user.email", "test@example.com"]).unwrap();
         crate::workspace::git(&repo, &["config", "user.name", "Test"]).unwrap();
 
-        fs::write(repo.join(".gitignore"), "dist/\nnode_modules/\n.next/\n__pycache__/\n").unwrap();
+        fs::write(
+            repo.join(".gitignore"),
+            "dist/\nnode_modules/\n.next/\n__pycache__/\n",
+        )
+        .unwrap();
         fs::write(repo.join("kept.txt"), "base\n").unwrap();
         crate::workspace::git(&repo, &["add", "-A"]).unwrap();
         crate::workspace::git(&repo, &["commit", "-q", "-m", "base"]).unwrap();
@@ -2425,7 +2471,14 @@ mod tests {
         let paths: Vec<&str> = live.files.iter().map(|file| file.path.as_str()).collect();
         assert_eq!(
             paths,
-            vec![".next/server.js", "dist/bundle.js", "module.pyc", "module.pyo", "node_modules/pkg/index.js", "src.ts"],
+            vec![
+                ".next/server.js",
+                "dist/bundle.js",
+                "module.pyc",
+                "module.pyo",
+                "node_modules/pkg/index.js",
+                "src.ts"
+            ],
             "project artifacts stay: {paths:?}"
         );
         assert_eq!(live.added_count, 6);

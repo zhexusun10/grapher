@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 
 // Retain the original algorithm only as the opt-in benchmark's reference.
 fn fixed(entries: &mut BTreeMap<String, Entry>, files: Vec<PendingFile>) -> Result<(), String> {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(4);
     if threads <= 1 || files.len() < 256 {
         for file in files {
             entries.insert(file.name, file_entry(&file.absolute, &file.metadata)?);
@@ -13,19 +16,35 @@ fn fixed(entries: &mut BTreeMap<String, Entry>, files: Vec<PendingFile>) -> Resu
     }
     let chunk = files.len().div_ceil(threads);
     let resolved = std::thread::scope(|scope| {
-        let handles: Vec<_> = files.chunks(chunk).map(|chunk| {
-            scope.spawn(move || {
-                chunk.iter().map(|file| {
-                    Ok((file.name.clone(), file_entry(&file.absolute, &file.metadata)?))
-                }).collect::<Result<Vec<_>, String>>()
+        let handles: Vec<_> = files
+            .chunks(chunk)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|file| {
+                            Ok((
+                                file.name.clone(),
+                                file_entry(&file.absolute, &file.metadata)?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                })
             })
-        }).collect();
-        handles.into_iter().map(|handle| {
-            handle.join().map_err(|_| "Project scan worker failed".to_string())?
-        }).collect::<Result<Vec<_>, String>>()
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| "Project scan worker failed".to_string())?
+            })
+            .collect::<Result<Vec<_>, String>>()
     })?;
     for chunk in resolved {
-        for (name, entry) in chunk { entries.insert(name, entry); }
+        for (name, entry) in chunk {
+            entries.insert(name, entry);
+        }
     }
     Ok(())
 }
@@ -34,7 +53,17 @@ fn observe(root: &Path) -> (BTreeMap<String, Entry>, Vec<PendingFile>, Duration)
     let mut entries = BTreeMap::new();
     let mut files = Vec::new();
     let started = Instant::now();
-    walk_scoped(root, Path::new(""), &mut entries, &mut files, false, root, &[], &Default::default()).unwrap();
+    walk_scoped(
+        root,
+        Path::new(""),
+        &mut entries,
+        &mut files,
+        false,
+        root,
+        &[],
+        &Default::default(),
+    )
+    .unwrap();
     // Fix enumeration order in this synthetic workload on every host. In the
     // clustered case the first old partition owns all large files.
     files.sort_by(|a, b| a.name.cmp(&b.name));
@@ -62,7 +91,10 @@ fn median(mut samples: Vec<Duration>) -> Duration {
 #[test]
 #[ignore = "local scan scheduling benchmark; run explicitly with --ignored --nocapture"]
 fn file_scanning_benchmark() {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(4);
     for (label, count, large_count, large_bytes, stride) in [
         ("small_below_threshold", 64, 0, 0, 1),
         ("uniform_small", 512, 0, 0, 1),
@@ -74,8 +106,15 @@ fn file_scanning_benchmark() {
         let small = vec![b'x'; 4096];
         let large = vec![b'y'; large_bytes];
         for index in 0..count {
-            fs::write(temp.path().join(format!("file-{index:05}.bin")),
-                if index % stride == 0 && index / stride < large_count { &large } else { &small }).unwrap();
+            fs::write(
+                temp.path().join(format!("file-{index:05}.bin")),
+                if index % stride == 0 && index / stride < large_count {
+                    &large
+                } else {
+                    &small
+                },
+            )
+            .unwrap();
         }
         let expected = timed(temp.path(), false).0;
         assert_eq!(timed(temp.path(), true).0, expected);
@@ -84,11 +123,19 @@ fn file_scanning_benchmark() {
         let mut walks = Vec::new();
         // Alternate order to avoid always giving one strategy the warmer cache.
         for round in 0..5 {
-            for candidate in if round % 2 == 0 { [false, true] } else { [true, false] } {
+            for candidate in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
                 let (actual, walk, elapsed) = timed(temp.path(), candidate);
                 assert_eq!(actual, expected);
                 walks.push(walk);
-                if candidate { queue.push(elapsed); } else { fixed.push(elapsed); }
+                if candidate {
+                    queue.push(elapsed);
+                } else {
+                    fixed.push(elapsed);
+                }
             }
         }
         println!("scan {label}: files={count}, workers={threads}, median_walk={:?}, fixed={:?}, queued={:?}",
@@ -105,10 +152,19 @@ fn snapshot_staging_benchmark() {
         let root = temp.path().join("project");
         let metadata = temp.path().join("graph-git");
         fs::create_dir(&root).unwrap();
-        workspace::git(&root, &[
-            "--git-dir", metadata.to_str().unwrap(), "--work-tree", root.to_str().unwrap(),
-            "init", "-q", &format!("--object-format={format}"),
-        ]).unwrap();
+        workspace::git(
+            &root,
+            &[
+                "--git-dir",
+                metadata.to_str().unwrap(),
+                "--work-tree",
+                root.to_str().unwrap(),
+                "init",
+                "-q",
+                &format!("--object-format={format}"),
+            ],
+        )
+        .unwrap();
         for index in 0..64u32 {
             let mut bytes = vec![b'z'; 4096];
             bytes[..4].copy_from_slice(&index.to_le_bytes());
@@ -129,7 +185,10 @@ fn snapshot_staging_benchmark() {
             stages.push(started.elapsed());
             assert_eq!(workspace::git(&root, &prefix).unwrap(), expected);
         }
-        println!("snapshot staging {format}: files=64, median_scan={:?}, median_stage={:?}",
-            median(scans), median(stages));
+        println!(
+            "snapshot staging {format}: files=64, median_scan={:?}, median_stage={:?}",
+            median(scans),
+            median(stages)
+        );
     }
 }

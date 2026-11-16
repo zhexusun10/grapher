@@ -26,18 +26,18 @@ mod open_file;
 mod project_discovery;
 mod sse;
 mod transcript;
-mod workspace_images;
 #[path = "workspace_attachments.rs"]
 mod workspace_attachments;
+mod workspace_images;
+use crate::path_identity::same_repository_binding;
 #[cfg(all(test, windows))]
 use crate::path_identity::windows_repository_key;
-use crate::path_identity::same_repository_binding;
 pub(crate) use activity::set_prepare_phase;
 use activity::*;
 use open_file::*;
 use project_discovery::*;
-pub(crate) use sse::{notify_output_available, notify_snapshot_changed};
 use sse::*;
+pub(crate) use sse::{notify_output_available, notify_snapshot_changed};
 use transcript::*;
 use workspace_attachments::{delete_workspace_attachment, write_workspace_attachment};
 
@@ -67,14 +67,20 @@ static SERVICE_ROOTS: OnceLock<Mutex<ServiceRoots>> = OnceLock::new();
 fn remember_service_root(service: &Arc<Service>, root: &std::path::Path) {
     if let Ok(mut roots) = SERVICE_ROOTS.get_or_init(Default::default).lock() {
         roots.retain(|_, (service, _)| service.strong_count() > 0);
-        roots.insert(Arc::as_ptr(service) as usize, (Arc::downgrade(service), root.to_owned()));
+        roots.insert(
+            Arc::as_ptr(service) as usize,
+            (Arc::downgrade(service), root.to_owned()),
+        );
     }
 }
 
 fn known_service_root(service: &Arc<Service>) -> Option<PathBuf> {
     let roots = SERVICE_ROOTS.get()?.lock().ok()?;
     let (owner, root) = roots.get(&(Arc::as_ptr(service) as usize))?;
-    owner.upgrade().filter(|owner| Arc::ptr_eq(owner, service)).map(|_| root.clone())
+    owner
+        .upgrade()
+        .filter(|owner| Arc::ptr_eq(owner, service))
+        .map(|_| root.clone())
 }
 
 fn cache_service(root: &std::path::Path, id: &str, service: Arc<Service>) -> Arc<Service> {
@@ -295,11 +301,17 @@ fn service_for_run(
     // (including nonblocking snapshot polls) behind an unrelated primary Run.
     if !create {
         if let Some(root) = known_service_root(primary) {
-            let cached = RUN_SERVICES.get().and_then(|registry| registry.lock().ok()
-                .and_then(|runs| runs.get(&root)?.get(run_id)?.upgrade()));
+            let cached = RUN_SERVICES.get().and_then(|registry| {
+                registry
+                    .lock()
+                    .ok()
+                    .and_then(|runs| runs.get(&root)?.get(run_id)?.upgrade())
+            });
             if let Some(cached) = cached.filter(|cached| !Arc::ptr_eq(cached, primary)) {
                 let reader = crate::store::Store::open_reader(&root.join("events.sqlite"))?;
-                if !reader.contains_run(run_id)? { return Err("Run not found".into()); }
+                if !reader.contains_run(run_id)? {
+                    return Err("Run not found".into());
+                }
                 return Ok(cache_service(&root, run_id, cached));
             }
         }
@@ -608,6 +620,12 @@ fn review_transcript_line(
     Some(std::borrow::Cow::Owned(redacted))
 }
 
+#[cfg(all(test, feature = "fixture"))]
+#[path = "batch_workspace_tests.rs"]
+mod batch_workspace_tests;
+#[cfg(test)]
+#[path = "detached_cleanup_service_tests.rs"]
+mod detached_cleanup_service_tests;
 #[cfg(test)]
 #[path = "file_changes_api_tests.rs"]
 mod file_changes_api_tests;
@@ -618,14 +636,11 @@ mod merger_continuation_tests;
 #[path = "node_message_delivery_tests.rs"]
 mod node_message_delivery_tests;
 #[cfg(all(test, feature = "fixture"))]
-#[path = "planner_review_tests.rs"]
-mod planner_review_tests;
-#[cfg(all(test, feature = "fixture"))]
-#[path = "batch_workspace_tests.rs"]
-mod batch_workspace_tests;
-#[cfg(all(test, feature = "fixture"))]
 #[path = "planner_continuation_tests.rs"]
 mod planner_continuation_tests;
+#[cfg(all(test, feature = "fixture"))]
+#[path = "planner_review_tests.rs"]
+mod planner_review_tests;
 #[cfg(all(test, feature = "fixture"))]
 #[path = "planner_steer_tests.rs"]
 mod planner_steer_tests;
@@ -644,9 +659,6 @@ mod prompt_tests;
 #[cfg(test)]
 #[path = "service_cache_tests.rs"]
 mod service_cache_tests;
-#[cfg(test)]
-#[path = "detached_cleanup_service_tests.rs"]
-mod detached_cleanup_service_tests;
 #[cfg(test)]
 #[path = "service_responsiveness_tests.rs"]
 mod service_responsiveness_tests;
@@ -1772,7 +1784,9 @@ fn stored_planner_session_id(
         return Ok(None);
     }
     if file_count > 1 || ids.len() > 1 {
-        return Err("Multiple Planner conversations found for one run; cannot select one safely".into());
+        return Err(
+            "Multiple Planner conversations found for one run; cannot select one safely".into(),
+        );
     }
     if ids.contains(expected) {
         return Ok(Some(expected.to_string()));
@@ -1829,13 +1843,18 @@ fn validate_planner_continuation_history(
         if file.metadata().map_err(|error| error.to_string())?.len() == 0 {
             continue;
         }
-        file.seek(SeekFrom::End(-1)).map_err(|error| error.to_string())?;
+        file.seek(SeekFrom::End(-1))
+            .map_err(|error| error.to_string())?;
         let mut last = [0];
-        file.read_exact(&mut last).map_err(|error| error.to_string())?;
-        file.seek(SeekFrom::Start(0)).map_err(|error| error.to_string())?;
+        file.read_exact(&mut last)
+            .map_err(|error| error.to_string())?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| error.to_string())?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
-        reader.read_line(&mut line).map_err(|error| error.to_string())?;
+        reader
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
         let header: serde_json::Value =
             serde_json::from_str(&line).map_err(|error| error.to_string())?;
         if header["type"] != "session" || header["id"] != id {
@@ -1847,7 +1866,11 @@ fn validate_planner_continuation_history(
         }
         loop {
             line.clear();
-            if reader.read_line(&mut line).map_err(|error| error.to_string())? == 0 {
+            if reader
+                .read_line(&mut line)
+                .map_err(|error| error.to_string())?
+                == 0
+            {
                 break;
             }
             let entry: serde_json::Value = serde_json::from_str(&line)
@@ -2110,8 +2133,18 @@ fn plan_goal_internal_with_started(
     on_planner_line: impl FnMut(&str),
 ) -> Result<Snapshot, (String, Option<PlanningSummary>)> {
     plan_goal_internal_with_options(
-        goal, config, mode, images, revision_run_id, service, background_review, None,
-        on_started, on_partitioner_line, on_route, on_planner_line,
+        goal,
+        config,
+        mode,
+        images,
+        revision_run_id,
+        service,
+        background_review,
+        None,
+        on_started,
+        on_partitioner_line,
+        on_route,
+        on_planner_line,
     )
 }
 
@@ -2180,7 +2213,9 @@ fn plan_goal_internal_with_options(
         &crate::process_control::planning_owner(&owner),
         || {
             (|| {
-                let (original_graph, continuation_initial) = if let Some(ref run_id) = revision_run_id {
+                let (original_graph, continuation_initial) = if let Some(ref run_id) =
+                    revision_run_id
+                {
                     if mode != Some("graph") {
                         return Err(("Graph revisions require graph mode".into(), None));
                     }
@@ -2200,31 +2235,65 @@ fn plan_goal_internal_with_options(
                         return Err(("Graph is no longer available for revision".into(), None));
                     }
                     if let Some(id) = continue_planning_id {
-                        let latest = runtime.state.planning.as_ref().ok_or(("No Planner turn to continue".into(), None))?;
-                        if background_review || !is_valid_planning_id(id) || images.as_ref().is_some_and(|items| !items.is_empty())
-                            || latest.planning_id != id || latest.status.as_deref() != Some("failed")
+                        let latest = runtime
+                            .state
+                            .planning
+                            .as_ref()
+                            .ok_or(("No Planner turn to continue".into(), None))?;
+                        if background_review
+                            || !is_valid_planning_id(id)
+                            || images.as_ref().is_some_and(|items| !items.is_empty())
+                            || latest.planning_id != id
+                            || latest.status.as_deref() != Some("failed")
                             || latest.plan_type.as_deref() != Some("graph")
                         {
-                            return Err(("The selected Planner turn is no longer eligible for continuation".into(), None));
+                            return Err((
+                                "The selected Planner turn is no longer eligible for continuation"
+                                    .into(),
+                                None,
+                            ));
                         }
-                        let failure = runtime.state.events.iter().rposition(|event| match &event.kind {
-                            EventKind::PlanningFailed { planning } | EventKind::PlannerTurnAborted { planning }
-                            | EventKind::PlannerReviewFinished { planning, .. } => planning.planning_id == id && planning.status.as_deref() == Some("failed"),
-                            _ => false,
-                        }).ok_or(("The failed Planner turn is not recorded".into(), None))?;
-                        if runtime.state.events[failure + 1..].iter().any(|event| matches!(event.kind,
-                            EventKind::Created { .. } | EventKind::GraphRevised { .. } | EventKind::ManualGraphRevised { .. }
-                            | EventKind::NodeTaskUpdated { .. } | EventKind::DraftEdited { .. }))
-                        {
+                        let failure = runtime
+                            .state
+                            .events
+                            .iter()
+                            .rposition(|event| match &event.kind {
+                                EventKind::PlanningFailed { planning }
+                                | EventKind::PlannerTurnAborted { planning }
+                                | EventKind::PlannerReviewFinished { planning, .. } => {
+                                    planning.planning_id == id
+                                        && planning.status.as_deref() == Some("failed")
+                                }
+                                _ => false,
+                            })
+                            .ok_or(("The failed Planner turn is not recorded".into(), None))?;
+                        if runtime.state.events[failure + 1..].iter().any(|event| {
+                            matches!(
+                                event.kind,
+                                EventKind::Created { .. }
+                                    | EventKind::GraphRevised { .. }
+                                    | EventKind::ManualGraphRevised { .. }
+                                    | EventKind::NodeTaskUpdated { .. }
+                                    | EventKind::DraftEdited { .. }
+                            )
+                        }) {
                             return Err(("The graph changed after this Planner turn; its draft can no longer be resumed safely".into(), None));
                         }
                     }
-                    let initial = continue_planning_id.is_some() && !runtime.state.events.iter().any(|event|
-                        matches!(event.kind, EventKind::Created { .. } | EventKind::GraphRevised { .. }));
+                    let initial = continue_planning_id.is_some()
+                        && !runtime.state.events.iter().any(|event| {
+                            matches!(
+                                event.kind,
+                                EventKind::Created { .. } | EventKind::GraphRevised { .. }
+                            )
+                        });
                     (Some(runtime.state.graph.clone()), initial)
                 } else {
                     if continue_planning_id.is_some() {
-                        return Err(("Select the original Run to continue the Planner".into(), None));
+                        return Err((
+                            "Select the original Run to continue the Planner".into(),
+                            None,
+                        ));
                     }
                     (None, false)
                 };
@@ -2258,9 +2327,21 @@ fn plan_goal_internal_with_options(
                 // Prove the retained session and draft before recording a new turn:
                 // a rejected retry must leave the previous attempt retryable.
                 let continuation_data = if let Some(previous_id) = continue_planning_id {
-                    let runtime = service.runtime.lock().map_err(|error| (error.to_string(), None))?;
-                    let previous = runtime.state.planning.as_ref().ok_or(("Missing Planner turn".into(), None))?;
-                    let workspace = PathBuf::from(previous.worktree.as_ref().ok_or(("Missing Planner workspace".into(), None))?);
+                    let runtime = service
+                        .runtime
+                        .lock()
+                        .map_err(|error| (error.to_string(), None))?;
+                    let previous = runtime
+                        .state
+                        .planning
+                        .as_ref()
+                        .ok_or(("Missing Planner turn".into(), None))?;
+                    let workspace = PathBuf::from(
+                        previous
+                            .worktree
+                            .as_ref()
+                            .ok_or(("Missing Planner workspace".into(), None))?,
+                    );
                     // A retained cwd must not override the current batch policy.
                     // Do not silently relocate an unfinished turn: its private
                     // edits/draft may not have been delivered to source.
@@ -2272,33 +2353,64 @@ fn plan_goal_internal_with_options(
                     if !workspace.is_dir() {
                         return Err(("The retained Planner workspace is missing".into(), None));
                     }
-                    let selected = runtime.planner_continuation_workspace(
-                        &workspace, previous.workspace_execution_id.as_deref(),
-                    ).map_err(|error| (format!("Cannot continue Planner workspace: {error}"), None))?;
+                    let selected = runtime
+                        .planner_continuation_workspace(
+                            &workspace,
+                            previous.workspace_execution_id.as_deref(),
+                        )
+                        .map_err(|error| {
+                            (format!("Cannot continue Planner workspace: {error}"), None)
+                        })?;
                     let (session_dir, session_id) = planner_session_directory_for_workspace(
-                        &root, &root.join("planning").join(previous_id), &repository, &workspace, Some(&runtime.state),
-                    ).map_err(|error| (error, None))?;
-                    let has_session = fs::read_dir(&session_dir).ok().is_some_and(|mut entries|
-                        entries.any(|entry| entry.ok().is_some_and(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))));
+                        &root,
+                        &root.join("planning").join(previous_id),
+                        &repository,
+                        &workspace,
+                        Some(&runtime.state),
+                    )
+                    .map_err(|error| (error, None))?;
+                    let has_session = fs::read_dir(&session_dir).ok().is_some_and(|mut entries| {
+                        entries.any(|entry| {
+                            entry.ok().is_some_and(|entry| {
+                                entry.path().extension().is_some_and(|ext| ext == "jsonl")
+                            })
+                        })
+                    });
                     if !has_session {
-                        return Err(("Cannot continue: the Planner session is missing".into(), None));
+                        return Err((
+                            "Cannot continue: the Planner session is missing".into(),
+                            None,
+                        ));
                     }
-                    validate_planner_continuation_history(&session_dir, &session_id)
-                        .map_err(|error| (format!("Cannot continue Planner session: {error}"), None))?;
-                    rebind_planner_session(&session_dir, &session_id, &workspace)
-                        .map_err(|error| (format!("Cannot rebind Planner session: {error}"), None))?;
+                    validate_planner_continuation_history(&session_dir, &session_id).map_err(
+                        |error| (format!("Cannot continue Planner session: {error}"), None),
+                    )?;
+                    rebind_planner_session(&session_dir, &session_id, &workspace).map_err(
+                        |error| (format!("Cannot rebind Planner session: {error}"), None),
+                    )?;
                     if stored_planner_session_id(&session_dir, &repository, &workspace, &session_id)
-                        .map_err(|error| (format!("Cannot continue Planner session: {error}"), None))?
-                        .as_deref() != Some(session_id.as_str())
+                        .map_err(|error| {
+                            (format!("Cannot continue Planner session: {error}"), None)
+                        })?
+                        .as_deref()
+                        != Some(session_id.as_str())
                     {
-                        return Err(("Cannot continue: the Planner session is missing".into(), None));
+                        return Err((
+                            "Cannot continue: the Planner session is missing".into(),
+                            None,
+                        ));
                     }
                     let graph = fs::read(session_dir.join(format!("graph-{previous_id}.json")))
-                        .map_err(|error| (format!("Cannot read retained Planner draft: {error}"), None))?;
-                    serde_json::from_slice::<Graph>(&graph)
-                        .map_err(|error| (format!("Invalid retained Planner draft: {error}"), None))?;
+                        .map_err(|error| {
+                            (format!("Cannot read retained Planner draft: {error}"), None)
+                        })?;
+                    serde_json::from_slice::<Graph>(&graph).map_err(|error| {
+                        (format!("Invalid retained Planner draft: {error}"), None)
+                    })?;
                     Some((workspace, selected, session_dir, session_id, graph))
-                } else { None };
+                } else {
+                    None
+                };
                 let planning_id = Uuid::new_v4().to_string();
                 let directory = root.join("planning").join(&planning_id);
                 // Persist provisional ownership before the first filesystem write.
@@ -2352,10 +2464,16 @@ fn plan_goal_internal_with_options(
                         goal.clone()
                     }),
                     run_id: Some(owner.clone()),
-                    worktree: continuation_data.as_ref().map(|(workspace, _, _, _, _)|
-                        crate::native::host_path(workspace).to_string_lossy().into_owned()),
-                    workspace_execution_id: continuation_data.as_ref()
-                        .and_then(|(_, selected, _, _, _)| selected.as_ref().map(|execution| execution.id.clone())),
+                    worktree: continuation_data.as_ref().map(|(workspace, _, _, _, _)| {
+                        crate::native::host_path(workspace)
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                    workspace_execution_id: continuation_data.as_ref().and_then(
+                        |(_, selected, _, _, _)| {
+                            selected.as_ref().map(|execution| execution.id.clone())
+                        },
+                    ),
                     roles: ["partition", "planner"]
                         .into_iter()
                         .map(|role| (role.to_string(), PlanningRoleMetrics::default()))
@@ -2385,11 +2503,17 @@ fn plan_goal_internal_with_options(
                         .map_err(|error| (error, None))?;
                 }
                 if continuation_initial {
-                    service.runtime.lock().map_err(|e| (e.to_string(), None))?
+                    service
+                        .runtime
+                        .lock()
+                        .map_err(|e| (e.to_string(), None))?
                         .emit(EventKind::PlanningStarted {
-                            goal: goal.clone(), config: config.clone(), planning: running.clone(),
+                            goal: goal.clone(),
+                            config: config.clone(),
+                            planning: running.clone(),
                             plan_type: Some("graph".into()),
-                        }).map_err(|error| (error, None))?;
+                        })
+                        .map_err(|error| (error, None))?;
                 }
                 if background_review {
                     let mut runtime = service.runtime.lock().map_err(|e| (e.to_string(), None))?;
@@ -2552,33 +2676,41 @@ fn plan_goal_internal_with_options(
                         },
                         "graph" => {
                             // The planning gate prevents new dispatch/publication.
-                            let (selected, planner_context_required, continuation_workspace) = if revision_run_id.is_some()
-                                && !background_review
-                            {
-                                check_planning_cancelled(&owner)?;
-                                let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-                                if runtime.state.run_id != owner {
-                                    return Err("Run changed during workspace selection".into());
-                                }
-                                let context_required =
-                                    planner_followup_context_required(&runtime.state);
-                                if let Some((workspace, selected, _, _, _)) = &continuation_data {
-                                    (selected.clone(), context_required, Some(workspace.clone()))
-                                } else {
-                                    let selected = if context_required {
-                                        runtime.planner_workspace()?
+                            let (selected, planner_context_required, continuation_workspace) =
+                                if revision_run_id.is_some() && !background_review {
+                                    check_planning_cancelled(&owner)?;
+                                    let runtime =
+                                        service.runtime.lock().map_err(|e| e.to_string())?;
+                                    if runtime.state.run_id != owner {
+                                        return Err("Run changed during workspace selection".into());
+                                    }
+                                    let context_required =
+                                        planner_followup_context_required(&runtime.state);
+                                    if let Some((workspace, selected, _, _, _)) = &continuation_data
+                                    {
+                                        (
+                                            selected.clone(),
+                                            context_required,
+                                            Some(workspace.clone()),
+                                        )
                                     } else {
-                                        None
-                                    };
-                                    (selected, context_required, None)
-                                }
-                            } else {
-                                (None, false, None)
-                            };
-                            let mut planner_workspace = continuation_workspace.unwrap_or_else(|| selected
-                                .as_ref()
-                                .map(|execution| PathBuf::from(&execution.worktree))
-                                .unwrap_or_else(|| repository.clone()));
+                                        let selected = if context_required {
+                                            runtime.planner_workspace()?
+                                        } else {
+                                            None
+                                        };
+                                        (selected, context_required, None)
+                                    }
+                                } else {
+                                    (None, false, None)
+                                };
+                            let mut planner_workspace =
+                                continuation_workspace.unwrap_or_else(|| {
+                                    selected
+                                        .as_ref()
+                                        .map(|execution| PathBuf::from(&execution.worktree))
+                                        .unwrap_or_else(|| repository.clone())
+                                });
                             let planner_workspace_targets = if planner_context_required {
                                 service
                                     .runtime
@@ -2628,7 +2760,9 @@ fn plan_goal_internal_with_options(
                                 },
                             )?;
                             planner_workspace_selected = true;
-                            config.feedback_enabled = service.runtime.lock()
+                            config.feedback_enabled = service
+                                .runtime
+                                .lock()
                                 .map_err(|error| error.to_string())?
                                 .feedback_enabled(config.feedback_enabled)?;
                             let planner_model_cfg =
@@ -2653,10 +2787,11 @@ fn plan_goal_internal_with_options(
                                     && revision_run_id.is_some()
                                     && is_approved
                                     && planner_context_required;
-                                let include_rework_note = continue_planning_id.is_none() && planner_rework_note_pending(
-                                    &runtime.state,
-                                    revision_run_id.as_deref(),
-                                );
+                                let include_rework_note = continue_planning_id.is_none()
+                                    && planner_rework_note_pending(
+                                        &runtime.state,
+                                        revision_run_id.as_deref(),
+                                    );
                                 let workspace_node =
                                     selected.as_ref().map(|execution| execution.node.as_str());
                                 let include_workspace_move = is_followup
@@ -2694,12 +2829,24 @@ fn plan_goal_internal_with_options(
                             for arg in &image_file_args {
                                 planner_extra_args.push(arg.as_str());
                             }
-                            let (planner_session_dir, planner_session_id) = if let Some((_, _, session_dir, session_id, _)) = &continuation_data {
+                            let (planner_session_dir, planner_session_id) = if let Some((
+                                _,
+                                _,
+                                session_dir,
+                                session_id,
+                                _,
+                            )) =
+                                &continuation_data
+                            {
                                 (session_dir.clone(), session_id.clone())
                             } else {
-                                let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
+                                let runtime =
+                                    service.runtime.lock().map_err(|error| error.to_string())?;
                                 planner_session_directory_for_workspace(
-                                    &root, &directory, &repository, &planner_workspace,
+                                    &root,
+                                    &directory,
+                                    &repository,
+                                    &planner_workspace,
                                     original_graph.as_ref().map(|_| &runtime.state),
                                 )?
                             };
@@ -2718,7 +2865,10 @@ fn plan_goal_internal_with_options(
                                 validate_planner_continuation_history(
                                     &planner_session_dir,
                                     &planner_session_id,
-                                ).map_err(|error| format!("Cannot review Planner session: {error}"))?;
+                                )
+                                .map_err(|error| {
+                                    format!("Cannot review Planner session: {error}")
+                                })?;
                             }
                             rebind_planner_session(
                                 &planner_session_dir,
@@ -2729,12 +2879,17 @@ fn plan_goal_internal_with_options(
                             fs::create_dir_all(&planner_session_dir).map_err(|e| e.to_string())?;
                             let graph_path =
                                 planner_session_dir.join(format!("graph-{planning_id}.json"));
-                            let graph_bytes = if let Some((_, _, _, _, graph)) = &continuation_data {
+                            let graph_bytes = if let Some((_, _, _, _, graph)) = &continuation_data
+                            {
                                 graph.clone()
                             } else {
-                                serde_json::to_vec(&original_graph.clone().unwrap_or_else(|| Graph {
-                                    original_goal: goal.clone(), ..Graph::default()
-                                })).map_err(|e| e.to_string())?
+                                serde_json::to_vec(&original_graph.clone().unwrap_or_else(|| {
+                                    Graph {
+                                        original_goal: goal.clone(),
+                                        ..Graph::default()
+                                    }
+                                }))
+                                .map_err(|e| e.to_string())?
                             };
                             fs::write(&graph_path, graph_bytes).map_err(|e| e.to_string())?;
                             let mut log = String::new();
@@ -2794,7 +2949,10 @@ fn plan_goal_internal_with_options(
                                     extra_args: planner_extra_args,
                                     environment: vec![
                                         ("GRAPHER_MODE", "planner".into()),
-                                        ("GRAPHER_CONTINUE_INTERRUPTED", continue_planning_id.is_some().to_string()),
+                                        (
+                                            "GRAPHER_CONTINUE_INTERRUPTED",
+                                            continue_planning_id.is_some().to_string(),
+                                        ),
                                         (
                                             "GRAPHER_PLANNER_RUN_ID",
                                             revision_run_id.clone().unwrap_or_default(),
@@ -2906,9 +3064,10 @@ fn plan_goal_internal_with_options(
                                                 serde_json::from_str::<serde_json::Value>(&text)
                                                     .ok()
                                             }) {
-                                                let requested_node = planner_workspace_requested_id(&result)
-                                                    .unwrap_or_default()
-                                                    .to_string();
+                                                let requested_node =
+                                                    planner_workspace_requested_id(&result)
+                                                        .unwrap_or_default()
+                                                        .to_string();
                                                 let resolution =
                                                     service.runtime.lock().ok().and_then(
                                                         |runtime| {
@@ -3110,7 +3269,12 @@ fn plan_goal_internal_with_options(
                             return Err("Run changed during graph revision".into());
                         }
                         if continuation_initial {
-                            runtime.create_with_planning(graph, config.clone(), Some(planning_id.clone()), Some(summary.clone()))?;
+                            runtime.create_with_planning(
+                                graph,
+                                config.clone(),
+                                Some(planning_id.clone()),
+                                Some(summary.clone()),
+                            )?;
                             runtime.set_route("graph")?;
                         } else if runtime.state.approved {
                             runtime.revise_graph(graph, summary.clone())?;
@@ -4113,7 +4277,10 @@ fn observe_planner_steer_line(service: &Arc<Service>, owner: &str, planning_id: 
         return;
     };
     if current == next
-        || (matches!(current.as_str(), "consumed" | "handled" | "failed" | "withdrawn") && next != "consumed")
+        || (matches!(
+            current.as_str(),
+            "consumed" | "handled" | "failed" | "withdrawn"
+        ) && next != "consumed")
     {
         return;
     }
@@ -4157,19 +4324,44 @@ fn node_steer_recorded(
     instruction: Option<&str>,
     images: &Option<Vec<crate::model::ImageAttachment>>,
 ) -> Result<bool, String> {
-    let Some(id) = request_id else { return Ok(false) };
+    let Some(id) = request_id else {
+        return Ok(false);
+    };
     let Some(existing) = state.events.iter().find_map(|event| match &event.kind {
-        EventKind::Steered { request_id: Some(request_id), execution_id, node, instruction, images } if request_id == id =>
-            Some((Some(execution_id), node, instruction, images)),
-        EventKind::NodeMessaged { request_id: Some(request_id), node, instruction, images, queued: true }
-        | EventKind::Invalidated { request_id: Some(request_id), target: node, instruction, images, human: true, .. }
-            if request_id == id => Some((None, node, instruction, images)),
+        EventKind::Steered {
+            request_id: Some(request_id),
+            execution_id,
+            node,
+            instruction,
+            images,
+        } if request_id == id => Some((Some(execution_id), node, instruction, images)),
+        EventKind::NodeMessaged {
+            request_id: Some(request_id),
+            node,
+            instruction,
+            images,
+            queued: true,
+        }
+        | EventKind::Invalidated {
+            request_id: Some(request_id),
+            target: node,
+            instruction,
+            images,
+            human: true,
+            ..
+        } if request_id == id => Some((None, node, instruction, images)),
         _ => None,
-    }) else { return Ok(false) };
+    }) else {
+        return Ok(false);
+    };
     let normalized_images = images.as_ref().filter(|items| !items.is_empty());
-    if node != Some(existing.1.as_str()) || instruction.map(str::trim) != Some(existing.2.as_str())
-        || execution_id.is_some_and(|execution_id| existing.0.is_some_and(|bound| execution_id != bound))
-        || serde_json::to_value(existing.3.as_ref().filter(|items| !items.is_empty())).ok() != serde_json::to_value(normalized_images).ok() {
+    if node != Some(existing.1.as_str())
+        || instruction.map(str::trim) != Some(existing.2.as_str())
+        || execution_id
+            .is_some_and(|execution_id| existing.0.is_some_and(|bound| execution_id != bound))
+        || serde_json::to_value(existing.3.as_ref().filter(|items| !items.is_empty())).ok()
+            != serde_json::to_value(normalized_images).ok()
+    {
         return Err("Steer request ID was already used for another message".into());
     }
     Ok(true)
@@ -4194,37 +4386,76 @@ fn control_with_request_id(
             return Err("Run changed; reload this conversation before controlling it".into());
         }
     }
-    if matches!(action.as_str(), "interrupt_steer" | "interrupt_steer_planner") {
-        if instruction.as_deref().is_none_or(|text| text.trim().is_empty()) {
+    if matches!(
+        action.as_str(),
+        "interrupt_steer" | "interrupt_steer_planner"
+    ) {
+        if instruction
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+        {
             return Err("Enter a message before interrupting".into());
         }
         let run = run_id.as_deref().ok_or("Missing Run identity")?;
         let planner = action == "interrupt_steer_planner";
-        if request_id.as_deref().is_some_and(|id|
-            Uuid::parse_str(id).map(|uuid| uuid.to_string() != id).unwrap_or(true)) {
+        if request_id.as_deref().is_some_and(|id| {
+            Uuid::parse_str(id)
+                .map(|uuid| uuid.to_string() != id)
+                .unwrap_or(true)
+        }) {
             return Err("Invalid steer request ID".into());
         }
         let (target, already_submitted) = {
             let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-            let submitted = request_id.as_ref().is_some_and(|id| runtime.state.events.iter().any(|event| match &event.kind {
-                EventKind::PlannerSteerSubmitted { request_id, .. } if planner => request_id == id,
-                EventKind::Steered { request_id: Some(request_id), .. } if !planner => request_id == id,
-                _ => false,
-            }));
-            let target = if submitted { String::new() } else if planner {
+            let submitted = request_id.as_ref().is_some_and(|id| {
+                runtime.state.events.iter().any(|event| match &event.kind {
+                    EventKind::PlannerSteerSubmitted { request_id, .. } if planner => {
+                        request_id == id
+                    }
+                    EventKind::Steered {
+                        request_id: Some(request_id),
+                        ..
+                    } if !planner => request_id == id,
+                    _ => false,
+                })
+            });
+            let target = if submitted {
+                String::new()
+            } else if planner {
                 crate::engine::composer::planner_id(run)?
             } else {
-                runtime.state.executions.iter().chain(&runtime.state.mergers)
-                    .find(|execution| Some(&execution.id) == execution_id.as_ref()
-                        && Some(&execution.node) == node.as_ref() && execution.status == "running")
-                    .map(|execution| execution.id.clone()).ok_or("Node execution is no longer running")?
+                runtime
+                    .state
+                    .executions
+                    .iter()
+                    .chain(&runtime.state.mergers)
+                    .find(|execution| {
+                        Some(&execution.id) == execution_id.as_ref()
+                            && Some(&execution.node) == node.as_ref()
+                            && execution.status == "running"
+                    })
+                    .map(|execution| execution.id.clone())
+                    .ok_or("Node execution is no longer running")?
             };
             (target, submitted)
         };
-        let send = || control_with_request_id(
-            if planner { "steer_planner" } else { "steer" }.into(), node, instruction,
-            run_id, execution_id, images, request_id, service);
-        return if already_submitted { send() } else { crate::engine::composer::interrupt_then(&target, send) };
+        let send = || {
+            control_with_request_id(
+                if planner { "steer_planner" } else { "steer" }.into(),
+                node,
+                instruction,
+                run_id,
+                execution_id,
+                images,
+                request_id,
+                service,
+            )
+        };
+        return if already_submitted {
+            send()
+        } else {
+            crate::engine::composer::interrupt_then(&target, send)
+        };
     }
     if action == "steer_planner" {
         let instruction = instruction.ok_or("Enter a planning message")?;
@@ -4496,16 +4727,29 @@ fn control_with_request_id(
         let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
         // Preserve the existing selected-Run API when no identity was supplied,
         // but recheck an explicit identity atomically with queue acceptance.
-        if run_id.as_deref().is_some_and(|id| id != runtime.state.run_id) {
+        if run_id
+            .as_deref()
+            .is_some_and(|id| id != runtime.state.run_id)
+        {
             return Err("Run changed while messaging node".into());
         }
-        if request_id.as_deref().is_some_and(|id|
-            Uuid::parse_str(id).map(|uuid| uuid.to_string() != id).unwrap_or(true)) {
+        if request_id.as_deref().is_some_and(|id| {
+            Uuid::parse_str(id)
+                .map(|uuid| uuid.to_string() != id)
+                .unwrap_or(true)
+        }) {
             return Err("Invalid steer request ID".into());
         }
         // Replay passive acceptance or a live Steer before consulting the
         // node's new state: a lost response cannot dispatch the same turn twice.
-        if node_steer_recorded(&runtime.state, request_id.as_deref(), node.as_deref(), execution_id.as_deref(), instruction.as_deref(), &images)? {
+        if node_steer_recorded(
+            &runtime.state,
+            request_id.as_deref(),
+            node.as_deref(),
+            execution_id.as_deref(),
+            instruction.as_deref(),
+            &images,
+        )? {
             return Ok(runtime.state.clone());
         }
         if let Some(running) = runtime.state.executions.iter().rev().find(|execution| {
@@ -4548,7 +4792,10 @@ fn control_with_request_id(
         }
         let execution_id = execution_id.ok_or("Missing execution identity")?;
         let request_id = request_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        if Uuid::parse_str(&request_id).map(|id| id.to_string() != request_id).unwrap_or(true) {
+        if Uuid::parse_str(&request_id)
+            .map(|id| id.to_string() != request_id)
+            .unwrap_or(true)
+        {
             return Err("Invalid steer request ID".into());
         }
         let images = images.filter(|items| !items.is_empty());
@@ -4556,7 +4803,14 @@ fn control_with_request_id(
         if run_id.as_deref() != Some(runtime.state.run_id.as_str()) {
             return Err("Run changed while steering".into());
         }
-        if node_steer_recorded(&runtime.state, Some(&request_id), Some(&node), Some(&execution_id), Some(&instruction), &images)? {
+        if node_steer_recorded(
+            &runtime.state,
+            Some(&request_id),
+            Some(&node),
+            Some(&execution_id),
+            Some(&instruction),
+            &images,
+        )? {
             return Ok(runtime.state.clone());
         }
         {
@@ -4582,7 +4836,12 @@ fn control_with_request_id(
             )?;
         }
         // Keep durable acceptance and pipe order atomic with queue withdrawal.
-        crate::engine::steer_node_with_id(&execution_id, instruction.trim(), images.clone(), &request_id)?;
+        crate::engine::steer_node_with_id(
+            &execution_id,
+            instruction.trim(),
+            images.clone(),
+            &request_id,
+        )?;
         runtime.emit(EventKind::Steered {
             execution_id,
             node,
@@ -4952,7 +5211,12 @@ fn control_with_request_id(
     drop(runtime);
     if matches!(
         action.as_str(),
-        "approve" | "resume" | "resume_node" | "resume_after_intervention" | "resolve" | "retry_publication"
+        "approve"
+            | "resume"
+            | "resume_node"
+            | "resume_after_intervention"
+            | "resolve"
+            | "retry_publication"
     ) {
         drive(service.clone());
     }
@@ -5118,7 +5382,11 @@ fn detect_repository(
     service: &Arc<Service>,
 ) -> Result<Option<crate::workspace::RepositoryInfo>, String> {
     crate::workspace::detect_with_size_check(path.as_deref().map(std::path::Path::new), |path| {
-        match idle_workspace_size_error(service, path, crate::workspace::cached_check_workspace_size)? {
+        match idle_workspace_size_error(
+            service,
+            path,
+            crate::workspace::cached_check_workspace_size,
+        )? {
             Some(error) => Err(error),
             None => Ok(()),
         }
@@ -5373,22 +5641,20 @@ fn is_valid_planning_id(id: &str) -> bool {
 
 fn enrich_planning_summary(summary: &mut PlanningSummary, directory: &std::path::Path) {
     if summary.plan_type.is_none() {
-        summary.plan_type = crate::path_safety::real_child_path(
-            directory, &directory.join("route.json"), true,
-        )
-        .ok()
-        .flatten()
-        .and_then(|path| fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice::<Route>(&bytes).ok())
-        .map(|route| route.plan_type);
+        summary.plan_type =
+            crate::path_safety::real_child_path(directory, &directory.join("route.json"), true)
+                .ok()
+                .flatten()
+                .and_then(|path| fs::read(path).ok())
+                .and_then(|bytes| serde_json::from_slice::<Route>(&bytes).ok())
+                .map(|route| route.plan_type);
     }
     if summary.goal.is_none() || summary.run_id.is_none() {
-        let request = crate::path_safety::real_child_path(
-            directory, &directory.join("request.json"), true,
-        )
-        .ok()
-        .flatten()
-        .and_then(|path| fs::read(path).ok());
+        let request =
+            crate::path_safety::real_child_path(directory, &directory.join("request.json"), true)
+                .ok()
+                .flatten()
+                .and_then(|path| fs::read(path).ok());
         if let Some(bytes) = request {
             if let Ok(req) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                 if summary.goal.is_none() {
@@ -5463,13 +5729,13 @@ fn get_planning_output(
         .map_err(|_| "Planning output not found")?;
     let directory = crate::path_safety::real_child_path(&root, &root.join(&planning_id), false)?
         .ok_or("Planning output not found")?;
-    let running = crate::path_safety::real_child_path(&root, &directory.join("summary.json"), true)?
-        .and_then(|path| fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice::<PlanningSummary>(&bytes).ok())
-        .is_some_and(|summary| summary.status.as_deref() == Some("running"));
-    let file_path = crate::path_safety::real_child_path(
-        &root, &directory.join(format!("{role}.jsonl")), true,
-    )?;
+    let running =
+        crate::path_safety::real_child_path(&root, &directory.join("summary.json"), true)?
+            .and_then(|path| fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<PlanningSummary>(&bytes).ok())
+            .is_some_and(|summary| summary.status.as_deref() == Some("running"));
+    let file_path =
+        crate::path_safety::real_child_path(&root, &directory.join(format!("{role}.jsonl")), true)?;
     if file_path.is_none() && running && offset == 0 {
         return Ok(
             serde_json::json!({ "planningId": planning_id, "role": role, "content": "",
@@ -5857,7 +6123,11 @@ pub fn dispatch(
         );
     }
     if command == "snapshot" && metadata {
-        let captured = service.runtime.lock().map_err(|e| e.to_string())?.browser_metadata()?;
+        let captured = service
+            .runtime
+            .lock()
+            .map_err(|e| e.to_string())?
+            .browser_metadata()?;
         return Ok(Arc::unwrap_or_clone(captured));
     }
     if command == "history" && metadata {
@@ -5875,8 +6145,11 @@ pub fn dispatch(
                 service,
             )?),
             "update_unstarted_node_task" => Some(update_unstarted_node_task(
-                argument(&body, "runId")?, argument(&body, "node")?,
-                argument(&body, "oldTask")?, argument(&body, "task")?, service,
+                argument(&body, "runId")?,
+                argument(&body, "node")?,
+                argument(&body, "oldTask")?,
+                argument(&body, "task")?,
+                service,
             )?),
             "add_manual_node" => Some(add_manual_node(
                 argument(&body, "runId")?,
@@ -6045,8 +6318,11 @@ pub fn dispatch(
             service,
         )?),
         "update_unstarted_node_task" => to_value(update_unstarted_node_task(
-            argument(&body, "runId")?, argument(&body, "node")?,
-            argument(&body, "oldTask")?, argument(&body, "task")?, service,
+            argument(&body, "runId")?,
+            argument(&body, "node")?,
+            argument(&body, "oldTask")?,
+            argument(&body, "task")?,
+            service,
         )?),
         "add_manual_node" => to_value(add_manual_node(
             argument(&body, "runId")?,
@@ -6238,8 +6514,11 @@ fn workspace_has_active_run(primary: &Arc<Service>, repository: &str) -> Result<
             Err(std::sync::TryLockError::WouldBlock) => return Ok(true),
             Err(error) => return Err(error.to_string()),
         };
-        if runtime.state.config.as_ref().is_some_and(|config|
-            same_repository_binding(&config.repository, repository))
+        if runtime
+            .state
+            .config
+            .as_ref()
+            .is_some_and(|config| same_repository_binding(&config.repository, repository))
             && (service.driving.load(Ordering::SeqCst)
                 || service.planning.load(Ordering::SeqCst)
                 || runtime.active()
@@ -6285,7 +6564,9 @@ fn repository_status(
     // and bindings enforce admission separately; only binding failures are
     // invalid here. Only missing directories may be forgotten automatically.
     let missing = path.is_absolute()
-        && path.metadata().is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        && path
+            .metadata()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
     Ok(serde_json::json!({
         "repository": repository, "valid": valid, "missing": missing,
         "error": error, "sizeLimitExceeded": size_limit_exceeded,
@@ -6377,7 +6658,13 @@ fn api_service(
             } else if command == "control"
                 && matches!(
                     body.get("action").and_then(serde_json::Value::as_str),
-                    Some("stop" | "cancel" | "stop_planner" | "steer_planner" | "interrupt_steer_planner")
+                    Some(
+                        "stop"
+                            | "cancel"
+                            | "stop_planner"
+                            | "steer_planner"
+                            | "interrupt_steer_planner"
+                    )
                 )
             {
                 active_planning_service(primary)
@@ -6553,7 +6840,9 @@ pub fn run() -> Result<(), String> {
                 if cleanup_stop.load(Ordering::SeqCst) {
                     return;
                 }
-                if crate::cleanup::detached::take_wakeup() { break; }
+                if crate::cleanup::detached::take_wakeup() {
+                    break;
+                }
                 thread::sleep(std::time::Duration::from_millis(100));
             }
             if let Some(service) = cleanup_service.upgrade() {
@@ -6815,8 +7104,16 @@ fn handle_http_request(
                 let images: Option<Vec<crate::model::ImageAttachment>> =
                     argument(&body, "images").ok();
                 let revision_run_id: Option<String> = argument(&body, "revisionRunId").ok();
-                let continue_planning_id: Option<String> = argument(&body, "continuePlanningId").ok();
-                Ok((goal, config, mode, images, revision_run_id, continue_planning_id))
+                let continue_planning_id: Option<String> =
+                    argument(&body, "continuePlanningId").ok();
+                Ok((
+                    goal,
+                    config,
+                    mode,
+                    images,
+                    revision_run_id,
+                    continue_planning_id,
+                ))
             }) {
                 Ok(tuple) => tuple,
                 Err(err) => {

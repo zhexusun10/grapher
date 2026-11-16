@@ -97,15 +97,33 @@ fn unstarted_task_edit_preserves_run_and_replays_without_resetting_work() {
     let executions = runtime.state.executions.len();
     let phase = runtime.state.phase.clone();
     let up_status = runtime.state.nodes["up"].status.clone();
-    runtime.update_unstarted_node_task("child", "task child", "new child task").unwrap();
+    runtime
+        .update_unstarted_node_task("child", "task child", "new child task")
+        .unwrap();
     assert_eq!(runtime.state.run_id, run_id);
-    assert_eq!(runtime.state.graph.nodes.iter().find(|n| n.id == "child").unwrap().task, "new child task");
+    assert_eq!(
+        runtime
+            .state
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "child")
+            .unwrap()
+            .task,
+        "new child task"
+    );
     assert_eq!(runtime.state.executions.len(), executions);
     assert_eq!(runtime.state.nodes["up"].status, up_status);
     assert_eq!(runtime.state.phase, phase);
-    assert!(runtime.update_unstarted_node_task("child", "task child", "stale").is_err());
-    assert!(runtime.update_unstarted_node_task("up", "task up", "too late").is_err());
-    assert!(runtime.update_unstarted_node_task("child", "new child task", "  ").is_err());
+    assert!(runtime
+        .update_unstarted_node_task("child", "task child", "stale")
+        .is_err());
+    assert!(runtime
+        .update_unstarted_node_task("up", "task up", "too late")
+        .is_err());
+    assert!(runtime
+        .update_unstarted_node_task("child", "new child task", "  ")
+        .is_err());
     let replay = runtime.store.load(&run_id).unwrap();
     assert_eq!(replay.graph, runtime.state.graph);
     assert_eq!(replay.phase, phase);
@@ -116,14 +134,21 @@ fn unstarted_task_edit_preserves_run_and_replays_without_resetting_work() {
 fn unstarted_task_edit_is_used_by_the_first_execution() {
     let (_temp, _source, mut runtime) = setup(true, chain());
     let run_id = runtime.state.run_id.clone();
-    runtime.update_unstarted_node_task("up", "task up", "updated upstream task").unwrap();
+    runtime
+        .update_unstarted_node_task("up", "task up", "updated upstream task")
+        .unwrap();
     assert_eq!(runtime.state.phase, "awaiting_approval");
-    assert_eq!(runtime.store.load(&run_id).unwrap().graph, runtime.state.graph);
+    assert_eq!(
+        runtime.store.load(&run_id).unwrap().graph,
+        runtime.state.graph
+    );
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
     let up = jobs.iter().find(|job| job.execution.node == "up").unwrap();
     assert_eq!(up.task, "updated upstream task");
-    assert!(runtime.update_unstarted_node_task("up", "updated upstream task", "racing edit").is_err());
+    assert!(runtime
+        .update_unstarted_node_task("up", "updated upstream task", "racing edit")
+        .is_err());
 }
 
 #[test]
@@ -167,8 +192,10 @@ fn manual_node_draft_validates_atomically_and_replays() {
 fn manual_node_feedback_requires_opt_in_and_respects_saved_opt_out() {
     let (_temp, _source, mut runtime) = setup(true, chain());
     let events = runtime.state.events.len();
-    assert!(runtime.add_manual_node(request(Some("target"), Some("up"), true))
-        .unwrap_err().contains("Enable Feedback in Settings"));
+    assert!(runtime
+        .add_manual_node(request(Some("target"), Some("up"), true))
+        .unwrap_err()
+        .contains("Enable Feedback in Settings"));
     assert_eq!(runtime.state.events.len(), events);
     assert_eq!(runtime.state.graph, chain());
     // The saved global toggle wins over the Run's original opt-in.
@@ -176,11 +203,15 @@ fn manual_node_feedback_requires_opt_in_and_respects_saved_opt_out() {
     saved.feedback_enabled = false;
     runtime.save_default_config(&saved).unwrap();
     runtime.state.config.as_mut().unwrap().feedback_enabled = true;
-    assert!(runtime.add_manual_node(request(Some("target"), Some("up"), true))
-        .unwrap_err().contains("Enable Feedback in Settings"));
+    assert!(runtime
+        .add_manual_node(request(Some("target"), Some("up"), true))
+        .unwrap_err()
+        .contains("Enable Feedback in Settings"));
     saved.feedback_enabled = true;
     runtime.save_default_config(&saved).unwrap();
-    runtime.add_manual_node(request(Some("target"), Some("up"), true)).unwrap();
+    runtime
+        .add_manual_node(request(Some("target"), Some("up"), true))
+        .unwrap();
     assert!(runtime.state.graph.edges.iter().any(|edge| edge.feedback));
 }
 

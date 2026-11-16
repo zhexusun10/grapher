@@ -13,9 +13,9 @@ mod equality;
 mod file_scan;
 mod normalization;
 
+mod runtime_inputs;
 mod sha256_stage;
 mod snapshot_recovery;
-mod runtime_inputs;
 pub(crate) use runtime_inputs::verify_native_inputs;
 
 pub(crate) use snapshot_recovery::recover_snapshot_readiness;
@@ -584,7 +584,10 @@ fn git_roots(project: &Path) -> Result<Option<(PathBuf, PathBuf, bool, bool)>, S
     let combined = workspace::project_git(
         project,
         &[
-            "rev-parse", "--path-format=absolute", "--absolute-git-dir", "--git-common-dir",
+            "rev-parse",
+            "--path-format=absolute",
+            "--absolute-git-dir",
+            "--git-common-dir",
         ],
     )
     .ok()
@@ -606,9 +609,11 @@ fn git_roots(project: &Path) -> Result<Option<(PathBuf, PathBuf, bool, bool)>, S
         ),
     };
     let current = PathBuf::from(current)
-        .canonicalize().map_err(|e| e.to_string())?;
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
     let common = PathBuf::from(common)
-        .canonicalize().map_err(|e| e.to_string())?;
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
     Ok(Some((common, current, metadata.is_file(), link)))
 }
 fn inspect_git(
@@ -650,7 +655,12 @@ fn inspect_git(
     let effective = workspace::project_git(
         project,
         &[
-            "config", "--null", "--show-scope", "--show-origin", "--list", "--includes",
+            "config",
+            "--null",
+            "--show-scope",
+            "--show-origin",
+            "--list",
+            "--includes",
         ],
     )?;
     let mut records = Vec::new();
@@ -664,7 +674,10 @@ fn inspect_git(
         };
         let (key, value) = record.split_once('\n').unwrap_or((record, ""));
         records.push((
-            scope.to_string(), origin.to_string(), key.to_string(), value.to_string(),
+            scope.to_string(),
+            origin.to_string(),
+            key.to_string(),
+            value.to_string(),
         ));
     }
     let origin_path = |origin: &str| -> Option<PathBuf> {
@@ -780,7 +793,8 @@ fn inspect_git(
         // for local/worktree classification. Keep Git's --path query above:
         // HOME/prefix expansion is Git's job, not a string substitution here.
         let local = records
-            .iter().rev()
+            .iter()
+            .rev()
             .find(|(_, _, input_key, _)| input_key == key)
             .is_some_and(|(scope, _, _, _)| matches!(scope.as_str(), "local" | "worktree"));
         git_files.insert(name.into(), (reference, local));
@@ -1128,7 +1142,9 @@ fn encode_normalized_value(mut value: serde_json::Value) -> Result<Vec<u8>, Stri
     }
     let legacy = value.get("schema").and_then(serde_json::Value::as_u64) == Some(5);
     remove_git_index(&mut value);
-    if legacy { strip(&mut value); }
+    if legacy {
+        strip(&mut value);
+    }
     serde_json::to_vec(&value).map_err(|e| e.to_string())
 }
 
@@ -1141,7 +1157,10 @@ struct ViewRecord<'a> {
 }
 impl<'a> ViewRecord<'a> {
     fn new(view: &'a View) -> Result<Self, String> {
-        Ok(Self { view, identity: node_view_identity(view)? })
+        Ok(Self {
+            view,
+            identity: node_view_identity(view)?,
+        })
     }
     fn save(&self, path: &Path) -> Result<(), String> {
         let bytes = serde_json::to_vec(self.view).map_err(|e| e.to_string())?;
@@ -1317,16 +1336,19 @@ fn stage_project_entries(
                 let executable = if cfg!(unix) {
                     mode & 0o111 != 0
                 } else {
-                    old_index.get_path(Path::new(&name), 0).and_then(|entry| {
-                        // Preserve the old byte-exact lookup even if libgit2's
-                        // ignore-case index finds a differently spelled entry.
-                        // Only that uncommon collision needs a linear search.
-                        if entry.path == name.as_bytes() {
-                            Some(entry)
-                        } else {
-                            old_index.iter().find(|entry| entry.path == name.as_bytes())
-                        }
-                    }).is_some_and(|entry| entry.mode == 0o100755)
+                    old_index
+                        .get_path(Path::new(&name), 0)
+                        .and_then(|entry| {
+                            // Preserve the old byte-exact lookup even if libgit2's
+                            // ignore-case index finds a differently spelled entry.
+                            // Only that uncommon collision needs a linear search.
+                            if entry.path == name.as_bytes() {
+                                Some(entry)
+                            } else {
+                                old_index.iter().find(|entry| entry.path == name.as_bytes())
+                            }
+                        })
+                        .is_some_and(|entry| entry.mode == 0o100755)
                 };
                 (oid, if executable { 0o100755 } else { 0o100644 })
             }
@@ -1921,7 +1943,9 @@ fn mark_ready_at(path: &Path, head: &str) -> Result<(), String> {
             .create_new(true)
             .open(&pending)
             .map_err(|e| e.to_string())?;
-        output.write_all(head.as_bytes()).map_err(|e| e.to_string())?;
+        output
+            .write_all(head.as_bytes())
+            .map_err(|e| e.to_string())?;
         output.sync_all().map_err(|e| e.to_string())?;
         drop(output);
         fs::rename(&pending, &file).map_err(|e| e.to_string())
@@ -3229,7 +3253,11 @@ pub(crate) fn verify_result_scoped(
 pub(crate) fn preparation_guard(path: &Path, exclusions: &[String]) -> Result<String, String> {
     // Only recorded, root-qualified managed W scopes may change during E
     // restoration. All ordinary project/Git metadata stays in this guard.
-    let view = if exclusions.is_empty() { inspect(path)? } else { inspect_scoped(path, path, exclusions)? };
+    let view = if exclusions.is_empty() {
+        inspect(path)?
+    } else {
+        inspect_scoped(path, path, exclusions)?
+    };
     let bytes = serde_json::to_vec(&view).map_err(|e| e.to_string())?;
     Ok(git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
         .map_err(|e| e.to_string())?
@@ -3317,7 +3345,10 @@ pub(crate) fn capture_node_scoped(
 ) -> Result<(), String> {
     let Some((view, inherited)) = node_view(path, source, exclusions)? else {
         return if staged_identity.is_some() {
-            Err("Node workspace view disappeared between staging and capture; retry snapshot".into())
+            Err(
+                "Node workspace view disappeared between staging and capture; retry snapshot"
+                    .into(),
+            )
         } else {
             Ok(())
         };
@@ -3441,7 +3472,12 @@ fn accept_resolution_checked(path: &Path, explicit: bool) -> Result<(), Resoluti
         .map_err(|e| e.to_string())?;
         checked_paths = before.keys().cloned().collect();
         let mut args = vec![
-            "--literal-pathspecs", "diff-files", "--name-only", "--no-ext-diff", "-z", "--",
+            "--literal-pathspecs",
+            "diff-files",
+            "--name-only",
+            "--no-ext-diff",
+            "-z",
+            "--",
         ];
         args.extend(checked_paths.iter().map(String::as_str));
         let unstaged = workspace::git(path, &args)?;

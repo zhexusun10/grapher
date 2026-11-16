@@ -198,9 +198,14 @@ fn malformed_attachment_content_fails_before_direct_or_staged_files_are_created(
     let root = child.runtime.lock().unwrap().root.clone();
     for node in [None, Some("worker")] {
         for content in [
-            "%%%%", "Zg=", "Zg==trailer", "Z",
-            "not-a-data-url,Zg==", "data:text/plain,Zg==",
-            "data:application/octet-stream;base64", "data:;base64,Zg==trailer",
+            "%%%%",
+            "Zg=",
+            "Zg==trailer",
+            "Z",
+            "not-a-data-url,Zg==",
+            "data:text/plain,Zg==",
+            "data:application/octet-stream;base64",
+            "data:;base64,Zg==trailer",
         ] {
             let mut body = upload(&repo, &id, node);
             body["content"] = content.into();
@@ -221,8 +226,14 @@ fn raw_and_data_url_uploads_preserve_bytes_and_browser_retry_compatibility() {
     fs::create_dir(&repo).unwrap();
     for (content, expected) in [
         ("AAEC/f7/", &b"\x00\x01\x02\xfd\xfe\xff"[..]),
-        ("data:application/octet-stream;base64,AAEC/f7/", &b"\x00\x01\x02\xfd\xfe\xff"[..]),
-        ("DATA:application/octet-stream;BASE64,AAEC/f7/", &b"\x00\x01\x02\xfd\xfe\xff"[..]),
+        (
+            "data:application/octet-stream;base64,AAEC/f7/",
+            &b"\x00\x01\x02\xfd\xfe\xff"[..],
+        ),
+        (
+            "DATA:application/octet-stream;BASE64,AAEC/f7/",
+            &b"\x00\x01\x02\xfd\xfe\xff"[..],
+        ),
         ("data:text/plain;base64, Z m 8\r\n", &b"fo"[..]),
         ("data:;base64,", &b""[..]),
     ] {
@@ -293,12 +304,27 @@ fn publication_allows_staged_private_attachments_but_not_source_uploads() {
     let repo = temp.path().join("repo");
     for private in [true, false] {
         let (child, id) = run(&primary, &repo);
-        let tree = if private { temp.path().join("private") } else { repo.clone() };
+        let tree = if private {
+            temp.path().join("private")
+        } else {
+            repo.clone()
+        };
         start(&child, &tree);
-        child.runtime.lock().unwrap().emit(EventKind::WorkspaceIsolationSelected { isolated: private }).unwrap();
-        child.runtime.lock().unwrap().emit(EventKind::PublicationStarted {
-            repository: repo.to_string_lossy().into(), heads: vec!["other-node".into()],
-        }).unwrap();
+        child
+            .runtime
+            .lock()
+            .unwrap()
+            .emit(EventKind::WorkspaceIsolationSelected { isolated: private })
+            .unwrap();
+        child
+            .runtime
+            .lock()
+            .unwrap()
+            .emit(EventKind::PublicationStarted {
+                repository: repo.to_string_lossy().into(),
+                heads: vec!["other-node".into()],
+            })
+            .unwrap();
         let result = request(&primary, UPLOAD, upload(&repo, &id, Some("worker")));
         if private {
             let result = result.unwrap();

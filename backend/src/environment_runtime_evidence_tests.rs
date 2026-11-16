@@ -342,8 +342,7 @@ fn native_runtime_legacy_startup_does_not_acquire_new_evidence_admission_rules()
     .unwrap();
     // Use the actual unchanged ABI probe with no extra ownership inventory to
     // establish the old-format input. Nothing is persisted/adopted as a new L.
-    let legacy =
-        super::super::verify(&work, "workspace", "env", "venv", false, &[], None).unwrap();
+    let legacy = super::super::verify(&work, "workspace", "env", "venv", false, &[], None).unwrap();
     assert!(legacy.runtime_evidence.is_none());
     let measured =
         super::super::verify(&work, "workspace", "env", "venv", false, &[], Some(2)).unwrap();
@@ -352,8 +351,8 @@ fn native_runtime_legacy_startup_does_not_acquire_new_evidence_admission_rules()
         "extra evidence must not change the native ABI payload"
     );
     let roots = [("workspace", work.as_path()), ("state", state.as_path())];
-    let error =
-        super::super::verify(&work, "workspace", "env", "venv", false, &roots, Some(2)).unwrap_err();
+    let error = super::super::verify(&work, "workspace", "env", "venv", false, &roots, Some(2))
+        .unwrap_err();
     assert!(
         error.contains("another managed slot"),
         "new evidence must still reject shared sibling inputs: {error}"

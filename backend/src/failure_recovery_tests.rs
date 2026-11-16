@@ -116,7 +116,9 @@ fn user_pause_resume_does_not_inflate_later_retries_or_followups() {
     runtime
         .finish(&next_retry.execution, Err("stopped".into()))
         .unwrap();
-    runtime.intervene("task", "Use a different approach").unwrap();
+    runtime
+        .intervene("task", "Use a different approach")
+        .unwrap();
     let followup = runtime.jobs().unwrap().remove(0);
     assert_eq!(
         followup.execution.attempt, 4,

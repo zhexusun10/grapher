@@ -169,9 +169,18 @@ impl Environments {
     ) -> Result<(), String> {
         self.validate_result_metadata(selected)?;
         let launch = self.load_launch(&selected.launch_ref)?;
-        if let Some(evidence) = launch.environment.as_ref().and_then(|binding| binding.runtime_evidence.as_ref()) {
-            evidence.preflight_project_code(&self.scoped_files(&selected.launch_ref)?,
-                &selected.environment_ref, self.scope_root(&launch), source, code_ref)?;
+        if let Some(evidence) = launch
+            .environment
+            .as_ref()
+            .and_then(|binding| binding.runtime_evidence.as_ref())
+        {
+            evidence.preflight_project_code(
+                &self.scoped_files(&selected.launch_ref)?,
+                &selected.environment_ref,
+                self.scope_root(&launch),
+                source,
+                code_ref,
+            )?;
         }
         Ok(())
     }
@@ -193,12 +202,18 @@ impl Environments {
     ) -> Result<(), String> {
         self.validate_result_metadata(selected)?;
         let launch = self.load_launch(&selected.launch_ref)?;
-        let Some(evidence) = launch.environment.as_ref().and_then(|binding| binding.runtime_evidence.as_ref()) else {
+        let Some(evidence) = launch
+            .environment
+            .as_ref()
+            .and_then(|binding| binding.runtime_evidence.as_ref())
+        else {
             return Ok(());
         };
-        if !selected.layout.as_deref().is_some_and(|layout| {
-            crate::path_identity::same_path(path, Path::new(layout))
-        }) {
+        if !selected
+            .layout
+            .as_deref()
+            .is_some_and(|layout| crate::path_identity::same_path(path, Path::new(layout)))
+        {
             return Err("Native runtime evidence belongs to another or missing physical layout; no cross-layout reconstruction is authorized".into());
         }
         let mut roots = BTreeMap::from([("workspace".into(), path.to_path_buf())]);
@@ -214,9 +229,19 @@ impl Environments {
         }
         let files = self.scoped_files(&selected.launch_ref)?;
         if project_ready {
-            evidence.preflight_prepared(&files, &selected.environment_ref, self.scope_root(&launch), &roots)
+            evidence.preflight_prepared(
+                &files,
+                &selected.environment_ref,
+                self.scope_root(&launch),
+                &roots,
+            )
         } else {
-            evidence.preflight(&files, &selected.environment_ref, self.scope_root(&launch), &roots)
+            evidence.preflight(
+                &files,
+                &selected.environment_ref,
+                self.scope_root(&launch),
+                &roots,
+            )
         }
     }
 

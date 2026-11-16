@@ -259,7 +259,15 @@ pub(crate) fn context_with_state(
     session: &Path,
     best_effort: bool,
 ) -> Result<PathBuf, String> {
-    context_with_source(workspace, state, None, generation, launch, session, best_effort)
+    context_with_source(
+        workspace,
+        state,
+        None,
+        generation,
+        launch,
+        session,
+        best_effort,
+    )
 }
 
 pub(crate) fn context_with_source(
@@ -356,20 +364,29 @@ fn python_module(args: &[String]) -> Option<(&str, &[String])> {
             continue;
         }
         let options = argument.strip_prefix('-')?;
-        if options.is_empty() || options.starts_with('-') { return None; }
+        if options.is_empty() || options.starts_with('-') {
+            return None;
+        }
         for (offset, option) in options.char_indices() {
             let rest = &options[offset + option.len_utf8()..];
             match option {
-                'm' => return if rest.is_empty() {
-                    Some((args.get(index + 1)?.as_str(), &args[index + 2..]))
-                } else { Some((rest, &args[index + 1..])) },
+                'm' => {
+                    return if rest.is_empty() {
+                        Some((args.get(index + 1)?.as_str(), &args[index + 2..]))
+                    } else {
+                        Some((rest, &args[index + 1..]))
+                    }
+                }
                 'c' | 'h' | '?' | 'V' => return None,
                 'W' | 'X' => {
-                    if rest.is_empty() { args.get(index + 1)?; index += 1; }
+                    if rest.is_empty() {
+                        args.get(index + 1)?;
+                        index += 1;
+                    }
                     break; // The remaining characters are the option's value.
                 }
-                'b' | 'B' | 'd' | 'E' | 'i' | 'I' | 'O' | 'P' | 'q' | 'R'
-                | 's' | 'S' | 'u' | 'v' | 'x' => {}
+                'b' | 'B' | 'd' | 'E' | 'i' | 'I' | 'O' | 'P' | 'q' | 'R' | 's' | 'S' | 'u'
+                | 'v' | 'x' => {}
                 _ => return None,
             }
         }
@@ -387,7 +404,9 @@ fn create_prefixes(
     let roots = roots(workspace, state);
     let conda_root = state.unwrap_or(workspace);
     let module = matches!(tool, "python" | "python3")
-        .then(|| python_module(args)).flatten().filter(|(module, _)| *module == "venv");
+        .then(|| python_module(args))
+        .flatten()
+        .filter(|(module, _)| *module == "venv");
     if let Some((_, arguments)) = module {
         let mut prefixes = Vec::new();
         let mut skip = false;
@@ -398,17 +417,29 @@ fn create_prefixes(
                 continue;
             }
             if !literal {
-                if matches!(arg.as_str(), "-h" | "--help") { return Ok(Vec::new()); }
-                if arg == "--" { literal = true; continue; }
-                if arg == "--prompt" { skip = true; continue; }
-                if arg.starts_with('-') { continue; }
+                if matches!(arg.as_str(), "-h" | "--help") {
+                    return Ok(Vec::new());
+                }
+                if arg == "--" {
+                    literal = true;
+                    continue;
+                }
+                if arg == "--prompt" {
+                    skip = true;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    continue;
+                }
             }
             prefixes.push(PathBuf::from(arg));
         }
         if prefixes.is_empty() {
             return Err("Native venv creation has no provable workspace prefix".into());
         }
-        for prefix in &prefixes { owned_any(&roots, prefix)?; }
+        for prefix in &prefixes {
+            owned_any(&roots, prefix)?;
+        }
         return Ok(prefixes);
     }
     if tool == "conda"
@@ -524,9 +555,15 @@ fn hint(
 /// Conda run delegates the remaining argv to the child even without '--'.
 /// The child's --prefix/--name flags are not evidence of manager selection.
 fn conda_manager_args(args: &[String]) -> &[String] {
-    let end = args.iter().position(|argument| argument == "--").unwrap_or(args.len());
+    let end = args
+        .iter()
+        .position(|argument| argument == "--")
+        .unwrap_or(args.len());
     let mut options = &args[..end];
-    if let Some(command) = options.iter().position(|argument| !argument.starts_with('-')) {
+    if let Some(command) = options
+        .iter()
+        .position(|argument| !argument.starts_with('-'))
+    {
         if options[command] == "run" {
             let mut index = command + 1;
             while index < options.len() {
@@ -535,20 +572,34 @@ fn conda_manager_args(args: &[String]) -> &[String] {
                     options = &options[..index];
                     break;
                 }
-                index += if matches!(argument.as_str(), "-n" | "--name" | "-p" | "--prefix" | "--cwd") { 2 } else { 1 };
+                index += if matches!(
+                    argument.as_str(),
+                    "-n" | "--name" | "-p" | "--prefix" | "--cwd"
+                ) {
+                    2
+                } else {
+                    1
+                };
             }
         }
     }
-    if options.iter().any(|argument| matches!(argument.as_str(), "-h" | "--help" | "-V" | "--version")) {
+    if options
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "-h" | "--help" | "-V" | "--version"))
+    {
         &args[..0]
-    } else { options }
+    } else {
+        options
+    }
 }
 
 fn conda_environment_name(args: &[String]) -> Option<&str> {
     let args = conda_manager_args(args);
     let mut index = 0;
     while index < args.len() {
-        if args[index] == "--" { break; }
+        if args[index] == "--" {
+            break;
+        }
         if args[index] == "-n" || args[index] == "--name" {
             return args.get(index + 1).map(String::as_str);
         }
@@ -565,7 +616,9 @@ fn conda_private_prefix(args: &[String], cwd: &Path) -> Option<PathBuf> {
     let mut index = 0;
     while index < args.len() {
         let argument = &args[index];
-        if argument == "--" { break; }
+        if argument == "--" {
+            break;
+        }
         let value = if argument == "-p" || argument == "--prefix" {
             index += 1;
             args.get(index).map(String::as_str)
@@ -573,7 +626,9 @@ fn conda_private_prefix(args: &[String], cwd: &Path) -> Option<PathBuf> {
             argument.strip_prefix("--prefix=")
         };
         if let Some(value) = value {
-            if value.is_empty() { return None; }
+            if value.is_empty() {
+                return None;
+            }
             // --prefix always names a filesystem path, including a bare leaf.
             // Native relative arguments belong to this invocation's cwd, not
             // the external state root used for legacy name-based provisioning.
@@ -673,7 +728,9 @@ fn reject_source_environment_tool(
     source: Option<&str>,
     requested: &Path,
 ) -> Result<(), String> {
-    let Some(source) = source else { return Ok(()); };
+    let Some(source) = source else {
+        return Ok(());
+    };
     if source.contains('\0') || !Path::new(source).is_absolute() {
         return Err("Invalid native observer source binding".into());
     }
@@ -683,7 +740,10 @@ fn reject_source_environment_tool(
     }
     // Compare executable directories BEFORE resolving the executable symlink:
     // Unix venv/bin/python usually points at an unrelated host Python binary.
-    if requested.parent().is_some_and(|parent| workspace::scope_contains(parent, source)) {
+    if requested
+        .parent()
+        .is_some_and(|parent| workspace::scope_contains(parent, source))
+    {
         return Err("Source-bound environment tool selected from a private workspace; refusing source-environment execution. A copied activation script or launcher may still name its old location. Recreate/install the environment at its current workspace path or use an unrelated external environment; no automatic relocation is performed.".into());
     }
     Ok(())
@@ -794,7 +854,8 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     let pip_args = if matches!(name.as_str(), "pip" | "pip3") {
         Some(business.as_slice())
     } else if matches!(name.as_str(), "python" | "python3") {
-        python_module(&business).and_then(|(module, arguments)| (module == "pip").then_some(arguments))
+        python_module(&business)
+            .and_then(|(module, arguments)| (module == "pip").then_some(arguments))
     } else {
         None
     };
@@ -1031,9 +1092,9 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
                 root: Some(root),
             };
             write_receipt(&file, &receipt, &ctx.generation)?;
-            private_use_recorded |= detected_prefix.as_ref().is_some_and(|detected| {
-                crate::path_identity::same_path(detected, &prefix)
-            });
+            private_use_recorded |= detected_prefix
+                .as_ref()
+                .is_some_and(|detected| crate::path_identity::same_path(detected, &prefix));
         }
         // A used private prefix is already a candidate for drain-time native
         // verification. Do not also label it external merely because the
@@ -1164,7 +1225,9 @@ print(json.dumps({'version':sys.version,'abi':sysconfig.get_config_var('SOABI'),
     // Only backend-owned probe code switches the extra evidence output on.
     let mut script = if runtime_schema.is_some() {
         script.replacen("record_files=False", "record_files=True", 1)
-    } else { script.to_string() };
+    } else {
+        script.to_string()
+    };
     if matches!(runtime_schema, Some(2 | 3)) {
         script = script.replacen("record_selectors=False", "record_selectors=True", 1);
     }
@@ -1205,7 +1268,9 @@ print(json.dumps({'version':sys.version,'abi':sysconfig.get_config_var('SOABI'),
     let (runtime_evidence, abi_output) = if runtime_schema.is_some() {
         let (evidence, abi) = RuntimeEvidence::from_probe(&output, root_paths)?;
         (Some(evidence), abi)
-    } else { (None, output) };
+    } else {
+        (None, output)
+    };
     let abi = git2::Oid::hash_object(git2::ObjectType::Blob, &abi_output)
         .map_err(|e| e.to_string())?
         .to_string();
@@ -1244,10 +1309,17 @@ pub(crate) fn validate_launch_with_state(
             &expected.kind,
             project_requirements,
             &roots,
-            expected.runtime_evidence.as_ref().map(RuntimeEvidence::schema),
+            expected
+                .runtime_evidence
+                .as_ref()
+                .map(RuntimeEvidence::schema),
         )?;
         if let Some(recorded) = &expected.runtime_evidence {
-            if !actual.runtime_evidence.as_ref().is_some_and(|current| current.same_runtime_files(recorded)) {
+            if !actual
+                .runtime_evidence
+                .as_ref()
+                .is_some_and(|current| current.same_runtime_files(recorded))
+            {
                 return Err("Bound native interpreter runtime file evidence changed; refusing unsafe startup".into());
             }
             // Selector paths constrain historical recovery, not an otherwise
@@ -1256,7 +1328,9 @@ pub(crate) fn validate_launch_with_state(
         }
         // Validate legacy records by their recorded contract, without rewriting
         // L/ABI or retrofitting newly observed files into historical evidence.
-        if expected.root.is_none() { actual.root = None; }
+        if expected.root.is_none() {
+            actual.root = None;
+        }
         if actual != *expected {
             return Err(
                 "Bound native interpreter ABI/library bytes changed; refusing unsafe startup"
@@ -1463,14 +1537,22 @@ pub(crate) fn resolve_for_policy_with_state(
     // collapse equal relative names from W and S into one scope.
     if state.is_some() && next.owned_scopes.is_none() {
         let root = binding_root_label(launch, &roots);
-        next.owned_scopes = Some(next.managed_scopes.drain(..)
-            .map(|path| EnvironmentScope { root: root.into(), path }).collect());
+        next.owned_scopes = Some(
+            next.managed_scopes
+                .drain(..)
+                .map(|path| EnvironmentScope {
+                    root: root.into(),
+                    path,
+                })
+                .collect(),
+        );
     }
     if best_effort {
         if let Some(scopes) = &mut next.owned_scopes {
             scopes.extend(discovered_scopes);
         } else {
-            next.managed_scopes.extend(discovered_scopes.into_iter().map(|scope| scope.path));
+            next.managed_scopes
+                .extend(discovered_scopes.into_iter().map(|scope| scope.path));
         }
         next.ambient_hints = ambient_hints;
     }
@@ -1500,7 +1582,15 @@ pub(crate) fn resolve_for_policy_with_state(
     }
     if let Some(((root_label, prefix), kind)) = candidates.into_iter().next() {
         let root = root_for(&roots, &root_label)?;
-        let binding = match verify(root, &root_label, &prefix, &kind, project_requirements, &roots, Some(3)) {
+        let binding = match verify(
+            root,
+            &root_label,
+            &prefix,
+            &kind,
+            project_requirements,
+            &roots,
+            Some(3),
+        ) {
             Ok(binding) => binding,
             Err(_) if best_effort => return unbound_launch(&next),
             Err(error) => return Err(error),
@@ -1550,7 +1640,10 @@ pub(crate) fn resolve_for_policy_with_state(
         }
         next.environment = Some(binding);
         if let Some(scopes) = &mut next.owned_scopes {
-            scopes.push(EnvironmentScope { root: root_label, path: prefix });
+            scopes.push(EnvironmentScope {
+                root: root_label,
+                path: prefix,
+            });
             scopes.sort();
             scopes.dedup();
         } else {
@@ -1583,7 +1676,10 @@ fn find_conda(paths: &[String], workspace: &Path) -> Result<String, String> {
     for directory in paths {
         // Native relative/empty PATH entries belong to the business cwd, never
         // the backend installation's cwd. Absolute entries remain unchanged.
-        let path = workspace.join(directory).join(if cfg!(windows) { "conda.exe" } else { "conda" });
+        let path =
+            workspace
+                .join(directory)
+                .join(if cfg!(windows) { "conda.exe" } else { "conda" });
         if path.is_file() {
             return Ok(text(&canonical(&path)?));
         }
@@ -1619,17 +1715,58 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         let file = session.join(format!("environment-observer-{generation}.json"));
         let legacy = fs::read(&file).unwrap();
-        context_with_source(&root, None, Some(&source), &generation, &launch, &session, false).unwrap();
+        context_with_source(
+            &root,
+            None,
+            Some(&source),
+            &generation,
+            &launch,
+            &session,
+            false,
+        )
+        .unwrap();
         assert_eq!(fs::read(&file).unwrap(), legacy);
         let mut changed = launch.clone();
-        changed.variables.insert("BUSINESS".into(), "changed".into());
-        assert!(context_with_source(&root, None, Some(&source), &generation, &changed, &session, false).is_err());
+        changed
+            .variables
+            .insert("BUSINESS".into(), "changed".into());
+        assert!(context_with_source(
+            &root,
+            None,
+            Some(&source),
+            &generation,
+            &changed,
+            &session,
+            false
+        )
+        .is_err());
         let generation = Uuid::new_v4().to_string();
-        let file = context_with_source(&root, None, Some(&source), &generation, &launch, &session, true).unwrap();
+        let file = context_with_source(
+            &root,
+            None,
+            Some(&source),
+            &generation,
+            &launch,
+            &session,
+            true,
+        )
+        .unwrap();
         let current = fs::read(&file).unwrap();
         let context: Context = serde_json::from_slice(&current).unwrap();
-        assert_eq!(context.source.as_deref(), Some(text(&canonical(&source).unwrap()).as_str()));
-        assert!(context_with_source(&root, None, Some(&root), &generation, &launch, &session, true).is_err());
+        assert_eq!(
+            context.source.as_deref(),
+            Some(text(&canonical(&source).unwrap()).as_str())
+        );
+        assert!(context_with_source(
+            &root,
+            None,
+            Some(&root),
+            &generation,
+            &launch,
+            &session,
+            true
+        )
+        .is_err());
         assert_eq!(fs::read(&file).unwrap(), current);
     }
 
@@ -1642,28 +1779,78 @@ mod tests {
         let private_env = root.join("custom-python");
         let python = python(&launch);
         let mut create = Command::new(&python);
-        create.args(["-m", "venv", "--without-pip"]).arg(&source_env);
+        create
+            .args(["-m", "venv", "--without-pip"])
+            .arg(&source_env);
         environment::controlled_output(create).unwrap();
         fs::create_dir_all(&private_env).unwrap();
         crate::native_copy::copy_tree(&source_env, &private_env, |_| false).unwrap();
-        let activation = if cfg!(windows) { "Scripts/activate" } else { "bin/activate" };
+        let activation = if cfg!(windows) {
+            "Scripts/activate"
+        } else {
+            "bin/activate"
+        };
         let original = fs::read(source_env.join(activation)).unwrap();
         let quote = |value: &str| format!("'{}'", value.replace('\\', "/").replace('\'', "'\\''"));
-        let script = "import json,sys; print(json.dumps({'executable':sys.executable,'prefix':sys.prefix}))";
+        let script =
+            "import json,sys; print(json.dumps({'executable':sys.executable,'prefix':sys.prefix}))";
         let mut bash = Command::new(&launch.shell);
-        bash.args(["--noprofile", "--norc", "-c", &format!("source {} && python -c {}", quote(&text(&private_env.join(activation))), quote(script))])
-            .current_dir(&root).env_remove("BASH_ENV").env_remove("ENV").env("PYTHONDONTWRITEBYTECODE", "1");
-        let output: serde_json::Value = serde_json::from_slice(&environment::controlled_output(bash).unwrap()).unwrap();
-        assert!(crate::path_identity::same_path(Path::new(output["prefix"].as_str().unwrap()), &source_env), "a standard copied activation still selects its original prefix");
+        bash.args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            &format!(
+                "source {} && python -c {}",
+                quote(&text(&private_env.join(activation))),
+                quote(script)
+            ),
+        ])
+        .current_dir(&root)
+        .env_remove("BASH_ENV")
+        .env_remove("ENV")
+        .env("PYTHONDONTWRITEBYTECODE", "1");
+        let output: serde_json::Value =
+            serde_json::from_slice(&environment::controlled_output(bash).unwrap()).unwrap();
+        assert!(
+            crate::path_identity::same_path(
+                Path::new(output["prefix"].as_str().unwrap()),
+                &source_env
+            ),
+            "a standard copied activation still selects its original prefix"
+        );
         let session = temp.path().join("guarded-session");
-        let observer = context_with_source(&root, None, Some(&source), &generation, &launch, &session, true).unwrap();
+        let observer = context_with_source(
+            &root,
+            None,
+            Some(&source),
+            &generation,
+            &launch,
+            &session,
+            true,
+        )
+        .unwrap();
         let marker = source_env.join("must-not-be-written");
         let source_alias = temp.path().join("source-alias");
         crate::path_safety::directory_link(&source, &source_alias);
-        for executable in [PathBuf::from(output["executable"].as_str().unwrap()), interpreter(&source_alias.join("custom-python"), "venv")] {
-            let error = tool(vec![text(&observer), "python".into(), text(&executable), "-c".into(),
-                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('source modified')".into(), text(&marker)]).unwrap_err();
-            assert!(error.contains("Source-bound environment tool") && error.contains("Recreate/install"), "{error}");
+        for executable in [
+            PathBuf::from(output["executable"].as_str().unwrap()),
+            interpreter(&source_alias.join("custom-python"), "venv"),
+        ] {
+            let error = tool(vec![
+                text(&observer),
+                "python".into(),
+                text(&executable),
+                "-c".into(),
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('source modified')"
+                    .into(),
+                text(&marker),
+            ])
+            .unwrap_err();
+            assert!(
+                error.contains("Source-bound environment tool")
+                    && error.contains("Recreate/install"),
+                "{error}"
+            );
             assert!(!marker.exists());
         }
         assert_eq!(fs::read(source_env.join(activation)).unwrap(), original);
@@ -1672,16 +1859,38 @@ mod tests {
         // activation diagnostic into a blanket ban on private/ambient Python.
         assert_eq!(tool(vec![text(&observer), "python".into(), text(&interpreter(&private_env, "venv")), "-I".into(), "-c".into(),
             "import pathlib,sys; assert pathlib.Path(sys.prefix).resolve()==pathlib.Path(sys.argv[1]).resolve()".into(), text(&private_env)]).unwrap(), 0);
-        assert_eq!(tool(vec![text(&observer), "python".into(), python, "-c".into(), "pass".into()]).unwrap(), 0);
+        assert_eq!(
+            tool(vec![
+                text(&observer),
+                "python".into(),
+                python,
+                "-c".into(),
+                "pass".into()
+            ])
+            .unwrap(),
+            0
+        );
         // Deleting a local environment after activation must not silently
         // authorize the stale source prefix again.
         fs::remove_dir_all(&private_env).unwrap();
-        let error = tool(vec![text(&observer), "python".into(), text(&interpreter(&source_env, "venv")), "-c".into(),
-            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('source modified')".into(), text(&marker)]).unwrap_err();
+        let error = tool(vec![
+            text(&observer),
+            "python".into(),
+            text(&interpreter(&source_env, "venv")),
+            "-c".into(),
+            "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('source modified')".into(),
+            text(&marker),
+        ])
+        .unwrap_err();
         assert!(error.contains("Source-bound environment tool"), "{error}");
         assert!(!marker.exists());
         assert_eq!(fs::read(source_env.join(activation)).unwrap(), original);
-        reject_source_environment_tool(&source, Some(&text(&source)), &interpreter(&source_env, "venv")).unwrap();
+        reject_source_environment_tool(
+            &source,
+            Some(&text(&source)),
+            &interpreter(&source_env, "venv"),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1815,11 +2024,19 @@ mod tests {
         );
         // Temporary per-command configuration is business state, not a change
         // to L. Observation must not reset it to the original launch values.
-        assert_eq!(tool(vec![
-            text(&observer), "python".into(), python.clone(), "-c".into(),
-            "import json,os,sys; assert os.environ.get('HOME') == json.loads(sys.argv[1])".into(),
-            serde_json::to_string(&std::env::var("HOME").ok()).unwrap(),
-        ]).unwrap(), 0);
+        assert_eq!(
+            tool(vec![
+                text(&observer),
+                "python".into(),
+                python.clone(),
+                "-c".into(),
+                "import json,os,sys; assert os.environ.get('HOME') == json.loads(sys.argv[1])"
+                    .into(),
+                serde_json::to_string(&std::env::var("HOME").ok()).unwrap(),
+            ])
+            .unwrap(),
+            0
+        );
         // The adapter must not reject an ambient interpreter merely because the
         // pip target is outside the managed workspace. pip itself may reject the
         // disposable dry-run request; that is business command status, not Runtime policy.
@@ -1859,10 +2076,16 @@ mod tests {
         let name = if cfg!(windows) { "conda.exe" } else { "conda" };
         let tool = workspace.join("tools").join(name);
         fs::write(&tool, "not executed").unwrap();
-        assert_eq!(find_conda(&["tools".into()], &workspace).unwrap(), text(&canonical(&tool).unwrap()));
+        assert_eq!(
+            find_conda(&["tools".into()], &workspace).unwrap(),
+            text(&canonical(&tool).unwrap())
+        );
         assert!(find_conda(&["missing".into()], &workspace).is_err());
         fs::write(workspace.join(name), "not executed").unwrap();
-        assert_eq!(find_conda(&[String::new()], &workspace).unwrap(), text(&canonical(&workspace.join(name)).unwrap()));
+        assert_eq!(
+            find_conda(&[String::new()], &workspace).unwrap(),
+            text(&canonical(&workspace.join(name)).unwrap())
+        );
     }
 
     #[test]
@@ -1879,41 +2102,94 @@ mod tests {
             fs::write(prefix.join("local-patch"), label).unwrap();
         }
         for label in ["workspace", "state", "workspace"] {
-            let root = if label == "workspace" { &workspace } else { &state };
+            let root = if label == "workspace" {
+                &workspace
+            } else {
+                &state
+            };
             let prefix = root.join("same-env");
             let generation = Uuid::new_v4().to_string();
             let session = temp.path().join(&generation);
-            let observer = context_with_state(&workspace, Some(&state), &generation,
-                &launch.expanded(&workspace), &session, true).unwrap();
+            let observer = context_with_state(
+                &workspace,
+                Some(&state),
+                &generation,
+                &launch.expanded(&workspace),
+                &session,
+                true,
+            )
+            .unwrap();
             assert_eq!(tool(vec![text(&observer), "python".into(), text(&interpreter(&prefix, "venv")),
                 "-I".into(), "-c".into(), "import pathlib,sys; p=pathlib.Path(sys.prefix); assert p.resolve()==pathlib.Path(sys.argv[1]).resolve(); assert (p/'local-patch').read_text()==sys.argv[2]".into(),
                 text(&prefix), label.into()]).unwrap(), 0);
-            launch = resolve_for_policy_with_state(&workspace, Some(&state), &launch,
-                &session, &generation, false, true).unwrap();
-            let binding = launch.environment.as_ref().expect("unique verified private use must not be classified as an external switch");
+            launch = resolve_for_policy_with_state(
+                &workspace,
+                Some(&state),
+                &launch,
+                &session,
+                &generation,
+                false,
+                true,
+            )
+            .unwrap();
+            let binding = launch
+                .environment
+                .as_ref()
+                .expect("unique verified private use must not be classified as an external switch");
             assert_eq!(binding.root.as_deref(), Some(label));
             assert_eq!(binding.prefix, "same-env");
             validate_launch_with_state(&workspace, Some(&state), &launch, false).unwrap();
-            assert!(launch.ambient_hints.is_empty(), "a private interpreter symlink must not create a host-interpreter hint");
+            assert!(
+                launch.ambient_hints.is_empty(),
+                "a private interpreter symlink must not create a host-interpreter hint"
+            );
             assert_eq!(launch.owned_scopes.as_ref().unwrap().len(), 2);
             for (name, root) in [("workspace", &workspace), ("state", &state)] {
-                assert_eq!(fs::read_to_string(root.join("same-env/local-patch")).unwrap(), name,
-                    "switching does not copy or reset either private environment");
+                assert_eq!(
+                    fs::read_to_string(root.join("same-env/local-patch")).unwrap(),
+                    name,
+                    "switching does not copy or reset either private environment"
+                );
             }
         }
         // A receipt alone is not proof: losing native metadata before drain
         // must still unbind rather than adopt the switched prefix.
         let generation = Uuid::new_v4().to_string();
         let session = temp.path().join(&generation);
-        let observer = context_with_state(&workspace, Some(&state), &generation,
-            &launch.expanded(&workspace), &session, true).unwrap();
-        assert_eq!(tool(vec![text(&observer), "python".into(), text(&interpreter(&state.join("same-env"), "venv")),
-            "-I".into(), "-c".into(), "pass".into()]).unwrap(), 0);
+        let observer = context_with_state(
+            &workspace,
+            Some(&state),
+            &generation,
+            &launch.expanded(&workspace),
+            &session,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            tool(vec![
+                text(&observer),
+                "python".into(),
+                text(&interpreter(&state.join("same-env"), "venv")),
+                "-I".into(),
+                "-c".into(),
+                "pass".into()
+            ])
+            .unwrap(),
+            0
+        );
         let metadata = state.join("same-env/pyvenv.cfg");
         let original = fs::read(&metadata).unwrap();
         fs::remove_file(&metadata).unwrap();
-        let unverified = resolve_for_policy_with_state(&workspace, Some(&state), &launch,
-            &session, &generation, false, true).unwrap();
+        let unverified = resolve_for_policy_with_state(
+            &workspace,
+            Some(&state),
+            &launch,
+            &session,
+            &generation,
+            false,
+            true,
+        )
+        .unwrap();
         assert!(unverified.environment.is_none());
         assert_eq!(unverified.owned_scopes, launch.owned_scopes);
         fs::write(&metadata, original).unwrap();
@@ -1921,18 +2197,51 @@ mod tests {
         for external in [false, true] {
             let generation = Uuid::new_v4().to_string();
             let session = temp.path().join(&generation);
-            let observer = context_with_state(&workspace, Some(&state), &generation,
-                &launch.expanded(&workspace), &session, true).unwrap();
-            let programs = if external { vec![PathBuf::from(&bootstrap)] } else {
-                vec![interpreter(&workspace.join("same-env"), "venv"), interpreter(&state.join("same-env"), "venv")]
+            let observer = context_with_state(
+                &workspace,
+                Some(&state),
+                &generation,
+                &launch.expanded(&workspace),
+                &session,
+                true,
+            )
+            .unwrap();
+            let programs = if external {
+                vec![PathBuf::from(&bootstrap)]
+            } else {
+                vec![
+                    interpreter(&workspace.join("same-env"), "venv"),
+                    interpreter(&state.join("same-env"), "venv"),
+                ]
             };
             for program in programs {
-                assert_eq!(tool(vec![text(&observer), "python".into(), text(&program),
-                    "-I".into(), "-c".into(), "pass".into()]).unwrap(), 0);
+                assert_eq!(
+                    tool(vec![
+                        text(&observer),
+                        "python".into(),
+                        text(&program),
+                        "-I".into(),
+                        "-c".into(),
+                        "pass".into()
+                    ])
+                    .unwrap(),
+                    0
+                );
             }
-            let next = resolve_for_policy_with_state(&workspace, Some(&state), &launch,
-                &session, &generation, false, true).unwrap();
-            assert!(next.environment.is_none(), "external or ambiguous use must remain unbound");
+            let next = resolve_for_policy_with_state(
+                &workspace,
+                Some(&state),
+                &launch,
+                &session,
+                &generation,
+                false,
+                true,
+            )
+            .unwrap();
+            assert!(
+                next.environment.is_none(),
+                "external or ambiguous use must remain unbound"
+            );
             assert_eq!(next.owned_scopes, launch.owned_scopes);
         }
     }
@@ -1941,18 +2250,35 @@ mod tests {
     fn environment_switching_and_unbinding_preserve_project_and_relative_business_paths() {
         let (temp, root, _session, mut launch, _) = setup();
         let python = python(&launch);
-        let mut business = vec!["{workspace}/tools".into(), "relative-bin".into(), String::new()];
+        let mut business = vec![
+            "{workspace}/tools".into(),
+            "relative-bin".into(),
+            String::new(),
+        ];
         business.extend(launch.path.clone());
         launch.path = business.clone();
         launch.unbound_path = Some(business.clone());
         for name in ["first-env", "second-env"] {
             let session = temp.path().join(format!("session-{name}"));
             let generation = Uuid::new_v4().to_string();
-            let observer = context(&root, &generation, &launch.expanded(&root), &session, true).unwrap();
-            assert_eq!(tool(vec![text(&observer), "python".into(), python.clone(),
-                "-m".into(), "venv".into(), "--without-pip".into(), text(&root.join(name))]).unwrap(), 0);
+            let observer =
+                context(&root, &generation, &launch.expanded(&root), &session, true).unwrap();
+            assert_eq!(
+                tool(vec![
+                    text(&observer),
+                    "python".into(),
+                    python.clone(),
+                    "-m".into(),
+                    "venv".into(),
+                    "--without-pip".into(),
+                    text(&root.join(name))
+                ])
+                .unwrap(),
+                0
+            );
             let switching = launch.environment.is_some();
-            launch = resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
+            launch =
+                resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
             if switching {
                 // Using another interpreter during a bound turn retains the
                 // existing best-effort unbound decision, not automatic authority.
@@ -1960,14 +2286,29 @@ mod tests {
                 assert_eq!(launch.path, business);
                 let session = temp.path().join(format!("activate-{name}"));
                 let generation = Uuid::new_v4().to_string();
-                let observer = context(&root, &generation, &launch.expanded(&root), &session, true).unwrap();
-                assert_eq!(tool(vec![text(&observer), "python".into(), text(&interpreter(&root.join(name), "venv")),
-                    "-c".into(), "pass".into()]).unwrap(), 0);
-                launch = resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
+                let observer =
+                    context(&root, &generation, &launch.expanded(&root), &session, true).unwrap();
+                assert_eq!(
+                    tool(vec![
+                        text(&observer),
+                        "python".into(),
+                        text(&interpreter(&root.join(name), "venv")),
+                        "-c".into(),
+                        "pass".into()
+                    ])
+                    .unwrap(),
+                    0
+                );
+                launch =
+                    resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
             }
             assert_eq!(launch.environment.as_ref().unwrap().prefix, name);
             assert!(launch.path[0].contains(name));
-            assert_eq!(&launch.path[1..], business.as_slice(), "activation must not drop project tools or accumulate old prefixes");
+            assert_eq!(
+                &launch.path[1..],
+                business.as_slice(),
+                "activation must not drop project tools or accumulate old prefixes"
+            );
         }
         let unbound = unbound_launch(&launch).unwrap();
         assert!(unbound.environment.is_none());
@@ -2028,12 +2369,23 @@ mod tests {
         assert!(resolve(&root, &launch, &session, &generation)
             .unwrap_err()
             .contains("Ambiguous"));
-        let unbound = resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
+        let unbound =
+            resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
         assert!(unbound.environment.is_none());
-        assert_eq!(unbound.owned_scopes.unwrap(), vec![
-            EnvironmentScope { root: "workspace".into(), path: "first".into() },
-            EnvironmentScope { root: "workspace".into(), path: "second".into() },
-        ], "ambiguity must not release either observed environment into project Git");
+        assert_eq!(
+            unbound.owned_scopes.unwrap(),
+            vec![
+                EnvironmentScope {
+                    root: "workspace".into(),
+                    path: "first".into()
+                },
+                EnvironmentScope {
+                    root: "workspace".into(),
+                    path: "second".into()
+                },
+            ],
+            "ambiguity must not release either observed environment into project Git"
+        );
     }
     #[test]
     fn python_application_arguments_do_not_create_environment_authority() {
@@ -2044,9 +2396,16 @@ mod tests {
         create.args(["-m", "venv", "--without-pip"]).arg(&inactive);
         environment::controlled_output(create).unwrap();
         let script = root.join("business.py");
-        fs::write(&script, "import sys; assert sys.argv[1:3] == ['-m', 'venv']\n").unwrap();
+        fs::write(
+            &script,
+            "import sys; assert sys.argv[1:3] == ['-m', 'venv']\n",
+        )
+        .unwrap();
         for mut args in [
-            vec!["-c".into(), "import sys; assert sys.argv[1:3] == ['-m', 'venv']".into()],
+            vec![
+                "-c".into(),
+                "import sys; assert sys.argv[1:3] == ['-m', 'venv']".into(),
+            ],
             vec![text(&script)],
             vec!["--".into(), text(&script)],
         ] {
@@ -2057,9 +2416,18 @@ mod tests {
             let mut invocation = vec![text(&observer), "python".into(), bootstrap.clone()];
             invocation.extend(args);
             assert_eq!(tool(invocation).unwrap(), 0);
-            let next = resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
-            assert!(next.environment.is_none(), "application argv must not manufacture a venv creation receipt");
-            assert!(next.owned_scopes.as_ref().unwrap().iter().any(|scope| scope.root == "workspace" && scope.path == "inactive"));
+            let next =
+                resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
+            assert!(
+                next.environment.is_none(),
+                "application argv must not manufacture a venv creation receipt"
+            );
+            assert!(next
+                .owned_scopes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|scope| scope.root == "workspace" && scope.path == "inactive"));
         }
         // Real module invocation still records creation, including valued
         // interpreter options and compact/grouped short-option spelling.
@@ -2067,27 +2435,71 @@ mod tests {
         let session = temp.path().join(&generation);
         let observer = context(&root, &generation, &launch, &session, true).unwrap();
         let created = root.join("created-with-options");
-        assert_eq!(tool(vec![text(&observer), "python".into(), bootstrap.clone(),
-            "-W".into(), "ignore".into(), "-X".into(), "utf8".into(),
-            "--check-hash-based-pycs".into(), "default".into(), "-IBmvenv".into(),
-            "--without-pip".into(), text(&created)]).unwrap(), 0);
+        assert_eq!(
+            tool(vec![
+                text(&observer),
+                "python".into(),
+                bootstrap.clone(),
+                "-W".into(),
+                "ignore".into(),
+                "-X".into(),
+                "utf8".into(),
+                "--check-hash-based-pycs".into(),
+                "default".into(),
+                "-IBmvenv".into(),
+                "--without-pip".into(),
+                text(&created)
+            ])
+            .unwrap(),
+            0
+        );
         let next = resolve_for_policy(&root, &launch, &session, &generation, false, true).unwrap();
         assert_eq!(next.environment.unwrap().prefix, "created-with-options");
 
         let generation = Uuid::new_v4().to_string();
         let session = temp.path().join(&generation);
         let observer = context(&root, &generation, &launch, &session, false).unwrap();
-        assert_eq!(tool(vec![text(&observer), "python".into(), bootstrap.clone(), "-c".into(),
-            "pass".into(), "-m".into(), "pip".into(), "install".into(), "business-argument".into()]).unwrap(), 0,
-            "application arguments must not trigger legacy pip policy checks");
-        let error = tool(vec![text(&observer), "python".into(), bootstrap, "-mpip".into(),
-            "install".into(), "--dry-run".into(), "--no-index".into(), "not-a-real-package".into()]).unwrap_err();
-        assert!(error.contains("host interpreter"), "compact module spelling must retain the legacy host-write guard: {error}");
+        assert_eq!(
+            tool(vec![
+                text(&observer),
+                "python".into(),
+                bootstrap.clone(),
+                "-c".into(),
+                "pass".into(),
+                "-m".into(),
+                "pip".into(),
+                "install".into(),
+                "business-argument".into()
+            ])
+            .unwrap(),
+            0,
+            "application arguments must not trigger legacy pip policy checks"
+        );
+        let error = tool(vec![
+            text(&observer),
+            "python".into(),
+            bootstrap,
+            "-mpip".into(),
+            "install".into(),
+            "--dry-run".into(),
+            "--no-index".into(),
+            "not-a-real-package".into(),
+        ])
+        .unwrap_err();
+        assert!(
+            error.contains("host interpreter"),
+            "compact module spelling must retain the legacy host-write guard: {error}"
+        );
     }
 
     #[test]
     fn python_module_options_do_not_scan_option_values_or_application_argv() {
-        let args = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>()
+        };
         for values in [
             vec!["-W", "-m", "venv", "target"],
             vec!["-X", "-m", "venv", "target"],
@@ -2099,32 +2511,90 @@ mod tests {
             assert!(python_module(&args(&values)).is_none(), "{values:?}");
         }
         let application = args(&["-m", "business_module", "-m", "venv", "target"]);
-        assert_eq!(python_module(&application), Some(("business_module", &application[2..])));
+        assert_eq!(
+            python_module(&application),
+            Some(("business_module", &application[2..]))
+        );
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("workspace");
         fs::create_dir(&root).unwrap();
-        let help = vec!["-mvenv".into(), text(&temp.path().join("outside")), "--help".into()];
-        assert!(create_prefixes("python", &help, &root, None).unwrap().is_empty(),
-            "help does not create an environment or request a write destination");
+        let help = vec![
+            "-mvenv".into(),
+            text(&temp.path().join("outside")),
+            "--help".into(),
+        ];
+        assert!(
+            create_prefixes("python", &help, &root, None)
+                .unwrap()
+                .is_empty(),
+            "help does not create an environment or request a write destination"
+        );
     }
 
     #[test]
     fn conda_run_application_options_are_not_manager_selectors() {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path();
-        let args = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>()
+        };
         for invocation in [
-            args(&["run", "python", "business.py", "--prefix", "wrong", "--name", "wrong"]),
-            args(&["run", "--cwd", "child-cwd", "python", "--prefix=wrong", "--name=wrong"]),
-            args(&["--debug", "run", "--no-capture-output", "python", "--name", "wrong"]),
+            args(&[
+                "run",
+                "python",
+                "business.py",
+                "--prefix",
+                "wrong",
+                "--name",
+                "wrong",
+            ]),
+            args(&[
+                "run",
+                "--cwd",
+                "child-cwd",
+                "python",
+                "--prefix=wrong",
+                "--name=wrong",
+            ]),
+            args(&[
+                "--debug",
+                "run",
+                "--no-capture-output",
+                "python",
+                "--name",
+                "wrong",
+            ]),
             args(&["create", "--prefix", "existing", "--help"]),
         ] {
-            assert!(conda_private_prefix(&invocation, cwd).is_none(), "child argv is not a prefix selector: {invocation:?}");
-            assert!(conda_environment_name(&invocation).is_none(), "child argv is not a name selector: {invocation:?}");
+            assert!(
+                conda_private_prefix(&invocation, cwd).is_none(),
+                "child argv is not a prefix selector: {invocation:?}"
+            );
+            assert!(
+                conda_environment_name(&invocation).is_none(),
+                "child argv is not a name selector: {invocation:?}"
+            );
         }
-        let selected = args(&["run", "--cwd", "child-cwd", "--prefix", "selected", "python", "--prefix", "wrong"]);
-        assert_eq!(conda_private_prefix(&selected, cwd), Some(cwd.join("selected")));
-        let named = args(&["run", "--name", "selected", "python", "--prefix", "wrong", "--name", "wrong"]);
+        let selected = args(&[
+            "run",
+            "--cwd",
+            "child-cwd",
+            "--prefix",
+            "selected",
+            "python",
+            "--prefix",
+            "wrong",
+        ]);
+        assert_eq!(
+            conda_private_prefix(&selected, cwd),
+            Some(cwd.join("selected"))
+        );
+        let named = args(&[
+            "run", "--name", "selected", "python", "--prefix", "wrong", "--name", "wrong",
+        ]);
         assert_eq!(conda_environment_name(&named), Some("selected"));
         assert!(conda_private_prefix(&named, cwd).is_none());
     }
@@ -2136,26 +2606,67 @@ mod tests {
         let cwd = workspace.join("subproject");
         fs::create_dir(&state).unwrap();
         fs::create_dir(&cwd).unwrap();
-        let arguments = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect::<Vec<_>>();
+        let arguments = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>()
+        };
         for args in [
             arguments(&["create", "--prefix", "env"]),
             arguments(&["install", "-p", "./env", "package"]),
             arguments(&["run", "--prefix=env", "--", "python"]),
             arguments(&["shell.bash", "activate", "./env"]),
         ] {
-            let prefix = conda_private_prefix(&args, &cwd).expect("explicit prefix is a path even without a slash");
-            assert!(crate::path_identity::same_path(&prefix, &cwd.join("env")), "{prefix:?}");
-            let value = hint("conda", Path::new(&python(&launch)), &args,
-                &workspace, Some(&state), &cwd, &launch).unwrap();
-            assert!(crate::path_identity::same_path(Path::new(&value.selector), &cwd.join("env")), "{}", value.selector);
+            let prefix = conda_private_prefix(&args, &cwd)
+                .expect("explicit prefix is a path even without a slash");
+            assert!(
+                crate::path_identity::same_path(&prefix, &cwd.join("env")),
+                "{prefix:?}"
+            );
+            let value = hint(
+                "conda",
+                Path::new(&python(&launch)),
+                &args,
+                &workspace,
+                Some(&state),
+                &cwd,
+                &launch,
+            )
+            .unwrap();
+            assert!(
+                crate::path_identity::same_path(Path::new(&value.selector), &cwd.join("env")),
+                "{}",
+                value.selector
+            );
         }
-        for args in [arguments(&["create", "--name", "env"]), arguments(&["shell.bash", "activate", "env"])] {
-            assert!(conda_private_prefix(&args, &cwd).is_none(), "a Conda name is not a cwd-relative prefix");
+        for args in [
+            arguments(&["create", "--name", "env"]),
+            arguments(&["shell.bash", "activate", "env"]),
+        ] {
+            assert!(
+                conda_private_prefix(&args, &cwd).is_none(),
+                "a Conda name is not a cwd-relative prefix"
+            );
         }
         let absolute = state.join("private-env");
-        assert_eq!(conda_private_prefix(&["list".into(), "--prefix".into(), text(&absolute)], &cwd), Some(absolute));
-        assert!(conda_private_prefix(&arguments(&["run", "--", "python", "--prefix", "not-conda"]), &cwd).is_none());
-        assert!(conda_environment_name(&arguments(&["run", "--", "python", "--name", "not-conda"])).is_none());
+        assert_eq!(
+            conda_private_prefix(&["list".into(), "--prefix".into(), text(&absolute)], &cwd),
+            Some(absolute)
+        );
+        assert!(conda_private_prefix(
+            &arguments(&["run", "--", "python", "--prefix", "not-conda"]),
+            &cwd
+        )
+        .is_none());
+        assert!(conda_environment_name(&arguments(&[
+            "run",
+            "--",
+            "python",
+            "--name",
+            "not-conda"
+        ]))
+        .is_none());
     }
 
     #[test]
@@ -2179,7 +2690,15 @@ mod tests {
             fs::write(prefix.join("marker"), marker).unwrap();
         }
         let generation = Uuid::new_v4().to_string();
-        let context = context_with_state(&workspace, Some(&state), &generation, &launch, &session, true).unwrap();
+        let context = context_with_state(
+            &workspace,
+            Some(&state),
+            &generation,
+            &launch,
+            &session,
+            true,
+        )
+        .unwrap();
         // A native Python command stands in for the package-manager invocation;
         // this exercises argv/cwd/receipt plumbing, NOT native Conda acceptance.
         // Both candidate prefixes are real, independently created Python venvs.
@@ -2190,12 +2709,23 @@ mod tests {
         child.current_dir(&cwd).env(CHILD, serde_json::to_string(&args).unwrap())
             .args(["--exact", "environment_discovery::tests::conda_prefix_receipt_uses_actual_cwd_not_a_same_named_state_scope", "--nocapture"]);
         environment::controlled_output(child).unwrap();
-        let selected = resolve_for_policy_with_state(&workspace, Some(&state), &launch,
-            &session, &generation, false, true).unwrap();
+        let selected = resolve_for_policy_with_state(
+            &workspace,
+            Some(&state),
+            &launch,
+            &session,
+            &generation,
+            false,
+            true,
+        )
+        .unwrap();
         let binding = selected.environment.unwrap();
         assert_eq!(binding.root.as_deref(), Some("workspace"));
         assert_eq!(binding.prefix, "subproject/env");
-        assert_eq!(fs::read_to_string(state.join("env/marker")).unwrap(), "not the selected prefix");
+        assert_eq!(
+            fs::read_to_string(state.join("env/marker")).unwrap(),
+            "not the selected prefix"
+        );
     }
 
     #[test]

@@ -27,13 +27,24 @@ fn setup() -> (tempfile::TempDir, PathBuf, Runtime) {
 #[test]
 fn deferred_cleanup_preserves_generation_source_and_active_writer_guards() {
     let (temp, _source, mut runtime) = setup();
-    let workspace = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
+    let workspace = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join(&runtime.state.run_id);
     directory(&workspace);
     let manifest = cleanup::manifest(&runtime.root, &runtime.store, &runtime.state, false).unwrap();
-    runtime.store.enqueue_cleanup(&runtime.state.run_id, &manifest).unwrap();
+    runtime
+        .store
+        .enqueue_cleanup(&runtime.state.run_id, &manifest)
+        .unwrap();
     runtime.emit(EventKind::Paused { paused: true }).unwrap();
-    runtime.retry_cleanup_deferred(&runtime.state.run_id).unwrap();
-    assert!(workspace.is_dir(), "a later event cancels the old cleanup generation");
+    runtime
+        .retry_cleanup_deferred(&runtime.state.run_id)
+        .unwrap();
+    assert!(
+        workspace.is_dir(),
+        "a later event cancels the old cleanup generation"
+    );
     assert!(runtime.store.detached_workspaces().unwrap().is_empty());
 
     let adopted = workspace.join("adopted-source");
@@ -41,14 +52,23 @@ fn deferred_cleanup_preserves_generation_source_and_active_writer_guards() {
     fs::write(adopted.join("user.txt"), "protected source").unwrap();
     runtime.store.remember_cleanup_source(&adopted).unwrap();
     runtime.defer_cleanup_worktrees().unwrap();
-    assert_eq!(fs::read_to_string(adopted.join("user.txt")).unwrap(), "protected source");
+    assert_eq!(
+        fs::read_to_string(adopted.join("user.txt")).unwrap(),
+        "protected source"
+    );
     assert!(runtime.store.detached_workspaces().unwrap().is_empty());
 
-    runtime.emit(EventKind::Started {
-        execution: execution(&runtime, &Uuid::new_v4().to_string()),
-        message_sequences: None, fresh_restart: false,
-    }).unwrap();
-    assert!(runtime.defer_cleanup_worktrees().unwrap_err().contains("Run is active"));
+    runtime
+        .emit(EventKind::Started {
+            execution: execution(&runtime, &Uuid::new_v4().to_string()),
+            message_sequences: None,
+            fresh_restart: false,
+        })
+        .unwrap();
+    assert!(runtime
+        .defer_cleanup_worktrees()
+        .unwrap_err()
+        .contains("Run is active"));
     assert!(workspace.is_dir());
     assert!(runtime.store.detached_workspaces().unwrap().is_empty());
 }
@@ -58,27 +78,58 @@ fn cleanup_retries_keep_undelivered_private_results() {
     for deferred in [false, true] {
         let (temp, source, mut runtime) = setup();
         runtime.set_route("graph").unwrap();
-        runtime.emit(EventKind::WorkspaceIsolationSelected { isolated: true }).unwrap();
+        runtime
+            .emit(EventKind::WorkspaceIsolationSelected { isolated: true })
+            .unwrap();
         let id = Uuid::new_v4().to_string();
-        runtime.emit(EventKind::Started {
-            execution: execution(&runtime, &id), message_sequences: None, fresh_restart: false,
-        }).unwrap();
-        runtime.emit(EventKind::Finished {
-            execution_id: id, head: "undelivered-result".into(), output: String::new(),
-            output_bytes: 0, metrics: None,
-        }).unwrap();
-        let workspace = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
+        runtime
+            .emit(EventKind::Started {
+                execution: execution(&runtime, &id),
+                message_sequences: None,
+                fresh_restart: false,
+            })
+            .unwrap();
+        runtime
+            .emit(EventKind::Finished {
+                execution_id: id,
+                head: "undelivered-result".into(),
+                output: String::new(),
+                output_bytes: 0,
+                metrics: None,
+            })
+            .unwrap();
+        let workspace = temp
+            .path()
+            .join(".grapher-worktrees")
+            .join(&runtime.state.run_id);
         directory(&workspace);
         runtime.cleanup_worktrees().unwrap();
         assert!(workspace.is_dir());
-        let manifest = cleanup::manifest(&runtime.root, &runtime.store, &runtime.state, false).unwrap();
-        runtime.store.enqueue_cleanup(&runtime.state.run_id, &manifest).unwrap();
-        if deferred { runtime.retry_cleanup_deferred(&runtime.state.run_id).unwrap(); }
-        else { runtime.retry_cleanup(&runtime.state.run_id).unwrap(); }
+        let manifest =
+            cleanup::manifest(&runtime.root, &runtime.store, &runtime.state, false).unwrap();
+        runtime
+            .store
+            .enqueue_cleanup(&runtime.state.run_id, &manifest)
+            .unwrap();
+        if deferred {
+            runtime
+                .retry_cleanup_deferred(&runtime.state.run_id)
+                .unwrap();
+        } else {
+            runtime.retry_cleanup(&runtime.state.run_id).unwrap();
+        }
         assert!(workspace.join("nested/dependencies/file").is_file());
         assert!(runtime.store.detached_workspaces().unwrap().is_empty());
-        assert!(runtime.store.cleanup_task(&runtime.state.run_id).unwrap().is_none());
-        assert!(!runtime.store.owned_cleanup_targets(&runtime.state.run_id).unwrap().is_empty());
+        assert!(runtime
+            .store
+            .cleanup_task(&runtime.state.run_id)
+            .unwrap()
+            .is_none());
+        assert!(!runtime
+            .store
+            .owned_cleanup_targets(&runtime.state.run_id)
+            .unwrap()
+            .is_empty());
         assert!(source.join("user.txt").is_file());
     }
 }
@@ -88,34 +139,59 @@ fn workspace_cleanup_refuses_active_mergers_and_result_processes() {
     for result_process in [false, true] {
         let (temp, _source, mut runtime) = setup();
         runtime.set_route("graph").unwrap();
-        let workspace = temp.path().join(".grapher-worktrees").join(&runtime.state.run_id);
+        let workspace = temp
+            .path()
+            .join(".grapher-worktrees")
+            .join(&runtime.state.run_id);
         directory(&workspace);
         if result_process {
             let input = crate::environment::CompositeResult {
                 domain: crate::environment::Domain {
-                    platform: "fixture".into(), arch: "fixture".into(), baseline: "base".into(),
-                    policy: "policy".into(), contract: "contract".into(),
+                    platform: "fixture".into(),
+                    arch: "fixture".into(),
+                    baseline: "base".into(),
+                    policy: "policy".into(),
+                    contract: "contract".into(),
                 },
-                code_ref: String::new(), environment_ref: String::new(), launch_ref: String::new(),
-                resource_refs: vec![], layout: None, generation: Uuid::new_v4().to_string(),
-                selected_from: vec![], inheritance: None,
+                code_ref: String::new(),
+                environment_ref: String::new(),
+                launch_ref: String::new(),
+                resource_refs: vec![],
+                layout: None,
+                generation: Uuid::new_v4().to_string(),
+                selected_from: vec![],
+                inheritance: None,
             };
-            runtime.emit(EventKind::ResultExecutionStarted { input, args: vec![] }).unwrap();
+            runtime
+                .emit(EventKind::ResultExecutionStarted {
+                    input,
+                    args: vec![],
+                })
+                .unwrap();
         } else {
             let mut merger = execution(&runtime, &Uuid::new_v4().to_string());
             merger.node = "merge:task".into();
             merger.worktree = workspace.to_string_lossy().into_owned();
-            runtime.emit(EventKind::MergerStarted { execution: merger }).unwrap();
+            runtime
+                .emit(EventKind::MergerStarted { execution: merger })
+                .unwrap();
         }
         assert!(runtime.active());
         // The ordinary entry may retain the workspace without queueing. A
         // persisted/recovered task must independently check all writer kinds.
         let _ = runtime.defer_cleanup_worktrees();
         assert!(workspace.join("nested/dependencies/file").is_file());
-        let manifest = cleanup::manifest(&runtime.root, &runtime.store, &runtime.state, false).unwrap();
-        runtime.store.enqueue_cleanup(&runtime.state.run_id, &manifest).unwrap();
+        let manifest =
+            cleanup::manifest(&runtime.root, &runtime.store, &runtime.state, false).unwrap();
+        runtime
+            .store
+            .enqueue_cleanup(&runtime.state.run_id, &manifest)
+            .unwrap();
         let result = runtime.retry_cleanup_deferred(&runtime.state.run_id);
-        assert!(result.is_err(), "cleanup retry accepted an active non-node writer: result_process={result_process}");
+        assert!(
+            result.is_err(),
+            "cleanup retry accepted an active non-node writer: result_process={result_process}"
+        );
         assert!(workspace.join("nested/dependencies/file").is_file());
         assert!(runtime.store.detached_workspaces().unwrap().is_empty());
     }

@@ -538,7 +538,12 @@ fn private_index_git(repository: &Path, index: &Path, args: &[&str]) -> Result<S
     private_index_git_input(repository, index, args, None)
 }
 
-fn private_index_git_input(repository: &Path, index: &Path, args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
+fn private_index_git_input(
+    repository: &Path,
+    index: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<String, String> {
     // Do not run source clean/smudge/EOL filters while delivering recorded
     // physical bytes, and do not mutate the shared snapshot repo's attributes.
     let metadata = index
@@ -638,14 +643,23 @@ fn with_source_lease<T>(
     let marker = format!("Grapher publication {}\n", journal.display());
     // Only this interrupted attempt's marker may be reclaimed.
     release_owned_lock(&lock_path, marker.as_bytes())?;
-    let mut lease = OpenOptions::new().write(true).create_new(true).open(&lock_path)
+    let mut lease = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
         .map_err(|e| format!("Cannot acquire source Git index lease: {e}"))?;
-    lease.write_all(marker.as_bytes()).and_then(|_| lease.sync_all()).map_err(|e| e.to_string())?;
+    lease
+        .write_all(marker.as_bytes())
+        .and_then(|_| lease.sync_all())
+        .map_err(|e| e.to_string())?;
     drop(lease);
     let outcome = operation();
     let released = release_owned_lock(&lock_path, marker.as_bytes());
     match outcome {
-        Ok(result) => { released?; Ok(result) }
+        Ok(result) => {
+            released?;
+            Ok(result)
+        }
         Err(error) => Err(error),
     }
 }
@@ -684,10 +698,16 @@ fn deliver(
         let final_tree = tree(repository, &prepared.result)?;
         if live_tree != input_tree
             && !(journal.join("applying").exists()
-                && valid_partial_checkout(repository, &prepared.input, &prepared.result, &live)?) {
+                && valid_partial_checkout(repository, &prepared.input, &prepared.result, &live)?)
+        {
             let from_input = diff_paths(repository, &prepared.input, &live)?;
             let from_result = diff_paths(repository, &prepared.result, &live)?;
-            let paths = from_input.intersection(&from_result).take(8).cloned().collect::<Vec<_>>().join(", ");
+            let paths = from_input
+                .intersection(&from_result)
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(format!("Source files changed during publication; private results are preserved. These paths match neither the original nor the result: {paths}. This may be an interrupted legacy file write, not a user edit. Preserve the current files and reconcile them with the retained publication before retrying."));
         }
         if live_tree != final_tree {
@@ -912,22 +932,19 @@ mod tests {
         assert!(!workspace::has_private_git(&path));
 
         let mut resolved = false;
-        let delivered = publish(
-            &source,
-            &[head_a, head_b],
-            &[],
-            Some(&path),
-            |workspace| {
-                resolved = true;
-                fs::write(workspace.join("shared.txt"), "merged\n").map_err(|e| e.to_string())?;
-                git(workspace, &["add", "-f", "--", "shared.txt"])?;
-                Ok(())
-            },
-        )
+        let delivered = publish(&source, &[head_a, head_b], &[], Some(&path), |workspace| {
+            resolved = true;
+            fs::write(workspace.join("shared.txt"), "merged\n").map_err(|e| e.to_string())?;
+            git(workspace, &["add", "-f", "--", "shared.txt"])?;
+            Ok(())
+        })
         .unwrap();
         assert!(resolved);
         assert!(workspace::has_private_git(&path));
-        assert_eq!(fs::read_to_string(source.join("shared.txt")).unwrap(), "merged\n");
+        assert_eq!(
+            fs::read_to_string(source.join("shared.txt")).unwrap(),
+            "merged\n"
+        );
         assert!(!delivered.is_empty());
     }
 }

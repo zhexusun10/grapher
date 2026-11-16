@@ -43,9 +43,13 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 fn read_index_flags(rest: &mut &str) -> Result<u32, String> {
     let mut flags = None;
     for _ in 0..5 {
-        let (line, after) = rest.split_once('\n').ok_or("Incomplete native index flags")?;
+        let (line, after) = rest
+            .split_once('\n')
+            .ok_or("Incomplete native index flags")?;
         if let Some((_, value)) = line.split_once("flags: ") {
-            flags = Some(u32::from_str_radix(value.trim(), 16).map_err(|e| e.to_string())? & 0x6000_8000);
+            flags = Some(
+                u32::from_str_radix(value.trim(), 16).map_err(|e| e.to_string())? & 0x6000_8000,
+            );
         }
         *rest = after;
     }
@@ -151,7 +155,9 @@ fn index_has_flag_delta(root: &Path, workspace_root: bool) -> Result<bool, Strin
     };
     let mut rest = output.as_str();
     while !rest.is_empty() {
-        let (header, after) = rest.split_once('\0').ok_or("Incomplete native index entry")?;
+        let (header, after) = rest
+            .split_once('\0')
+            .ok_or("Incomplete native index entry")?;
         rest = after;
         if header.as_bytes().first() != Some(&b'H') || read_index_flags(&mut rest)? != 0 {
             return Ok(true);
@@ -206,27 +212,40 @@ fn intent_batches<'a>(names: &[&'a str]) -> Vec<Vec<&'a str>> {
     let mut spellings = BTreeMap::<String, String>::new();
     for &name in names {
         let mut prefix = String::new();
-        let prefixes: Vec<_> = name.split('/').map(|part| {
-            if !prefix.is_empty() { prefix.push('/'); }
-            prefix.push_str(part);
-            prefix.clone()
-        }).collect();
+        let prefixes: Vec<_> = name
+            .split('/')
+            .map(|part| {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(part);
+                prefix.clone()
+            })
+            .collect();
         let isolated = !name.is_ascii();
         let conflict = prefixes.iter().any(|prefix| {
-            spellings.get(&prefix.to_ascii_lowercase()).is_some_and(|prior| prior != prefix)
+            spellings
+                .get(&prefix.to_ascii_lowercase())
+                .is_some_and(|prior| prior != prefix)
         });
         if isolated || conflict {
-            if !pending.is_empty() { batches.push(std::mem::take(&mut pending)); }
+            if !pending.is_empty() {
+                batches.push(std::mem::take(&mut pending));
+            }
             spellings.clear();
         }
         if isolated {
             batches.push(vec![name]);
         } else {
-            for prefix in prefixes { spellings.insert(prefix.to_ascii_lowercase(), prefix); }
+            for prefix in prefixes {
+                spellings.insert(prefix.to_ascii_lowercase(), prefix);
+            }
             pending.push(name);
         }
     }
-    if !pending.is_empty() { batches.push(pending); }
+    if !pending.is_empty() {
+        batches.push(pending);
+    }
     batches
 }
 
@@ -234,7 +253,10 @@ fn intent_batches<'a>(names: &[&'a str]) -> Vec<Vec<&'a str>> {
 /// `add -N` needs a path on disk even though it records no file content. Never
 /// depend on or recreate that path in the real (possibly unmaterialized) project.
 fn restore_intent(path: &Path, names: &[&str]) -> Result<(), String> {
-    let metadata = PathBuf::from(workspace::project_git(path, &["rev-parse", "--absolute-git-dir"])?);
+    let metadata = PathBuf::from(workspace::project_git(
+        path,
+        &["rev-parse", "--absolute-git-dir"],
+    )?);
     let current = index(&metadata)?;
     let owner = crate::workspace_view::owner(path).unwrap_or(path);
     let storage = workspace::private_git_dir(owner).unwrap_or_else(|| metadata.clone());
@@ -243,7 +265,9 @@ fn restore_intent(path: &Path, names: &[&str]) -> Result<(), String> {
     struct Scratch(Option<PathBuf>);
     impl Drop for Scratch {
         fn drop(&mut self) {
-            if let Some(path) = &self.0 { let _ = fs::remove_dir_all(path); }
+            if let Some(path) = &self.0 {
+                let _ = fs::remove_dir_all(path);
+            }
         }
     }
     let mut lease = Scratch(Some(scratch.clone()));
@@ -255,12 +279,18 @@ fn restore_intent(path: &Path, names: &[&str]) -> Result<(), String> {
         let mut groups = [Vec::new(), Vec::new(), Vec::new()];
         for name in names {
             let relative = Path::new(name);
-            if !relative.components().all(|part| matches!(part, std::path::Component::Normal(_))) {
+            if !relative
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+            {
                 return Err("Unsafe intent-to-add path".into());
             }
-            let item = current.get(name).ok_or("Missing intent-to-add index entry")?;
+            let item = current
+                .get(name)
+                .ok_or("Missing intent-to-add index entry")?;
             let target = worktree.join(relative);
-            fs::create_dir_all(target.parent().ok_or("Missing intent-to-add parent")?).map_err(|e| e.to_string())?;
+            fs::create_dir_all(target.parent().ok_or("Missing intent-to-add parent")?)
+                .map_err(|e| e.to_string())?;
             let group = match item.mode.as_str() {
                 "100644" => 0,
                 "100755" => 1,
@@ -268,10 +298,15 @@ fn restore_intent(path: &Path, names: &[&str]) -> Result<(), String> {
                 _ => return Err("Unsupported intent-to-add entry mode".into()),
             };
             if group == 2 {
-                crate::workspace_symlinks::materialize(&worktree, &target, &crate::workspace_symlinks::Link {
-                    value: "intent-placeholder".into(), project_absolute: false,
-                    kind: crate::workspace_symlinks::Kind::SymbolicFile,
-                })?;
+                crate::workspace_symlinks::materialize(
+                    &worktree,
+                    &target,
+                    &crate::workspace_symlinks::Link {
+                        value: "intent-placeholder".into(),
+                        project_absolute: false,
+                        kind: crate::workspace_symlinks::Kind::SymbolicFile,
+                    },
+                )?;
             } else {
                 fs::write(&target, []).map_err(|e| e.to_string())?;
             }
@@ -284,21 +319,52 @@ fn restore_intent(path: &Path, names: &[&str]) -> Result<(), String> {
         batches.push((worktree, groups));
     }
     // An existing ordinary cache entry is not made intent-to-add by `add -N`.
-    workspace::project_git_bytes(path, &[
-        "-c", "core.ignorecase=false", "update-index", "--force-remove", "-z", "--stdin",
-    ], Some(&remove))?;
+    workspace::project_git_bytes(
+        path,
+        &[
+            "-c",
+            "core.ignorecase=false",
+            "update-index",
+            "--force-remove",
+            "-z",
+            "--stdin",
+        ],
+        Some(&remove),
+    )?;
     for (worktree, groups) in batches {
-        for (group, input) in groups.iter().enumerate().filter(|(_, input)| !input.is_empty()) {
+        for (group, input) in groups
+            .iter()
+            .enumerate()
+            .filter(|(_, input)| !input.is_empty())
+        {
             let mut args = vec![
-                "--git-dir", metadata.to_str().ok_or("Invalid native index path")?,
-                "--work-tree", worktree.to_str().ok_or("Invalid intent worktree path")?,
-                "-c", "core.ignorestat=false", "-c", "core.symlinks=true",
+                "--git-dir",
+                metadata.to_str().ok_or("Invalid native index path")?,
+                "--work-tree",
+                worktree.to_str().ok_or("Invalid intent worktree path")?,
+                "-c",
+                "core.ignorestat=false",
+                "-c",
+                "core.symlinks=true",
                 // Recorded names/modes, not user checkout policies, define
                 // this private skeleton. Stored configuration is untouched.
-                "-c", "core.ignorecase=false", "-c", "core.sparseCheckout=false",
-                "add", "-f", "-N", "--pathspec-from-file=-", "--pathspec-file-nul",
+                "-c",
+                "core.ignorecase=false",
+                "-c",
+                "core.sparseCheckout=false",
+                "add",
+                "-f",
+                "-N",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
             ];
-            if group < 2 { args.push(if group == 1 { "--chmod=+x" } else { "--chmod=-x" }); }
+            if group < 2 {
+                args.push(if group == 1 {
+                    "--chmod=+x"
+                } else {
+                    "--chmod=-x"
+                });
+            }
             workspace::project_git_bytes(path, &args, Some(input))?;
         }
     }
@@ -335,7 +401,9 @@ fn restore_flags<'a>(
     for (flag, input) in [("--assume-unchanged", assume), ("--skip-worktree", skip)] {
         if !input.is_empty() {
             workspace::project_git_bytes(
-                path, &["update-index", flag, "-z", "--stdin"], Some(&input),
+                path,
+                &["update-index", flag, "-z", "--stdin"],
+                Some(&input),
             )?;
         }
     }
@@ -350,12 +418,22 @@ fn install_selected_index(source: &Path, index: &Path) -> Result<(), String> {
     let mut lock_name = index.as_os_str().to_os_string();
     lock_name.push(".lock");
     let lock_path = PathBuf::from(lock_name);
-    let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&lock_path)
-        .map_err(|e| format!("Cannot reserve native index lock {}: {e}", lock_path.display()))?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+        .map_err(|e| {
+            format!(
+                "Cannot reserve native index lock {}: {e}",
+                lock_path.display()
+            )
+        })?;
     struct IndexLock(Option<PathBuf>);
     impl Drop for IndexLock {
         fn drop(&mut self) {
-            if let Some(path) = &self.0 { let _ = fs::remove_file(path); }
+            if let Some(path) = &self.0 {
+                let _ = fs::remove_file(path);
+            }
         }
     }
     let mut lease = IndexLock(Some(lock_path.clone()));
@@ -509,12 +587,21 @@ pub(crate) fn compose(
     // when the recorded input explicitly did not assume it was unchanged.
     workspace::project_git_bytes(
         path,
-        &["-c", "core.ignorestat=false", "update-index", "-z", "--index-info"],
+        &[
+            "-c",
+            "core.ignorestat=false",
+            "update-index",
+            "-z",
+            "--index-info",
+        ],
         Some(&updates),
     )?;
-    restore_flags(path, changed.into_iter().filter_map(|name| {
-        wanted.get(name).map(|item| (name.as_str(), item.flags))
-    }))?;
+    restore_flags(
+        path,
+        changed
+            .into_iter()
+            .filter_map(|name| wanted.get(name).map(|item| (name.as_str(), item.flags))),
+    )?;
     if index(&metadata)? != wanted {
         return Err("Native project index did not preserve the composed staging state".into());
     }

@@ -9,10 +9,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-#[path = "environment_runtime_selectors.rs"]
-mod selectors;
 #[path = "environment_runtime_resolution.rs"]
 mod resolution;
+#[path = "environment_runtime_selectors.rs"]
+mod selectors;
 
 pub(super) const MARKER: &[u8] = b"\0GRAPHER_NATIVE_FILES\0";
 
@@ -124,9 +124,10 @@ fn valid_relative(path: &str) -> bool {
 
 impl RuntimeEvidence {
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if !matches!((self.schema, &self.selectors, &self.external_selectors),
-            (1, None, None) | (2, Some(_), None) | (3, Some(_), Some(_)))
-            || self.files.is_empty()
+        if !matches!(
+            (self.schema, &self.selectors, &self.external_selectors),
+            (1, None, None) | (2, Some(_), None) | (3, Some(_), Some(_))
+        ) || self.files.is_empty()
             || self.files.len() > 128
             || self.files.windows(2).any(|pair| pair[0] >= pair[1])
         {
@@ -174,7 +175,9 @@ impl RuntimeEvidence {
         Ok(())
     }
 
-    pub(super) fn schema(&self) -> u32 { self.schema }
+    pub(super) fn schema(&self) -> u32 {
+        self.schema
+    }
 
     // Recovery selectors are not an extra business-launch compatibility gate.
     // Actual startup still remeasures the original ABI and all recorded files.
@@ -207,13 +210,17 @@ impl RuntimeEvidence {
             .map_err(|error| format!("Invalid native runtime byte evidence: {error}"))?;
         let (raw, references, schema) = match probe {
             Probe::Files(files) => (files, None, 1),
-            Probe::Selectors(probe) if matches!(probe.schema, 2 | 3) => (probe.files, Some(probe.references), probe.schema),
+            Probe::Selectors(probe) if matches!(probe.schema, 2 | 3) => {
+                (probe.files, Some(probe.references), probe.schema)
+            }
             _ => return Err("Unsupported native runtime probe schema".into()),
         };
         if raw.is_empty() || raw.len() > 128 {
             return Err("Native runtime input inventory is empty or exceeds its bound".into());
         }
-        let supplied_workspace = roots.iter().find(|(label, _)| *label == "workspace")
+        let supplied_workspace = roots
+            .iter()
+            .find(|(label, _)| *label == "workspace")
             .map(|(_, path)| *path);
         let roots = roots
             .iter()
@@ -224,9 +231,16 @@ impl RuntimeEvidence {
             // W itself or its enclosing bucket may be a trusted root alias.
             // Use a recognizable allocator layout only if its real bucket
             // contains physical W; an unrelated alias parent is not authority.
-            for path in supplied_workspace.into_iter().chain(std::iter::once(workspace.as_path())) {
+            for path in supplied_workspace
+                .into_iter()
+                .chain(std::iter::once(workspace.as_path()))
+            {
                 if crate::workspace_state::process_root(path).is_ok() {
-                    let bucket = canonical(path.parent().and_then(Path::parent).ok_or("Missing workspace bucket")?)?;
+                    let bucket = canonical(
+                        path.parent()
+                            .and_then(Path::parent)
+                            .ok_or("Missing workspace bucket")?,
+                    )?;
                     if crate::workspace::scope_contains(workspace, &bucket) {
                         workspace_bucket = Some(bucket);
                         break;
@@ -241,10 +255,19 @@ impl RuntimeEvidence {
                     let state_container = state.parent().and_then(Path::parent);
                     let owner = state_container.and_then(Path::parent);
                     if state.file_name().is_some_and(|name| name == "process")
-                        && state_container.is_some_and(|path| path.file_name().is_some_and(|name| name == ".grapher-state"))
-                        && workspace.parent().zip(owner).is_some_and(|(work_run, state_run)| crate::path_identity::same_path(work_run, state_run))
+                        && state_container.is_some_and(|path| {
+                            path.file_name()
+                                .is_some_and(|name| name == ".grapher-state")
+                        })
+                        && workspace
+                            .parent()
+                            .zip(owner)
+                            .is_some_and(|(work_run, state_run)| {
+                                crate::path_identity::same_path(work_run, state_run)
+                            })
                     {
-                        workspace_bucket = owner.and_then(Path::parent).map(canonical).transpose()?;
+                        workspace_bucket =
+                            owner.and_then(Path::parent).map(canonical).transpose()?;
                     }
                 }
             }
@@ -290,12 +313,22 @@ impl RuntimeEvidence {
         };
         evidence.validate()?;
         if let Some(references) = references {
-            evidence.selectors = Some(selectors::observe(&references, &evidence.files, &evidence.roots, schema == 3)?);
+            evidence.selectors = Some(selectors::observe(
+                &references,
+                &evidence.files,
+                &evidence.roots,
+                schema == 3,
+            )?);
             evidence.schema = schema;
             if schema == 3 {
                 // Keep the previously proven early external continuations even
                 // if an original reference now defers while crossing codeRef.
-                evidence.external_selectors = Some(selectors::observe(&references, &evidence.files, &evidence.roots, false)?);
+                evidence.external_selectors = Some(selectors::observe(
+                    &references,
+                    &evidence.files,
+                    &evidence.roots,
+                    false,
+                )?);
             }
             evidence.validate()?;
         }
@@ -318,11 +351,19 @@ impl RuntimeEvidence {
         code_ref: &str,
     ) -> Result<(), String> {
         self.validate()?;
-        if self.schema < 3 { return Ok(()); }
-        let rooted: Vec<_> = self.files.iter().filter_map(|file| match file {
-            RuntimeFile::Root { root, path, blob } => Some((root.as_str(), path.as_str(), blob.as_str())),
-            _ => None,
-        }).collect();
+        if self.schema < 3 {
+            return Ok(());
+        }
+        let rooted: Vec<_> = self
+            .files
+            .iter()
+            .filter_map(|file| match file {
+                RuntimeFile::Root { root, path, blob } => {
+                    Some((root.as_str(), path.as_str(), blob.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
         let coverage = files.verify_recorded_runtime_files(version, legacy_root, &rooted)?;
         crate::workspace_view::verify_native_inputs(source, code_ref, &coverage.project)
     }
@@ -370,11 +411,16 @@ impl RuntimeEvidence {
         if let Some(selectors) = &self.selectors {
             if self.schema == 3 {
                 let snapshot = files.runtime_paths(version, legacy_root)?;
-                for selector in selectors.iter().chain(self.external_selectors.iter().flatten()) {
+                for selector in selectors
+                    .iter()
+                    .chain(self.external_selectors.iter().flatten())
+                {
                     selector.preflight_projected(&self.roots, &snapshot, project_ready)?;
                 }
             } else {
-                for selector in selectors { selector.preflight()?; }
+                for selector in selectors {
+                    selector.preflight()?;
+                }
             }
         }
         let rooted: Vec<_> = self

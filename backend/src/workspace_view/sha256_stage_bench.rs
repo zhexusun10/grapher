@@ -2,27 +2,59 @@
 use super::*;
 use std::time::{Duration, Instant};
 
-pub(super) fn legacy_stage(path: &Path, metadata: &Path, entries: BTreeMap<String, Entry>) -> Result<(), String> {
+pub(super) fn legacy_stage(
+    path: &Path,
+    metadata: &Path,
+    entries: BTreeMap<String, Entry>,
+) -> Result<(), String> {
     let mut input = Vec::new();
-    let prefix = ["--git-dir", metadata.to_str().ok_or("Invalid graph Git")?, "--work-tree", path.to_str().ok_or("Invalid project path")?];
+    let prefix = [
+        "--git-dir",
+        metadata.to_str().ok_or("Invalid graph Git")?,
+        "--work-tree",
+        path.to_str().ok_or("Invalid project path")?,
+    ];
     for (name, entry) in entries {
         let (oid, mode) = match entry {
             Entry::Directory { .. } | Entry::Special { .. } => continue,
             Entry::File { mode, blob, .. } => {
                 let file = crate::native::host_path(&path.join(&name));
                 let mut args = prefix.to_vec();
-                args.extend(["hash-object", "-w", "--no-filters", "--", file.to_str().ok_or("Invalid file path")?]);
+                args.extend([
+                    "hash-object",
+                    "-w",
+                    "--no-filters",
+                    "--",
+                    file.to_str().ok_or("Invalid file path")?,
+                ]);
                 let oid = workspace::git(path, &args)?;
-                if git2::Oid::hash_file(git2::ObjectType::Blob, &file).map_err(|e| e.to_string())?.to_string() != blob {
+                if git2::Oid::hash_file(git2::ObjectType::Blob, &file)
+                    .map_err(|e| e.to_string())?
+                    .to_string()
+                    != blob
+                {
                     return Err("Project changed while capturing SHA-256 bytes".into());
                 }
-                (oid, if cfg!(unix) && mode & 0o111 != 0 { "100755" } else { "100644" })
+                (
+                    oid,
+                    if cfg!(unix) && mode & 0o111 != 0 {
+                        "100755"
+                    } else {
+                        "100644"
+                    },
+                )
             }
             Entry::Link { target, .. } => {
                 let mut args = prefix.to_vec();
                 args.extend(["hash-object", "-w", "--no-filters", "--stdin"]);
                 let oid = workspace::git_bytes(path, &args, None, Some(target.value.as_bytes()))?;
-                (String::from_utf8(oid).map_err(|e| e.to_string())?.trim().into(), "120000")
+                (
+                    String::from_utf8(oid)
+                        .map_err(|e| e.to_string())?
+                        .trim()
+                        .into(),
+                    "120000",
+                )
             }
         };
         crate::workspace_git_index::append_index_info(&mut input, mode, &oid, &name);
@@ -43,7 +75,11 @@ fn observations(root: &Path) -> BTreeMap<String, Entry> {
 }
 
 fn tree(root: &Path, metadata: &Path) -> String {
-    workspace::git(root, &["--git-dir", metadata.to_str().unwrap(), "write-tree"]).unwrap()
+    workspace::git(
+        root,
+        &["--git-dir", metadata.to_str().unwrap(), "write-tree"],
+    )
+    .unwrap()
 }
 
 fn median(mut samples: Vec<Duration>) -> Duration {
@@ -55,17 +91,38 @@ fn median(mut samples: Vec<Duration>) -> Duration {
 #[ignore = "local SHA-256 blob batching benchmark; run explicitly with --ignored --nocapture"]
 fn sha256_blob_batching_benchmark() {
     crate::ensure_test_data_root();
-    for (label, count, large) in [("singleton", 1, false), ("small_64", 64, false), ("small_256", 256, false), ("mixed_streaming", 64, true)] {
+    for (label, count, large) in [
+        ("singleton", 1, false),
+        ("small_64", 64, false),
+        ("small_256", 256, false),
+        ("mixed_streaming", 64, true),
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("project");
         let old = temp.path().join("legacy-git");
         let new = temp.path().join("batch-git");
         fs::create_dir(&root).unwrap();
         for metadata in [&old, &new] {
-            workspace::git(&root, &["--git-dir", metadata.to_str().unwrap(), "--work-tree", root.to_str().unwrap(), "init", "-q", "--object-format=sha256"]).unwrap();
+            workspace::git(
+                &root,
+                &[
+                    "--git-dir",
+                    metadata.to_str().unwrap(),
+                    "--work-tree",
+                    root.to_str().unwrap(),
+                    "init",
+                    "-q",
+                    "--object-format=sha256",
+                ],
+            )
+            .unwrap();
         }
         for index in 0..count {
-            let size = if large && index % 16 == 0 { 2 * 1024 * 1024 } else { 4096 };
+            let size = if large && index % 16 == 0 {
+                2 * 1024 * 1024
+            } else {
+                4096
+            };
             let mut bytes = vec![b'x'; size];
             bytes[..4].copy_from_slice(&(index as u32).to_le_bytes());
             fs::write(root.join(format!("file-{index:04}.bin")), bytes).unwrap();
@@ -85,13 +142,25 @@ fn sha256_blob_batching_benchmark() {
         let mut old_times = Vec::new();
         let mut new_times = Vec::new();
         for round in 0..3 {
-            for batch in if round % 2 == 0 { [false, true] } else { [true, false] } {
+            for batch in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
                 let entries = observations(&root);
                 let started = Instant::now();
-                if batch { stage(&root, &new, entries).unwrap(); } else { legacy_stage(&root, &old, entries).unwrap(); }
+                if batch {
+                    stage(&root, &new, entries).unwrap();
+                } else {
+                    legacy_stage(&root, &old, entries).unwrap();
+                }
                 let elapsed = started.elapsed();
                 assert_eq!(tree(&root, if batch { &new } else { &old }), expected);
-                if batch { new_times.push(elapsed); } else { old_times.push(elapsed); }
+                if batch {
+                    new_times.push(elapsed);
+                } else {
+                    old_times.push(elapsed);
+                }
             }
         }
         println!("SHA-256 {label}: empty-store legacy={empty_old:?}, batch={empty_new:?}; warm median legacy={:?}, batch={:?}", median(old_times), median(new_times));

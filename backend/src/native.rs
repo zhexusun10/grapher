@@ -863,19 +863,49 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("business-preload-ran");
         let preload = temp.path().join("business-preload.cjs");
-        fs::write(&preload, format!("require('node:fs').writeFileSync({},'injected');", serde_json::to_string(&marker.to_string_lossy()).unwrap())).unwrap();
+        fs::write(
+            &preload,
+            format!(
+                "require('node:fs').writeFileSync({},'injected');",
+                serde_json::to_string(&marker.to_string_lossy()).unwrap()
+            ),
+        )
+        .unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "native::tests::trusted_node_probe_never_loads_ambient_business_preloads", "--nocapture"])
+            .args([
+                "--exact",
+                "native::tests::trusted_node_probe_never_loads_ambient_business_preloads",
+                "--nocapture",
+            ])
             .env(CHILD, "1")
-            .env("NODE_OPTIONS", format!("--require {}", serde_json::to_string(&native_test_path(&preload)).unwrap()))
+            .env(
+                "NODE_OPTIONS",
+                format!(
+                    "--require {}",
+                    serde_json::to_string(&native_test_path(&preload)).unwrap()
+                ),
+            )
             .env("NODE_PATH", temp.path())
-            .output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("TRUSTED_NODE_PROBE_OK"), "child probe must actually run");
-        assert!(!marker.exists(), "trusted Node resolution must not execute a business preload");
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("TRUSTED_NODE_PROBE_OK"),
+            "child probe must actually run"
+        );
+        assert!(
+            !marker.exists(),
+            "trusted Node resolution must not execute a business preload"
+        );
     }
 
-    fn native_test_path(path: &Path) -> String { host_path(path).to_string_lossy().replace('\\', "/") }
+    fn native_test_path(path: &Path) -> String {
+        host_path(path).to_string_lossy().replace('\\', "/")
+    }
 
     #[test]
     fn source_binding_named_like_a_graph_slot_keeps_its_own_git_directory() {

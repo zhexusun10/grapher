@@ -94,15 +94,21 @@ impl Runtime {
     /// Started. An unset template must not silently resend the original task.
     /// Runtime-owned overrides let wording be finalized without changing Rust;
     /// no prompt is ever loaded from an agent-writable project directory.
-    pub(super) fn prepare_feedback_continuations(&mut self, ready: &[Node]) -> Result<BTreeSet<String>, String> {
+    pub(super) fn prepare_feedback_continuations(
+        &mut self,
+        ready: &[Node],
+    ) -> Result<BTreeSet<String>, String> {
         let mut events = Vec::new();
         let mut undelivered = BTreeSet::new();
         for node in ready {
-            let Some(mut continuation) = self.state.nodes[&node.id].feedback_continuation.clone() else {
+            let Some(mut continuation) = self.state.nodes[&node.id].feedback_continuation.clone()
+            else {
                 continue;
             };
-            if continuation.dispatched && continuation.delivery_id.is_some()
-                && !delivery::feedback_input_delivered(self, &continuation)? {
+            if continuation.dispatched
+                && continuation.delivery_id.is_some()
+                && !delivery::feedback_input_delivered(self, &continuation)?
+            {
                 undelivered.insert(node.id.clone());
             }
             if continuation.instruction.is_some() {

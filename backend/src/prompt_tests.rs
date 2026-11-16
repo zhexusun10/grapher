@@ -1,11 +1,20 @@
 use super::*;
 
 #[cfg(feature = "fixture")]
-fn create_legacy_private_run(runtime: &mut Runtime, graph: Graph, config: Config) -> Result<(), String> {
+fn create_legacy_private_run(
+    runtime: &mut Runtime,
+    graph: Graph,
+    config: Config,
+) -> Result<(), String> {
     // These tests exercise the still-supported pre-batch scheduler/private
     // workspace contract. New adaptive Runs are covered by batch_workspace_tests.
     runtime.state.run_id = Uuid::new_v4().to_string();
-    runtime.emit(EventKind::Created { graph, config, planning_id: None, planning: None })?;
+    runtime.emit(EventKind::Created {
+        graph,
+        config,
+        planning_id: None,
+        planning: None,
+    })?;
     runtime.store.select_run(Some(&runtime.state.run_id))
 }
 
@@ -444,27 +453,53 @@ fn control_resume_node_targets_the_requested_run_and_node() {
     let temp = tempfile::tempdir().unwrap();
     let repository = crate::fixture::repository(temp.path()).unwrap();
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    runtime.create(Graph {
-        original_goal: "two branches".into(),
-        nodes: ["left", "right"].into_iter().map(|name| Node {
-            id: name.into(), task: name.into(),
-        }).collect(),
-        edges: vec![],
-    }, serde_json::from_value(serde_json::json!({
-        "repository": repository, "model": "mock/model", "maxParallel": 2,
-    })).unwrap()).unwrap();
+    runtime
+        .create(
+            Graph {
+                original_goal: "two branches".into(),
+                nodes: ["left", "right"]
+                    .into_iter()
+                    .map(|name| Node {
+                        id: name.into(),
+                        task: name.into(),
+                    })
+                    .collect(),
+                edges: vec![],
+            },
+            serde_json::from_value(serde_json::json!({
+                "repository": repository, "model": "mock/model", "maxParallel": 2,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     runtime.approve().unwrap();
     let jobs = runtime.jobs().unwrap();
-    let left = jobs.iter().find(|job| job.execution.node == "left").unwrap();
-    runtime.finish(&left.execution, Err("provider failure".into())).unwrap();
+    let left = jobs
+        .iter()
+        .find(|job| job.execution.node == "left")
+        .unwrap();
+    runtime
+        .finish(&left.execution, Err("provider failure".into()))
+        .unwrap();
     let run_id = runtime.state.run_id.clone();
     let service = Arc::new(Service {
-        runtime: Mutex::new(runtime), driving: AtomicBool::new(true),
+        runtime: Mutex::new(runtime),
+        driving: AtomicBool::new(true),
         drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-        planning: AtomicBool::new(false), extension: temp.path().join("unused.ts"),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
     });
-    let invoke = |node: Option<&str>, run: &str| control("resume_node".into(),
-        node.map(str::to_owned), None, Some(run.into()), None, None, &service);
+    let invoke = |node: Option<&str>, run: &str| {
+        control(
+            "resume_node".into(),
+            node.map(str::to_owned),
+            None,
+            Some(run.into()),
+            None,
+            None,
+            &service,
+        )
+    };
     assert!(invoke(None, &run_id).is_err());
     assert!(invoke(Some("right"), &run_id).is_err());
     assert!(invoke(Some("left"), "different-run").is_err());
@@ -472,7 +507,10 @@ fn control_resume_node_targets_the_requested_run_and_node() {
     assert_eq!(snapshot.nodes["left"].status, "waiting");
     assert_eq!(snapshot.nodes["right"].status, "running");
     assert_eq!(*service.drive_signal.0.lock().unwrap(), 1);
-    assert!(invoke(Some("left"), &run_id).is_err(), "duplicate requests cannot queue another attempt");
+    assert!(
+        invoke(Some("left"), &run_id).is_err(),
+        "duplicate requests cannot queue another attempt"
+    );
 }
 
 #[cfg(feature = "fixture")]
@@ -2092,28 +2130,29 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         planner_write_tools: true,
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    create_legacy_private_run(&mut runtime,
-            Graph {
-                original_goal: "test".into(),
-                nodes: vec![
-                    Node {
-                        id: "keep".into(),
-                        task: "keep".into(),
-                    },
-                    Node {
-                        id: "pending".into(),
-                        task: "pending".into(),
-                    },
-                ],
-                edges: vec![Edge {
-                    from: "keep".into(),
-                    to: "pending".into(),
-                    feedback: false,
-                }],
-            },
-            config.clone(),
-        )
-        .unwrap();
+    create_legacy_private_run(
+        &mut runtime,
+        Graph {
+            original_goal: "test".into(),
+            nodes: vec![
+                Node {
+                    id: "keep".into(),
+                    task: "keep".into(),
+                },
+                Node {
+                    id: "pending".into(),
+                    task: "pending".into(),
+                },
+            ],
+            edges: vec![Edge {
+                from: "keep".into(),
+                to: "pending".into(),
+                feedback: false,
+            }],
+        },
+        config.clone(),
+    )
+    .unwrap();
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
     let run_id = runtime.state.run_id.clone();
@@ -2217,21 +2256,22 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         planner_write_tools: true,
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    create_legacy_private_run(&mut runtime,
-            Graph {
-                original_goal: "test".into(),
-                nodes: ["change", "other"]
-                    .into_iter()
-                    .map(|name| Node {
-                        id: name.into(),
-                        task: name.into(),
-                    })
-                    .collect(),
-                edges: vec![],
-            },
-            config.clone(),
-        )
-        .unwrap();
+    create_legacy_private_run(
+        &mut runtime,
+        Graph {
+            original_goal: "test".into(),
+            nodes: ["change", "other"]
+                .into_iter()
+                .map(|name| Node {
+                    id: name.into(),
+                    task: name.into(),
+                })
+                .collect(),
+            edges: vec![],
+        },
+        config.clone(),
+    )
+    .unwrap();
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
     let run_id = runtime.state.run_id.clone();
@@ -2495,7 +2535,8 @@ fn manual_graph_edits_after_reject_create_approvable_graph_drafts() {
         engine: "pi".into(),
         pi_command: "/bin/sh".into(),
         pi_args: vec![],
-        isolate_parallel_nodes: true, post_task_review: false,
+        isolate_parallel_nodes: true,
+        post_task_review: false,
         planner_write_tools: true,
         model: "mock/model".into(),
         thinking_level: "medium".into(),
@@ -2615,7 +2656,8 @@ esac
         model: "mock/model".into(),
         role_models: Default::default(),
         thinking_level: "off".into(),
-        isolate_parallel_nodes: true, max_parallel: 1,
+        isolate_parallel_nodes: true,
+        max_parallel: 1,
         feedback_enabled: false,
         max_feedback: 0,
         auto_approve: false,
@@ -3230,7 +3272,9 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
             );
             assert!(!node.join("deleted.txt").exists());
             if !standard_git {
-                assert!(crate::workspace::shadow_repo_if_exists(&repository).unwrap().is_none());
+                assert!(crate::workspace::shadow_repo_if_exists(&repository)
+                    .unwrap()
+                    .is_none());
             }
         }
     }
@@ -3632,40 +3676,42 @@ esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
 "#, release.display())).unwrap();
     let mut runtime = Runtime::open(root).unwrap();
-    create_legacy_private_run(&mut runtime,
-            Graph {
-                original_goal: "Check real completion order".into(),
-                nodes: ["a_slow", "z_fast", "after_fast"]
-                    .into_iter()
-                    .map(|name| Node {
-                        id: name.into(),
-                        task: "Write your result".into(),
-                    })
-                    .collect(),
-                edges: vec![Edge {
-                    from: "z_fast".into(),
-                    to: "after_fast".into(),
-                    feedback: false,
-                }],
-            },
-            Config {
-                environment: None,
-                repository: repository.to_string_lossy().into(),
-                engine: "pi".into(),
-                pi_command: "/bin/sh".into(),
-                pi_args: vec![script.to_string_lossy().into()],
-                model: "test".into(),
-                thinking_level: "medium".into(),
-                max_parallel: 4,
-                max_feedback: 2,
-                feedback_enabled: false,
-                isolate_parallel_nodes: true, post_task_review: false,
-                planner_write_tools: true,
-                auto_approve: false,
-                role_models: Default::default(),
-            },
-        )
-        .unwrap();
+    create_legacy_private_run(
+        &mut runtime,
+        Graph {
+            original_goal: "Check real completion order".into(),
+            nodes: ["a_slow", "z_fast", "after_fast"]
+                .into_iter()
+                .map(|name| Node {
+                    id: name.into(),
+                    task: "Write your result".into(),
+                })
+                .collect(),
+            edges: vec![Edge {
+                from: "z_fast".into(),
+                to: "after_fast".into(),
+                feedback: false,
+            }],
+        },
+        Config {
+            environment: None,
+            repository: repository.to_string_lossy().into(),
+            engine: "pi".into(),
+            pi_command: "/bin/sh".into(),
+            pi_args: vec![script.to_string_lossy().into()],
+            model: "test".into(),
+            thinking_level: "medium".into(),
+            max_parallel: 4,
+            max_feedback: 2,
+            feedback_enabled: false,
+            isolate_parallel_nodes: true,
+            post_task_review: false,
+            planner_write_tools: true,
+            auto_approve: false,
+            role_models: Default::default(),
+        },
+    )
+    .unwrap();
     runtime.approve().unwrap();
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
@@ -4104,48 +4150,50 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
 "#, release = release.display(), release_related = release_related.display(),
         slow_started = slow_started.display(), related_started = related_started.display())).unwrap();
     let mut runtime = Runtime::open(root).unwrap();
-    create_legacy_private_run(&mut runtime,
-            Graph {
-                original_goal: "Feedback barrier".into(),
-                nodes: ["owner", "slow", "related", "review", "consumer"]
-                    .into_iter()
-                    .map(|name| Node {
-                        id: name.into(),
-                        task: name.into(),
-                    })
-                    .collect(),
-                edges: [
-                    ("owner", "review", false),
-                    ("owner", "related", false),
-                    ("review", "owner", true),
-                    ("review", "consumer", false),
-                ]
+    create_legacy_private_run(
+        &mut runtime,
+        Graph {
+            original_goal: "Feedback barrier".into(),
+            nodes: ["owner", "slow", "related", "review", "consumer"]
                 .into_iter()
-                .map(|(from, to, feedback)| Edge {
-                    from: from.into(),
-                    to: to.into(),
-                    feedback,
+                .map(|name| Node {
+                    id: name.into(),
+                    task: name.into(),
                 })
                 .collect(),
-            },
-            Config {
-                feedback_enabled: true,
-                environment: None,
-                repository: repository.to_string_lossy().into(),
-                engine: "pi".into(),
-                pi_command: "/bin/sh".into(),
-                pi_args: vec![script.to_string_lossy().into()],
-                model: "test".into(),
-                role_models: Default::default(),
-                thinking_level: "medium".into(),
-                max_parallel: 4,
-                max_feedback: 1,
-                auto_approve: false,
-                isolate_parallel_nodes: true, post_task_review: false,
-                planner_write_tools: true,
-            },
-        )
-        .unwrap();
+            edges: [
+                ("owner", "review", false),
+                ("owner", "related", false),
+                ("review", "owner", true),
+                ("review", "consumer", false),
+            ]
+            .into_iter()
+            .map(|(from, to, feedback)| Edge {
+                from: from.into(),
+                to: to.into(),
+                feedback,
+            })
+            .collect(),
+        },
+        Config {
+            feedback_enabled: true,
+            environment: None,
+            repository: repository.to_string_lossy().into(),
+            engine: "pi".into(),
+            pi_command: "/bin/sh".into(),
+            pi_args: vec![script.to_string_lossy().into()],
+            model: "test".into(),
+            role_models: Default::default(),
+            thinking_level: "medium".into(),
+            max_parallel: 4,
+            max_feedback: 1,
+            auto_approve: false,
+            isolate_parallel_nodes: true,
+            post_task_review: false,
+            planner_write_tools: true,
+        },
+    )
+    .unwrap();
     runtime.approve().unwrap();
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
@@ -4430,7 +4478,8 @@ fn planning_metrics_parsing_and_persistence() {
         #[cfg(feature = "fixture")]
         pi_args: Vec::new(),
         model: "test-model".into(),
-        isolate_parallel_nodes: true, post_task_review: false,
+        isolate_parallel_nodes: true,
+        post_task_review: false,
         planner_write_tools: true,
         thinking_level: "medium".into(),
         max_parallel: 4,
@@ -4598,7 +4647,8 @@ fn execution_and_run_metrics_parsing_and_persistence() {
         pi_args: Vec::new(),
         model: "test-model".into(),
         role_models: Default::default(),
-        isolate_parallel_nodes: true, thinking_level: "medium".into(),
+        isolate_parallel_nodes: true,
+        thinking_level: "medium".into(),
         feedback_enabled: false,
         max_parallel: 2,
         max_feedback: 1,
@@ -4698,7 +4748,8 @@ fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
     let config = Config {
         feedback_enabled: false,
         environment: None,
-        isolate_parallel_nodes: true, post_task_review: false,
+        isolate_parallel_nodes: true,
+        post_task_review: false,
         planner_write_tools: true,
         repository: "/workspace/repo-a".into(),
         #[cfg(feature = "fixture")]
@@ -4839,7 +4890,8 @@ fn completed_graph_is_published_by_driver() {
         repository: String::new(),
         engine: "fixture".into(),
         pi_command: String::new(),
-        isolate_parallel_nodes: true, post_task_review: false,
+        isolate_parallel_nodes: true,
+        post_task_review: false,
         planner_write_tools: true,
         pi_args: Vec::new(),
         model: String::new(),
@@ -4853,9 +4905,13 @@ fn completed_graph_is_published_by_driver() {
         .create(
             Graph {
                 original_goal: "Publish an isolated batch of independent outcomes".into(),
-                nodes: ["first", "middle", "last", "extra"].into_iter().map(|name| Node {
-                    id: name.into(), task: name.into(),
-                }).collect(),
+                nodes: ["first", "middle", "last", "extra"]
+                    .into_iter()
+                    .map(|name| Node {
+                        id: name.into(),
+                        task: name.into(),
+                    })
+                    .collect(),
                 edges: Vec::new(),
             },
             config,
@@ -4993,7 +5049,9 @@ fn planner_system_prompt_gates_review_rule() {
         .split_once("</rules>")
         .unwrap()
         .0;
-    assert!(rules.trim_end().ends_with(&format!("- {PLANNER_REVIEW_RULE}")));
+    assert!(rules
+        .trim_end()
+        .ends_with(&format!("- {PLANNER_REVIEW_RULE}")));
     assert_eq!(
         enabled.replace(&format!("- {PLANNER_REVIEW_RULE}\n"), ""),
         base,
@@ -5019,7 +5077,10 @@ fn planner_system_prompt_preserves_inline_and_file_overrides() {
         assert_eq!(planner_system_prompt(path_text, true).unwrap(), inline);
         assert_eq!(fs::read_to_string(&path).unwrap(), custom);
         if custom.contains("</rules>") {
-            assert_eq!(inline.replace(&format!("- {PLANNER_REVIEW_RULE}\n"), ""), custom);
+            assert_eq!(
+                inline.replace(&format!("- {PLANNER_REVIEW_RULE}\n"), ""),
+                custom
+            );
         } else {
             assert!(inline.starts_with(custom));
         }
@@ -5593,7 +5654,8 @@ fn save_config_updates_bootstrap_and_persists() {
         feedback_enabled: true,
         environment: None,
         repository: temp_dir.path().to_string_lossy().into(),
-        isolate_parallel_nodes: true, model: "openai/gpt-4o".into(),
+        isolate_parallel_nodes: true,
+        model: "openai/gpt-4o".into(),
         role_models: Default::default(),
         thinking_level: "high".into(),
         max_parallel: 2,
@@ -5690,18 +5752,36 @@ fn save_config_updates_bootstrap_and_persists() {
     );
 
     // 5. Verify bounds (min 2, max 40) and distinct defaults for 0.
-    for (input, expected_parallel, expected_feedback) in
-        [(0, 20, 4), (1, 2, 2), (8, 8, 8), (20, 20, 20), (24, 24, 24), (40, 40, 40), (100, 40, 40)]
-    {
+    for (input, expected_parallel, expected_feedback) in [
+        (0, 20, 4),
+        (1, 2, 2),
+        (8, 8, 8),
+        (20, 20, 20),
+        (24, 24, 24),
+        (40, 40, 40),
+        (100, 40, 40),
+    ] {
         let mut bounded = new_config.clone();
         bounded.max_parallel = input;
         bounded.max_feedback = input;
         let saved = save_config(bounded, &service).unwrap();
-        assert_eq!(saved.config.max_parallel, expected_parallel, "parallel input={input}");
-        assert_eq!(saved.config.max_feedback, expected_feedback, "feedback input={input}");
+        assert_eq!(
+            saved.config.max_parallel, expected_parallel,
+            "parallel input={input}"
+        );
+        assert_eq!(
+            saved.config.max_feedback, expected_feedback,
+            "feedback input={input}"
+        );
         let boot = bootstrap(&service, false).unwrap();
-        assert_eq!(boot.config.max_parallel, expected_parallel, "bootstrap parallel input={input}");
-        assert_eq!(boot.config.max_feedback, expected_feedback, "bootstrap feedback input={input}");
+        assert_eq!(
+            boot.config.max_parallel, expected_parallel,
+            "bootstrap parallel input={input}"
+        );
+        assert_eq!(
+            boot.config.max_feedback, expected_feedback,
+            "bootstrap feedback input={input}"
+        );
     }
 }
 
@@ -6188,13 +6268,18 @@ fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
             task: "Feature QA verification task".into(),
         });
 
-    service.runtime.lock().unwrap().emit(EventKind::Steered {
-        execution_id: "feat-qa-execution".into(),
-        node: "feat_qa".into(),
-        instruction: "Keep the public API compatible".into(),
-        request_id: None,
-        images: None,
-    }).unwrap();
+    service
+        .runtime
+        .lock()
+        .unwrap()
+        .emit(EventKind::Steered {
+            execution_id: "feat-qa-execution".into(),
+            node: "feat_qa".into(),
+            instruction: "Keep the public API compatible".into(),
+            request_id: None,
+            images: None,
+        })
+        .unwrap();
 
     // Node fallback still computes from the target task, not publication steers.
     let fallback = get_merger_prompt(
@@ -6206,7 +6291,10 @@ fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
         .as_str()
         .unwrap()
         .contains("Feature QA verification task"));
-    assert!(!fallback["prompt"].as_str().unwrap().contains("<user further request>"));
+    assert!(!fallback["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("<user further request>"));
 
     // Only a source-publication Merger receives the extra user requests.
     {
@@ -6215,11 +6303,15 @@ fn get_merger_prompt_reads_written_disk_prompt_and_falls_back() {
         runtime.state.graph.original_goal = "Original goal".into();
     }
     let publication = get_merger_prompt(
-        &serde_json::json!({"runId": run_id, "executionId": merger_id}), &service,
-    ).unwrap();
+        &serde_json::json!({"runId": run_id, "executionId": merger_id}),
+        &service,
+    )
+    .unwrap();
     let prompt = publication["prompt"].as_str().unwrap();
     assert!(prompt.contains("Original goal\n\n<user further request>"));
-    assert!(prompt.contains("<user further request>\nKeep the public API compatible\n</user further request>"));
+    assert!(prompt.contains(
+        "<user further request>\nKeep the public API compatible\n</user further request>"
+    ));
 
     // 3. When system-prompt.md is written to disk, it reads the disk file directly
     let session_dir = temp.path().join("mergers").join(merger_id);

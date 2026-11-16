@@ -43,7 +43,11 @@ impl Collection<'_> {
 
 // Match native Windows aliases without normalizing any persisted manifest.
 fn inspection_key(name: &str) -> String {
-    if cfg!(windows) { name.to_lowercase() } else { name.into() }
+    if cfg!(windows) {
+        name.to_lowercase()
+    } else {
+        name.into()
+    }
 }
 
 fn untouched_blocker<'a>(
@@ -60,15 +64,20 @@ fn untouched_blocker<'a>(
         if let Some(path) = untouched.get(ancestor) {
             return Some(path.as_str());
         }
-        let Some((parent, _)) = ancestor.rsplit_once('/') else { break };
+        let Some((parent, _)) = ancestor.rsplit_once('/') else {
+            break;
+        };
         ancestor = parent;
     }
     if !directory {
         // A file/link also cannot replace a directory containing retained
         // descendants. Sorted lookup avoids scanning every omission per file.
         let prefix = format!("{key}/");
-        return untouched.range(prefix.clone()..).next()
-            .filter(|path| path.starts_with(&prefix)).map(String::as_str);
+        return untouched
+            .range(prefix.clone()..)
+            .next()
+            .filter(|path| path.starts_with(&prefix))
+            .map(String::as_str);
     }
     None
 }
@@ -119,7 +128,8 @@ impl Version {
             serde_json::to_vec(&(&self.head, &self.parents, &self.entries, rooted))
         } else {
             serde_json::to_vec(&(&self.head, &self.parents, &self.entries))
-        }.map_err(|e| e.to_string())?;
+        }
+        .map_err(|e| e.to_string())?;
         git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
             .map(|id| id.to_string())
             .map_err(|e| e.to_string())
@@ -365,11 +375,17 @@ impl Files {
         let entries = |version: &str| -> Result<Entries, String> {
             let value = self.load(version)?;
             let entries = if let Some(rooted) = value.rooted {
-                rooted.roots.get(root).ok_or("Missing environment snapshot root")?.entries.clone()
+                rooted
+                    .roots
+                    .get(root)
+                    .ok_or("Missing environment snapshot root")?
+                    .entries
+                    .clone()
             } else {
                 value.entries
             };
-            Ok(entries.into_iter()
+            Ok(entries
+                .into_iter()
                 .filter(|(name, _)| workspace::scope_contains(Path::new(name), Path::new(scope)))
                 .collect())
         };
@@ -398,7 +414,11 @@ impl Files {
         Ok(())
     }
 
-    fn save_blob(&self, source: &Path, checked: Option<&RefCell<BTreeSet<String>>>) -> Result<String, String> {
+    fn save_blob(
+        &self,
+        source: &Path,
+        checked: Option<&RefCell<BTreeSet<String>>>,
+    ) -> Result<String, String> {
         // Every live file is read, even if another file has identical content.
         // Only the test-only unbatched reference omits operation-local proof.
         let blob = hash(source)?;
@@ -645,12 +665,20 @@ impl Files {
         parents: &[String],
         checked: &RefCell<BTreeSet<String>>,
     ) -> Result<Version, String> {
-        let root = workspace.canonicalize().map_err(|error| error.to_string())?;
+        let root = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
         let mut entries = Entries::new();
         for path in self.scoped_paths(&root)? {
             self.collect(&root, &path, &mut entries, Collection::Capture(checked))?;
         }
-        Ok(Version { head: head.into(), parents: parents.to_vec(), entries, checksum: None, rooted: None })
+        Ok(Version {
+            head: head.into(),
+            parents: parents.to_vec(),
+            entries,
+            checksum: None,
+            rooted: None,
+        })
     }
 
     /// Environment sealing only: preserve the parent's immutable reference when
@@ -667,7 +695,12 @@ impl Files {
         self.save_changed(value, parent, &previous)
     }
 
-    fn save_changed(&self, value: Version, parent: &str, previous: &Version) -> Result<String, String> {
+    fn save_changed(
+        &self,
+        value: Version,
+        parent: &str,
+        previous: &Version,
+    ) -> Result<String, String> {
         if value.entries == previous.entries && value.rooted == previous.rooted {
             return Ok(parent.into());
         }
@@ -803,7 +836,11 @@ impl Files {
         self.validate_entries(&self.compose(versions)?, &checked)
     }
 
-    fn validate_value(&self, value: &Version, checked: &RefCell<BTreeSet<String>>) -> Result<(), String> {
+    fn validate_value(
+        &self,
+        value: &Version,
+        checked: &RefCell<BTreeSet<String>>,
+    ) -> Result<(), String> {
         self.validate_entries(&value.entries, checked)?;
         if let Some(rooted) = &value.rooted {
             for root in rooted.roots.values() {
@@ -813,7 +850,11 @@ impl Files {
         Ok(())
     }
 
-    fn validate_entries(&self, entries: &Entries, checked: &RefCell<BTreeSet<String>>) -> Result<(), String> {
+    fn validate_entries(
+        &self,
+        entries: &Entries,
+        checked: &RefCell<BTreeSet<String>>,
+    ) -> Result<(), String> {
         for entry in entries.values() {
             if let Entry::File { blob, .. } = entry {
                 self.verify_blob(blob, checked)?;
@@ -825,7 +866,9 @@ impl Files {
     pub(crate) fn verify(&self, workspace: &Path, version: &str, head: &str) -> Result<(), String> {
         let value = self.load(version)?;
         if value.rooted.is_some() {
-            return Err("Root-qualified environment verification requires explicit root targets".into());
+            return Err(
+                "Root-qualified environment verification requires explicit root targets".into(),
+            );
         }
         if value.head != head {
             return Err("Feedback file snapshot does not match its Git head".into());
@@ -836,7 +879,12 @@ impl Files {
         let mut entries = Entries::new();
         let checked = RefCell::default();
         for path in self.scoped_paths(&root)? {
-            self.collect(&root, &path, &mut entries, Collection::Verify(&value.entries, &checked))?;
+            self.collect(
+                &root,
+                &path,
+                &mut entries,
+                Collection::Verify(&value.entries, &checked),
+            )?;
         }
         if entries != value.entries {
             return Err("Feedback workspace files changed after completion".into());
@@ -916,15 +964,23 @@ impl Files {
         // traversal: removal precedes creation. Links remain forbidden, even
         // when the snapshot would replace them with a directory.
         for (name, entry) in &desired {
-            if let Some(blocker) = untouched_blocker(&untouched, name, matches!(entry, Entry::Directory { .. })) {
+            if let Some(blocker) =
+                untouched_blocker(&untouched, name, matches!(entry, Entry::Directory { .. }))
+            {
                 return Err(format!(
                     "Cannot restore managed path {}: conflicts with untouched excluded cache or unreadable/unresolvable link at {blocker}; preserving live state",
                     root.join(name).display()
                 ));
             }
-            if let Some(parent) = Path::new(name).parent().filter(|path| !path.as_os_str().is_empty()) {
+            if let Some(parent) = Path::new(name)
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+            {
                 let mut replaced = None;
-                for ancestor in parent.ancestors().filter(|path| !path.as_os_str().is_empty()) {
+                for ancestor in parent
+                    .ancestors()
+                    .filter(|path| !path.as_os_str().is_empty())
+                {
                     let key = path_name(ancestor)?;
                     if matches!(current.get(&key), Some(Entry::File { .. }))
                         && matches!(desired.get(&key), Some(Entry::Directory { .. }))
@@ -933,25 +989,47 @@ impl Files {
                         break;
                     }
                 }
-                real_child_path(&root, &root.join(replaced.unwrap_or(parent)), replaced.is_some())?;
+                real_child_path(
+                    &root,
+                    &root.join(replaced.unwrap_or(parent)),
+                    replaced.is_some(),
+                )?;
             }
         }
-        let previous_paths = if let Some(previous) = previous.filter(|version| self.exists(version)) {
+        let previous_paths = if let Some(previous) = previous.filter(|version| self.exists(version))
+        {
             let previous = self.load(previous)?;
             if previous.rooted.is_some() {
                 return Err("Root-qualified environment snapshot cannot be used as a single-root predecessor".into());
             }
             // A legacy predecessor cannot authorize deleting/traversing an
             // omitted live link. Ancestor directories are removed only if empty.
-            previous.entries.keys()
+            previous
+                .entries
+                .keys()
                 .filter(|name| untouched_blocker(&untouched, name, true).is_none())
-                .map(|name| root.join(name)).collect()
-        } else { Vec::new() };
-        Ok(Some(Materialization { root, desired, current, tracked: tracked.into_iter().map(str::to_owned).collect(), previous_paths }))
+                .map(|name| root.join(name))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Some(Materialization {
+            root,
+            desired,
+            current,
+            tracked: tracked.into_iter().map(str::to_owned).collect(),
+            previous_paths,
+        }))
     }
 
     fn apply_materialization(&self, plan: Materialization) -> Result<(), String> {
-        let Materialization { root, desired, current, tracked, previous_paths } = plan;
+        let Materialization {
+            root,
+            desired,
+            current,
+            tracked,
+            previous_paths,
+        } = plan;
         #[cfg(unix)]
         for (name, entry) in &current {
             if matches!(entry, Entry::Directory { .. }) {
@@ -1130,11 +1208,18 @@ fn link(root: &Path, target: &Path, path: &Path, directory: bool) -> Result<(), 
         if directory {
             // Same native junction contract, without spawning a PATH-selected
             // Node or exposing backend work to business NODE_OPTIONS/NODE_PATH.
-            crate::workspace_symlinks::materialize(root, path, &crate::workspace_symlinks::Link {
-                value: target.to_str().ok_or("Environment junction target must be UTF-8")?.into(),
-                project_absolute: false,
-                kind: crate::workspace_symlinks::Kind::Junction,
-            })
+            crate::workspace_symlinks::materialize(
+                root,
+                path,
+                &crate::workspace_symlinks::Link {
+                    value: target
+                        .to_str()
+                        .ok_or("Environment junction target must be UTF-8")?
+                        .into(),
+                    project_absolute: false,
+                    kind: crate::workspace_symlinks::Kind::Junction,
+                },
+            )
         } else {
             std::os::windows::fs::symlink_file(target, path).map_err(|error| {
                 format!(

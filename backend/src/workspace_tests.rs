@@ -50,7 +50,10 @@ fn private_git_queries_use_graph_metadata_and_keep_cli_fallbacks() {
         vec!["rev-parse", "refs/grapher/base"],
         vec!["diff", "--name-only", "--diff-filter=U"],
     ] {
-        assert_eq!(workspace::git_read(&node, &args).unwrap().unwrap(), cli(&args));
+        assert_eq!(
+            workspace::git_read(&node, &args).unwrap().unwrap(),
+            cli(&args)
+        );
     }
     assert_eq!(workspace::git(&node, &["rev-parse", "HEAD"]).unwrap(), base);
     assert_eq!(
@@ -58,7 +61,12 @@ fn private_git_queries_use_graph_metadata_and_keep_cli_fallbacks() {
         user_head
     );
     assert!(workspace::git_read(&node, &["status", "--porcelain"]).is_none());
-    let ancestry = ["merge-base", "--is-ancestor", user_head.as_str(), base.as_str()];
+    let ancestry = [
+        "merge-base",
+        "--is-ancestor",
+        user_head.as_str(),
+        base.as_str(),
+    ];
     assert!(workspace::git_read(&node, &ancestry).is_none());
     assert_eq!(workspace::git(&node, &ancestry).unwrap(), cli(&ancestry));
     for args in [
@@ -118,7 +126,12 @@ fn explicit_shadow_reads_use_the_selected_database_without_caching_refs() {
         let shadow = workspace::shadow_repo_dir(&source).unwrap();
         for prefix in [
             vec!["--git-dir", shadow.to_str().unwrap()],
-            vec!["--git-dir", shadow.to_str().unwrap(), "--work-tree", source.to_str().unwrap()],
+            vec![
+                "--git-dir",
+                shadow.to_str().unwrap(),
+                "--work-tree",
+                source.to_str().unwrap(),
+            ],
         ] {
             for query in [
                 vec!["rev-parse", "HEAD"],
@@ -149,24 +162,47 @@ fn explicit_shadow_reads_use_the_selected_database_without_caching_refs() {
                 assert!(workspace::git_read(&source, &args).is_none());
             }
         }
-        assert!(workspace::git_read(&source, &["--git-dir", ".git", "rev-parse", "HEAD"]).is_none());
+        assert!(
+            workspace::git_read(&source, &["--git-dir", ".git", "rev-parse", "HEAD"]).is_none()
+        );
         let missing = source.join("missing.git");
         let args = ["--git-dir", missing.to_str().unwrap(), "rev-parse", "HEAD"];
         assert!(workspace::git_read(&source, &args).is_none());
         assert!(workspace::git(&source, &args).is_err());
-        assert_eq!(workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(), head);
-        let next = workspace::repository_git(&source, &[
-            "commit-tree", &format!("{head}^{{tree}}"), "-p", &head, "-m", "next",
-        ]).unwrap();
+        assert_eq!(
+            workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+            head
+        );
+        let next = workspace::repository_git(
+            &source,
+            &[
+                "commit-tree",
+                &format!("{head}^{{tree}}"),
+                "-p",
+                &head,
+                "-m",
+                "next",
+            ],
+        )
+        .unwrap();
         workspace::repository_git(&source, &["update-ref", "HEAD", &next]).unwrap();
-        assert_eq!(workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(), next);
+        assert_eq!(
+            workspace::repository_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+            next
+        );
         if let Some(native_head) = native_head {
-            assert_eq!(workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(), native_head);
+            assert_eq!(
+                workspace::git(&source, &["rev-parse", "HEAD"]).unwrap(),
+                native_head
+            );
         } else {
             assert!(!source.join(".git").exists());
         }
         assert_eq!(fs::read(source.join(".git/index")).ok(), native_index);
-        assert_eq!(fs::read_to_string(source.join("file.txt")).unwrap(), "snapshot bytes");
+        assert_eq!(
+            fs::read_to_string(source.join("file.txt")).unwrap(),
+            "snapshot bytes"
+        );
     }
 }
 
@@ -188,8 +224,10 @@ fn git_read_private_ancestry_obeys_replacement_refs() {
     workspace::git(&node, &["replace", &head, &base]).unwrap();
     let args = ["merge-base", "--is-ancestor", &base, "HEAD"];
     assert!(workspace::git_bytes(&node, &args, None, None).is_err());
-    assert!(workspace::verify_prepared_ancestor(&node, &base).is_err(),
-        "the optimized reader must not accept ancestry rejected by Git");
+    assert!(
+        workspace::verify_prepared_ancestor(&node, &base).is_err(),
+        "the optimized reader must not accept ancestry rejected by Git"
+    );
 }
 
 #[test]
@@ -198,7 +236,8 @@ fn git_read_private_revision_obeys_replacement_refs() {
     workspace::git(&node, &["update-ref", "refs/grapher/query", &head]).unwrap();
     workspace::git(&node, &["replace", &head, &base]).unwrap();
     let args = ["rev-parse", "refs/grapher/query^{tree}"];
-    let expected = String::from_utf8(workspace::git_bytes(&node, &args, None, None).unwrap()).unwrap();
+    let expected =
+        String::from_utf8(workspace::git_bytes(&node, &args, None, None).unwrap()).unwrap();
     assert_eq!(workspace::git(&node, &args).unwrap(), expected.trim());
 }
 
@@ -209,7 +248,10 @@ fn git_read_private_ancestry_rejects_noncommit_objects() {
         let object = workspace::git(&node, &["rev-parse", revision]).unwrap();
         let args = ["merge-base", "--is-ancestor", &object, &object];
         assert!(workspace::git_bytes(&node, &args, None, None).is_err());
-        assert!(workspace::git(&node, &args).is_err(), "{revision} is not a commit");
+        assert!(
+            workspace::git(&node, &args).is_err(),
+            "{revision} is not a commit"
+        );
     }
 }
 
@@ -221,11 +263,20 @@ fn git_read_explicit_directory_does_not_discover_dot_git() {
     workspace::git(source, &["commit", "--allow-empty", "-qm", "source"]).unwrap();
     for args in [
         vec!["--git-dir", source.to_str().unwrap(), "rev-parse", "HEAD"],
-        vec!["--git-dir", source.to_str().unwrap(), "--work-tree", source.to_str().unwrap(), "rev-parse", "HEAD"],
+        vec![
+            "--git-dir",
+            source.to_str().unwrap(),
+            "--work-tree",
+            source.to_str().unwrap(),
+            "rev-parse",
+            "HEAD",
+        ],
     ] {
         assert!(workspace::git_bytes(source, &args, None, None).is_err());
-        assert!(workspace::git(source, &args).is_err(),
-            "an invalid explicit Git directory must not discover its nested .git");
+        assert!(
+            workspace::git(source, &args).is_err(),
+            "an invalid explicit Git directory must not discover its nested .git"
+        );
     }
 }
 
@@ -244,27 +295,43 @@ fn node_snapshot_stages_independent_slots_before_waiting_for_host_refs() {
             workspace::git(&source, &["commit", "-qm", "source"]).unwrap();
         }
         let base = workspace::snapshot_repository(&source).unwrap();
-        let slots: Vec<_> = ["a", "b"].into_iter().map(|name| {
-            let slot = temp.path().join(".grapher-worktrees/run").join(name);
-            workspace::prepare(&source, &slot, &base, &[]).unwrap();
-            fs::write(slot.join("result.txt"), name).unwrap();
-            slot
-        }).collect();
-        let metadata: Vec<_> = slots.iter()
-            .map(|slot| workspace::private_git_dir(slot).unwrap()).collect();
-        let local_heads: Vec<_> = metadata.iter().map(|dir| {
-            git2::Repository::open(dir).unwrap()
-                .find_reference("refs/heads/grapher-node").unwrap().target().unwrap()
-        }).collect();
+        let slots: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|name| {
+                let slot = temp.path().join(".grapher-worktrees/run").join(name);
+                workspace::prepare(&source, &slot, &base, &[]).unwrap();
+                fs::write(slot.join("result.txt"), name).unwrap();
+                slot
+            })
+            .collect();
+        let metadata: Vec<_> = slots
+            .iter()
+            .map(|slot| workspace::private_git_dir(slot).unwrap())
+            .collect();
+        let local_heads: Vec<_> = metadata
+            .iter()
+            .map(|dir| {
+                git2::Repository::open(dir)
+                    .unwrap()
+                    .find_reference("refs/heads/grapher-node")
+                    .unwrap()
+                    .target()
+                    .unwrap()
+            })
+            .collect();
         let lock = workspace::host_ref_lock(&source).unwrap();
         let guard = lock.lock().unwrap();
-        let workers: Vec<_> = slots.iter().cloned().map(|slot| {
-            let source = source.clone();
-            std::thread::spawn(move || {
-                let name = slot.file_name().unwrap().to_str().unwrap();
-                workspace::snapshot_node(&slot, &source, name)
+        let workers: Vec<_> = slots
+            .iter()
+            .cloned()
+            .map(|slot| {
+                let source = source.clone();
+                std::thread::spawn(move || {
+                    let name = slot.file_name().unwrap().to_str().unwrap();
+                    workspace::snapshot_node(&slot, &source, name)
+                })
             })
-        }).collect();
+            .collect();
 
         // Observe private refs without acquiring the slot leases the workers
         // retain while waiting for import. This is a lock-order assertion, not
@@ -273,10 +340,14 @@ fn node_snapshot_stages_independent_slots_before_waiting_for_host_refs() {
         let deadline = Instant::now() + Duration::from_secs(30);
         let staged = loop {
             let ready = metadata.iter().zip(&local_heads).all(|(dir, previous)| {
-                git2::Repository::open(dir).ok().and_then(|repo| {
-                    repo.find_reference("refs/heads/grapher-node").ok()
-                        .and_then(|reference| reference.target())
-                }).is_some_and(|head| head != *previous)
+                git2::Repository::open(dir)
+                    .ok()
+                    .and_then(|repo| {
+                        repo.find_reference("refs/heads/grapher-node")
+                            .ok()
+                            .and_then(|reference| reference.target())
+                    })
+                    .is_some_and(|head| head != *previous)
             });
             if ready || Instant::now() >= deadline {
                 break ready;
@@ -286,29 +357,54 @@ fn node_snapshot_stages_independent_slots_before_waiting_for_host_refs() {
         // Cleanup may run while local snapshots wait to import. The active
         // inputs must remain pinned in the shared alternate even after a GC;
         // the workers' new objects belong to their own private repositories.
-        let collected = staged.then(|| workspace::repository_git(
-            &source, &["gc", "--prune=now", "--quiet"],
-        ));
+        let collected =
+            staged.then(|| workspace::repository_git(&source, &["gc", "--prune=now", "--quiet"]));
         drop(guard); // Release before asserting/joining, including regressions.
-        let heads: Vec<_> = workers.into_iter()
-            .map(|worker| worker.join().unwrap().unwrap()).collect();
-        assert!(staged, "private snapshots waited for the repository ref lock");
+        let heads: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap().unwrap())
+            .collect();
+        assert!(
+            staged,
+            "private snapshots waited for the repository ref lock"
+        );
         collected.unwrap().unwrap();
         assert_ne!(heads[0], heads[1]);
         for ((slot, head), name) in slots.iter().zip(&heads).zip(["a", "b"]) {
-            assert_eq!(workspace::repository_git(&source, &[
-                "rev-parse", &format!("refs/grapher/heads/{head}"),
-            ]).unwrap(), *head);
-            assert_eq!(workspace::repository_git(&source, &[
-                "rev-parse", &format!("refs/grapher/nodes/{}", crate::compiler::node_id(name)),
-            ]).unwrap(), *head);
-            assert_eq!(workspace::repository_git(&source, &[
-                "show", &format!("{head}:result.txt"),
-            ]).unwrap(), name);
+            assert_eq!(
+                workspace::repository_git(
+                    &source,
+                    &["rev-parse", &format!("refs/grapher/heads/{head}"),]
+                )
+                .unwrap(),
+                *head
+            );
+            assert_eq!(
+                workspace::repository_git(
+                    &source,
+                    &[
+                        "rev-parse",
+                        &format!("refs/grapher/nodes/{}", crate::compiler::node_id(name)),
+                    ]
+                )
+                .unwrap(),
+                *head
+            );
+            assert_eq!(
+                workspace::repository_git(&source, &["show", &format!("{head}:result.txt"),])
+                    .unwrap(),
+                name
+            );
             crate::workspace_view::verify_result(slot, &source, head).unwrap();
-            let downstream = temp.path().join(".grapher-worktrees/run").join(format!("child-{name}"));
+            let downstream = temp
+                .path()
+                .join(".grapher-worktrees/run")
+                .join(format!("child-{name}"));
             workspace::prepare(&source, &downstream, &base, std::slice::from_ref(head)).unwrap();
-            assert_eq!(fs::read_to_string(downstream.join("result.txt")).unwrap(), name);
+            assert_eq!(
+                fs::read_to_string(downstream.join("result.txt")).unwrap(),
+                name
+            );
         }
         assert!(!source.join("result.txt").exists());
     }
@@ -340,10 +436,14 @@ fn node_snapshot_refuses_changes_between_staging_and_capture() {
         // final capture, without a production test hook or a timing race.
         let deadline = Instant::now() + Duration::from_secs(30);
         let staged = loop {
-            let head = git2::Repository::open(&metadata).ok().and_then(|repo| {
-                repo.find_reference("refs/heads/grapher-node").ok()
-                    .and_then(|reference| reference.target())
-            }).filter(|head| head.to_string() != previous);
+            let head = git2::Repository::open(&metadata)
+                .ok()
+                .and_then(|repo| {
+                    repo.find_reference("refs/heads/grapher-node")
+                        .ok()
+                        .and_then(|reference| reference.target())
+                })
+                .filter(|head| head.to_string() != previous);
             if head.is_some() || Instant::now() >= deadline {
                 break head;
             }
@@ -360,11 +460,18 @@ fn node_snapshot_refuses_changes_between_staging_and_capture() {
         }
         drop(guard);
         let result = worker.join().unwrap();
-        let head = staged.expect("node did not reach the import boundary").to_string();
+        let head = staged
+            .expect("node did not reach the import boundary")
+            .to_string();
         let error = result.expect_err("a changed workspace must not produce a completed snapshot");
-        assert!(error.contains("changed between staging and capture"), "{error}");
-        assert!(!crate::workspace_view::has_record(&source, &head),
-            "failed capture must not publish mixed code/view evidence");
+        assert!(
+            error.contains("changed between staging and capture"),
+            "{error}"
+        );
+        assert!(
+            !crate::workspace_view::has_record(&source, &head),
+            "failed capture must not publish mixed code/view evidence"
+        );
         // A fresh attempt observes the actual new state and remains usable.
         let retried = workspace::snapshot_node(&slot, &source, "node").unwrap();
         crate::workspace_view::verify_result(&slot, &source, &retried).unwrap();
@@ -384,16 +491,19 @@ fn node_snapshot_allows_source_edits_between_staging_and_capture() {
         if standard {
             workspace::git(&source, &["init", "-q"]).unwrap();
             workspace::git(&source, &["config", "user.name", "Project Author"]).unwrap();
-            workspace::git(&source, &["config", "user.email", "project@example.invalid"]).unwrap();
+            workspace::git(
+                &source,
+                &["config", "user.email", "project@example.invalid"],
+            )
+            .unwrap();
             workspace::project_git(&source, &["add", "."]).unwrap();
             workspace::project_git(&source, &["commit", "-qm", "source"]).unwrap();
         }
         let base = workspace::snapshot_repository(&source).unwrap();
         let node = temp.path().join(".grapher-worktrees/run/node");
         workspace::prepare(&source, &node, &base, &[]).unwrap();
-        let original_project_head = standard.then(|| {
-            workspace::project_git(&node, &["rev-parse", "HEAD"]).unwrap()
-        });
+        let original_project_head =
+            standard.then(|| workspace::project_git(&node, &["rev-parse", "HEAD"]).unwrap());
         fs::write(node.join("result.txt"), "node result").unwrap();
         let metadata = workspace::private_git_dir(&node).unwrap();
         let previous = workspace::git(&node, &["rev-parse", "HEAD"]).unwrap();
@@ -406,11 +516,17 @@ fn node_snapshot_allows_source_edits_between_staging_and_capture() {
         });
         let deadline = Instant::now() + Duration::from_secs(30);
         let staged = loop {
-            let ready = git2::Repository::open(&metadata).ok().and_then(|repo| {
-                repo.find_reference("refs/heads/grapher-node").ok()
-                    .and_then(|reference| reference.target())
-            }).is_some_and(|head| head.to_string() != previous);
-            if ready || Instant::now() >= deadline { break ready; }
+            let ready = git2::Repository::open(&metadata)
+                .ok()
+                .and_then(|repo| {
+                    repo.find_reference("refs/heads/grapher-node")
+                        .ok()
+                        .and_then(|reference| reference.target())
+                })
+                .is_some_and(|head| head.to_string() != previous);
+            if ready || Instant::now() >= deadline {
+                break ready;
+            }
             std::thread::sleep(Duration::from_millis(10));
         };
         // Only the node slot is frozen. The user's live source, including its
@@ -435,23 +551,44 @@ fn node_snapshot_allows_source_edits_between_staging_and_capture() {
         crate::workspace_view::verify_result(&node, &source, &head).unwrap();
         assert_eq!(fs::read(source.join(".git/index")).ok(), live_index);
         if let Some(live_head) = live_head {
-            assert_eq!(workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(), live_head);
+            assert_eq!(
+                workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap(),
+                live_head
+            );
         }
-        assert_eq!(fs::read_to_string(source.join("input.txt")).unwrap(),
-            if standard { "unstaged source edit" } else { "live source edit" });
+        assert_eq!(
+            fs::read_to_string(source.join("input.txt")).unwrap(),
+            if standard {
+                "unstaged source edit"
+            } else {
+                "live source edit"
+            }
+        );
         assert!(source.join("source-only.txt").is_file());
         assert!(!source.join("removed.txt").exists());
         assert!(!source.join("result.txt").exists());
 
         let child = temp.path().join(".grapher-worktrees/run/child");
         workspace::prepare(&source, &child, &base, &[head]).unwrap();
-        assert_eq!(fs::read_to_string(child.join("input.txt")).unwrap(), "recorded input");
-        assert_eq!(fs::read_to_string(child.join("removed.txt")).unwrap(), "recorded file");
-        assert_eq!(fs::read_to_string(child.join("result.txt")).unwrap(), "node result");
+        assert_eq!(
+            fs::read_to_string(child.join("input.txt")).unwrap(),
+            "recorded input"
+        );
+        assert_eq!(
+            fs::read_to_string(child.join("removed.txt")).unwrap(),
+            "recorded file"
+        );
+        assert_eq!(
+            fs::read_to_string(child.join("result.txt")).unwrap(),
+            "node result"
+        );
         assert!(!child.join("source-only.txt").exists());
         assert!(!child.join("source-only-directory").exists());
         if let Some(original) = original_project_head {
-            assert_eq!(workspace::project_git(&child, &["rev-parse", "HEAD"]).unwrap(), original);
+            assert_eq!(
+                workspace::project_git(&child, &["rev-parse", "HEAD"]).unwrap(),
+                original
+            );
         }
     }
 }
@@ -469,20 +606,27 @@ fn node_snapshot_rejects_conflicts_without_waiting_for_host_refs() {
     let slot = temp.path().join(".grapher-worktrees/run/node");
     workspace::prepare(&source, &slot, &base, &[]).unwrap();
     let blob = workspace::git(&slot, &["rev-parse", "HEAD:input.txt"]).unwrap();
-    workspace::git_bytes(&slot, &["update-index", "--index-info"], None, Some(
-        format!("100644 {blob} 1\tconflict.txt\n100644 {blob} 2\tconflict.txt\n").as_bytes(),
-    )).unwrap();
+    workspace::git_bytes(
+        &slot,
+        &["update-index", "--index-info"],
+        None,
+        Some(format!("100644 {blob} 1\tconflict.txt\n100644 {blob} 2\tconflict.txt\n").as_bytes()),
+    )
+    .unwrap();
     let lock = workspace::host_ref_lock(&source).unwrap();
     let guard = lock.lock().unwrap();
     let (send, receive) = mpsc::channel();
     let worker = std::thread::spawn(move || {
-        send.send(workspace::snapshot_node(&slot, &source, "node")).unwrap();
+        send.send(workspace::snapshot_node(&slot, &source, "node"))
+            .unwrap();
     });
     let result = receive.recv_timeout(Duration::from_secs(30));
     drop(guard);
     worker.join().unwrap();
-    assert!(result.expect("conflict validation waited for the host ref lock")
-        .unwrap_err().contains("Unresolved merge conflicts remain"));
+    assert!(result
+        .expect("conflict validation waited for the host ref lock")
+        .unwrap_err()
+        .contains("Unresolved merge conflicts remain"));
 }
 
 #[test]
@@ -825,19 +969,46 @@ fn collection_predicates_keep_case_unicode_and_tracked_override_rules() {
         (".Next/build-id", false, false, false),
         ("not_node_modules/file.js", false, false, false),
         ("dist/build/out/target/authored", false, false, false),
-        ("x/.grapher-publish-0123456789abcdef.tmp", false, true, false),
-        ("x/.grapher-publish-0123456789abcdeG.tmp", false, false, false),
+        (
+            "x/.grapher-publish-0123456789abcdef.tmp",
+            false,
+            true,
+            false,
+        ),
+        (
+            "x/.grapher-publish-0123456789abcdeG.tmp",
+            false,
+            false,
+            false,
+        ),
         ("x/.grapher-publish-01234.tmp", false, false, false),
         ("managed/normal.txt", false, false, true),
         ("managed/tracked.pyc", false, false, true),
-        ("managed/.grapher-publish-0123456789abcdef.tmp", false, true, true),
+        (
+            "managed/.grapher-publish-0123456789abcdef.tmp",
+            false,
+            true,
+            true,
+        ),
     ];
     for (name, generated, reserved, managed) in cases {
-        assert_eq!(workspace::is_generated_artifact(Path::new(name)), generated, "{name}");
+        assert_eq!(
+            workspace::is_generated_artifact(Path::new(name)),
+            generated,
+            "{name}"
+        );
         for tracked in [false, true] {
-            let paths = if tracked { BTreeSet::from([name.to_string()]) } else { BTreeSet::new() };
+            let paths = if tracked {
+                BTreeSet::from([name.to_string()])
+            } else {
+                BTreeSet::new()
+            };
             for exclude_managed in [false, true] {
-                let exclusions = if exclude_managed { vec!["managed".into()] } else { vec![] };
+                let exclusions = if exclude_managed {
+                    vec!["managed".into()]
+                } else {
+                    vec![]
+                };
                 assert_eq!(
                     workspace::collection_excluded(Path::new(name), &paths, &exclusions),
                     (managed && exclude_managed) || (!tracked && (generated || reserved)),
@@ -1324,9 +1495,15 @@ fn private_git_requires_committed_history_not_only_project_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
     fs::create_dir_all(source.join(".git")).unwrap();
-    assert!(!workspace::has_private_git(&source), "an empty .git is not usable history");
+    assert!(
+        !workspace::has_private_git(&source),
+        "an empty .git is not usable history"
+    );
     workspace::git(&source, &["init", "-q"]).unwrap();
-    assert!(!workspace::has_private_git(&source), "an unborn HEAD is not usable history");
+    assert!(
+        !workspace::has_private_git(&source),
+        "an unborn HEAD is not usable history"
+    );
     fs::write(source.join("keep.txt"), "base").unwrap();
     workspace::git(&source, &["add", "-A"]).unwrap();
     workspace::git(&source, &["commit", "-qm", "base"]).unwrap();
@@ -1340,8 +1517,16 @@ fn private_git_requires_committed_history_not_only_project_metadata() {
     let retained = metadata.with_extension("retained");
     fs::rename(&metadata, &retained).unwrap();
     assert!(crate::workspace_view::is_bound(&slot));
-    assert!(git2::Repository::open(&slot).unwrap().head().unwrap().peel_to_commit().is_ok());
-    assert!(!workspace::has_private_git(&slot), "project Git must not substitute for missing Graph history");
+    assert!(git2::Repository::open(&slot)
+        .unwrap()
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .is_ok());
+    assert!(
+        !workspace::has_private_git(&slot),
+        "project Git must not substitute for missing Graph history"
+    );
     assert_eq!(fs::read_to_string(slot.join("keep.txt")).unwrap(), "base");
     fs::rename(retained, metadata).unwrap();
     assert!(workspace::has_private_git(&slot));

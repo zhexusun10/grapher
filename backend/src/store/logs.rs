@@ -430,24 +430,39 @@ impl Store {
         type Migrations = Mutex<HashMap<Key, Weak<Mutex<()>>>>;
         static MIGRATIONS: OnceLock<Migrations> = OnceLock::new();
         let migration = {
-            let mut pending = MIGRATIONS.get_or_init(Default::default).lock().map_err(|e| e.to_string())?;
+            let mut pending = MIGRATIONS
+                .get_or_init(Default::default)
+                .lock()
+                .map_err(|e| e.to_string())?;
             pending.retain(|_, lock| lock.strong_count() > 0);
-            let key = (self.connection.path().unwrap_or(":memory:").to_owned(), run.to_owned(), id.to_owned());
-            let lock = pending.get(&key).and_then(Weak::upgrade).unwrap_or_default();
+            let key = (
+                self.connection.path().unwrap_or(":memory:").to_owned(),
+                run.to_owned(),
+                id.to_owned(),
+            );
+            let lock = pending
+                .get(&key)
+                .and_then(Weak::upgrade)
+                .unwrap_or_default();
             pending.insert(key, Arc::downgrade(&lock));
             lock
         };
         let _migration = migration.lock().map_err(|e| e.to_string())?;
         self.ensure_not_deleted(run)?;
         let existing = self.log_bytes(run, id)?;
-        if existing > 0 { return Ok(existing); }
+        if existing > 0 {
+            return Ok(existing);
+        }
         let (text, _) = self.legacy_transcript(run, id)?;
         let _write_guard = store_write_guard()?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
-            .map_err(|e| e.to_string())?;
+        let tx =
+            rusqlite::Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
         self.ensure_not_deleted(run)?;
         let existing = self.log_bytes(run, id)?;
-        if existing > 0 { return Ok(existing); }
+        if existing > 0 {
+            return Ok(existing);
+        }
         insert_chunks(&tx, run, id, 0, &text, true)?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(text.len())

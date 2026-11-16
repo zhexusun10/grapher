@@ -312,11 +312,24 @@ fn feedback_continuation_queued_input_does_not_wake_or_reconfigure_dirty_nodes()
         runtime.pause(true).unwrap();
         for name in ["owner", "review", "related", "later"] {
             let mut expected = runtime.state.nodes[name].clone();
-            runtime.intervene_with_images(name, &format!("extra {name}"), Some(vec![ImageAttachment {
-                r#type: "image".into(), mime_type: "image/png".into(), data: name.into(), name: None,
-            }])).unwrap();
+            runtime
+                .intervene_with_images(
+                    name,
+                    &format!("extra {name}"),
+                    Some(vec![ImageAttachment {
+                        r#type: "image".into(),
+                        mime_type: "image/png".into(),
+                        data: name.into(),
+                        name: None,
+                    }]),
+                )
+                .unwrap();
             expected.pending_messages = runtime.state.nodes[name].pending_messages.clone();
-            assert_eq!(serde_json::to_value(&runtime.state.nodes[name]).unwrap(), serde_json::to_value(expected).unwrap(), "queue must preserve feedback/workspace/revision for {name}");
+            assert_eq!(
+                serde_json::to_value(&runtime.state.nodes[name]).unwrap(),
+                serde_json::to_value(expected).unwrap(),
+                "queue must preserve feedback/workspace/revision for {name}"
+            );
         }
         assert!(runtime.state.paused);
         assert!(runtime.jobs().unwrap().is_empty());
@@ -328,7 +341,10 @@ fn feedback_continuation_queued_input_does_not_wake_or_reconfigure_dirty_nodes()
         assert_eq!(repair.execution.node, "owner");
         assert!(repair.task.starts_with("Feedback:\nfix the issue"));
         assert!(repair.task.contains("extra owner"));
-        assert!(runtime.jobs().unwrap().is_empty(), "dirty descendants must still wait for the repair");
+        assert!(
+            runtime.jobs().unwrap().is_empty(),
+            "dirty descendants must still wait for the repair"
+        );
         assert_eq!(runtime.state.nodes["review"].pending_messages.len(), 1);
         finish(&mut runtime, &repair, "repaired");
         let rechecks = runtime.jobs().unwrap();
@@ -341,7 +357,15 @@ fn feedback_continuation_queued_input_does_not_wake_or_reconfigure_dirty_nodes()
             if job.execution.node == "review" {
                 assert_eq!(job.session_fork.as_ref().unwrap().id, review.execution.id);
             }
-            finish(&mut runtime, job, if job.feedback_source { "<ACCEPT>" } else { "done" });
+            finish(
+                &mut runtime,
+                job,
+                if job.feedback_source {
+                    "<ACCEPT>"
+                } else {
+                    "done"
+                },
+            );
         }
         let later = runtime.jobs().unwrap().remove(0);
         assert_eq!(later.execution.node, "later");
@@ -355,15 +379,29 @@ fn node_input_recovery_feedback_target_retains_queued_turn_across_restart() {
     for shared in [false, true] {
         let (_temp, _source, mut runtime) = configured(shared);
         invalidate(&mut runtime, false);
-        runtime.intervene_with_images("owner", "extra repair constraint", Some(vec![ImageAttachment {
-            r#type: "image".into(), mime_type: "image/png".into(), data: "repair".into(), name: None,
-        }])).unwrap();
+        runtime
+            .intervene_with_images(
+                "owner",
+                "extra repair constraint",
+                Some(vec![ImageAttachment {
+                    r#type: "image".into(),
+                    mime_type: "image/png".into(),
+                    data: "repair".into(),
+                    name: None,
+                }]),
+            )
+            .unwrap();
         let repair = runtime.jobs().unwrap().remove(0);
         assert_eq!(repair.execution.node, "owner");
         assert!(repair.task.contains("extra repair constraint"));
         let mut current = repair;
         for _ in 0..2 {
-            runtime.finish(&current.execution, Err("failed before Pi accepted repair".into())).unwrap();
+            runtime
+                .finish(
+                    &current.execution,
+                    Err("failed before Pi accepted repair".into()),
+                )
+                .unwrap();
             let root = runtime.root.clone();
             drop(runtime);
             runtime = Runtime::open(&root).unwrap();
@@ -372,7 +410,10 @@ fn node_input_recovery_feedback_target_retains_queued_turn_across_restart() {
             let retry = runtime.jobs().unwrap().remove(0);
             assert_eq!(retry.task, current.task);
             assert_eq!(retry.images.as_ref().unwrap()[0].data, "repair");
-            assert_eq!(runtime.state.nodes["review"].status, "dirty", "retry cannot wake feedback descendants");
+            assert_eq!(
+                runtime.state.nodes["review"].status, "dirty",
+                "retry cannot wake feedback descendants"
+            );
             assert!(runtime.jobs().unwrap().is_empty());
             current = retry;
         }

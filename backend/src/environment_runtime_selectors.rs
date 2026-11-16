@@ -22,17 +22,29 @@ fn absolute(path: &str) -> bool {
 
 fn without_trailing_separator(path: &str) -> &str {
     let trimmed = path.trim_end_matches(|character| character == '/' || character == '\\');
-    if trimmed.is_empty() { path } else { trimmed }
+    if trimmed.is_empty() {
+        path
+    } else {
+        trimmed
+    }
 }
 
 pub(super) fn validate(
-    selectors: &[Selector], files: &[RuntimeFile], roots: &BTreeMap<String, String>, complete: bool,
+    selectors: &[Selector],
+    files: &[RuntimeFile],
+    roots: &BTreeMap<String, String>,
+    complete: bool,
 ) -> Result<(), String> {
-    let external: BTreeSet<_> = files.iter().filter_map(|file| match file {
-        RuntimeFile::External { path, .. } => Some(path.clone()),
-        RuntimeFile::Root { root, path, .. } if complete => Some(text(&Path::new(&roots[root]).join(path))),
-        _ => None,
-    }).collect();
+    let external: BTreeSet<_> = files
+        .iter()
+        .filter_map(|file| match file {
+            RuntimeFile::External { path, .. } => Some(path.clone()),
+            RuntimeFile::Root { root, path, .. } if complete => {
+                Some(text(&Path::new(&roots[root]).join(path)))
+            }
+            _ => None,
+        })
+        .collect();
     let targets: BTreeSet<_> = selectors.iter().map(|item| item.target.clone()).collect();
     if selectors.len() > 128
         || targets != external
@@ -151,12 +163,18 @@ pub(super) fn observe(
         // This is the target observed by the interpreter, not a selector to
         // reinterpret through a possibly changed filesystem a second time.
         let target = text(Path::new(resolved));
-        if text(&canonical(Path::new(without_trailing_separator(requested)))?) != target {
+        if text(&canonical(Path::new(without_trailing_separator(
+            requested,
+        )))?)
+            != target
+        {
             return Err("Native runtime selector changed during observation".into());
         }
         observed.insert(target.clone());
         if complete || external.contains(target.as_str()) {
-            let path = if complete { text(Path::new(requested)) } else {
+            let path = if complete {
+                text(Path::new(requested))
+            } else {
                 text(&external_continuation(Path::new(requested), roots)?)
             };
             let selector = Selector {
@@ -185,7 +203,10 @@ pub(super) fn observe(
 
 impl Selector {
     pub(super) fn preflight_projected(
-        &self, roots: &BTreeMap<String, String>, snapshot: &crate::workspace_files::RuntimePaths, project_ready: bool,
+        &self,
+        roots: &BTreeMap<String, String>,
+        snapshot: &crate::workspace_files::RuntimePaths,
+        project_ready: bool,
     ) -> Result<(), String> {
         let actual = super::resolution::resolve(&self.path, roots, snapshot, project_ready)
             .map_err(|error| format!("{error}; preserving current workspace/state"))?;

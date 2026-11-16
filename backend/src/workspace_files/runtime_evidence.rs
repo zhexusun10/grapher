@@ -34,9 +34,11 @@ impl Files {
                         coverage.project.push(input());
                         continue;
                     }
-                    None => return Err(format!(
+                    None => {
+                        return Err(format!(
                         "Native runtime input has no recorded root byte evidence: {root}:{path}"
-                    )),
+                    ))
+                    }
                 };
                 if frame
                     .layout

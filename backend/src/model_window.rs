@@ -88,7 +88,8 @@ fn agent_model_files() -> Vec<PathBuf> {
         .map(|path| path.join("models.json"))
         .collect();
     // Match the runtime overlay: Pi's local definitions win when not isolated.
-    if std::env::var_os("GRAPHER_ISOLATED_PI_MODELS").as_deref() != Some(std::ffi::OsStr::new("1")) {
+    if std::env::var_os("GRAPHER_ISOLATED_PI_MODELS").as_deref() != Some(std::ffi::OsStr::new("1"))
+    {
         if let Some(home) = home {
             files.push(home.join(".pi/agent/models.json"));
         }

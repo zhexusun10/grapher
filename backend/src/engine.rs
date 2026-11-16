@@ -24,8 +24,8 @@ use std::{
 };
 
 pub mod composer;
-pub(crate) mod feedback_input;
 mod context_stats;
+pub(crate) mod feedback_input;
 mod output_buffer;
 mod tool_output;
 
@@ -420,7 +420,8 @@ pub fn steer_node_with_id(
     images: Option<Vec<crate::model::ImageAttachment>>,
     request_id: &str,
 ) -> Result<(), String> {
-    let transport = format!("{instruction}\n\n<grapher-node-steer-id>{request_id}</grapher-node-steer-id>");
+    let transport =
+        format!("{instruction}\n\n<grapher-node-steer-id>{request_id}</grapher-node-steer-id>");
     send_steer(execution_id, &transport, images, false, Some(request_id))
 }
 
@@ -511,7 +512,9 @@ impl Drop for NodeRpcGuard {
             if let Some(rpc) = map.remove(&self.0) {
                 if let Ok(mut pending) = rpc.pending.lock() {
                     for (_, reply) in pending.drain() {
-                        let _ = reply.send(Err("Pi process ended before acknowledging the request".into()));
+                        let _ = reply.send(Err(
+                            "Pi process ended before acknowledging the request".into(),
+                        ));
                     }
                 }
             }
@@ -628,7 +631,11 @@ impl PiModelConfig {
             PiRole::NodeAgent | PiRole::Merger => "nodeAgent",
         };
         let settings = base_config.role_models.get(key);
-        let env_value = |key| std::env::var(key).ok().filter(|value| !value.trim().is_empty());
+        let env_value = |key| {
+            std::env::var(key)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        };
         let model = env_value(role.model_env_var())
             .or_else(|| {
                 if role == PiRole::Merger {
@@ -1194,7 +1201,10 @@ fn run_pi_with_timeout(
         },
     );
     if request.role == PiRole::Planner {
-        command.env("GRAPHER_FEEDBACK_ENABLED", config.feedback_enabled.to_string());
+        command.env(
+            "GRAPHER_FEEDBACK_ENABLED",
+            config.feedback_enabled.to_string(),
+        );
         // The workspace extension owns its tool registration, so it must see
         // the same decision that produced --exclude-tools above.
         command.env(
@@ -1624,7 +1634,9 @@ fn run_turn(
     context_stats.changed(channels.rpc_sender.as_ref());
     loop {
         if let Some(sender) = &channels.rpc_sender {
-            if let Ok(mut ui) = channels.rpc_ui.lock() { ui.expire(sender); }
+            if let Ok(mut ui) = channels.rpc_ui.lock() {
+                ui.expire(sender);
+            }
         }
         output_buffer.flush_due(&mut *on_output)?;
         // Planners/nodes need a steer handoff window. The Partitioner has no
@@ -1715,17 +1727,25 @@ fn run_turn(
                         "agent_settled" if rpc_agent => agent_ended = Some(Instant::now()),
                         "extension_ui_request" | "extension_error" if rpc_agent => {
                             if let Some(sender) = &channels.rpc_sender {
-                                if let Ok(mut ui) = channels.rpc_ui.lock() { ui.push(event.clone(), sender); }
+                                if let Ok(mut ui) = channels.rpc_ui.lock() {
+                                    ui.push(event.clone(), sender);
+                                }
                             }
                             // Dialog inputs and command-handler errors can echo
                             // secrets. Keep those ephemeral; ordinary lifecycle
                             // hook errors must reach live/replayed transcripts
                             // even when no composer command is polling.
-                            if event["type"] == "extension_ui_request" || event["event"] == "command" { continue; }
+                            if event["type"] == "extension_ui_request"
+                                || event["event"] == "command"
+                            {
+                                continue;
+                            }
                         }
                         "response" if rpc_agent => {
                             if let Some(id) = event["id"].as_str() {
-                                if let Ok(mut ui) = channels.rpc_ui.lock() { ui.completed(id); }
+                                if let Ok(mut ui) = channels.rpc_ui.lock() {
+                                    ui.completed(id);
+                                }
                             }
                             if event["id"].as_str() == Some(initial_rpc_id)
                                 && event["success"] == false
@@ -1754,7 +1774,8 @@ fn run_turn(
                                         // Acceptance can precede the next turn_start. Do not
                                         // exit on an earlier agent_settled and drop this turn.
                                         if result.is_ok()
-                                            && (event["command"] == "prompt" || event["command"].is_null())
+                                            && (event["command"] == "prompt"
+                                                || event["command"].is_null())
                                             && event["data"]["disposition"] != "handled"
                                         {
                                             agent_ended = None;
@@ -1895,7 +1916,11 @@ const PROCESS_FAILURE_TAIL_LINES: usize = 64;
 fn process_failure_tail(lines: &[String]) -> String {
     let mut tail = Vec::new();
     let mut bytes = 0;
-    for line in lines.iter().rev().map(|line| line.trim()).filter(|line| !line.is_empty())
+    for line in lines
+        .iter()
+        .rev()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
         .take(PROCESS_FAILURE_TAIL_LINES)
     {
         let separator = usize::from(!tail.is_empty());
@@ -2536,10 +2561,18 @@ mod tests {
     #[test]
     fn process_failure_tail_keeps_exception_cause_before_runtime_trailers() {
         let lines: Vec<_> = [
-            "file:///private/agent.mjs:7", "throw new Error('startup failed')", "",
-            "Error: startup failed", "    at file:///private/agent.mjs:7:1", "",
-            "Node.js v24.16.0", "",
-        ].into_iter().map(String::from).collect();
+            "file:///private/agent.mjs:7",
+            "throw new Error('startup failed')",
+            "",
+            "Error: startup failed",
+            "    at file:///private/agent.mjs:7:1",
+            "",
+            "Node.js v24.16.0",
+            "",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let detail = process_failure_tail(&lines);
         assert!(detail.contains("Error: startup failed"));
         assert!(detail.ends_with("Node.js v24.16.0"));
@@ -2550,14 +2583,20 @@ mod tests {
 
     #[test]
     fn process_failure_tail_is_bounded_and_preserves_utf8() {
-        let lines = vec!["old noise".repeat(4096), "中文🚀".repeat(4096),
-            "Error: managed startup failed".into(), "Node.js v24.16.0".into()];
+        let lines = vec![
+            "old noise".repeat(4096),
+            "中文🚀".repeat(4096),
+            "Error: managed startup failed".into(),
+            "Node.js v24.16.0".into(),
+        ];
         let detail = process_failure_tail(&lines);
         assert!(detail.len() <= PROCESS_FAILURE_TAIL_BYTES);
         assert!(detail.contains("Error: managed startup failed"));
         assert!(detail.ends_with("Node.js v24.16.0"));
         assert!(!detail.contains("old noise"));
-        let lines: Vec<_> = (0..100).map(|index| format!("diagnostic {index}")).collect();
+        let lines: Vec<_> = (0..100)
+            .map(|index| format!("diagnostic {index}"))
+            .collect();
         let detail = process_failure_tail(&lines);
         assert_eq!(detail.lines().count(), PROCESS_FAILURE_TAIL_LINES);
         assert!(detail.starts_with("diagnostic 36\n"));
@@ -4341,7 +4380,13 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
             |line| output.push_str(&line),
         )
         .unwrap_err();
-        assert!(resumed.contains("failed to resume the existing session"), "{resumed}");
-        assert!(output.contains("No project session found with id"), "{output}");
+        assert!(
+            resumed.contains("failed to resume the existing session"),
+            "{resumed}"
+        );
+        assert!(
+            output.contains("No project session found with id"),
+            "{output}"
+        );
     }
 }

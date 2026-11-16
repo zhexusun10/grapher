@@ -182,8 +182,13 @@ pub(super) fn feedback_input_delivered(
     };
     let boundary: InputBoundary = serde_json::from_slice(&bytes)
         .map_err(|error| format!("Invalid feedback delivery evidence: {error}"))?;
-    if boundary.execution_id != id || boundary.session_id != started.session_id
-        || boundary.delivery_marker.as_deref().is_some_and(|marker| marker != id) {
+    if boundary.execution_id != id
+        || boundary.session_id != started.session_id
+        || boundary
+            .delivery_marker
+            .as_deref()
+            .is_some_and(|marker| marker != id)
+    {
         return Err("Feedback delivery evidence belongs to another execution".into());
     }
     let origin = runtime
@@ -267,9 +272,9 @@ pub(super) fn feedback_input_delivered(
         let delivered = match boundary.delivery_marker.as_deref() {
             // Pi may resize/convert attachments and append hints to the stored
             // user text. Correlate the turn itself, not its pre-normalized text.
-            Some(marker) => text.as_deref().is_some_and(|text| {
-                engine::feedback_input::identifies(text, marker)
-            }),
+            Some(marker) => text
+                .as_deref()
+                .is_some_and(|text| engine::feedback_input::identifies(text, marker)),
             None => text.as_deref() == input.instruction.as_deref(),
         };
         if delivered {
