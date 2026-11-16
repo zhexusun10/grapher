@@ -142,6 +142,46 @@ fn seed_legacy(path: &std::path::Path, indexed: bool) -> String {
 }
 
 #[test]
+fn planning_duration_bits_survive_event_and_checkpoint_replay() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("events.db");
+    let store = Store::open(&path).unwrap();
+    let mut state = Snapshot {
+        run_id: "duration-replay".into(),
+        ..Default::default()
+    };
+    let summary = PlanningSummary {
+        planning_id: "planning".into(),
+        total_planning_duration: 1.5581296660000001,
+        model_duration: 0.10000000000000002,
+        ..Default::default()
+    };
+    let mut event = created("repo", Some("planning"), None);
+    if let EventKind::Created { planning, .. } = &mut event {
+        *planning = Some(summary.clone());
+    }
+    store.append(&mut state, event).unwrap();
+    let assert_replay = |run_id: &str| {
+        let replay = Store::open(&path).unwrap().load(run_id).unwrap();
+        assert_eq!(replay.planning, Some(summary.clone()));
+    };
+    assert_replay(&state.run_id); // Event replay, before the first checkpoint.
+    store
+        .append(
+            &mut state,
+            EventKind::Failed {
+                node: "live".into(),
+                execution_id: None,
+                error: "test failure".into(),
+                output_bytes: 0,
+                metrics: None,
+            },
+        )
+        .unwrap();
+    assert_replay(&state.run_id); // A terminal event seals the same metrics into a checkpoint.
+}
+
+#[test]
 fn migrates_planning_ids_and_uses_exact_index() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.db");

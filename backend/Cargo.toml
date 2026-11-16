@@ -31,7 +31,8 @@ required-features = ["acceptance"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Event/checkpoint replay must retain the exact recorded f64 metrics.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 # Preserve checked u64/usize SQL conversions, now opt-in in rusqlite 0.41.
 rusqlite = { version = "0.41", default-features = false, features = ["bundled", "cache", "fallible_uint"] }
