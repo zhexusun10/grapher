@@ -46,16 +46,12 @@ Visibility survives backend/browser restarts, propagates across open same-origin
 tabs and is re-read on picker opening. This is a Grapher-wide visibility rule,
 not Pi's session-local Ctrl+P cycling scope.
 
+Enabled extensions register their composer commands through Pi's ordinary extension loader and `get_commands` protocol. [extension-commands.ts](../../engine/extension-commands.ts) supplies an independent command context when no matching active Pi process is available; command names and handlers are not maintained in per-package lists. It loads the selected extensions for the composer's current repository, including trusted project extensions and MCP overrides. Each discovery or execution uses a short-lived RPC worker with an in-memory Pi context, without creating a Grapher Run, saving a session, or making model calls. Host, project, invocation and dialog identities fence replies; changing projects or leaving the composer cancels pending dialogs, and abandoned invocations expire. Settings' read-only extension catalog remains separate from this explicit command-loading path.
+
 `/name` renames the opened conversation card in the sidebar without altering
 its original goal prompt; it works only in the main conversation composer (Graph
-Planner or Serial), not in a Graph node agent dialog. `/compact`, `/session` (`/stats`), `/copy`, `/reload` and registered
-extension commands address only an **active** Pi process. Idle/finished sessions
-and the home screen cannot run extension commands; Grapher reports this in a
-floating card above the input rather than launching an untracked model/tool execution.
-`/mcp` runs Pi's status command; `/mcp login`, `/mcp logout` and `/mcp reconnect`
-retain Pi's server selection and authentication flows (optional server name).
-MCP must be enabled for the active role. Extension command names are discovered
-from that process's `get_commands`, not a fixed Grapher extension allowlist. Skills keep their existing
+Planner or Serial), not in a Graph node agent dialog. `/compact`, `/session` (`/stats`) and `/copy` require an **active** Pi process because they operate on conversation history. Registered extension commands, including `/reload`, use the matching active process when available and otherwise the independent command context; operations that request a real conversation or inference fail explicitly there.
+`/mcp` shows the active process's connection status when loaded there, or the independent context's status for the selected project otherwise. `/mcp login`, `/mcp logout` and `/mcp reconnect` retain Pi's server selection and authentication flows (optional server name). MCP must be enabled for the role. Command names in both contexts come from `get_commands`. Skills keep their existing
 prompt-expansion path, and active-session prompt templates use ordinary message
 submission. Unknown commands (including `/help`) and session-management commands (`/quit`, `/exit`,
 `/new`, `/tree`, `/fork`, `/clone`, `/resume`, session switching, auth and Pi
@@ -100,7 +96,9 @@ Settings Add/Remove changes Grapher's selection, not installed global files. Cha
 
 External resources default to `~/.pi/agent` (`GRAPHER_GLOBAL_PI_AGENT_DIR` overrides it). Grapher credentials and selection overrides use `PI_CODING_AGENT_DIR`, normally `~/.grapher/pi-agent`. Dedicated resources shadow external copies; bundled copies are deduplicated against both. [global-extensions.ts](../../engine/global-extensions.ts) owns discovery, identity, and precedence.
 
-`pi-trim` is mandatory for every role and recognizes both the Pi 1.4 and Pi 1.5 default identities. `pi-continuity` is enabled by default for Planner/Node/Merger and can be disabled. `pi-better-web-search` is off by default for Planner/Node and must be enabled in Settings; before enabling, confirm at least one configured provider supports the `web_search` API. It registers search only for supported available providers. Exact releases and integrity belong in `package.json` and `package-lock.json`, not a second version list here. The root `pi-ai` and `pi-coding-agent` packages provide extension peers and are pinned to the version recorded in `pi-lock.json`; review them alongside any source baseline upgrade.
+`pi-trim` is mandatory for every role and recognizes both the Pi 1.4 and Pi 1.5 default identities. `pi-continuity` is enabled by default for Planner/Node/Merger and can be disabled. `pi-better-web-search` is off by default for Planner/Node and must be enabled in Settings. It exposes `web_search` when a dedicated search API, Pi-authenticated official DeepSeek Search/Fetch, or an authenticated compatible lightweight model is available. Exact releases and integrity belong in `package.json` and `package-lock.json`, not a second version list here. The root `pi-ai` and `pi-coding-agent` packages provide extension peers and are pinned to the version recorded in `pi-lock.json`; review them alongside any source baseline upgrade.
+
+Dedicated search APIs support Keenable, Exa, Perplexity and DeepSeek independently of the conversation model. Saved keys are resolved per provider: Grapher's `<PI_CODING_AGENT_DIR>/better-web-search-auth.json`, then the external Pi directory's `better-web-search-auth.json` (normally `~/.pi/agent`, overridden by `GRAPHER_GLOBAL_PI_AGENT_DIR`), then `KEENABLE_API_KEY`, `EXA_API_KEY`, `PERPLEXITY_API_KEY` or `DEEPSEEK_API_KEY`. The bundled compatibility shim delegates parsing to the extension, reads inherited keys afresh, and keeps writes in the dedicated store; it never copies inherited keys into environment values or rewrites the external file. An explicit `PI_BETTER_WEB_SEARCH_AUTH` path or `GRAPHER_ISOLATED_PI_SEARCH=1` disables inheritance. The upstream extension's login/logout/status actions still require its local TUI; its help, provider and API menus use the normal RPC command bridge. Pi's official DeepSeek provider credentials work without an available chat model. Model-backed routes require OpenAI `luna`, Claude `haiku`, or other brands' `flash` models; other tiers are not fallback candidates. The default timeout is 60 seconds for response headers and a separate 60 seconds of output inactivity, both configurable with `PI_BETTER_WEB_SEARCH_TIMEOUT_MS`.
 
 ### MCP project overrides
 

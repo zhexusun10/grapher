@@ -221,7 +221,7 @@ impl Transport {
         if body["version"] != 1
             || !matches!(
                 body["operation"].as_str(),
-                Some("catalog" | "model_visibility" | "set_model_visibility" | "login" | "poll" | "respond" | "cancel" | "logout")
+                Some("catalog" | "model_visibility" | "set_model_visibility" | "login" | "poll" | "respond" | "cancel" | "logout" | "extension_command")
             )
         {
             return Err("Invalid Provider/Auth Adapter operation".into());
@@ -330,6 +330,56 @@ mod tests {
         );
         let val = result.unwrap();
         assert!(val.get("providers").is_some());
+        transport.shutdown();
+    }
+
+    #[test]
+    fn extension_commands_use_the_selected_project_without_a_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let own = directory.path().join("own");
+        let global = directory.path().join("global");
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(global.join("extensions")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(global.join("extensions/probe.ts"), "export default function(pi) { pi.registerCommand('custom-settings', { handler: async (_args, ctx) => ctx.ui.notify(ctx.cwd, 'info') }); }").unwrap();
+        let root = crate::native::installation_root();
+        let transport = Transport::new();
+        let request = |command: Value| serde_json::json!({
+            "version": 1, "operation": "extension_command", "command": command,
+        });
+        let catalog = transport.request_with(request(serde_json::json!({"operation": "catalog", "repository": project})), || {
+            let mut command = Command::new("node");
+            command.arg("--import").arg("./pi/packages/coding-agent/src/experimental/source-resolver.ts")
+                .arg(crate::native::host_path(&root.join("engine/provider-host.ts")))
+                .current_dir(&root).env("PI_CODING_AGENT_DIR", &own)
+                .env("GRAPHER_GLOBAL_PI_AGENT_DIR", &global)
+                .env("GRAPHER_ISOLATED_PI_MODELS", "1").env("GRAPHER_ISOLATED_PI_SEARCH", "1").env("PI_OFFLINE", "1")
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            Bridge::spawn(&mut command)
+        }).unwrap();
+        assert!(catalog["commands"].as_array().unwrap().iter().any(|command| command["name"] == "custom-settings"));
+        let command_id = uuid::Uuid::new_v4().to_string();
+        let fields = |operation: &str| serde_json::json!({
+            "operation": operation, "instance": catalog["instance"], "commandId": command_id,
+            "repository": project, "text": "/custom-settings",
+        });
+        transport.request(request(fields("execute"))).unwrap();
+        let mut complete = false;
+        let mut messages = Vec::new();
+        for _ in 0..500 {
+            let result = transport.request(request(fields("poll"))).unwrap();
+            messages.extend(result["events"].as_array().unwrap().iter().cloned());
+            if result["status"] != "pending" {
+                assert_eq!(result["status"], "complete", "{result}");
+                complete = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(complete);
+        assert!(messages.iter().any(|event| event["message"].as_str() == project.to_str()));
+        assert!(!own.join("sessions").exists());
         transport.shutdown();
     }
 

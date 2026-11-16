@@ -102,7 +102,7 @@ const actionText = fs.existsSync(path.join(path.dirname(fileURLToPath(import.met
   ? fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'action'),'utf8') : '';
 if (process.env.GRAPHER_MODE === 'planner' && actionText === 'move-left') {
   const target = JSON.parse(process.env.GRAPHER_PLANNER_WORKSPACES || '{}').left;
-  console.log(JSON.stringify({type:'tool_execution_end',toolName:'switch_workspace',isError:false,result:{content:[{type:'text',text:JSON.stringify(target)}]}}));
+  console.log(JSON.stringify({type:'tool_execution_end',toolName:'switch_workspace',isError:false,result:{content:[{type:'text',text:JSON.stringify({requestedId:'left'})}]}}));
 }
 const finalText = 'done';
 console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:finalText}]}}));

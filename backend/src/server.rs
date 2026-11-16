@@ -5942,6 +5942,17 @@ pub fn dispatch(
             let _ = changed;
             to_value(result)
         }
+        "extension_command" => {
+            let repository: Option<String> = argument(&body, "repository")?;
+            if matches!(body["operation"].as_str(), Some("catalog" | "execute")) {
+                if let Some(repository) = repository.as_deref().filter(|value| !value.is_empty()) {
+                    crate::workspace::validate_binding(std::path::Path::new(repository))?;
+                }
+            }
+            to_value(crate::provider_auth::request(serde_json::json!({
+                "version": 1, "operation": "extension_command", "command": body,
+            }))?)
+        }
         "provider_auth" => {
             #[cfg(not(feature = "fixture"))]
             let operation = body["operation"].as_str().map(str::to_owned);

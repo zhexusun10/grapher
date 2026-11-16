@@ -9,7 +9,7 @@ export function ExtensionItem({ extension, disabled, onToggle }: {
 }) {
   const bundledDescriptions: Record<string, string> = {
     'npm:pi-continuity': t('更稳健的循环工程：自动恢复意外的流式中断、消息截断、网络断连，以及 API 5 小时/每周额度限制。'),
-    'npm:pi-better-web-search': t('开启前请确认你的所有 Provider 中有支持 web_search API 的 Provider；注册由可用模型 Provider 提供的 web_search 工具，当没有 Provider 可搜索时不注册。'),
+    'npm:pi-better-web-search': t('支持已配置的专用搜索 API 和已认证的兼容 Provider；仅在有可用搜索接口时注册 web_search 工具。'),
   };
   const description = extension.bundled
     ? `${extension.source}${bundledDescriptions[extension.id] ? ` · ${bundledDescriptions[extension.id]}` : ''}`

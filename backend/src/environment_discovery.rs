@@ -627,6 +627,14 @@ fn unbound_launch(launch: &LaunchConfig) -> Result<LaunchConfig, String> {
     let mut next = launch.clone();
     next.entry = next.shell.clone();
     next.restore_unbound_path();
+    // Explicit launches require the declared entry directory to remain first
+    // even when a failed native verification falls back to the unbound shell.
+    if next.requires_entry_first() {
+        if let Some(directory) = Path::new(&next.shell).parent().map(text) {
+            next.path.retain(|path| path != &directory);
+            next.path.insert(0, directory);
+        }
+    }
     next.hook = None;
     next.environment = None;
     next.variables.remove("VIRTUAL_ENV");

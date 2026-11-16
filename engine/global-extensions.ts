@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { isCaseInsensitive, pathKey, toHostInput } from './path-identity.mjs';
 import { fileURLToPath } from 'node:url';
-import { DefaultPackageManager, SettingsManager, createMcpExtension, composerCommandsExtension, type InlineExtension } from './pi-compat.ts';
+import { DefaultPackageManager, SettingsManager, createMcpExtension, composerCommandsExtension, loadBundledWebSearch, type InlineExtension } from './pi-compat.ts';
 import { loadGrapherMcpConfig } from './mcp-config.ts';
 import workspacePolicy from './prompt-extension.ts';
 
@@ -20,6 +20,9 @@ export const continuityId = 'npm:pi-continuity';
 export const bundledContinuity = fileURLToPath(new URL('../node_modules/pi-continuity/extensions/index.ts', import.meta.url));
 export const webSearchId = 'npm:pi-better-web-search';
 export const bundledWebSearch = fileURLToPath(new URL('../node_modules/pi-better-web-search/extensions/index.ts', import.meta.url));
+export const webSearchExtension: InlineExtension = {
+  name: 'pi-better-web-search', factory: async pi => { await (await loadBundledWebSearch())(pi); },
+};
 // Bundled extensions are pinned project dependencies; only trim is mandatory.
 const bundledExtensions = [
   { id: trimId, name: 'pi-trim', path: bundledTrim, required: true, defaultEnabled: true },
@@ -247,7 +250,7 @@ export async function executionResources(args: string[], directory: string, role
     // Web search follows the normal extension opt-in and only augments roles
     // that already receive user extensions.
     if (discoverExtensions && (state[webSearchId] ?? bundledDefault(webSearchId))) {
-      extensions.push(bundledWebSearch);
+      extensionFactories.push(webSearchExtension);
     }
     // Keep credentials in Grapher's dedicated agent directory; read global MCP
     // config fresh, then let dedicated/project entries win name collisions.

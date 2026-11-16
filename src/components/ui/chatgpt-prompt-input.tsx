@@ -383,7 +383,7 @@ export const PromptBox = React.forwardRef<HTMLTextAreaElement, PromptBoxProps>(
         internalTextareaRef.current?.setSelectionRange(text.length, text.length);
       });
     };
-    const commands = useComposerCommands({ text: currentText, runId, node, planMode: visiblePlanMode,
+    const commands = useComposerCommands({ text: currentText, repository, runId, node, planMode: visiblePlanMode,
       conversationModel, setText: setCommandText });
 
     // 分析光标左侧文本中是否存在 @ 或 /

@@ -44,11 +44,30 @@ import { ModelConfig } from '../pi/packages/coding-agent/src/core/model-config.t
 import { overlayRuntimeOptions } from './model-config-overlay.mjs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+
+import { withInheritedSearchCredentials } from './search-credentials.mjs';
 
 const parseModels = (content: string) => JSON.parse(stripJsonComments(content.replace(/^\uFEFF/, '')));
 export function modelRuntimeOptions(options: Parameters<typeof ModelRuntime.create>[0] = {}) {
   const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), '.grapher', 'pi-agent');
   return overlayRuntimeOptions(options, agentDir, parseModels, async (path: string) => !(await ModelConfig.load(path)).getError());
+}
+export async function loadBundledWebSearch() {
+  // Reuse Pi's loader and SDK modules for the one bundled compatibility shim.
+  const [{ createJiti }, { VIRTUAL_MODULES }] = await Promise.all([
+    import('../pi/packages/coding-agent/src/core/extensions/jiti-loader.ts'),
+    import('../pi/packages/coding-agent/src/core/extensions/virtual-modules.ts'),
+  ]);
+  const credentialPath = fileURLToPath(new URL('../node_modules/pi-better-web-search/lib/credentials.ts', import.meta.url));
+  const loader = createJiti(import.meta.url, { moduleCache: false, virtualModules: VIRTUAL_MODULES, tsconfigPaths: true });
+  const credentials = withInheritedSearchCredentials(await loader.import(credentialPath));
+  // This relative module belongs only to this package-local loader. Other
+  // user extensions keep their own imports and credential implementations.
+  const jiti = createJiti(import.meta.url, { moduleCache: false,
+    virtualModules: { ...VIRTUAL_MODULES, './credentials.ts': credentials }, tsconfigPaths: true });
+  return jiti.import<import('../pi/packages/coding-agent/src/index.ts').ExtensionFactory>(
+    fileURLToPath(new URL('../node_modules/pi-better-web-search/extensions/index.ts', import.meta.url)), { default: true });
 }
 export type { InlineExtension } from '../pi/packages/coding-agent/src/index.ts';
 // RPC does not dispatch interactive-mode builtins. Delegate command actions
@@ -187,6 +206,33 @@ export function preparePiCli() {
     import('../pi/packages/coding-agent/src/index.ts'),
   ]);
 }
+export async function runPiCommandCli(args: string[], options: MainOptions = {}) {
+  const needsSession = () => { throw new Error('This operation requires an active conversation.'); };
+  const prompt = AgentSession.prototype.prompt;
+  const restore: Array<() => void> = [];
+  AgentSession.prototype.prompt = function (text, promptOptions) {
+    const name = /^\/([^\s]+)/.exec(text)?.[1];
+    if (!name || !this.extensionRunner.getCommand(name)) return Promise.reject(new Error('Only registered extension commands can run without a conversation.'));
+    return prompt.call(this, text, promptOptions);
+  };
+  // Commands can manage configuration and credentials. They cannot create a
+  // conversation, compact nonexistent history, or start an inference request.
+  for (const [prototype, names] of [
+    [AgentSession.prototype, ['compact', 'newSession', 'fork', 'navigateTree', 'switchSession']],
+    [ModelRuntime.prototype, ['stream', 'streamSimple', 'complete', 'classify', 'generateImages']],
+  ] as const) {
+    for (const name of names) {
+      const object = prototype as unknown as Record<string, unknown>;
+      const original = object[name];
+      if (typeof original !== 'function') continue;
+      object[name] = needsSession;
+      restore.push(() => { object[name] = original; });
+    }
+  }
+  try { await runPiCli(args, options); }
+  finally { AgentSession.prototype.prompt = prompt; for (const reset of restore) reset(); }
+}
+
 export async function runPiCli(args: string[], options: MainOptions = {}) {
   const [{ setupCli }, { main }] = await preparePiCli();
   setupCli();

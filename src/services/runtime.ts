@@ -168,6 +168,9 @@ export const runtimeService = {
     t("撤回请求超时，请重试以恢复已撤回的消息。")),
   composerModels: (fields: Record<string, unknown>) => request<Snapshot>("composer_models", fields),
   composerRename: (fields: { runId: string; title: string }) => request<Snapshot>("composer_rename", fields),
+  extensionCommand: <T = unknown>(fields: Record<string, unknown>) => withRequestTimeout(
+    signal => requestBody<T>("extension_command", fields, signal), fields.operation === 'catalog' ? 35_000 : metadataTimeoutMs,
+    t("Pi 指令请求超时，请确认执行结果后再重试。")),
   composerCommand: <T = unknown>(fields: Record<string, unknown>) => withRequestTimeout(
     signal => requestBody<T>("composer_command", fields, signal), fields.operation === "execute" ? 310_000 : metadataTimeoutMs,
     t("Pi 指令请求超时，请确认执行结果后再重试。")),

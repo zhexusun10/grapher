@@ -5,6 +5,17 @@ import { ProviderAuthAdapter } from "./provider-auth-adapter.mjs";
 import { root, verifyBaseline } from "../scripts/pi-baseline.mjs";
 import { verifyPiDependencies } from "../scripts/pi-dependencies.mjs";
 import { configureAgentDir } from "./agent-dir.mjs";
+import type { ExtensionCommands } from "./extension-commands.ts";
+
+let commandHost: ExtensionCommands | undefined;
+let commandHostLoading: Promise<ExtensionCommands> | undefined;
+async function dispatch(request: Record<string, any>) {
+  if (request.operation !== 'extension_command') return adapter.dispatch(request);
+  if (request.version !== 1) throw new Error('Invalid extension command protocol');
+  commandHostLoading ??= import('./extension-commands.ts')
+    .then(({ ExtensionCommands }) => commandHost = new ExtensionCommands());
+  return (await commandHostLoading).dispatch(request.command);
+}
 
 configureAgentDir();
 verifyBaseline();
@@ -25,7 +36,7 @@ let inputClosed = false;
 const finish = () => {
   // A pipe may close immediately after its last line, while catalog/login is
   // still resolving. Drain replies before exiting; signals still cancel now.
-  if (inputClosed && pending === 0) { adapter.close(); process.exit(0); }
+  if (inputClosed && pending === 0) void stop();
 };
 input.on("line", async (line) => {
   pending++;
@@ -37,7 +48,7 @@ input.on("line", async (line) => {
     // construct ModelRuntime, check credentials, refresh tokens or call a model.
     reply = request.version === 1 && request.operation === 'grapher_prepare' && typeof request.id === 'string'
       ? { version: 1, id: request.id, result: { ready: true } }
-      : { version: 1, result: await adapter.dispatch(request) };
+      : { version: 1, result: await dispatch(request) };
   } catch {
     // No raw exception, request body, or credential object crosses this boundary.
     reply = { version: 1, error: "Provider/Auth operation failed. Refresh providers or restart login." };
@@ -46,7 +57,14 @@ input.on("line", async (line) => {
   // Exiting on stdin EOF before the write callback truncates the JSON reply.
   process.stdout.write(`${JSON.stringify(reply)}\n`, () => { pending--; finish(); });
 });
-const stop = () => { adapter.close(); process.exit(0); };
+let stopping = false;
+const stop = async () => {
+  if (stopping) return;
+  stopping = true;
+  await commandHost?.close();
+  adapter.close();
+  process.exit(0);
+};
 input.on("close", () => {
   inputClosed = true;
   // A vanished parent must not leave an interactive login child alive forever.

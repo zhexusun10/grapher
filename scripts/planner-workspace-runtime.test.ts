@@ -5,6 +5,7 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { configurePlannerWorkspace, switchPlannerWorkspace, plannerWorkspaceState } from '../engine/planner-workspace.ts';
+import { samePath } from '../engine/path-identity.mjs';
 import { managedBashOptions, rebindWorkspaceEnvironment } from '../engine/launch-binding.mjs';
 import workspacePolicy from '../engine/prompt-extension.ts';
 
@@ -88,14 +89,14 @@ test('Planner workspace lookup distinguishes literal ids from inherited object p
         assert.throws(() => switchPlannerWorkspace(id), {
           message: `No current workspace is available for node '${id}'`,
         }, `${id} is not a backend target merely because Object.prototype defines it`);
-        assert.equal(process.cwd(), realpathSync.native(project), 'a missing id cannot change cwd');
+        assert.ok(samePath(process.cwd(), project), 'a missing id cannot change cwd');
         bind(Object.fromEntries([[id, {
           requestedNode: id, actualNode: 'task', executionId: 'task-execution', workspace,
         }]]));
         const selected = switchPlannerWorkspace(id);
         assert.equal(selected.requestedNode, id);
-        assert.equal(selected.workspace, realpathSync.native(workspace));
-        assert.equal(process.cwd(), realpathSync.native(workspace), 'explicit prototype-like ids remain usable');
+        assert.ok(samePath(selected.workspace, workspace));
+        assert.ok(samePath(process.cwd(), workspace), 'explicit prototype-like ids remain usable');
       }
     }
   } finally {

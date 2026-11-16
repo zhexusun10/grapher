@@ -293,7 +293,7 @@ test('macOS browser drives Graph publication and a persistent Serial follow-up',
       assert.ok(parked && resumed, 'Serial must park and resume the real Pi process');
       assert.equal(resumed.pid, parked.pid, 'the follow-up uses the same process');
       assert.deepEqual(browserErrors, []);
-      assert.ok(calls.some(call => call.role === 'planner' && call.tool === 'node'));
+      assert.ok(calls.some(call => call.role === 'planner' && call.tool === 'edit_graph'));
       assert.ok(calls.filter(call => call.role === 'node' && call.tool === 'bash').length >= 5);
       success = true;
       console.log(`macOS browser acceptance: Graph, Serial, Seatbelt, Git and pinned Pi; ${calls.length} local model calls; stale send retried: ${retried}`);

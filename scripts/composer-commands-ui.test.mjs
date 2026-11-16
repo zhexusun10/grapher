@@ -224,6 +224,92 @@ test("composer model scope, slash completion, blocking and extension dialogs", a
   }
 });
 
+test("standalone extension commands work before a conversation and follow the selected project", { timeout: 30_000 }, async () => {
+  const server = await commandServer();
+  let browser;
+  try {
+    await server.listen();
+    browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
+    for (const suffix of ["", "?run=1"]) {
+      const page = await browser.newPage();
+      const jobs = new Map();
+      const saved = [];
+      const cancelled = [];
+      const commands = ["pi-better-web-search", "web-search-provider", "web-search-api", "mcp", "custom-settings"].map(name => ({ name, source: "extension" }));
+      let activeExecutions = 0;
+      await page.route("**/api/*", async route => {
+        const url = route.request().url();
+        const body = route.request().postDataJSON();
+        let result = [];
+        if (url.endsWith("/list_files")) result = { files: [] };
+        if (url.endsWith("/list_skills")) result = { skills: [] };
+        if (url.endsWith("/provider_auth")) result = { providers: [], models: [] };
+        if (url.endsWith("/composer_command")) {
+          if (body.operation === "execute") activeExecutions++;
+          await route.fulfill({ status: 400, json: { error: "Pi session is not active" } });
+          return;
+        }
+        if (url.endsWith("/extension_command")) {
+          assert.equal(body.runId, undefined, "standalone commands have no Run owner");
+          assert.ok(["/project", "/other-project"].includes(body.repository));
+          if (body.operation === "catalog") result = { instance: "standalone-host", commands: body.repository === "/project" ? commands : [{ name: "other-project-settings", source: "extension" }] };
+          else {
+            assert.equal(body.instance, "standalone-host");
+            if (body.operation === "execute") {
+              const custom = body.text === "/custom-settings";
+              jobs.set(body.commandId, { repository: body.repository, status: custom ? "pending" : "complete", events: [custom
+                ? { type: "extension_ui_request", id: "choice", method: "select", title: "Custom settings", options: ["Inspect"] }
+                : { type: "extension_ui_request", id: "info", method: "notify", message: body.text === "/mcp" ? `MCP project: ${body.repository}` : "Search setup: /web-search-api and /web-search-provider" }] });
+              result = {};
+            } else {
+              const job = jobs.get(body.commandId);
+              assert.ok(job);
+              assert.equal(body.repository, job.repository, "replies stay pinned to the original project");
+              if (body.operation === "poll") { result = { status: job.status, events: job.events }; job.events = []; }
+              if (body.operation === "respond") {
+                if (body.response.id === "choice") job.events.push({ type: "extension_ui_request", id: "value", method: "input", title: "Custom value" });
+                else { saved.push(body.response.value); job.status = "complete"; job.events.push({ type: "extension_ui_request", id: "saved", method: "notify", message: "Custom setting saved" }); }
+                result = { accepted: true };
+              }
+              if (body.operation === "cancel") { if (job.status === "pending") { cancelled.push(body.repository); job.status = "cancelled"; } result = {}; }
+            }
+          }
+        }
+        await route.fulfill({ json: { result } });
+      });
+      await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__commands${suffix}`);
+      const composer = page.locator("textarea").first();
+      await composer.fill("/");
+      for (const command of commands) await expect(page.locator(".suggestion-item-title").filter({ hasText: `/${command.name}` })).toBeVisible();
+      const submit = async text => { await composer.fill(text); await composer.press("Escape"); await composer.press("Enter"); };
+      await submit("/pi-better-web-search");
+      await expect(page.locator('.prompt-command-popover[role="status"]')).toContainText("Search setup");
+      await submit("/mcp");
+      await expect(page.locator('.prompt-command-popover[role="status"]')).toContainText("MCP project: /project");
+      await submit("/custom-settings");
+      await page.getByRole("button", { name: "Inspect", exact: true }).click();
+      await page.getByRole("textbox", { name: "Custom value" }).fill("custom-browser-value");
+      await page.getByRole("button", { name: "提交", exact: true }).click();
+      await expect(page.locator('.prompt-command-popover[role="status"]')).toContainText("Custom setting saved");
+      assert.deepEqual(saved, ["custom-browser-value"]);
+      assert.equal(activeExecutions, 0);
+      assert.deepEqual(JSON.parse(await page.locator("output").textContent()).calls, [], "configuration creates no model prompt or conversation");
+      await submit("/custom-settings");
+      await page.getByRole("button", { name: "Inspect", exact: true }).click();
+      await expect(page.getByRole("textbox", { name: "Custom value" })).toBeVisible();
+      await page.getByRole("button", { name: "Switch project", exact: true }).click();
+      await expect.poll(() => cancelled).toEqual(["/project"]);
+      await expect(page.getByRole("textbox", { name: "Custom value" })).toHaveCount(0);
+      await expect(composer).toBeEnabled();
+      await composer.fill("/");
+      await expect(page.locator(".suggestion-item-title").filter({ hasText: "/other-project-settings" })).toBeVisible();
+      assert.equal(await page.locator(".suggestion-item-title").filter({ hasText: "/custom-settings" }).count(), 0);
+      assert.equal(saved.length, 1, "project changes cancel pending entry");
+      await page.close();
+    }
+  } finally { await browser?.close(); await server.close(); }
+});
+
 test("a delayed model command cannot overwrite newer settings in the same conversation", { timeout: 30_000 }, async () => {
   const server = await commandServer();
   let browser;

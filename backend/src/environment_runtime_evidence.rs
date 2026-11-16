@@ -179,7 +179,14 @@ impl RuntimeEvidence {
     // Recovery selectors are not an extra business-launch compatibility gate.
     // Actual startup still remeasures the original ABI and all recorded files.
     pub(super) fn same_runtime_files(&self, other: &Self) -> bool {
-        self.schema == other.schema && self.roots == other.roots && self.files == other.files
+        self.schema == other.schema
+            && self.files == other.files
+            && self.roots.len() == other.roots.len()
+            && self.roots.iter().all(|(label, path)| {
+                other.roots.get(label).is_some_and(|other_path| {
+                    crate::path_identity::same_path(Path::new(path), Path::new(other_path))
+                })
+            })
     }
 
     pub(super) fn from_probe(

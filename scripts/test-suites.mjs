@@ -71,7 +71,7 @@ export const suites = {
         'model-visibility.test.mjs', 'ensure-deps.test.mjs', 'dev.test.mjs',
         'planning-trajectory.test.mjs', 'pi-process-contract.test.mjs'),
       sourceTests('execution-retry.test.ts', 'pi-compat.test.ts', 'global-extensions.test.ts',
-        'continuation-context.test.ts'),
+        'extension-commands.test.ts', 'search-credentials.test.ts', 'continuation-context.test.ts'),
       tsxTests('continuity-boundary.test.ts'),
     ],
   },

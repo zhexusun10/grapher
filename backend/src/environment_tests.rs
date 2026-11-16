@@ -461,6 +461,7 @@ fn tracked_scope_admission_uses_the_live_source_index_not_an_older_graph_snapsho
 
 pub(super) fn policy() -> EnvironmentConfig {
     let python = python();
+    let git = crate::native::trusted_git().unwrap();
     EnvironmentConfig {
         mode: "native-workspace".into(),
         platform: platform().into(),
@@ -477,6 +478,7 @@ pub(super) fn policy() -> EnvironmentConfig {
                     .unwrap()
                     .to_string_lossy()
                     .into(),
+                git.parent().unwrap().to_string_lossy().into(),
             ],
             unbound_path: None,
             shell: shell(),

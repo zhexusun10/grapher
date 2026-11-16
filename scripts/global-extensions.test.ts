@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bundledTrim, bundledContinuity, bundledWebSearch, continuityId, extensionCatalog, executionResources, setExtensionEnabled, trimId, webSearchId, workspacePolicyName } from '../engine/global-extensions.ts';
+import { bundledTrim, bundledContinuity, bundledWebSearch, continuityId, extensionCatalog, executionResources, setExtensionEnabled, trimId, webSearchId, webSearchExtension, workspacePolicyName } from '../engine/global-extensions.ts';
 import workspacePolicy from '../engine/prompt-extension.ts';
 import { loadGrapherMcpConfig } from '../engine/mcp-config.ts';
 import { loadMcpConfig } from '../engine/pi-compat.ts';
@@ -399,25 +399,25 @@ test('bundled web search defaults off, persists opt-in for Planner/Node only and
     assert.equal(initial.required, false);
     assert.equal(initial.enabled, false);
     for (const role of ['partition', 'merger', 'planner', 'node']) {
-      assert.ok(!(await executionResources([], f.own, role)).args.includes(bundledWebSearch));
+      assert.ok(!(await executionResources([], f.own, role)).extensionFactories.includes(webSearchExtension));
     }
     const enabled = await setExtensionEnabled(f.own, webSearchId, true);
     assert.equal(enabled.extensions.find(extension => extension.id === webSearchId)?.enabled, true);
     assert.equal(JSON.parse(readFileSync(join(f.own, 'extensions.json'), 'utf8')).overrides[webSearchId], true);
     for (const role of ['planner', 'node']) {
-      assert.equal((await executionResources([], f.own, role)).args.filter(arg => arg === bundledWebSearch).length, 1);
+      assert.equal((await executionResources([], f.own, role)).extensionFactories.filter(factory => factory === webSearchExtension).length, 1);
       for (const flag of ['--no-extensions', '-ne']) {
-        assert.ok(!(await executionResources([flag], f.own, role)).args.includes(bundledWebSearch));
+        assert.ok(!(await executionResources([flag], f.own, role)).extensionFactories.includes(webSearchExtension));
       }
     }
     for (const role of ['partition', 'merger']) {
-      assert.ok(!(await executionResources([], f.own, role)).args.includes(bundledWebSearch));
+      assert.ok(!(await executionResources([], f.own, role)).extensionFactories.includes(webSearchExtension));
     }
     const disabled = await setExtensionEnabled(f.own, webSearchId, false);
     assert.equal(disabled.extensions.find(extension => extension.id === webSearchId)?.enabled, false);
     assert.equal(JSON.parse(readFileSync(join(f.own, 'extensions.json'), 'utf8')).overrides[webSearchId], false);
     for (const role of ['partition', 'merger', 'planner', 'node']) {
-      assert.ok(!(await executionResources([], f.own, role)).args.includes(bundledWebSearch));
+      assert.ok(!(await executionResources([], f.own, role)).extensionFactories.includes(webSearchExtension));
     }
     assert.ok(existsSync(bundledWebSearch), 'removal must not uninstall the bundled package');
   } finally { f.close(); }
@@ -477,7 +477,9 @@ for (const [name, id, bundled, toggles] of [
       for (const enabled of toggles) {
         if (id !== trimId) await setExtensionEnabled(f.own, id, enabled);
         const resources = await executionResources([], f.own, 'planner');
-        assert.equal(resources.args.filter(arg => arg === bundled).length, enabled ? 1 : 0);
+        const count = id === webSearchId ? resources.extensionFactories.filter(factory => factory === webSearchExtension).length
+          : resources.args.filter(arg => arg === bundled).length;
+        assert.equal(count, enabled ? 1 : 0);
         for (const pkg of packages) {
           assert.ok(!resources.args.includes(join(pkg, 'a.ts')));
           assert.ok(!resources.args.includes(join(pkg, 'b.ts')));

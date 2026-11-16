@@ -20,6 +20,11 @@ fn absolute(path: &str) -> bool {
     Path::new(path).is_absolute() && !path.contains('\0')
 }
 
+fn without_trailing_separator(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(|character| character == '/' || character == '\\');
+    if trimmed.is_empty() { path } else { trimmed }
+}
+
 pub(super) fn validate(
     selectors: &[Selector], files: &[RuntimeFile], roots: &BTreeMap<String, String>, complete: bool,
 ) -> Result<(), String> {
@@ -146,7 +151,7 @@ pub(super) fn observe(
         // This is the target observed by the interpreter, not a selector to
         // reinterpret through a possibly changed filesystem a second time.
         let target = text(Path::new(resolved));
-        if text(&canonical(Path::new(requested))?) != target {
+        if text(&canonical(Path::new(without_trailing_separator(requested)))?) != target {
             return Err("Native runtime selector changed during observation".into());
         }
         observed.insert(target.clone());
@@ -195,9 +200,13 @@ impl Selector {
     }
 
     pub(super) fn preflight(&self) -> Result<(), String> {
+        // A file selector may be reported with a trailing separator by a
+        // native probe. Remove only that separator before canonicalization;
+        // the selector's identity and recorded target remain unchanged.
+        let path = without_trailing_separator(&self.path);
         // Do not canonicalize the recorded target through today's filesystem.
         // Equal bytes at a different target cannot authorize redirecting it.
-        let actual = canonical(Path::new(&self.path)).map_err(|error| format!(
+        let actual = canonical(Path::new(path)).map_err(|error| format!(
             "External native runtime selector is unavailable: {}; preserving current workspace/state: {error}", self.path))?;
         if text(&actual) != self.target {
             return Err(format!("External native runtime selector was redirected: {} (recorded {}, current {}); preserving current workspace/state", self.path, self.target, text(&actual)));
