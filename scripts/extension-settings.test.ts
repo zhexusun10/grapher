@@ -57,6 +57,39 @@ test('a reopened Settings card reads the page-session catalog instead of repaint
   } finally { globalThis.fetch = original; }
 });
 
+test('command consumers are notified when enabled extensions change, without duplicate notifications on unchanged reads', async () => {
+  const original = globalThis.fetch;
+  const entry = { id: 'subscription-fixture', name: 'Fixture', enabled: true, bundled: false, required: false, source: 'auto', path: '/fixture.ts' };
+  let enabled = true;
+  let fail = false;
+  const changes: number[] = [];
+  const unsubscribe = piExtensions.subscribeSelection(() => { changes.push(piExtensions.getSelectionRevision()); });
+  globalThis.fetch = (async (_url, init) => {
+    if (fail) return new Response(JSON.stringify({ error: 'selection write failed' }), { status: 500 });
+    const body = JSON.parse(String(init?.body));
+    if (body.operation === 'set_enabled') enabled = body.enabled;
+    return new Response(JSON.stringify({ result: { globalDirectory: '/pi', extensions: [{ ...entry, enabled }] } }));
+  }) as typeof fetch;
+  try {
+    await piExtensions.catalog(true);
+    const before = piExtensions.getSelectionRevision();
+    changes.length = 0;
+    await piExtensions.catalog(true);
+    assert.deepEqual(changes, []);
+    await piExtensions.setEnabled(entry.id, false);
+    assert.deepEqual(changes, [before + 1]);
+    await piExtensions.catalog(true);
+    assert.deepEqual(changes, [before + 1]);
+    fail = true;
+    await assert.rejects(piExtensions.setEnabled(entry.id, true), /selection write failed/);
+    assert.equal(piExtensions.getSelectionRevision(), before + 1);
+    unsubscribe();
+    fail = false;
+    await piExtensions.setEnabled(entry.id, true);
+    assert.deepEqual(changes, [before + 1], 'unmounted consumers are detached');
+  } finally { unsubscribe(); globalThis.fetch = original; }
+});
+
 for (const failed of [false, true]) {
   test(`a ${failed ? 'failed' : 'successful'} pre-toggle refresh cannot replace the saved extension selection`, async () => {
     const original = globalThis.fetch;

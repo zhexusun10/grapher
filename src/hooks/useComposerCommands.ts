@@ -1,8 +1,9 @@
-import { useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { t } from "../i18n";
 import { availableCatalogModels, roleModelConfig, normalizeModelThinkingLevels, updateRoleModelConfig } from "../modelConfig";
 import type { ThinkingLevel } from "../types";
 import { providerAuth } from "../services/providerAuth";
+import { piExtensions } from "../services/piExtensions";
 import { runtimeService } from "../services/runtime";
 import { blockedCommands, ComposerModels, mergeCommands, parseSlashCommand, type ExtensionUIRequest, type PiCommandCatalog } from "../services/composerCommands";
 
@@ -16,12 +17,17 @@ function scoreMatch(candidate: string, query: string): number {
   return 0;
 }
 
-type CommandSession = { instance: string; commandId: string; runId: string; node?: string; global?: boolean; repository?: string; requests: ExtensionUIRequest[] };
-type GlobalCommandState = { status: 'pending' | 'complete' | 'cancelled' | 'failed'; events: ExtensionUIRequest[]; error?: string };
+type CommandSession = { instance: string; commandId: string; runId: string; node?: string; standalone?: boolean; repository?: string; requests: ExtensionUIRequest[] };
+type StandaloneCommandState = { status: 'pending' | 'complete' | 'cancelled' | 'failed'; events: ExtensionUIRequest[]; error?: string };
+type CommandCatalog = { catalog: PiCommandCatalog; standalone: boolean };
+type CommandCatalogState = { key: string; result?: CommandCatalog; loading: boolean; error: string };
+const isCommandCatalog = (value: PiCommandCatalog | null | undefined): value is PiCommandCatalog =>
+  typeof value?.instance === 'string' && Array.isArray(value.commands) && value.commands.every(command =>
+    typeof command?.name === 'string' && (command.description === undefined || typeof command.description === 'string'));
 const isDialog = (request: ExtensionUIRequest) => ["select", "confirm", "input", "editor"].includes(request.method ?? "");
 
 async function cancelDialogs(session: CommandSession, requests: ExtensionUIRequest[]) {
-  if (session.global) {
+  if (session.standalone) {
     await runtimeService.extensionCommand({ repository: session.repository, instance: session.instance, commandId: session.commandId, operation: 'cancel' }).catch(() => {});
     return;
   }
@@ -43,8 +49,15 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
   const identity = useRef(scopeKey);
   identity.current = scopeKey;
   const catalog = useSyncExternalStore(providerAuth.subscribeCatalog, providerAuth.getCachedCatalog, () => null);
-  const [commands, setCommands] = useState<PiCommandCatalog | null>(null);
-  const [globalCommands, setGlobalCommands] = useState<PiCommandCatalog | null>(null);
+  const selectionRevision = useSyncExternalStore(piExtensions.subscribeSelection, piExtensions.getSelectionRevision, () => 0);
+  const catalogKey = JSON.stringify([scopeKey, selectionRevision]);
+  const catalogIdentity = useRef(catalogKey);
+  catalogIdentity.current = catalogKey;
+  const [commandCatalog, setCommandCatalog] = useState<CommandCatalogState>({ key: catalogKey, loading: false, error: '' });
+  const [refreshRevision, setRefreshRevision] = useState(0);
+  const catalogRequest = useRef<{ key: string; task: Promise<CommandCatalog> } | null>(null);
+  const commandResult = commandCatalog.key === catalogKey ? commandCatalog.result : undefined;
+  const commands = commandResult?.catalog;
   const [ui, setUI] = useState<ExtensionUIRequest[]>([]);
   const [notice, setNotice] = useState("");
   const [scopedModelsOpen, setScopedModelsOpen] = useState(false);
@@ -59,12 +72,11 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
   const settingsIdentity = useRef(settingsKey);
   settingsIdentity.current = settingsKey;
   const argument = text.match(/^\/(model|thinking)\s+([^\n]*)$/);
-  const mcpArgument = text.match(/^\/mcp\s+([^\n]*)$/);
   const model = catalog?.models.find(item => `${item.provider}/${item.id}` === settings.model);
   const levels = model?.thinkingLevels ?? [];
 
   useEffect(() => {
-    setCommands(null); setGlobalCommands(null); setUI([]); setNotice(""); setScopedModelsOpen(false);
+    setUI([]); setNotice(""); setScopedModelsOpen(false);
     return () => {
       generation.current++;
       const session = active.current;
@@ -72,19 +84,39 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
       if (session) void cancelDialogs(session, session.requests.splice(0));
     };
   }, [scopeKey]);
+  const loadCommandCatalog = useCallback((): Promise<CommandCatalog> => {
+    const key = JSON.stringify([catalogKey, refreshRevision]);
+    if (catalogRequest.current?.key === key) return catalogRequest.current.task;
+    setCommandCatalog(previous => ({ key: catalogKey,
+      result: previous.key === catalogKey ? previous.result : undefined, loading: true, error: '' }));
+    const task = (async () => {
+      if (runId && !runId.startsWith('pending-')) {
+        const catalog = await runtimeService.composerCommand<PiCommandCatalog>({ runId, node, operation: 'catalog' }).catch(() => null);
+        if (isCommandCatalog(catalog)) return { catalog, standalone: false };
+      }
+      const catalog = await runtimeService.extensionCommand<PiCommandCatalog>({ repository: commandRepository, operation: 'catalog' });
+      if (!isCommandCatalog(catalog)) throw new Error('Invalid extension command catalog');
+      return { catalog, standalone: true };
+    })().then(result => {
+      if (catalogIdentity.current === catalogKey && catalogRequest.current?.task === task) {
+        setCommandCatalog({ key: catalogKey, result, loading: false, error: '' });
+      }
+      return result;
+    }, error => {
+      if (catalogIdentity.current === catalogKey && catalogRequest.current?.task === task) {
+        setCommandCatalog({ key: catalogKey, loading: false, error: t('扩展指令加载失败，请重试。') });
+      }
+      throw error;
+    }).finally(() => { if (catalogRequest.current?.task === task) catalogRequest.current = null; });
+    catalogRequest.current = { key, task };
+    return task;
+  }, [catalogKey, refreshRevision, runId, node, commandRepository]);
   const commandTrigger = text.startsWith("/");
   useEffect(() => {
     if (!commandTrigger) return;
-    let disposed = false;
     void providerAuth.catalog().catch(() => {});
-    void runtimeService.extensionCommand<PiCommandCatalog>({ repository: commandRepository, operation: 'catalog' })
-      .then(catalog => { if (!disposed) setGlobalCommands(catalog); }).catch(() => {});
-    if (runId && !runId.startsWith("pending-")) {
-      void runtimeService.composerCommand<PiCommandCatalog>({ runId, node, operation: "catalog" })
-        .then(commands => { if (!disposed) setCommands(commands); }).catch(() => {});
-    }
-    return () => { disposed = true; };
-  }, [commandTrigger, scopeKey]);
+    void loadCommandCatalog().catch(() => {});
+  }, [commandTrigger, loadCommandCatalog]);
 
   const suggestions = useMemo(() => {
     if (argument) {
@@ -118,11 +150,9 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
       rankedModels.sort((a, b) => b.score - a.score);
       return rankedModels.map(({ model, full, score }) => ({ title: full, subtitle: model.name, value: `/model ${full}`, score }));
     }
-    if (mcpArgument) return ["login", "logout", "reconnect"].filter(action => action.startsWith(mcpArgument[1].toLowerCase()))
-      .map(action => ({ title: `/mcp ${action}`, subtitle: t("可选：输入服务名；省略时由 Pi 选择服务。"), value: `/mcp ${action} `, score: 80 }));
     const query = text.match(/^\/([^\s/]*)$/)?.[1].toLowerCase();
     if (query === undefined) return [];
-    const matched = mergeCommands([...(commands?.commands ?? []), ...(globalCommands?.commands ?? [])])
+    const matched = mergeCommands(commands?.commands ?? [])
       .filter(command => !modelNode || command.name !== "name")
       .map(command => ({ command, score: scoreMatch(command.name, query) }))
       .filter(item => item.score > 0);
@@ -132,7 +162,7 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
     return matched.map(({ command, score }) => ({
       title: `/${command.name}`, subtitle: t(command.description ?? "Pi command"), value: `/${command.name} `, score,
     }));
-  }, [text, catalog, commands, globalCommands, settings.model, settings.thinkingLevel, modelNode]);
+  }, [text, catalog, commands, settings.model, settings.thinkingLevel, modelNode]);
 
   const respond = async (id: string, response: Record<string, unknown>) => {
     const session = active.current;
@@ -140,7 +170,7 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
     if (!session || !request) return;
     const fields = { instance: session.instance, commandId: session.commandId,
       operation: 'respond', response: { type: 'extension_ui_response', id: request.id, ...response } };
-    if (session.global) await runtimeService.extensionCommand({ repository: session.repository, ...fields });
+    if (session.standalone) await runtimeService.extensionCommand({ repository: session.repository, ...fields });
     else await runtimeService.composerCommand({ runId: session.runId, node: session.node, ...fields });
     session.requests = session.requests.filter(item => item.id !== request.id);
     if (active.current === session) setUI([...session.requests]);
@@ -199,14 +229,16 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
       if (isCurrent()) setNotice(t("已更新当前会话配置；正在执行的调用保持不变，后续调用使用新配置。"));
       return isCurrent() ? "handled" : "menu";
     }
-    const available = runId && !runId.startsWith('pending-')
-      ? await runtimeService.composerCommand<PiCommandCatalog>({ runId, node, operation: 'catalog' }).catch(() => null) : null;
+    const resolved = await loadCommandCatalog().catch(() => { throw new Error(t('扩展指令加载失败，请重试。')); });
     if (!isCurrent()) return 'menu';
+    const available = resolved.catalog;
+    const registered = available.commands.some(item => item.name === command.name);
+    const requiresHistory = ['compact', 'session', 'stats', 'copy'].includes(command.name);
+    if (requiresHistory && resolved.standalone) throw new Error(t('此 Pi 指令需要活动会话，请先开始对话。'));
+    if (!registered && !requiresHistory) throw new Error(t('未知或未启用的指令：/{0}', command.name));
     const repository = commandRepository;
-    const globals = globalCommands ?? await runtimeService.extensionCommand<PiCommandCatalog>({ repository, operation: 'catalog' }).catch(() => null);
-    if (!isCurrent()) return 'menu';
-    if (globals?.commands?.some(item => item.name === command.name) && !available?.commands?.some(item => item.name === command.name)) {
-      const session: CommandSession = { global: true, repository, runId: runId ?? '', node, instance: globals.instance,
+    if (resolved.standalone) {
+      const session: CommandSession = { standalone: true, repository, runId: runId ?? '', node, instance: available.instance,
         commandId: crypto.randomUUID(), requests: [] };
       active.current = session;
       const fields = { repository, instance: session.instance, commandId: session.commandId };
@@ -214,7 +246,7 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
       try {
         await runtimeService.extensionCommand({ ...fields, operation: 'execute', text });
         while (isCurrent() && active.current === session) {
-          const state = await runtimeService.extensionCommand<GlobalCommandState>({ ...fields, operation: 'poll' });
+          const state = await runtimeService.extensionCommand<StandaloneCommandState>({ ...fields, operation: 'poll' });
           if (!isCurrent() || active.current !== session) return 'menu';
           for (const event of state.events) {
             if (isDialog(event)) session.requests.push(event);
@@ -234,10 +266,7 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
         if (active.current === session) { active.current = null; setUI([]); }
       }
     }
-    if (!runId || !available) throw new Error(t("此 Pi 指令需要活动会话，请先开始对话。"));
-    if (command.name === "mcp" && !available.commands.some(item => item.name === "mcp")) {
-      throw new Error(t("当前 Pi 会话未加载 MCP。请在 Settings 启用 MCP 扩展后重新启动该 Agent。"));
-    }
+    if (!runId) throw new Error(t("此 Pi 指令需要活动会话，请先开始对话。"));
     if (available.commands.some(item => item.name === command.name && item.source === "prompt")) return "prompt";
     const session = { runId, node, instance: available.instance, commandId: crypto.randomUUID(), requests: [] as ExtensionUIRequest[] };
     active.current = session;
@@ -288,6 +317,9 @@ export function useComposerCommands({ text, repository, runId, node, planMode, c
       if (active.current === session) { active.current = null; setUI([]); }
     }
   };
-  return { suggestions, argumentMode: !!argument || !!mcpArgument, execute, ui: ui[0], respond, notice,
+  return { suggestions, argumentMode: !!argument, execute, ui: ui[0], respond, notice,
+    commandsLoading: commandCatalog.key === catalogKey && commandCatalog.loading,
+    commandsError: commandCatalog.key === catalogKey ? commandCatalog.error : '',
+    refreshCommands: () => setRefreshRevision(value => value + 1),
     clearNotice: () => setNotice(""), scopedModelsOpen, closeScopedModels: () => setScopedModelsOpen(false) };
 }

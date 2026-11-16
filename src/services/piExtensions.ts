@@ -27,14 +27,28 @@ async function call(operation: string, fields: Record<string, unknown> = {}): Pr
 let cachedCatalog: ExtensionCatalog | null = null;
 let inFlightCatalog: Promise<ExtensionCatalog> | null = null;
 let catalogGeneration = 0;
+let selectionRevision = 0;
+let selectionFingerprint = '';
+const selectionListeners = new Set<() => void>();
 
 const remember = (catalog: ExtensionCatalog) => {
   cachedCatalog = catalog;
+  const fingerprint = JSON.stringify(catalog.extensions.map(({ id, path, enabled }) => [id, path, enabled]));
+  if (fingerprint !== selectionFingerprint) {
+    selectionFingerprint = fingerprint;
+    selectionRevision++;
+    for (const listener of selectionListeners) listener();
+  }
   return catalog;
 };
 
 export const piExtensions = {
   getCachedCatalog: () => cachedCatalog,
+  getSelectionRevision: () => selectionRevision,
+  subscribeSelection: (listener: () => void) => {
+    selectionListeners.add(listener);
+    return () => { selectionListeners.delete(listener); };
+  },
   // `refresh` bypasses the page-session catalog; the refresh control and a mount
   // that already had cached rows use it to pick up edits made outside Grapher.
   catalog: (refresh = false): Promise<ExtensionCatalog> => {

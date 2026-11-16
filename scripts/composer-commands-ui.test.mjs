@@ -22,6 +22,7 @@ test("composer model scope, slash completion, blocking and extension dialogs", a
     browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
     const page = await browser.newPage();
     let pendingExecute;
+    let standaloneCatalogs = 0;
     let events = [];
     const responses = [];
     const renames = [];
@@ -51,6 +52,10 @@ test("composer model scope, slash completion, blocking and extension dialogs", a
           base: "",
           feedbackCounts: {},
         };
+      }
+      if (request.url().endsWith('/extension_command')) {
+        standaloneCatalogs++;
+        result = { instance: 'standalone', commands: [] };
       }
       if (request.url().endsWith("/composer_command")) {
         assert.equal(body.runId, "run-a");
@@ -170,6 +175,7 @@ test("composer model scope, slash completion, blocking and extension dialogs", a
     const errorBox = await errorCard.boundingBox();
     const composerBox = await page.locator(".prompt-box-container").boundingBox();
     assert.ok(errorBox.y + errorBox.height <= composerBox.y, "inactive-session errors float above the input");
+    const beforeActive = standaloneCatalogs;
     await page.goto(`${base}?run=1&node=a`);
     // Node agent dialogs hide `/name` in suggestions and reject it when submitted.
     await composer.fill("/");
@@ -217,6 +223,7 @@ test("composer model scope, slash completion, blocking and extension dialogs", a
     await page.waitForFunction(() => document.querySelector("textarea").value === "");
     assert.deepEqual(responses[2], { type: "extension_ui_response", id: "choice", cancelled: true });
     assert.equal(responses.length, 3, "a same-tick double click must never answer the following dialog");
+    assert.equal(standaloneCatalogs, beforeActive, 'an active Agent supplies the command catalog without starting a standalone worker');
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();
@@ -235,7 +242,7 @@ test("standalone extension commands work before a conversation and follow the se
       const jobs = new Map();
       const saved = [];
       const cancelled = [];
-      const commands = ["pi-better-web-search", "web-search-provider", "web-search-api", "mcp", "custom-settings"].map(name => ({ name, source: "extension" }));
+      const commands = ["custom-help", "provider-preferences", "api-options", "mcp", "custom-settings"].map(name => ({ name, source: "extension" }));
       let activeExecutions = 0;
       await page.route("**/api/*", async route => {
         const url = route.request().url();
@@ -259,7 +266,7 @@ test("standalone extension commands work before a conversation and follow the se
               const custom = body.text === "/custom-settings";
               jobs.set(body.commandId, { repository: body.repository, status: custom ? "pending" : "complete", events: [custom
                 ? { type: "extension_ui_request", id: "choice", method: "select", title: "Custom settings", options: ["Inspect"] }
-                : { type: "extension_ui_request", id: "info", method: "notify", message: body.text === "/mcp" ? `MCP project: ${body.repository}` : "Search setup: /web-search-api and /web-search-provider" }] });
+                : { type: "extension_ui_request", id: "info", method: "notify", message: body.text === "/mcp" ? `MCP project: ${body.repository}` : "Custom extension help" }] });
               result = {};
             } else {
               const job = jobs.get(body.commandId);
@@ -282,8 +289,8 @@ test("standalone extension commands work before a conversation and follow the se
       await composer.fill("/");
       for (const command of commands) await expect(page.locator(".suggestion-item-title").filter({ hasText: `/${command.name}` })).toBeVisible();
       const submit = async text => { await composer.fill(text); await composer.press("Escape"); await composer.press("Enter"); };
-      await submit("/pi-better-web-search");
-      await expect(page.locator('.prompt-command-popover[role="status"]')).toContainText("Search setup");
+      await submit("/custom-help");
+      await expect(page.locator('.prompt-command-popover[role="status"]')).toContainText("Custom extension help");
       await submit("/mcp");
       await expect(page.locator('.prompt-command-popover[role="status"]')).toContainText("MCP project: /project");
       await submit("/custom-settings");
@@ -307,6 +314,130 @@ test("standalone extension commands work before a conversation and follow the se
       assert.equal(saved.length, 1, "project changes cancel pending entry");
       await page.close();
     }
+  } finally { await browser?.close(); await server.close(); }
+});
+
+test("extension catalogs show loading and retry, refresh selections and reject stale results", { timeout: 30_000 }, async () => {
+  const server = await commandServer();
+  let browser;
+  try {
+    await server.listen();
+    browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
+    const page = await browser.newPage();
+    const reads = [];
+    page.setDefaultTimeout(5_000);
+    let disabled = false;
+    await page.route("**/api/*", async route => {
+      const url = route.request().url();
+      const body = route.request().postDataJSON();
+      if (url.endsWith('/extension_command')) { reads.push(route); return; }
+      if (url.endsWith('/pi_extensions')) {
+        assert.equal(body.operation, 'set_enabled');
+        disabled = true;
+        await route.fulfill({ json: { result: { globalDirectory: '/pi', extensions: [{ id: 'fixture-extension', name: 'Fixture', path: '/pi/fixture.ts', enabled: false }] } } });
+        return;
+      }
+      const result = url.endsWith('/list_files') ? { files: [] } : url.endsWith('/list_skills') ? { skills: [] }
+        : url.endsWith('/provider_auth') ? { providers: [], models: [] } : {};
+      await route.fulfill({ json: { result } });
+    });
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__commands`);
+    const composer = page.locator('textarea').first();
+    await composer.fill('/');
+    await expect.poll(() => reads.length).toBe(1);
+    await expect(page.locator('.prompt-box-suggestions-list [role="status"]')).toContainText('正在读取扩展指令');
+    await reads[0].fulfill({ status: 503, json: { error: 'Temporary host failure' } });
+    await expect(page.locator('.prompt-box-suggestions-list [role="status"]')).toContainText('扩展指令加载失败');
+    await page.getByRole('button', { name: '重试', exact: true }).click();
+    await expect.poll(() => reads.length).toBe(2);
+    await reads[1].fulfill({ json: { result: { instance: 'host', commands: [{ name: 'totally-custom-extension', description: 'User installed command', source: 'extension' }] } } });
+    await expect(page.getByText('/totally-custom-extension', { exact: true })).toBeVisible();
+    assert.equal(await page.getByText('/pi-better-web-search', { exact: true }).count(), 0);
+    assert.equal(await page.getByText('/mcp', { exact: true }).count(), 0, 'unloaded extensions get no synthetic entries');
+    await page.getByRole('button', { name: '刷新指令', exact: true }).click();
+    await expect.poll(() => reads.length).toBe(3);
+    await page.getByRole('button', { name: 'Disable fixture extension', exact: true }).evaluate(button => button.click());
+    await expect.poll(() => disabled).toBe(true);
+    await expect.poll(() => reads.length).toBe(4);
+    await reads[3].fulfill({ json: { result: { instance: 'host', commands: [{ name: 'another-extension', source: 'extension' }] } } });
+    await expect(page.getByText('/another-extension', { exact: true })).toBeVisible();
+    await reads[2].fulfill({ json: { result: { instance: 'host', commands: [{ name: 'totally-custom-extension', source: 'extension' }] } } });
+    await expect(page.getByText('/totally-custom-extension', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('/another-extension', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Switch project', exact: true }).evaluate(button => button.click());
+    await expect.poll(() => reads.length).toBe(5);
+    assert.equal(reads[4].request().postDataJSON().repository, '/other-project');
+    await expect(page.getByText('/another-extension', { exact: true })).toHaveCount(0);
+    await reads[4].fulfill({ json: { result: { instance: 'host', commands: [{ name: 'project-command', source: 'extension' }] } } });
+    await expect(page.getByText('/project-command', { exact: true })).toBeVisible();
+  } finally { await browser?.close(); await server.close(); }
+});
+
+test("arbitrary extension dialogs support filtering, keyboard selection, IME and cancellation", { timeout: 30_000 }, async () => {
+  const server = await commandServer();
+  let browser;
+  try {
+    await server.listen();
+    browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
+    const page = await browser.newPage();
+    const jobs = new Map();
+    const replies = [];
+    await page.route('**/api/*', async route => {
+      const url = route.request().url();
+      const body = route.request().postDataJSON();
+      let result = url.endsWith('/list_files') ? { files: [] } : url.endsWith('/list_skills') ? { skills: [] }
+        : url.endsWith('/provider_auth') ? { providers: [], models: [] } : {};
+      if (url.endsWith('/extension_command')) {
+        if (body.operation === 'catalog') result = { instance: 'host', commands: [{ name: 'choose-workspace', source: 'extension' }] };
+        if (body.operation === 'execute') jobs.set(body.commandId, { status: 'pending', events: [{ type: 'extension_ui_request', id: 'choice', method: 'select', title: 'Choose workspace', options: Array.from({ length: 12 }, (_, index) => `Workspace ${index + 1}`) }] });
+        const job = jobs.get(body.commandId);
+        if (body.operation === 'poll') { result = { status: job.status, events: job.events }; job.events = []; }
+        if (body.operation === 'respond') {
+          replies.push(body.response);
+          if (body.response.cancelled) job.status = 'complete';
+          else if (body.response.id === 'choice') job.events.push({ type: 'extension_ui_request', id: 'input', method: 'input', title: 'Workspace name' });
+          else if (body.response.id === 'input') job.events.push({ type: 'extension_ui_request', id: 'editor', method: 'editor', title: 'Workspace notes', prefill: 'Existing notes' });
+          else { job.status = 'complete'; job.events.push({ type: 'extension_ui_request', id: 'done', method: 'notify', message: 'Workspace configured' }); }
+        }
+        if (body.operation === 'cancel') job.status = 'cancelled';
+      }
+      await route.fulfill({ json: { result } });
+    });
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__commands`);
+    const composer = page.locator('textarea').first();
+    const submit = async () => { await composer.fill('/choose-workspace'); await composer.press('Escape'); await composer.press('Enter'); };
+    await submit();
+    const filter = page.getByRole('searchbox', { name: '筛选选项' });
+    await expect(filter).toBeFocused();
+    await filter.fill('missing');
+    await expect(page.locator('.prompt-command-ui [role="status"]')).toContainText('没有匹配的选项');
+    await filter.fill('12');
+    await filter.press('ArrowDown');
+    await expect(page.getByRole('button', { name: 'Workspace 12', exact: true })).toBeFocused();
+    await page.keyboard.press('Enter');
+    const input = page.getByRole('textbox', { name: 'Workspace name' });
+    await expect(input).toBeFocused();
+    await input.fill('工作区');
+    await input.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', isComposing: true });
+    assert.equal(replies.length, 1, 'IME confirmation does not submit the dialog');
+    await input.press('Shift+Enter');
+    assert.equal(replies.length, 1, 'Shift+Enter preserves a newline');
+    await input.fill('New workspace');
+    await input.press('Enter');
+    const editor = page.getByRole('textbox', { name: 'Workspace notes' });
+    await expect(editor).toBeFocused();
+    await expect(editor).toHaveValue('Existing notes');
+    await editor.press('Enter');
+    assert.equal(replies.length, 2, 'editor Enter preserves multiline editing');
+    await editor.press('ControlOrMeta+Enter');
+    await expect(page.locator('.prompt-command-popover[role="status"]')).toContainText('Workspace configured');
+    assert.equal(replies.length, 3);
+    await submit();
+    await expect(filter).toBeFocused();
+    await filter.press('Escape');
+    await expect.poll(() => replies.length).toBe(4);
+    assert.equal(replies[3].cancelled, true);
+    await expect(page.locator('.prompt-command-ui')).toHaveCount(0);
   } finally { await browser?.close(); await server.close(); }
 });
 

@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { PromptBox } from "../../src/components/ui/chatgpt-prompt-input";
 import { ComposerModels, type ComposerScope } from "../../src/services/composerCommands";
+import { piExtensions } from "../../src/services/piExtensions";
 import { runtimeService } from "../../src/services/runtime";
 import { defaultConfig, emptySnapshot, type RoleModelConfig, type Snapshot } from "../../src/types";
 import { updateRoleModelConfig } from "../../src/modelConfig";
@@ -37,6 +38,7 @@ function Fixture() {
       <button onClick={() => setNode(node === "a" ? "b" : "a")}>Switch node</button>
       <button onClick={() => setSnapshot(previous => ({ ...previous, runId: previous.runId === "run-a" ? "run-b" : "run-a" }))}>Switch run</button>
       <button onClick={() => setConfig(previous => ({ ...previous, repository: previous.repository === "/project" ? "/other-project" : "/project" }))}>Switch project</button>
+      <button onClick={() => { void piExtensions.setEnabled('fixture-extension', false); }}>Disable fixture extension</button>
       <button onClick={() => setShowComposer(previous => !previous)}>Toggle composer</button>
       <button onClick={() => setConfig(previous => updateRoleModelConfig(previous, "planner", { model: "test/two", thinkingLevel: "off" }))}>Apply newer settings</button>
       {showComposer && <PromptBox repository={config.repository} runId={snapshot.runId || undefined} node={node}

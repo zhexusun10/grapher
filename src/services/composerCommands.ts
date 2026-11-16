@@ -25,7 +25,6 @@ export const builtinCommands = [
   { name: "model", description: "选择当前会话 / 节点的模型" },
   { name: "thinking", description: "选择思考等级" },
   { name: "scoped-models", description: "全局管理可见模型" },
-  { name: "mcp", description: "查看 MCP 状态或登录、退出、重连服务" },
   { name: "compact", description: "压缩当前 Pi 会话上下文" },
   { name: "session", description: "查看当前 Pi 会话统计" },
   { name: "stats", description: "查看当前 Pi 会话统计" },

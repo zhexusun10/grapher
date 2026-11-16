@@ -39,5 +39,6 @@
   filter: none;
 }
 .prompt-command-ui button:focus-visible { outline: 2px solid var(--text-primary); }
-.prompt-command-ui textarea { width: 100%; min-height: 64px; margin-top: 8px; padding: 6px; }
+.prompt-command-ui textarea, .prompt-command-ui input { width: 100%; margin-top: 8px; padding: 6px; }
+.prompt-command-ui textarea { min-height: 64px; }
 .prompt-command-options { display: flex; flex-wrap: wrap; }
