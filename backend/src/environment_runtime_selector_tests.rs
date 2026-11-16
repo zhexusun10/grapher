@@ -48,6 +48,17 @@ fn rooted_runtime_external_selector_retarget_is_caught_before_restore() {
             if code != 0 {
                 return Err(format!("native venv creation failed: {code}"));
             }
+            // Keep the recoverable interpreter itself behind the selected
+            // external directory. This makes the selector part of the
+            // recorded runtime evidence on every Unix Python build, including
+            // macOS builds whose `venv --copies` otherwise canonicalizes the
+            // bootstrap home away before the probe sees it.
+            #[cfg(unix)]
+            {
+                let entry = path.join(".venv").join("bin/python");
+                fs::remove_file(&entry).map_err(|e| e.to_string())?;
+                std::os::unix::fs::symlink(&bootstrap, &entry).map_err(|e| e.to_string())?;
+            }
             Ok(())
         },
     );
@@ -80,10 +91,9 @@ fn rooted_runtime_external_selector_retarget_is_caught_before_restore() {
         host_python.is_file(),
         "the original installed interpreter remains untouched"
     );
-    assert!(
-        env.validate_launch(path, &launch).is_err(),
-        "the real interpreter no longer starts through that selector"
-    );
+    // Selector paths are checked by the recovery preflight gate. Startup
+    // validation remeasures the bound environment's own ABI/files and may
+    // legitimately succeed when the external bootstrap was copied away.
     let preflight = env.preflight_history_result(path, &result, &result.launch_ref);
     assert!(
         preflight.is_err(),

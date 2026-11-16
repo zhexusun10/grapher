@@ -627,19 +627,21 @@ fn unbound_launch(launch: &LaunchConfig) -> Result<LaunchConfig, String> {
     let mut next = launch.clone();
     next.entry = next.shell.clone();
     next.restore_unbound_path();
+    next.hook = None;
+    next.environment = None;
+    next.variables.remove("VIRTUAL_ENV");
+    next.variables.remove("CONDA_PREFIX");
+    next.variables.remove("CONDA_DEFAULT_ENV");
     // Explicit launches require the declared entry directory to remain first
     // even when a failed native verification falls back to the unbound shell.
+    // Decide after clearing the binding: an ambient automatic launch must keep
+    // its frozen business PATH order when it becomes unbound.
     if next.requires_entry_first() {
         if let Some(directory) = Path::new(&next.shell).parent().map(text) {
             next.path.retain(|path| path != &directory);
             next.path.insert(0, directory);
         }
     }
-    next.hook = None;
-    next.environment = None;
-    next.variables.remove("VIRTUAL_ENV");
-    next.variables.remove("CONDA_PREFIX");
-    next.variables.remove("CONDA_DEFAULT_ENV");
     // Ownership survives even when activation cannot be verified.
     next.validate()?;
     Ok(next)

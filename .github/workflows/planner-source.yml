@@ -239,10 +239,18 @@ jobs:
             local result=$?
             trap - EXIT
             if [ "$attached" = 1 ]; then
+              sync
               if ! hdiutil detach "$volume"; then
-                if ! hdiutil detach -force "$volume"; then result=1; fi
+                # APFS can keep the helper process alive briefly after the
+                # last child exits. Force the volume unmount and image detach,
+                # but preserve the actual test result if the host cleanup
+                # remains busy.
+                diskutil unmount force "$volume" >/dev/null 2>&1 || true
+                hdiutil detach -force "$volume" >/dev/null 2>&1 || \
+                  hdiutil detach -force "$image" >/dev/null 2>&1 || true
               fi
             fi
+            rm -rf "$parent" || true
             exit "$result"
           }
           trap cleanup EXIT

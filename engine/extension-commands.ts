@@ -122,6 +122,10 @@ export class ExtensionCommands {
       if (job.status !== 'pending') return;
       if (!match || !catalog.commands.some((command: Event) => available(command) && command.name === match[1])) throw new Error('Unknown extension command');
       await worker.request({ type: 'prompt', message: `/${match[1]}${match[2] ? ` ${match[2]}` : ''}` });
+      // Notify is fire-and-forget in Pi's RPC protocol. Wait for the worker
+      // to close so the final UI event is delivered before completion is
+      // observable to the backend/UI poller.
+      await worker.close();
       if (job.status === 'pending') job.status = 'complete';
     } catch {
       if (job.status === 'pending') {
