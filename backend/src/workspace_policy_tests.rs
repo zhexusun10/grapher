@@ -92,38 +92,15 @@ fn finish_private(runtime: &mut Runtime, job: &Job, file: &str, output: &str) {
 /// Exercise the same recoverable publication boundary as the server, without
 /// launching a model. All file transfers still go through real Git publication.
 #[cfg(feature = "fixture")]
-fn deliver_batch(runtime: &mut Runtime) {
+pub(super) fn deliver_batch(runtime: &mut Runtime) {
     assert_eq!(runtime.state.phase, "publishing");
-    let recoveries = runtime
+    assert!(runtime
         .state
         .batch_handoff
         .as_ref()
         .unwrap()
         .recovery_execution_ids
-        .clone();
-    if !recoveries.is_empty() {
-        let config = runtime.state.config.as_ref().unwrap();
-        let heads = recoveries
-            .iter()
-            .map(|id| {
-                let execution = runtime
-                    .state
-                    .executions
-                    .iter()
-                    .find(|execution| execution.id == *id)
-                    .unwrap();
-                let head = Runtime::capture_batch_recovery(
-                    &runtime.root,
-                    &runtime.state.run_id,
-                    config,
-                    execution,
-                )
-                .unwrap();
-                (id.clone(), head)
-            })
-            .collect();
-        runtime.record_batch_recoveries(heads).unwrap();
-    }
+        .is_empty());
     let publication = runtime.state.publication.clone().unwrap();
     let head = crate::graph_merge::merge_graph_scoped(
         Path::new(&publication.repository),
@@ -139,49 +116,6 @@ fn deliver_batch(runtime: &mut Runtime) {
         runtime.state.phase, "running",
         "delivery alone never completes unfinished nodes"
     );
-}
-
-/// Compatibility fixture only: old schedulers could deliver successful siblings
-/// and capture failed work before retry. New scheduling must never emit this.
-#[cfg(feature = "fixture")]
-fn legacy_handoff(runtime: &mut Runtime, recovery_nodes: &[&str]) {
-    let recovery_execution_ids = recovery_nodes
-        .iter()
-        .map(|name| {
-            runtime
-                .state
-                .executions
-                .iter()
-                .rev()
-                .find(|e| e.node == *name)
-                .unwrap()
-                .id
-                .clone()
-        })
-        .collect();
-    let heads = runtime
-        .state
-        .executions
-        .iter()
-        .filter_map(|execution| {
-            execution
-                .after
-                .as_ref()
-                .filter(|head| !head.is_empty() && !runtime.state.published_heads.contains(head))
-                .cloned()
-        })
-        .collect();
-    runtime
-        .emit_outputs(vec![
-            EventKind::BatchHandoffRequested {
-                recovery_execution_ids,
-            },
-            EventKind::PublicationStarted {
-                repository: runtime.state.config.as_ref().unwrap().repository.clone(),
-                heads,
-            },
-        ])
-        .unwrap();
 }
 
 #[test]
@@ -218,7 +152,7 @@ fn capped_dispatch_prioritizes_waiting_peers_without_blocking_ready_descendants(
 }
 
 #[test]
-fn adopting_a_legacy_multilayer_private_batch_keeps_intervening_dependencies() {
+fn recorded_multilayer_private_scope_keeps_intervening_dependencies() {
     let (_temp, _source, runtime) = adaptive(
         false,
         graph(
@@ -232,6 +166,66 @@ fn adopting_a_legacy_multilayer_private_batch_keeps_intervening_dependencies() {
         runtime.topology_batch(&["b".into(), "deep".into()]),
         ["a", "b", "middle", "deep"]
     );
+}
+
+#[cfg(feature = "fixture")]
+#[test]
+fn private_parent_handoff_requires_the_current_physical_owner() {
+    for reassigned in [false, true] {
+        let (_temp, _source, mut runtime) =
+            setup(true, graph(&["a", "b", "child"], &[("a", "child")]));
+        runtime.approve().unwrap();
+        let mut jobs = runtime.jobs().unwrap();
+        for job in &mut jobs {
+            prepare_private(&mut runtime, job);
+            finish_private(
+                &mut runtime,
+                job,
+                &format!("{}.txt", job.execution.node),
+                "done",
+            );
+        }
+        let parent = &jobs
+            .iter()
+            .find(|job| job.execution.node == "a")
+            .unwrap()
+            .execution;
+        let retained = Path::new(&parent.worktree).join("failed-owner.txt");
+        if reassigned {
+            let mut occupant = parent.clone();
+            occupant.id = Uuid::new_v4().to_string();
+            occupant.session_id = occupant.id.clone();
+            occupant.node = "b".into();
+            occupant.after = None;
+            occupant.completed_at = None;
+            runtime
+                .emit(EventKind::Started {
+                    execution: occupant.clone(),
+                    message_sequences: Some(vec![]),
+                    fresh_restart: false,
+                })
+                .unwrap();
+            fs::write(&retained, "retain the new owner's partial work").unwrap();
+            runtime
+                .finish(&occupant, Err("preparation interrupted".into()))
+                .unwrap();
+        }
+        let mut child = runtime.jobs().unwrap().remove(0);
+        assert_eq!(child.execution.node, "child");
+        assert_eq!(child.execution.worktree == parent.worktree, !reassigned);
+        assert!(runtime.state.publication.is_none());
+        prepare_private(&mut runtime, &mut child);
+        assert!(Path::new(&child.execution.worktree).join("a.txt").is_file());
+        if reassigned {
+            assert_eq!(
+                fs::read_to_string(retained).unwrap(),
+                "retain the new owner's partial work"
+            );
+            assert!(!Path::new(&child.execution.worktree)
+                .join("failed-owner.txt")
+                .exists());
+        }
+    }
 }
 
 #[cfg(feature = "fixture")]
@@ -1369,92 +1363,6 @@ fn private_writers_drain_before_delivering_to_ready_descendants() {
     assert!(source.join("fast.txt").is_file());
 }
 
-#[cfg(feature = "fixture")]
-#[test]
-fn legacy_private_recovery_waits_for_live_source_writers_before_resuming_in_place() {
-    let (_temp, source, mut runtime) = adaptive(
-        false,
-        graph(
-            &["a", "b", "c", "d", "slow"],
-            &[("b", "slow"), ("c", "slow")],
-        ),
-        true,
-        0,
-    );
-    let mut first = runtime.jobs().unwrap();
-    for job in &mut first {
-        prepare_private(&mut runtime, job);
-        if job.execution.node == "a" {
-            fs::write(
-                Path::new(&job.execution.worktree).join("partial.txt"),
-                "retained work",
-            )
-            .unwrap();
-            runtime
-                .finish(&job.execution, Err("provider failed".into()))
-                .unwrap();
-        } else {
-            finish_private(
-                &mut runtime,
-                job,
-                &format!("{}.txt", job.execution.node),
-                "done",
-            );
-        }
-    }
-    runtime.jobs().unwrap();
-    legacy_handoff(&mut runtime, &[]);
-    deliver_batch(&mut runtime);
-    // An older scheduler could already have dispatched the next source batch.
-    let slow = Execution {
-        id: Uuid::new_v4().to_string(),
-        node: "slow".into(),
-        session_id: Uuid::new_v4().to_string(),
-        worktree: source.to_string_lossy().into(),
-        before: String::new(),
-        workspace_lineage: vec!["slow".into()],
-        ..first[0].execution.clone()
-    };
-    runtime
-        .emit_outputs(vec![
-            EventKind::ExecutionBatchStarted {
-                nodes: vec!["slow".into()],
-                isolated: false,
-                resumed: false,
-            },
-            EventKind::Started {
-                execution: slow.clone(),
-                message_sequences: Some(vec![]),
-                fresh_restart: true,
-            },
-        ])
-        .unwrap();
-    runtime.resume_node("a").unwrap();
-    assert!(runtime.jobs().unwrap().is_empty());
-    assert_eq!(
-        runtime.state.phase, "running",
-        "never publish into an active source writer"
-    );
-    assert!(runtime.state.batch_handoff.is_none());
-    assert!(!source.join("partial.txt").exists());
-    runtime
-        .finish(&slow, Ok((String::new(), "done".into())))
-        .unwrap();
-    let mut retry = runtime.jobs().unwrap().remove(0);
-    assert_eq!(retry.execution.node, "a");
-    assert!(!retry.source_direct);
-    assert_eq!(retry.execution.worktree, first[0].execution.worktree);
-    assert!(!source.join("partial.txt").exists());
-    prepare_private(&mut runtime, &mut retry);
-    finish_private(&mut runtime, &retry, "a.txt", "done");
-    runtime.jobs().unwrap();
-    deliver_batch(&mut runtime);
-    assert_eq!(
-        fs::read_to_string(source.join("partial.txt")).unwrap(),
-        "retained work"
-    );
-}
-
 #[test]
 fn disabled_isolation_and_worker_limit_apply_to_every_batch_including_revisions() {
     for (isolate, limit, expected) in [(false, 0, 4), (true, 3, 3), (true, 2, 2), (true, 1, 1)] {
@@ -1607,17 +1515,18 @@ fn batches_switch_shared_private_shared_private_and_deliver_before_dependents_ru
 
 #[cfg(feature = "fixture")]
 #[test]
-fn resumed_batch_retains_source_baseline_on_replay_and_legacy_batches_refresh_it() {
+fn resumed_batch_retains_source_baseline_and_new_batches_refresh_it() {
     let (_temp, source, mut runtime) = adaptive(true, graph(&["a", "b", "c"], &[]), true, 0);
-    let legacy: EventKind = serde_json::from_value(serde_json::json!({
-        "type": "execution_batch_started", "nodes": ["a", "b", "c"], "isolated": true,
+    assert!(serde_json::from_value::<EventKind>(serde_json::json!({
+        "type":"execution_batch_started","nodes":["a","b","c"],"isolated":true
     }))
-    .unwrap();
-    assert!(matches!(
-        &legacy,
-        EventKind::ExecutionBatchStarted { resumed: false, .. }
-    ));
-    runtime.emit(legacy.clone()).unwrap();
+    .is_err());
+    let current = EventKind::ExecutionBatchStarted {
+        nodes: vec!["a".into(), "b".into(), "c".into()],
+        isolated: true,
+        resumed: false,
+    };
+    runtime.emit(current.clone()).unwrap();
     let head = workspace::snapshot_repository(&source).unwrap();
     runtime
         .emit(EventKind::SourceSnapshotted { head: head.clone() })
@@ -1641,7 +1550,7 @@ fn resumed_batch_retains_source_baseline_on_replay_and_legacy_batches_refresh_it
     assert_eq!(runtime.state.isolated_workspaces, Some(true));
     assert!(runtime.state.paused, "restart retains the scheduling pause");
     runtime.resume_scheduling().unwrap();
-    runtime.emit(legacy).unwrap();
+    runtime.emit(current).unwrap();
     assert_eq!(
         runtime.latest_source_head(),
         "",
@@ -1737,7 +1646,7 @@ fn paused_private_nodes_resume_in_place_before_delivery_or_new_work() {
                 assert_eq!(job.execution.worktree, previous.worktree);
                 assert!(!job.source_direct);
                 assert!(job.session_fork.is_none());
-                assert!(job.recovered_workspace.is_none());
+
                 assert!(job.preserved_workspace.is_some());
                 assert_eq!(job.continuation, has_session);
                 assert_eq!(job.initial_recovery, !has_session);
@@ -1932,7 +1841,7 @@ fn paused_private_node_stop_holds_delivery_until_followup_finishes() {
             original.attempt + 1,
             "a new human turn still advances the logical attempt"
         );
-        assert!(job.session_fork.is_none() && job.recovered_workspace.is_none());
+        assert!(job.session_fork.is_none());
         assert!(job.preserved_workspace.is_some());
         assert!(!job.source_direct && !job.continuation && !job.materialize_source);
         assert_eq!(job.initial_recovery, !has_session);
@@ -2012,10 +1921,15 @@ fn private_followup_runs_beside_disjoint_publication_without_changing_its_inputs
             .iter()
             .filter_map(|e| e.after.clone())
             .collect();
+        assert!(runtime
+            .emit(EventKind::BatchHandoffRequested {
+                recovery_execution_ids: vec![original.id.clone()],
+            })
+            .is_err());
         runtime
             .emit_outputs(vec![
                 EventKind::BatchHandoffRequested {
-                    recovery_execution_ids: vec![original.id.clone()],
+                    recovery_execution_ids: vec![],
                 },
                 EventKind::PublicationStarted {
                     repository: source.to_string_lossy().into(),
@@ -2023,7 +1937,6 @@ fn private_followup_runs_beside_disjoint_publication_without_changing_its_inputs
                 },
             ])
             .unwrap();
-        assert!(runtime.intervene("a", "unsafe capture race").is_err());
         assert!(runtime.intervene("b", "unsafe input writer").is_err());
         runtime
             .emit(EventKind::BatchHandoffRequested {
@@ -2094,385 +2007,6 @@ fn private_followup_runs_beside_disjoint_publication_without_changing_its_inputs
         assert!(runtime.jobs().unwrap().is_empty());
         assert_eq!(runtime.state.phase, "completed");
     }
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn paused_private_node_keeps_prepared_inputs_after_legacy_sibling_handoff_and_restart() {
-    for (git, has_session) in [(true, true), (false, false)] {
-        let (_temp, source, mut runtime) = adaptive(
-            git,
-            graph(
-                &["a", "b", "c", "d", "later", "x", "y", "z", "w"],
-                &[
-                    ("b", "later"),
-                    ("c", "later"),
-                    ("a", "x"),
-                    ("a", "y"),
-                    ("a", "z"),
-                    ("a", "w"),
-                    ("later", "x"),
-                    ("later", "y"),
-                    ("later", "z"),
-                    ("later", "w"),
-                ],
-            ),
-            true,
-            0,
-        );
-        let mut jobs = runtime.jobs().unwrap();
-        for job in &mut jobs {
-            prepare_private(&mut runtime, job);
-            if job.execution.node != "a" {
-                finish_private(
-                    &mut runtime,
-                    job,
-                    &format!("{}.txt", job.execution.node),
-                    "done",
-                );
-            }
-        }
-        let original = runtime
-            .state
-            .executions
-            .iter()
-            .find(|e| e.node == "a")
-            .unwrap()
-            .clone();
-        let path = Path::new(&original.worktree);
-        fs::write(path.join("tracked.txt"), "paused staged edit").unwrap();
-        workspace::git(path, &["add", "tracked.txt"]).unwrap();
-        fs::write(path.join("partial.txt"), "paused untracked edit").unwrap();
-        fs::remove_file(path.join("deleted.txt")).unwrap();
-        let staged = workspace::git(path, &["diff", "--cached"]).unwrap();
-        if has_session {
-            let session = runtime.root.join("sessions").join(&original.id);
-            fs::create_dir_all(&session).unwrap();
-            fs::write(session.join(format!("test_{}.jsonl", original.session_id)),
-                format!("{}\n", serde_json::json!({"type":"session", "id":original.session_id, "cwd":original.worktree}))).unwrap();
-        }
-        runtime.request_execution_stop(Some("a")).unwrap();
-        runtime.finish(&original, Err("stopped".into())).unwrap();
-        assert!(
-            !runtime.state.paused,
-            "stopping one node must not pause its siblings"
-        );
-        assert!(runtime.jobs().unwrap().is_empty());
-        assert!(runtime.state.publication.is_none());
-        // Replay compatibility: older schedulers delivered completed siblings
-        // immediately after a node-only stop. New scheduling holds that handoff,
-        // but an already-recorded delivery must still preserve paused inputs.
-        let heads = runtime
-            .state
-            .executions
-            .iter()
-            .filter_map(|e| e.after.clone())
-            .collect();
-        runtime
-            .emit_outputs(vec![
-                EventKind::BatchHandoffRequested {
-                    recovery_execution_ids: vec![],
-                },
-                EventKind::PublicationStarted {
-                    repository: source.to_string_lossy().into(),
-                    heads,
-                },
-            ])
-            .unwrap();
-        deliver_batch(&mut runtime);
-        let delivered = runtime.state.published_head.clone().unwrap();
-        assert_ne!(delivered, original.before);
-        assert!(source.join("b.txt").is_file() && source.join("c.txt").is_file());
-        assert!(!source.join("partial.txt").exists());
-        // Retain an older source-native dispatch too; new scheduling would
-        // wait for the stopped private writer before switching workspaces.
-        let later = Execution {
-            id: Uuid::new_v4().to_string(),
-            node: "later".into(),
-            session_id: Uuid::new_v4().to_string(),
-            worktree: source.to_string_lossy().into(),
-            before: String::new(),
-            workspace_lineage: vec!["later".into()],
-            ..original.clone()
-        };
-        runtime
-            .emit_outputs(vec![
-                EventKind::ExecutionBatchStarted {
-                    nodes: vec!["later".into()],
-                    isolated: false,
-                    resumed: false,
-                },
-                EventKind::Started {
-                    execution: later.clone(),
-                    message_sequences: Some(vec![]),
-                    fresh_restart: true,
-                },
-            ])
-            .unwrap();
-        fs::write(source.join("later.txt"), "new shared work").unwrap();
-        runtime
-            .finish(&later, Ok((String::new(), "done".into())))
-            .unwrap();
-        assert!(runtime.jobs().unwrap().is_empty());
-        let root = runtime.root.clone();
-        drop(runtime);
-        runtime = Runtime::open(&root).unwrap();
-        runtime.resume_node("a").unwrap();
-        // A second stop before Prepared must still find the earlier preparation
-        // in this same session, not adopt the intervening publication's inputs.
-        let unprepared = runtime.jobs().unwrap().remove(0);
-        runtime.request_execution_stop(Some("a")).unwrap();
-        runtime
-            .finish(
-                &unprepared.execution,
-                Err("stopped before preparation".into()),
-            )
-            .unwrap();
-        assert!(runtime.jobs().unwrap().is_empty());
-        drop(runtime);
-        runtime = Runtime::open(&root).unwrap();
-        runtime.resume_node("a").unwrap();
-        let mut resumed = runtime.jobs().unwrap().remove(0);
-        assert_eq!(resumed.execution.worktree, original.worktree);
-        assert_eq!(resumed.execution.session_id, original.session_id);
-        assert_eq!(resumed.execution.attempt, original.attempt);
-        assert!(resumed.session_fork.is_none() && resumed.recovered_workspace.is_none());
-        assert_eq!(resumed.continuation, has_session);
-        assert_eq!(resumed.initial_recovery, !has_session);
-        prepare_private(&mut runtime, &mut resumed);
-        assert_eq!(resumed.expected_source_head, original.before);
-        assert!(!resumed.materialize_source);
-        assert_eq!(
-            runtime.latest_source_head(),
-            delivered,
-            "do not rewind the Run's current source baseline"
-        );
-        assert_eq!(workspace::git(path, &["diff", "--cached"]).unwrap(), staged);
-        assert_eq!(
-            fs::read_to_string(path.join("partial.txt")).unwrap(),
-            "paused untracked edit"
-        );
-        assert!(!path.join("deleted.txt").exists());
-        for name in ["b.txt", "c.txt", "later.txt"] {
-            assert!(
-                !path.join(name).exists(),
-                "later results must not enter the retained node view"
-            );
-        }
-        assert!(!source.join("partial.txt").exists());
-        finish_private(&mut runtime, &resumed, "a.txt", "done");
-        assert!(runtime.jobs().unwrap().is_empty());
-        deliver_batch(&mut runtime);
-        let mut next = runtime.jobs().unwrap();
-        assert_eq!(next.len(), 4);
-        prepare_private(&mut runtime, &mut next[0]);
-        for name in ["a.txt", "b.txt", "c.txt", "later.txt", "partial.txt"] {
-            assert!(
-                Path::new(&next[0].execution.worktree).join(name).is_file(),
-                "the next private batch must include all delivered and shared work: {name}"
-            );
-        }
-        assert!(!runtime
-            .state
-            .events
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::BatchRecoveryCaptured { .. })));
-    }
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn offline_paused_batch_restoration_is_guarded_replayable_and_stays_paused() {
-    use crate::maintenance::paused_batch::{restoration, restore_paused_batch_at};
-    let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
-    let mut jobs = runtime.jobs().unwrap();
-    for job in &mut jobs {
-        prepare_private(&mut runtime, job);
-        if job.execution.node != "a" {
-            finish_private(
-                &mut runtime,
-                job,
-                &format!("{}.txt", job.execution.node),
-                "done",
-            );
-        }
-    }
-    let paused = &jobs[0].execution;
-    let path = Path::new(&paused.worktree);
-    fs::write(path.join("partial.txt"), "unfinished").unwrap();
-    let session = runtime.root.join("sessions").join(&paused.id);
-    fs::create_dir_all(&session).unwrap();
-    let session_file = session.join(format!("test_{}.jsonl", paused.session_id));
-    let session_bytes = format!(
-        "{}\n",
-        serde_json::json!({"type":"session", "id":paused.session_id, "cwd":paused.worktree})
-    );
-    fs::write(&session_file, &session_bytes).unwrap();
-    runtime.pause(true).unwrap();
-    runtime.request_execution_stop(None).unwrap();
-    runtime.finish(paused, Err("stopped".into())).unwrap();
-    let original_node = serde_json::to_value(&runtime.state.nodes["a"]).unwrap();
-    runtime.pause(false).unwrap();
-    // Emulate the older scheduler's erroneous handoff, not the fixed dispatch.
-    let heads = runtime
-        .state
-        .executions
-        .iter()
-        .filter_map(|e| e.after.clone())
-        .collect();
-    runtime
-        .emit_outputs(vec![
-            EventKind::BatchHandoffRequested {
-                recovery_execution_ids: vec![paused.id.clone()],
-            },
-            EventKind::PublicationStarted {
-                repository: source.to_string_lossy().into_owned(),
-                heads,
-            },
-        ])
-        .unwrap();
-    let captured = Runtime::capture_batch_recovery(
-        &runtime.root,
-        &runtime.state.run_id,
-        runtime.state.config.as_ref().unwrap(),
-        paused,
-    )
-    .unwrap();
-    runtime
-        .record_batch_recoveries(
-            [(paused.id.clone(), captured.clone())]
-                .into_iter()
-                .collect(),
-        )
-        .unwrap();
-    let publication = runtime.state.publication.as_ref().unwrap();
-    let default = crate::graph_merge::publication_workspace(&source, &publication.heads).unwrap();
-    let journal = path
-        .parent()
-        .unwrap()
-        .join(default.file_name().unwrap())
-        .with_extension("publication")
-        .join("00000000");
-    fs::create_dir_all(&journal).unwrap();
-    fs::write(
-        journal.join("input.json"),
-        serde_json::to_vec(&(String::new(), paused.before.clone())).unwrap(),
-    )
-    .unwrap();
-    for marker in ["prepared.json", "applying", "installed"] {
-        fs::write(journal.join(marker), "evidence").unwrap();
-        let error = restoration(&runtime.root, &runtime.state).unwrap_err();
-        assert!(error.contains("delivery"), "{error}");
-        fs::remove_file(journal.join(marker)).unwrap();
-    }
-    fs::rename(&session_file, session.join("held.jsonl")).unwrap();
-    assert!(restoration(&runtime.root, &runtime.state).is_err());
-    fs::rename(session.join("held.jsonl"), &session_file).unwrap();
-    let mut changed = runtime.state.clone();
-    changed.published_heads.push(captured);
-    assert!(restoration(&runtime.root, &changed).is_err());
-    let event = Event {
-        sequence: changed.events.last().unwrap().sequence + 1,
-        timestamp: now(),
-        kind: EventKind::PublicationCompleted {
-            head: "delivered".into(),
-        },
-    };
-    apply(&mut changed, &event);
-    assert!(restoration(&runtime.root, &changed).is_err());
-    let mut active = runtime.state.clone();
-    active.mergers.push(paused.clone());
-    active.mergers.last_mut().unwrap().status = "running".into();
-    assert!(restoration(&runtime.root, &active).is_err());
-    let previous_events = runtime.state.events.len();
-    let history = serde_json::to_value(&runtime.state.executions).unwrap();
-    restoration(&runtime.root, &runtime.state).unwrap();
-    let root = runtime.root.clone();
-    let id = runtime.state.run_id.clone();
-    let sequence = runtime.state.events.last().unwrap().sequence;
-    let backup = _temp.path().join("recovery-backup");
-    assert!(restore_paused_batch_at(&root, vec![id.clone()])
-        .unwrap_err()
-        .contains("owns this runtime"));
-    drop(runtime);
-    restore_paused_batch_at(&root, vec![id.clone()]).unwrap();
-    let mut args = vec![
-        id.clone(),
-        "--apply".into(),
-        "--backup".into(),
-        backup.to_string_lossy().into_owned(),
-        "--expect-sequence".into(),
-        (sequence - 1).to_string(),
-    ];
-    assert!(restore_paused_batch_at(&root, args.clone())
-        .unwrap_err()
-        .contains("Run changed"));
-    assert!(!backup.exists());
-    *args.last_mut().unwrap() = sequence.to_string();
-    restore_paused_batch_at(&root, args).unwrap();
-    assert_eq!(
-        crate::store::Store::open_reader(&backup.join("events.sqlite"))
-            .unwrap()
-            .load(&id)
-            .unwrap()
-            .events
-            .len(),
-        previous_events
-    );
-    runtime = Runtime::open(&root).unwrap();
-    assert_eq!(runtime.state.events.len(), previous_events + 1);
-    assert_eq!(
-        serde_json::to_value(&runtime.state.executions).unwrap(),
-        history
-    );
-    let mut replay = Snapshot {
-        run_id: runtime.state.run_id.clone(),
-        ..Default::default()
-    };
-    for event in &runtime.state.events {
-        apply(&mut replay, event);
-    }
-    for state in [
-        &runtime.state,
-        &runtime.store.load(&runtime.state.run_id).unwrap(),
-        &replay,
-    ] {
-        assert!(state.paused);
-        assert_eq!(state.phase, "paused");
-        assert!(state.publication.is_none() && state.batch_handoff.is_none());
-        assert_eq!(
-            serde_json::to_value(&state.nodes["a"]).unwrap(),
-            original_node
-        );
-        assert_eq!(state.nodes["b"].status, "completed");
-        assert!(state.can_resume());
-        assert_eq!(
-            crate::snapshot_view::snapshot_metadata(state).unwrap()["nodes"]["a"]["status"],
-            "paused"
-        );
-    }
-    assert!(runtime.jobs().unwrap().is_empty());
-    assert!(
-        restoration(&runtime.root, &runtime.state).is_err(),
-        "repeated apply must not append another restoration"
-    );
-    assert_eq!(fs::read_to_string(&session_file).unwrap(), session_bytes);
-    assert_eq!(
-        fs::read_to_string(path.join("partial.txt")).unwrap(),
-        "unfinished"
-    );
-    assert!(!source.join("partial.txt").exists());
-    let root = runtime.root.clone();
-    drop(runtime);
-    runtime = Runtime::open(&root).unwrap();
-    assert!(runtime.state.paused && runtime.jobs().unwrap().is_empty());
-    runtime.pause(false).unwrap();
-    let resumed = runtime.jobs().unwrap().remove(0);
-    assert_eq!(resumed.execution.worktree, paused.worktree);
-    assert_eq!(resumed.execution.session_id, paused.session_id);
-    assert_eq!(resumed.execution.attempt, paused.attempt);
-    assert!(resumed.continuation && !resumed.source_direct);
-    assert!(runtime.state.publication.is_none());
 }
 
 #[cfg(feature = "fixture")]
@@ -2573,7 +2107,7 @@ fn failed_private_retries_keep_partial_work_and_successful_siblings_private_acro
             assert_eq!(retry.execution.session_id, original.session_id);
             assert_eq!(retry.execution.attempt, previous.attempt + 1);
             assert!(!retry.source_direct && !retry.materialize_source);
-            assert!(retry.session_fork.is_none() && retry.recovered_workspace.is_none());
+            assert!(retry.session_fork.is_none());
             assert!(retry.preserved_workspace.is_some());
             assert_eq!(retry.initial_recovery, !has_session);
             prepare_private(&mut runtime, &mut retry);
@@ -2621,11 +2155,7 @@ fn failed_private_retries_keep_partial_work_and_successful_siblings_private_acro
             );
         }
         assert!(!source.join("deleted.txt").exists());
-        assert!(!runtime
-            .state
-            .events
-            .iter()
-            .any(|e| matches!(e.kind, EventKind::BatchRecoveryCaptured { .. })));
+
         assert_eq!(
             runtime
                 .state
@@ -2903,125 +2433,6 @@ fn retry_of_a_private_standalone_followup_does_not_trigger_graph_review() {
 
 #[cfg(feature = "fixture")]
 #[test]
-fn legacy_recovery_capture_stays_retryable_even_after_an_earlier_batch_published() {
-    let (temp, _source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
-    let mut jobs = runtime.jobs().unwrap();
-    for job in &mut jobs {
-        prepare_private(&mut runtime, job);
-        if job.execution.node == "a" {
-            fs::write(
-                Path::new(&job.execution.worktree).join("partial.txt"),
-                "keep",
-            )
-            .unwrap();
-            runtime
-                .finish(&job.execution, Err("provider failed".into()))
-                .unwrap();
-        } else {
-            finish_private(
-                &mut runtime,
-                job,
-                &format!("{}.txt", job.execution.node),
-                "done",
-            );
-        }
-    }
-    runtime.jobs().unwrap();
-    legacy_handoff(&mut runtime, &[]);
-    deliver_batch(&mut runtime);
-    runtime.jobs().unwrap();
-    runtime.resume_node("a").unwrap();
-    legacy_handoff(&mut runtime, &["a"]);
-    let failed = runtime
-        .state
-        .executions
-        .iter()
-        .find(|execution| execution.node == "a")
-        .unwrap()
-        .clone();
-    let parked = temp.path().join("parked");
-    fs::rename(&failed.worktree, &parked).unwrap();
-    let error = Runtime::capture_batch_recovery(
-        &runtime.root,
-        &runtime.state.run_id,
-        runtime.state.config.as_ref().unwrap(),
-        &failed,
-    )
-    .unwrap_err();
-    runtime
-        .emit(EventKind::PublicationFailed { error })
-        .unwrap();
-    runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
-    runtime.retry_publication().unwrap();
-    assert_eq!(
-        runtime.state.phase, "publishing",
-        "empty original heads do not mean the recovery was delivered"
-    );
-    assert!(runtime.jobs().unwrap().is_empty());
-    fs::rename(parked, &failed.worktree).unwrap();
-    deliver_batch(&mut runtime);
-    assert!(runtime.jobs().unwrap().remove(0).source_direct);
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn legacy_captured_unchanged_recovery_can_finish_without_republishing_an_empty_head_set() {
-    let (_temp, source, mut runtime) = adaptive(false, graph(&["a", "b", "c", "d"], &[]), true, 0);
-    for mut job in runtime.jobs().unwrap() {
-        prepare_private(&mut runtime, &mut job);
-        if job.execution.node == "a" {
-            runtime
-                .finish(&job.execution, Err("provider failed before edits".into()))
-                .unwrap();
-        } else {
-            let head = workspace::snapshot_node_for_run(
-                Path::new(&job.execution.worktree),
-                &source,
-                &job.execution.node,
-                Some(&runtime.state.run_id),
-            )
-            .unwrap();
-            runtime
-                .finish(&job.execution, Ok((head, "done".into())))
-                .unwrap();
-        }
-    }
-    runtime.jobs().unwrap();
-    legacy_handoff(&mut runtime, &[]);
-    deliver_batch(&mut runtime);
-    runtime.jobs().unwrap();
-    runtime.resume_node("a").unwrap();
-    legacy_handoff(&mut runtime, &["a"]);
-    let failed = runtime
-        .state
-        .executions
-        .iter()
-        .find(|execution| execution.node == "a")
-        .unwrap();
-    let head = Runtime::capture_batch_recovery(
-        &runtime.root,
-        &runtime.state.run_id,
-        runtime.state.config.as_ref().unwrap(),
-        failed,
-    )
-    .unwrap();
-    assert!(runtime.state.published_heads.contains(&head));
-    runtime
-        .record_batch_recoveries([(failed.id.clone(), head)].into_iter().collect())
-        .unwrap();
-    runtime
-        .emit(EventKind::PublicationFailed {
-            error: "interrupted after capture".into(),
-        })
-        .unwrap();
-    runtime.retry_publication().unwrap();
-    assert_eq!(runtime.state.phase, "running");
-    assert!(runtime.state.batch_handoff.is_none());
-    assert!(runtime.jobs().unwrap().remove(0).source_direct);
-}
-
-#[cfg(feature = "fixture")]
-#[test]
 fn batch_conflict_blocks_next_batch_until_publication_retry_resolves_it() {
     let (_temp, source, mut runtime) = adaptive(
         false,
@@ -3223,12 +2634,11 @@ fn failed_shared_retry_stays_in_place_and_review_is_claimed_once() {
 }
 
 #[test]
-fn recovered_attachment_receipts_preserve_edits_and_deletions_but_not_incomplete_copies() {
+fn current_attachment_receipts_preserve_edits_and_deletions_but_not_incomplete_copies() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("data");
-    let previous = temp.path().join("private");
     let source = temp.path().join("source");
-    for path in [&root, &previous, &source] {
+    for path in [&root, &source] {
         fs::create_dir(path).unwrap();
     }
     let run = Uuid::new_v4().to_string();
@@ -3238,23 +2648,23 @@ fn recovered_attachment_receipts_preserve_edits_and_deletions_but_not_incomplete
         crate::attachment_inputs::stage(&root, &run, "owner", &id, "data.csv", b"original")
             .unwrap();
         if case != "incomplete" {
-            crate::attachment_inputs::deliver(&root, &run, "owner", &relative, &previous).unwrap();
+            crate::attachment_inputs::deliver(&root, &run, "owner", &relative, &source).unwrap();
         }
         if case == "deleted" {
-            fs::remove_file(previous.join(&relative)).unwrap();
+            fs::remove_file(source.join(&relative)).unwrap();
         } else {
             fs::create_dir_all(source.join(&relative).parent().unwrap()).unwrap();
             fs::write(source.join(&relative), case).unwrap();
         }
-        let result = crate::attachment_inputs::deliver_recovered(
-            &root, &run, "owner", &relative, &source, &previous,
+        let result = crate::attachment_inputs::deliver_prepared(
+            &root, &run, "owner", &relative, &source, true,
         );
         if case == "incomplete" {
             assert!(result.unwrap_err().contains("incomplete"));
         } else {
             result.unwrap();
-            crate::attachment_inputs::deliver_recovered(
-                &root, &run, "owner", &relative, &source, &previous,
+            crate::attachment_inputs::deliver_prepared(
+                &root, &run, "owner", &relative, &source, true,
             )
             .unwrap();
         }
@@ -3304,108 +2714,6 @@ fn retained_planner_edits_after_completion_reopen_the_batch_handoff() {
     );
     runtime.jobs().unwrap();
     assert_eq!(runtime.state.phase, "completed");
-}
-
-#[cfg(feature = "fixture")]
-#[test]
-fn legacy_cwd_changing_recovery_keeps_the_original_sessions_attachment_claims() {
-    let (_temp, source, mut runtime) = adaptive(true, graph(&["a", "b", "c", "d"], &[]), true, 0);
-    let mut jobs = runtime.jobs().unwrap();
-    let input_id = Uuid::new_v4().to_string();
-    let reference = format!("grapher-attachments/{input_id}/input.txt");
-    for job in &mut jobs {
-        prepare_private(&mut runtime, job);
-        if job.execution.node == "a" {
-            crate::attachment_inputs::stage(
-                &runtime.root,
-                &runtime.state.run_id,
-                "a",
-                &input_id,
-                "input.txt",
-                b"complete input",
-            )
-            .unwrap();
-            runtime
-                .emit(EventKind::Steered {
-                    execution_id: job.execution.id.clone(),
-                    node: "a".into(),
-                    instruction: reference.clone(),
-                    request_id: None,
-                    images: None,
-                })
-                .unwrap();
-            let path = Path::new(&job.execution.worktree).join(&reference);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, "truncated").unwrap(); // interrupted copy: no delivery receipt
-            let session = runtime.root.join("sessions").join(&job.execution.id);
-            fs::create_dir_all(&session).unwrap();
-            fs::write(session.join(format!("test_{}.jsonl", job.execution.session_id)),
-                format!("{}\n", serde_json::json!({"type":"session", "id":job.execution.session_id, "cwd":job.execution.worktree}))).unwrap();
-            runtime
-                .finish(&job.execution, Err("interrupted delivery".into()))
-                .unwrap();
-        } else {
-            finish_private(
-                &mut runtime,
-                job,
-                &format!("{}.txt", job.execution.node),
-                "done",
-            );
-        }
-    }
-    runtime.jobs().unwrap();
-    legacy_handoff(&mut runtime, &[]);
-    deliver_batch(&mut runtime);
-    runtime.jobs().unwrap();
-    runtime.resume_node("a").unwrap();
-    legacy_handoff(&mut runtime, &["a"]);
-    deliver_batch(&mut runtime);
-    runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
-    let retry = runtime.jobs().unwrap().remove(0);
-    assert!(retry.continuation && retry.session_fork.is_some() && retry.source_direct);
-    assert!(
-        retry.attachment_instructions.contains(&reference),
-        "forking the Pi session must not lose the unfinished turn's accepted input claims"
-    );
-    let error = crate::attachment_inputs::deliver_recovered(
-        &runtime.root,
-        &retry.run_id,
-        "a",
-        &retry.attachment_instructions,
-        &source,
-        Path::new(retry.recovered_workspace.as_ref().unwrap()),
-    )
-    .unwrap_err();
-    assert!(error.contains("incomplete"), "{error}");
-    assert_eq!(
-        fs::read_to_string(source.join(&reference)).unwrap(),
-        "truncated"
-    );
-
-    // A failed source retry now owns the forked session ID. The next retry
-    // still needs the original private turn's claims, not an empty input set.
-    let session = runtime.root.join("sessions").join(&retry.execution.id);
-    fs::create_dir_all(&session).unwrap();
-    fs::write(
-        session.join(format!("test_{}.jsonl", retry.execution.session_id)),
-        "retained fork",
-    )
-    .unwrap();
-    runtime.finish(&retry.execution, Err(error)).unwrap();
-    runtime.resume_node("a").unwrap();
-    let again = runtime.jobs().unwrap().remove(0);
-    assert!(again.attachment_instructions.contains(&reference));
-    assert!(again.session_fork.is_none());
-    let error = perform_with_merger(
-        &again,
-        &runtime.root,
-        &[],
-        |_| {},
-        |_| Ok(()),
-        |_| Err("unexpected merger".into()),
-    )
-    .unwrap_err();
-    assert!(error.contains("incomplete"), "{error}");
 }
 
 #[cfg(feature = "fixture")]

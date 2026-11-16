@@ -138,6 +138,7 @@ interface SidebarProps {
   isSettingsOpen: boolean;
   runLabels?: Record<string, string>;
   runCardKeys?: Record<string, string>;
+  initialRunIds?: readonly string[];
   isReady?: boolean;
   isOpeningProject?: boolean;
   switchingProjectPath?: string | null;
@@ -162,6 +163,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   isSettingsOpen,
   runLabels = {},
   runCardKeys = {},
+  initialRunIds = [],
   isReady = true,
   isOpeningProject = false,
   switchingProjectPath = null,
@@ -182,15 +184,13 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   const [projectContextMenu, setProjectContextMenu] = useState<(ContextMenuAnchor & { project: ProjectItem }) | null>(null);
   const [runContextMenu, setRunContextMenu] = useState<(ContextMenuAnchor & { runId: string; provisionalPrompt?: string }) | null>(null);
   const reduceMotion = useReducedMotion() ?? false;
-  // Cards restored on the first paint keep their final visual state; only cards
-  // that arrive later (bootstrap, opening a project, or switching workspaces)
-  // play the entrance. Run cards behind a skeleton are arrivals too, so only a
-  // warm sidebar contributes them here.
+  // The caller may remember current cache IDs solely for motion. Cards still
+  // render only from the authoritative runs prop after bootstrap.
   const restoredKeysRef = React.useRef<{ projects: Set<string>; runs: Set<string> } | null>(null);
   if (restoredKeysRef.current === null) {
     restoredKeysRef.current = {
       projects: new Set(projects.map(proj => workspaceKey(proj.path))),
-      runs: new Set(isReady ? runs.map(id => runCardKeys[id] ?? id) : []),
+      runs: new Set([...initialRunIds, ...(isReady ? runs : [])].map(id => runCardKeys[id] ?? id)),
     };
   }
   const restoredProjectKeys = restoredKeysRef.current.projects;

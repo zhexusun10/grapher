@@ -113,7 +113,7 @@ fn metadata_event(event: &Event) -> Value {
 /// Durable projection only: history stays in events, transcripts in execution_logs.
 pub(crate) fn checkpoint_projection(state: &Snapshot) -> Value {
     json!({
-        "nodeMessageQueueVersion": 1,
+        "formatVersion": 1,
         "privateBatch": state.private_batch,
         "isolatedWorkspaces": state.isolated_workspaces,
         "batchHandoff": state.batch_handoff,
@@ -175,8 +175,8 @@ pub fn snapshot_metadata(state: &Snapshot) -> Result<Value, String> {
         "resultExecution": state.result_execution,
         "runMetrics": state.run_metrics
     });
-    // Keep legacy persisted failure events/checkpoints compatible while exposing
-    // interruption as a distinct UI state. Ordinary provider errors stay failed.
+    // Persist failure events as recorded; expose user interruptions as a
+    // distinct UI state. Ordinary provider errors stay failed.
     let running_merge_targets: std::collections::BTreeSet<_> = state
         .mergers
         .iter()

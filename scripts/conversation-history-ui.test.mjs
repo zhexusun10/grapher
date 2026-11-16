@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureSummaries, fixtureFileChanges, fixtureExecutionPage } from "./fixtures/current-api.mjs";
 import test, { before, after } from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
@@ -47,9 +48,14 @@ async function newPage(handler, language = "en") {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
   await context.addInitScript(value => localStorage.setItem("grapher_language_v1", value), language);
   const errors = [];
-  await context.route("**/api/*", handler);
+  await context.route("**/api/*", route => {
+    if (new URL(route.request().url()).pathname === "/api/get_file_changes") {
+      return route.fulfill({ json: { result: fixtureFileChanges(route.request().postDataJSON()) } });
+    }
+    return handler(route);
+  });
   const page = await context.newPage(); page.setDefaultTimeout(12_000);
-  page.on("pageerror", error => errors.push(String(error)));
+  page.on("pageerror", error => { errors.push(String(error)); console.error(error.stack); });
   return { context, page, errors };
 }
 
@@ -377,14 +383,17 @@ test("failed node attempts keep their execution record spacing even", { timeout:
   const blankDelta = line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "\n\n" } });
   const retryOutput = tool("retry-one") + blankDelta + tool("retry-two");
   const execution = (id, attempt, status, output) => ({ id, node: "task", attempt, revision: attempt, status, output,
-    startedAt: attempt * 1000, completedAt: attempt * 1000 + 1, sessionId: "session", worktree: "/mock", before: "", after: "" });
-  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+    outputBytes: Buffer.byteLength(output), startedAt: attempt * 1000, completedAt: attempt * 1000 + 1,
+    sessionId: "session", worktree: "/mock", before: "", after: "" });
+  const records = [execution("failed", 1, "failed", failedOutput), execution("retry", 2, "completed", retryOutput)];
+  const snapshots = [{ runId: "footer-run", executions: [{ id: "previous", status: "completed", output: "" }, ...records] }];
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result:
+    route.request().url().endsWith("/get_execution_output")
+      ? fixtureExecutionPage(route.request().postDataJSON(), snapshots) : {} } }));
   try {
     await page.goto(`${origin}/__workspace-footer?mode=graph&turn=follow-up`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !!window.audit?.setExecutions);
-    await page.evaluate(executions => window.audit.setExecutions(executions), [
-      execution("failed", 1, "failed", failedOutput), execution("retry", 2, "completed", retryOutput),
-    ]);
+    await page.evaluate(executions => window.audit.setExecutions(executions), records);
     const failureHeader = page.locator(".session-label-toggle").first();
     assert.equal(await failureHeader.getAttribute("aria-expanded"), "false");
     await failureHeader.click();
@@ -450,21 +459,23 @@ test("a retry's blank streamed text stays out of layout until it has visible con
   const tool = id => startTool(id, `echo ${id}`) + endTool(id, "done");
   const delta = text => line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
   const execution = (id, attempt, status, output) => ({ id, node: "task", attempt, revision: attempt, status, output,
-    startedAt: attempt * 1000, completedAt: status === "running" ? null : attempt * 1000 + 1,
+    outputBytes: Buffer.byteLength(output), startedAt: attempt * 1000, completedAt: status === "running" ? null : attempt * 1000 + 1,
     sessionId: "session", worktree: "/mock", before: "", after: "" });
   const failed = execution("failed", 1, "failed", tool("old-tool"));
   const retryOutput = tool("live-tool") + delta("\n\n");
-  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
+  let records = [failed, execution("retry", 2, "running", retryOutput)];
+  const { context, page, errors } = await newPage(route => route.fulfill({ json: { result:
+    route.request().url().endsWith("/get_execution_output") ? fixtureExecutionPage(route.request().postDataJSON(),
+      [{ runId: "footer-run", executions: [{ id: "previous", status: "completed", output: "" }, ...records] }]) : {} } }));
   try {
     await page.goto(`${origin}/__workspace-footer?mode=graph&turn=follow-up`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !!window.audit?.setExecutions);
-    await page.evaluate(executions => window.audit.setExecutions(executions),
-      [failed, execution("retry", 2, "running", retryOutput)]);
+    await page.evaluate(executions => window.audit.setExecutions(executions), records);
     const retry = page.locator('[data-execution-id="retry"]');
     await retry.locator(".tool-call-card").waitFor();
     assert.equal(await retry.locator("[data-transcript-id]").count(), 1, "blank live text must not reserve a row");
-    await page.evaluate(executions => window.audit.setExecutions(executions), [failed,
-      execution("retry", 2, "running", retryOutput + delta("Visible after whitespace") + tool("next-tool"))]);
+    records = [failed, execution("retry", 2, "running", retryOutput + delta("Visible after whitespace") + tool("next-tool"))];
+    await page.evaluate(executions => window.audit.setExecutions(executions), records);
     await retry.getByText("Visible after whitespace", { exact: true }).waitFor();
     await retry.locator(".tool-call-card").last().waitFor();
     assert.equal(await retry.locator("[data-transcript-id]").count(), 3, "the continued text appears once in its original place");
@@ -760,7 +771,11 @@ for (const mode of ["graph", "serial", "planner"]) {
       try {
         await page.goto(`${origin}/__workspace-footer?mode=${mode}`, { waitUntil: "domcontentloaded" });
         await page.waitForFunction(() => !!window.audit?.startExecution);
-        if (mode !== "planner") await page.evaluate(() => { window.audit.startExecution(); window.audit.finish(); });
+        if (mode !== "planner") await page.evaluate(() => {
+          window.audit.startExecution();
+          window.audit.setExecutionMetrics({ model: "test/model", thinkingLevel: "low" });
+          window.audit.finish();
+        });
         const name = language === "en"
           ? (mode === "planner" ? "Planning session details" : "Workspace and session details")
           : (mode === "planner" ? "规划会话信息" : "工作区与会话信息");
@@ -951,9 +966,15 @@ for (const mode of ["serial", "graph", "merger", "node-merger"]) {
   test(`${mode}: execution history preserves upward wheel progress`, { timeout: 60_000 }, async () => {
     const output = Array.from({ length: 100 }, (_, index) =>
       assistant(`MODE_HISTORY_${index} ` + (index % 2 ? "wrapped content ".repeat(40) : "short"))).join("");
-    const { context, page, errors } = await newPage(route => route.fulfill({ json: {
-      result: route.request().url().endsWith("/get_merger_prompt") ? { prompt: "Merge the completed work." } : {},
-    } }));
+    const { context, page, errors } = await newPage(route => {
+      const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+      const result = command === "get_merger_prompt"
+        ? { runId: body.runId, executionId: body.executionId, prompt: "Merge the completed work." }
+        : command === "get_execution_output"
+          ? fixtureExecutionPage(body, [{ runId: "footer-run", executions: [{ id: "current", status: "completed", output }] }])
+          : {};
+      return route.fulfill({ json: { result } });
+    });
     try {
       page.setDefaultTimeout(30_000);
       await page.goto(`${origin}/__workspace-footer?mode=${mode}`, { waitUntil: "domcontentloaded" });
@@ -1201,13 +1222,12 @@ test("the Planner session keeps its first start and accumulates time took across
   } finally { await context.close(); }
 });
 
-test("a Planner turn recorded before session tracking keeps its usage", { timeout: 30_000 }, async () => {
+test("Planner usage without a session ID is not merged into a tracked session", { timeout: 30_000 }, async () => {
   const { context, page, errors } = await newPage(route => route.fulfill({ json: { result: {} } }));
   try {
     await page.goto(`${origin}/__workspace-footer?mode=planner`, { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !!window.audit?.selectPlannerWorkspace);
-    // The second turn creates a backend session bucket; the first predates
-    // session IDs, so only the panel can add its usage back.
+    // Only the second turn has a proven owner in the tracked session.
     await page.evaluate(() => window.audit.selectPlannerWorkspace("/mock/next"));
     await page.evaluate(() => {
       const usage = input => ({ input, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0,
@@ -1221,7 +1241,7 @@ test("a Planner turn recorded before session tracking keeps its usage", { timeou
     });
     await page.getByRole("button", { name: "Planning session details", exact: true }).click();
     const details = page.locator(".workspace-details-body");
-    await details.getByText("Cumulative tokens: 8k", { exact: true }).waitFor();
+    await details.getByText("Cumulative tokens: 3k", { exact: true }).waitFor();
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -1285,6 +1305,103 @@ test("a resumed node session keeps its first start and accumulates time took", {
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
+
+for (const mode of ["graph", "serial"]) {
+  test(`${mode}: an accepted follow-up cannot claim an identical pending message with another request ID`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      const text = body.executionId === "answered" ? assistant("ACCEPTED_FOLLOWUP_RESPONSE") : "";
+      return route.fulfill({ json: { result: fixtureExecutionPage(body, [{ runId: "footer-run", executions: [
+        { id: body.executionId, status: "completed", output: text },
+      ] }]) } });
+    });
+    try {
+      await page.goto(`${origin}/__workspace-footer?mode=${mode}&turn=follow-up`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.setMessages);
+      await page.evaluate(() => {
+        const runId = "footer-run", node = "task";
+        const execution = (id, attempt) => ({ id, node, status: "completed", revision: attempt, attempt,
+          sessionId: "session", worktree: "/mock", before: "", after: "", output: "", startedAt: attempt, completedAt: attempt + 1 });
+        const first = execution("opening", 1), answered = execution("answered", 2);
+        window.audit.setExecutions([first, answered]);
+        window.audit.finish();
+        window.audit.setMessages([
+          { id: "initial", role: "user", text: "Initial task" },
+          ...["accepted", "pending"].map(id => ({ id, role: "user", text: "same follow-up", node, runId,
+            steerRequestId: id, pendingExecution: id === "pending", files: [{ name: `${id}.txt`, size: 1, type: "text/plain" }] })),
+        ]);
+        window.audit.setBatchSnapshot({ events: [
+          { type: "started", sequence: 1, timestamp: 1, execution: first, message_sequences: [] },
+          { type: "invalidated", sequence: 2, timestamp: 2, target: node, instruction: "same follow-up", request_id: "accepted", human: true },
+          { type: "started", sequence: 3, timestamp: 3, execution: answered, message_sequences: [2] },
+        ] });
+      });
+      await page.getByText("ACCEPTED_FOLLOWUP_RESPONSE", { exact: true }).waitFor();
+      const order = await page.evaluate(() => {
+        const row = name => [...document.querySelectorAll(".chat-message-row.user")].find(row => row.textContent.includes(name));
+        const accepted = row("accepted.txt"), pending = row("pending.txt"), response = document.querySelector('[data-execution-id="answered"]');
+        return !!accepted && !!pending && !!response &&
+          !!(accepted.compareDocumentPosition(response) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+          !!(response.compareDocumentPosition(pending) & Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+      assert.ok(order, "the accepted message owns its response; the other request remains after it");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
+
+for (const mode of ["graph", "serial"]) {
+  test(`${mode}: a discarded version cannot hide a new durable turn with the same text`, { timeout: 30_000 }, async () => {
+    const { context, page, errors } = await newPage(async route => {
+      const body = route.request().postDataJSON();
+      return route.fulfill({ json: { result: fixtureExecutionPage(body, [{ runId: "footer-run", executions: [
+        { id: body.executionId, status: "completed", output: body.executionId === "answered" ? assistant("NEW_BRANCH_RESPONSE") : "" },
+      ] }]) } });
+    });
+    try {
+      await page.goto(`${origin}/__workspace-footer?mode=${mode}&turn=follow-up`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !!window.audit?.setMessages);
+      await page.evaluate(() => {
+        const runId = "footer-run", node = "task";
+        const make = (id, attempt) => ({ id, node, status: "completed", revision: attempt, attempt, sessionId: "session",
+          worktree: "/mock", before: "", after: "", output: "", startedAt: attempt, completedAt: attempt + 1 });
+        const [opening, old, discarded, replacement, answered] = ["opening", "old", "discarded", "replacement", "answered"].map((id, index) => make(id, index + 1));
+        window.audit.setExecutions([opening, old, discarded, replacement, answered]);
+        window.audit.finish();
+        window.audit.setMessages([
+          { id: "initial", role: "user", text: "Initial task" },
+          { id: "edited", role: "user", text: "revised request", node, runId, currentVersionIndex: 1, versions: [
+            { id: "v1", text: "original request", timestamp: 1, subsequentEntries: [{ id: "discarded-message", role: "user", text: "reused instruction", node, runId }] },
+            { id: "v2", text: "revised request", timestamp: 6, subsequentEntries: [] },
+          ] },
+        ]);
+        window.audit.setBatchSnapshot({ supersededExecutionIds: [old.id, discarded.id], events: [
+          { type: "started", sequence: 1, timestamp: 1, execution: opening, message_sequences: [] },
+          { type: "invalidated", sequence: 2, timestamp: 2, target: node, instruction: "original request", human: true },
+          { type: "started", sequence: 3, timestamp: 3, execution: old, message_sequences: [2] },
+          { type: "invalidated", sequence: 4, timestamp: 4, target: node, instruction: "reused instruction", human: true },
+          { type: "started", sequence: 5, timestamp: 5, execution: discarded, message_sequences: [4] },
+          { type: "conversation_edited", sequence: 6, timestamp: 6, target: node, nodes: [node], instruction: "revised request",
+            old_instruction: "original request", from_execution_id: old.id, from_event_sequence: 2, first_turn: false },
+          { type: "started", sequence: 7, timestamp: 7, execution: replacement, message_sequences: [] },
+          { type: "invalidated", sequence: 8, timestamp: 8, target: node, instruction: "reused instruction", request_id: "new-request", human: true },
+          { type: "started", sequence: 9, timestamp: 9, execution: answered, message_sequences: [8] },
+        ] });
+      });
+      await page.getByText("NEW_BRANCH_RESPONSE", { exact: true }).waitFor();
+      assert.equal(await page.locator(".chat-message-row.user", { hasText: "reused instruction" }).count(), 1,
+        "the new request stays visible while the discarded request remains hidden");
+      await page.evaluate(async () => {
+        window.audit.setMessages(messages => [...messages, { id: "pending-after-edit", role: "user", text: "original request",
+          node: "task", runId: "footer-run", steerRequestId: "pending-after-edit", pendingExecution: true }]);
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      });
+      assert.equal(await page.locator(".chat-message-row.user", { hasText: "original request" }).count(), 1,
+        "a new pending request cannot be discarded because it repeats the pre-edit text");
+      assert.deepEqual(errors, []);
+    } finally { await context.close(); }
+  });
+}
 
 for (const [mode, turn] of [
   ["serial", "provisional"], ["serial", "initial"], ["serial", "follow-up"], ["graph", "initial"], ["graph", "follow-up"],
@@ -1393,8 +1510,9 @@ data: ${JSON.stringify({ runId: running.runId })}
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [running.runId], repositoryInfo: { path: config.repository, name: "Stalled append", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = running; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [running.runId], conversations: fixtureSummaries([running]), repositoryInfo: { path: config.repository, name: "Stalled append", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "load_run": case "snapshot": case "history": result = running; break;
       case "snapshot_if_changed": result = { version: "running", snapshot: running }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -1431,7 +1549,7 @@ data: ${JSON.stringify({ runId: running.runId })}
   }
 });
 
-test("actual App keeps a Planner follow-up draft when bootstrap still blocks the turn", { timeout: 45_000 }, async () => {
+test("actual App preserves a landing draft while authoritative bootstrap blocks a turn", { timeout: 45_000 }, async () => {
   const config = { repository: "/mock/bootstrap-gate", model: "test/model", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: true };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
@@ -1447,7 +1565,7 @@ test("actual App keeps a Planner follow-up draft when bootstrap still blocks the
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     if (command === "bootstrap") {
       await bootstrapGate;
-      return route.fulfill({ json: { result: { config, snapshot: empty, runs: [saved.runId],
+      return route.fulfill({ json: { result: { config, snapshot: empty, runs: [saved.runId], conversations: fixtureSummaries([saved]),
         repositoryInfo: { path: config.repository, name: "Bootstrap gate", branch: "main", head: "", clean: true }, dataPath: "/mock" } } });
     }
     if (command === "plan_goal_stream") {
@@ -1456,7 +1574,9 @@ test("actual App keeps a Planner follow-up draft when bootstrap still blocks the
     }
     let result;
     switch (command) {
-      case "snapshot": case "history": result = saved; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "snapshot": case "history": result = saved; break;
       case "snapshot_if_changed": result = { version: "fixed", snapshot: saved }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -1473,16 +1593,16 @@ test("actual App keeps a Planner follow-up draft when bootstrap still blocks the
     await page.addInitScript(({ config, saved }) => {
       localStorage.setItem("grapher_projects", JSON.stringify([{ id: config.repository, path: config.repository,
         name: "Bootstrap gate", branch: "main", clean: true, lastOpened: 1 }]));
-      localStorage.setItem("grapher_config", JSON.stringify(config));
-      localStorage.setItem("grapher_workspace_runs", JSON.stringify({ [config.repository]: [saved.runId] }));
-      localStorage.setItem("grapher_run_labels", JSON.stringify({ [saved.runId]: "Existing conversation" }));
+      localStorage.setItem("grapher_data_path", "/mock");
+      localStorage.setItem("grapher-format-1:/mock:grapher_config", JSON.stringify(config));
+      localStorage.setItem("grapher-format-1:/mock:grapher_workspace_runs", JSON.stringify({ [config.repository]: [saved.runId] }));
+      localStorage.setItem("grapher-format-1:/mock:grapher_run_labels", JSON.stringify({ [saved.runId]: "Existing conversation" }));
     }, { config, saved });
     await page.goto(origin, { waitUntil: "domcontentloaded" });
-    await page.locator('[data-run-id="fast"]').waitFor();
-    await page.locator('[data-run-id="fast"]').click();
-    const input = page.locator(".pane-bottom-chat textarea").first();
+    assert.equal(await page.locator('[data-run-id="fast"]').count(), 0,
+      "cached Run hints must wait for authoritative ownership");
+    const input = page.locator(".landing-screen textarea");
     await input.waitFor();
-    await page.waitForFunction(() => !document.querySelector(".pane-bottom-chat textarea")?.disabled);
     await input.fill("KEEP_PLANNER_DRAFT");
     await input.press("Enter");
     await page.locator(".floating-error-banner").filter({ hasText: "Backend settings are still loading" }).waitFor();
@@ -1490,6 +1610,10 @@ test("actual App keeps a Planner follow-up draft when bootstrap still blocks the
     assert.equal(await input.inputValue(), "KEEP_PLANNER_DRAFT", "a blocked Planner turn must keep the draft");
     assert.equal(planRequests, 0, "a blocked Planner turn must not reach the backend");
     assert.equal(await page.locator('.chat-bubble-user', { hasText: "KEEP_PLANNER_DRAFT" }).count(), 0);
+    releaseBootstrap();
+    await page.locator('[data-run-id="fast"]').waitFor();
+    assert.equal(await input.inputValue(), "KEEP_PLANNER_DRAFT", "bootstrap cannot overwrite the retained draft");
+    assert.equal(planRequests, 0);
     assert.deepEqual(errors, []);
   } finally {
     releaseBootstrap();
@@ -1513,8 +1637,10 @@ test("actual App re-attaches a running revision plan without locking or stale ro
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [saved.runId], repositoryInfo: { path: config.repository, name: "Recovered", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = saved; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [saved.runId], conversations: fixtureSummaries([saved]), repositoryInfo: { path: config.repository, name: "Recovered", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "get_execution_output": result = fixtureExecutionPage(body, [saved]); break;
+      case "load_run": case "snapshot": case "history": result = saved; break;
       case "snapshot_if_changed": result = { version: "recovered", snapshot: saved }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": case "get_planning": result = command === "get_planning" ? summary : [summary]; break;
@@ -1569,8 +1695,9 @@ test("a live Planner turn keeps the node conversation the reader opened", { time
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [running.runId], repositoryInfo: { path: config.repository, name: "Live node view", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = running; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [running.runId], conversations: fixtureSummaries([running]), repositoryInfo: { path: config.repository, name: "Live node view", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "load_run": case "snapshot": case "history": result = running; break;
       case "snapshot_if_changed": result = { version: "live-node-view", snapshot: running }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -1648,9 +1775,11 @@ test("actual App reopening Planner history does not move cached follow-ups past 
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId, other.runId],
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId, other.runId], conversations: fixtureSummaries([current, other]),
         repositoryInfo: { path: config.repository, name: "Planner order", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = body.runId === other.runId ? other : current; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "get_execution_output": result = fixtureExecutionPage(body, [current, other]); break;
+      case "load_run": case "snapshot": case "history": result = body.runId === other.runId ? other : current; break;
       case "snapshot_if_changed": result = { version: String(turn), snapshot: null }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -1720,8 +1849,10 @@ test("actual App renders a Planner goal once even when the saved replay contains
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [saved.runId], repositoryInfo: { path: config.repository, name: "Goal dup", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = saved; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [saved.runId], conversations: fixtureSummaries([saved]), repositoryInfo: { path: config.repository, name: "Goal dup", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "get_execution_output": result = fixtureExecutionPage(body, [saved]); break;
+      case "load_run": case "snapshot": case "history": result = saved; break;
       case "snapshot_if_changed": result = { version: "fixed", snapshot: null }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -1764,8 +1895,9 @@ test("actual App reopens a provisional conversation before the Planner assigns a
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [other.runId], repositoryInfo: { path: config.repository, name: "Provisional", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = other; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [other.runId], conversations: fixtureSummaries([other]), repositoryInfo: { path: config.repository, name: "Provisional", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "load_run": case "snapshot": case "history": result = other; break;
       case "snapshot_if_changed": result = { version: "fixed", snapshot: other }; break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -1824,8 +1956,9 @@ test("actual App: first Serial message keeps the footer still through approval a
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [], repositoryInfo: { path: config.repository, name: "First Serial", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = snapshot; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [], conversations: [], repositoryInfo: { path: config.repository, name: "First Serial", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "load_run": case "snapshot": case "history": result = snapshot; break;
       case "snapshot_if_changed": result = { version: snapshot.phase + snapshot.executions.length, snapshot: snapshot.runId ? snapshot : null }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -3264,6 +3397,10 @@ for (const layout of ["virtualized", "long"]) {
   test(`Latest smoothly traverses ${layout} history, tracks new output and can be interrupted`, { timeout: 30_000 }, async () => {
     const { context, page, errors } = await newPage(async route => {
       const command = new URL(route.request().url()).pathname.slice(5);
+      if (command === "get_execution_output") {
+        const snapshot = await page.evaluate(() => window.audit.latestSnapshot);
+        return route.fulfill({ json: { result: fixtureExecutionPage(route.request().postDataJSON(), [snapshot]) } });
+      }
       assert.ok(["list_files", "list_skills"].includes(command), `unexpected API ${command}`);
       await route.fulfill({ json: { result: command === "list_files" ? { files: [] } : { skills: [] } } });
     });
@@ -3342,8 +3479,9 @@ test("actual App preserves scrollback and reuses bounded history on Node/Convers
     requests.push({ command, ...body });
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: Object.keys(runs), repositoryInfo: { path: config.repository, name: "Cache test", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = runs[body.runId]; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: Object.keys(runs), conversations: fixtureSummaries(Object.values(runs)), repositoryInfo: { path: config.repository, name: "Cache test", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "load_run": case "snapshot": case "history": result = runs[body.runId]; break;
       case "snapshot_if_changed": result = { version: body.runId, snapshot: null }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -3463,8 +3601,9 @@ test("Node navigation keeps history painted after the fade while older pages fil
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], repositoryInfo: { path: config.repository, name: "Node reveal", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = snapshot; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], conversations: fixtureSummaries([snapshot]), repositoryInfo: { path: config.repository, name: "Node reveal", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "load_run": case "snapshot": case "history": result = snapshot; break;
       case "snapshot_if_changed": result = { version: "1", snapshot: null }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -3558,8 +3697,9 @@ test("each Node record waits for its own first viewport fill instead of re-layin
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], repositoryInfo: { path: config.repository, name: "Node fill", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = snapshot; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], conversations: fixtureSummaries([snapshot]), repositoryInfo: { path: config.repository, name: "Node fill", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "load_run": case "snapshot": case "history": result = snapshot; break;
       case "snapshot_if_changed": result = { version: "1", snapshot: null }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -3624,7 +3764,7 @@ test("actual App stop preserves a sent Planner follow-up and the next unsent dra
   const config = { repository: "/mock/stop", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
-  const saved = { ...empty, runId: "stop-run", config, planType: "graph", phase: "awaiting_approval", planningId: "old-plan",
+  let saved = { ...empty, runId: "stop-run", config, planType: "graph", phase: "awaiting_approval", planningId: "old-plan",
     graph: { originalGoal: "Original goal", nodes: [{ id: "worker", task: "Task" }], edges: [] },
     nodes: { worker: { status: "waiting", revision: 1, instruction: "", error: null } },
     events: [{ type: "created", sequence: 1, planning_id: "old-plan", timestamp: 1 }] };
@@ -3636,8 +3776,10 @@ test("actual App stop preserves a sent Planner follow-up and the next unsent dra
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [saved.runId], repositoryInfo: { path: config.repository, name: "Stop test", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = saved; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [saved.runId], conversations: fixtureSummaries([saved]), repositoryInfo: { path: config.repository, name: "Stop test", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "get_execution_output": result = fixtureExecutionPage(body, [saved]); break;
+      case "load_run": case "snapshot": case "history": result = saved; break;
       case "snapshot_if_changed": result = { version: stopped ? "stopped" : "old", snapshot: stopped ? saved : null }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -3654,9 +3796,17 @@ test("actual App stop preserves a sent Planner follow-up and the next unsent dra
         controls.push(body);
         if (body.action === "stop_planner") {
           stopped = true;
+          const submitted = saved.events.find(event => event.type === "planner_steer_submitted");
+          saved = { ...saved, events: [...saved.events, { type: "planner_steer_status", sequence: 4, timestamp: 4,
+            planning_id: saved.planningId, request_id: submitted.request_id, status: "unknown" }] };
         } else {
           assert.equal(body.action, "steer_planner");
           assert.equal(body.instruction, "STEER_BEFORE_STOP");
+          saved = { ...saved, events: [...saved.events,
+            { type: "planner_steer_submitted", sequence: 2, timestamp: 2, planning_id: saved.planningId,
+              request_id: body.requestId, instruction: body.instruction },
+            { type: "planner_steer_status", sequence: 3, timestamp: 3, planning_id: saved.planningId,
+              request_id: body.requestId, status: "queued" }] };
         }
         result = saved;
         break;
@@ -3749,9 +3899,10 @@ test("switching conversations on a large viewport stays anchored to the newest r
     }
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: Object.keys(runs),
+      case "bootstrap": result = { config, snapshot: empty, runs: Object.keys(runs), conversations: fixtureSummaries(Object.values(runs)),
         repositoryInfo: { path: config.repository, name: "Large Switch", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = runs[body.runId] || empty; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "load_run": case "snapshot": case "history": result = runs[body.runId] || empty; break;
       case "snapshot_if_changed": result = { version: body.runId, snapshot: null }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -3969,8 +4120,9 @@ test("an edited Planner follow-up keeps its turn and the failure notice", { time
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: config.repository, name: "Edit failure", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = current; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], conversations: fixtureSummaries([current]), repositoryInfo: { path: config.repository, name: "Edit failure", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "load_run": case "snapshot": case "history": result = current; break;
       case "snapshot_if_changed": result = { version: "fixed", snapshot: current }; break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;

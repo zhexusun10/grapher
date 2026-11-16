@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureSummaries, fixtureFileChanges, fixtureExecutionPage } from "./fixtures/current-api.mjs";
 import test, { before, after } from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
@@ -18,7 +19,8 @@ async function waitFor(check) {
 }
 const catalog = {
   providers: [{ id: "test", name: "Test", methods: [], configured: true }], warning: null,
-  models: ["old", "new"].map(id => ({ provider: "test", id, name: id, available: true, api: "mock", contextWindow: 1000 })),
+  models: ["old", "new"].map(id => ({ provider: "test", id, name: id, available: true, api: "mock", contextWindow: 1000,
+    thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], thinkingLevelFallbacks: {} })),
 };
 before(async () => {
   server = await createServer({
@@ -56,7 +58,12 @@ async function fixture(name, handler = async () => false, reducedMotion = "reduc
     const command = new URL(route.request().url()).pathname.slice(5);
     const body = route.request().postDataJSON();
     if (await handler(route, command, body)) return;
-    const defaults = { provider_auth: catalog, pi_extensions: { globalDirectory: "mock", extensions: [] },
+    if (command === "get_execution_output") {
+      const snapshots = await page.evaluate(() => window.audit?.fixtureSnapshots?.() ?? []);
+      return route.fulfill({ json: { result: fixtureExecutionPage(body, snapshots) } });
+    }
+    const defaults = { provider_auth: catalog, get_file_changes: fixtureFileChanges(body),
+      extension_command: { instance: "standalone", commands: [] }, pi_extensions: { globalDirectory: "mock", extensions: [] },
       environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true },
       list_files: { files: [] }, list_skills: { skills: [] },
       write_workspace_attachment: { name: "fixture.txt", path: "grapher-attachments/00000000-0000-4000-8000-000000000001/fixture.txt" },
@@ -4260,8 +4267,10 @@ for (const approved of [false, true]) {
       const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
       let result;
       switch (command) {
-        case "bootstrap": result = { config, snapshot: empty, runs: [draft.runId], repositoryInfo: info, dataPath: "/mock" }; break;
-        case "history": case "snapshot": result = draft; break;
+        case "bootstrap": result = { config, snapshot: empty, runs: [draft.runId], conversations: fixtureSummaries([draft]), repositoryInfo: info, dataPath: "/mock" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
+        case "extension_command": result = { instance: "standalone", commands: [] }; break;
+        case "load_run": case "history": case "snapshot": result = draft; break;
         case "snapshot_if_changed":
           if (requested) polls += 1;
           result = { version: `poll-${polls}`, snapshot: draft }; break;
@@ -4343,8 +4352,10 @@ for (const wireStatus of ["completed", "done"]) {
       const body = route.request().postDataJSON();
       let result;
       switch (command) {
-        case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], repositoryInfo: info, dataPath: "/mock" }; break;
-        case "history": case "snapshot": result = snapshot; break;
+        case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], conversations: fixtureSummaries([snapshot]), repositoryInfo: info, dataPath: "/mock" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
+        case "extension_command": result = { instance: "standalone", commands: [] }; break;
+        case "load_run": case "history": case "snapshot": result = snapshot; break;
         case "snapshot_if_changed": result = { version: "1", snapshot }; break;
         case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
         case "list_plannings": result = []; break;
@@ -4459,8 +4470,10 @@ test("topology Pause/Continue controls running nodes and distinguishes paused at
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "history": case "snapshot": result = current; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], conversations: fixtureSummaries([current]), repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "history": case "snapshot": result = current; break;
       case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -4557,10 +4570,12 @@ test("recovered planning polls activity before route discovery and opens the com
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
   const empty = { runId: "", config: null, graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
     plan: null, executions: [], events: [], approved: false, paused: false, phase: "draft", base: "", feedbackCounts: {} };
-  const running = { planningId: "recovered-plan", repository: "/a", status: "running", planType: "undecided", createdAt: Date.now(),
+  const running = { planningId: "recovered-plan", runId: "recovered-run", repository: "/a", status: "running", planType: "undecided", createdAt: Date.now(),
     modelDuration: 0, totalPlanningDuration: 0, roles: { partition: {}, planner: {} } };
   const info = { path: "/a", name: "Alpha", branch: "main", head: "", clean: true };
-  const bootstrap = { config, snapshot: empty, runs: [], repositoryInfo: info, dataPath: "/mock" };
+  const active = { ...empty, runId: running.runId, config, phase: "planning", planType: "undecided",
+    planningId: running.planningId, planning: running };
+  const bootstrap = { config, snapshot: active, runs: [active.runId], conversations: fixtureSummaries([active]), repositoryInfo: info, dataPath: "/mock" };
   const completed = { ...empty, runId: "recovered-run", config, planType: "graph", phase: "awaiting_approval",
     planningId: running.planningId, planning: { ...running, status: "success" },
     graph: { originalGoal: "Recovered goal", nodes: [], edges: [] } };
@@ -4577,6 +4592,8 @@ test("recovered planning polls activity before route discovery and opens the com
     let result;
     switch (command) {
       case "bootstrap": result = bootstrap; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
       case "list_plannings": result = [finished ? completed.planning : running]; break;
       case "get_planning": result = finished ? completed.planning : running; break;
@@ -4585,7 +4602,7 @@ test("recovered planning polls activity before route discovery and opens the com
         assert.equal(body.role, "planner");
         offsets.push(body.offset);
         const bytes = Buffer.from(output);
-        result = { planningId: running.planningId, role: "planner", content: bytes.subarray(body.offset).toString(),
+        result = { planningId: running.planningId, role: "planner", content: bytes.subarray(body.offset).toString(), startOffset: body.offset,
           nextOffset: bytes.length, totalBytes: bytes.length, complete: true, running: !finished };
         break;
       }
@@ -4593,6 +4610,7 @@ test("recovered planning polls activity before route discovery and opens the com
         assert.equal(body.planningId, running.planningId);
         assert.equal(body.repository, "/a");
         result = completed; break;
+      case "load_run": result = finished ? completed : active; break;
       case "history": case "snapshot": result = completed; break;
       case "snapshot_if_changed": result = { version: "fixed", snapshot: null }; break;
       case "provider_auth": result = catalog; break;
@@ -4631,7 +4649,7 @@ test("recovered planning polls activity before route discovery and opens the com
 
 test("pure frontend refresh during active planning re-attaches silently without a reconnect banner", { timeout: 45_000 }, async () => {
   const config = { repository: "/a", model: "test/old", thinkingLevel: "medium", maxParallel: 2, maxFeedback: 3, autoApprove: false };
-  const runningPlanning = { planningId: "active-plan", repository: "/a", status: "running", createdAt: Date.now(),
+  const runningPlanning = { planningId: "active-plan", runId: "active-plan-run", repository: "/a", status: "running", createdAt: Date.now(),
     modelDuration: 0, totalPlanningDuration: 0, roles: { partition: {}, planner: {} } };
   const planningSnapshot = {
     runId: "active-plan-run", config, planType: "undecided", phase: "planning",
@@ -4640,7 +4658,7 @@ test("pure frontend refresh during active planning re-attaches silently without 
     nodes: {}, plan: null, executions: [], events: [], approved: false, paused: false, base: "", feedbackCounts: {},
   };
   const info = { path: "/a", name: "Alpha", branch: "main", head: "", clean: true };
-  const bootstrap = { config, snapshot: planningSnapshot, runs: ["active-plan-run"], repositoryInfo: info, dataPath: "/mock" };
+  const bootstrap = { config, snapshot: planningSnapshot, runs: ["active-plan-run"], conversations: fixtureSummaries([planningSnapshot]), repositoryInfo: info, dataPath: "/mock" };
   const line = event => JSON.stringify(event) + "\n";
   const output = line({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "Active refresh goal" }] } }) +
     line({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Streaming active plan output" } });
@@ -4661,6 +4679,8 @@ test("pure frontend refresh during active planning re-attaches silently without 
     let result;
     switch (command) {
       case "bootstrap": result = bootstrap; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
       case "list_plannings": result = [runningPlanning]; break;
       case "get_planning": result = runningPlanning; break;
@@ -4669,11 +4689,11 @@ test("pure frontend refresh during active planning re-attaches silently without 
         assert.equal(body.role, "planner");
         offsets.push(body.offset);
         const bytes = Buffer.from(output);
-        result = { planningId: runningPlanning.planningId, role: "planner", content: bytes.subarray(body.offset).toString(),
+        result = { planningId: runningPlanning.planningId, role: "planner", content: bytes.subarray(body.offset).toString(), startOffset: body.offset,
           nextOffset: bytes.length, totalBytes: bytes.length, complete: false, running: true };
         break;
       }
-      case "history": case "snapshot": result = planningSnapshot; break;
+      case "load_run": case "history": case "snapshot": result = planningSnapshot; break;
       case "snapshot_if_changed": result = { version: "fixed", snapshot: null }; break;
       case "provider_auth": result = catalog; break;
       case "list_files": result = { files: [] }; break;
@@ -4718,8 +4738,11 @@ test("node follow-ups keep records expanded and completed nodes continue instead
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "history": case "snapshot": result = current; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], conversations: fixtureSummaries([current]), repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "get_execution_output": result = fixtureExecutionPage(body, [current]); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "history": case "snapshot": result = current; break;
       case "snapshot_if_changed": result = { version: "fixed", snapshot: null }; break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -4821,8 +4844,10 @@ for (const [planType, publicationPhase] of [["graph", null], ["serial", null], [
       const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
       let result;
       switch (command) {
-        case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-        case "history": case "snapshot": result = current; break;
+        case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], conversations: fixtureSummaries([current]), repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
+        case "extension_command": result = { instance: "standalone", commands: [] }; break;
+        case "load_run": case "history": case "snapshot": result = current; break;
         case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
         case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
         case "list_plannings": result = []; break;
@@ -4830,6 +4855,7 @@ for (const [planType, publicationPhase] of [["graph", null], ["serial", null], [
         case "list_skills": result = { skills: [] }; break;
         case "provider_auth": result = catalog; break;
         case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+        case "get_execution_output": result = fixtureExecutionPage(body, [current]); break;
         case "control": {
           actions.push(body.action);
           const sequence = current.events.length + 1;
@@ -4854,6 +4880,10 @@ for (const [planType, publicationPhase] of [["graph", null], ["serial", null], [
     const openNode = async () => {
       await page.locator('[data-run-id="queue-run"]').click();
       if (planType === "graph") await page.locator('[data-node-id="task"]').click();
+      if (publicationPhase && current.executions.length > 1) {
+        const firstRecord = page.locator('.session-label-toggle[aria-expanded="false"]').filter({ hasText: "#1" });
+        if (await firstRecord.count()) await firstRecord.click();
+      }
       await page.getByText("Initial queue result", { exact: true }).waitFor();
     };
     try {
@@ -4997,9 +5027,11 @@ for (const nodeId of ["merger", "merge:join", "merger:publication"]) {
     await context.route("**/api/*", async route => {
       const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
       let result;
-      if (command === "bootstrap") result = { config, snapshot: empty, runs: [current.runId],
+      if (command === "bootstrap") result = { config, snapshot: empty, runs: [current.runId], conversations: fixtureSummaries([current]),
         repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" };
-      else if (command === "history" || command === "snapshot") result = current;
+      else if (command === "get_file_changes") result = fixtureFileChanges(body);
+      else if (command === "extension_command") result = { instance: "standalone", commands: [] };
+      else if (command === "load_run" || command === "history" || command === "snapshot") result = current;
       else if (command === "snapshot_if_changed") result = { version: JSON.stringify(current), snapshot: current };
       else if (command === "repository_status") result = { repository: "/a", valid: true, error: null };
       else if (command === "list_plannings") result = [];
@@ -5056,8 +5088,10 @@ test("editing a node objective replaces the opening turn without creating a chat
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "history": case "snapshot": result = current; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], conversations: fixtureSummaries([current]), repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "history": case "snapshot": result = current; break;
       case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -5162,8 +5196,10 @@ for (const planType of ["graph", "serial"]) {
       const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
       let result;
       switch (command) {
-        case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-        case "history": case "snapshot": result = current; break;
+        case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], conversations: fixtureSummaries([current]), repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
+        case "extension_command": result = { instance: "standalone", commands: [] }; break;
+        case "load_run": case "history": case "snapshot": result = current; break;
         case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
         case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
         case "list_plannings": result = []; break;
@@ -5301,8 +5337,10 @@ test("pausing a node returns an unread steer to the composer and removes its car
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "history": case "snapshot": result = current; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], conversations: fixtureSummaries([current]), repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "history": case "snapshot": result = current; break;
       case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -5387,8 +5425,10 @@ test("a partially loaded transcript never rolls back a repeated consumed steer",
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "history": case "snapshot": result = current; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], conversations: fixtureSummaries([current]), repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "history": case "snapshot": result = current; break;
       case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -5450,7 +5490,7 @@ test("late node sends and edits cannot overwrite another workspace or its compos
   };
   const empty = { ...snapshots.b, runId: "", graph: { originalGoal: "", nodes: [], edges: [] }, approved: false, phase: "draft", config: null };
   const info = path => ({ path, name: path === "/a" ? "Alpha" : "Beta", branch: "main", head: "", clean: true });
-  const bootstrap = { config, snapshot: empty, runs: ["a", "b"], repositoryInfo: info("/a"), dataPath: "/mock" };
+  const bootstrap = { config, snapshot: empty, runs: ["a", "b"], conversations: fixtureSummaries(Object.values(snapshots)), repositoryInfo: info("/a"), dataPath: "/mock" };
   const sendGate = deferred(), editGate = deferred();
   let controls = 0, edits = 0, sendReplied = false, editReplied = false;
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US", reducedMotion: "reduce" });
@@ -5468,7 +5508,10 @@ test("late node sends and edits cannot overwrite another workspace or its compos
     let result;
     switch (command) {
       case "bootstrap": result = bootstrap; break;
-      case "snapshot": case "history": result = snapshots[body.runId]; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "get_execution_output": result = fixtureExecutionPage(body, Object.values(snapshots)); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "snapshot": case "history": result = snapshots[body.runId]; break;
       case "snapshot_if_changed": result = { version: "fixed", snapshot: null }; break;
       case "detect_repository": result = info(body.path || body.repository); break;
       case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
@@ -5759,8 +5802,10 @@ for (const kind of ["publication", "node"]) {
       const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
       let result;
       switch (command) {
-        case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-        case "history": case "snapshot": result = current; break;
+        case "bootstrap": result = { config, snapshot: empty, runs: [current.runId], conversations: fixtureSummaries([current]), repositoryInfo: { path: "/a", name: "Alpha", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
+        case "extension_command": result = { instance: "standalone", commands: [] }; break;
+        case "load_run": case "history": case "snapshot": result = current; break;
         case "snapshot_if_changed": result = { version: JSON.stringify(current), snapshot: current }; break;
         case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
         case "list_plannings": result = []; break;
@@ -5778,6 +5823,7 @@ for (const kind of ["publication", "node"]) {
         }
         case "provider_auth": result = catalog; break;
         case "pi_extensions": result = { globalDirectory: "mock", extensions: [] }; break;
+        case "get_execution_output": result = fixtureExecutionPage(body, [current]); break;
         case "control": {
           actions.push({ action: body.action, executionId: body.executionId, node: body.node });
           const sequence = current.events.length + 1;

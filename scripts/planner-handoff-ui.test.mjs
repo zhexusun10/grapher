@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureSummaries, fixtureFileChanges } from "./fixtures/current-api.mjs";
 import test, { before, after } from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
@@ -88,8 +89,10 @@ async function openFollowUp({ repository, firstRead = "ready" }) {
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [running.runId], repositoryInfo: { path: config.repository, name: "Handoff", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = running; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [running.runId], conversations: fixtureSummaries([running]), repositoryInfo: { path: config.repository, name: "Handoff", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "snapshot": case "history": result = running; break;
       case "snapshot_if_changed": result = { version: "handoff", snapshot: running }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -151,9 +154,11 @@ async function openPagedPlanner({ graphRunning = true, stalled = false } = {}) {
     let result;
     switch (command) {
       case "bootstrap": result = { config, snapshot: { ...snapshot, runId: "", graph: { originalGoal: "", nodes: [], edges: [] },
-        nodes: {}, executions: [], events: [], phase: "draft", planning: null, planningId: undefined }, runs: [snapshot.runId],
+        nodes: {}, executions: [], events: [], phase: "draft", planning: null, planningId: undefined }, runs: [snapshot.runId], conversations: fixtureSummaries([snapshot]),
         repositoryInfo: { path: config.repository, name: "Planner fill", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = snapshot; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "snapshot": case "history": result = snapshot; break;
       case "snapshot_if_changed": {
         polls++;
         result = { version: String(polls), snapshot: { ...snapshot,
@@ -262,7 +267,9 @@ test("empty failed Planner composer resumes its own turn without adding a user m
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: failed, runs: [failed.runId], repositoryInfo: { path: config.repository, name: "Resume", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "bootstrap": result = { config, snapshot: failed, runs: [failed.runId], conversations: fixtureSummaries([failed]), repositoryInfo: { path: config.repository, name: "Resume", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(request); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
       case "snapshot": case "history": case "load_run": result = failed; break;
       case "snapshot_if_changed": result = { version: "failed", snapshot: failed }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
@@ -315,9 +322,11 @@ test("post-task review output starts after a divider instead of continuing the p
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: completed, runs: [completed.runId],
+      case "bootstrap": result = { config, snapshot: completed, runs: [completed.runId], conversations: fixtureSummaries([completed]),
         repositoryInfo: { path: config.repository, name: "Review divider", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = completed; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "snapshot": case "history": result = completed; break;
       case "snapshot_if_changed": result = { version: "review-divider", snapshot: completed }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -422,8 +431,10 @@ test("a steer whose durable window starts at that turn stays visible after the r
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: planned, runs: [planned.runId], repositoryInfo: { path: config.repository, name: "Steer window", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = planned; break;
+      case "bootstrap": result = { config, snapshot: planned, runs: [planned.runId], conversations: fixtureSummaries([planned]), repositoryInfo: { path: config.repository, name: "Steer window", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "snapshot": case "history": result = planned; break;
       case "snapshot_if_changed": result = { version: "steer-window", snapshot: planned }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -486,13 +497,16 @@ test("Planner shows generated tools immediately and moves a queued steer only wh
     if (command === "plan_goal_stream") return route.continue();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: initial, runs: [initial.runId], repositoryInfo: { path: config.repository, name: "Steer", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = snapshot; break;
+      case "bootstrap": result = { config, snapshot: initial, runs: [initial.runId], conversations: fixtureSummaries([initial]), repositoryInfo: { path: config.repository, name: "Steer", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "snapshot": case "history": result = snapshot; break;
       case "snapshot_if_changed": result = { version: String(snapshot.events.length), snapshot }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": case "list_files": case "list_skills": result = command === "list_plannings" ? [] : command === "list_files" ? { files: [] } : { skills: [] }; break;
       case "provider_auth": result = { providers: [{ id: "test", name: "Test", configured: true, methods: [] }],
-        models: [{ provider: "test", id: "model", name: "Model", available: true, thinkingLevels: ["medium", "high"] }], warning: null }; break;
+        models: [{ provider: "test", id: "model", name: "Model", available: true, api: "mock", contextWindow: 1000,
+          thinkingLevels: ["medium", "high"], thinkingLevelFallbacks: {} }], warning: null }; break;
       case "composer_models":
         snapshot = { ...snapshot, modelConfig: { ...config, roleModels: { planner: body.settings } } };
         result = snapshot; break;

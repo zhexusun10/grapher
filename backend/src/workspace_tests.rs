@@ -5,6 +5,15 @@ use std::{
 };
 use tempfile::TempDir;
 
+const RUN_ID: &str = "48b8e1d1-2428-42a2-9b28-9d90f631f9d1";
+
+fn slot(temp: &TempDir, name: &str) -> PathBuf {
+    temp.path()
+        .join(".grapher-worktrees")
+        .join(RUN_ID)
+        .join(name)
+}
+
 #[test]
 fn host_git_disables_automatic_maintenance() {
     let temp = tempfile::tempdir().unwrap();
@@ -34,7 +43,7 @@ fn private_git_queries_use_graph_metadata_and_keep_cli_fallbacks() {
     let user_head = workspace::git(&repository, &["rev-parse", "HEAD"]).unwrap();
     fs::write(repository.join("tracked.txt"), "uncommitted input").unwrap();
     let base = workspace::snapshot_repository(&repository).unwrap();
-    let node = temp.path().join(".grapher-worktrees/run/node");
+    let node = slot(&temp, "node");
     workspace::prepare(&repository, &node, &base, &[]).unwrap();
     assert_ne!(base, user_head);
     workspace::project_git(&node, &["update-ref", "refs/grapher/base", &user_head]).unwrap();
@@ -209,7 +218,7 @@ fn explicit_shadow_reads_use_the_selected_database_without_caching_refs() {
 fn private_query_fixture() -> (TempDir, PathBuf, String, String) {
     let temp = tempfile::tempdir().unwrap();
     let (source, base) = source(&temp);
-    let node = temp.path().join(".grapher-worktrees/run/query");
+    let node = slot(&temp, "query");
     workspace::prepare(&source, &node, &base, &[]).unwrap();
     fs::write(node.join("tracked.txt"), "new task bytes").unwrap();
     workspace::git(&node, &["add", "tracked.txt"]).unwrap();
@@ -298,7 +307,7 @@ fn node_snapshot_stages_independent_slots_before_waiting_for_host_refs() {
         let slots: Vec<_> = ["a", "b"]
             .into_iter()
             .map(|name| {
-                let slot = temp.path().join(".grapher-worktrees/run").join(name);
+                let slot = slot(&temp, name);
                 workspace::prepare(&source, &slot, &base, &[]).unwrap();
                 fs::write(slot.join("result.txt"), name).unwrap();
                 slot
@@ -384,7 +393,10 @@ fn node_snapshot_stages_independent_slots_before_waiting_for_host_refs() {
                     &source,
                     &[
                         "rev-parse",
-                        &format!("refs/grapher/nodes/{}", crate::compiler::node_id(name)),
+                        &format!(
+                            "refs/grapher/runs/{RUN_ID}/nodes/{}",
+                            crate::compiler::node_id(name)
+                        ),
                     ]
                 )
                 .unwrap(),
@@ -396,10 +408,7 @@ fn node_snapshot_stages_independent_slots_before_waiting_for_host_refs() {
                 name
             );
             crate::workspace_view::verify_result(slot, &source, head).unwrap();
-            let downstream = temp
-                .path()
-                .join(".grapher-worktrees/run")
-                .join(format!("child-{name}"));
+            let downstream = self::slot(&temp, &format!("child-{name}"));
             workspace::prepare(&source, &downstream, &base, std::slice::from_ref(head)).unwrap();
             assert_eq!(
                 fs::read_to_string(downstream.join("result.txt")).unwrap(),
@@ -420,7 +429,7 @@ fn node_snapshot_refuses_changes_between_staging_and_capture() {
         fs::create_dir(&source).unwrap();
         fs::write(source.join("input.txt"), "input").unwrap();
         let base = workspace::snapshot_repository(&source).unwrap();
-        let slot = temp.path().join(".grapher-worktrees/run/node");
+        let slot = slot(&temp, "node");
         workspace::prepare(&source, &slot, &base, &[]).unwrap();
         fs::write(slot.join("result.txt"), "first").unwrap();
         let metadata = workspace::private_git_dir(&slot).unwrap();
@@ -500,7 +509,7 @@ fn node_snapshot_allows_source_edits_between_staging_and_capture() {
             workspace::project_git(&source, &["commit", "-qm", "source"]).unwrap();
         }
         let base = workspace::snapshot_repository(&source).unwrap();
-        let node = temp.path().join(".grapher-worktrees/run/node");
+        let node = slot(&temp, "node");
         workspace::prepare(&source, &node, &base, &[]).unwrap();
         let original_project_head =
             standard.then(|| workspace::project_git(&node, &["rev-parse", "HEAD"]).unwrap());
@@ -568,7 +577,7 @@ fn node_snapshot_allows_source_edits_between_staging_and_capture() {
         assert!(!source.join("removed.txt").exists());
         assert!(!source.join("result.txt").exists());
 
-        let child = temp.path().join(".grapher-worktrees/run/child");
+        let child = slot(&temp, "child");
         workspace::prepare(&source, &child, &base, &[head]).unwrap();
         assert_eq!(
             fs::read_to_string(child.join("input.txt")).unwrap(),
@@ -603,7 +612,7 @@ fn node_snapshot_rejects_conflicts_without_waiting_for_host_refs() {
     fs::create_dir(&source).unwrap();
     fs::write(source.join("input.txt"), "input").unwrap();
     let base = workspace::snapshot_repository(&source).unwrap();
-    let slot = temp.path().join(".grapher-worktrees/run/node");
+    let slot = slot(&temp, "node");
     workspace::prepare(&source, &slot, &base, &[]).unwrap();
     let blob = workspace::git(&slot, &["rev-parse", "HEAD:input.txt"]).unwrap();
     workspace::git_bytes(
@@ -1252,28 +1261,59 @@ fn graph_snapshot_copies_local_filter_and_attribute_settings() {
 }
 
 #[test]
-fn reclaimed_slots_remove_private_git_metadata_and_orphans() {
+fn unscoped_node_refs_are_rejected_before_workspace_mutation() {
     let temp = tempfile::tempdir().unwrap();
-    let run = temp.path().join(".grapher-worktrees").join("run");
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file.txt"), "original").unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let target = temp.path().join("unscoped");
+    assert!(
+        workspace::prepare(&source, &target, &base, &["named-parent".into()])
+            .unwrap_err()
+            .contains("Run identity")
+    );
+    assert!(
+        workspace::snapshot_node_for_run(&target, &source, "worker", None)
+            .unwrap_err()
+            .contains("Run identity")
+    );
+    assert!(!target.exists());
+    assert_eq!(fs::read(source.join("file.txt")).unwrap(), b"original");
+}
+
+#[test]
+fn reclaimed_slots_remove_only_current_owned_git_metadata_and_orphans() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file.txt"), "content").unwrap();
+    let base = workspace::snapshot_repository(&source).unwrap();
+    let run = temp
+        .path()
+        .join(".grapher-worktrees")
+        .join(uuid::Uuid::new_v4().to_string());
     let slot = run.join("slot");
-    fs::create_dir_all(&slot).unwrap();
-    workspace::git(&slot, &["init", "-q"]).unwrap();
-    fs::write(slot.join("file.txt"), "content").unwrap();
-    workspace::hide_private_git(&slot).unwrap();
-    assert!(!slot.join(".git").exists());
-    assert!(workspace::private_git_dir(&slot).is_some());
+    workspace::prepare(&source, &slot, &base, &[]).unwrap();
+    let metadata = workspace::private_git_dir(&slot).unwrap();
+    assert!(metadata.join("workspace-layout-v4").is_file());
     workspace::remove_private_git(&slot).unwrap();
     assert!(workspace::private_git_dir(&slot).is_none());
-
     let orphan = run.join("orphan");
-    fs::create_dir_all(&orphan).unwrap();
-    workspace::git(&orphan, &["init", "-q"]).unwrap();
-    workspace::hide_private_git(&orphan).unwrap();
+    workspace::prepare(&source, &orphan, &base, &[]).unwrap();
     let metadata = workspace::private_git_dir(&orphan).unwrap();
     fs::remove_dir_all(&orphan).unwrap();
-    assert!(metadata.is_dir());
+    let unknown = run.join(".grapher-git").join("0123456789abcdef.git");
+    let retired = run.join(".grapher-git").join("legacy-slot.git");
+    for path in [&unknown, &retired] {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join("keep"), "unowned").unwrap();
+    }
     workspace::reclaim_orphan_git_metadata(&run).unwrap();
     assert!(!metadata.exists());
+    assert_eq!(fs::read(unknown.join("keep")).unwrap(), b"unowned");
+    assert_eq!(fs::read(retired.join("keep")).unwrap(), b"unowned");
+    assert_eq!(fs::read(source.join("file.txt")).unwrap(), b"content");
 }
 
 #[test]
@@ -1286,11 +1326,7 @@ fn recreated_slot_ignores_metadata_from_a_deleted_workspace() {
     workspace::git(&source, &["add", "-A"]).unwrap();
     workspace::git(&source, &["commit", "-q", "-m", "base"]).unwrap();
     let base = workspace::git(&source, &["rev-parse", "HEAD"]).unwrap();
-    let slot = temp
-        .path()
-        .join(".grapher-worktrees")
-        .join("run")
-        .join("slot");
+    let slot = slot(&temp, "slot");
     workspace::prepare(&source, &slot, &base, &[]).unwrap();
     workspace::hide_private_git(&slot).unwrap();
     assert!(workspace::private_git_dir(&slot).is_some());
@@ -1507,10 +1543,14 @@ fn private_git_requires_committed_history_not_only_project_metadata() {
     fs::write(source.join("keep.txt"), "base").unwrap();
     workspace::git(&source, &["add", "-A"]).unwrap();
     workspace::git(&source, &["commit", "-qm", "base"]).unwrap();
-    assert!(workspace::has_private_git(&source));
+    assert!(workspace::project_git(&source, &["rev-parse", "HEAD"]).is_ok());
+    assert!(
+        !workspace::has_private_git(&source),
+        "project history is not Graph metadata"
+    );
 
     let base = workspace::snapshot_repository(&source).unwrap();
-    let slot = temp.path().join(".grapher-worktrees/run/node");
+    let slot = slot(&temp, "node");
     workspace::prepare(&source, &slot, &base, &[]).unwrap();
     assert!(workspace::has_private_git(&slot));
     let metadata = workspace::private_git_dir(&slot).unwrap();
@@ -1544,11 +1584,7 @@ fn prepare_recovers_from_incomplete_or_unborn_private_git_metadata() {
     let base = workspace::snapshot_repository(&source).unwrap();
 
     // 1. Interrupted right after allocate_private_git: only workspace-layout-v4 exists.
-    let allocated_only = temp
-        .path()
-        .join(".grapher-worktrees")
-        .join("run")
-        .join("allocated-only");
+    let allocated_only = slot(&temp, "allocated-only");
     fs::create_dir_all(&allocated_only).unwrap();
     super::allocate_private_git(&allocated_only).unwrap();
     assert!(workspace::private_git_dir(&allocated_only).is_some());
@@ -1561,11 +1597,7 @@ fn prepare_recovers_from_incomplete_or_unborn_private_git_metadata() {
     );
 
     // 2. Interrupted right after git init: HEAD exists as an unborn branch without a commit.
-    let unborn = temp
-        .path()
-        .join(".grapher-worktrees")
-        .join("run")
-        .join("unborn");
+    let unborn = slot(&temp, "unborn");
     fs::create_dir_all(&unborn).unwrap();
     super::allocate_private_git(&unborn).unwrap();
     workspace::git(&unborn, &["init", "-q"]).unwrap();
@@ -1575,11 +1607,7 @@ fn prepare_recovers_from_incomplete_or_unborn_private_git_metadata() {
     assert_eq!(fs::read_to_string(unborn.join("keep.txt")).unwrap(), "base");
 
     // 3. Unsupported legacy metadata (HEAD without workspace-layout-v4) is still refused.
-    let legacy = temp
-        .path()
-        .join(".grapher-worktrees")
-        .join("run")
-        .join("legacy");
+    let legacy = slot(&temp, "legacy");
     fs::create_dir_all(&legacy).unwrap();
     let metadata = legacy
         .parent()

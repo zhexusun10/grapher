@@ -17,13 +17,17 @@ fn feedback_batch_survives_restart_before_and_after_atomic_application() {
     runtime.pause(false).unwrap();
     runtime.drain_feedback().unwrap();
     assert!(runtime.state.pending_feedback.is_empty());
+    assert_eq!(runtime.state.nodes["owner"].status, "dirty");
+    assert!(runtime.state.nodes["owner"]
+        .instruction
+        .contains("Read reports/audit.json."));
     assert_eq!(
-        runtime.state.nodes["owner"]
-            .feedback_workspace
-            .as_ref()
-            .unwrap()
-            .additional_sources
-            .len(),
+        runtime
+            .state
+            .events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::Invalidated { .. }))
+            .count(),
         1
     );
     let counts = runtime.state.feedback_counts.clone();
@@ -40,6 +44,11 @@ fn feedback_batch_survives_restart_before_and_after_atomic_application() {
             .unwrap();
     }
     assert_eq!(runtime.state.feedback_counts, counts);
+    assert!(
+        runtime.0.jobs().unwrap().is_empty(),
+        "private review results must be delivered before repair"
+    );
+    super::super::workspace_policy::deliver_batch(&mut runtime);
     let repair = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &repair);
     assert!(Path::new(&repair.execution.worktree)
@@ -71,19 +80,20 @@ fn feedback_batch_commit_failure_keeps_all_requests_and_budgets_unchanged() {
     db.execute_batch("DROP TRIGGER reject_batch;").unwrap();
     runtime.drain_feedback().unwrap();
     assert_eq!(runtime.state.feedback_counts.len(), 2);
+    assert_eq!(runtime.state.nodes["owner"].status, "dirty");
     assert_eq!(
-        runtime.state.nodes["owner"]
-            .feedback_workspace
-            .as_ref()
-            .unwrap()
-            .additional_sources
-            .len(),
+        runtime
+            .state
+            .events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::Invalidated { .. }))
+            .count(),
         1
     );
 }
 
 #[test]
-fn exhausted_sender_is_not_merged_or_forwarded_with_applicable_feedback() {
+fn exhausted_sender_does_not_forward_instructions_or_consume_another_budget() {
     let (_temp, _source, mut runtime) = configured(&["owner", "review_one", "review_two"], 1);
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
@@ -99,19 +109,18 @@ fn exhausted_sender_is_not_merged_or_forwarded_with_applicable_feedback() {
         })
         .unwrap();
     let repair = runtime.jobs().unwrap().remove(0);
-    assert!(repair
-        .feedback_workspace
-        .as_ref()
-        .unwrap()
-        .additional_sources
-        .is_empty());
+    assert!(repair.feedback_workspace.is_none());
+    assert!(repair.source_direct);
     assert_eq!(repair.task.matches("Feedback:").count(), 1);
     assert!(repair.task.contains("Feedback:\nRead reports/audit.json."));
     assert_eq!(runtime.state.feedback_counts["review_two->owner"], 1);
     execute(&mut runtime, &repair);
     let path = Path::new(&repair.execution.worktree);
     assert!(path.join("reports/review_one.txt").exists());
-    assert!(!path.join("reports/review_two.txt").exists());
+    assert!(
+        path.join("reports/review_two.txt").exists(),
+        "successful private code is delivered independently of feedback budgets"
+    );
     assert!(runtime
         .state
         .events
@@ -161,9 +170,10 @@ fn feedback_inputs_stay_reserved_without_managed_environments() {
     execute(&mut runtime, &reviews[1]);
     runtime.drain_feedback().unwrap();
     for review in &reviews {
-        assert!(
-            runtime.workspace_reserved(Path::new(&review.execution.worktree), Some("unrelated"))
-        );
+        assert!(runtime.allocation_workspace_reserved(
+            Path::new(&review.execution.worktree),
+            Some("unrelated")
+        ));
         assert!(Path::new(&review.execution.worktree).is_dir());
     }
 }
@@ -185,36 +195,11 @@ fn parallel_acceptances_do_not_start_repair_or_consume_feedback_budget() {
     assert!(runtime.state.pending_feedback.is_empty());
     assert!(runtime.state.feedback_counts.is_empty());
     assert!(runtime.state.nodes["owner"].feedback_workspace.is_none());
-    assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 2);
+    assert_eq!(runtime.state.publication.as_ref().unwrap().heads.len(), 3);
 }
 
 #[test]
 fn batch_conflict_blocks_repair_preserves_sources_and_can_retry_with_merger() {
-    fn run(runtime: &mut Runtime, job: &Job) -> Result<(String, String), String> {
-        let events = std::cell::RefCell::new(Vec::new());
-        let result = perform_with_merger(
-            job,
-            &runtime.root,
-            &[],
-            |_| {},
-            |head| {
-                events.borrow_mut().push(EventKind::Prepared {
-                    execution_id: job.execution.id.clone(),
-                    head,
-                });
-                Ok(())
-            },
-            |event| {
-                events.borrow_mut().push(event);
-                Ok(())
-            },
-        );
-        for event in events.into_inner() {
-            runtime.emit(event).unwrap();
-        }
-        runtime.finish(&job.execution, result.clone()).unwrap();
-        result
-    }
     let (temp, _source, mut runtime) = configured(&["owner", "review_one", "review_two"], 1);
     let script = temp.path().join("agent.sh");
     let original = fs::read_to_string(&script).unwrap();
@@ -233,70 +218,82 @@ fn batch_conflict_blocks_repair_preserves_sources_and_can_retry_with_merger() {
     for review in &reviews {
         execute(&mut runtime, review);
     }
-    let repair = runtime.jobs().unwrap().remove(0);
-    let error = run(&mut runtime, &repair).unwrap_err();
-    assert!(error.contains("Workspace composition blocked"));
-    assert_eq!(runtime.state.nodes["owner"].status, "blocked");
-    let failed_slot = Path::new(&repair.execution.worktree);
-    assert!(workspace::git(failed_slot, &["rev-parse", "--verify", "MERGE_HEAD"]).is_ok());
-    for source in repair.feedback_workspace.as_ref().unwrap().sources() {
+    assert!(runtime.0.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "publishing");
+    let publication = runtime.state.publication.clone().unwrap();
+    let source = PathBuf::from(&publication.repository);
+    let error = crate::graph_merge::merge_graph_scoped(&source, &publication.heads, &[], |_| {
+        Err("resolver unavailable".into())
+    })
+    .unwrap_err();
+    assert!(error.contains("resolver unavailable"));
+    assert!(!source.join("reports").exists());
+    runtime
+        .emit(EventKind::PublicationFailed { error })
+        .unwrap();
+    assert!(runtime.0.jobs().unwrap().is_empty());
+    assert_eq!(
+        runtime
+            .state
+            .executions
+            .iter()
+            .filter(|e| e.node == "owner")
+            .count(),
+        1,
+        "repair must not start on a failed publication"
+    );
+    for review in &reviews {
+        let recorded = runtime
+            .state
+            .executions
+            .iter()
+            .find(|e| e.id == review.execution.id)
+            .unwrap();
         assert_eq!(
-            workspace::git(Path::new(&source.worktree), &["rev-parse", "HEAD"]).unwrap(),
-            source.head
+            workspace::git(
+                Path::new(&review.execution.worktree),
+                &["rev-parse", "HEAD"]
+            )
+            .unwrap(),
+            recorded.after.as_ref().unwrap().as_str()
         );
         assert!(
-            workspace::repository_status(Path::new(&source.worktree), &[])
+            workspace::repository_status(Path::new(&review.execution.worktree), &[])
                 .unwrap()
                 .is_empty()
         );
     }
-    // A deterministic fixture Merger resolves only the evidence conflict. The
-    // target agent must not run until this merge has committed successfully.
-    let resolver = r#"cat >/dev/null
-if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
-  printf 'both review reports retained\n' > reports/conflict.txt
-  git add reports/conflict.txt
-  git commit --no-edit >/dev/null
-  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Conflict resolved"}]}}'
-  exit 0
-fi
-"#;
-    fs::write(&script, format!("{resolver}\n{original}")).unwrap();
-    runtime
-        .intervene(
-            "owner",
-            "Retry the feedback batch after fixing the evidence Merger",
+    runtime.state = runtime.store.load(&runtime.state.run_id).unwrap();
+    runtime.retry_publication().unwrap();
+    let mut calls = 0;
+    let head = crate::graph_merge::merge_graph_scoped(&source, &publication.heads, &[], |path| {
+        calls += 1;
+        fs::write(
+            path.join("reports/conflict.txt"),
+            "both review reports retained\n",
         )
+        .map_err(|e| e.to_string())?;
+        workspace::git(path, &["add", "-f", "reports/conflict.txt"]).map(|_| ())
+    })
+    .unwrap();
+    assert_eq!(calls, 1);
+    runtime
+        .emit(EventKind::PublicationCompleted { head })
         .unwrap();
-    assert_eq!(runtime.state.nodes["owner"].status, "blocked");
-    assert!(
-        runtime.jobs().unwrap().is_empty(),
-        "passive input must not unblock failed composition"
-    );
-    runtime.resume_node("owner").unwrap();
-    let retry = runtime.jobs().unwrap().remove(0);
-    run(&mut runtime, &retry).unwrap();
-    assert!(Path::new(&retry.execution.worktree)
-        .join("reports/review_one.txt")
-        .exists());
-    assert!(Path::new(&retry.execution.worktree)
-        .join("reports/review_two.txt")
-        .exists());
+    let repair = runtime.jobs().unwrap().remove(0);
+    assert!(repair.source_direct);
+    execute(&mut runtime, &repair);
+    for file in ["review_one.txt", "review_two.txt", "conflict.txt"] {
+        assert!(source.join("reports").join(file).is_file());
+    }
     assert_eq!(
-        fs::read_to_string(Path::new(&retry.execution.worktree).join("owner.txt"))
-            .unwrap()
-            .trim(),
+        fs::read_to_string(source.join("owner.txt")).unwrap().trim(),
         "fixed"
     );
-    assert!(runtime
-        .state
-        .events
-        .iter()
-        .any(|event| matches!(&event.kind, EventKind::MergerFinished { .. })));
 }
 
 #[test]
-fn legacy_feedback_records_default_to_single_input_and_exact_head_validation() {
+fn feedback_without_reviewed_execution_is_superseded_without_invalidating_the_target() {
     let (_temp, _source, mut runtime) = configured(&["owner", "review"], 1);
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
@@ -304,52 +301,38 @@ fn legacy_feedback_records_default_to_single_input_and_exact_head_validation() {
     execute(&mut runtime, &review);
     let mut json = serde_json::to_value(&runtime.state.pending_feedback[0]).unwrap();
     json.as_object_mut().unwrap().remove("targetExecutionId");
-    let legacy: PendingFeedback = serde_json::from_value(json).unwrap();
-    assert!(legacy.target_execution_id.is_none());
-    assert!(runtime.feedback_request_is_current(&legacy));
-    runtime.state.pending_feedback[0] = legacy;
+    assert!(serde_json::from_value::<PendingFeedback>(json).is_err());
+    let mut missing = runtime.state.pending_feedback[0].clone();
+    missing.target_execution_id = None;
+    assert!(!runtime.feedback_request_is_current(&missing));
+    runtime.state.pending_feedback[0] = missing;
+    let before = serde_json::to_value(&runtime.state.nodes["owner"]).unwrap();
     runtime.drain_feedback().unwrap();
-    let mut json = serde_json::to_value(
-        runtime.state.nodes["owner"]
-            .feedback_workspace
-            .as_ref()
-            .unwrap(),
-    )
-    .unwrap();
-    json.as_object_mut().unwrap().remove("additionalSources");
-    let legacy: FeedbackWorkspace = serde_json::from_value(json).unwrap();
-    assert!(legacy.additional_sources.is_empty());
+    assert_eq!(
+        serde_json::to_value(&runtime.state.nodes["owner"]).unwrap(),
+        before
+    );
+    assert!(runtime.state.pending_feedback.is_empty());
 }
 
 #[test]
-fn modified_additional_sender_blocks_batch_before_target_starts() {
-    let (_temp, _source, mut runtime) = configured(&["owner", "review_one", "review_two"], 1);
+fn publication_keeps_additional_senders_unrecorded_edits_out_of_source() {
+    let (_temp, source, mut runtime) = configured(&["owner", "review_one", "review_two"], 1);
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
-    for review in runtime.jobs().unwrap() {
-        execute(&mut runtime, &review);
+    let reviews = runtime.jobs().unwrap();
+    for review in &reviews {
+        execute(&mut runtime, review);
     }
+    let late = Path::new(&reviews[1].execution.worktree).join("late.txt");
+    fs::write(&late, "unrecorded").unwrap();
     let repair = runtime.jobs().unwrap().remove(0);
-    let input = repair.feedback_workspace.as_ref().unwrap();
-    fs::write(
-        Path::new(&input.additional_sources[0].worktree).join("late.txt"),
-        "unrecorded",
-    )
-    .unwrap();
-    let result = perform(
-        &repair,
-        &runtime.root,
-        &[],
-        |_| {},
-        |_| panic!("target must not start"),
-    );
-    assert!(result
-        .unwrap_err()
-        .contains("Feedback workspace changed after completion"));
-    assert_eq!(
-        workspace::git(Path::new(&input.worktree), &["rev-parse", "HEAD"]).unwrap(),
-        input.head
-    );
+    assert!(repair.source_direct);
+    assert!(!source.join("late.txt").exists());
+    assert_eq!(fs::read_to_string(late).unwrap(), "unrecorded");
+    execute(&mut runtime, &repair);
+    assert!(source.join("reports/review_one.txt").is_file());
+    assert!(source.join("reports/review_two.txt").is_file());
 }
 
 #[test]
@@ -397,7 +380,8 @@ fn failed_batch_agent_keeps_its_prepared_workspace_and_partial_edits_on_retry() 
         .unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
     assert_eq!(retry.execution.worktree, repair.execution.worktree);
-    assert!(retry.preserved_workspace.is_some());
+    assert!(retry.source_direct);
+    assert!(retry.preserved_workspace.is_none());
     execute(&mut runtime, &retry);
     let path = Path::new(&retry.execution.worktree);
     assert_eq!(

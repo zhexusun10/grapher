@@ -214,10 +214,10 @@ test("Planner time took adds earlier turns of the same Planner session", async (
   const branchTiming = plannerSessionTiming([first, abandoned, turn("turn-3", role("new-session", 200_000, 10), 200_000)]);
   assert.equal(branchTiming.startedAt, 200_000);
   assert.equal(branchTiming.priorDurationSeconds, 0);
-  // Legacy turns without session IDs stay in the same conversation.
-  const legacyTiming = plannerSessionTiming([turn("legacy", role(undefined, 5_000, 20), 5_000), second]);
-  assert.equal(legacyTiming.startedAt, 5_000);
-  assert.equal(legacyTiming.priorDurationSeconds, 20);
+  // Unidentified turns cannot contribute to another Pi session's clock.
+  const unownedTiming = plannerSessionTiming([turn("unowned", role(undefined, 5_000, 20), 5_000), second]);
+  assert.equal(unownedTiming.startedAt, 90_000);
+  assert.equal(unownedTiming.priorDurationSeconds, 0);
   // A recovered attempt can be recorded after later turns; the displayed turn
   // still owns its own duration while every other session turn is prior.
   const recovered = turn("recovered", role("planner-session", 150_000, 10), 10_000);

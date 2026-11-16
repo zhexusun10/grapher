@@ -1,5 +1,7 @@
 use super::*;
 
+const RUN_ID: &str = "48b8e1d1-2428-42a2-9b28-9d90f631f9d1";
+
 mod environment_probe {
     include!("workspace_view/environment_probe.rs");
 }
@@ -31,7 +33,7 @@ fn configure_author(repo: &Path) {
 fn slot(temp: &tempfile::TempDir, name: &str) -> PathBuf {
     temp.path()
         .join(".grapher-worktrees")
-        .join("48b8e1d1-2428-42a2-9b28-9d90f631f9d1")
+        .join(RUN_ID)
         .join(name)
 }
 fn bytes(path: &Path) -> Vec<u8> {
@@ -370,7 +372,8 @@ fn node_snapshot_staging_keeps_scoped_removal_and_live_environment_files() {
         bytes(&node.join(".venv/runtime")),
         b"must remain live, not in Git"
     );
-    let head = workspace::snapshot_node_scoped(&node, &source, "node", None, &exclusions).unwrap();
+    let head =
+        workspace::snapshot_node_scoped(&node, &source, "node", Some(RUN_ID), &exclusions).unwrap();
     verify_result_scoped(&node, &source, &head, &exclusions).unwrap();
 }
 
@@ -1380,9 +1383,14 @@ fn offline_dependencies_and_runnable_output_survive_snapshots_forks_and_source_d
             assert!(workspace::repository_status(&node, &exclusions)
                 .unwrap()
                 .contains("node_modules/offline-local/index.js"));
-            let result =
-                workspace::snapshot_node_scoped(&node, &source, "offline", None, &exclusions)
-                    .unwrap();
+            let result = workspace::snapshot_node_scoped(
+                &node,
+                &source,
+                "offline",
+                Some(RUN_ID),
+                &exclusions,
+            )
+            .unwrap();
             verify_result(&node, &source, &result).unwrap();
             let child = slot(&temp, "offline-fork");
             workspace::prepare(&source, &child, &base, &[result.clone()]).unwrap();

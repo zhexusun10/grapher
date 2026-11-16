@@ -9,6 +9,24 @@ const response = (result: unknown) => new Response(JSON.stringify({ result }), {
   headers: { "Content-Type": "application/json" },
 });
 
+test("Run load failures stop at the authoritative endpoint and validate response ownership", async () => {
+  const original = globalThis.fetch;
+  const calls: string[] = [];
+  try {
+    for (const error of ["Unsupported Grapher database format", "Run not found", "Cannot load Run"]) {
+      calls.length = 0;
+      globalThis.fetch = async url => {
+        calls.push(String(url));
+        return new Response(JSON.stringify({ error }), { status: 400 });
+      };
+      await assert.rejects(runtimeService.loadRun("requested"));
+      assert.deepEqual(calls, ["/api/load_run"], "a failed load cannot be bypassed by snapshot/history");
+    }
+    globalThis.fetch = async () => response({ ...emptySnapshot, runId: "other" });
+    await assert.rejects(runtimeService.loadRun("requested"), /不匹配|match/i);
+  } finally { globalThis.fetch = original; }
+});
+
 test("an empty skill refresh removes cached skills rather than resurrecting them", async () => {
   const original = globalThis.fetch;
   let calls = 0;
@@ -252,7 +270,7 @@ test("Plan rootNodes pass through snapshot and compile APIs without translation"
     globalThis.fetch = async url => {
       const command = String(url).split("/").at(-1);
       const value = command === "compile_graph" ? plan
-        : command === "bootstrap" ? { config: defaultConfig, snapshot: wire, runs: [], dataPath: "/mock" }
+        : command === "bootstrap" ? { config: defaultConfig, snapshot: wire, runs: [], conversations: [], dataPath: "/mock" }
         : command === "snapshot_if_changed" ? { version: "old", snapshot: wire } : wire;
       const result = response(null);
       result.json = async () => ({ result: value });
@@ -267,20 +285,19 @@ test("Plan rootNodes pass through snapshot and compile APIs without translation"
   } finally { globalThis.fetch = original; }
 });
 
-test("legacy completion is normalized across snapshot APIs without changing other statuses or content", async () => {
+test("current completion statuses and literal user content pass through snapshot APIs unchanged", async () => {
   const original = globalThis.fetch;
-  const statuses = ["done", "completed", "waiting", "running", "paused", "blocked", "failed", "dirty"];
+  const statuses = ["completed", "waiting", "running", "paused", "blocked", "failed", "dirty"];
   const wire = { ...emptySnapshot, runId: "legacy-label", phase: "publication_failed",
     graph: { originalGoal: "Keep done in user content", nodes: statuses.map(name => ({ id: name, task: name })), edges: [] },
     nodes: Object.fromEntries(statuses.map(status => [status, { status, revision: 1, head: "retained", instruction: "done is literal user text", error: null }])),
     extra: { evidence: "untouched" } };
   const expected = structuredClone(wire);
-  expected.nodes.done.status = "completed";
   try {
     globalThis.fetch = async url => {
       const command = String(url).split("/").at(-1);
       return response(command === "bootstrap" || command === "save_config"
-        ? { config: defaultConfig, snapshot: wire, runs: [wire.runId], dataPath: "/mock" }
+        ? { config: defaultConfig, snapshot: wire, runs: [wire.runId], conversations: [], dataPath: "/mock" }
         : command === "snapshot_if_changed" ? { version: "legacy-v1", snapshot: wire } : wire);
     };
     const reads = [
@@ -303,11 +320,11 @@ test("legacy completion is normalized across snapshot APIs without changing othe
     assert.deepEqual(poll.snapshot, expected);
     globalThis.fetch = async () => response({ version: "legacy-v1", snapshot: null });
     assert.equal((await runtimeService.snapshotIfChanged("legacy-v1")).snapshot, null);
-    assert.equal(wire.nodes.done.status, "done", "the wire fixture is not rewritten");
+    assert.equal(wire.nodes.completed.status, "completed", "the wire fixture is not rewritten");
   } finally { globalThis.fetch = original; }
 });
 
-test("current snapshots retain their identities and normalization never mutates legacy snapshots", async () => {
+test("current snapshots retain identity and unsupported statuses are rejected without mutation", async () => {
   const original = globalThis.fetch;
   const node = Object.freeze({ status: "completed" as const, revision: 1, head: "head", instruction: "", error: null });
   const current = Object.freeze({ ...emptySnapshot, runId: "current-label", nodes: Object.freeze({ task: node }) });
@@ -322,20 +339,16 @@ test("current snapshots retain their identities and normalization never mutates 
     };
     assert.equal(await runtimeService.snapshot(), current);
     wire = legacy;
-    const normalized = await runtimeService.snapshot();
-    assert.equal(normalized.nodes.task.status, "completed");
+    await assert.rejects(runtimeService.snapshot(), /Unsupported node status/);
     assert.equal(legacy.nodes.task.status, "done");
-    assert.equal(normalized.nodes.unchanged, node);
-    assert.equal(normalized.graph, legacy.graph);
-    assert.equal(normalized.events, legacy.events);
   } finally { globalThis.fetch = original; }
 });
 
-test("Planner completion streams retain rootNodes while normalizing node status", async () => {
+test("Planner completion streams retain current rootNodes and node status", async () => {
   const original = globalThis.fetch;
   const wire = { ...emptySnapshot, runId: "stream-label", phase: "needs_attention",
     plan: { executionBatches: [["task"]], rootNodes: ["task"], terminals: ["task"], warnings: [] },
-    nodes: { task: { status: "done", revision: 1, head: "head", instruction: "", error: null } } };
+    nodes: { task: { status: "completed", revision: 1, head: "head", instruction: "", error: null } } };
   try {
     for (const wrapped of [false, true]) {
       let notified: Snapshot | undefined;

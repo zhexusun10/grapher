@@ -1,8 +1,6 @@
 //! Git is an internal composition channel. Publication delivers files only:
 //! never import an object, move a ref, or replace the user's Git index.
 mod atomic_files;
-mod repair;
-pub(crate) use repair::repair_legacy_file;
 
 use super::compose_graph_scoped;
 use crate::workspace::{self, git, repository_git};
@@ -534,10 +532,6 @@ fn select_attempt(
     }
 }
 
-fn private_index_git(repository: &Path, index: &Path, args: &[&str]) -> Result<String, String> {
-    private_index_git_input(repository, index, args, None)
-}
-
 fn private_index_git_input(
     repository: &Path,
     index: &Path,
@@ -750,7 +744,13 @@ mod tests {
         let node = temp.path().join("node");
         workspace::prepare(&source, &node, &base, &[]).unwrap();
         fs::write(node.join("result.txt"), "node result").unwrap();
-        let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+        let head = workspace::snapshot_node_for_run(
+            &node,
+            &source,
+            "node",
+            Some(&uuid::Uuid::new_v4().to_string()),
+        )
+        .unwrap();
         let path = temp
             .path()
             .join(".grapher-worktrees")
@@ -787,7 +787,13 @@ mod tests {
         let node = temp.path().join("node");
         workspace::prepare(&source, &node, &base, &[]).unwrap();
         fs::write(node.join("result.txt"), "result").unwrap();
-        let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+        let head = workspace::snapshot_node_for_run(
+            &node,
+            &source,
+            "node",
+            Some(&uuid::Uuid::new_v4().to_string()),
+        )
+        .unwrap();
         let run_id = uuid::Uuid::new_v4().to_string();
         let path = temp
             .path()
@@ -869,7 +875,13 @@ mod tests {
         let node = temp.path().join("node");
         workspace::prepare(&source, &node, &base, &[]).unwrap();
         fs::write(node.join("result.txt"), "result").unwrap();
-        let head = workspace::snapshot_node(&node, &source, "node").unwrap();
+        let head = workspace::snapshot_node_for_run(
+            &node,
+            &source,
+            "node",
+            Some(&uuid::Uuid::new_v4().to_string()),
+        )
+        .unwrap();
         fs::create_dir(source.join("managed")).unwrap();
         fs::write(source.join("managed/user.txt"), "user-owned staged content").unwrap();
         git(&source, &["add", "managed/user.txt"]).unwrap();
@@ -895,12 +907,24 @@ mod tests {
         let node_a = temp.path().join("node-a");
         workspace::prepare(&source, &node_a, &base, &[]).unwrap();
         fs::write(node_a.join("shared.txt"), "from a\n").unwrap();
-        let head_a = workspace::snapshot_node(&node_a, &source, "node-a").unwrap();
+        let head_a = workspace::snapshot_node_for_run(
+            &node_a,
+            &source,
+            "node-a",
+            Some(&uuid::Uuid::new_v4().to_string()),
+        )
+        .unwrap();
 
         let node_b = temp.path().join("node-b");
         workspace::prepare(&source, &node_b, &base, &[]).unwrap();
         fs::write(node_b.join("shared.txt"), "from b\n").unwrap();
-        let head_b = workspace::snapshot_node(&node_b, &source, "node-b").unwrap();
+        let head_b = workspace::snapshot_node_for_run(
+            &node_b,
+            &source,
+            "node-b",
+            Some(&uuid::Uuid::new_v4().to_string()),
+        )
+        .unwrap();
 
         let run_id = uuid::Uuid::new_v4().to_string();
         let path = temp

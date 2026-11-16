@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureSummaries, fixtureFileChanges } from "./fixtures/current-api.mjs";
 import test from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
@@ -61,7 +62,7 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
   };
   const empty = { ...makeSnapshot("", repositoryA, ""), config: null, phase: "draft" };
   const info = repository => ({ path: repository, name: repository.includes("Beta") ? "Beta" : "Alpha", branch: "main", head: "", clean: true });
-  const bootstrap = { config, snapshot: empty, runs: ["run-a", "run-b"], repositoryInfo: info(repositoryA), dataPath: "/mock/.grapher" };
+  const bootstrap = { config, snapshot: empty, runs: ["run-a", "run-b"], conversations: fixtureSummaries([snapshots["run-a"], snapshots["run-b"]]), repositoryInfo: info(repositoryA), dataPath: "/mock/.grapher" };
   const errors = [];
   let releasePlanning;
   let planningRequested = false;
@@ -79,7 +80,7 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
         { id: repositoryA, path: repositoryA, name: "Alpha", branch: "main", clean: true, lastOpened: 2 },
         { id: repositoryB, path: repositoryB, name: "Beta", branch: "main", clean: true, lastOpened: 1 },
       ]));
-      // Reproduce old cross-workspace pollution and a Windows path alias.
+      // Unversioned hints are ignored; the current index supplies ownership.
       localStorage.setItem("grapher_workspace_runs", JSON.stringify({
         [repositoryA]: ["run-a", "run-b", "pending-stale"],
         [repositoryB]: ["run-b", "run-a"],
@@ -94,7 +95,9 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
       let result;
       switch (command) {
         case "bootstrap": case "save_config": result = bootstrap; break;
-        case "history": case "snapshot": result = snapshots[body.runId] || empty; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
+        case "extension_command": result = { instance: "standalone", commands: [] }; break;
+        case "load_run": case "history": case "snapshot": result = snapshots[body.runId] || empty; break;
         case "snapshot_if_changed": result = { version: "mock-1", snapshot: snapshots[body.runId] || null }; break;
         case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
         case "detect_repository":
@@ -123,7 +126,7 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
     page.on("pageerror", error => errors.push(String(error)));
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.waitForFunction(() => {
-      const index = JSON.parse(localStorage.getItem("grapher_workspace_runs"));
+      const index = JSON.parse(localStorage.getItem("grapher-format-1:/mock/.grapher:grapher_workspace_runs"));
       return index["c:/projects/alpha"]?.join() === "run-a" && index["c:/projects/beta"]?.join() === "run-b";
     });
     assert.deepEqual(await page.locator(".runs-list [data-run-id]").evaluateAll(cards => cards.map(card => card.dataset.runId)), ["run-a"]);
@@ -325,7 +328,7 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
     assert.equal(await page.locator(".run-item.chosen").count(), 0);
     await page.locator('[data-run-id="run-b"]').waitFor();
     assert.equal(await page.locator('.runs-list [data-run-id="run-a"]').count(), 0);
-    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_workspace_runs"))), {
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock/.grapher:grapher_workspace_runs"))), {
       "c:/projects/alpha": ["run-a"], "c:/projects/beta": ["run-b"],
     });
 
@@ -353,7 +356,7 @@ test("workspace isolation, accessible home and delayed planning ownership", { ti
     await page.locator('[data-run-id="run-b"]').click();
     await page.locator(".chat-messages-stream", { hasText: "Beta conversation" }).waitFor();
     releasePlanning();
-    await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_workspace_runs"))["c:/projects/alpha"]?.includes("new-a"));
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock/.grapher:grapher_workspace_runs"))["c:/projects/alpha"]?.includes("new-a"));
     assert.deepEqual(await page.locator(".runs-list [data-run-id]").evaluateAll(cards => cards.map(card => card.dataset.runId)), ["run-b"]);
     assert.ok((await page.locator(".chat-messages-stream").innerText()).includes("Beta conversation"));
     assert.ok(!(await page.locator(".chat-messages-stream").innerText()).includes("Detached Alpha"));
@@ -414,8 +417,10 @@ test("workspace removal commits backend deletion before pruning indexes and surv
         case "bootstrap": case "save_config":
           // Keep a stale backend default after removing the final entry: an
           // explicitly empty browser workspace list must not be repopulated.
-          result = { config, snapshot: empty, runs: Object.keys(snapshots), repositoryInfo: info(repositoryA), dataPath: "/mock/.grapher" }; break;
-        case "history": case "snapshot": result = snapshots[body.runId] || empty; break;
+          result = { config, snapshot: empty, runs: Object.keys(snapshots), conversations: fixtureSummaries(Object.values(snapshots)), repositoryInfo: info(repositoryA), dataPath: "/mock/.grapher" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
+        case "extension_command": result = { instance: "standalone", commands: [] }; break;
+        case "load_run": case "history": case "snapshot": result = snapshots[body.runId] || empty; break;
         case "snapshot_if_changed": result = { version: "mock-1", snapshot: snapshots[body.runId] || null }; break;
         case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
         case "detect_repository": result = info(body.path || body.repository); break;
@@ -470,17 +475,17 @@ test("workspace removal commits backend deletion before pruning indexes and surv
     releaseDeletion();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_projects")).length === 1);
     assert.ok((await page.locator(".chat-messages-stream").innerText()).includes("Beta conversation"));
-    for (const key of ["grapher_run_labels", "grapher_run_modes"]) {
+    for (const key of ["grapher-format-1:/mock/.grapher:grapher_run_labels", "grapher-format-1:/mock/.grapher:grapher_run_modes"]) {
       const saved = await page.evaluate(key => JSON.parse(localStorage.getItem(key)), key);
       assert.deepEqual(Object.keys(saved), ["run-b"]);
     }
-    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_workspace_runs"))), { "c:/projects/beta": ["run-b"] });
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock/.grapher:grapher_workspace_runs"))), { "c:/projects/beta": ["run-b"] });
     await remove("Beta");
     await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_projects")).length === 0);
     await page.reload({ waitUntil: "networkidle" });
     assert.equal(await page.locator(".project-workspace-item").count(), 0);
     assert.equal(await page.locator(".runs-list [data-run-id]").count(), 0);
-    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_workspace_runs"))), {});
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock/.grapher:grapher_workspace_runs"))), {});
     assert.deepEqual(errors, []);
   } finally {
     releaseDeletion();
@@ -518,8 +523,10 @@ test("workspace size warning appears after background Run completion and stays d
       const finished = state.phase === "completed";
       let result;
       switch (command) {
-        case "bootstrap": result = { config, snapshot: state, runs: [state.runId], repositoryInfo: info, dataPath: "/mock/.grapher" }; break;
-        case "snapshot": case "history": result = state; break;
+        case "bootstrap": result = { config, snapshot: state, runs: [state.runId], conversations: fixtureSummaries([state]), repositoryInfo: info, dataPath: "/mock/.grapher" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
+        case "extension_command": result = { instance: "standalone", commands: [] }; break;
+        case "load_run": case "snapshot": case "history": result = state; break;
         case "snapshot_if_changed": result = { version: state.phase, snapshot: state }; break;
         case "repository_status": result = { repository: body.repository, valid: true, error: finished ? sizeError : null, sizeLimitExceeded: finished }; break;
         case "detect_repository": result = info; break;
@@ -603,8 +610,10 @@ test("removing active workspace returns to home landing page instead of switchin
       let result;
       switch (command) {
         case "bootstrap": case "save_config":
-          result = { config, snapshot: empty, runs: Object.keys(snapshots), repositoryInfo: info(repositoryA), dataPath: "/mock/.grapher" }; break;
-        case "history": case "snapshot": result = snapshots[body.runId] || empty; break;
+          result = { config, snapshot: empty, runs: Object.keys(snapshots), conversations: fixtureSummaries(Object.values(snapshots)), repositoryInfo: info(repositoryA), dataPath: "/mock/.grapher" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
+        case "extension_command": result = { instance: "standalone", commands: [] }; break;
+        case "load_run": case "history": case "snapshot": result = snapshots[body.runId] || empty; break;
         case "snapshot_if_changed": result = { version: "mock-1", snapshot: snapshots[body.runId] || null }; break;
         case "repository_status": result = { repository: body.repository, valid: true, error: null }; break;
         case "detect_repository": result = info(body.path || body.repository); break;
@@ -644,7 +653,7 @@ test("removing active workspace returns to home landing page instead of switchin
     assert.equal(await page.locator(".project-workspace-item").count(), 1);
     assert.equal(await page.locator(".project-workspace-item.active").count(), 0);
     assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_projects")).map(p => p.name)), ["Beta"]);
-    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).repository), "");
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock/.grapher:grapher_config")).repository), "");
 
     // Switching to Beta still starts at home; the user opens its conversation explicitly.
     await page.locator(".project-workspace-item", { hasText: "Beta" }).click();

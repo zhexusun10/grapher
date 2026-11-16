@@ -158,21 +158,21 @@ export const ToolCallCard: React.FC<ToolCallCardProps> = React.memo(
           return {
             icon: <FileText size={14} className="tool-icon read" />,
             badge: "read",
-            summary: args.path || args.file || t("读取工作区文件"),
+            summary: args.path || t("读取工作区文件"),
             type: "file",
           };
         case "write":
           return {
             icon: <FileCode size={14} className="tool-icon write" />,
             badge: "write",
-            summary: args.path || args.file || t("写入或创建文件"),
+            summary: args.path || t("写入或创建文件"),
             type: "file",
           };
         case "edit":
           return {
             icon: <FileEdit size={14} className="tool-icon edit" />,
             badge: "edit",
-            summary: args.path || args.file || t("代码编辑与修改"),
+            summary: args.path || t("代码编辑与修改"),
             type: "file",
           };
         case "route_task":

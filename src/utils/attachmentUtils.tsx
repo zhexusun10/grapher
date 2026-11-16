@@ -55,7 +55,7 @@ export interface ParsedMessageAttachments {
 }
 
 /**
- * Parses out <file name="...">...</file> XML tags, legacy markdown attachment blocks,
+ * Parses out <file name="...">...</file> XML tags
  * and bracketed file references so the chat bubble never dumps raw file contents,
  * while extracting attachment metadata to render an attachment badge card.
  */
@@ -86,23 +86,6 @@ export function parseMessageAttachmentsAndText(
     }
   }
   cleanText = cleanText.replace(fileTagRegex, "");
-
-  // 2. Legacy markdown attachment blocks: ---\n### 附件文件: filename\n```...\n```
-  const legacyMdRegex = /\n*---\s*\n###\s*(?:附件文件|Attached file):\s*([^\n]+)\n```[a-zA-Z]*\n([\s\S]*?)```\s*/gi;
-  while ((match = legacyMdRegex.exec(cleanText)) !== null) {
-    const fullName = match[1].trim();
-    const fileName = fullName.split(/[/\\]/).pop() || fullName;
-    const content = match[2];
-    if (!attachments.some((a) => a.name === fileName || a.name === fullName)) {
-      attachments.push({
-        name: fileName,
-        size: content ? new Blob([content]).size : undefined,
-        type: "file",
-        content,
-      });
-    }
-  }
-  cleanText = cleanText.replace(legacyMdRegex, "");
 
   // 3. Bracketed labels: [附件: filename] or [Attachment: filename] or [filename.ext]
   const bracketRegex = /\s*\[(?:附件|图片|Attachment):\s*([^\]]+)\]/gi;

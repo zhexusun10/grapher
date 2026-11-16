@@ -87,7 +87,7 @@ fn rooted_runtime_cache_classification_is_root_qualified_and_not_a_byte_restore_
 }
 
 #[test]
-fn legacy_runtime_byte_evidence_stays_single_root_without_rewriting_its_manifest() {
+fn current_single_root_byte_evidence_cannot_supply_another_root() {
     let (temp, _rooted_files, paths, _layouts) = fixture();
     let files = Files::environment(&temp.path().join("legacy-store"), &["env".into()], &[])
         .unwrap()
@@ -107,7 +107,7 @@ fn legacy_runtime_byte_evidence_stays_single_root_without_rewriting_its_manifest
     assert!(files
         .verify_recorded_runtime_files(&version, "workspace", &[("state", "env/value", blob)])
         .unwrap_err()
-        .contains("Legacy environment has no byte evidence"));
+        .contains("Single-root snapshot has no byte evidence"));
     assert_eq!(
         fs::read(files.version_path(&version).unwrap()).unwrap(),
         original

@@ -2,7 +2,7 @@ import type { TranscriptItem } from "../types";
 
 export interface ThinkingUpdate {
   type: "thinking_start" | "thinking_delta" | "thinking_end";
-  contentIndex?: number;
+  contentIndex: number;
   delta?: string;
   // Compact frames can carry the already-generated text on thinking_start.
   content?: string | MessageContent;
@@ -65,11 +65,8 @@ function findThinkingInsertIndex(items: TranscriptItem[], contentIndex: number |
 
 /** One card per contentIndex within one assistant message, for live SSE and replay. */
 export function updateThinkingItems(items: TranscriptItem[], update: ThinkingUpdate, messageStart = 0, id?: string): TranscriptItem[] {
+  if (!Number.isSafeInteger(update.contentIndex) || update.contentIndex < 0) return items;
   let index = blockIndex(items, update.contentIndex, messageStart);
-  // Older events may not carry an index. A new start after an end is a new block.
-  if (update.type === "thinking_start" && update.contentIndex === undefined && index >= 0 && items[index].status !== "running") {
-    index = -1;
-  }
   const closed = update.type === "thinking_start" && index < 0 ? closeThinkingItems(items, messageStart) : items;
   const next = closed === items ? items.slice() : closed;
   if (index < 0) {
@@ -96,10 +93,7 @@ export function finalizeThinkingItems(items: TranscriptItem[], content: MessageC
   let next = closeThinkingItems(items, messageStart).slice();
   content.forEach((part, contentIndex) => {
     if (part.type !== "thinking") return;
-    let index = blockIndex(next, contentIndex, messageStart);
-    if (index < 0) {
-      index = next.findIndex((item, i) => i >= messageStart && item.type === "thinking" && item.thinkingContentIndex === undefined);
-    }
+    const index = blockIndex(next, contentIndex, messageStart);
     if (index >= 0) {
       next[index] = {
         ...next[index], thinkingContentIndex: contentIndex, status: "success",

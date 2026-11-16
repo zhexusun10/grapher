@@ -105,8 +105,7 @@ function overrides(directory: string): Record<string, boolean> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.values(value).some(v => typeof v !== 'boolean')) {
     throw new Error('Invalid Grapher extensions.json');
   }
-  // Ignore obsolete selections from versions that allowed disabling pi-trim.
-  delete value[trimId];
+  if (Object.hasOwn(value, trimId)) throw new Error('Unsupported pi-trim override; pi-trim is required');
   return value;
 }
 async function resolveGlobal() {

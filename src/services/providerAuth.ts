@@ -25,10 +25,10 @@ export interface ProviderInfo {
 interface ModelInfo {
   provider: string; id: string; name: string; api: string; contextWindow: number; available: boolean;
   hidden?: boolean;
-  // Optional while an older Provider/Auth host is still running. Never infer
-  // capabilities from model names or assume all reasoning levels are supported.
-  thinkingLevels?: ThinkingLevel[];
-  thinkingLevelFallbacks?: Partial<Record<ThinkingLevel, ThinkingLevel>>;
+  // Provider capabilities come from the pinned host, including an empty set
+  // when the provider cannot report capabilities.
+  thinkingLevels: ThinkingLevel[];
+  thinkingLevelFallbacks: Partial<Record<ThinkingLevel, ThinkingLevel>>;
 }
 export interface ProviderCatalog { providers: ProviderInfo[]; models: ModelInfo[]; warning: string | null; hiddenModels?: string[] }
 export interface ModelVisibility { hiddenModels: string[] }
@@ -76,12 +76,12 @@ function validCachedCatalog(value: unknown): value is ProviderCatalog {
     ["authType", "authSource", "authEnvVar"].every(key => provider[key] == null || typeof provider[key] === "string")) &&
     value.models.every(model => record(model) && ["provider", "id", "name"].every(key => typeof model[key] === "string") &&
       typeof model.available === "boolean" &&
-      (model.api === undefined || typeof model.api === "string") &&
-      (model.contextWindow === undefined || (typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow))) &&
+      typeof model.api === "string" &&
+      typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow) &&
       (model.hidden === undefined || typeof model.hidden === "boolean") &&
-      (model.thinkingLevels === undefined || strings(model.thinkingLevels)) &&
-      (model.thinkingLevelFallbacks === undefined || (record(model.thinkingLevelFallbacks) &&
-        Object.values(model.thinkingLevelFallbacks).every(level => typeof level === "string"))));
+      strings(model.thinkingLevels) &&
+      record(model.thinkingLevelFallbacks) &&
+        Object.values(model.thinkingLevelFallbacks).every(level => typeof level === "string"));
 }
 
 export function loadStorageCatalog(storage?: Pick<Storage, "getItem">): ProviderCatalog | null {
@@ -185,6 +185,7 @@ export const providerAuth = {
     const generation = catalogGeneration;
     const task: Promise<ProviderCatalog> = call<ProviderCatalog>("catalog", { refresh })
       .then((result) => {
+        if (!validCachedCatalog(result)) throw new Error("Unsupported Provider/Auth catalog format");
         // Old callers must receive the current catalog too; otherwise a
         // Settings load can re-publish stale availability after logout/login.
         if (generation !== catalogGeneration) return providerAuth.catalog();

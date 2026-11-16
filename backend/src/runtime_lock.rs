@@ -1,5 +1,5 @@
 //! Cross-platform exclusive ownership of the Grapher runtime directory.
-use std::{fs, path::Path};
+use std::{fs, path::Path, sync::Arc};
 
 #[cfg(windows)]
 use std::{
@@ -13,6 +13,7 @@ use std::os::fd::AsRawFd;
 
 pub struct RuntimeLock {
     _marker: fs::File,
+    _parent: Option<Arc<RuntimeLock>>,
     #[cfg(windows)]
     mutex: usize,
     #[cfg(windows)]
@@ -21,6 +22,13 @@ pub struct RuntimeLock {
 
 #[cfg(windows)]
 static PROCESS_LOCKS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+impl RuntimeLock {
+    pub(crate) fn retain_parent(mut self, parent: Arc<RuntimeLock>) -> Self {
+        self._parent = Some(parent);
+        self
+    }
+}
 
 pub fn acquire(root: &Path) -> Result<RuntimeLock, String> {
     let marker = fs::OpenOptions::new()
@@ -37,7 +45,10 @@ pub fn acquire(root: &Path) -> Result<RuntimeLock, String> {
         if result != 0 {
             return Err("Another Grapher instance owns this runtime. Close it before opening this data directory again.".into());
         }
-        return Ok(RuntimeLock { _marker: marker });
+        return Ok(RuntimeLock {
+            _marker: marker,
+            _parent: None,
+        });
     }
 
     #[cfg(windows)]
@@ -67,13 +78,17 @@ pub fn acquire(root: &Path) -> Result<RuntimeLock, String> {
         }
         return Ok(RuntimeLock {
             _marker: marker,
+            _parent: None,
             mutex: mutex as usize,
             key,
         });
     }
 
     #[cfg(not(any(unix, windows)))]
-    Ok(RuntimeLock { _marker: marker })
+    Ok(RuntimeLock {
+        _marker: marker,
+        _parent: None,
+    })
 }
 
 impl Drop for RuntimeLock {

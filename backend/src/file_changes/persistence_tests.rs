@@ -198,9 +198,9 @@ fn saving_a_pending_overlay_keeps_confirmed_edits_to_the_same_file() {
     let temp = tempfile::tempdir().unwrap();
     let run = uuid::Uuid::new_v4().to_string();
     let text = concat!(
-        "{\"type\":\"tool_execution_start\",\"toolCallId\":\"done\",\"toolName\":\"edit\",\"args\":{\"path\":\"current.txt\",\"oldText\":\"old\",\"newText\":\"new\"}}\n",
+        "{\"type\":\"tool_execution_start\",\"toolCallId\":\"done\",\"toolName\":\"edit\",\"args\":{\"path\":\"current.txt\",\"edits\":[{\"oldText\":\"old\",\"newText\":\"new\"}]}}\n",
         "{\"type\":\"tool_execution_end\",\"toolCallId\":\"done\",\"toolName\":\"edit\",\"isError\":false}\n",
-        "{\"type\":\"tool_execution_start\",\"toolCallId\":\"pending\",\"toolName\":\"edit\",\"args\":{\"path\":\"current.txt\",\"oldText\":\"new\",\"newText\":\"pending\"}}\n",
+        "{\"type\":\"tool_execution_start\",\"toolCallId\":\"pending\",\"toolName\":\"edit\",\"args\":{\"path\":\"current.txt\",\"edits\":[{\"oldText\":\"new\",\"newText\":\"pending\"}]}}\n",
     );
     update_from_log_chunk(&run, "current", "worker", "/repo", "/repo", text, true);
     persist(temp.path(), &run).unwrap();

@@ -48,7 +48,7 @@ test("parseMessageAttachmentsAndText strips legacy bracket labels and preserves 
   assert.equal(parsed.attachments[0].size, 2048);
 });
 
-test("parseMessageAttachmentsAndText handles legacy markdown attachment blocks", () => {
+test("retired markdown attachment syntax stays ordinary message text", () => {
   const raw = `请检查附件
 ---
 ### 附件文件: test.py
@@ -57,8 +57,6 @@ print("hello world")
 \`\`\``;
 
   const parsed = parseMessageAttachmentsAndText(raw);
-  assert.equal(parsed.cleanText, "请检查附件");
-  assert.equal(parsed.attachments.length, 1);
-  assert.equal(parsed.attachments[0].name, "test.py");
-  assert.ok(parsed.attachments[0].content?.includes("print(\"hello world\")"));
+  assert.equal(parsed.cleanText, raw);
+  assert.deepEqual(parsed.attachments, []);
 });

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureFileChanges } from "./fixtures/current-api.mjs";
 import test, { before, after } from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
@@ -48,10 +49,13 @@ test("actual App: node results render before Planner completion; edges rearrange
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
     if (command === "plan_goal_stream") return route.continue();
+    const body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": result = { config, snapshot: empty, runs: [], repositoryInfo: { path: config.repository, name: "Live graph", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
-      case "snapshot": case "history": result = snapshot; break;
+      case "bootstrap": result = { config, snapshot: empty, runs: [], conversations: [], repositoryInfo: { path: config.repository, name: "Live graph", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "extension_command": result = { instance: "standalone", commands: [] }; break;
+      case "load_run": case "snapshot": case "history": result = snapshot; break;
       case "snapshot_if_changed": result = { version: snapshot.phase, snapshot: allowSnapshotPoll && snapshot.runId ? snapshot : null }; break;
       case "repository_status": result = { repository: config.repository, valid: true, error: null }; break;
       case "list_plannings": result = []; break;
@@ -351,6 +355,7 @@ test("literal task IDs and colliding Merger cards open separate conversations", 
   const output = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "MERGER_LOG" }] } }) + "\n";
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "get_file_changes") return route.fulfill({ json: { result: fixtureFileChanges(route.request().postDataJSON()) } });
     const body = route.request().postDataJSON();
     let result;
     if (command === "list_files") result = { files: [] };
@@ -362,7 +367,7 @@ test("literal task IDs and colliding Merger cards open separate conversations", 
     await route.fulfill({ json: { result } });
   });
   const page = await context.newPage();
-  page.on("pageerror", error => errors.push(String(error)));
+  page.on("pageerror", error => { errors.push(String(error)); console.error(error.stack); });
   const taskIds = ["join", "publication", "merger:join", "merger:publication", "merger · join"];
   const graph = { originalGoal: "Literal identities", nodes: taskIds.map(id => ({ id, task: `TASK_${id}` })),
     edges: [{ from: "join", to: "publication", feedback: false }] };
@@ -423,6 +428,7 @@ test("prototype-like and Unicode task IDs remain literal in the graph UI", { tim
   const errors = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "get_file_changes") return route.fulfill({ json: { result: fixtureFileChanges(route.request().postDataJSON()) } });
     const result = command === "list_files" ? { files: [] } : command === "list_skills" ? { skills: [] } : null;
     if (result === null) errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ json: { result } });
@@ -476,6 +482,7 @@ for (const collision of [
     ];
     await context.route("**/api/*", async route => {
       const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
+      if (command === "get_file_changes") return route.fulfill({ json: { result: fixtureFileChanges(body) } });
       let result;
       if (command === "list_files") result = { files: [] };
       else if (command === "list_skills") result = { skills: [] };
@@ -522,6 +529,7 @@ test("Fit View prioritizes current running cards only when the graph cannot fit"
   const errors = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "get_file_changes") return route.fulfill({ json: { result: fixtureFileChanges(route.request().postDataJSON()) } });
     const result = command === "list_files" ? { files: [] } : command === "list_skills" ? { skills: [] } : null;
     if (result === null) errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ json: { result } });
@@ -597,6 +605,7 @@ test("manual Fit View follows running cards through an ongoing layout animation"
   const errors = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "get_file_changes") return route.fulfill({ json: { result: fixtureFileChanges(route.request().postDataJSON()) } });
     const result = command === "list_files" ? { files: [] } : command === "list_skills" ? { skills: [] } : null;
     if (result === null) errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ json: { result } });
@@ -634,6 +643,7 @@ test("graph splitter preserves ordinary resizing, cancellation, keyboard control
   const errors = [];
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
+    if (command === "get_file_changes") return route.fulfill({ json: { result: fixtureFileChanges(route.request().postDataJSON()) } });
     const result = command === "list_files" ? { files: [] } : command === "list_skills" ? { skills: [] } : null;
     if (result === null) errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ json: { result } });
@@ -696,6 +706,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
     const errors = [];
     await context.route("**/api/*", async route => {
       const command = new URL(route.request().url()).pathname.slice(5);
+      if (command === "get_file_changes") return route.fulfill({ json: { result: fixtureFileChanges(route.request().postDataJSON()) } });
       const result = command === "list_files" ? { files: [] } : command === "list_skills" ? { skills: [] } : null;
       if (result === null) errors.push(`Unexpected API: ${command}`);
       await route.fulfill({ json: { result } });

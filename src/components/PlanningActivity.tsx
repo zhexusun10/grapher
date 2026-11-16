@@ -301,7 +301,7 @@ function PlanningHistory({ runId = "", planningIds, onReady, onOutputChange, onL
           const latest = segments.current.get(planningId);
           const settled = !page.running && planningId !== liveId;
           const next = latest
-            ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, settled)
+            ? appendTranscriptPage(latest, page, settled)
             : windowFromPage(page, settled);
           if (!current) {
             const scroller = transcriptScrollParent(sectionRef.current);

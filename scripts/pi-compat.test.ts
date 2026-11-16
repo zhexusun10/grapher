@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { accessSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { accessSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
+import { SessionManager } from '../pi/packages/coding-agent/src/core/session-manager.ts';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join, relative, isAbsolute } from 'node:path';
 import { Agent } from '../pi/packages/agent/src/index.ts';
 import { InMemoryCredentialStore } from '../pi/packages/ai/src/auth/credential-store.ts';
 import { loadExtensions } from '../pi/packages/coding-agent/src/core/extensions/loader.ts';
@@ -12,7 +14,188 @@ import {
   ModelRuntime, SettingsManager, resolveToCwd, getModelThinkingCapabilities, composerCommandsExtension, clearUnreadQueue,
   createBashToolDefinition, createLocalBashOperations,
   createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition,
+  assertCurrentPiDirectories, assertCurrentPiSettings, DefaultPackageManager,
 } from '../engine/pi-compat.ts';
+
+test('retired Pi sessions are rejected before migration and current sessions retain Run identity', () => {
+  const root = mkdtempSync(join(tmpdir(), 'grapher-session-format-'));
+  const previous = process.env.GRAPHER_ACTIVE_RUN_ID;
+  process.env.GRAPHER_ACTIVE_RUN_ID = '11111111-1111-4111-8111-111111111111';
+  try {
+    for (const version of [undefined, 1, 2, 3, 4]) {
+      const path = join(root, `old-${version}.jsonl`);
+      const bytes = `${JSON.stringify({ type: 'session', version, id: 'old', cwd: root })}\n`;
+      writeFileSync(path, bytes);
+      assert.throws(() => SessionManager.open(path), /Unsupported Grapher Pi session/);
+      const openDirectory = join(root, `open-${version}`);
+      assert.throws(() => SessionManager.open(path, openDirectory), /Unsupported Grapher Pi session/);
+      assert.equal(existsSync(openDirectory), false, 'opening a rejected file must not create its target directory');
+      assert.throws(() => SessionManager.forkFrom(path, root, join(root, 'forbidden')), /Unsupported Grapher Pi session/);
+      assert.equal(readFileSync(path, 'utf8'), bytes);
+      assert.equal(existsSync(join(root, 'forbidden')), false, 'reject before creating a fork directory');
+    }
+    const current = SessionManager.create(root, join(root, 'current'));
+    current.appendMessage({ role: 'user', content: 'same input', timestamp: 1 });
+    const path = current.getSessionFile()!;
+    const bytes = readFileSync(path, 'utf8');
+    const reopened = SessionManager.open(path);
+    assert.equal((reopened.getHeader() as any).grapherFormat, 1);
+    const forked = SessionManager.forkFrom(path, root, join(root, 'forked'));
+    assert.deepEqual(forked.getEntries(), reopened.getEntries());
+    assert.equal((forked.getHeader() as any).grapherRunId, process.env.GRAPHER_ACTIVE_RUN_ID);
+    assert.equal(readFileSync(path, 'utf8'), bytes, 'fork leaves the source append history untouched');
+    process.env.GRAPHER_ACTIVE_RUN_ID = '22222222-2222-4222-8222-222222222222';
+    assert.throws(() => SessionManager.open(path), /another Grapher Run/);
+    assert.equal(readFileSync(path, 'utf8'), bytes);
+  } finally {
+    if (previous === undefined) delete process.env.GRAPHER_ACTIVE_RUN_ID;
+    else process.env.GRAPHER_ACTIVE_RUN_ID = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Pi settings and startup directories reject retired inputs without changing their bytes', () => {
+  for (const settings of [{ queueMode: 'all' }, { websockets: true }, { skills: { customDirectories: [] } },
+    { retry: { maxDelayMs: 1 } }, { apiKeys: { example: 'fixture' } }]) {
+    const before = structuredClone(settings);
+    assert.throws(() => assertCurrentPiSettings(settings), /Unsupported Pi settings/);
+    assert.throws(() => SettingsManager.inMemory(settings as any), /Unsupported Pi settings/);
+    assert.deepEqual(settings, before);
+  }
+  const root = mkdtempSync(join(tmpdir(), 'grapher-pi-format-'));
+  try {
+    for (const relative of ['commands/prompt.md', 'tools/rg', 'old.jsonl', 'oauth.json', 'keybindings.json', 'settings.json']) {
+      const agent = join(root, relative.replaceAll('/', '-'));
+      const path = join(agent, relative);
+      mkdirSync(join(path, '..'), { recursive: true });
+      const bytes = relative === 'keybindings.json' ? '{"cursorUp":"up"}'
+        : relative === 'settings.json' ? '{"queueMode":"all"}'
+        : relative === 'old.jsonl' ? '{"type":"session","cwd":"/old"}\n' : '{}';
+      writeFileSync(path, bytes);
+      assert.throws(() => assertCurrentPiDirectories(root, agent), /Unsupported Pi/);
+      assert.equal(readFileSync(path, 'utf8'), bytes);
+      assert.equal(existsSync(join(agent, 'prompts')), false);
+      assert.equal(existsSync(join(agent, 'auth.json')), false);
+    }
+    const cleanAgent = join(root, 'clean-agent');
+    mkdirSync(cleanAgent);
+    writeFileSync(join(cleanAgent, 'extension-log.jsonl'), '{"type":"extension_log"}\n');
+    writeFileSync(join(cleanAgent, 'large-extension-log.jsonl'), JSON.stringify({ type: 'extension_log', text: 'x'.repeat(1024 * 1024) }) + '\n');
+    assert.doesNotThrow(() => assertCurrentPiDirectories(root, cleanAgent), 'unrelated extension logs are not old sessions');
+    const project = join(root, 'project');
+    mkdirSync(join(project, '.pi/commands'), { recursive: true });
+    assert.throws(() => assertCurrentPiDirectories(project, join(root, 'clean-agent')), /commands directory/);
+    assert.equal(existsSync(join(project, '.pi/commands')), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('current in-memory entry lists retain their tree without requiring a persisted header', () => {
+  const source = SessionManager.inMemory();
+  source.appendMessage({ role: 'user', content: 'current input', timestamp: 1 });
+  const entries = structuredClone(source.getEntries());
+  const restored = SessionManager.inMemory(process.cwd(), { id: 'memory-copy' }, entries);
+  assert.deepEqual(restored.getEntries(), entries);
+  assert.equal(restored.getLeafId(), source.getLeafId());
+  assert.equal(restored.getSessionId(), 'memory-copy');
+  assert.equal(restored.isPersisted(), false);
+  assert.equal(restored.getSessionFile(), undefined);
+  assert.equal((restored.getHeader() as any).grapherFormat, 1);
+  assert.throws(() => SessionManager.inMemory(process.cwd(), undefined,
+    [...entries, { type: 'session', version: 2 } as any]), /Unsupported Grapher Pi session/);
+  assert.deepEqual(source.getEntries(), entries);
+});
+
+test('Pi directory checks use the same path spelling rules as the SDK', () => {
+  const root = mkdtempSync(join(tmpdir(), 'grapher-pi-path-format-'));
+  try {
+    const agent = join(root, 'agent');
+    mkdirSync(join(agent, 'commands'), { recursive: true });
+    writeFileSync(join(agent, 'commands/prompt.md'), 'keep');
+    const spellings = [pathToFileURL(agent).href];
+    const homeRelative = relative(homedir(), agent);
+    if (!isAbsolute(homeRelative)) spellings.push(`~/${homeRelative.replaceAll('\\', '/')}`);
+    for (const spelling of spellings) assert.throws(() => assertCurrentPiDirectories(root, spelling), /commands directory/);
+    const project = join(root, 'project');
+    mkdirSync(join(project, '.pi/commands'), { recursive: true });
+    assert.throws(() => assertCurrentPiDirectories(pathToFileURL(project).href, join(root, 'clean-agent')), /commands directory/);
+    assert.equal(readFileSync(join(agent, 'commands/prompt.md'), 'utf8'), 'keep');
+    assert.equal(existsSync(join(agent, 'prompts')), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('global settings discovery leaves untrusted project settings unread', () => {
+  const root = mkdtempSync(join(tmpdir(), 'grapher-pi-project-trust-'));
+  try {
+    mkdirSync(join(root, '.pi'));
+    const path = join(root, '.pi/settings.json'), bytes = '{"queueMode":"all"}\n';
+    writeFileSync(path, bytes);
+    const settings = SettingsManager.create(root, join(root, 'agent'), { projectTrusted: false });
+    assert.deepEqual(settings.getProjectSettings(), {});
+    assert.throws(() => SettingsManager.create(root, join(root, 'agent'), { projectTrusted: true }), /Unsupported Pi settings/);
+    assert.equal(readFileSync(path, 'utf8'), bytes);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('SDK branch extraction keeps current ownership, labels and a reopenable file', () => {
+  const root = mkdtempSync(join(tmpdir(), 'grapher-pi-branch-format-'));
+  const previous = process.env.GRAPHER_ACTIVE_RUN_ID;
+  process.env.GRAPHER_ACTIVE_RUN_ID = '11111111-1111-4111-8111-111111111111';
+  try {
+    for (const persisted of [true, false]) {
+      const session = persisted ? SessionManager.create(root, join(root, 'sessions')) : SessionManager.inMemory(root);
+      const first = session.appendMessage({ role: 'user', content: 'first', timestamp: 1 });
+      session.appendLabelChange(first, 'anchor');
+      const second = session.appendMessage({ role: 'user', content: 'second', timestamp: 2 });
+      const originalPath = session.getSessionFile();
+      const original = originalPath ? readFileSync(originalPath, 'utf8') : undefined;
+      const rewrite = Object.getOwnPropertyDescriptor(session, '_rewriteFile');
+      assert.throws(() => session.createBranchedSession('missing-entry'), /not found/);
+      assert.deepEqual(Object.getOwnPropertyDescriptor(session, '_rewriteFile'), rewrite);
+      const path = session.createBranchedSession(second);
+      assert.equal((session.getHeader() as any).grapherFormat, 1);
+      assert.equal((session.getHeader() as any).grapherRunId, process.env.GRAPHER_ACTIVE_RUN_ID);
+      assert.equal(session.getEntry(second)?.parentId, first, 'removing label entries must preserve the branch chain');
+      assert.equal(session.getTree().length, 1);
+      assert.ok(session.getEntries().some(entry => entry.type === 'label' && entry.label === 'anchor'));
+      if (persisted) {
+        assert.ok(path);
+        assert.deepEqual(SessionManager.open(path).getEntries(), session.getEntries());
+        assert.equal(readFileSync(originalPath!, 'utf8'), original);
+      } else assert.equal(path, undefined);
+    }
+    const unflushed = SessionManager.create(root, join(root, 'deferred'));
+    const model = unflushed.appendModelChange('test', 'model');
+    unflushed.appendMessage({ role: 'user', content: 'source conversation', timestamp: 1 });
+    const path = unflushed.createBranchedSession(model)!;
+    assert.equal(existsSync(path), false, 'a branch without messages stays unflushed');
+    unflushed.appendMessage({ role: 'user', content: 'first branch input', timestamp: 2 });
+    assert.equal((SessionManager.open(path).getHeader() as any).grapherRunId, process.env.GRAPHER_ACTIVE_RUN_ID);
+  } finally {
+    if (previous === undefined) delete process.env.GRAPHER_ACTIVE_RUN_ID;
+    else process.env.GRAPHER_ACTIVE_RUN_ID = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('edit rejects retired top-level replacements while keeping current collection normalization', () => {
+  const tool = createEditToolDefinition(process.cwd());
+  for (const input of [{ path: 'file', oldText: 'a', newText: 'b' },
+    { path: 'file', edits: [{ oldText: 'a', newText: 'b' }], oldText: 'c', newText: 'd' }]) {
+    const before = structuredClone(input);
+    assert.throws(() => tool.prepareArguments(input), /Unsupported edit input/);
+    assert.deepEqual(input, before);
+  }
+  for (const edits of ['[{"oldText":"a","newText":"b"}]', { oldText: 'a', newText: 'b' }]) {
+    assert.deepEqual(tool.prepareArguments({ path: 'file', edits }), { path: 'file', edits: [{ oldText: 'a', newText: 'b' }] });
+  }
+});
+
+test('package resolution uses managed installs even when a retired global resolver is available', () => {
+  const manager = new DefaultPackageManager({ cwd: process.cwd(), agentDir: process.cwd(), settingsManager: SettingsManager.inMemory() }) as any;
+  manager.getLegacyGlobalNpmInstallPath = () => assert.fail('must never query npm/pnpm global installations');
+  const path = manager.getNpmInstallPath({ name: 'fixture-package' }, 'user');
+  assert.equal(path, join(process.cwd(), 'npm/node_modules/fixture-package'));
+});
 
 test('queue recall excludes drained-but-not-yet-rendered turns and preserves queue modes', () => {
   const agent = new Agent({ streamFn: () => { throw new Error('no model calls'); } });

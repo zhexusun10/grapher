@@ -6,8 +6,9 @@ import {
   clearLandingDraft,
   landingDraftKey,
   LANDING_GOAL_STORAGE_KEY,
-  LEGACY_LANDING_GOAL_STORAGE_KEY,
 } from "../src/services/landingDraft";
+
+const LEGACY_LANDING_GOAL_STORAGE_KEY = "grapher_landing_goal_draft";
 
 class MemoryStorage implements Storage {
   private data = new Map<string, string>();
@@ -58,7 +59,7 @@ test("unbound draft is inherited when repository has no draft yet", () => {
   assert.equal(raw["c:/projects/alpha"], "Draft typed before opening a project");
 });
 
-test("clearLandingDraft cleans up workspace draft and legacy key", () => {
+test("clearLandingDraft cleans up the workspace draft", () => {
   const store = new MemoryStorage();
   const repo = "C:\\Projects\\Alpha";
 
@@ -97,13 +98,13 @@ test("corrupt draft caches can be replaced and cleared without dropping valid wo
   }
 });
 
-test("clearing a corrupt draft cache also retires its legacy fallback", () => {
+test("clearing drafts leaves retired storage untouched", () => {
   const store = new MemoryStorage();
   store.setItem(LANDING_GOAL_STORAGE_KEY, "null");
   store.setItem(LEGACY_LANDING_GOAL_STORAGE_KEY, "Already submitted draft");
   clearLandingDraft("/current", store);
   assert.equal(loadLandingDraft("/current", store), "");
-  assert.equal(store.getItem(LEGACY_LANDING_GOAL_STORAGE_KEY), null);
+  assert.equal(store.getItem(LEGACY_LANDING_GOAL_STORAGE_KEY), "Already submitted draft");
 });
 
 for (const operation of ["save", "clear"] as const) {
@@ -127,9 +128,12 @@ for (const operation of ["save", "clear"] as const) {
   });
 }
 
-test("fallback to legacy key if drafts map is absent", () => {
+test("retired single-draft key is never read or written", () => {
   const store = new MemoryStorage();
   store.setItem(LEGACY_LANDING_GOAL_STORAGE_KEY, "Legacy draft content");
 
-  assert.equal(loadLandingDraft("C:\\Projects\\Alpha", store), "Legacy draft content");
+  assert.equal(loadLandingDraft("C:\\Projects\\Alpha", store), "");
+  saveLandingDraft("/current", "Current draft", store);
+  clearLandingDraft("/current", store);
+  assert.equal(store.getItem(LEGACY_LANDING_GOAL_STORAGE_KEY), "Legacy draft content");
 });

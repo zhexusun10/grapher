@@ -33,7 +33,7 @@ pub enum Target {
         name: String,
         /// Source binding owned when this target was recorded. Used to serialize
         /// live ref/object reclamation with Grapher Git work on that source.
-        #[serde(default)]
+        #[serde(deserialize_with = "Option::deserialize")]
         source: Option<PathBuf>,
     },
 }
@@ -44,9 +44,8 @@ pub struct Manifest {
     pub targets: BTreeSet<Target>,
     /// None: deleted conversation; Some: workspace-only cleanup at this event.
     pub sequence: Option<i64>,
-    #[serde(default)]
     pub protected_sources: BTreeSet<PathBuf>,
-    #[serde(default)]
+    #[serde(deserialize_with = "Option::deserialize")]
     pub unresolved_repository: Option<String>,
 }
 
@@ -84,7 +83,6 @@ impl Target {
                         | "planning"
                         | "mergers"
                         | "planner-sessions"
-                        | "partition-workers"
                         | "environments"
                         | "file-changes"
                         | "attachment-inputs"
@@ -101,23 +99,14 @@ impl Target {
                 checkout,
             } => {
                 if !parent.is_absolute()
-                    || !matches!(
-                        bucket.as_str(),
-                        ".grapher-worktrees" | ".grapher-workspaces"
-                    )
+                    || bucket != ".grapher-worktrees"
                     || Uuid::parse_str(owner).is_err()
-                    || (checkout.is_none() && owner != run_id)
-                    || checkout.as_ref().is_some_and(|id| {
-                        bucket != ".grapher-workspaces" || Uuid::parse_str(id).is_err()
-                    })
+                    || owner != run_id
+                    || checkout.is_some()
                 {
                     return Err("Invalid owned workspace directory".into());
                 }
-                let mut child = parent.join(bucket).join(owner);
-                if let Some(checkout) = checkout {
-                    child.push(checkout);
-                }
-                (parent.clone(), child)
+                (parent.clone(), parent.join(bucket).join(owner))
             }
             Self::Shadow { root, name, .. } => {
                 let valid = name
@@ -191,13 +180,6 @@ pub(crate) fn configuration_targets(
         fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
         let parent = parent.canonicalize().map_err(|error| error.to_string())?;
         targets.insert(Target::workspace(&parent, run_id, ".grapher-worktrees"));
-        // Keep legacy project-adjacent ownership; old executions can still be
-        // resumed/removed without moving their recorded paths.
-        if let Some(parent) = source.parent() {
-            for bucket in [".grapher-worktrees", ".grapher-workspaces"] {
-                targets.insert(Target::workspace(parent, run_id, bucket));
-            }
-        }
     }
     let shadow = crate::workspace::shadow_repo_dir(&source)?;
     if fs::symlink_metadata(&shadow).is_ok() {
@@ -257,82 +239,6 @@ pub(crate) fn remember_event(
     Ok(())
 }
 
-fn legacy_workspace(path: &Path, run_id: &str) -> Option<Target> {
-    if !path.is_absolute() {
-        return None;
-    }
-    let checkout = path.file_name()?.to_str()?;
-    let owner_dir = path.parent()?;
-    let owner = owner_dir.file_name()?.to_str()?;
-    let bucket_dir = owner_dir.parent()?;
-    let bucket = bucket_dir.file_name()?.to_str()?;
-    if Uuid::parse_str(owner).is_err() || Uuid::parse_str(run_id).is_err() {
-        return None;
-    }
-    let parent = bucket_dir.parent()?.canonicalize().ok()?;
-    if bucket == ".grapher-worktrees" && owner == run_id {
-        Some(Target::workspace(&parent, run_id, bucket))
-    } else if bucket == ".grapher-workspaces" && Uuid::parse_str(checkout).is_ok() {
-        Some(Target::Workspace {
-            parent,
-            bucket: bucket.into(),
-            owner: owner.into(),
-            checkout: Some(checkout.into()),
-        })
-    } else {
-        None
-    }
-}
-
-/// Recover legacy workspace roots without requiring the source folder. Prefer
-/// already proven physical parents (including execution/Planner metadata) over
-/// the binding's lexical parent, which may have been only a source alias.
-fn missing_source_workspaces(
-    run_id: &str,
-    repository: &str,
-    targets: &BTreeSet<Target>,
-) -> Result<BTreeSet<Target>, String> {
-    let mut recovered = BTreeSet::new();
-    if Uuid::parse_str(run_id).is_err() {
-        return Ok(recovered);
-    }
-    let mut parents: BTreeSet<PathBuf> = targets
-        .iter()
-        .filter_map(|target| match target {
-            Target::Workspace { parent, .. } => Some(parent.clone()),
-            _ => None,
-        })
-        .collect();
-    if parents.is_empty() {
-        let source = Path::new(repository);
-        if !source.is_absolute()
-            || source.file_name().is_none()
-            || source
-                .components()
-                .any(|part| matches!(part, std::path::Component::ParentDir))
-        {
-            return Ok(recovered);
-        }
-        let Some(parent) = source.parent() else {
-            return Ok(recovered);
-        };
-        let parent = match parent.canonicalize() {
-            Ok(parent) => parent,
-            // Nothing exists at this recorded location, but retaining it in
-            // the manifest keeps retries idempotent if deletion is interrupted.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => parent.to_path_buf(),
-            Err(error) => return Err(error.to_string()),
-        };
-        parents.insert(parent);
-    }
-    for parent in parents {
-        for bucket in [".grapher-worktrees", ".grapher-workspaces"] {
-            recovered.insert(Target::workspace(&parent, run_id, bucket));
-        }
-    }
-    Ok(recovered)
-}
-
 pub(crate) fn manifest(
     root: &Path,
     store: &Store,
@@ -350,51 +256,7 @@ pub(crate) fn manifest(
             Err(error) => return Err(error),
         }
     }
-    // Legacy databases lack recorded physical parents. Execution metadata and
-    // owned planning markers authorize only the standard private layout.
-    for execution in state.executions.iter().chain(&state.mergers) {
-        if let Some(target) = legacy_workspace(Path::new(&execution.worktree), &state.run_id) {
-            if !matches!(&target, Target::Workspace { owner, checkout: Some(checkout), .. } if owner != &state.run_id && checkout != &execution.id)
-            {
-                targets.insert(target);
-            }
-        }
-    }
-    for event in &state.events {
-        if let EventKind::Started { execution, .. } | EventKind::MergerStarted { execution } =
-            &event.kind
-        {
-            if let Some(target) = legacy_workspace(Path::new(&execution.worktree), &state.run_id) {
-                if !matches!(&target, Target::Workspace { owner, checkout: Some(checkout), .. } if owner != &state.run_id && checkout != &execution.id)
-                {
-                    targets.insert(target);
-                }
-            }
-        }
-    }
     let planning = crate::workspace_cleanup::planning_ids(root, state)?;
-    for id in &planning {
-        let marker = root.join("planning").join(id).join("planner-workspace");
-        if let Some(marker) = real_child_path(root, &marker, true)? {
-            let path =
-                PathBuf::from(fs::read_to_string(marker).map_err(|error| error.to_string())?);
-            if let Some(target) = legacy_workspace(&path, &state.run_id) {
-                if matches!(&target, Target::Workspace { checkout: Some(checkout), .. } if checkout == id)
-                {
-                    targets.insert(target);
-                }
-            }
-        }
-    }
-    if let Some(config) = &state.config {
-        if !Path::new(&config.repository).is_dir() {
-            targets.extend(missing_source_workspaces(
-                &state.run_id,
-                &config.repository,
-                &targets,
-            )?);
-        }
-    }
     let unresolved_repository = state
         .config
         .as_ref()
@@ -549,13 +411,8 @@ pub(crate) fn retains_workspaces(state: &Snapshot) -> bool {
     {
         return true;
     }
-    // Preserve Runtime's recorded route and legacy single-task fallback.
-    let serial = match state.plan_type.as_deref() {
-        Some(mode) => mode == "serial",
-        None => state.graph.nodes.len() == 1 && state.graph.nodes[0].id == "task",
-    };
+    let serial = state.plan_type.as_deref() == Some("serial");
     !serial
-        && state.isolated_workspaces.is_some()
         && (!state.pending_feedback.is_empty()
             || state.nodes.values().any(|node| node.status != "completed")
             || state.executions.iter().any(|execution| {
@@ -619,8 +476,7 @@ fn execute_inner(root: &Path, store: &Store, task: &Task, detach: bool) -> Resul
                 // eventual removal; a later publication can queue a new task.
                 return store.finish_cleanup(&task.run_id);
             }
-            // Retry collecting legacy markers too, if the first attempt could
-            // not read them. The Run's event generation is still unchanged.
+            // Refresh recorded ownership while the Run generation is unchanged.
             manifest = self::manifest(root, store, &state, false)?;
             store.enqueue_cleanup(&task.run_id, &manifest)?;
         } else if !store.run_was_deleted(&task.run_id)? {
@@ -637,7 +493,7 @@ fn execute_inner(root: &Path, store: &Store, task: &Task, detach: bool) -> Resul
             .map_err(|error| error.to_string())?;
             configuration_targets(root, &task.run_id, &config)?
         } else {
-            missing_source_workspaces(&task.run_id, repository, &manifest.targets)?
+            BTreeSet::new()
         };
         if recovered
             .iter()
@@ -674,8 +530,7 @@ fn execute_inner(root: &Path, store: &Store, task: &Task, detach: bool) -> Resul
                             true,
                         )?;
                     } else {
-                        // Legacy ownership lacks the source lock. Refs are safe
-                        // to remove; object GC waits for an offline cleanup.
+                        // Without a source lock, defer object GC to offline cleanup.
                         crate::workspace::prune_shadow_run_refs(
                             &path,
                             &task.run_id,
@@ -724,53 +579,6 @@ fn execute_inner(root: &Path, store: &Store, task: &Task, detach: bool) -> Resul
         return Err(format!("Workspace ownership predates this version and the binding is missing: {repository}. Restore it or explicitly inspect its project parent with cleanup:workspaces."));
     }
     store.finish_cleanup(&task.run_id)
-}
-
-/// Only new, marked idle workers are disposable. Claimed workers with failed
-/// copy-back have durable Run ownership and retain their recoverable histories.
-pub(crate) fn idle_partitioners(root: &Path, store: &Store) -> Result<Vec<Task>, String> {
-    let mut tasks = Vec::new();
-    let Some(directory) = real_child_path(root, &root.join("partition-workers"), false)? else {
-        return Ok(tasks);
-    };
-    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let id = entry.file_name().to_string_lossy().into_owned();
-        if Uuid::parse_str(&id).is_err() {
-            continue;
-        }
-        let target = Target::data("partition-workers", &id);
-        if store.has_cleanup_owner(&target)? {
-            continue;
-        }
-        let Some(marker) = real_child_path(
-            root,
-            &root
-                .join("partition-workers")
-                .join(&id)
-                .join(".grapher-partition-worker.json"),
-            true,
-        )?
-        else {
-            continue;
-        };
-        let marker: serde_json::Value =
-            serde_json::from_slice(&fs::read(marker).map_err(|error| error.to_string())?)
-                .unwrap_or_default();
-        if marker["kind"] != "grapher-partition-worker" || marker["version"] != 1 {
-            continue;
-        }
-        tasks.push(Task {
-            run_id: format!("partition-prewarm-{id}"),
-            manifest: Manifest {
-                targets: BTreeSet::from([target]),
-                ..Default::default()
-            },
-            attempts: 0,
-            last_error: None,
-        });
-    }
-    Ok(tasks)
 }
 
 pub(crate) fn attempt(root: &Path, store: &Store, task: &Task) -> Result<(), String> {

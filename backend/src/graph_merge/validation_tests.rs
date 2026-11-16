@@ -37,7 +37,7 @@ fn script(path: &Path, body: &str) {
 fn config(source: &Path, script: &Path) -> Config {
     serde_json::from_value(serde_json::json!({
         "repository": source, "piCommand": "/bin/sh", "piArgs": [script],
-        "model": "fixture", "maxParallel": 1, "postTaskReview": false,
+        "model": "fixture/merger", "maxParallel": 1, "postTaskReview": false,
     }))
     .unwrap()
 }
@@ -64,7 +64,8 @@ impl Fixture {
             workspace::git(&source, &["init", "-q"]).unwrap();
         }
         let base = workspace::snapshot_repository(&source).unwrap();
-        let slot = |name: &str| temp.path().join(".grapher-worktrees/run").join(name);
+        let run = Uuid::new_v4().to_string();
+        let slot = |name: &str| temp.path().join(".grapher-worktrees").join(&run).join(name);
         let mut parents = Vec::new();
         for label in ["left", "right"] {
             let path = slot(label);
@@ -83,7 +84,7 @@ impl Fixture {
         script(&script_path, body);
         let config = config(&source, &script_path);
         let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-        runtime.state.run_id = Uuid::new_v4().to_string();
+        runtime.state.run_id = run;
         runtime
             .emit(EventKind::Created {
                 graph: Graph {

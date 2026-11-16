@@ -5,7 +5,11 @@
 
 ## Runtime data
 
-Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`:
+Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`.
+On a known database-format mismatch, startup preserves that directory's existing
+data and selects a separate current-format `format-1/` child (or the next available
+numbered slot). Subsequent starts reuse it; all paths below are relative to the
+effective data root reported in startup logs and bootstrap `dataPath`:
 
 ```text
 .grapher/
@@ -16,14 +20,14 @@ Runtime data defaults to `.grapher/`, configurable with `GRAPHER_DATA_DIR`:
   attachment-inputs/     # Immutable Run/node-scoped inputs awaiting delivery
   planning/              # Planning attempts and JSONL output
   sessions/              # Node Pi sessions
-  planner-sessions/      # Planner history for Runs without a prior planning attempt
-  partition-workers/     # Legacy Partitioner sessions retained for cleanup/recovery
+  planner-sessions/      # One deterministic Planner conversation per Run
+  partition-workers/     # Unsupported historical directories are not adopted
   mergers/               # Merger sessions/output (including composition attempts)
   environments/          # Managed native-environment snapshots and launch records
   shadow_repos/          # Host-only graph Git databases for Git projects and ordinary folders
 ```
 
-Data-directory writer exclusion and startup recovery are specified in [Recovery and ownership](runtime.md#recovery-and-ownership).
+Data-directory writer exclusion, the persisted-format boundary and startup recovery are specified in [Runtime](runtime.md#persisted-format-boundary).
 
 ### Derived file-change summaries
 
@@ -75,7 +79,7 @@ child links. A receipt deletes only its unique detached directory, never even an
 empty parent that a source project or new allocation may now own. Pi histories
 and user source folders are not retirement targets.
 
-Explicit synchronous reset/offline cleanup and legacy per-node slot reclamation
+Explicit synchronous reset/offline cleanup and slot reclamation
 retain their existing execution paths. This change removes deletion from online
 completion's critical section; it does not promise faster disk deletion or change
 node dependencies, publication ordering, or source-edit permissions. Evidence:
@@ -118,6 +122,6 @@ during key calculation, before copying, while nonrecursive aliases remain valid.
 Unix retains its existing link-preserving copy/key behavior. These rules concern
 engine inputs, not project workspace inheritance or additional filesystem isolation.
 
-Successful caches survive shutdown/restart. Failed preparations, abandoned per-backend copies and unused obsolete versions are reclaimed before preparation; live versions are never removed. Marked copies at the old project-adjacent default are also recovered. Unknown unmarked legacy directories require explicit offline cleanup rather than guessed deletion.
+Successful caches survive shutdown/restart. Failed preparations, abandoned per-backend copies and unused obsolete versions in the current runtime cache are reclaimed before preparation; live versions are never removed. Old project-adjacent caches and unmarked engine directories are left untouched. Offline cleanup also requires the current marker/lease protocol.
 
 The cache contains engine/dependencies, not project state or conversations. Role/process preparation belongs to [Pi prewarming](../development/pi-integration.md#prewarming-and-prepared-runtime); external shared-state limits belong to [Filesystem isolation](filesystem-isolation.md#shared-runtime-and-external-state).

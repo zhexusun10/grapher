@@ -114,24 +114,6 @@ fn main() {
         println!("{}", result.unwrap_or_else(|error| serde_json::json!({ "diagnostics": [{ "code": "E000", "message": error.to_string() }] })));
         return;
     }
-    if std::env::args().nth(1).as_deref() == Some("--repair-publication-file") {
-        if let Err(error) =
-            grapher::maintenance::repair_publication_file(std::env::args().skip(2).collect())
-        {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    if std::env::args().nth(1).as_deref() == Some("--restore-paused-batch") {
-        if let Err(error) =
-            grapher::maintenance::restore_paused_batch(std::env::args().skip(2).collect())
-        {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-        return;
-    }
     if std::env::args().nth(1).as_deref() == Some("--cleanup-workspaces") {
         if let Err(error) =
             grapher::maintenance::cleanup_workspaces(std::env::args().skip(2).collect())
@@ -141,15 +123,10 @@ fn main() {
         }
         return;
     }
-    if matches!(
-        std::env::args().nth(1).as_deref(),
-        Some("--compact" | "--migrate")
-    ) {
-        if let Err(error) = grapher::server::compact_output_chunks() {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-        return;
+
+    if let Some(argument) = std::env::args().nth(1) {
+        eprintln!("Unknown Grapher argument: {argument}");
+        std::process::exit(1);
     }
 
     if let Err(error) = grapher::server::run() {

@@ -93,42 +93,28 @@ fn execution(id: &str, node: &str) -> Execution {
 }
 
 #[test]
-fn sidebar_summaries_never_materialize_legacy_transcripts() {
+fn sidebar_summaries_never_materialize_current_logs() {
     let fixture = Fixture::new();
     fixture.create("first", "C:/Alpha", "First");
     fixture.create("second", "/beta", "");
     fixture.create("unbound", "", "Not a workspace");
     let connection = Connection::open(&fixture.path).unwrap();
-    // Deliberately invalid log JSON must never be parsed. Large legacy Finished
-    // records are read from the metadata prefix, not their transcript bodies.
-    for payload in [
-        "{\"type\":\"output\",broken legacy transcript".into(),
-        format!(
-            "{{\"type\":\"finished\",\"execution_id\":\"old\",\"head\":\"head\",\"output\":\"{}",
-            "x".repeat(8192)
-        ),
-    ] {
-        connection
-            .execute(
-                "INSERT INTO events(run_id,timestamp,kind,payload) VALUES('first',1,NULL,?1)",
-                [payload],
-            )
-            .unwrap();
-    }
-    connection
-        .execute("UPDATE events SET kind=NULL WHERE kind='created'", [])
-        .unwrap();
+    let text = format!("broken log JSON {}", "x".repeat(2 * 1024 * 1024));
+    connection.execute(
+        "INSERT INTO execution_logs(run_id,execution_id,offset,bytes,text) VALUES('first','log',0,?1,?2)",
+        rusqlite::params![text.len(),text],
+    ).unwrap();
     let summaries = fixture.summaries();
     assert_eq!(
         summaries
             .iter()
             .map(|s| s.run_id.as_str())
             .collect::<Vec<_>>(),
-        ["first", "second"]
+        ["second", "first"]
     );
-    assert_eq!(summaries[0].repository, "C:/Alpha");
-    assert_eq!(summaries[0].title, "First");
-    assert_eq!(summaries[1].title, "");
+    assert_eq!(summaries[1].repository, "C:/Alpha");
+    assert_eq!(summaries[1].title, "First");
+    assert_eq!(summaries[0].title, "");
 }
 
 #[test]
@@ -183,7 +169,7 @@ fn sidebar_status_matches_reducer_including_standalone_mergers_and_dirty_nodes()
         },
         EventKind::Started {
             execution: execution("node", "worker"),
-            message_sequences: None,
+            message_sequences: Some(vec![]),
             fresh_restart: false,
         },
         // Pause intent does not make a draining execution idle.
@@ -275,7 +261,7 @@ fn sidebar_title_edits_use_the_canonical_reducer() {
             &mut state,
             EventKind::Started {
                 execution: execution("anchor", "worker"),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             },
         )
@@ -340,7 +326,7 @@ fn sidebar_isolates_corrupt_runs_and_recovers_after_the_bad_row_is_removed() {
             "INSERT INTO events(run_id,timestamp,kind,payload) VALUES('damaged',1,'started',?1)",
             [serde_json::to_string(&EventKind::Started {
                 execution: execution("missing", "nonexistent"),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             })
             .unwrap()],

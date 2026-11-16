@@ -16,27 +16,6 @@ pub(crate) struct Topology {
 }
 
 impl Topology {
-    /// Match the legacy view JSON normalization, which removes every object
-    /// member named `security`, even in path-keyed maps. This is only identity
-    /// comparison; ordinary topology equality and materialization stay strict.
-    pub(crate) fn eq_for_view_identity(&self, other: &Self) -> bool {
-        let Self { aliases, outside } = self;
-        aliases
-            .iter()
-            .filter(|(name, _)| name.as_str() != "security")
-            .eq(other
-                .aliases
-                .iter()
-                .filter(|(name, _)| name.as_str() != "security"))
-            && outside
-                .iter()
-                .filter(|(name, _)| name.as_str() != "security")
-                .eq(other
-                    .outside
-                    .iter()
-                    .filter(|(name, _)| name.as_str() != "security"))
-    }
-
     /// A nonempty topology needs physical reconstruction and verification.
     pub(crate) fn is_empty(&self) -> bool {
         self.aliases.is_empty() && self.outside.is_empty()
@@ -48,31 +27,6 @@ impl Topology {
         self.aliases
             .retain(|name, target| keep(name) && keep(target));
         self.outside.retain(|name, _| keep(name));
-    }
-}
-
-/// Sorted checksum projection; full stored topology keeps every project path.
-pub(crate) struct ForViewIdentity<'a>(pub(crate) &'a Topology);
-impl Serialize for ForViewIdentity<'_> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        struct Paths<'a, T>(&'a BTreeMap<String, T>);
-        impl<T: Serialize> Serialize for Paths<'_, T> {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                let mut map = serializer.serialize_map(None)?;
-                for (name, value) in self.0 {
-                    if name != "security" {
-                        map.serialize_entry(name, value)?;
-                    }
-                }
-                map.end()
-            }
-        }
-        let Topology { aliases, outside } = self.0;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("aliases", &Paths(aliases))?;
-        map.serialize_entry("outside", &Paths(outside))?;
-        map.end()
     }
 }
 

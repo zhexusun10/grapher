@@ -31,9 +31,8 @@ impl PartialEq for Extra {
 }
 impl Eq for Extra {}
 
-/// Sorted checksum projection. Schema 5 omitted ACLs; schema 6 binds them.
-/// Legacy owners survive checksum validation before host normalization.
-pub(crate) struct ForViewIdentity<'a>(pub(crate) &'a Extra, pub(crate) bool);
+/// Sorted checksum projection, including native ACL evidence.
+pub(crate) struct ForViewIdentity<'a>(pub(crate) &'a Extra);
 impl Serialize for ForViewIdentity<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
@@ -52,17 +51,14 @@ impl Serialize for ForViewIdentity<'_> {
         map.serialize_entry("flags", flags)?;
         map.serialize_entry("owner", owner)?;
         map.serialize_entry("protected", protected)?;
-        if self.1 {
-            map.serialize_entry("security", security)?;
-        }
+        map.serialize_entry("security", security)?;
         map.end()
     }
 }
 
 impl Extra {
-    /// Match the selected checksum format. Unlike portable equality, legacy
-    /// owner fields count until load validates and normalizes their evidence.
-    pub(crate) fn eq_for_view_identity(&self, other: &Self, security: bool) -> bool {
+    /// Complete identity comparison, including recorded ownership and ACLs.
+    pub(crate) fn eq_for_view_identity(&self, other: &Self) -> bool {
         let Self {
             attributes,
             security: acl,
@@ -72,7 +68,7 @@ impl Extra {
             efs,
         } = self;
         attributes == &other.attributes
-            && (!security || acl == &other.security)
+            && acl == &other.security
             && *protected == other.protected
             && *flags == other.flags
             && *owner == other.owner

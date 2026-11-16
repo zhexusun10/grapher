@@ -85,54 +85,6 @@ pub(crate) fn planning_ids(root: &Path, state: &Snapshot) -> Result<BTreeSet<Str
     Ok(ids)
 }
 
-/// Legacy Planner markers can name a provisional UUID different from the
-/// committed Run's UUID. Only remove the marked checkout, never its siblings.
-pub(crate) fn planning_workspace_paths(
-    root: &Path,
-    state: &Snapshot,
-    parent: &Path,
-) -> Result<Vec<PathBuf>, String> {
-    let workspaces = parent.join(".grapher-workspaces");
-    let mut paths = Vec::new();
-    for id in planning_ids(root, state)? {
-        let marker = root.join("planning").join(id).join("planner-workspace");
-        let Some(marker) = real_child_path(root, &marker, true)? else {
-            continue;
-        };
-        let path = PathBuf::from(fs::read_to_string(marker).map_err(|error| error.to_string())?);
-        let Some(owner) = path
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-        else {
-            continue;
-        };
-        let Some(checkout) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if Uuid::parse_str(owner).is_err() || Uuid::parse_str(checkout).is_err() {
-            continue;
-        }
-        // Reconstruct under the trusted physical project parent. A source cwd,
-        // forged external path, traversal, or alias parent cannot authorize removal.
-        let expected = workspaces.join(owner).join(checkout);
-        let Some(actual_root) = path
-            .parent()
-            .and_then(Path::parent)
-            .and_then(|p| p.canonicalize().ok())
-        else {
-            continue;
-        };
-        if workspaces.canonicalize().ok().as_ref() != Some(&actual_root) {
-            continue;
-        }
-        if let Some(path) = real_child_path(parent, &expected, false)? {
-            paths.push(path);
-        }
-    }
-    Ok(paths)
-}
-
 /// Collect/validate the entire plan before calling this. Removing a Run root
 /// recursively includes all node executions, retries, and preparation copies.
 pub(crate) fn remove_paths(paths: Vec<PathBuf>) -> Result<(), String> {
@@ -152,18 +104,6 @@ pub(crate) fn remove_paths(paths: Vec<PathBuf>) -> Result<(), String> {
                     "Cannot remove owned directory {}: {error}",
                     path.display()
                 ))
-            }
-        }
-        // A legacy Planner owner may now be empty. Never recursively remove
-        // that parent; another conversation may still have a checkout there.
-        if path
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::file_name)
-            .is_some_and(|name| name == ".grapher-workspaces")
-        {
-            if let Some(parent) = path.parent() {
-                let _ = fs::remove_dir(parent);
             }
         }
     }

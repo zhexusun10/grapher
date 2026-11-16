@@ -26,7 +26,7 @@ import { CreateNodeForm } from "./CreateNodeForm";
 import { getMergerSystemPrompt } from "../../services/mergerPrompt";
 import { runtimeService } from "../../services/runtime";
 import { deduceRouteType, shouldShowRouteBadge } from "../../services/executionRoute";
-import { activeNodeConversationEvents, nodeConversationExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit, type ConversationExecution } from "../../services/conversationBranch";
+import { activeNodeConversationEvents, localMessagesAfterEdit, nodeConversationExecutions, executionIdForMessage, versionIndexForEdit, versionsForEdit, type ConversationExecution } from "../../services/conversationBranch";
 import { captureViewScrollState, resolveViewScroll, calculateExpandedCardScrollDelta, CONVERSATION_BOTTOM_THRESHOLD, type ViewScrollState } from "../../services/conversationScroll";
 import { isNodeWorking, nodeDependenciesCompleted } from "../../lib/nodeWorking";
 import { resolveGraphPhase } from "../../lib/graphPhase";
@@ -46,7 +46,7 @@ import { HISTORY_PREPEND_EVENT, TRANSCRIPT_CONTENT_GROWTH_EVENT, TRANSCRIPT_FINA
 import { smoothScrollToLatest } from "../../services/smoothConversationScroll";
 import { firstPlannerUserIsSteer, plannerHistoryMessageSources, plannerUserTurns, skipsFirstPersistedTurn, withoutLiveFirstTurn } from "../../services/plannerUserTurns";
 import { plannerSteerRows, planningOutputSteerIds, type PlannerSteerRow } from "../../services/plannerSteers";
-import { executionSessionTiming, executionSessionUsageThrough, mergePlannerTurns, plannerLegacyUsage, plannerResolvedSessionId, plannerSessionTiming, plannerSessionUsageThrough, plannerTurnSummaries, addTokenUsage } from "../../services/sessionMetrics";
+import { executionSessionTiming, executionSessionUsageThrough, mergePlannerTurns, plannerResolvedSessionId, plannerSessionTiming, plannerSessionUsageThrough, plannerTurnSummaries } from "../../services/sessionMetrics";
 import { PlanningActivity } from "../PlanningActivity";
 import { statusText, phaseText } from "../graph/TaskNode";
 import { useAnimatedNodes } from "../../hooks/useAnimatedNodes";
@@ -191,12 +191,12 @@ function steerEventOrdinals(events: readonly GraphEvent[]): Map<number, number> 
   return ordinals;
 }
 
-/** Match an optimistic turn to the durable event that replaces it. A steer's
- * occurrence must agree with `steerOrdinal`; otherwise an older identical
- * event would swallow a newly queued duplicate and hide its pending card. */
+/** Match an optimistic turn to its durable request receipt. For anonymous
+ * Steers, occurrence matching keeps repeated current SDK input distinct. */
 function matchesRecordedTurn(message: ChatMessage, event: GraphEvent, ordinal: number | undefined): boolean {
-  if (message.steerRequestId && event.request_id && event.type === "steered") {
-    return message.steerRequestId === event.request_id && (!message.executionId || message.executionId === event.execution_id);
+  if (message.steerRequestId && event.request_id) {
+    return message.steerRequestId === event.request_id &&
+      (event.type !== "steered" || !message.executionId || message.executionId === event.execution_id);
   }
   if (message.text.replace(/^\[@[^\]]+\]\s*/, "").trim() !== (event.instruction ?? "").trim()) return false;
   if (ordinal === undefined || message.delivery !== "steered") return true;
@@ -710,38 +710,20 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     (selectedMerger.node === "merger" || selectedMerger.status === "failed");
   const nodeMessages = useMemo(() => {
     if (!selectedNode) return [];
-    // Older clients could persist the synthetic task-card edit as a chat turn.
     const mergerConversation = !!selectedMerger;
     const conversationExecutions = mergerConversation ? state.mergers ?? [] : state.executions;
     const conversationExecutionIds = new Set(conversationExecutions
       .filter(execution => execution.node === conversationNode).map(execution => execution.id));
     const localMessages = effectiveMessages.filter((msg) => msg.role === "user" && msg.node === conversationNode &&
-      msg.runId === state.runId && msg.id !== `task-${conversationNode}` &&
+      msg.runId === state.runId &&
       (mergerConversation ? msg.conversationKind === "merger" : msg.conversationKind !== "merger"));
     const latestEdit = mergerConversation ? undefined : [...state.events].reverse().find((event) =>
       event.type === "conversation_edited" && event.target === conversationNode && event.nodes?.includes(conversationNode));
     const local = latestEdit?.old_instruction
-      ? (() => {
-        const index = localMessages.findIndex((msg) =>
-          msg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === latestEdit.old_instruction);
-        return index >= 0 ? localMessages.slice(0, index) : localMessages;
-      })()
+      ? localMessagesAfterEdit(localMessages, latestEdit, state.events)
       : localMessages;
     const localRemaining = [...local];
     const matchedLocals = new Map<number, ChatMessage>();
-    const rolledBackTurns = new Set<string>();
-    for (const msg of local) {
-      if (msg.versions && msg.currentVersionIndex !== undefined) {
-        for (let i = 0; i < msg.versions.length; i++) {
-          if (i !== msg.currentVersionIndex) {
-            for (const sub of msg.versions[i].subsequentEntries ?? []) {
-              const cleanSub = sub.text.replace(/^\[@[^\]]+\]\s*/, "").trim();
-              if (cleanSub) rolledBackTurns.add(cleanSub);
-            }
-          }
-        }
-      }
-    }
     const activeEvents = (mergerConversation ? state.events : activeNodeConversationEvents(state, conversationNode)).filter((event) => {
       if (mergerConversation) {
         return event.type === "steered" && event.node === conversationNode &&
@@ -752,12 +734,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
       if (event.type === "node_messaged") return event.node === conversationNode && state.graph.nodes.some(node => node.id === conversationNode);
       if (event.type === "invalidated") return event.human && event.target === conversationNode && state.graph.nodes.some(node => node.id === conversationNode);
-      if (event.type === "conversation_edited") return event.target === conversationNode &&
+      if (event.type === "conversation_edited") return !event.first_turn && event.target === conversationNode &&
         event.nodes?.includes(conversationNode) && conversationExecutionIds.has(event.from_execution_id ?? "");
       return false;
-    }).filter((event) => {
-      if (event.instruction && rolledBackTurns.has(event.instruction.trim())) return false;
-      return true;
     });
     const ordinals = steerEventOrdinals(activeEvents);
     const recorded = activeEvents.reverse().filter((event) => {
@@ -774,7 +753,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     }).reverse().map((event): ChatMessage => {
       const matchingLocal = matchedLocals.get(event.sequence);
       return {
-        id: `event-${event.sequence}`, parentId: null, role: "user",
+        id: matchingLocal?.id ?? `event-${event.sequence}`, parentId: null, role: "user",
         text: event.instruction || "", images: event.images, files: matchingLocal?.files, node: conversationNode, runId: state.runId,
         executionId: executionIdForMessage(state, event), steerRequestId: event.request_id,
         pendingExecution: state.nodes[conversationNode]?.pendingMessages?.some(message => message.sequence === event.sequence),
@@ -864,7 +843,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         ? [attempts[0]] : [],
     }];
     const assigned = new Set(turns[0].executions.map(item => item.id));
-    let nextAttempt = 1;
 
     // Passive node messages are opening input, not in-flight Steers. A claimed
     // batch owns its response only after the last user bubble in that batch.
@@ -896,16 +874,6 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       let executions: ConversationExecution[] = claimed ? [claimed] : [];
       if (claimed) {
         assigned.add(claimed.id);
-        nextAttempt = Math.max(nextAttempt, attempts.findIndex(item => item.id === claimed.id) + 1);
-      } else if (!message.delivery && !message.executionId && !message.pendingExecution) {
-        // Older snapshots did not persist execution_id on every edit. Keep the
-        // historical attempt ordering as a compatibility fallback.
-        while (nextAttempt < attempts.length && assigned.has(attempts[nextAttempt].id)) nextAttempt += 1;
-        if (nextAttempt < attempts.length) {
-          executions = [attempts[nextAttempt]];
-          assigned.add(attempts[nextAttempt].id);
-          nextAttempt += 1;
-        }
       }
       turns.push({ id: message.id, isInitial: false, userMessage: message, executions });
     }
@@ -1047,18 +1015,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   const plannerUsageThrough = useMemo(
     () => plannerSessionUsageThrough(plannerTurnHistory, displayedPlannerTurnId),
     [plannerTurnHistory, displayedPlannerTurnId]);
-  // Turns recorded before session IDs existed cannot appear in the backend's
-  // per-session bucket, yet the displayed conversation still contains them.
   const plannerBackendUsage = plannerUsageThrough.latest
     ? sessionTokenUsage(state.runMetrics?.sessionUsage, resolvedPlannerSessionId)
     : undefined;
-  const plannerLegacy = useMemo(
-    () => plannerBackendUsage ? plannerLegacyUsage(plannerTurnHistory, displayedPlannerTurnId) : undefined,
-    [plannerBackendUsage, plannerTurnHistory, displayedPlannerTurnId]);
   const plannerUsage = plannerUsageThrough.latest
-    ? (plannerBackendUsage
-      ? (plannerLegacy ? addTokenUsage(plannerBackendUsage, plannerLegacy) : plannerBackendUsage)
-      : ((plannerUsageThrough.complete ? plannerUsageThrough.usage : undefined)
+    ? (plannerBackendUsage ?? ((plannerUsageThrough.complete ? plannerUsageThrough.usage : undefined)
         ?? plannerRole?.usage))
     : plannerUsageThrough.usage;
   const displayedPlannerContext = plannerUsageThrough.latest
@@ -1588,7 +1549,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
         .map(message => (message.inlineSteerOrdinal ?? -1) + 1));
       const key = inlineSteerKey({ id: "", role: "user", text, delivery: "steered", executionId: targetExecution.id, inlineSteerOrdinal: ordinal, steerRequestId: options.requestId })!;
       const window = inlineUserTurns[targetExecution.id];
-      const afterOffset = window?.end ?? targetExecution.outputBytes ?? new TextEncoder().encode(targetExecution.output).length;
+      const afterOffset = window?.end ?? targetExecution.outputBytes ?? 0;
       const occurrence = 1 + liveSteers.filter(item => item.executionId === targetExecution.id && item.text === text &&
         item.afterOffset <= afterOffset && !liveSteerConsumed(item, window)).length;
       marker = { key, requestId: options.requestId, executionId: targetExecution.id, text, afterOffset, occurrence, images: options?.images,
@@ -1971,9 +1932,9 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
   // Keep successful conversation turns visible, but do not mount readers for
   // old failed/stopped attempts until requested. Explicit choices win even as
   // an execution changes from newest to historical.
-  const isAttemptExpanded = useCallback((exec: Execution, latestId: string | undefined) => {
+  const isAttemptExpanded = useCallback((exec: ConversationExecution, latestId: string | undefined) => {
     if (collapsedAttemptIds.has(exec.id)) return false;
-    return openedAttemptIds.has(exec.id) || isDefaultAttemptExpanded(exec, latestId);
+    return exec.historyEndOffset !== undefined || openedAttemptIds.has(exec.id) || isDefaultAttemptExpanded(exec, latestId);
   }, [collapsedAttemptIds, openedAttemptIds]);
 
   const handleToggleAttempt = useCallback((exec: Execution, records: readonly Execution[], panelEl?: HTMLElement | null) => {
@@ -2267,14 +2228,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
     const latestEdit = [...state.events].reverse().find((event) =>
       event.type === "conversation_edited" && event.target === serialNode.id && event.nodes?.includes(serialNode.id));
     if (latestEdit?.old_instruction) {
-      const oldIndex = messages.findIndex((msg) =>
-        msg.text.replace(/^\[@[^\]]+\]\s*/, "").trim() === latestEdit.old_instruction);
-      if (oldIndex >= 0) {
-        messages = messages.slice(0, latestEdit.first_turn ? oldIndex + 1 : oldIndex);
-        if (latestEdit.first_turn && messages[0]) {
-          messages[0] = { ...messages[0], text: serialNode.task };
-        }
+      const retained = localMessagesAfterEdit(messages, latestEdit, state.events, !!latestEdit.first_turn);
+      if (retained !== messages && latestEdit.first_turn && retained[0]) {
+        retained[0] = { ...retained[0], text: serialNode.task };
       }
+      messages = retained;
     }
     const localRemaining = messages.filter((msg) => msg.node === serialNode.id);
     const replacedIds = new Set<string>();
@@ -2294,7 +2252,7 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
       }
       return true;
     }).reverse().map((event): ChatMessage => ({
-      id: `event-${event.sequence}`, parentId: null, role: "user",
+      id: matchedLocals.get(event.sequence)?.id ?? `event-${event.sequence}`, parentId: null, role: "user",
       text: event.instruction || "", images: event.images, files: matchedLocals.get(event.sequence)?.files, node: serialNode.id, runId: state.runId,
       versions: event.type === "conversation_edited" ? versionsForEdit(state, event) : undefined,
       currentVersionIndex: event.type === "conversation_edited" ? versionIndexForEdit(state, event) : undefined,
@@ -2342,10 +2300,8 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
           continue;
         }
       }
-      const exact = msg.executionId && lastMessageByExecution.get(msg.executionId) === msg.id
+      const next = msg.executionId && lastMessageByExecution.get(msg.executionId) === msg.id
         ? serialExecutions.find(execution => execution.id === msg.executionId && !assigned.has(execution.id)) : undefined;
-      const next = exact ?? (!msg.delivery && !msg.executionId && !msg.pendingExecution
-        ? serialExecutions.find(execution => !assigned.has(execution.id)) : undefined);
       const execs = next ? [next] : [];
       if (next) assigned.add(next.id);
       turns.push({ id: msg.id, userMessage: { ...msg, executionId: next?.id ?? msg.executionId }, isInitial: false, executions: execs });
@@ -3485,19 +3441,11 @@ export const GraphWorkbench: React.FC<GraphWorkbenchProps> = React.memo(({
                     )}
                     {pendingPlannerSteers.length > 0 && <div className="planner-steer-list" aria-label={t("Planner 待处理消息")} aria-live="polite">
                       {pendingPlannerSteers.map(row => {
-                        // An older backend cannot echo the identity marker. If
-                        // its replay already shows the same text, keep the
-                        // uncertainty notice without adding a second bubble;
-                        // text overlap is never treated as consumption proof.
-                        const legacyOverlap = row.status === "unknown" && !state.events.some(event => event.request_id === row.id) &&
-                          useSavedPlanner && savedPlannerShowsUserTurns && persistedUserTurns.filter(text => text === row.message.text.trim()).length === 1 &&
-                          plannerMessages.filter(message => message.plannerSteerId && message.text.trim() === row.message.text.trim()).length === 1;
                         return <div className={`planner-steer-entry ${row.status}`} key={row.id}>
-                          {legacyOverlap ? <div className="planner-steer-state">{t("未确认的消息：{0}", row.message.text.trim())}</div> :
                             <div className="chat-message-row user planner-steer-message">
                               <EditableUserBubble text={row.message.text.trim()} images={row.message.images} files={row.message.files}
                                 editing={false} draft="" onDraftChange={() => {}} onCancel={() => {}} onSend={() => false} />
-                            </div>}
+                            </div>
                           <div className="planner-steer-state"><span>{plannerSteerLabel(row)}</span>
                             {["submitted", "queued", "accepted"].includes(row.status) && <> · {t("Alt + Q 撤回排队消息 · Alt + S 打断工具并发送")}</>}
                           </div>

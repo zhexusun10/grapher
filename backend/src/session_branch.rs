@@ -25,6 +25,43 @@ impl PreparedBranch {
     }
 }
 
+fn validate_session_header(header: &Value, directory: &Path, id: &str) -> Result<(), String> {
+    if header["type"] != "session"
+        || header["id"] != id
+        || header["version"] != 3
+        || header["grapherFormat"] != 1
+    {
+        return Err("Unsupported Grapher Pi session format or identity".into());
+    }
+    let run = header["grapherRunId"]
+        .as_str()
+        .ok_or("Missing Pi session Run identity")?;
+    Uuid::parse_str(run).map_err(|_| "Invalid Pi session Run identity")?;
+    let parent = directory
+        .parent()
+        .ok_or("Missing session owner directory")?;
+    match parent.file_name().and_then(|name| name.to_str()) {
+        Some("planner-sessions")
+            if directory.file_name().and_then(|name| name.to_str()) != Some(run) =>
+        {
+            return Err("Planner session belongs to another Run".into());
+        }
+        Some("sessions" | "mergers") => {
+            let root = parent.parent().ok_or("Missing session data directory")?;
+            let store = crate::store::Store::open_reader(&root.join("events.sqlite"))?;
+            let execution_id = directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("Missing session execution identity")?;
+            if store.run_for_execution(execution_id)?.as_deref() != Some(run) {
+                return Err("Pi session belongs to another Run".into());
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn session_file(
     source_dir: &Path,
     source_id: &str,
@@ -63,10 +100,13 @@ fn session_file(
         .read_line(&mut first)
         .map_err(|error| error.to_string())?;
     let header: Value = serde_json::from_str(&first).map_err(|error| error.to_string())?;
-    if header["type"] != "session" || header["id"] != source_id {
-        return Err("Node session history belongs to another identity".into());
-    }
+    validate_session_header(&header, source_dir, source_id)?;
     Ok((source, reader, header))
+}
+
+#[cfg(any(test, not(feature = "fixture")))]
+pub(crate) fn validate_session_format(directory: &Path, id: &str) -> Result<(), String> {
+    session_file(directory, id).map(|_| ())
 }
 
 fn open_session(
@@ -149,64 +189,24 @@ pub(crate) fn rebind_session_cwd(directory: &Path, id: &str, cwd: &Path) -> Resu
     rewrite_session_header(&path, input, header, &actual)
 }
 
-/// Planner sessions historically use arbitrary JSONL filenames, so locate the
-/// matching Pi identity from the header instead of requiring `_<id>.jsonl`.
-/// This deliberately does not validate the old cwd: a Planner follow-up may
-/// move from a reclaimed node workspace back to source.
+/// Rebind a current Run's session after validating format, identity and tail.
 pub(crate) fn rebind_session_cwd_by_header(
     directory: &Path,
     id: &str,
     cwd: &Path,
 ) -> Result<(), String> {
-    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     if !directory.is_dir() {
         return Ok(());
     }
-    let actual = session_cwd(cwd)?;
-    let mut matched = None;
-    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
-        let path = entry.map_err(|error| error.to_string())?.path();
-        if path.extension().is_none_or(|ext| ext != "jsonl") || !path.is_file() {
-            continue;
-        }
-        let mut file = fs::File::open(&path).map_err(|error| error.to_string())?;
-        if file.metadata().map_err(|error| error.to_string())?.len() == 0 {
-            continue;
-        }
-        file.seek(SeekFrom::End(-1))
-            .map_err(|error| error.to_string())?;
-        let mut last = [0];
-        file.read_exact(&mut last)
-            .map_err(|error| error.to_string())?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| error.to_string())?;
-        let mut input = BufReader::new(file);
-        let mut line = String::new();
-        input
-            .read_line(&mut line)
-            .map_err(|error| error.to_string())?;
-        let header: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        if header.get("type").and_then(Value::as_str) != Some("session")
-            || header.get("id").and_then(Value::as_str) != Some(id)
-        {
-            continue;
-        }
-        if last != *b"\n" {
-            return Err("Planner session has an incomplete last entry".into());
-        }
-        if matched.replace((path, input, header)).is_some() {
-            return Err(
-                "Multiple Planner conversations found for one run; cannot select one safely".into(),
-            );
-        }
+    let has_session = fs::read_dir(directory)
+        .map_err(|e| e.to_string())?
+        .any(|entry| {
+            entry.is_ok_and(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        });
+    if !has_session {
+        return Ok(());
     }
-    if let Some((path, input, header)) = matched {
-        if header.get("cwd").and_then(Value::as_str) == Some(actual.to_string_lossy().as_ref()) {
-            return Ok(());
-        }
-        return rewrite_session_header(&path, input, header, &actual);
-    }
-    Ok(())
+    rebind_session_cwd(directory, id, cwd)
 }
 
 /// Move a node's own conversation to a new cwd without rewriting the original
@@ -339,12 +339,7 @@ pub struct OutputUserTurn {
 }
 
 fn output_user_turns(output: &str, old_text: &str) -> Vec<(usize, Option<u64>, Option<String>)> {
-    let normalized = |text: &str| {
-        text.strip_suffix(crate::engine::FEEDBACK_INSTRUCTIONS)
-            .unwrap_or(text)
-            .trim()
-            .to_string()
-    };
+    let normalized = |text: &str| text.trim().to_string();
     let expected = normalized(old_text);
     let mut cursor = 0;
     let mut turns = Vec::new();
@@ -545,8 +540,6 @@ fn prepare_user_branch(
                 text
             };
             text == old_text
-                || (!planner
-                    && text.strip_suffix(crate::engine::FEEDBACK_INSTRUCTIONS) == Some(old_text))
                 || (planner
                     && text.ends_with(&format!("\n{old_text}"))
                     && (text.starts_with("Current graph node status:\n")
@@ -756,6 +749,69 @@ impl UserBranch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // All positive fixtures model sessions written by the current Pi binding.
+    macro_rules! json {
+        ($($value:tt)+) => {{
+            let mut value = serde_json::json!($($value)+);
+            if value.get("type").and_then(Value::as_str) == Some("session") {
+                value["version"] = serde_json::json!(3);
+                value["grapherFormat"] = serde_json::json!(1);
+                value["grapherRunId"] = value["id"].clone();
+            }
+            value
+        }};
+    }
+
+    #[test]
+    fn retired_session_headers_are_rejected_before_rebind_fork_or_branch() {
+        for (version, format) in [
+            (None, None),
+            (Some(2), Some(1)),
+            (Some(3), None),
+            (Some(4), Some(1)),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let id = Uuid::new_v4().to_string();
+            let file = temp.path().join(format!("test_{id}.jsonl"));
+            let header = serde_json::json!({"type":"session","id":id,"cwd":temp.path(),
+                "version":version,"grapherFormat":format,"grapherRunId":id});
+            let original = format!("{header}\n");
+            fs::write(&file, &original).unwrap();
+            assert!(validate_session_format(temp.path(), &id).is_err());
+            assert!(rebind_session_cwd_by_header(temp.path(), &id, temp.path()).is_err());
+            let target = temp.path().join("fork");
+            assert!(fork_session(
+                temp.path(),
+                &id,
+                temp.path(),
+                &target,
+                &Uuid::new_v4().to_string(),
+                temp.path()
+            )
+            .is_err());
+            assert!(branch_before_user(temp.path(), &id, temp.path(), "old", 0, 1).is_err());
+            assert_eq!(fs::read_to_string(&file).unwrap(), original);
+            assert!(!target.exists());
+        }
+    }
+
+    #[test]
+    fn a_foreign_run_header_is_rejected_before_planner_rebinding() {
+        let temp = tempfile::tempdir().unwrap();
+        let run = Uuid::new_v4().to_string();
+        let directory = temp.path().join("planner-sessions").join(&run);
+        fs::create_dir_all(&directory).unwrap();
+        let header = serde_json::json!({"type":"session","version":3,"grapherFormat":1,
+            "grapherRunId":Uuid::new_v4().to_string(),"id":run,"cwd":temp.path()});
+        let original = format!("{header}\n");
+        let file = directory.join(format!("test_{run}.jsonl"));
+        fs::write(&file, &original).unwrap();
+        assert!(rebind_session_cwd_by_header(&directory, &run, temp.path())
+            .unwrap_err()
+            .contains("another Run"));
+        assert_eq!(fs::read_to_string(file).unwrap(), original);
+    }
 
     #[test]
     fn planner_steer_marker_does_not_break_editing_the_recorded_turn() {
@@ -1099,15 +1155,22 @@ mod tests {
     }
 
     #[test]
-    fn feedback_source_history_edits_match_the_original_task_without_protocol_suffix() {
+    fn feedback_source_history_edits_match_the_original_task() {
         let dir = tempfile::tempdir().unwrap();
         let id = Uuid::new_v4().to_string();
         let path = dir.path().join(format!("test_{id}.jsonl"));
-        fs::write(&path, [
-            json!({"type":"session", "id":id, "cwd":dir.path()}),
-            json!({"type":"message", "id":"task", "parentId":null,
-                "message":{"role":"user", "content":format!("Review code{}", crate::engine::FEEDBACK_INSTRUCTIONS), "timestamp":1}}),
-        ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
+        fs::write(
+            &path,
+            [
+                json!({"type":"session", "id":id, "cwd":dir.path()}),
+                json!({"type":"message", "id":"task", "parentId":null,
+                "message":{"role":"user", "content":"Review code", "timestamp":1}}),
+            ]
+            .iter()
+            .map(|entry| format!("{entry}\n"))
+            .collect::<String>(),
+        )
+        .unwrap();
         let branch = branch_before_user(dir.path(), &id, dir.path(), "Review code", 0, 2).unwrap();
         let marker: Value =
             serde_json::from_str(fs::read_to_string(&path).unwrap().lines().last().unwrap())

@@ -10,7 +10,6 @@ export {
   createLocalBashOperations,
   createReadToolDefinition,
   createWriteToolDefinition,
-  createEditToolDefinition,
 } from '../pi/packages/coding-agent/src/index.ts';
 export type { ExtensionAPI, BashOperations } from '../pi/packages/coding-agent/src/index.ts';
 
@@ -36,13 +35,17 @@ export { mcpNamespace } from '../pi/packages/mcp/src/index.ts';
 export { CONFIG_DIR_NAME } from '../pi/packages/coding-agent/src/config.ts';
 export { resolveToCwd } from '../pi/packages/coding-agent/src/core/tools/path-utils.ts';
 import type { MainOptions, InlineExtension } from '../pi/packages/coding-agent/src/index.ts';
-import { AgentSession, ModelRuntime } from '../pi/packages/coding-agent/src/index.ts';
+import { AgentSession, ModelRuntime, SessionManager, SettingsManager, DefaultPackageManager,
+  createEditToolDefinition as piEditTool } from '../pi/packages/coding-agent/src/index.ts';
 import { Agent } from '../pi/packages/agent/src/index.ts';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { stripJsonComments } from '../pi/packages/coding-agent/src/utils/json.ts';
 import { ModelConfig } from '../pi/packages/coding-agent/src/core/model-config.ts';
 import { overlayRuntimeOptions } from './model-config-overlay.mjs';
 import { join } from 'node:path';
+import { existsSync, readFileSync, readdirSync, mkdirSync, openSync, readSync, writeFileSync, closeSync } from 'node:fs';
+import { migrateKeybindingsConfig } from '../pi/packages/coding-agent/src/core/keybindings.ts';
+import { resolvePath as resolvePiPath } from '../pi/packages/coding-agent/src/utils/paths.ts';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -233,7 +236,194 @@ export async function runPiCommandCli(args: string[], options: MainOptions = {})
   finally { AgentSession.prototype.prompt = prompt; for (const reset of restore) reset(); }
 }
 
+export const GRAPHER_SESSION_FORMAT = 1;
+
+// Keep the current edits normalization, but never fold retired top-level edits
+// into a second replacement, even when a valid edits array was also supplied.
+export function createEditToolDefinition(...args: Parameters<typeof piEditTool>) {
+  const tool = piEditTool(...args);
+  return { ...tool, prepareArguments(input: unknown) {
+    if (input && typeof input === 'object' && ('oldText' in input || 'newText' in input)) {
+      throw new Error('Unsupported edit input: use path and edits[]');
+    }
+    return tool.prepareArguments ? tool.prepareArguments(input) : input;
+  } };
+}
+
+export function assertCurrentPiSettings(settings: Record<string, any>) {
+  if (['queueMode', 'websockets', 'apiKeys'].some(key => key in settings) ||
+      (settings.skills !== null && typeof settings.skills === 'object' && !Array.isArray(settings.skills)) ||
+      (settings.retry && typeof settings.retry === 'object' && 'maxDelayMs' in settings.retry)) {
+    throw new Error('Unsupported Pi settings format; update settings explicitly before using Grapher');
+  }
+}
+
+// Run before Pi's CLI or resource loading. These inputs would otherwise be
+// renamed, rewritten or removed by upstream startup migrations.
+export function assertCurrentPiDirectories(cwd: string, agentDir: string, projectTrusted = true) {
+  cwd = resolvePiPath(cwd);
+  agentDir = resolvePiPath(agentDir);
+  for (const [directory, readSettings] of [[agentDir, true], [join(cwd, '.pi'), projectTrusted]] as const) {
+    // Startup moves commands regardless of project trust. Settings only become
+    // input when the SDK is allowed to load their scope.
+    if (existsSync(join(directory, 'commands'))) throw new Error('Unsupported Pi commands directory; use prompts/');
+    const settings = join(directory, 'settings.json');
+    if (readSettings && existsSync(settings)) assertCurrentPiSettings(JSON.parse(readFileSync(settings, 'utf8').replace(/^\uFEFF/, '')));
+  }
+  if (existsSync(agentDir)) for (const name of readdirSync(agentDir).filter(name => name.endsWith('.jsonl'))) {
+    let value;
+    try { value = readPiHeader(join(agentDir, name), Infinity).header; }
+    catch (error) {
+      if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code) continue;
+      throw error;
+    }
+    if (value?.type === 'session' && value.cwd) {
+      throw new Error('Unsupported Pi sessions in agent root; use a new agent directory');
+    }
+  }
+  if (!existsSync(join(agentDir, 'auth.json')) && existsSync(join(agentDir, 'oauth.json'))) {
+    throw new Error('Unsupported Pi oauth.json; configure auth.json explicitly');
+  }
+  if (['fd', 'rg', 'fd.exe', 'rg.exe'].some(name => existsSync(join(agentDir, 'tools', name)))) {
+    throw new Error('Unsupported Pi tools directory; configure bin/ explicitly');
+  }
+  const keybindings = join(agentDir, 'keybindings.json');
+  if (existsSync(keybindings)) {
+    const config = JSON.parse(readFileSync(keybindings, 'utf8').replace(/^\uFEFF/, ''));
+    if (config && typeof config === 'object' && !Array.isArray(config) && migrateKeybindingsConfig(config).migrated) {
+      throw new Error('Unsupported Pi keybinding names; use current names');
+    }
+  }
+}
+
+export function assertCurrentSessionHeader(header: any) {
+  if (header?.type !== 'session' || header.version !== 3 || header.grapherFormat !== GRAPHER_SESSION_FORMAT) {
+    throw new Error('Unsupported Grapher Pi session format');
+  }
+  const run = process.env.GRAPHER_ACTIVE_RUN_ID;
+  if (run && header.grapherRunId !== run) throw new Error('Pi session belongs to another Grapher Run');
+}
+
+function markNewSession(manager: SessionManager) {
+  const header = manager.getHeader();
+  if (header?.type !== 'session' || header.version !== 3) throw new Error('Unsupported Grapher Pi session format');
+  Object.assign(header, { grapherFormat: GRAPHER_SESSION_FORMAT,
+    grapherRunId: process.env.GRAPHER_ACTIVE_RUN_ID ?? null });
+}
+
+function readPiHeader(path: string, limit = 1024 * 1024): { header: any; complete: boolean } {
+  const fd = openSync(path, 'r');
+  try {
+    const chunks: Buffer[] = [];
+    let count = 0;
+    while (count < limit) {
+      const bytes = Buffer.alloc(Math.min(64 * 1024, limit - count));
+      const size = readSync(fd, bytes, 0, bytes.length, count);
+      if (!size) break;
+      const newline = bytes.subarray(0, size).indexOf(10);
+      chunks.push(bytes.subarray(0, newline < 0 ? size : newline));
+      count += size;
+      if (newline >= 0) return { header: JSON.parse(Buffer.concat(chunks).toString('utf8')), complete: true };
+    }
+    if (!count) return { header: null, complete: false };
+    if (count === limit) throw new Error('Unsupported Grapher Pi session header');
+    return { header: JSON.parse(Buffer.concat(chunks).toString('utf8')), complete: false };
+  } finally { closeSync(fd); }
+}
+
+export function assertCurrentSessionFile(path: string) {
+  const { header, complete } = readPiHeader(path);
+  if (!complete) throw new Error('Unsupported Grapher Pi session header');
+  assertCurrentSessionHeader(header);
+}
+
+// These private touchpoints are deliberately confined to the pinned binding.
+// Guard every SDK load, including continue/fork/setSessionFile and RPC switching,
+// before upstream's _loadEntries can migrate and rewrite the original file.
+const openSession = SessionManager.open;
+SessionManager.open = function (path, ...args) {
+  const resolved = resolvePiPath(path);
+  if (existsSync(resolved)) assertCurrentSessionFile(resolved);
+  // The SDK constructor can create sessionDir before _setSessionFile runs.
+  return openSession.call(this, resolved, ...args);
+};
+const sessionPrototype = SessionManager.prototype as any;
+const setSessionFile = sessionPrototype._setSessionFile;
+sessionPrototype._setSessionFile = function (path: string, ...args: any[]) {
+  const resolved = resolvePiPath(path);
+  if (existsSync(resolved)) assertCurrentSessionFile(resolved);
+  return setSessionFile.call(this, resolved, ...args);
+};
+const loadEntries = sessionPrototype._loadEntries;
+sessionPrototype._loadEntries = function (entries: any[], ...args: any[]) {
+  const header = entries.find(entry => entry.type === 'session');
+  // Current SDK callers may restore a headerless entry tree in memory. That
+  // path creates a fresh header and never invokes file/version migration.
+  if (this.persist || header) assertCurrentSessionHeader(this.persist ? entries[0] : header);
+  return loadEntries.call(this, entries, ...args);
+};
+const newSession = SessionManager.prototype.newSession;
+SessionManager.prototype.newSession = function (...args) {
+  const result = newSession.apply(this, args);
+  markNewSession(this);
+  return result;
+};
+const createBranchedSession = sessionPrototype.createBranchedSession;
+sessionPrototype.createBranchedSession = function (...args: any[]) {
+  assertCurrentSessionHeader(this.getHeader());
+  const ownRewrite = Object.getOwnPropertyDescriptor(this, '_rewriteFile');
+  const rewrite = this._rewriteFile;
+  // This synchronous SDK operation constructs a fresh header itself. Tag that
+  // header before its first write, without changing the SDK's branch algorithm.
+  this._rewriteFile = function (...writeArgs: any[]) {
+    markNewSession(this);
+    return rewrite.apply(this, writeArgs);
+  };
+  try {
+    const result = createBranchedSession.apply(this, args);
+    markNewSession(this); // In-memory and not-yet-flushed branches do not rewrite.
+    return result;
+  } finally {
+    if (ownRewrite) Object.defineProperty(this, '_rewriteFile', ownRewrite);
+    else delete this._rewriteFile;
+  }
+};
+SessionManager.forkFrom = function (source, cwd, directory, options) {
+  // Validate before upstream can create a target file. Seed the current header
+  // ourselves because upstream forkFrom constructs an unmarked Pi-only header.
+  const original = SessionManager.open(source);
+  assertCurrentSessionHeader(original.getHeader());
+  const target = SessionManager.create(cwd, directory, options);
+  const header = target.getHeader()!;
+  header.parentSession = resolvePiPath(source);
+  const path = target.getSessionFile()!;
+  mkdirSync(target.getSessionDir(), { recursive: true });
+  const fd = openSync(path, 'wx');
+  try {
+    writeFileSync(fd, `${JSON.stringify(header)}\n`);
+    for (const entry of original.getEntries()) writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+  } finally { closeSync(fd); }
+  return SessionManager.open(path, target.getSessionDir());
+};
+
+const piSettings = SettingsManager as any;
+const migrateSettings = piSettings.migrateSettings;
+piSettings.migrateSettings = function (settings: Record<string, any>) {
+  assertCurrentPiSettings(settings);
+  return migrateSettings.call(this, settings);
+};
+const createSettings = SettingsManager.create;
+SettingsManager.create = function (cwd, agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), '.grapher', 'pi-agent'), ...args) {
+  assertCurrentPiDirectories(cwd, agentDir, args[0]?.projectTrusted !== false);
+  return createSettings.call(this, cwd, agentDir, ...args);
+};
+const packagePrototype = DefaultPackageManager.prototype as any;
+packagePrototype.getNpmInstallPath = function (source: unknown, scope: unknown) {
+  return this.getManagedNpmInstallPath(source, scope);
+};
+
 export async function runPiCli(args: string[], options: MainOptions = {}) {
+  assertCurrentPiDirectories(process.cwd(), process.env.PI_CODING_AGENT_DIR || join(homedir(), '.grapher', 'pi-agent'));
   const [{ setupCli }, { main }] = await preparePiCli();
   setupCli();
   // Pi's CLI creates its own runtime. Retarget its default models path while

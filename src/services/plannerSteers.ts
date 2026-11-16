@@ -24,8 +24,7 @@ export function newExecutionSteer(message: ChatMessage, executionId: string, req
  * instruction: the composer keeps one the Planner did not record (so it can be
  * edited and resent), while a recorded submission keeps its pending card and
  * clears the input. A failed RPC is a rejection, not a delivery. */
-export function plannerSteerOwner(send: { recorded: boolean; status?: string; legacy?: boolean }): "composer" | "pending" {
-  if (send.legacy) return "pending";
+export function plannerSteerOwner(send: { recorded: boolean; status?: string }): "composer" | "pending" {
   if (!send.recorded) return "composer";
   return send.status === "failed" ? "composer" : "pending";
 }

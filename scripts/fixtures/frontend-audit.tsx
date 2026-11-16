@@ -18,11 +18,11 @@ import { ToolCallCard } from "../../src/components/ToolCallCard";
 import { VirtualizedTranscript } from "../../src/components/VirtualizedTranscript";
 import { VirtualizedList } from "../../src/components/VirtualizedList";
 import { TranscriptHistoryStatus } from "../../src/components/TranscriptHistoryStatus";
-import { ExecutionTranscript, executionTranscriptCache } from "../../src/components/ExecutionTranscript";
+import { ExecutionTranscript as CurrentExecutionTranscript, executionTranscriptCache } from "../../src/components/ExecutionTranscript";
 import { PlanningActivity, planningTranscriptCache } from "../../src/components/PlanningActivity";
 import { useConversationTranscriptCache } from "../../src/hooks/useConversationTranscriptCache";
 import { cachedPlanningOutput, invalidateTranscriptCaches, planningTranscriptKey } from "../../src/services/transcriptCache";
-import { GraphWorkbench } from "../../src/components/views/GraphWorkbench";
+import { GraphWorkbench as CurrentGraphWorkbench } from "../../src/components/views/GraphWorkbench";
 import { tokens } from "../../src/tokens";
 import { closeThinkingItems, finalizeThinkingItems, updateThinkingItems } from "../../src/services/thinkingTranscript";
 import type { Execution, TranscriptItem } from "../../src/types";
@@ -32,6 +32,27 @@ import "../../src/styles-workbench.css";
 import "../../src/styles-planning.css";
 
 const audit = ((window as any).audit = {});
+// Fixture text is the backing log store. Publish current byte metadata and let
+// the browser read scoped pages through the mocked API.
+const fixtureLogRuns = new Map<string, Map<string, Execution>>();
+function fixtureExecution(runId: string, execution: Execution): Execution {
+  const record = execution.outputBytes === undefined
+    ? { ...execution, outputBytes: new TextEncoder().encode(execution.output).length } : execution;
+  let records = fixtureLogRuns.get(runId);
+  if (!records) fixtureLogRuns.set(runId, records = new Map());
+  records.set(record.id, record);
+  return record;
+}
+audit.fixtureSnapshots = () => [...fixtureLogRuns].map(([runId, records]) => ({ runId, executions: [...records.values()] }));
+function ExecutionTranscript(props: React.ComponentProps<typeof CurrentExecutionTranscript>) {
+  return <CurrentExecutionTranscript {...props} execution={fixtureExecution(props.runId ?? "", props.execution)} />;
+}
+function GraphWorkbench(props: React.ComponentProps<typeof CurrentGraphWorkbench>) {
+  const state = { ...props.state,
+    executions: props.state.executions.map(execution => fixtureExecution(props.state.runId, execution)),
+    mergers: props.state.mergers?.map(execution => fixtureExecution(props.state.runId, execution)) };
+  return <CurrentGraphWorkbench {...props} state={state} />;
+}
 const config = { ...defaultConfig, repository: "/a", model: "test/old" };
 function SettingsFixture() {
   const [committed, setCommitted] = useState(config);
@@ -264,6 +285,7 @@ function LatestScrollFixture() {
   const layout = new URLSearchParams(location.search).get("layout");
   const pagedLive = layout === "live-paged";
   const live = layout === "live-tool" || layout === "live-empty" || pagedLive;
+  const streaming = live || layout === "long" || layout === "virtualized";
   const nodeView = (live || layout === "thinking-card") && new URLSearchParams(location.search).get("view") === "node";
   const assistant = (text: string) => JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } }) + "\n";
   const [output, setOutput] = useState(() => {
@@ -283,18 +305,19 @@ function LatestScrollFixture() {
   audit.appendLatest = () => setOutput(previous => previous + assistant("APPEND_WHILE_SMOOTH_SCROLLING"));
   audit.appendToolEvents = (events: unknown[]) => setOutput(previous => previous + events.map(event => JSON.stringify(event) + "\n").join(""));
   audit.unmountConversation = () => setMounted(false);
-  const state = { ...emptySnapshot, runId: "latest-run", config, phase: live ? "running" : "paused", paused: !live, approved: true, planType: nodeView ? "graph" : "serial",
+  const state = { ...emptySnapshot, runId: "latest-run", config, phase: streaming ? "running" : "paused", paused: !streaming, approved: true, planType: nodeView ? "graph" : "serial",
     graph: { originalGoal: "Latest-scroll regression", nodes: [{ id: "task", task: "Inspect the long conversation" }], edges: [] },
-    nodes: { task: { status: live ? "running" : "completed", revision: 0, instruction: "", error: null } },
-    executions: [{ id: "latest-execution", node: "task", status: live ? "running" : "completed", revision: 0, attempt: 1, output,
-      ...(pagedLive ? { outputBytes: 10_000_000 } : {}),
-      startedAt: 1, completedAt: live ? null : 2, sessionId: "latest-session", worktree: "/mock", before: "", after: "" }] } as Snapshot;
+    nodes: { task: { status: streaming ? "running" : "completed", revision: 0, instruction: "", error: null } },
+    executions: [{ id: "latest-execution", node: "task", status: streaming ? "running" : "completed", revision: 0, attempt: 1, output,
+      outputBytes: pagedLive ? 10_000_000 : new TextEncoder().encode(output).length,
+      startedAt: 1, completedAt: streaming ? null : 2, sessionId: "latest-session", worktree: "/mock", before: "", after: "" }] } as Snapshot;
+  audit.latestSnapshot = state;
   const noop = () => {};
   return mounted ? <div style={{ height: 800, display: "flex" }}>
     <GraphWorkbench state={state} routeType={nodeView ? "graph" : "serial"} selected={nodeView ? "task" : ""} setSelected={noop} selectedMergerId="" setSelectedMergerId={noop}
       effectiveMessages={[]} isPlanning={false} plannerStream={{ items: [] }} onSendMessage={noop} onRequestConfirmation={noop}
       onControl={noop} onSave={noop} onOpenEditor={noop} onOpenApproval={noop} onOpenFile={noop} repoInfo={null} config={config}
-      active={live} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
+      active={streaming} locked={false} pendingRequest={false} publishing={false} publicationFailed={false}
       nodes={[]} edges={[]} nodeTypes={{}} edgeTypes={{}} tokens={tokens} />
   </div> : <p>Conversation closed</p>;
 }

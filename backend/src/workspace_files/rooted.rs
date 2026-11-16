@@ -295,6 +295,7 @@ impl Files {
         self.validate_rooted_metadata(&snapshot)?;
         self.check_native_project_scopes(paths, &snapshot)?;
         Ok(Version {
+            schema: 1,
             head: String::new(),
             parents: parents.to_vec(),
             entries: Entries::new(),

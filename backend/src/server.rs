@@ -502,9 +502,8 @@ pub struct Bootstrap {
 const PARTITIONER_PROMPT: &str = include_str!("../resources/prompts/partitioner.md");
 const PLANNER_PROMPT: &str = include_str!("../resources/prompts/planner.md");
 const PLANNER_REVIEW_RULE: &str =
-    "Once all nodes you assigned have completed, the harness will resume your session so you can review the results.";
-const POST_TASK_REVIEW_PROMPT: &str =
-    "All tasks you assigned are completed. Consider your next move.";
+    "Once all nodes you assigned have completed, the harness will resume your session.";
+const POST_TASK_REVIEW_PROMPT: &str = "All nodes are completed. Consider your next move.";
 /// Rework semantics shared by the injected Planner status block and the
 /// post-task review turn so revisions price downstream re-runs correctly.
 /// Both consume the same durable one-shot marker.
@@ -765,13 +764,7 @@ fn bootstrap_projection(
     // are recorded separately; the current Run keeps its original config.
     let mut config = saved_config_on_disk
         .or(active_config)
-        .or_else(|| {
-            let mut cfg = event_config?;
-            if !cfg.model.is_empty() && !cfg.model.contains('/') {
-                cfg.model = String::new();
-            }
-            Some(cfg)
-        })
+        .or(event_config)
         .unwrap_or(Config {
             repository: detected_repo
                 .as_ref()
@@ -797,6 +790,7 @@ fn bootstrap_projection(
         });
     config.max_feedback = normalize_max_feedback(config.max_feedback);
     config.max_parallel = normalize_max_parallel(config.max_parallel);
+    config.validate_model_settings()?;
     // Settings are future-Run defaults, not an environment selection surface.
     // Historical Run/descriptor policies remain in their immutable projections.
     config.environment = None;
@@ -1675,10 +1669,8 @@ fn planner_followup_prompt(
     }
 }
 
-/// Planning attempts have separate logs/graph files, but a run has exactly one
-/// Planner conversation. Older runs kept the Pi session in their first planning
-/// attempt; manual graphs (and attempts without a persisted session) use a
-/// dedicated run-scoped directory instead.
+/// Planning attempts have separate logs and graph files. Each Run owns one
+/// Planner conversation in planner-sessions/<runId>.
 fn stored_planner_session_id(
     directory: &std::path::Path,
     repository: &std::path::Path,
@@ -1706,18 +1698,13 @@ fn stored_planner_session_id(
         let Some(bucket) = owner_dir.parent() else {
             return Ok(None);
         };
-        let legacy = bucket
-            .file_name()
-            .is_some_and(|name| name == ".grapher-workspaces")
-            && leaf == expected
-            && Uuid::parse_str(leaf).is_ok();
         let node = bucket
             .file_name()
             .is_some_and(|name| name == ".grapher-worktrees")
             && leaf
                 .get(leaf.len().saturating_sub(36)..)
                 .is_some_and(|id| Uuid::parse_str(id).is_ok());
-        if Uuid::parse_str(owner).is_err() || !(legacy || node) {
+        if Uuid::parse_str(owner).is_err() || !node {
             return Ok(None);
         }
         let Some(parent) = bucket
@@ -1767,7 +1754,20 @@ fn stored_planner_session_id(
             .and_then(|cwd| cwd.as_str())
             .ok_or("Missing Planner session repository")?;
         if value.get("type").and_then(|kind| kind.as_str()) != Some("session")
-            || Uuid::parse_str(id).is_err()
+            || id != expected
+            || value.get("version").and_then(serde_json::Value::as_u64) != Some(3)
+            || value
+                .get("grapherFormat")
+                .and_then(serde_json::Value::as_u64)
+                != Some(1)
+            || value
+                .get("grapherRunId")
+                .and_then(serde_json::Value::as_str)
+                != Some(expected)
+            || !entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(&format!("_{expected}.jsonl"))
             || !(crate::path_identity::same_path(std::path::Path::new(cwd), &repository)
                 || workspace.as_deref().is_some_and(|workspace| {
                     crate::path_identity::same_path(std::path::Path::new(cwd), workspace)
@@ -1791,10 +1791,7 @@ fn stored_planner_session_id(
     if ids.contains(expected) {
         return Ok(Some(expected.to_string()));
     }
-    if ids.len() == 1 {
-        return Ok(ids.into_iter().next());
-    } // Legacy session with a random Pi ID.
-    Err("Multiple Planner conversations found for one run; cannot select one safely".into())
+    Err("Planner session does not match its Run identity".into())
 }
 
 fn session_path_identity(path: &std::path::Path) -> String {
@@ -1916,18 +1913,12 @@ fn event_planner_id(kind: &EventKind) -> Option<&str> {
 
 fn planner_session_directory_for_workspace(
     root: &std::path::Path,
-    attempt: &std::path::Path,
+    _attempt: &std::path::Path,
     repository: &std::path::Path,
     workspace: &std::path::Path,
     revision: Option<&Snapshot>,
 ) -> Result<(PathBuf, String), String> {
-    let Some(snapshot) = revision else {
-        let id = attempt
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or("Invalid planning identity")?;
-        return Ok((attempt.join("planner-session"), id.to_string()));
-    };
+    let snapshot = revision.ok_or("Missing Run identity for Planner session")?;
     if Uuid::parse_str(&snapshot.run_id).is_err() {
         return Err("Invalid run identity for Planner session".into());
     }
@@ -1954,15 +1945,8 @@ fn planner_session_directory_for_workspace(
         }
         Err(error.unwrap_or_else(|| "Invalid Planner session".into()))
     };
-    // Prefer the oldest surviving conversation, not the latest attempt. Only a
-    // committed attempt makes a missing session unrecoverable: an attempt that
-    // never launched Pi legitimately has no session yet.
-    let mut committed_planner_attempt = false;
-    for event in &snapshot.events {
-        let Some(id) = event_planner_id(&event.kind) else {
-            continue;
-        };
-        if matches!(
+    let committed_planner_attempt = snapshot.events.iter().any(|event| {
+        matches!(
             &event.kind,
             EventKind::Created {
                 planning_id: Some(_),
@@ -1971,21 +1955,8 @@ fn planner_session_directory_for_workspace(
                 planning: Some(_),
                 ..
             } | EventKind::GraphRevised { .. }
-        ) {
-            committed_planner_attempt = true;
-        }
-        if Uuid::parse_str(id).is_err() {
-            continue;
-        }
-        let previous = root.join("planning").join(id);
-        let session = previous.join("planner-session");
-        let previous_workspace = fs::read_to_string(previous.join("planner-workspace"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| workspace.to_path_buf());
-        if let Some(pi_id) = stored(&session, &previous_workspace, id)? {
-            return Ok((session, pi_id));
-        }
-    }
+        )
+    });
     let session = root.join("planner-sessions").join(&snapshot.run_id);
     if let Some(id) = stored(&session, workspace, &snapshot.run_id)? {
         return Ok((session, id));
@@ -2439,6 +2410,7 @@ fn plan_goal_internal_with_options(
                 fs::write(
                 directory.join("request.json"),
                 serde_json::to_vec(&serde_json::json!({
+                    "formatVersion": 1,
                     "goal": goal, "config": config, "mode": mode, "revisionRunId": revision_run_id,
                     "runId": owner, "backgroundReview": background_review,
                     "continuePlanningId": continue_planning_id, "continuationInitial": continuation_initial
@@ -2847,7 +2819,7 @@ fn plan_goal_internal_with_options(
                                     &directory,
                                     &repository,
                                     &planner_workspace,
-                                    original_graph.as_ref().map(|_| &runtime.state),
+                                    Some(&runtime.state),
                                 )?
                             };
                             // Pi accepts a header-only file without a resume warning.
@@ -3513,11 +3485,38 @@ fn plan_goal_internal_with_options(
     })
 }
 
+fn validate_planning_summary(summary: &PlanningSummary) -> Result<(), String> {
+    if !is_valid_planning_id(&summary.planning_id)
+        || summary
+            .run_id
+            .as_deref()
+            .is_none_or(|id| !is_valid_planning_id(id))
+        || summary.repository.as_deref().is_none_or(str::is_empty)
+        || summary.goal.is_none()
+    {
+        return Err("Unsupported or unattributed Planner summary".into());
+    }
+    Ok(())
+}
+
+fn read_planning_summary(bytes: &[u8]) -> Result<PlanningSummary, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if value["formatVersion"] != 1 {
+        return Err("Unsupported Planner summary format".into());
+    }
+    let summary: PlanningSummary = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    validate_planning_summary(&summary)?;
+    Ok(summary)
+}
+
 fn write_planning_summary(
     directory: &std::path::Path,
     summary: &PlanningSummary,
 ) -> Result<(), String> {
-    let json = serde_json::to_vec_pretty(summary).map_err(|e| e.to_string())?;
+    validate_planning_summary(summary)?;
+    let mut value = serde_json::to_value(summary).map_err(|e| e.to_string())?;
+    value["formatVersion"] = serde_json::json!(1);
+    let json = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
     let pending = directory.join("summary.pending");
     fs::write(&pending, &json).map_err(|e| e.to_string())?;
     fs::rename(pending, directory.join("summary.json")).map_err(|e| e.to_string())?;
@@ -3533,7 +3532,7 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
         let directory = entry.path();
         let Some(mut summary) = fs::read(directory.join("summary.json"))
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<PlanningSummary>(&bytes).ok())
+            .and_then(|bytes| read_planning_summary(&bytes).ok())
         else {
             continue;
         };
@@ -3546,6 +3545,18 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
         let request = fs::read(directory.join("request.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let Some(request) = request.filter(|request| {
+            request["formatVersion"] == 1 && request["runId"].as_str() == summary.run_id.as_deref()
+        }) else {
+            continue;
+        };
+        if recorded
+            .as_deref()
+            .is_some_and(|id| Some(id) != summary.run_id.as_deref())
+        {
+            continue;
+        }
+        let request = Some(request);
         let background_review = request
             .as_ref()
             .is_some_and(|request| request["backgroundReview"].as_bool() == Some(true));
@@ -3576,21 +3587,14 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
                 }
                 .into(),
             );
-        } else if background_review
-            && summary.status.as_deref() == Some("failed")
-            && summary.error.as_deref() == Some(BACKEND_STOPPED_PLANNING_ERROR)
-        {
-            // A review interrupted before this fix was persisted with the
-            // foreground planning wording. Repair the sidecar while loading it.
-            summary.error = Some(BACKEND_STOPPED_REVIEW_ERROR.into());
         }
         if summary.status.as_deref() != Some("failed") {
             continue;
         }
         if let Some(request) = &request {
             if let Ok(config) = argument::<Config>(request, "config") {
-                // Interrupted summaries used to retain zero metrics despite saved JSONL.
-                if interrupted || summary.roles.values().all(|m| m.session_start.is_none()) {
+                // Recover metrics only for a current attempt interrupted before its terminal summary.
+                if interrupted {
                     summary.roles.clear();
                     summary.model_duration = 0.0;
                     for (role, pi_role) in [
@@ -3610,24 +3614,15 @@ fn recover_plannings(service: &Arc<Service>) -> Result<(), String> {
                 }
             }
         }
-        enrich_planning_summary(&mut summary, &directory);
         write_planning_summary(&directory, &summary)?;
         let Some(request) = request else {
             continue;
         };
         let unrecorded = recorded.is_none();
-        let run_id = recorded
+        let run_id = summary
+            .run_id
             .clone()
-            .or_else(|| request["runId"].as_str().map(str::to_owned))
-            .or_else(|| {
-                // Legacy requests omitted the provisional Run ID. The private
-                // workspace preserves it as .grapher-workspaces/<runId>/<attempt>.
-                let path =
-                    PathBuf::from(fs::read_to_string(directory.join("planner-workspace")).ok()?);
-                let id = path.parent()?.file_name()?.to_str()?;
-                Uuid::parse_str(id).ok().map(|_| id.to_owned())
-            })
-            .unwrap_or_else(|| summary.planning_id.clone());
+            .ok_or("Missing Planner Run identity")?;
         // A failed revision must not replace its existing compiled graph, but
         // its durable Planner output stays part of the conversation: record the
         // aborted turn once so a reload can replay it. Successful attempts are
@@ -4458,6 +4453,7 @@ fn control_with_request_id(
         };
     }
     if action == "steer_planner" {
+        let planner_run = run_id.as_deref().ok_or("Missing Run identity")?;
         let instruction = instruction.ok_or("Enter a planning message")?;
         if instruction.trim().is_empty() {
             return Err("Enter a planning message".into());
@@ -4509,11 +4505,7 @@ fn control_with_request_id(
         // because the Pi RPC entry is not visible yet.
         let wait_until = std::time::Instant::now() + std::time::Duration::from_secs(8);
         let active_run_id = loop {
-            let lookup = if let Some(ref id) = run_id {
-                crate::engine::planner_revision_run_id_for_run(id)
-            } else {
-                crate::engine::planner_revision_run_id()
-            };
+            let lookup = crate::engine::planner_revision_run_id_for_run(planner_run);
             match lookup {
                 Ok(id) => break id,
                 Err(_)
@@ -4701,11 +4693,7 @@ fn control_with_request_id(
         }
         let snapshot = runtime.state.clone();
         drop(runtime);
-        if let Some(id) = run_id {
-            crate::engine::steer_planner_for_run_nowait(&id, &message, images)?;
-        } else {
-            crate::engine::steer_planner_nowait(&message, images)?;
-        }
+        crate::engine::steer_planner_for_run_nowait(planner_run, &message, images)?;
         return Ok(snapshot);
     }
     if action == "message_node" {
@@ -5310,7 +5298,7 @@ fn edit_planner(
             )?)
         }
         None => {
-            // A legacy conversation stored under an unexpected filename must
+            // A persisted conversation under an unexpected filename must
             // fail loudly rather than be silently replaced by a fresh one.
             let has_sessions = fs::read_dir(&session_dir).ok().is_some_and(|entries| {
                 entries.filter_map(Result::ok).any(|entry| {
@@ -5589,13 +5577,7 @@ fn recover_cleanup_tasks(service: &Arc<Service>) -> Result<(), String> {
                 .store
                 .delete_run_with_cleanup(&id, Some(&manifest))?;
         }
-        for task in crate::cleanup::idle_partitioners(&runtime.root, &runtime.store)? {
-            runtime
-                .store
-                .delete_run_with_cleanup(&task.run_id, Some(&task.manifest))?;
-        }
-        // Catch successful publications whose cleanup was interrupted before
-        // queueing, including workspaces left by older versions.
+        // Catch successful publications interrupted before cleanup was queued.
         for id in runtime.store.completed_workspace_runs()? {
             if runtime.store.cleanup_task(&id)?.is_none() {
                 let state = runtime.store.load(&id)?;
@@ -5639,35 +5621,6 @@ fn is_valid_planning_id(id: &str) -> bool {
         && id != ".."
 }
 
-fn enrich_planning_summary(summary: &mut PlanningSummary, directory: &std::path::Path) {
-    if summary.plan_type.is_none() {
-        summary.plan_type =
-            crate::path_safety::real_child_path(directory, &directory.join("route.json"), true)
-                .ok()
-                .flatten()
-                .and_then(|path| fs::read(path).ok())
-                .and_then(|bytes| serde_json::from_slice::<Route>(&bytes).ok())
-                .map(|route| route.plan_type);
-    }
-    if summary.goal.is_none() || summary.run_id.is_none() {
-        let request =
-            crate::path_safety::real_child_path(directory, &directory.join("request.json"), true)
-                .ok()
-                .flatten()
-                .and_then(|path| fs::read(path).ok());
-        if let Some(bytes) = request {
-            if let Ok(req) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if summary.goal.is_none() {
-                    summary.goal = req["goal"].as_str().map(str::to_owned);
-                }
-                if summary.run_id.is_none() {
-                    summary.run_id = req["runId"].as_str().map(str::to_owned);
-                }
-            }
-        }
-    }
-}
-
 fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningSummary, String> {
     if !is_valid_planning_id(&planning_id) {
         return Err(format!("Invalid planning ID: {planning_id}"));
@@ -5681,23 +5634,10 @@ fn get_planning(planning_id: String, service: &Arc<Service>) -> Result<PlanningS
     )?
     .ok_or_else(|| format!("Planning summary not found: {planning_id}"))?;
     let content = fs::read_to_string(&summary_path).map_err(|error| error.to_string())?;
-    let mut summary =
-        serde_json::from_str::<PlanningSummary>(&content).map_err(|error| error.to_string())?;
-    if summary.repository.is_none() {
-        if let Some(repo) = runtime
-            .store
-            .find_repository_by_planning_id(&summary.planning_id)
-        {
-            summary.repository = Some(repo);
-            if let Ok(migrated_json) = serde_json::to_string_pretty(&summary) {
-                let _ = fs::write(&summary_path, migrated_json);
-            }
-        }
+    let summary = read_planning_summary(content.as_bytes())?;
+    if summary.planning_id != planning_id {
+        return Err("Planner summary belongs to another attempt".into());
     }
-    enrich_planning_summary(
-        &mut summary,
-        summary_path.parent().ok_or("Missing planning directory")?,
-    );
     Ok(summary)
 }
 
@@ -5715,6 +5655,7 @@ fn get_planning_output(
     if !is_valid_planning_id(&planning_id) {
         return Err("Invalid planning ID".into());
     }
+    let summary = get_planning(planning_id.clone(), service)?;
     if !matches!(role.as_str(), "partition" | "planner") {
         return Err("Invalid planning role".into());
     }
@@ -5729,11 +5670,7 @@ fn get_planning_output(
         .map_err(|_| "Planning output not found")?;
     let directory = crate::path_safety::real_child_path(&root, &root.join(&planning_id), false)?
         .ok_or("Planning output not found")?;
-    let running =
-        crate::path_safety::real_child_path(&root, &directory.join("summary.json"), true)?
-            .and_then(|path| fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<PlanningSummary>(&bytes).ok())
-            .is_some_and(|summary| summary.status.as_deref() == Some("running"));
+    let running = summary.status.as_deref() == Some("running");
     let file_path =
         crate::path_safety::real_child_path(&root, &directory.join(format!("{role}.jsonl")), true)?;
     if file_path.is_none() && running && offset == 0 {
@@ -5852,26 +5789,16 @@ fn list_plannings(
     let mut summaries = Vec::new();
     if let Ok(entries) = fs::read_dir(&planning_dir) {
         for entry in entries.flatten() {
-            // Listings may backfill summaries, so never follow a linked
-            // history directory or leaf file, even to another planning entry.
+            // Never follow linked history directories or leaf files.
             if let Ok(Some(summary_path)) = crate::path_safety::real_child_path(
                 &planning_dir,
                 &entry.path().join("summary.json"),
                 true,
             ) {
                 if let Ok(content) = fs::read_to_string(&summary_path) {
-                    if let Ok(mut summary) = serde_json::from_str::<PlanningSummary>(&content) {
-                        // If repository is missing, attempt to backfill from associated run in event store
-                        if summary.repository.is_none() {
-                            if let Some(repo) = runtime
-                                .store
-                                .find_repository_by_planning_id(&summary.planning_id)
-                            {
-                                summary.repository = Some(repo);
-                                if let Ok(migrated_json) = serde_json::to_string_pretty(&summary) {
-                                    let _ = fs::write(&summary_path, migrated_json);
-                                }
-                            }
+                    if let Ok(summary) = read_planning_summary(content.as_bytes()) {
+                        if entry.file_name().to_str() != Some(summary.planning_id.as_str()) {
+                            continue;
                         }
 
                         // Filter by repository if requested (fail closed)
@@ -5883,9 +5810,6 @@ fn list_plannings(
                             {
                                 continue; // Reject unrelated or unattributed history.
                             }
-                        }
-                        if let Some(directory) = summary_path.parent() {
-                            enrich_planning_summary(&mut summary, directory);
                         }
                         summaries.push(summary);
                     }
@@ -6716,31 +6640,6 @@ fn origin_matches_allowlist(origin: &str, allowed: &str) -> bool {
     })
 }
 
-/// Offline per-execution log migration and physical compaction. The legacy
-/// --compact flag is an alias. Refuse concurrent backends via the runtime lease.
-pub fn compact_output_chunks() -> Result<(), String> {
-    let root = crate::workspace::data_root();
-    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    let root = root.canonicalize().map_err(|error| error.to_string())?;
-    let _lock = crate::runtime_lock::acquire(&root)?;
-    let path = root.join("events.sqlite");
-    let before = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-    let store = crate::store::Store::open(&path)?;
-    let report = store.migrate_legacy_logs()?;
-    store.vacuum()?;
-    let after = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-    println!(
-        "[migrate] backfilled {} rows, migrated {} executions, updated {} rows, deleted {} output chunks\n[migrate] events.sqlite: {:.1} MB -> {:.1} MB",
-        report.backfilled_rows,
-        report.migrated_executions,
-        report.updated_rows,
-        report.deleted_chunks,
-        before as f64 / 1_048_576.0,
-        after as f64 / 1_048_576.0
-    );
-    Ok(())
-}
-
 /// Preload only an explicitly configured project. Repository discovery/status
 /// and large snapshot serialization are not prerequisites for warming engines.
 #[cfg(any(not(feature = "fixture"), test))]
@@ -6748,14 +6647,8 @@ fn configured_prewarm_config(runtime: &Runtime) -> Option<Config> {
     fs::read(runtime.root.join("config.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Config>(&bytes).ok())
-        .or_else(|| {
-            let mut config = runtime.state.config.clone()?;
-            // Match bootstrap's treatment of legacy, unqualified model names.
-            if !config.model.is_empty() && !config.model.contains('/') {
-                config.model.clear();
-            }
-            Some(config)
-        })
+        .or_else(|| runtime.state.config.clone())
+        .filter(|config| config.validate_model_settings().is_ok())
         .filter(|config| !config.repository.trim().is_empty())
 }
 
@@ -6778,24 +6671,20 @@ fn warm_selected_engines(service: &Arc<Service>) {
 pub fn run() -> Result<(), String> {
     use tiny_http::{Response, Server};
     load_env_file();
-    let root = crate::workspace::data_root();
-    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    // Planning/session paths must use the same real root as the execution
-    // sandbox. In particular, CARGO_MANIFEST_DIR/../.grapher is not a
-    // lexical child of the canonical .grapher directory.
-    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let configured_root = crate::workspace::data_root();
+    // Resolve format admission and directory ownership before reading config,
+    // replacing adapters, or recovering any persisted session/workspace.
+    let lazy_primary = std::env::var_os("GRAPHER_DEV_LAZY_PRIMARY").is_some();
+    let directory = crate::startup::select(&configured_root)?;
+    // Recovery and every later path (including child engines) must already
+    // observe the selected root, rather than the incompatible configured one.
+    std::env::set_var("GRAPHER_DATA_DIR", &directory.root);
+    let runtime = directory.open(!lazy_primary)?;
+    let root = runtime.root.clone();
     let extension = root.join("grapher-planner.ts");
+    // Format refusal precedes replacement of any persisted adapter resource.
     fs::write(&extension, include_str!("../resources/planner.ts"))
         .map_err(|error| error.to_string())?;
-    // `npm run dev` restarts are dominated by replaying the selected Run's
-    // streamed output. The browser only materializes a settled Run when it is
-    // opened, so dev can start without replaying it.
-    let lazy_primary = std::env::var_os("GRAPHER_DEV_LAZY_PRIMARY").is_some();
-    let runtime = if lazy_primary {
-        Runtime::open_lazy(&root)?
-    } else {
-        Runtime::open(&root)?
-    };
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(false),

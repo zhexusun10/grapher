@@ -343,20 +343,6 @@ pub(super) fn cleanup_temporaries(
     Ok(())
 }
 
-/// Git streams only requested blobs into private staging. Also used by the
-/// offline repair so restoring a large binary never buffers it all in RAM.
-pub(super) fn stage_files(
-    repository: &Path,
-    journal: &Path,
-    result: &str,
-    paths: &[&str],
-) -> Result<PathBuf, String> {
-    // Offline legacy repair still accepts arbitrary paths from a pinned tree.
-    stage_files_with_index(repository, journal, paths, |index| {
-        private_index_git(repository, index, &["read-tree", result]).map(|_| ())
-    })
-}
-
 /// Normal delivery already has validated mode/OID entries for its delta. Build
 /// the disposable checkout index from those entries, not the full result tree.
 /// Git remains responsible for index encoding and raw blob checkout (SHA-1/256).
@@ -551,6 +537,25 @@ fn install_with(
 }
 
 #[cfg(test)]
+fn private_index_git(repository: &Path, index: &Path, args: &[&str]) -> Result<String, String> {
+    private_index_git_input(repository, index, args, None)
+}
+
+// Synthetic full-index reference for the staging benchmark and disposable
+// index recovery tests. No runtime or maintenance path reads old Runs here.
+#[cfg(test)]
+fn stage_files(
+    repository: &Path,
+    journal: &Path,
+    result: &str,
+    paths: &[&str],
+) -> Result<PathBuf, String> {
+    stage_files_with_index(repository, journal, paths, |index| {
+        private_index_git(repository, index, &["read-tree", result]).map(|_| ())
+    })
+}
+
+#[cfg(test)]
 #[path = "staging_bench.rs"]
 mod staging_bench;
 
@@ -568,8 +573,22 @@ mod tests {
         git(&source, &["add", "-A"]).unwrap();
         git(&source, &["commit", "-qm", "base"]).unwrap();
         let input = workspace::snapshot_repository(&source).unwrap();
-        let node = temp.path().join("node");
-        workspace::prepare(&source, &node, &input, &[]).unwrap();
+        let run = uuid::Uuid::new_v4().to_string();
+        let node = temp
+            .path()
+            .join(".grapher-worktrees")
+            .join(&run)
+            .join("node");
+        workspace::prepare_with_merger_expected_for_run(
+            &source,
+            &node,
+            &input,
+            &[],
+            "",
+            Some(&run),
+            || Err("unexpected conflict".into()),
+        )
+        .unwrap();
         let journal = temp.path().join("journal");
         fs::create_dir(&journal).unwrap();
         (temp, source, node, journal, input)

@@ -1,12 +1,12 @@
 use grapher::{
-    model::{EventKind, Graph, Node, NodeState, Snapshot},
+    model::{Config, EventKind, Execution, Graph, Node, NodeState, Snapshot},
     store::Store,
 };
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use tempfile::TempDir;
 
 #[test]
-fn node_status_round_trips_current_values_and_normalizes_legacy_completion() {
+fn node_status_round_trips_current_values_and_rejects_retired_completion() {
     for status in [
         "waiting",
         "running",
@@ -15,99 +15,107 @@ fn node_status_round_trips_current_values_and_normalizes_legacy_completion() {
         "completed",
         "failed",
         "dirty",
-        "done",
     ] {
         let mut payload = serde_json::to_value(NodeState::default()).unwrap();
         payload["status"] = status.into();
         let node: NodeState = serde_json::from_value(payload).unwrap();
-        let expected = if status == "done" {
-            "completed"
-        } else {
-            status
-        };
-        assert_eq!(node.status, expected);
-        assert_eq!(serde_json::to_value(node).unwrap()["status"], expected);
+        assert_eq!(node.status, status);
+        assert_eq!(serde_json::to_value(node).unwrap()["status"], status);
+    }
+    for status in ["done", "unknown"] {
+        let mut payload = serde_json::to_value(NodeState::default()).unwrap();
+        payload["status"] = status.into();
+        assert!(serde_json::from_value::<NodeState>(payload).is_err());
     }
 }
 
 #[test]
-fn legacy_checkpoint_reopens_as_completed_without_rewriting_persisted_evidence() {
+fn corrupt_checkpoint_replays_current_completion_without_rewriting_evidence() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("runtime.sqlite");
-    let mut state = Snapshot {
-        run_id: "legacy-completion".into(),
-        plan_type: Some("serial".into()),
-        graph: Graph {
-            nodes: vec![Node {
-                id: "task".into(),
-                task: "Keep the saved result".into(),
-            }],
-            ..Graph::default()
-        },
-        ..Snapshot::default()
-    };
-    state.nodes.insert(
-        "task".into(),
-        NodeState {
-            status: "completed".into(),
-            head: Some("retained-head".into()),
-            ..NodeState::default()
-        },
-    );
+    let path = temp.path().join("events.sqlite");
     let store = Store::open(&path).unwrap();
-    store.append(&mut state, EventKind::Settled).unwrap();
-    let sequence = state.events.last().unwrap().sequence;
-    let mut checkpoint = serde_json::to_value(&state).unwrap();
-    checkpoint["nodeMessageQueueVersion"] = 1.into();
-    checkpoint["nodes"]["task"]["status"] = "done".into();
-    let payload = serde_json::to_string(&checkpoint).unwrap();
-    drop(store);
-
-    let db = Connection::open(&path).unwrap();
-    db.execute(
-        "INSERT INTO checkpoints(run_id,sequence,payload) VALUES (?1,?2,?3)",
-        params![state.run_id, sequence, payload],
-    )
-    .unwrap();
-    let original_event: String = db
-        .query_row(
-            "SELECT payload FROM events WHERE sequence=?1",
-            [sequence],
-            |row| row.get(0),
+    let mut state = Snapshot {
+        run_id: "run".into(),
+        ..Default::default()
+    };
+    let config: Config =
+        serde_json::from_value(serde_json::json!({"repository":"/repo","model":"test"})).unwrap();
+    store
+        .append(
+            &mut state,
+            EventKind::Created {
+                graph: Graph {
+                    nodes: vec![Node {
+                        id: "task".into(),
+                        task: "test".into(),
+                    }],
+                    ..Default::default()
+                },
+                config,
+                planning_id: None,
+                planning: None,
+            },
         )
         .unwrap();
-    drop(db);
-
-    let store = Store::open(&path).unwrap();
-    let mut restored = store.load(&state.run_id).unwrap();
+    let execution: Execution = serde_json::from_value(serde_json::json!({
+        "id":"execution","node":"task","revision":1,"attempt":1,"sessionId":"execution",
+        "worktree":"/repo","before":"","after":null,"status":"running","output":"",
+        "startedAt":1,"completedAt":null
+    }))
+    .unwrap();
+    store
+        .append(
+            &mut state,
+            EventKind::Started {
+                execution,
+                message_sequences: Some(vec![]),
+                fresh_restart: false,
+            },
+        )
+        .unwrap();
+    store
+        .append(
+            &mut state,
+            EventKind::Finished {
+                execution_id: "execution".into(),
+                head: "retained-head".into(),
+                output: String::new(),
+                output_bytes: 0,
+                metrics: None,
+            },
+        )
+        .unwrap();
+    let db = Connection::open(&path).unwrap();
+    let checkpoint: String = db
+        .query_row("SELECT payload FROM checkpoints", [], |row| row.get(0))
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&checkpoint).unwrap();
+    value["nodes"]["task"]["status"] = "done".into();
+    let corrupted = value.to_string();
+    db.execute("UPDATE checkpoints SET payload=?1", [&corrupted])
+        .unwrap();
+    let events: String = db
+        .query_row("SELECT json_group_array(payload) FROM events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let restored = store.load("run").unwrap();
     assert_eq!(restored.nodes["task"].status, "completed");
     assert_eq!(
         restored.nodes["task"].head.as_deref(),
         Some("retained-head")
     );
     assert_eq!(
-        serde_json::to_value(&restored).unwrap()["nodes"]["task"]["status"],
-        "completed"
+        db.query_row("SELECT payload FROM checkpoints", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        corrupted
     );
-    store.append(&mut restored, EventKind::Settled).unwrap();
-    assert_eq!(restored.phase, "completed");
-    drop(store);
-
-    let db = Connection::open(&path).unwrap();
-    let stored_checkpoint: String = db
-        .query_row(
-            "SELECT payload FROM checkpoints WHERE run_id=?1",
-            [&state.run_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let stored_event: String = db
-        .query_row(
-            "SELECT payload FROM events WHERE sequence=?1",
-            [sequence],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(stored_checkpoint, payload);
-    assert_eq!(stored_event, original_event);
+    assert_eq!(
+        db.query_row("SELECT json_group_array(payload) FROM events", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+        events
+    );
 }

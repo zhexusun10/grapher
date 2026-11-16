@@ -53,94 +53,6 @@ fn execution(id: &str) -> Execution {
     }
 }
 
-// Seed through raw SQL: Store's new writer must never create legacy rows.
-fn legacy(db: &Connection, run: &str, kind: EventKind, indexed: bool) {
-    let value = serde_json::to_value(kind).unwrap();
-    let id = value["execution_id"]
-        .as_str()
-        .or(value["execution"]["id"].as_str());
-    db.execute(
-        "INSERT INTO events(run_id,timestamp,payload,kind,execution_id) VALUES(?1,1000,?2,?3,?4)",
-        params![
-            run,
-            value.to_string(),
-            indexed.then(|| value["type"].as_str()).flatten(),
-            if indexed { id } else { None }
-        ],
-    )
-    .unwrap();
-}
-
-fn seed_legacy(path: &std::path::Path, indexed: bool) -> String {
-    let _store = Store::open(path).unwrap();
-    let db = Connection::open(path).unwrap();
-    let text = format!("{}\n── Final response ──\n完成𠀀\n", "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":7,\"output\":3,\"totalTokens\":10}}}\n".repeat(500));
-    for kind in [
-        created("repo", Some("id"), None),
-        EventKind::Started {
-            execution: execution("completed"),
-            message_sequences: None,
-            fresh_restart: false,
-        },
-        EventKind::Output {
-            execution_id: "completed".into(),
-            text: "redundant".into(),
-        },
-        EventKind::Finished {
-            execution_id: "completed".into(),
-            head: "h".into(),
-            output: text.clone(),
-            output_bytes: 0,
-            metrics: None,
-        },
-        EventKind::Started {
-            execution: execution("failed"),
-            message_sequences: None,
-            fresh_restart: false,
-        },
-        EventKind::Output {
-            execution_id: "failed".into(),
-            text: "失败前\n".into(),
-        },
-        EventKind::Output {
-            execution_id: "failed".into(),
-            text: "𠀀𠀁\u{1b}[31m错误\u{1b}[0m".into(),
-        },
-        EventKind::Failed {
-            node: "failed".into(),
-            execution_id: Some("failed".into()),
-            error: "failed".into(),
-            output_bytes: 0,
-            metrics: None,
-        },
-        EventKind::Started {
-            execution: execution("live"),
-            message_sequences: None,
-            fresh_restart: false,
-        },
-        EventKind::Output {
-            execution_id: "live".into(),
-            text: "interrupted\n".into(),
-        },
-        EventKind::MergerStarted {
-            execution: execution("merge"),
-        },
-        EventKind::Output {
-            execution_id: "merge".into(),
-            text: "conflict\n".into(),
-        },
-        EventKind::MergerFailed {
-            execution_id: "merge".into(),
-            error: "unresolved".into(),
-            output_bytes: 0,
-            metrics: None,
-        },
-    ] {
-        legacy(&db, "run", kind, indexed);
-    }
-    text
-}
-
 #[test]
 fn planning_duration_bits_survive_event_and_checkpoint_replay() {
     let temp = TempDir::new().unwrap();
@@ -182,124 +94,56 @@ fn planning_duration_bits_survive_event_and_checkpoint_replay() {
 }
 
 #[test]
-fn migrates_planning_ids_and_uses_exact_index() {
+fn current_planning_index_uses_exact_ids() {
+    let temp = TempDir::new().unwrap();
+    let store = Store::open(&temp.path().join("events.db")).unwrap();
+    for (run, id, nested) in [("one", "a%_", false), ("two", "aXy", true)] {
+        let mut state = Snapshot {
+            run_id: run.into(),
+            ..Default::default()
+        };
+        store
+            .append(
+                &mut state,
+                created(run, (!nested).then_some(id), nested.then_some(id)),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store.run_for_planning_id("a%_").unwrap().as_deref(),
+        Some("one")
+    );
+    assert_eq!(
+        store.run_for_planning_id("aXy").unwrap().as_deref(),
+        Some("two")
+    );
+    assert_eq!(store.run_for_planning_id("a").unwrap(), None);
+}
+
+#[test]
+fn unversioned_databases_are_rejected_without_schema_or_payload_changes() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.db");
     {
         let db = Connection::open(&path).unwrap();
-        db.execute_batch("CREATE TABLE events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, timestamp INTEGER NOT NULL, payload TEXT NOT NULL);").unwrap();
-        for (run, id, nested) in [("one", "a%_", false), ("two", "aXy", true)] {
-            let kind = created(
-                run,
-                if nested { None } else { Some(id) },
-                if nested { Some(id) } else { None },
-            );
-            db.execute(
-                "INSERT INTO events(run_id,timestamp,payload) VALUES (?1,1,?2)",
-                params![run, serde_json::to_string(&kind).unwrap()],
-            )
-            .unwrap();
-        }
+        db.execute_batch("CREATE TABLE events(sequence INTEGER PRIMARY KEY,run_id TEXT,timestamp INTEGER,payload TEXT);
+            INSERT INTO events VALUES(1,'old',1,'old payload');").unwrap();
     }
-    let store = Store::open(&path).unwrap();
-    assert_eq!(
-        store.find_repository_by_planning_id("a%_"),
-        Some("one".into())
-    );
-    assert_eq!(
-        store.find_repository_by_planning_id("aXy"),
-        Some("two".into())
-    );
-    assert_eq!(store.find_repository_by_planning_id("a"), None);
-    let mut state = Snapshot {
-        run_id: "three".into(),
-        ..Default::default()
-    };
-    store
-        .append(&mut state, created("both", Some("direct"), Some("nested")))
-        .unwrap();
-    assert_eq!(
-        store.find_repository_by_planning_id("direct"),
-        Some("both".into())
-    );
-    assert_eq!(
-        store.find_repository_by_planning_id("nested"),
-        Some("both".into())
-    );
+    let before = std::fs::read(&path).unwrap();
+    assert!(Store::open(&path)
+        .err()
+        .unwrap()
+        .contains("Unsupported Grapher database format"));
+    assert!(grapher::store::conversation_summaries(&path)
+        .err()
+        .unwrap()
+        .contains("Unsupported Grapher database format"));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 #[test]
-fn legacy_projection_preserves_sha1_and_sha256_heads_without_rewriting_history() {
-    for indexed in [false, true] {
-        for length in [40, 64] {
-            let temp = TempDir::new().unwrap();
-            let path = temp.path().join("events.db");
-            let store = Store::open(&path).unwrap();
-            let mut state = Snapshot {
-                run_id: "run".into(),
-                ..Default::default()
-            };
-            store
-                .append(&mut state, created("repo", None, None))
-                .unwrap();
-            store
-                .append(
-                    &mut state,
-                    EventKind::Started {
-                        execution: execution("completed"),
-                        message_sequences: None,
-                        fresh_restart: false,
-                    },
-                )
-                .unwrap();
-            let head = "a".repeat(length);
-            let output = "legacy 中文𠀀 transcript\n".repeat(512);
-            // Keep the historical tag-first shape for bounded metadata projection.
-            let payload = serde_json::to_string(&EventKind::Finished {
-                execution_id: "completed".into(),
-                head: head.clone(),
-                output: output.clone(),
-                output_bytes: 0,
-                metrics: None,
-            })
-            .unwrap();
-            let db = Connection::open(&path).unwrap();
-            db.execute("INSERT INTO events(run_id,timestamp,payload,kind,execution_id) VALUES('run',1000,?1,?2,?3)",
-                params![payload, indexed.then_some("finished"), indexed.then_some("completed")]).unwrap();
-            let loaded = store.load("run").unwrap();
-            assert_eq!(
-                loaded.nodes["completed"].head.as_deref(),
-                Some(head.as_str()),
-                "indexed={indexed}, length={length}"
-            );
-            assert_eq!(loaded.executions[0].after.as_deref(), Some(head.as_str()));
-            assert!(loaded.executions[0].output.is_empty());
-            assert_eq!(
-                store.ensure_legacy_logs("run", "completed").unwrap(),
-                output.len()
-            );
-            assert_eq!(
-                store
-                    .execution_log_page("run", "completed", 0, usize::MAX)
-                    .unwrap()
-                    .content,
-                output
-            );
-            let saved: String = db
-                .query_row(
-                    "SELECT payload FROM events ORDER BY sequence DESC LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(saved, payload, "reads must never rewrite the legacy event");
-        }
-    }
-}
-
-#[test]
-fn legacy_projection_keeps_64_byte_execution_ids_readable_on_demand() {
-    for indexed in [false, true] {
+fn current_logs_preserve_sha1_sha256_heads_and_long_execution_ids() {
+    for length in [40, 64] {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("events.db");
         let store = Store::open(&path).unwrap();
@@ -307,35 +151,51 @@ fn legacy_projection_keeps_64_byte_execution_ids_readable_on_demand() {
         let output = "retained log 中文𠀀\n".repeat(512);
         let mut initial = execution("completed");
         initial.id = id.clone();
-        let db = Connection::open(&path).unwrap();
-        for kind in [
-            created("repo", None, None),
-            EventKind::Started {
-                execution: initial,
-                message_sequences: None,
-                fresh_restart: false,
-            },
-            EventKind::Finished {
-                execution_id: id.clone(),
-                head: "a".repeat(40),
-                output: output.clone(),
-                output_bytes: 0,
-                metrics: None,
-            },
-        ] {
-            let value = serde_json::to_value(&kind).unwrap();
-            let payload = serde_json::to_string(&kind).unwrap();
-            let event_id = value["execution_id"]
-                .as_str()
-                .or(value["execution"]["id"].as_str());
-            db.execute("INSERT INTO events(run_id,timestamp,payload,kind,execution_id) VALUES('run',1000,?1,?2,?3)",
-                params![payload, indexed.then(|| value["type"].as_str()).flatten(), indexed.then_some(event_id).flatten()]).unwrap();
-        }
-        assert_eq!(
-            store.ensure_legacy_logs("run", &id).unwrap(),
-            output.len(),
-            "indexed={indexed}"
-        );
+        let mut state = Snapshot {
+            run_id: "run".into(),
+            ..Default::default()
+        };
+        store
+            .append(&mut state, created("repo", None, None))
+            .unwrap();
+        store
+            .append(
+                &mut state,
+                EventKind::Started {
+                    execution: initial,
+                    message_sequences: Some(vec![]),
+                    fresh_restart: false,
+                },
+            )
+            .unwrap();
+        store
+            .append(
+                &mut state,
+                EventKind::Output {
+                    execution_id: id.clone(),
+                    text: output.clone(),
+                },
+            )
+            .unwrap();
+        store
+            .append(
+                &mut state,
+                EventKind::Finished {
+                    execution_id: id.clone(),
+                    head: "a".repeat(length),
+                    output: String::new(),
+                    output_bytes: output.len(),
+                    metrics: None,
+                },
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let loaded = store.load("run").unwrap();
+        assert_eq!(loaded.executions[0].id, id);
+        assert_eq!(loaded.executions[0].after, Some("a".repeat(length)));
+        assert_eq!(loaded.executions[0].output_bytes, output.len());
+        assert!(loaded.executions[0].output.is_empty());
         assert_eq!(
             store
                 .execution_log_page("run", &id, 0, usize::MAX)
@@ -343,9 +203,6 @@ fn legacy_projection_keeps_64_byte_execution_ids_readable_on_demand() {
                 .content,
             output
         );
-        let loaded = store.load("run").unwrap();
-        assert_eq!(loaded.executions[0].id, id);
-        assert_eq!(loaded.executions[0].status, "completed");
     }
 }
 
@@ -439,116 +296,17 @@ fn log_pages_reject_gaps_overlaps_and_invalid_byte_ranges_without_mutation() {
 }
 
 #[test]
-fn migration_preserves_finished_failed_interrupted_and_merger_logs_and_is_idempotent() {
+fn future_databases_are_rejected_without_mutation() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.db");
-    let full = seed_legacy(&path, false);
-    let store = Store::open(&path).unwrap();
-    // JIT may have run before the offline command; deterministic chunks match.
-    store.ensure_legacy_logs("run", "completed").unwrap();
-    let report = store.migrate_legacy_logs().unwrap();
-    assert_eq!(report.backfilled_rows, 13);
-    assert_eq!(report.migrated_executions, 4);
-    assert_eq!(report.deleted_chunks, 5);
-    for (id, expected) in [
-        ("completed", full.as_str()),
-        ("failed", "失败前\n𠀀𠀁\u{1b}[31m错误\u{1b}[0m"),
-        ("live", "interrupted\n"),
-        ("merge", "conflict\n\nMerger failed: unresolved\n"),
-    ] {
-        let page = store.execution_log_page("run", id, 0, usize::MAX).unwrap();
-        assert_eq!(page.content, expected);
-        assert_eq!(page.total_bytes, expected.len());
-    }
-    let loaded = store.load("run").unwrap();
-    assert!(loaded
-        .executions
-        .iter()
-        .chain(&loaded.mergers)
-        .all(|e| e.output.is_empty() && e.output_bytes > 0));
-    assert_eq!(
-        loaded.executions[0]
-            .metrics
-            .as_ref()
-            .unwrap()
-            .usage
-            .total_tokens,
-        5000
-    );
-    let db = Connection::open(&path).unwrap();
-    assert_eq!(
-        db.query_row("SELECT COUNT(*) FROM events WHERE kind='output'", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.query_row(
-            "SELECT length(json_extract(payload,'$.output')) FROM events WHERE kind='finished'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        0
-    );
-    store.vacuum().unwrap();
-    assert_eq!(
-        db.query_row("PRAGMA auto_vacuum", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        2
-    );
-    let again = store.migrate_legacy_logs().unwrap();
-    assert_eq!(
-        again.updated_rows
-            + again.backfilled_rows
-            + again.deleted_chunks
-            + again.migrated_executions,
-        0
-    );
-}
-
-#[test]
-fn jit_is_concurrent_idempotent_and_never_mutates_events() {
-    for indexed in [false, true] {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("events.db");
-        let full = seed_legacy(&path, indexed);
+    {
         let db = Connection::open(&path).unwrap();
-        let before: String = db.query_row("SELECT json_group_array(json_object('sequence',sequence,'payload',payload,'kind',kind,'execution_id',execution_id)) FROM events", [], |r| r.get(0)).unwrap();
-        let loaded = Store::open(&path).unwrap().load("run").unwrap();
-        assert!(loaded.executions.iter().all(|e| e.output.is_empty()));
-        let responses = std::thread::scope(|scope| {
-            let readers: Vec<_> = (0..2)
-                .map(|_| {
-                    let path = &path;
-                    scope.spawn(move || {
-                        let store = Store::open(path).unwrap();
-                        store.ensure_legacy_logs("run", "completed").unwrap();
-                        store.ensure_legacy_logs("run", "merge").unwrap();
-                        store
-                            .execution_log_page("run", "completed", 0, usize::MAX)
-                            .unwrap()
-                            .content
-                    })
-                })
-                .collect();
-            readers
-                .into_iter()
-                .map(|reader| reader.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(responses, vec![full.clone(), full]);
-        let after: String = db.query_row("SELECT json_group_array(json_object('sequence',sequence,'payload',payload,'kind',kind,'execution_id',execution_id)) FROM events", [], |r| r.get(0)).unwrap();
-        assert_eq!(before, after);
-        assert_eq!(
-            Store::open(&path)
-                .unwrap()
-                .execution_log_page("run", "merge", 0, usize::MAX)
-                .unwrap()
-                .content,
-            "conflict\n\nMerger failed: unresolved\n"
-        );
+        db.execute_batch("PRAGMA user_version=999; CREATE TABLE future(payload TEXT);")
+            .unwrap();
     }
+    let before = std::fs::read(&path).unwrap();
+    assert!(Store::open(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 #[test]
@@ -569,7 +327,7 @@ fn utf8_paging_and_interleaved_cursors_survive_reopen_and_cascade_deletion() {
                 &mut state,
                 EventKind::Started {
                     execution: execution(id),
-                    message_sequences: None,
+                    message_sequences: Some(vec![]),
                     fresh_restart: false,
                 },
             )
@@ -687,7 +445,7 @@ fn tail_pages_never_discard_a_tool_result_larger_than_the_page() {
             &mut state,
             EventKind::Started {
                 execution: execution("completed"),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             },
         )
@@ -734,7 +492,7 @@ fn committed_finished_has_no_text_and_carries_metrics_and_pid() {
     runtime
         .emit(EventKind::Started {
             execution: exec.clone(),
-            message_sequences: None,
+            message_sequences: Some(vec![]),
             fresh_restart: false,
         })
         .unwrap();
@@ -810,7 +568,7 @@ fn runtime_completion_tail_and_feedback_roll_back_and_retry_together() {
         runtime
             .emit(EventKind::Started {
                 execution: execution("live"),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             })
             .unwrap();
@@ -827,7 +585,7 @@ fn runtime_completion_tail_and_feedback_roll_back_and_retry_together() {
         runtime
             .emit(EventKind::Started {
                 execution: exec.clone(),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             })
             .unwrap();
@@ -960,7 +718,7 @@ fn runtime_completion_recovers_the_log_prefix_missing_from_live_metadata() {
         runtime
             .emit(EventKind::Started {
                 execution: exec.clone(),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             })
             .unwrap();
@@ -1018,7 +776,7 @@ fn runtime_completion_rejects_an_incomplete_recovered_log_before_writing_its_tai
         runtime
             .emit(EventKind::Started {
                 execution: exec.clone(),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             })
             .unwrap();
@@ -1094,7 +852,7 @@ fn terminal_checkpoint_is_written_once_and_resets_the_periodic_interval() {
                 &mut state,
                 EventKind::Started {
                     execution: execution("completed"),
-                    message_sequences: None,
+                    message_sequences: Some(vec![]),
                     fresh_restart: false,
                 },
             )
@@ -1184,7 +942,7 @@ fn runtime_merger_failure_and_failed_bytes_survive_reload() {
     runtime
         .emit(EventKind::Started {
             execution: execution("failed"),
-            message_sequences: None,
+            message_sequences: Some(vec![]),
             fresh_restart: false,
         })
         .unwrap();
@@ -1246,10 +1004,11 @@ fn interrupted_runtime_preserves_committed_logs_bytes_and_metrics() {
         let mut runtime = grapher::runtime::Runtime::open(temp.path()).unwrap();
         runtime.state.run_id = "run".into();
         runtime.emit(created("repo", None, None)).unwrap();
+        runtime.store.select_run(Some("run")).unwrap();
         runtime
             .emit(EventKind::Started {
                 execution: execution("failed"),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             })
             .unwrap();
@@ -1275,7 +1034,6 @@ fn interrupted_runtime_preserves_committed_logs_bytes_and_metrics() {
             .content,
         text
     );
-    runtime.store.migrate_legacy_logs().unwrap();
     assert_eq!(
         runtime.store.load("run").unwrap().executions[0].output_bytes,
         text.len()
@@ -1308,7 +1066,7 @@ fn terminal_cache_settlement_matches_single_and_batch_event_commits() {
             } else {
                 EventKind::Started {
                     execution: exec.clone(),
-                    message_sequences: None,
+                    message_sequences: Some(vec![]),
                     fresh_restart: false,
                 }
             };
@@ -1418,7 +1176,7 @@ fn failed_log_commit_never_advances_projection_or_offset_cursor() {
             &mut state,
             EventKind::Started {
                 execution: execution("completed"),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             },
         )
@@ -1495,7 +1253,7 @@ fn small_output_batches_fill_bounded_chunks_across_reopens_without_changing_byte
                 &mut state,
                 EventKind::Started {
                     execution: execution(id),
-                    message_sequences: None,
+                    message_sequences: Some(vec![]),
                     fresh_restart: false,
                 },
             )
@@ -1603,7 +1361,7 @@ fn delete_run_releases_incremental_pages_and_cascades_logs() {
             &mut state,
             EventKind::Started {
                 execution: execution("completed"),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             },
         )
@@ -1711,7 +1469,7 @@ fn transcript_events_and_mixed_batches_roll_back_logs_state_and_cursors_together
                     &mut state,
                     EventKind::Started {
                         execution: execution("completed"),
-                        message_sequences: None,
+                        message_sequences: Some(vec![]),
                         fresh_restart: false,
                     },
                 )
@@ -1731,7 +1489,7 @@ fn transcript_events_and_mixed_batches_roll_back_logs_state_and_cursors_together
                     exec.output = "imported 𠀀\n".into();
                     EventKind::Started {
                         execution: exec,
-                        message_sequences: None,
+                        message_sequences: Some(vec![]),
                         fresh_restart: false,
                     }
                 }
@@ -1803,6 +1561,27 @@ fn transcript_events_and_mixed_batches_roll_back_logs_state_and_cursors_together
                     .content,
                 "original 中文\nafter\n"
             );
+            if form != "output" {
+                let before = serde_json::to_value(&state).unwrap();
+                let result = if batched {
+                    store.append_batch(&mut state, vec![EventKind::Paused { paused: true }, kind])
+                } else {
+                    store.append(&mut state, kind)
+                };
+                assert!(
+                    result.is_err(),
+                    "inline imports remain rejected after the injected failure is removed"
+                );
+                assert_eq!(serde_json::to_value(&state).unwrap(), before);
+                assert_eq!(
+                    store
+                        .execution_log_page("run", "completed", 0, usize::MAX)
+                        .unwrap()
+                        .content,
+                    "original 中文\nafter\n"
+                );
+                continue;
+            }
             if batched {
                 store
                     .append_batch(
@@ -1866,7 +1645,7 @@ fn failed_workspace_deletion_preserves_live_change_accumulators_until_commit() {
                 &mut state,
                 EventKind::Started {
                     execution: exec.clone(),
-                    message_sequences: None,
+                    message_sequences: Some(vec![]),
                     fresh_restart: false,
                 },
             )
@@ -1942,7 +1721,7 @@ fn clearing_one_store_does_not_reset_another_stores_live_tool_tracking() {
             &mut state,
             EventKind::Started {
                 execution: exec.clone(),
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             },
         )

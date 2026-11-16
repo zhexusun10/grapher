@@ -65,6 +65,14 @@ fn run_created_at_with(
     workspace_owned: bool,
     configure: impl Fn(&Path, &Path) -> Result<(), String>,
 ) {
+    let mut prepared = job.clone();
+    if prepared.materialize_source {
+        let exclusions = runtime.exclusions().unwrap();
+        runtime
+            .attach_job_source(&mut prepared, &exclusions)
+            .unwrap();
+    }
+    let job = &prepared;
     let root = runtime.root.clone();
     let result = perform(
         job,
@@ -177,7 +185,15 @@ fn install_project_native_input(venv: &Path, work: &Path) -> Result<(), String> 
 
 fn publish(runtime: &mut Runtime, source: &Path) -> ResultDescriptor {
     assert!(runtime.jobs().unwrap().is_empty());
-    let publication = runtime.state.publication.clone().unwrap();
+    let Some(publication) = runtime
+        .state
+        .publication
+        .clone()
+        .filter(|p| p.status == "publishing")
+    else {
+        assert_eq!(runtime.state.phase, "completed");
+        return runtime.result_descriptor().unwrap();
+    };
     let head = crate::graph_merge::merge_graph_scoped(
         source,
         &publication.heads,
@@ -199,6 +215,7 @@ fn publish(runtime: &mut Runtime, source: &Path) -> ResultDescriptor {
             head: published_head,
         })
         .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.phase, "completed");
     runtime.result_descriptor().unwrap()
 }
@@ -283,7 +300,9 @@ fs.writeFileSync('code.txt','business-code');
         prefix: "env-a".into(),
         abi: "0".repeat(40),
         root: Some("workspace".into()),
-        runtime_evidence: None,
+        runtime_evidence: Some(super::tests::metadata_runtime_evidence(Path::new(
+            &job.execution.worktree,
+        ))),
     });
     let input = CompositeResult {
         launch_ref: env.launch(&bound).unwrap(),
@@ -338,7 +357,7 @@ fn root_qualified_scopes_keep_state_names_out_of_project_capture_and_survive_loc
         prefix: "business-env".into(),
         abi: "0".repeat(40),
         root: Some("workspace".into()),
-        runtime_evidence: None,
+        runtime_evidence: Some(super::tests::metadata_runtime_evidence(&project)),
     });
     let reference = env.launch(&launch).unwrap();
     assert_eq!(env.exclusions(&reference).unwrap(), vec!["business-env"]);
@@ -494,6 +513,7 @@ fn unavailable_result_descriptor_does_not_block_code_publication() {
     runtime
         .emit(EventKind::PublicationCompleted { head })
         .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.phase, "completed");
     assert!(runtime.state.published_result.is_none());
     assert!(runtime.result_descriptor().is_err());
@@ -515,30 +535,30 @@ fn best_effort_bound_fanout_is_parallel_and_custom_prefixes_never_enter_git() {
         branches[0].execution.worktree,
         branches[1].execution.worktree
     );
-    assert_eq!(branches[0].execution.worktree, a.execution.worktree);
-    for (index, branch) in branches.iter().enumerate() {
+    assert!(
+        branches
+            .iter()
+            .all(|branch| branch.execution.worktree != a.execution.worktree),
+        "parallel children retain independent slots while the parent is unpublished"
+    );
+    for branch in &branches {
         let input = branch.environment_input.as_ref().unwrap();
         let bound = store(&runtime)
             .load_launch(&input.launch_ref)
             .unwrap()
             .environment
             .is_some();
-        assert_eq!(
-            bound,
-            index == 0,
-            "only the exclusive local branch reuses E"
+        assert!(
+            !bound,
+            "a fixed environment cannot move to either fresh branch"
         );
         assert_eq!(
             input.inheritance.as_ref().unwrap().reason,
-            if index == 0 {
-                "same-layout"
-            } else {
-                "fixed-layout-not-reusable"
-            }
+            "fixed-layout-not-reusable"
         );
     }
-    // B takes the exclusive parent slot; C remains an ordinary report task.
-    run(&mut runtime, &branches[0]);
+    // B provisions its own environment; C remains an ordinary report task.
+    run_created(&mut runtime, &branches[0], "business-env");
     run(&mut runtime, &branches[1]);
     let d = runtime.jobs().unwrap().remove(0);
     assert_eq!(d.execution.worktree, branches[0].execution.worktree);
@@ -575,12 +595,11 @@ fn best_effort_bound_fanout_is_parallel_and_custom_prefixes_never_enter_git() {
     );
     runtime.intervene("A", "A").unwrap();
     let followup = runtime.jobs().unwrap().remove(0);
-    assert_eq!(
-        followup.execution.worktree, d.execution.worktree,
-        "terminal reservation allows explicit ancestor handoff"
-    );
+    assert!(followup.source_direct && followup.config.environment.is_none());
+    assert_eq!(Path::new(&followup.execution.worktree), source);
     run(&mut runtime, &followup);
-    publish(&mut runtime, &source);
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "completed");
     assert_eq!(
         runtime.state.executions[0].result.as_ref(),
         Some(&historical)
@@ -816,22 +835,20 @@ fn rooted_terminals_with_w_and_s_bindings_keep_named_results_and_real_interprete
         .unwrap();
         let mut legacy = env.load_launch(&restored.launch_ref).unwrap();
         legacy.environment.as_mut().unwrap().runtime_evidence = None;
+        assert!(env
+            .launch(&legacy)
+            .unwrap_err()
+            .contains("runtime file evidence"));
         if name == "B" {
-            legacy.environment.as_mut().unwrap().root = None;
+            let mut missing_root = env.load_launch(&restored.launch_ref).unwrap();
+            missing_root.environment.as_mut().unwrap().root = None;
+            assert!(env.launch(&missing_root).unwrap_err().contains("root"));
         }
-        let legacy_ref = env.launch(&legacy).unwrap();
-        let legacy_file = env
-            .directory
-            .join("launches")
-            .join(format!("{legacy_ref}.json"));
-        let old_bytes = fs::read(&legacy_file).unwrap();
-        env.validate_launch(Path::new(&entry.workspace), &legacy)
-            .unwrap();
-        assert_eq!(
-            fs::read(&legacy_file).unwrap(),
-            old_bytes,
-            "legacy ABI/JSON is not rewritten or retrofitted"
-        );
+        env.validate_launch(
+            Path::new(&entry.workspace),
+            &env.load_launch(&restored.launch_ref).unwrap(),
+        )
+        .unwrap();
         let launch = env
             .load_launch(&restored.launch_ref)
             .unwrap()
@@ -1492,27 +1509,27 @@ fn best_effort_serialized_roots_keep_independent_terminal_slots() {
 }
 
 #[test]
-fn best_effort_reused_path_preserves_business_environment_when_binding_is_unavailable() {
+fn independent_unpublished_paths_keep_their_business_environments() {
     let (_temp, source, mut runtime) = setup(
         graph(&["A", "B", "C", "D"], &[("A", "C", false), ("B", "D", false)]), automatic(),
-        "const state=process.env.GTEST_STATE; if(name==='C' && (!fs.existsSync(state+'/business-env') || !fs.existsSync(state+'/.venv'))) throw Error('Runtime cleaned a business environment');",
+        "const state=process.env.GTEST_STATE; if(name==='C' && (!fs.existsSync(state+'/business-env') || fs.existsSync(state+'/.venv'))) throw Error('Runtime lost A environment or borrowed B environment');",
     );
     runtime.state.config.as_mut().unwrap().max_parallel = 1;
     let a = runtime.jobs().unwrap().remove(0);
     run_created(&mut runtime, &a, "business-env");
     let b = runtime.jobs().unwrap().remove(0);
-    assert_eq!(a.execution.worktree, b.execution.worktree);
+    assert_ne!(a.execution.worktree, b.execution.worktree);
     run_created(&mut runtime, &b, ".venv");
     let c = runtime.jobs().unwrap().remove(0);
-    assert_eq!(c.execution.worktree, b.execution.worktree);
+    assert_eq!(c.execution.worktree, a.execution.worktree);
     let c_state = state_of(&runtime, &c.execution.worktree);
     assert!(
         c_state.join("business-env").exists(),
         "Runtime must preserve the business environment"
     );
     assert!(
-        c_state.join(".venv").exists(),
-        "Runtime must preserve the current workspace environment"
+        !c_state.join(".venv").exists(),
+        "C must not borrow B's independent environment"
     );
     run(&mut runtime, &c);
     let d = runtime.jobs().unwrap().remove(0);

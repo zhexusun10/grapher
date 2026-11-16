@@ -76,9 +76,15 @@ fn checkpoint_with_root_nodes_loads_without_rewriting_events() {
         .unwrap();
 
     let mut checkpoint = serde_json::to_value(&state).unwrap();
-    checkpoint["nodeMessageQueueVersion"] = json!(1);
+    checkpoint["formatVersion"] = json!(1);
     checkpoint["events"] = json!([]);
     checkpoint["base"] = json!("loaded-from-checkpoint");
+    checkpoint["checksum"] = json!(git2::Oid::hash_object(
+        git2::ObjectType::Blob,
+        &serde_json::to_vec(&checkpoint).unwrap()
+    )
+    .unwrap()
+    .to_string());
     let decoded: Snapshot = serde_json::from_value(checkpoint.clone()).unwrap();
     assert_eq!(
         decoded.plan.unwrap().root_nodes,

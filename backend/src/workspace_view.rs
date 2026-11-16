@@ -94,7 +94,7 @@ fn strip_entry_system_managed(entry: &mut Entry) {
 
 impl View {
     fn validate_schema(&self) -> Result<(), String> {
-        if !matches!(self.schema, 5 | VIEW_SCHEMA) {
+        if self.schema != VIEW_SCHEMA {
             return Err("Unsupported project-view schema".into());
         }
         for repository in self.repositories.values() {
@@ -103,12 +103,8 @@ impl View {
         Ok(())
     }
 
-    /// Legacy view records may contain host-managed metadata that is not part
-    /// of the project. Normalize after checksum validation so old evidence
-    /// remains loadable while comparisons use the stable project identity.
+    /// Host-managed metadata never becomes portable project ownership.
     fn strip_system_managed(&mut self) {
-        // Upgrade only after validation; immutable legacy files stay untouched.
-        self.schema = VIEW_SCHEMA;
         self.root_extra.strip_system_managed();
         for entry in self.entries.values_mut().chain(
             self.git_entries
@@ -1175,6 +1171,7 @@ fn load(path: &Path) -> Result<View, String> {
     let bytes = fs::read(path.join("view.json")).map_err(|e| format!("Missing complete project-view evidence: {e}; start a new Run (existing workspace retained)"))?;
     let expected = fs::read_to_string(path.join("checksum")).map_err(|e| e.to_string())?;
     let mut view: View = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    view.validate_schema()?;
     if git2::Oid::hash_object(git2::ObjectType::Blob, &normalized_bytes(&view)?)
         .map_err(|e| e.to_string())?
         .to_string()
@@ -1182,7 +1179,6 @@ fn load(path: &Path) -> Result<View, String> {
     {
         return Err("Damaged project-view evidence; refusing a partial reconstruction".into());
     }
-    view.validate_schema()?;
     for key in view.entries.keys() {
         if !Path::new(key)
             .components()

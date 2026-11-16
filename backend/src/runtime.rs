@@ -67,9 +67,6 @@ pub struct Job {
     /// A failed attempt with durable Prepared evidence. Its own working tree,
     /// including uncommitted files and agent commits, must not be recomposed.
     pub preserved_workspace: Option<Execution>,
-    /// Complete attachment receipts from a failed private attempt whose files
-    /// were already delivered through the batch recovery barrier.
-    pub recovered_workspace: Option<String>,
     /// Physical baseline for one-time copies of files that are outside the
     /// recorded Git commit; normal project outputs are inherited through Git.
     pub copy_from_workspace: Option<String>,
@@ -180,21 +177,6 @@ enum RecoveryScope {
     InterruptedOnly,
 }
 
-/// A checkpoint may predate accumulated delivered heads. The event log is the
-/// durable record of what a completed publication already wrote into the source,
-/// so union it in before scheduling or retrying a publication.
-fn repair_delivered_heads(store: &Store, state: &mut Snapshot) -> Result<(), String> {
-    if state.published_head.is_none() || state.run_id.is_empty() {
-        return Ok(());
-    }
-    for head in store.delivered_heads(&state.run_id)? {
-        if !state.published_heads.contains(&head) {
-            state.published_heads.push(head);
-        }
-    }
-    Ok(())
-}
-
 /// Runtime-owned graph and completed results captured for one Planner edit.
 /// The edit remains provisional, so the runtime re-evaluates it at commit.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -252,6 +234,14 @@ impl Runtime {
     fn open_with(root: &Path, load_selected: bool) -> Result<Self, String> {
         fs::create_dir_all(root).map_err(|error| error.to_string())?;
         let lock = Arc::new(acquire(root)?);
+        Self::open_primary_with_lease(root, load_selected, lock)
+    }
+
+    pub(crate) fn open_primary_with_lease(
+        root: &Path,
+        load_selected: bool,
+        lock: Arc<RuntimeLock>,
+    ) -> Result<Self, String> {
         let store = Store::open(&root.join("events.sqlite"))?;
         #[allow(unused_mut)]
         let mut state = if load_selected {
@@ -270,7 +260,6 @@ impl Runtime {
                 config.engine = "pi".into();
             }
         }
-        repair_delivered_heads(&store, &mut state)?;
         let mut runtime = Self {
             store,
             state,
@@ -340,7 +329,6 @@ impl Runtime {
                 config.engine = "pi".into();
             }
         }
-        repair_delivered_heads(&store, &mut state)?;
         let mut runtime = Self {
             store,
             state,
@@ -510,6 +498,7 @@ impl Runtime {
     }
 
     pub fn emit(&mut self, mut kind: EventKind) -> Result<(), String> {
+        kind.validate_current_format()?;
         if let EventKind::Prepared { execution_id, .. } = &kind {
             if !self.shared_source_workspace()
                 && self
@@ -561,8 +550,6 @@ impl Runtime {
             ..
         } = &kind
         {
-            self.store
-                .ensure_legacy_logs(&self.state.run_id, execution_id)?;
             self.store.append(
                 &mut self.state,
                 EventKind::Output {
@@ -593,7 +580,7 @@ impl Runtime {
             _ => None,
         };
         if let Some((id, output_bytes, metrics)) = terminal {
-            *output_bytes = self.store.ensure_legacy_logs(&self.state.run_id, id)?;
+            *output_bytes = self.store.log_bytes(&self.state.run_id, id)?;
             if let Some(execution) = self
                 .state
                 .executions
@@ -1309,50 +1296,32 @@ impl Runtime {
     }
 
     pub(crate) fn is_serial(&self) -> bool {
-        match self.state.plan_type.as_deref() {
-            Some(mode) => mode == "serial",
-            None => self.state.graph.nodes.len() == 1 && self.state.graph.nodes[0].id == "task",
-        }
+        self.state.plan_type.as_deref() == Some("serial")
     }
 
     fn uses_legacy_file_channel(&self) -> bool {
-        self.state.source_files.is_some()
-            || self.state.nodes.values().any(|node| {
-                node.legacy_files_override.is_some()
-                    || node.legacy_files_version.is_some()
-                    || node.legacy_baseline_files_version.is_some()
-                    || node.legacy_files_changed
-                    || node
-                        .result
-                        .as_ref()
-                        .is_some_and(|result| !result.resource_refs.is_empty())
-            })
-            || self.state.executions.iter().any(|execution| {
-                execution
-                    .input
+        self.state.nodes.values().any(|node| {
+            node.result
+                .as_ref()
+                .is_some_and(|result| !result.resource_refs.is_empty())
+        }) || self.state.executions.iter().any(|execution| {
+            execution
+                .input
+                .as_ref()
+                .is_some_and(|result| !result.resource_refs.is_empty())
+                || execution
+                    .result
                     .as_ref()
                     .is_some_and(|result| !result.resource_refs.is_empty())
-                    || execution
-                        .result
-                        .as_ref()
-                        .is_some_and(|result| !result.resource_refs.is_empty())
-            })
-            || self
-                .state
-                .published_result
-                .as_ref()
-                .is_some_and(|descriptor| !descriptor.result.resource_refs.is_empty())
-            || self.state.events.iter().any(|event| match &event.kind {
-                EventKind::SourceFilesRecorded { .. } | EventKind::WorkspaceFilesChanged { .. } => {
-                    true
-                }
-                EventKind::WorkspaceResolved { files_version, .. } => files_version.is_some(),
-                _ => false,
-            })
+        }) || self
+            .state
+            .published_result
+            .as_ref()
+            .is_some_and(|descriptor| !descriptor.result.resource_refs.is_empty())
     }
 
     fn legacy_file_channel_error(&self) -> String {
-        "This saved workspace uses legacy ignored-file snapshots and is read-only; use the current workspace Git inheritance contract".into()
+        "Unsupported workspace file format; start a new Run".into()
     }
 
     fn require_current_file_contract(&self) -> Result<(), String> {
@@ -1596,11 +1565,7 @@ impl Runtime {
                 self.state
                     .executions
                     .iter()
-                    .filter(|execution| {
-                        self.batch_workspaces()
-                            && execution.status == "failed"
-                            && !self.batch_recovery_was_delivered(execution)
-                    })
+                    .filter(|execution| self.batch_workspaces() && execution.status == "failed")
                     .map(|execution| execution.id.as_str()),
             )
             .collect();
@@ -1852,11 +1817,7 @@ impl Runtime {
                 self.state
                     .executions
                     .iter()
-                    .filter(|execution| {
-                        self.batch_workspaces()
-                            && execution.status == "failed"
-                            && !self.batch_recovery_was_delivered(execution)
-                    })
+                    .filter(|execution| self.batch_workspaces() && execution.status == "failed")
                     .map(|execution| execution.id.as_str()),
             )
             .collect();
@@ -2770,11 +2731,6 @@ impl Runtime {
                     execution: previous,
                     ..
                 } if previous.node == execution.node => return false,
-                EventKind::Invalidated {
-                    target,
-                    source_direct,
-                    ..
-                } if sequences.is_none() && target == &execution.node => return *source_direct,
                 _ => {}
             }
         }
@@ -3557,72 +3513,6 @@ impl Runtime {
             })
     }
 
-    /// Legacy dispatches have no complete input binding. Rebuild both active
-    /// follow-ups and passive additions by claim identity, never by equal text.
-    fn claimed_node_messages(&self, previous: &Execution) -> Vec<PendingNodeMessage> {
-        let attempts: BTreeSet<_> = self
-            .state
-            .executions
-            .iter()
-            .rev()
-            .filter(|execution| {
-                execution.node == previous.node
-                    && !self.state.superseded_execution_ids.contains(&execution.id)
-            })
-            .skip_while(|execution| execution.id != previous.id)
-            .take_while(|execution| {
-                matches!(execution.status.as_str(), "failed" | "resolved")
-                    && execution.pid.is_none()
-                    && execution.output_bytes == 0
-            })
-            .map(|execution| execution.id.as_str())
-            .collect();
-        let sequences: BTreeSet<_> = self
-            .state
-            .events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                EventKind::Started {
-                    execution,
-                    message_sequences,
-                    ..
-                } if attempts.contains(execution.id.as_str()) => message_sequences.as_ref(),
-                _ => None,
-            })
-            .flatten()
-            .copied()
-            .collect();
-        self.state
-            .events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                EventKind::NodeMessaged {
-                    node,
-                    instruction,
-                    images,
-                    queued: true,
-                    ..
-                }
-                | EventKind::Invalidated {
-                    target: node,
-                    instruction,
-                    images,
-                    human: true,
-                    ..
-                } if node == &previous.node && sequences.contains(&event.sequence) => {
-                    Some(PendingNodeMessage {
-                        sequence: event.sequence,
-                        instruction: instruction.clone(),
-                        images: images.clone(),
-                        source_direct: false,
-                        shared_workspace: false,
-                    })
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
     /// A node's instruction slot outlives the turn that used it. Once dispatched,
     /// it belongs to that attempt, not every later passive message. Dispatch is
     /// not consumption: a proven unstarted retry restores its bound input below.
@@ -3810,7 +3700,6 @@ impl Runtime {
             execution_id: execution.id,
             head,
             nodes: downstream(&self.state.graph, node).into_iter().collect(),
-            files_version: None,
         })
     }
 
@@ -4175,7 +4064,7 @@ impl Runtime {
                     .unwrap_or_else(|| source_head.clone())
             };
             let feedback_undelivered = undelivered_feedback_turns.contains(&node.id);
-            let mut queued_messages = self.state.nodes[&node.id].pending_messages.clone();
+            let queued_messages = self.state.nodes[&node.id].pending_messages.clone();
             let message_sequences = queued_messages
                 .iter()
                 .map(|message| message.sequence)
@@ -4333,7 +4222,7 @@ impl Runtime {
             // A feedback or source-direct follow-up can fail before its fork
             // was created. Resume the original completed node session and send
             // the already-recorded follow-up, rather than losing its history.
-            let fallback_anchor = if (continuation || feedback_undelivered)
+            let fallback_anchor = if (continuation || pending_followup || feedback_undelivered)
                 && resume.is_some_and(|previous| {
                     session_missing(previous) && no_session_activity(previous)
                 }) {
@@ -4385,23 +4274,7 @@ impl Runtime {
                         && self.state.events.iter().any(|event| matches!(&event.kind,
                             EventKind::NodeInputBound { execution_id, .. } if execution_id == &previous.id))
                 });
-            // Legacy turns without a binding retain their conservative checks.
-            let unstarted_followup = feedback_undelivered
-                || unstarted_bound_input
-                || (continuation
-                    && self.state.nodes[&node.id]
-                        .feedback_continuation
-                        .as_ref()
-                        .is_none_or(|input| input.delivery_id.is_none())
-                    && self.state.nodes[&node.id].human_instruction
-                    && !self.state.nodes[&node.id].instruction.is_empty()
-                    && resume.is_some_and(|previous| {
-                        !session_missing(previous)
-                            && self.state.execution_is_preparation_only(previous)
-                            && no_unfinished_activity(previous)
-                            && (has_completed_history(previous)
-                                || self.state.nodes[&node.id].feedback_continuation.is_some())
-                    }));
+            let unstarted_followup = feedback_undelivered || unstarted_bound_input;
             let failed_before_session = self.state.nodes[&node.id].human_instruction
                 && resume.is_some_and(|previous| {
                     previous.status == "failed"
@@ -4470,12 +4343,10 @@ impl Runtime {
                 .flatten()
                 .filter(|execution| matches!(execution.status.as_str(), "failed" | "resolved"));
             let retry_input = input_previous.and_then(|previous| self.bound_node_input(previous));
-            if retry_input.is_none() {
-                if let Some(previous) = input_previous {
-                    queued_messages.extend(self.claimed_node_messages(previous));
-                    queued_messages.sort_by_key(|message| message.sequence);
-                    queued_messages.dedup_by_key(|message| message.sequence);
-                }
+            if input_previous.is_some() && retry_input.is_none() {
+                return Err(
+                    "Missing durable node input binding; cannot recover this attempt".into(),
+                );
             }
             let continuation = continuation
                 && !initial_recovery
@@ -4487,7 +4358,6 @@ impl Runtime {
                     matches!(previous.status.as_str(), "failed" | "resolved")
                         && !self.is_serial()
                         && !source_direct_run
-                        && !self.batch_recovery_was_delivered(previous)
                         && !Self::same_workspace_path(Path::new(&previous.worktree), &resolved_repository)
                         && self.state.nodes[&node.id].edit_execution_id.is_none()
                         && self.state.nodes[&node.id].feedback_workspace.as_ref()
@@ -4537,9 +4407,6 @@ impl Runtime {
                     materialize_source = false;
                 }
             }
-            let recovered_workspace = workspace_resume
-                .filter(|previous| batch_workspaces && self.batch_recovery_was_delivered(previous))
-                .map(|previous| previous.worktree.clone());
             let feedback_workspace = if batch_workspaces {
                 None // prior private results are already in the batch's source baseline
             } else {
@@ -4556,6 +4423,20 @@ impl Runtime {
             let shared_terminal = (!feedback_rebase && self.state.nodes[&node.id].shared_workspace)
                 .then(|| self.terminal_workspace_for(&node.id))
                 .flatten()
+                .and_then(|terminal| {
+                    let owner = self.planner_workspace_owner(terminal)?;
+                    if owner.id == terminal.id {
+                        return Some(terminal);
+                    }
+                    // A prior ancestor follow-up can own the same terminal
+                    // view now. Use that completed owner's current input,
+                    // while keeping a later failed occupant reserved.
+                    (owner.status == "completed"
+                        && (owner.node == node.id
+                            || owner.workspace_lineage.contains(&terminal.node))
+                        && owner.after.as_ref() == self.state.nodes[&terminal.node].head.as_ref())
+                    .then_some(owner)
+                })
                 .filter(|execution| {
                     !Self::same_workspace_path(Path::new(&execution.worktree), &resolved_repository)
                 });
@@ -4597,7 +4478,13 @@ impl Runtime {
                     .unwrap_or_else(|| source_head.clone());
                 workspace_lineage.extend(terminal.workspace_lineage.iter().cloned());
                 let path = Path::new(&terminal.worktree);
-                if !busy(path) {
+                // This is a handoff of the current terminal owner, not idle
+                // allocation. Unrelated jobs still cannot recycle this slot.
+                if self
+                    .planner_workspace_owner(terminal)
+                    .is_some_and(|owner| owner.id == terminal.id)
+                    && !self.workspace_reserved(path, Some(&node.id))
+                {
                     if path.is_dir() {
                         inherit_workspace = self.workspace_has_head(path, &before);
                         terminal.worktree.clone()
@@ -4659,12 +4546,21 @@ impl Runtime {
                     .collect();
                 let inherited_parent = parent_executions.iter().find(|execution| {
                     let path = Path::new(&execution.worktree);
-                    self.has_single_consumer(&execution.node) && path.is_dir() && !busy(path)
+                    self.has_single_consumer(&execution.node)
+                        && self
+                            .planner_workspace_owner(execution)
+                            .is_some_and(|owner| owner.id == execution.id)
+                        && path.is_dir()
+                        && !self.workspace_reserved(path, Some(&node.id))
                 });
                 let available_parent = inherited_parent.or_else(|| {
                     parent_executions.iter().find(|execution| {
                         self.has_single_consumer(&execution.node)
-                            && !busy(Path::new(&execution.worktree))
+                            && self
+                                .planner_workspace_owner(execution)
+                                .is_some_and(|owner| owner.id == execution.id)
+                            && !self
+                                .workspace_reserved(Path::new(&execution.worktree), Some(&node.id))
                     })
                 });
                 if let Some(parent) = available_parent {
@@ -4825,8 +4721,7 @@ impl Runtime {
             // details can show what this attempt will actually use. Completion
             // replaces this placeholder with parsed live metrics.
             // Explicit per-node selections survive conversation profile saves.
-            // Legacy synchronized overrides are only a fallback when no Run
-            // selection exists. Dispatched jobs keep immutable config/metrics.
+            // Dispatched jobs keep immutable config and metrics.
             let node_state = &self.state.nodes[&node.id];
             let node_settings = node_state
                 .model_config
@@ -4839,7 +4734,6 @@ impl Runtime {
                         .as_ref()
                         .map(RunModelConfig::node_agent_settings)
                 })
-                .or_else(|| node_state.model_config.clone())
                 .or_else(|| self.state.config.as_ref().map(Config::node_agent_settings));
             if let Some(settings) = &node_settings {
                 execution.metrics = Some(ExecutionMetrics {
@@ -5340,7 +5234,6 @@ impl Runtime {
                 feedback_workspace,
                 inherit_workspace,
                 preserved_workspace,
-                recovered_workspace,
                 copy_from_workspace,
                 history_edit,
                 feedback_source,
@@ -5949,8 +5842,6 @@ impl Runtime {
                 // partial metrics must never become a durable successful result.
                 let recovered;
                 let transcript = if live.output.len() != previous_bytes {
-                    self.store
-                        .ensure_legacy_logs(&self.state.run_id, &execution.id)?;
                     recovered = self
                         .store
                         .execution_log_page(&self.state.run_id, &execution.id, 0, usize::MAX)?
@@ -6178,17 +6069,14 @@ impl Runtime {
             })
             && self.state.nodes.get(&pending.to).is_some_and(|node| {
                 node.revision == pending.target_revision
-                    && match &pending.target_execution_id {
-                        Some(id) => {
-                            node.status == "completed"
-                                && self.latest_node_execution(&pending.to).is_some_and(
-                                    |execution| {
-                                        execution.id == *id && execution.status == "completed"
-                                    },
-                                )
-                        }
-                        None => node.head == pending.target_head,
-                    }
+                    && pending.target_execution_id.as_ref().is_some_and(|id| {
+                        node.status == "completed"
+                            && self
+                                .latest_node_execution(&pending.to)
+                                .is_some_and(|execution| {
+                                    execution.id == *id && execution.status == "completed"
+                                })
+                    })
             })
             && !self
                 .state
@@ -6219,8 +6107,7 @@ impl Runtime {
             .iter()
             .filter(|candidate| {
                 candidate.execution_id == pending.execution_id
-                    || pending.target_execution_id.is_some()
-                        && candidate.to == pending.to
+                    || candidate.to == pending.to
                         && candidate.target_execution_id == pending.target_execution_id
                         && candidate.target_revision == pending.target_revision
                         && self.feedback_request_is_current(candidate)
@@ -6378,7 +6265,7 @@ impl Runtime {
                         && pending
                             .target_execution_id
                             .as_ref()
-                            .is_none_or(|id| execution.id == *id)
+                            .is_some_and(|id| execution.id == *id)
                 })
                 .ok_or("Missing feedback target session")?;
             events.push(EventKind::Invalidated {
@@ -6533,6 +6420,7 @@ impl Runtime {
             .published_result
             .clone()
             .ok_or("No managed result has been published")?;
+        descriptor.validate_format()?;
         if self
             .state
             .published_head
@@ -6547,7 +6435,7 @@ impl Runtime {
         let store = self.environments()?.ok_or("No managed environment store")?;
         for result in &results {
             if !result.resource_refs.is_empty() {
-                return Err("This saved result depends on legacy ignored-file snapshots and is read-only; publish a new Run before using it".into());
+                return Err("Unsupported result resource format; publish a new Run".into());
             }
             store.validate_result_metadata(result)?;
             if result.code_ref != descriptor.result.code_ref {
@@ -7636,27 +7524,15 @@ fn perform_with_merger_inner(
     // Uploads for a closed node are staged outside its immutable project
     // view. Deliver accepted inputs only after validation/preparation and the
     // durable Prepared boundary, so failed/interrupted delivery is recoverable.
-    if let Some(previous) = &job.recovered_workspace {
-        crate::attachment_inputs::deliver_recovered(
-            root,
-            &job.run_id,
-            &job.execution.node,
-            &job.attachment_instructions,
-            path,
-            Path::new(previous),
-        )?;
-    } else {
-        crate::attachment_inputs::deliver_prepared(
-            root,
-            &job.run_id,
-            &job.execution.node,
-            &job.attachment_instructions,
-            path,
-            // A shared batch uses live source, never a recomposed project view.
-            // Proven input deletions there remain edits even on a later retry.
-            job.preserved_workspace.is_some() || (job.batch_workspaces && source_tree),
-        )?;
-    }
+    crate::attachment_inputs::deliver_prepared(
+        root,
+        &job.run_id,
+        &job.execution.node,
+        &job.attachment_instructions,
+        path,
+        // Proven deletions in a retained partial view or source remain edits.
+        job.preserved_workspace.is_some() || (job.batch_workspaces && source_tree),
+    )?;
     let mut execution_view = job.execution.clone();
     execution_view.input = environment_input.clone();
     let mut on_output = on_output;

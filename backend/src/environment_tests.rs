@@ -434,7 +434,9 @@ process.stdout.write(execFileSync(managedLaunch().shell,['--noprofile','--norc',
         "private commands must not read today's source config"
     );
     write_config(&a, 23);
-    let latest = workspace::snapshot_node(&a, &source, "A").unwrap();
+    let latest =
+        workspace::snapshot_node_for_run(&a, &source, "A", Some(&Uuid::new_v4().to_string()))
+            .unwrap();
     let b = temp.path().join(".grapher-worktrees/config-paths/B");
     workspace::prepare(&source, &b, &latest, &[]).unwrap();
     assert_eq!(
@@ -846,18 +848,18 @@ pub(super) fn setup(
     fs::write(&script, format!("import {{applyLaunchBinding}} from {}; import fs from 'node:fs'; applyLaunchBinding();\nlet task=''; for await (const chunk of process.stdin) task+=chunk; const name=task.startsWith('Feedback:')?'A':task.split('\\n')[0];\nconst envRoot=process.env.GTEST_STATE?process.env.GTEST_STATE+'/.env':'.env'; fs.mkdirSync(envRoot,{{recursive:true}}); if(process.env.GTEST_STATE) fs.mkdirSync(process.env.GTEST_STATE+'/.cache',{{recursive:true}}); let response='Completed';\n{body}\nconsole.log(JSON.stringify({{type:'message_end',message:{{role:'assistant',content:[{{type:'text',text:response}}]}}}}));", serde_json::to_string(&format!("file:///{binding}")).unwrap())).unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
         "repository": source, "model": "local/test", "maxParallel": 4, "maxFeedback": 1,
+        "feedbackEnabled":graph.edges.iter().any(|edge| edge.feedback),
         "engine": "pi", "piCommand": native::trusted_node().unwrap(), "piArgs": [script], "environment": policy,
     })).unwrap();
     let mut runtime = Runtime::open(&temp.path().join("data")).unwrap();
-    // Explicit E/L fixtures test private workspace mechanics, not adaptive admission.
-    runtime.state.run_id = Uuid::new_v4().to_string();
+    // Record a current private scope; these fixtures exercise E/L mechanics.
+    let nodes = graph.nodes.iter().map(|node| node.id.clone()).collect();
+    runtime.create(graph, config).unwrap();
     runtime
-        .emit(EventKind::Created {
-            graph,
-            config,
-            planning_id: None,
-            planning: None,
-        })
+        .emit(EventKind::WorkspaceIsolationSelected { isolated: true })
+        .unwrap();
+    runtime
+        .emit(EventKind::PrivateBatchSelected { nodes })
         .unwrap();
     runtime
         .store
@@ -865,11 +867,34 @@ pub(super) fn setup(
         .unwrap();
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
+    let policy = runtime
+        .state
+        .config
+        .as_ref()
+        .unwrap()
+        .environment
+        .as_ref()
+        .unwrap();
+    let result = Environments::new(&runtime.root, &runtime.state.run_id, policy)
+        .unwrap()
+        .initialize(&source)
+        .unwrap();
+    runtime
+        .emit(EventKind::EnvironmentInitialized { result })
+        .unwrap();
     (temp, source, runtime)
 }
 
 #[cfg(feature = "fixture")]
 pub(super) fn run(runtime: &mut Runtime, job: &Job) {
+    let mut prepared_job = job.clone();
+    if prepared_job.materialize_source {
+        let exclusions = runtime.exclusions().unwrap();
+        runtime
+            .attach_job_source(&mut prepared_job, &exclusions)
+            .unwrap();
+    }
+    let job = &prepared_job;
     let root = runtime.root.clone();
     let result = perform(
         job,
@@ -1102,6 +1127,35 @@ fn ambient_environment_hints_use_non_authoritative_previous_agent_wording() {
     );
 }
 #[test]
+fn unversioned_launch_records_are_rejected_without_rewriting_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let policy = policy();
+    let store = Environments::new(temp.path(), &Uuid::new_v4().to_string(), &policy).unwrap();
+    let bytes = serde_json::to_vec(&policy.launch).unwrap();
+    let id = digest(&bytes).unwrap();
+    let file = store.directory.join("launches").join(format!("{id}.json"));
+    fs::write(&file, &bytes).unwrap();
+    assert!(store
+        .load_launch(&id)
+        .unwrap_err()
+        .contains("Unsupported native launch record format"));
+    assert_eq!(fs::read(&file).unwrap(), bytes);
+    let current = store.launch(&policy.launch).unwrap();
+    assert!(store.load_launch(&current).unwrap().owned_scopes.is_some());
+}
+
+pub(super) fn metadata_runtime_evidence(
+    root: &Path,
+) -> crate::environment_discovery::RuntimeEvidence {
+    serde_json::from_value(serde_json::json!({
+        "schema":1,"roots":{},"files":[{
+            "location":"external","path":root.join("native-proof"),"blob":"0".repeat(40)
+        }]
+    }))
+    .unwrap()
+}
+
+#[test]
 fn history_scope_transition_is_checked_before_touching_code_or_partial_environment() {
     let temp = tempfile::tempdir().unwrap();
     let mut lazy = policy();
@@ -1114,8 +1168,8 @@ fn history_scope_transition_is_checked_before_touching_code_or_partial_environme
         kind: "venv".into(),
         prefix: "business-env".into(),
         abi: "0".repeat(40),
-        root: None,
-        runtime_evidence: None,
+        root: Some("workspace".into()),
+        runtime_evidence: Some(metadata_runtime_evidence(temp.path())),
     });
     let custom = store.launch(&previous).unwrap();
     assert!(store
@@ -1149,7 +1203,7 @@ fn history_scope_checks_compare_snapshot_roots_not_project_exclusions() {
             prefix: prefix.into(),
             abi: "0".repeat(40),
             root: Some(root.into()),
-            runtime_evidence: None,
+            runtime_evidence: Some(metadata_runtime_evidence(temp.path())),
         });
         launch.owned_scopes = Some(vec![EnvironmentScope {
             root: root.into(),
@@ -1813,7 +1867,7 @@ const previous=fs.existsSync(env)?fs.readFileSync(env,'utf8'):'';
 if(name==='A' && !previous) fs.writeFileSync(env,'1');
 else if(name==='B'){ if(previous!=='1') throw Error('wrong B environment'); fs.writeFileSync(env,'2'); }
 else if(name==='C'){ if(previous!=='2') throw Error('wrong C environment'); fs.writeFileSync(env,'3'); fs.mkdirSync('ordinary',{recursive:true}); fs.writeFileSync('ordinary/result','C artifact'); }
-else if(task.includes('rebuild after C')) { if(previous!=='4') throw Error('rebuild restored historical environment'); }
+else if(task.includes('repeat current view')) { if(previous!=='4') throw Error('repeated followup restored historical environment'); }
 else { if(previous!=='3') throw Error('ancestor restored old environment'); fs.writeFileSync(env,'4'); }
 fs.writeFileSync(process.env.GTEST_STATE+'/.cache/runtime','cache should not fork E');
 "#,
@@ -1866,6 +1920,23 @@ fs.writeFileSync(process.env.GTEST_STATE+'/.cache/runtime','cache should not for
             runtime.state.executions.last().unwrap().result
         );
     }
+    runtime.intervene("A", "repeat current view").unwrap();
+    let a2 = runtime.jobs().unwrap().remove(0);
+    assert_eq!(a2.execution.worktree, a1.execution.worktree);
+    assert_eq!(
+        a2.environment_input.as_ref().unwrap().environment_ref,
+        runtime
+            .state
+            .executions
+            .iter()
+            .find(|e| e.id == a1.execution.id)
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()
+            .environment_ref
+    );
+    run(&mut runtime, &a2);
     for (index, expected) in histories.iter().enumerate() {
         assert_eq!(
             runtime.state.executions[index].result.as_ref().unwrap(),
@@ -1885,6 +1956,8 @@ fs.writeFileSync(process.env.GTEST_STATE+'/.cache/runtime','cache should not for
         .emit(EventKind::PublicationCompleted { head })
         .unwrap();
     assert!(runtime.state.published_result.is_some());
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "completed");
     assert!(
         !source.join(".env").exists(),
         "managed environment is delivered by reference, never copied to source"
@@ -1898,10 +1971,20 @@ fs.writeFileSync(process.env.GTEST_STATE+'/.cache/runtime','cache should not for
     assert_eq!(replay.nodes["A"].result, runtime.state.nodes["A"].result);
     assert_eq!(replay.executions[0].result.as_ref().unwrap(), &a0);
     fs::remove_dir_all(&a.execution.worktree).unwrap();
-    runtime.intervene("A", "rebuild after C").unwrap();
-    let rebuilt = runtime.jobs().unwrap().remove(0);
-    assert_eq!(rebuilt.execution.worktree, a.execution.worktree);
-    run(&mut runtime, &rebuilt);
+    // Current Graph follow-ups use source after publication. Exercise missing
+    // private-layout reconstruction through the model-free Result entry.
+    let output = runtime.launch_result(&[
+        "-c".into(),
+        "import os,pathlib; print((pathlib.Path(os.environ['GTEST_STATE'])/'.env/version').read_text())".into(),
+    ]).unwrap();
+    assert_eq!(output.trim(), "4");
+    assert!(Path::new(&a.execution.worktree).is_dir());
+    for (index, expected) in histories.iter().enumerate() {
+        assert_eq!(
+            runtime.state.executions[index].result.as_ref().unwrap(),
+            expected
+        );
+    }
     let rebuilt_policy = runtime
         .state
         .config
@@ -1912,7 +1995,7 @@ fs.writeFileSync(process.env.GTEST_STATE+'/.cache/runtime','cache should not for
         .unwrap();
     let rebuilt_state = Environments::new(&runtime.root, &runtime.state.run_id, &rebuilt_policy)
         .unwrap()
-        .state_root(Path::new(&rebuilt.execution.worktree))
+        .state_root(Path::new(&a.execution.worktree))
         .unwrap();
     assert_eq!(
         fs::read_to_string(rebuilt_state.join(".env/version")).unwrap(),
@@ -1922,7 +2005,7 @@ fs.writeFileSync(process.env.GTEST_STATE+'/.cache/runtime','cache should not for
 
 #[cfg(feature = "fixture")]
 #[test]
-fn fixed_fanout_blocks_only_missing_path_capability_not_global_parallelism() {
+fn fixed_fanout_blocks_relocation_without_silently_serializing_branches() {
     let (_temp, _source, mut runtime) = setup(
         graph(&["A", "B", "C"], &[("A", "B", false), ("A", "C", false)]),
         policy(),
@@ -1931,14 +2014,15 @@ fn fixed_fanout_blocks_only_missing_path_capability_not_global_parallelism() {
     let a = runtime.jobs().unwrap().remove(0);
     run(&mut runtime, &a);
     let next = runtime.jobs().unwrap();
-    assert_eq!(next.len(), 1);
-    assert_eq!(next[0].execution.worktree, a.execution.worktree);
-    assert_eq!(runtime.state.nodes["C"].status, "blocked");
-    assert!(runtime.state.nodes["C"]
-        .error
-        .as_ref()
-        .unwrap()
-        .contains("no silent"));
+    assert!(next.is_empty());
+    for name in ["B", "C"] {
+        assert_eq!(runtime.state.nodes[name].status, "blocked");
+        assert!(runtime.state.nodes[name]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("no silent"));
+    }
 }
 
 #[cfg(feature = "fixture")]
@@ -2160,12 +2244,16 @@ else if(process.env.CURRENT_L!=='explicit') throw Error('downstream launch not b
 
 #[cfg(feature = "fixture")]
 #[test]
-fn feedback_pins_el_and_forks_only_the_owners_history() {
-    let (_temp, _source, mut runtime) = setup(
+fn private_feedback_delivers_code_keeps_el_private_and_forks_only_owners_history() {
+    let (_temp, source, mut runtime) = setup(
         graph(&["A", "B"], &[("A", "B", false), ("B", "A", true)]),
         state_policy(),
         r#"
-if(name==='A') { const repair=fs.existsSync(process.env.GTEST_STATE+'/.env/version'); if(repair && fs.readFileSync(process.env.GTEST_STATE+'/.env/version','utf8')!=='2')throw Error('feedback lost E2'); fs.writeFileSync(process.env.GTEST_STATE+'/.env/version',repair?'3':'1'); }
+if(!process.env.GTEST_STATE) {
+  if(name==='A') { if(!task.startsWith('Feedback:'))throw Error('repair lost instruction'); fs.writeFileSync('repaired.txt','source repair'); }
+  else { if(fs.readFileSync('repaired.txt','utf8')!=='source repair')throw Error('recheck lost source input'); response='<ACCEPT>'; }
+}
+else if(name==='A') { const repair=fs.existsSync(process.env.GTEST_STATE+'/.env/version'); if(repair && fs.readFileSync(process.env.GTEST_STATE+'/.env/version','utf8')!=='2')throw Error('feedback lost E2'); fs.writeFileSync(process.env.GTEST_STATE+'/.env/version',repair?'3':'1'); }
 else { const version=fs.readFileSync(process.env.GTEST_STATE+'/.env/version','utf8'); if(version==='1'){fs.writeFileSync(process.env.GTEST_STATE+'/.env/version','2');response='Review proof.\n<FEEDBACK>';} else {if(version!=='3')throw Error('repair environment not inherited');response='<ACCEPT>';}}
 "#,
     );
@@ -2173,7 +2261,7 @@ else { const version=fs.readFileSync(process.env.GTEST_STATE+'/.env/version','ut
         let directory = runtime.root.join("sessions").join(&job.execution.id);
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join(format!("test_{}.jsonl", job.execution.session_id)), format!("{}\n{}\n",
-            serde_json::json!({"type":"session","version":3,"id":job.execution.session_id,"cwd":job.execution.worktree}),
+            serde_json::json!({"type":"session","version":3,"grapherFormat":1,"grapherRunId":runtime.state.run_id,"id":job.execution.session_id,"cwd":job.execution.worktree}),
             serde_json::json!({"type":"message","id":"user","parentId":null,"message":{"role":"user","content":text,"timestamp":job.execution.started_at}}))).unwrap();
     };
     let a = runtime.jobs().unwrap().remove(0);
@@ -2184,12 +2272,25 @@ else { const version=fs.readFileSync(process.env.GTEST_STATE+'/.env/version','ut
     history(&runtime, &b, "REVIEW PRIVATE HISTORY");
     let b0 = runtime.state.executions[1].result.clone().unwrap();
     assert_eq!(runtime.state.pending_feedback.len(), 1);
-    let repair = runtime.jobs().unwrap().remove(0);
-    assert_eq!(repair.execution.worktree, b.execution.worktree);
-    assert_eq!(
-        repair.environment_input.as_ref().unwrap().environment_ref,
-        b0.environment_ref
+    assert!(
+        runtime.jobs().unwrap().is_empty(),
+        "private feedback waits for batch delivery"
     );
+    let publication = runtime.state.publication.clone().unwrap();
+    let head = crate::graph_merge::merge_graph_scoped(
+        &source,
+        &publication.heads,
+        &runtime.exclusions().unwrap(),
+        |_| Err("unexpected conflict".into()),
+    )
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head })
+        .unwrap();
+    let repair = runtime.jobs().unwrap().remove(0);
+    assert!(repair.source_direct && repair.config.environment.is_none());
+    assert!(repair.environment_input.is_none());
+    assert_eq!(Path::new(&repair.execution.worktree), source);
     assert_eq!(repair.task, "Feedback:\nReview proof.");
     run(&mut runtime, &repair);
     let text = fs::read_to_string(
@@ -2209,12 +2310,15 @@ else { const version=fs.readFileSync(process.env.GTEST_STATE+'/.env/version','ut
         "{{node}}\n[fixture recheck]",
     )
     .unwrap();
-    let repaired_environment = runtime.state.nodes["A"].result.clone().unwrap();
     let verify = runtime.jobs().unwrap().remove(0);
     assert_eq!(verify.session_fork.as_ref().unwrap().id, b.execution.id);
+    assert!(verify.source_direct && verify.config.environment.is_none());
+    assert!(verify.environment_input.is_none());
+    let private_state =
+        crate::workspace_state::process_root(Path::new(&b.execution.worktree)).unwrap();
     assert_eq!(
-        verify.environment_input.as_ref().unwrap().environment_ref,
-        repaired_environment.environment_ref
+        fs::read_to_string(private_state.join(".env/version")).unwrap(),
+        "2"
     );
     run(&mut runtime, &verify);
     let history = fs::read_to_string(

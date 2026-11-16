@@ -43,7 +43,8 @@ function Fixture() {
     planType: graph ? "graph" : "serial", events, graph: { originalGoal: "Original task", nodes: [{ id: "task", task: "Original task" }], edges: [] },
     nodes: { task: { status: running ? "running" : "completed", revision: 0, instruction: "", error: null } },
     executions: [{ id: "exec", node: "task", status: running ? "running" : "completed", revision: 0, attempt: 1,
-      output, ...(paged ? { outputBytes: 100 } : {}), startedAt: 1, completedAt: running ? null : 2, sessionId: "session", worktree: "/mock", before: "", after: "" }] } as Snapshot;
+      output: "", outputBytes: paged ? 100 : new TextEncoder().encode(output).length, startedAt: 1, completedAt: running ? null : 2, sessionId: "session", worktree: "/mock", before: "", after: "" }] } as Snapshot;
+  audit.snapshot = () => ({ ...state, executions: state.executions.map(execution => ({ ...execution, output })) });
   const noop = () => {};
   return <><button style={{ position: "fixed", top: 0, left: 0, zIndex: 100 }} onClick={() => setVisible(value => !value)}>Toggle view</button>
     <div style={{ height: 800, display: "flex" }}>{visible && <GraphWorkbench state={state} routeType={graph ? "graph" : "serial"}

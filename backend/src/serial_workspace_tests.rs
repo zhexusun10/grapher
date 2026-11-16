@@ -196,7 +196,9 @@ fn serial_runs_do_not_keep_published_graph_snapshots_alive() {
         let path = Path::new(&job.execution.worktree);
         workspace::prepare(&source, path, &job.execution.before, &[]).unwrap();
         fs::write(path.join("result.txt"), "published").unwrap();
-        let head = workspace::snapshot_node(path, &source, "task").unwrap();
+        let head =
+            workspace::snapshot_node_for_run(path, &source, "task", Some(&graph.state.run_id))
+                .unwrap();
         graph
             .finish(&job.execution, Ok((head, "completed".into())))
             .unwrap();
@@ -209,6 +211,7 @@ fn serial_runs_do_not_keep_published_graph_snapshots_alive() {
         graph
             .emit(EventKind::PublicationCompleted { head })
             .unwrap();
+        assert!(graph.jobs().unwrap().is_empty());
         let mut serial = graph.open_run("").unwrap();
         serial
             .create(single(), graph.state.config.clone().unwrap())

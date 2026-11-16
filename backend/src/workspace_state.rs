@@ -12,7 +12,7 @@ pub(crate) fn root(workspace: &Path) -> Result<PathBuf, String> {
     let bucket = run.parent().ok_or("Workspace has no managed parent")?;
     if !bucket
         .file_name()
-        .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
+        .is_some_and(|name| name == ".grapher-worktrees")
     {
         return Err("External runtime state requires a recorded managed workspace slot".into());
     }

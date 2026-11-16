@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SessionTokenUsage } from "../src/components/SessionTokenUsage.tsx";
-import { addTokenUsage, executionSessionUsageThrough, plannerLegacyUsage, plannerResolvedSessionId, plannerSessionUsageThrough } from "../src/services/sessionMetrics.ts";
+import { addTokenUsage, executionSessionUsageThrough, plannerResolvedSessionId, plannerSessionTiming, plannerSessionUsageThrough } from "../src/services/sessionMetrics.ts";
 import type { Execution, PlanningSummary, SessionContext, TokenUsage } from "../src/types.ts";
 import { attemptSessionContext, consumedTokenCount, formatCacheHitRate, formatContextUsed, formatContextWindow, formatTokenCount, sessionContext, sessionTokenUsage } from "../src/utils/tokenUsage.ts";
 import { translate } from "../src/i18n/index.ts";
@@ -201,9 +201,9 @@ const attempt = (id: string, sessionId: string, startedAt: number, usage?: Token
   metrics: usage ? { durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0, usage } : null,
 });
 const plannerTurn = (planningId: string, sessionId: string, usage?: TokenUsage): PlanningSummary => ({
-  planningId, roles: usage ? { planner: {
-    model: "planner/model", sessionId, durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0, usage,
-  } } : {}, totalPlanningDuration: 1, modelDuration: 1,
+  planningId, roles: { planner: {
+    model: "planner/model", sessionId, durationSeconds: 1, assistantMessages: 1, tools: 0, toolErrors: 0, usage: usage as TokenUsage,
+  } }, totalPlanningDuration: 1, modelDuration: 1,
 });
 
 test("an older attempt shows only the session usage through that attempt", () => {
@@ -266,25 +266,28 @@ test("an older Planner turn shows only its session usage prefix", () => {
   assert.equal(missing.usage, undefined);
 });
 
-test("Planner turns recorded before session tracking stay in the newest total", () => {
-  const legacy = plannerTurn("legacy", "legacy-id", sessionUsage(5_000, 100));
-  legacy.roles.planner!.sessionId = undefined;
+test("Planner turns without session identity never contribute to another session's total", () => {
+  const unowned = plannerTurn("unowned", "unused", sessionUsage(5_000, 100));
+  unowned.roles.planner!.sessionId = undefined;
   const current = plannerTurn("current", "planner-a", sessionUsage(3_000, 200));
-  const turns = [legacy, current];
+  const total = plannerSessionUsageThrough([unowned, current], "current");
+  assert.equal(total.usage?.input, 3_000);
+  assert.equal(total.usage?.output, 200);
+  assert.equal(total.usage?.consumedTokens, 3_200);
+});
 
-  // The backend cannot bucket the legacy turn, but it is part of the
-  // conversation shown in the panel, so its usage is added back.
-  assert.equal(plannerLegacyUsage(turns, "current")?.input, 5_000);
-  assert.equal(plannerSessionUsageThrough(turns, "current").usage?.input, 8_000);
-  const total = addTokenUsage(sessionUsage(3_000, 200), plannerLegacyUsage(turns, "current")!);
-  assert.equal(total.input, 8_000);
-  assert.equal(total.output, 300);
-  assert.equal(total.consumedTokens, 8_300);
-
-  // No legacy turns means nothing to add; an unknown legacy usage is omitted
-  // rather than contributing a partial sum.
-  assert.equal(plannerLegacyUsage([current], "current"), undefined);
-  assert.equal(plannerLegacyUsage([plannerTurn("bad", "legacy-id"), current], "current"), undefined);
+test("a failed Planner turn without a session never borrows a neighboring session", () => {
+  const earlier = plannerTurn("earlier", "session-a", sessionUsage(100, 10));
+  earlier.createdAt = 1_000;
+  const failed: PlanningSummary = { planningId: "failed", status: "failed", createdAt: 4_000,
+    roles: { planner: { durationSeconds: 2 } } };
+  const later = plannerTurn("later", "session-b", sessionUsage(200, 20));
+  later.createdAt = 8_000;
+  for (const turns of [[earlier, failed], [earlier, failed, later]]) {
+    assert.equal(plannerResolvedSessionId(turns, "failed"), undefined);
+    assert.deepEqual(plannerSessionTiming(turns, { latestId: "failed" }), { startedAt: 4_000, priorDurationSeconds: 0 });
+    assert.equal(plannerSessionUsageThrough(turns, "failed").usage, undefined);
+  }
 });
 
 test("pending review/follow-up turn inherits the prior Planner session identity before Pi starts", () => {
@@ -294,6 +297,10 @@ test("pending review/follow-up turn inherits the prior Planner session identity 
     roles: { planner: { model: "", durationSeconds: 0, assistantMessages: 0, tools: 0, toolErrors: 0, usage: sessionUsage(0, 0) } },
   };
   assert.equal(plannerResolvedSessionId([first, pendingReview], "review-2"), "planner-a");
+  pendingReview.status = "running";
+  pendingReview.roles.planner!.durationSeconds = 2; // Process setup can precede Pi's session report.
+  assert.equal(plannerResolvedSessionId([first, pendingReview], "review-2"), "planner-a");
+  assert.equal(plannerSessionTiming([first, pendingReview], { latestId: "review-2" }).priorDurationSeconds, 1);
   assert.equal(plannerResolvedSessionId([first], "unrecorded-3"), "planner-a");
   assert.equal(plannerResolvedSessionId([first], "turn-1"), "planner-a");
 });

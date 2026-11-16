@@ -1,14 +1,12 @@
 //! Choose isolation at idle boundaries; active source workers may refill slots.
 use super::*;
-use std::collections::BTreeMap;
 
 const SHARED_SOURCE_BATCH_LIMIT: usize = 3;
 
 impl Runtime {
-    /// Missing selection identifies legacy Runs, whose existing ownership
-    /// contract is replayed without changing directories underneath them.
+    /// Graph Runs use the current adaptive batch policy.
     pub(crate) fn batch_workspaces(&self) -> bool {
-        !self.is_serial() && self.state.isolated_workspaces.is_some()
+        !self.is_serial()
     }
 
     pub(crate) fn shared_source_workspace(&self) -> bool {
@@ -46,36 +44,8 @@ impl Runtime {
             || self.workspace_reserved(path, owner)
     }
 
-    pub(super) fn batch_recovery_was_delivered(&self, execution: &Execution) -> bool {
-        let mut skip_above = None;
-        self.state
-            .events
-            .iter()
-            .rev()
-            .find_map(|event| {
-                if let EventKind::PausedBatchRestored {
-                    handoff_sequence, ..
-                } = &event.kind
-                {
-                    skip_above = Some(
-                        skip_above.map_or(*handoff_sequence, |low: i64| low.min(*handoff_sequence)),
-                    );
-                    return None;
-                }
-                if skip_above.is_some_and(|low| event.sequence > low) {
-                    return None;
-                }
-                match &event.kind {
-                    EventKind::BatchRecoveryCaptured { heads } => heads.get(&execution.id),
-                    _ => None,
-                }
-            })
-            .is_some_and(|head| self.state.published_heads.contains(head))
-    }
-
     /// Every unfinished private member holds the batch's delivery barrier.
     /// Failure, interruption and manual input resolution are not task results.
-    /// Historical delivered recoveries keep their recorded ownership semantics.
     fn unfinished_private_execution(&self, node: &str) -> Option<&Execution> {
         if !self.batch_workspaces() {
             return None;
@@ -118,9 +88,7 @@ impl Runtime {
             return None;
         }
         let repository = resolve_repository(&self.root, self.state.config.as_ref()?).ok()?;
-        (!Self::same_workspace_path(Path::new(&previous.worktree), &repository)
-            && !self.batch_recovery_was_delivered(previous))
-        .then_some(previous)
+        (!Self::same_workspace_path(Path::new(&previous.worktree), &repository)).then_some(previous)
     }
 
     /// Recovery and new human turns stay private, even with only one member
@@ -317,36 +285,6 @@ impl Runtime {
                 self.emit(EventKind::PrivateBatchSelected { nodes: vec![] })?;
             }
             return Ok(());
-        }
-        // Adopt an older in-flight private dispatch without moving its writers
-        // or refreshing source. Graph revisions reconcile the surviving scope;
-        // explicit feedback/history branching still retires the old scope.
-        let previous = self
-            .state
-            .events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.kind {
-                EventKind::ExecutionBatchStarted {
-                    nodes, isolated, ..
-                } => Some((*isolated).then_some(nodes.clone())),
-                EventKind::PublicationCompleted { .. }
-                | EventKind::ConversationEdited { .. }
-                | EventKind::PrivateBatchSelected { .. }
-                | EventKind::Invalidated { human: false, .. } => Some(None),
-                _ => None,
-            })
-            .flatten();
-        if let Some(nodes) = previous {
-            if self.state.isolated_workspaces == Some(true)
-                && self.state.executions.iter().any(|e| {
-                    nodes.contains(&e.node) && !self.state.superseded_execution_ids.contains(&e.id)
-                })
-            {
-                self.emit(EventKind::PrivateBatchSelected {
-                    nodes: self.private_batch_scope(&nodes),
-                })?;
-            }
         }
         Ok(())
     }
@@ -623,100 +561,6 @@ impl Runtime {
         });
         self.emit_outputs(events)?;
         Ok(Some(repository))
-    }
-
-    /// Replay-only compatibility for a previously recorded recovery handoff.
-    /// New retries never request capture. Runs outside the Run mutex; capture
-    /// only project bytes, keeping private environments in their own slot.
-    pub(crate) fn capture_batch_recovery(
-        root: &Path,
-        run_id: &str,
-        config: &Config,
-        execution: &Execution,
-    ) -> Result<String, String> {
-        let repository = resolve_repository(root, config)?;
-        let path = Path::new(&execution.worktree);
-        let run_root = PathBuf::from(workspace::normalize_workspace_display_path(
-            &workspace::workspaces_parent(root)
-                .join(".grapher-worktrees")
-                .join(run_id),
-        ));
-        if crate::path_safety::real_child_path(&run_root, path, false)?.is_none()
-            || Self::same_workspace_path(path, &repository)
-            || !workspace::has_private_git(path)
-        {
-            return Err("Retained private recovery workspace is missing or reassigned; partial work was not replaced".into());
-        }
-        let base = if execution.before.is_empty() {
-            workspace::git(path, &["rev-parse", "refs/grapher/base"])?
-        } else {
-            execution.before.clone()
-        };
-        workspace::verify_prepared_ancestor(path, &base)?;
-        let mut exclusions = config
-            .environment
-            .as_ref()
-            .map(|policy| policy.exclusions())
-            .unwrap_or_default();
-        if let (Some(policy), Some(input)) = (&config.environment, &execution.input) {
-            let store = crate::environment::Environments::new(root, run_id, policy)?;
-            let discovered =
-                store.discover(path, input, &root.join("sessions").join(&execution.id))?;
-            exclusions.extend(store.exclusions(&discovered.launch_ref)?);
-        }
-        let head = workspace::snapshot_node_scoped(path, &repository, &execution.node, Some(run_id), &exclusions)
-            .map_err(|error| format!("Cannot hand off partial work for '{}': {error}. The private workspace is retained for repair and retry", execution.node))?;
-        crate::file_changes::record_git_commit_changes(
-            run_id,
-            &execution.id,
-            &execution.node,
-            path,
-            &repository,
-            &base,
-            &head,
-        );
-        Ok(head)
-    }
-
-    /// Captured heads and publication inputs become durable together. A crash
-    /// after capture or partial checkout must retry these exact inputs.
-    pub(crate) fn record_batch_recoveries(
-        &mut self,
-        heads: BTreeMap<String, String>,
-    ) -> Result<Publication, String> {
-        let handoff = self
-            .state
-            .batch_handoff
-            .as_ref()
-            .ok_or("Missing batch handoff")?;
-        if !matches!(self.state.phase.as_str(), "publishing" | "merging")
-            || heads.len() != handoff.recovery_execution_ids.len()
-            || handoff
-                .recovery_execution_ids
-                .iter()
-                .any(|id| !heads.contains_key(id))
-        {
-            return Err("Batch recovery inputs changed during capture".into());
-        }
-        let publication = self
-            .state
-            .publication
-            .as_ref()
-            .ok_or("Missing publication")?;
-        let mut inputs: BTreeSet<_> = publication.heads.iter().cloned().collect();
-        inputs.extend(heads.values().cloned());
-        let repository = publication.repository.clone();
-        self.emit_outputs(vec![
-            EventKind::BatchRecoveryCaptured { heads },
-            EventKind::PublicationStarted {
-                repository,
-                heads: inputs.into_iter().collect(),
-            },
-        ])?;
-        self.state
-            .publication
-            .clone()
-            .ok_or_else(|| "Missing publication".into())
     }
 
     /// All adaptive batches use one completion/review path, independent of

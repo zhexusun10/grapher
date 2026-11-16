@@ -242,11 +242,23 @@ jobs:
             local result=$?
             trap - EXIT
             if [ "$attached" = 1 ]; then
-              # A partial detach can unmount the volume before ejecting its
-              # image fails. Retry the image device, which is still addressable
-              # after its mountpoint disappears.
-              if ! hdiutil detach "$device"; then
-                if diskutil info "$device" >/dev/null 2>&1 && ! hdiutil detach -force "$device"; then
+              # A partial detach can remove the mountpoint while APFS still
+              # holds the image device open. Retry that device with backoff.
+              local attempt
+              for attempt in 1 2 3 4 5; do
+                if ! diskutil info "$device" >/dev/null 2>&1 || hdiutil detach "$device" || hdiutil detach -force "$device"; then
+                  attached=0
+                  break
+                fi
+                if [ "$attempt" -lt 5 ]; then
+                  echo "::warning::APFS image $device is busy; retrying detach in ${attempt}s."
+                  sleep "$attempt"
+                fi
+              done
+              if [ "$attached" = 1 ] && diskutil info "$device" >/dev/null 2>&1; then
+                echo "::error::Could not detach temporary APFS image $device after 5 attempts."
+                hdiutil info || true
+                if [ "$result" -eq 0 ]; then
                   result=1
                 fi
               fi

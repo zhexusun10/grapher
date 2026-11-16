@@ -94,18 +94,16 @@ blocked -> waiting            (an upstream node runs again)
   recoverably interrupted execution; it is not a provider/protocol failure.
 - `blocked`: dependencies failed or workspace composition could not proceed. Starting an upstream execution returns the node to `waiting` so the new result is composed again.
 
-Node and execution completion both use `completed` in API projections. Historical
-checkpoints with the legacy node status `done` are normalized to `completed` on
-read without rewriting stored events or transcripts. The browser also normalizes
-legacy node statuses at the HTTP/SSE snapshot boundary, so a newly loaded UI can
-still display completion correctly while an older backend is running. This is
-only a spelling conversion; it never changes Run phase or publication evidence.
+Node and execution completion both use `completed` in API projections. Persisted
+node states and browser snapshots reject `done` and unknown statuses. Routing is
+explicit in `Routed`/`planType`; graph shape never selects Serial. A new Run may
+remain `undecided` until routing completes.
 
 Nodes remain stable across recorded execution attempts. Historical output and backend-recorded Git snapshots remain inspectable even when a later revision supersedes their result; ordinary files remain tied to their physical directory.
 
 ## Scheduling and concurrency
 
-Only ready nodes dispatch, subject to the **per-Graph-Run** limit. `maxParallel=0` defaults to 20; positive values configure the limit (range 2–40 in Settings, default 20), with a hard maximum of 40. New Runs use the [adaptive workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy): shared-source workers may refill free slots as dependencies resolve, while private workers refill and retry within their recorded topology batch. Private delivery waits for the whole batch to succeed; unrelated private writers do not block a retry. Source/private workspace switching retains its drain barriers. Legacy Runs keep their recorded scheduling contract.
+Only ready nodes dispatch, subject to the **per-Graph-Run** limit. `maxParallel=0` defaults to 20; positive values configure the limit (range 2–40 in Settings, default 20), with a hard maximum of 40. New Runs use the [adaptive workspace policy](workspace-snapshots-and-feedback.md#adaptive-workspace-policy): shared-source workers may refill free slots as dependencies resolve, while private workers refill and retry within their recorded topology batch. Private delivery waits for the whole batch to succeed; unrelated private writers do not block a retry. Source/private workspace switching retains its drain barriers. Unsupported persisted scheduling formats are rejected before recovery.
 
 There is no global pool limiting nodes across Runs, and no shared cap for Planner/Serial sessions. Choose concurrency with provider quotas and machine resources in mind. Creating or switching conversations does not stop background Runs.
 
@@ -160,7 +158,7 @@ those remain available for a later explicit Continue.
 Saving changed Node Agent model/thinking settings records the conversation's
 selection and synchronizes per-node overrides for unstarted and failed nodes.
 Conversation-scoped `/model` and `/thinking` edits to Node Agent also synchronize
-the legacy model/thinking fallback, matching Settings: unspecified role fields
+the shared model/thinking defaults, matching Settings: unspecified role fields
 inherit the new default, while explicit Planner/Partitioner fields stay unchanged.
 Per-node composer overrides never update those conversation defaults.
 Every subsequent dispatch uses the latest conversation selection, including
@@ -168,7 +166,7 @@ feedback targets, invalidated descendants, retries, history edits and follow-ups
 of completed nodes; stale synchronized overrides from earlier saves cannot override it.
 An explicit `NodeModelOverrideUpdated` selection instead belongs only to its named
 node (`modelOverride`), precedes the conversation profile at dispatch, and is
-excluded from profile synchronization and legacy Run-model hydration. It survives
+excluded from profile synchronization. Run profiles are never inferred from node overrides. It survives
 failure reconciliation and replay without changing sibling or future nodes.
 A running attempt keeps its original settings, even if the save precedes its
 success or failure, and recorded attempt metrics are not rewritten. Saving does
@@ -213,7 +211,7 @@ Source locks cover approval and recorded Git snapshots after approved Planner re
 
 Creating feedback routes is [opt-in through Settings](overview.md#optional-feedback-capability). The rules below still govern previously committed routes and queued verdicts when the capability is later disabled.
 
-A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `<FEEDBACK>`. The node's per-turn system `<rules>` carries this protocol, including resumed and protocol-repair turns; the task and follow-up user messages do not receive a protocol suffix. The dispatch's current feedback-edge state controls the rule, so a later graph revision can remove it. Existing sessions with the older user-message suffix remain editable. Concrete feedback is still sent to the target as a `Feedback:` user instruction.
+A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `<FEEDBACK>`. The node's per-turn system `<rules>` carries this protocol, including resumed and protocol-repair turns; the task and follow-up user messages do not receive a protocol suffix. The dispatch's current feedback-edge state controls the rule, so a later graph revision can remove it. Concrete feedback is still sent to the target as a `Feedback:` user instruction.
 
 - `<ACCEPT>` leaves the result accepted without sending an additional instruction.
 - `<FEEDBACK>` queues a versioned request for the graph's one explicit target. Current requests reviewing the same target execution/revision are applied together as one repair once affected running work has been stopped and its failures settled. Only senders of applicable `<FEEDBACK>` contribute project-file results and instructions; `<ACCEPT>`, exhausted and superseded requests contribute neither. The batch invalidates the target and its ordinary dependency descendants once; other branches remain valid. The target continues its own history with the combined project results and each sender's explicit instructions, never the senders' conversations. Feedback budgets are still consumed once per applied source/target edge, not once per batch. Previously dispatched descendants, including feedback senders and interrupted in-scope writers, retain their own conversations. Once their dependencies are ready they receive a new turn against the updated workspace; invalidation retires the old result, not the history. Never-started nodes still receive their original tasks.
@@ -223,7 +221,7 @@ A node with an outgoing feedback edge must end its response with `<ACCEPT>` or `
 
 While feedback budget remains, a pending verdict that will apply makes every running execution in its scope doomed: the runtime stops them immediately instead of letting them finish into a discarded result, and their recorded failures settle before the batch invalidates the scope and dispatches the repair. Consumers cannot use a result whose pending feedback may supersede it; unrelated branches remain schedulable. Once a review's verdict is resolved, its feedback edge no longer blocks ready descendants just because an accepted sibling is still running. Scheduling that review again reactivates the barrier; queued unresolved verdicts retain their drain-before-handoff checks.
 
-`Finished` and `FeedbackQueued` commit atomically. Requests pin source execution/head, the reviewed target execution/revision, and the final response's log-byte range before invalidation clears heads. The reviewed execution is taken from dispatch order, not the target's movable head after directory handoff. Legacy requests without that execution identity retain exact-head validation and are not grouped with other requests. Batch resolutions, per-edge counters, the single invalidation and descendant `FeedbackContinuationQueued` anchors commit atomically; restart cannot partially consume a batch. Duplicate deliveries are idempotent, and a superseded review cannot overwrite a newer target result. Acceptance, exhausted budgets and superseded requests never transfer workspace ownership. Batching waits for already-running affected work, not for feedback nodes that have not been dispatched.
+`Finished` and `FeedbackQueued` commit atomically. Requests pin source execution/head, the reviewed target execution/revision, and the final response's log-byte range before invalidation clears heads. The reviewed execution is taken from dispatch order, not the target's movable head after directory handoff. Requests without that execution identity are superseded rather than applied by head matching. Batch resolutions, per-edge counters, the single invalidation and descendant `FeedbackContinuationQueued` anchors commit atomically; restart cannot partially consume a batch. Duplicate deliveries are idempotent, and a superseded review cannot overwrite a newer target result. Acceptance, exhausted budgets and superseded requests never transfer workspace ownership. Batching waits for already-running affected work, not for feedback nodes that have not been dispatched.
 
 Cleanliness and physical transfer checks belong to [Feedback workspace handoff](workspace-snapshots-and-feedback.md#feedback-and-history-edits); conversation forks belong to [Session continuity](execution-model.md#sessions-follow-ups-and-history-edits).
 
@@ -302,14 +300,12 @@ Queued `NodeMessaged` events and human `Invalidated` follow-ups retain the clien
 request ID: retries return the same durable acceptance even after dispatch or
 replay, while another ID with equal text is a distinct turn. This also covers the
 first follow-up to a completed, failed or published node. Reusing an ID with a
-different payload is rejected; legacy events without an ID remain replayable.
-The browser uses that acceptance, not the latest unrelated event, to avoid
-unpausing a Run on a repeated acknowledgement. Legacy `NodeMessaged` events
-without `queued: true` remain record-only notes.
+different payload is rejected. The browser uses that acceptance, not the latest unrelated event, to avoid
+unpausing a Run on a repeated acknowledgement.
 
 Accepted human follow-ups are a per-node FIFO in the event-sourced projection,
 identified by event sequence rather than text. Equal messages are separate turns.
-The legacy `instruction` field is not the queue and later sends cannot overwrite
+The `instruction` field holds the current directive; it is not the queue and later sends cannot overwrite
 an accepted pending turn. Existing approval, dependency and writer ownership checks still apply;
 queueing does not bypass them. Publication admission is workspace-scoped:
 [disjoint retained private writers](workspace-snapshots-and-feedback.md#adaptive-workspace-policy)
@@ -341,12 +337,10 @@ Browser metadata polls retain only the binding's event/execution identity, not
 a redundant copy of its prompt and image payload; durable events keep the complete
 input. A bound input is **not** proof of consumption or permission to replay an active
 turn; existing launch/session checks still gate recovery, and feedback descendants
-retain their stricter Pi delivery-boundary checks. Older dispatches without this
-binding reconstruct both active and passive messages from their event-sequence
-claims, never by text equality. Equal messages remain distinct ordered inputs.
+retain their stricter Pi delivery-boundary checks. An attempt missing its durable
+input binding cannot be recovered by reconstructing or guessing its prompt.
 
-Pending turns survive checkpoints and restart; legacy checkpoints without queue
-metadata rebuild from business events without rewriting stored data. Startup
+Pending turns survive current-format checkpoints and restart. Startup
 still pauses unfinished Runs for explicit recovery rather than silently making
 model calls. Dispatched messages remain bound to their execution, including its
 failure/interruption evidence; a claim is not evidence of model completion.
@@ -400,8 +394,9 @@ local card; pause rollback also keys identified turns by ID, not a renumbered
 text occurrence. A stale `intervene` routed to a live steer replays the same
 receipt on retry even after that execution settles, instead of dispatching again.
 Withdrawal resolves only those returned IDs in the owning execution/Run and
-returns the original draft/attachments in queue order. Unidentified legacy or
-extension input is returned without suppressing any same-text history card.
+returns the original draft/attachments in queue order. A current `messages[]`
+receipt is required. Unidentified extension input is returned without suppressing
+any same-text history card.
 Append-only `withdrawn` Planner statuses and `steers_withdrawn` event sequences
 suppress recalled cards after reload without deleting consumed history. The
 composer restores the removed text and available images, preserving its draft;
@@ -435,18 +430,54 @@ Focused evidence: [queue/replay regressions](../../backend/src/node_message_queu
 
 ## Event and output storage
 
+### Persisted format boundary
+
+`events.sqlite` uses `PRAGMA user_version=1`. Only an empty database is initialized;
+unversioned or unsupported databases are rejected by Store/Runtime opens before
+schema changes, log reads, sidebar catalog reads or recovery. At server startup,
+[the directory selector](../../backend/src/startup.rs) probes the version read-only
+under the configured directory's runtime lease. A known incompatible version
+selects a separate `format-1/` data directory beneath it, with a new database,
+configuration and session roots. An atomic, versioned `startup-format-1.json`
+selection record makes restarts reuse that database even if the original database
+is subsequently archived. Occupied incompatible or unrelated directories are
+retained and the selector tries `format-1-2/`, `format-1-3/`, etc. An invalid selection
+record or a missing selected store is an error, not a request to erase history.
+Startup logs both database paths. The original
+database and its records, config, sessions and workspaces are not imported or
+rewritten. Direct Store/Runtime and maintenance opens remain strict.
+
+The active Runtime lease retains the configured directory's lease as well as its
+own, including while child Run services survive. Lock contention, corruption,
+I/O errors and an invalid current schema remain startup errors, not reasons to
+open empty history. The effective root is exported to child engines and returned
+as bootstrap `dataPath`, so browser caches follow the selected store. Selection is
+an explicit nullable row, never inferred from the latest Run.
+
+Checkpoints carry `formatVersion=1` and an integrity checksum. They are optional
+accelerators: a missing, invalid or damaged checkpoint replays current business
+events without rewriting them. There is no queue-version or delivered-head repair.
+All event rows have an indexed kind; output exists only in `execution_logs`.
+
+Planner summary/request files carry `formatVersion=1` and explicit Run ownership.
+Summary reads never fill missing metadata from events or other files. Every Run's
+Planner session lives in `planner-sessions/<runId>` with that Run's deterministic
+Pi identity. Session validation checks Pi version 3, `grapherFormat=1`, Run ownership,
+identity and a complete tail before rebinding, forking or editing. Interrupted
+current attempts still recover their durable summaries and log metrics.
+
 ### Log production and context
 
 Business events include graph creation/revision, approval, execution transitions,
 feedback, human intervention, pause, and publication. Execution output is stored
 separately in UTF-8 byte-indexed `execution_logs` chunks; terminal events carry
-structured metadata rather than full transcripts. Metadata-only legacy replay
-preserves both SHA-1 and SHA-256 heads without rewriting stored events. New output
+structured metadata rather than full transcripts. Current replay preserves
+both SHA-1 and SHA-256 heads without reading transcript payloads. New output
 fills the final partial chunk up to 32 KiB instead of one row per stdout packet. Extending a chunk
 never changes its committed prefix or existing byte cursors; log writes and
-cursor/projection updates remain commit-ordered. Mixed event/output batches and
-legacy inline transcript imports or replacements share one SQLite transaction;
-failed commits leave logs, projections and derived caches unchanged. Run-deletion
+cursor/projection updates remain commit-ordered. Mixed event/output batches share
+one SQLite transaction; inline Started/Finished transcript imports and replacements
+are rejected. Failed commits leave logs, projections and derived caches unchanged. Run-deletion
 cache invalidation likewise follows the successful deletion transaction; clearing
 one data store does not reset another store's live tool tracking. The
 [append writer](../../backend/src/store/append.rs) owns this ordering. After the
@@ -647,7 +678,7 @@ with the committed snapshot. This applies to appended Planner revisions as well
 as first plans. A displayed live Planner remains eligible for watchdog reads even
 if a transient summary read reports a terminal log. A newly read terminal tail
 also gets a bounded recheck for a final writer flush; stable cached history does
-not poll indefinitely. Tests and legacy-log migration are described in
+not poll indefinitely. Tests and current-format log verification are described in
 [Conversation logs](../development/conversation-logs.md).
 
 ## Recovery and ownership

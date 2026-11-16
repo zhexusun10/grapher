@@ -87,6 +87,7 @@ fn startup_cleanup_recovers_unqueued_completed_workspaces_and_provisional_attemp
                 config(&source),
             )
             .unwrap();
+        runtime.set_route("serial").unwrap();
         runtime
             .emit(EventKind::PublicationCompleted {
                 head: "test".into(),
@@ -94,8 +95,7 @@ fn startup_cleanup_recovers_unqueued_completed_workspaces_and_provisional_attemp
             .unwrap();
         runtime.state.run_id.clone()
     };
-    let workspace = temp
-        .path()
+    let workspace = crate::workspace::workspaces_parent(&root)
         .join(".grapher-worktrees")
         .join(&id)
         .join("node/dependencies");
@@ -146,6 +146,7 @@ fn attempt(
     let directory = root.join("planning").join(&id);
     fs::create_dir_all(&directory).unwrap();
     let mut request = serde_json::json!({
+        "formatVersion": 1,
         "goal": "Original goal", "config": config(root), "mode": "graph",
         "revisionRunId": if revision { Some(run_id) } else { None },
     });
@@ -168,9 +169,20 @@ fn attempt(
         status: Some("running".into()),
         created_at: Some(1000),
         repository: Some(root.to_string_lossy().into()),
+        run_id: Some(run_id.into()),
+        goal: Some("Original goal".into()),
+        plan_type: Some("graph".into()),
         ..Default::default()
     };
-    write_planning_summary(&directory, &summary).unwrap();
+    if legacy {
+        fs::write(
+            directory.join("summary.json"),
+            serde_json::to_vec(&summary).unwrap(),
+        )
+        .unwrap();
+    } else {
+        write_planning_summary(&directory, &summary).unwrap();
+    }
     fs::write(directory.join("planner.jsonl"), concat!(
         "{\"type\":\"grapher_process_started\",\"timestamp\":1000}\n",
         "{\"type\":\"tool_execution_start\",\"grapherReceivedAt\":2000}\n",
@@ -181,12 +193,13 @@ fn attempt(
 }
 
 #[test]
-fn restart_recovers_durable_and_legacy_planning_with_the_original_run_id() {
+fn restart_recovers_current_planning_and_leaves_legacy_files_untouched() {
     for legacy in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let primary = service(temp.path());
         let id = Uuid::new_v4().to_string();
-        let (_, running) = attempt(temp.path(), &id, legacy, false);
+        let (directory, running) = attempt(temp.path(), &id, legacy, false);
+        let before = fs::read(directory.join("summary.json")).unwrap();
         if !legacy {
             let child = service_for_run(&primary, &id, true).unwrap();
             child
@@ -203,6 +216,19 @@ fn restart_recovers_durable_and_legacy_planning_with_the_original_run_id() {
             invalidate_service_cache(temp.path(), Some(&id));
         }
         recover_plannings(&primary).unwrap();
+        if legacy {
+            assert!(!primary
+                .runtime
+                .lock()
+                .unwrap()
+                .store
+                .contains_run(&id)
+                .unwrap());
+            assert_eq!(fs::read(directory.join("summary.json")).unwrap(), before);
+            assert!(get_planning(running.planning_id, &primary).is_err());
+            assert!(list_plannings(&primary, None).unwrap().is_empty());
+            continue;
+        }
         let restored = service_for_run(&primary, &id, false).unwrap();
         let state = snapshot(&restored).unwrap();
         assert_eq!(state.run_id, id);
@@ -448,7 +474,7 @@ fn deleted_and_cleared_planning_runs_are_not_reimported() {
         let temp = tempfile::tempdir().unwrap();
         let primary = service(temp.path());
         let id = Uuid::new_v4().to_string();
-        attempt(temp.path(), &id, true, false);
+        attempt(temp.path(), &id, false, false);
         recover_plannings(&primary).unwrap();
         assert!(primary
             .runtime
@@ -618,8 +644,7 @@ fn restart_preserves_the_review_failure_context_in_the_durable_summary() {
     assert!(error.contains("send a follow-up to continue"), "{error}");
     assert!(!error.contains("start a new planning attempt"), "{error}");
 
-    // Sidecars written by the older recovery path retain the foreground
-    // wording. Loading them repairs the diagnostic without touching the event.
+    // Unsupported sidecars are left unchanged, including their diagnostic.
     let generic =
         "Backend stopped during planning. Saved output is preserved; start a new planning attempt.";
     let mut stale = summary;
@@ -629,17 +654,7 @@ fn restart_preserves_the_review_failure_context_in_the_durable_summary() {
         serde_json::to_vec(&stale).unwrap(),
     )
     .unwrap();
+    let before = fs::read(directory.join("summary.json")).unwrap();
     recover_plannings(&primary).unwrap();
-    let repaired: PlanningSummary =
-        serde_json::from_slice(&fs::read(directory.join("summary.json")).unwrap()).unwrap();
-    assert!(repaired
-        .error
-        .as_deref()
-        .unwrap()
-        .contains("send a follow-up to continue"));
-    assert!(!repaired
-        .error
-        .as_deref()
-        .unwrap()
-        .contains("start a new planning attempt"));
+    assert_eq!(fs::read(directory.join("summary.json")).unwrap(), before);
 }

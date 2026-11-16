@@ -111,6 +111,7 @@ enum Entry {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Version {
+    schema: u32,
     head: String,
     parents: Vec<String>,
     entries: Entries,
@@ -122,13 +123,13 @@ struct Version {
 
 impl Version {
     fn checksum(&self) -> Result<String, String> {
-        // The old tuple and omitted field are byte-for-byte unchanged for
-        // legacy single-root manifests. New coverage is part of the checksum.
-        let bytes = if let Some(rooted) = &self.rooted {
-            serde_json::to_vec(&(&self.head, &self.parents, &self.entries, rooted))
-        } else {
-            serde_json::to_vec(&(&self.head, &self.parents, &self.entries))
-        }
+        let bytes = serde_json::to_vec(&(
+            self.schema,
+            &self.head,
+            &self.parents,
+            &self.entries,
+            &self.rooted,
+        ))
         .map_err(|e| e.to_string())?;
         git2::Oid::hash_object(git2::ObjectType::Blob, &bytes)
             .map(|id| id.to_string())
@@ -283,6 +284,7 @@ impl Files {
         self.save_version(
             version,
             Version {
+                schema: 1,
                 head: String::new(),
                 parents: vec![],
                 entries: Entries::new(),
@@ -297,11 +299,7 @@ impl Files {
     }
 
     fn version_path(&self, version: &str) -> Result<PathBuf, String> {
-        let id = version
-            .strip_prefix("before-")
-            .or_else(|| version.strip_prefix("after-"))
-            .unwrap_or(version);
-        Uuid::parse_str(id).map_err(|_| "Invalid workspace file version")?;
+        Uuid::parse_str(version).map_err(|_| "Invalid workspace file version")?;
         Ok(self
             .directory
             .join("versions")
@@ -321,11 +319,14 @@ impl Files {
         let value: Version =
             serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
                 .map_err(|error| error.to_string())?;
+        if value.schema != 1 {
+            return Err("Unsupported environment snapshot schema".into());
+        }
         match &value.checksum {
             Some(checksum) if value.checksum()? != *checksum => {
                 return Err(format!("Damaged workspace file manifest: {version}"))
             }
-            None if self.scopes.is_some() => {
+            None => {
                 return Err(format!(
                     "Managed environment manifest lacks integrity evidence: {version}"
                 ))
@@ -673,6 +674,7 @@ impl Files {
             self.collect(&root, &path, &mut entries, Collection::Capture(checked))?;
         }
         Ok(Version {
+            schema: 1,
             head: head.into(),
             parents: parents.to_vec(),
             entries,

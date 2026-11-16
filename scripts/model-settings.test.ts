@@ -21,8 +21,8 @@ const catalog: ProviderCatalog = {
       thinkingLevels: ["off"], thinkingLevelFallbacks: { minimal: "off", low: "off", medium: "off", high: "off", xhigh: "off", max: "off" } },
     { provider: "example", id: "restricted", name: "Restricted Model", api: "test", contextWindow: 1000, available: true,
       thinkingLevels: ["low", "high", "max"], thinkingLevelFallbacks: { off: "low", minimal: "low", medium: "high", xhigh: "max" } },
-    { provider: "example", id: "hidden", name: "Unavailable Model", api: "test", contextWindow: 1000, available: false },
-    { provider: "closed", id: "old", name: "Old Model", api: "test", contextWindow: 1000, available: false },
+    { provider: "example", id: "hidden", name: "Unavailable Model", api: "test", contextWindow: 1000, available: false, thinkingLevels: [], thinkingLevelFallbacks: {} },
+    { provider: "closed", id: "old", name: "Old Model", api: "test", contextWindow: 1000, available: false, thinkingLevels: [], thinkingLevelFallbacks: {} },
   ],
   warning: null,
 };
@@ -633,7 +633,7 @@ test("ProviderAuthAdapter refuses to resolve a secret prompt with non-ASCII text
   }
 });
 
-test("resolveExecutionModelAndThinking extracts model and thinking from execution output events", () => {
+test("historical model labels require durable execution metrics", () => {
   const execution: Execution = {
     id: "exec-1",
     node: "task-1",
@@ -654,8 +654,8 @@ test("resolveExecutionModelAndThinking extracts model and thinking from executio
   };
 
   const result = resolveExecutionModelAndThinking(execution, false, legacy, {});
-  assert.equal(result.model, "openai-codex/gpt-6-sol");
-  assert.equal(result.thinkingLevel, "high");
+  assert.equal(result.model, t("未设置模型"));
+  assert.equal(result.thinkingLevel, "");
 });
 
 test("failed-node model overrides provide the next attempt's fallback without rewriting recorded model events", () => {
@@ -670,6 +670,7 @@ test("failed-node model overrides provide the next attempt's fallback without re
   }, replacement), { model: "env/model", thinkingLevel: "off" });
   assert.equal(resolveExecutionModelAndThinking(execution, true, legacy, {}, replacement).model, legacy.model);
   execution.output = JSON.stringify({ type: "model_change", provider: "recorded", modelId: "original" });
+  execution.metrics = { model: "recorded/original" } as Execution["metrics"];
   assert.equal(resolveExecutionModelAndThinking(execution, false, legacy, {}, replacement).model, "recorded/original");
 });
 
@@ -697,6 +698,7 @@ test("Merger selections follow saved Node Agent changes unless overridden, witho
     JSON.stringify({ type: "model_change", provider: "actual", modelId: "merger" }),
     JSON.stringify({ type: "thinking_level_change", thinkingLevel: "high" }),
   ].join("\n");
+  execution.metrics = { model: "actual/merger", thinkingLevel: "high" } as Execution["metrics"];
   assert.deepEqual(resolveExecutionModelAndThinking(execution, true, config, env),
     { model: "actual/merger", thinkingLevel: "high" });
 });
@@ -739,13 +741,13 @@ test("execution metrics keep the actual model after a later settings change", ()
     { model: "actual/provider-model", thinkingLevel: "xhigh" });
 });
 
-test("legacy completed attempts fall back to their node override instead of the conversation default", () => {
+test("completed attempts without metrics do not inherit mutable model selections", () => {
   const execution: Execution = {
     id: "legacy", node: "task", revision: 1, attempt: 1, sessionId: "session", worktree: "/worktree",
     before: "base", after: "head", status: "completed", output: "", startedAt: 1000, completedAt: 2000,
   };
   const nodeOverride = { model: "antigravity/gemini-3.8-flash", thinkingLevel: "high" as const };
-  assert.deepEqual(resolveExecutionModelAndThinking(execution, false, legacy, {}, nodeOverride), nodeOverride);
+  assert.deepEqual(resolveExecutionModelAndThinking(execution, false, legacy, {}, nodeOverride), { model: t("未设置模型"), thinkingLevel: "" });
   execution.metrics = {
     durationSeconds: 50, assistantMessages: 1, tools: 0, toolErrors: 0,
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0 },
@@ -754,7 +756,7 @@ test("legacy completed attempts fall back to their node override instead of the 
   assert.equal(resolveExecutionModelAndThinking(execution, false, legacy, {}, nodeOverride).model, "actual/model");
 });
 
-test("resolveExecutionModelAndThinking falls back to config and role models when not in output", () => {
+test("launch placeholders resolve current config before execution metrics arrive", () => {
   const execution: Execution = {
     id: "exec-2",
     node: "task-2",
@@ -764,7 +766,7 @@ test("resolveExecutionModelAndThinking falls back to config and role models when
     worktree: "/path/to/worktree-2",
     before: "1111111",
     after: "2222222",
-    status: "completed",
+    status: "running",
     output: "some regular non-json text\n",
     startedAt: 1000,
     completedAt: 2000,
@@ -793,11 +795,11 @@ test("resolveExecutionModelAndThinking falls back to config and role models when
   assert.equal(mergerResult.thinkingLevel, "xhigh");
 });
 
-test("stored Provider catalogs reject corrupt renderable fields while retaining legacy optional capabilities", () => {
+test("stored Provider catalogs require current capability fields and reject corrupt entries", () => {
   const read = (value: unknown) => loadStorageCatalog({ getItem: () => JSON.stringify(value) });
   assert.deepEqual(read(catalog), catalog);
   const legacy = { ...catalog, models: catalog.models.map(({ thinkingLevels, thinkingLevelFallbacks, ...model }) => model) };
-  assert.deepEqual(read(legacy), legacy, "older caches without optional thinking capabilities remain usable");
+  assert.equal(read(legacy), null, "older caches without capability fields must refresh");
   for (const invalid of [
     {}, [], "old cache", 1,
     { ...catalog, models: [null] },
@@ -844,7 +846,7 @@ test("providerAuth catalog cache stores and returns synchronously without redund
       fetchCount++;
       return new Response(JSON.stringify({
         result: {
-          providers: [{ id: "mock-provider", name: "Mock", configured: true }],
+          providers: [{ id: "mock-provider", name: "Mock", configured: true, methods: [], authType: null }],
           models: [],
           warning: null,
         },

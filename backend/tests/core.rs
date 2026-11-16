@@ -758,7 +758,7 @@ fn feedback_reexecutes_only_affected_branch_in_place() {
     finish_wave(&mut runtime, "<ACCEPT>");
     finish_wave(&mut runtime, "<ACCEPT>");
     assert!(runtime.jobs().unwrap().is_empty());
-    assert_eq!(runtime.state.phase, "publishing");
+    assert_eq!(runtime.state.phase, "completed");
     let frontend: Vec<_> = runtime
         .state
         .executions
@@ -766,16 +766,15 @@ fn feedback_reexecutes_only_affected_branch_in_place() {
         .filter(|execution| execution.node == "frontend")
         .collect();
     assert_eq!(frontend.len(), 2);
-    // The owner's history is forked, but the reviewer's completed tree is used.
-    assert_ne!(frontend[0].session_id, frontend[1].session_id);
     let review = runtime
         .state
         .executions
         .iter()
         .find(|execution| execution.node == "review")
         .unwrap();
-    assert_eq!(frontend[1].worktree, review.worktree);
-    assert_eq!(frontend[1].before, review.after.clone().unwrap());
+    assert_ne!(frontend[0].session_id, review.session_id);
+    assert_ne!(frontend[1].session_id, review.session_id);
+    assert_eq!(frontend[1].worktree, frontend[0].worktree);
     assert_eq!(
         runtime
             .state
@@ -929,7 +928,7 @@ fn exhausted_feedback_continues_downstream_without_rework_or_text_injection() {
             limit + 1
         );
         assert!(runtime.jobs().unwrap().is_empty());
-        assert_eq!(runtime.state.phase, "publishing");
+        assert_eq!(runtime.state.phase, "completed");
     }
 }
 
@@ -1306,7 +1305,7 @@ fn load_run_switches_active_state_and_allows_continuation() {
 }
 
 #[test]
-fn actual_worktrees_parallel_merge_and_feedback_fixture_complete() {
+fn actual_shared_source_parallel_and_feedback_fixture_complete() {
     let temp = TempDir::new().unwrap();
     let mut runtime = runtime(temp.path());
     runtime.approve().unwrap();
@@ -1338,7 +1337,7 @@ fn actual_worktrees_parallel_merge_and_feedback_fixture_complete() {
         }
     }
     assert_eq!(
-        runtime.state.phase, "publishing",
+        runtime.state.phase, "completed",
         "{:?}",
         runtime.state.nodes
     );
@@ -1350,13 +1349,13 @@ fn actual_worktrees_parallel_merge_and_feedback_fixture_complete() {
     assert!(fs::read_to_string(final_workspace.join("frontend.md"))
         .unwrap()
         .contains("Attempt 2"));
-    assert!(workspace::git(
+    assert!(!workspace::git(
         &temp.path().join("fixture-repository"),
         &["status", "--porcelain"]
     )
     .unwrap()
     .is_empty());
-    assert!(!temp.path().join("fixture-repository/frontend.md").exists());
+    assert!(temp.path().join("fixture-repository/frontend.md").exists());
 }
 
 #[test]
@@ -1370,8 +1369,20 @@ fn conflicting_worktrees_block_without_modifying_source_repository() {
     workspace::prepare(&repository, &second, &base, &[]).unwrap();
     fs::write(first.join("README.md"), "first\n").unwrap();
     fs::write(second.join("README.md"), "second\n").unwrap();
-    let first_head = workspace::snapshot_node(&first, &repository, "first").unwrap();
-    let second_head = workspace::snapshot_node(&second, &repository, "second").unwrap();
+    let first_head = workspace::snapshot_node_for_run(
+        &first,
+        &repository,
+        "first",
+        Some("48b8e1d1-2428-42a2-9b28-9d90f631f9d1"),
+    )
+    .unwrap();
+    let second_head = workspace::snapshot_node_for_run(
+        &second,
+        &repository,
+        "second",
+        Some("48b8e1d1-2428-42a2-9b28-9d90f631f9d1"),
+    )
+    .unwrap();
     let merged = temp.path().join("merged");
     let error =
         workspace::prepare(&repository, &merged, &base, &[first_head, second_head]).unwrap_err();
@@ -1414,8 +1425,10 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     let temp = TempDir::new().unwrap();
     let repository = grapher::fixture::repository(temp.path()).unwrap();
     let base = workspace::verify(&repository).unwrap();
-    let node_a = temp.path().join("node_a");
-    let node_b = temp.path().join("node_b");
+    let run = uuid::Uuid::new_v4().to_string();
+    let scope = format!("refs/grapher/runs/{run}/nodes");
+    let node_a = temp.path().join(&run).join("node_a");
+    let node_b = temp.path().join(&run).join("node_b");
 
     workspace::prepare(&repository, &node_a, &base, &[]).unwrap();
     assert!(!node_a.join(".git/grapher-repository").exists());
@@ -1426,7 +1439,7 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     );
     fs::write(node_a.join("a.txt"), "hello from node A\n").unwrap();
     // Encode arbitrary labels before using them in refs.
-    let invalid_ref = format!("refs/grapher/nodes/{}", node_id("../invalid"));
+    let invalid_ref = format!("{scope}/{}", node_id("../invalid"));
     assert!(workspace::snapshot_node(&node_a, &repository, "../invalid").is_ok());
     assert!(
         workspace::repository_git(&repository, &["rev-parse", "--verify", &invalid_ref]).is_ok()
@@ -1435,9 +1448,9 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     let head_a = workspace::snapshot_node(&node_a, &repository, "nodeA").unwrap();
 
     let host_ref_a =
-        workspace::repository_git(&repository, &["rev-parse", "refs/grapher/nodes/nodeA"]).unwrap();
+        workspace::repository_git(&repository, &["rev-parse", &format!("{scope}/nodeA")]).unwrap();
     assert_eq!(host_ref_a, head_a);
-    assert!(workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeA"]).is_err());
+    assert!(workspace::git(&repository, &["rev-parse", &format!("{scope}/nodeA")]).is_err());
 
     // Shared FETCH_HEAD writes would race across parallel nodes.
     assert!(
@@ -1458,9 +1471,9 @@ fn node_ref_namespace_and_no_write_fetch_head_transport_contract() {
     let head_b = workspace::snapshot_node(&node_b, &repository, "nodeB").unwrap();
 
     let host_ref_b =
-        workspace::repository_git(&repository, &["rev-parse", "refs/grapher/nodes/nodeB"]).unwrap();
+        workspace::repository_git(&repository, &["rev-parse", &format!("{scope}/nodeB")]).unwrap();
     assert_eq!(host_ref_b, head_b);
-    assert!(workspace::git(&repository, &["rev-parse", "refs/grapher/nodes/nodeB"]).is_err());
+    assert!(workspace::git(&repository, &["rev-parse", &format!("{scope}/nodeB")]).is_err());
 }
 
 #[test]
@@ -1532,11 +1545,35 @@ fn human_resolved_workspace_is_imported_before_fresh_execution() {
         },
         config(),
     );
+    runtime
+        .emit(EventKind::WorkspaceIsolationSelected { isolated: true })
+        .unwrap();
+    runtime
+        .emit(EventKind::PrivateBatchSelected {
+            nodes: vec!["worker".into()],
+        })
+        .unwrap();
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     let repository = grapher::fixture::repository(&root).unwrap();
+    let result = perform(
+        &job,
+        &root,
+        &[],
+        |_| {},
+        |head| {
+            runtime.emit(EventKind::Prepared {
+                execution_id: job.execution.id.clone(),
+                head,
+            })?;
+            Err("prepared only".into())
+        },
+    );
+    assert_eq!(result.unwrap_err(), "prepared only");
+    runtime
+        .finish(&job.execution, Err("Workspace composition blocked".into()))
+        .unwrap();
     let workspace_path = Path::new(&job.execution.worktree);
-    workspace::prepare(&repository, workspace_path, &job.execution.before, &[]).unwrap();
     fs::write(workspace_path.join("resolved.txt"), "human resolution\n").unwrap();
     workspace::git(workspace_path, &["add", "resolved.txt"]).unwrap();
     workspace::git(workspace_path, &["commit", "-m", "Resolve composition"]).unwrap();

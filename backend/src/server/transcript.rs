@@ -1,5 +1,5 @@
 //! Byte reads do not hold a Run's projection mutex while reading SQLite,
-//! migrating legacy logs, parsing derived counters, or serializing the page.
+//! parsing derived counters, or serializing the page.
 use super::*;
 
 pub(super) struct ExecutionOutputRead {
@@ -75,13 +75,7 @@ pub(super) fn read_execution_output(
     let path = read.root.join("events.sqlite");
     let store = crate::store::Store::open_reader(&path)?;
     store.ensure_not_deleted(&read.run_id)?;
-    let mut total = store.log_bytes(&read.run_id, &read.execution_id)?;
-    if total == 0 && read.status != "running" {
-        // A separate, schema-free writer coordinates only this compatibility
-        // path. Ordinary pages never acquire the process-wide Store write lock.
-        total = crate::store::Store::open_log_writer(&path)?
-            .ensure_legacy_logs(&read.run_id, &read.execution_id)?;
-    }
+    let total = store.log_bytes(&read.run_id, &read.execution_id)?;
     let limit = if read.status != "running"
         && body.get("full").and_then(serde_json::Value::as_bool) == Some(true)
     {

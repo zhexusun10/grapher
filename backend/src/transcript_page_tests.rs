@@ -1,11 +1,27 @@
 use super::*;
 
+fn record_test_planning(directory: &std::path::Path, id: &str, repository: &std::path::Path) {
+    write_planning_summary(
+        directory,
+        &PlanningSummary {
+            planning_id: id.into(),
+            run_id: Some(Uuid::new_v4().to_string()),
+            repository: Some(repository.to_string_lossy().into()),
+            goal: Some("test".into()),
+            status: Some("running".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+}
+
 #[test]
 fn planner_tail_pages_preserve_long_jsonl_records_and_unicode_across_boundaries() {
     let temp = tempfile::TempDir::new().unwrap();
     let id = Uuid::new_v4().to_string();
     let directory = temp.path().join("planning").join(&id);
     fs::create_dir_all(&directory).unwrap();
+    record_test_planning(&directory, &id, temp.path());
     let text = format!(
         "{}\n{}\n",
         serde_json::json!({
@@ -205,6 +221,7 @@ fn live_forward_pages_never_exceed_the_reported_total_while_the_writer_appends()
     let id = Uuid::new_v4().to_string();
     let directory = temp.path().join("planning").join(&id);
     fs::create_dir_all(&directory).unwrap();
+    record_test_planning(&directory, &id, temp.path());
     let path = directory.join("planner.jsonl");
     fs::write(&path, b"{}\n").unwrap();
     let service = Arc::new(Service {
@@ -262,8 +279,8 @@ fn live_forward_pages_never_exceed_the_reported_total_while_the_writer_appends()
 }
 
 #[test]
-fn execution_reads_and_legacy_backfills_finish_while_the_run_projection_is_locked() {
-    for (legacy, full) in [(false, false), (true, false), (false, true), (true, true)] {
+fn execution_reads_finish_while_the_run_projection_is_locked() {
+    for full in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = Runtime::open_lazy(temp.path()).unwrap();
         runtime.state.run_id = "isolated-log-read".into();
@@ -280,7 +297,7 @@ fn execution_reads_and_legacy_backfills_finish_while_the_run_projection_is_locke
         runtime
             .emit(EventKind::Started {
                 execution,
-                message_sequences: None,
+                message_sequences: Some(vec![]),
                 fresh_restart: false,
             })
             .unwrap();
@@ -289,16 +306,7 @@ fn execution_reads_and_legacy_backfills_finish_while_the_run_projection_is_locke
             serde_json::json!({"type":"message_end","message":{
             "role":"assistant","content":[{"type":"text","text":"中文🚀".repeat(100_000)}]}})
         );
-        if legacy {
-            // Retain an old Finished payload without modern execution_logs.
-            let db = rusqlite::Connection::open(temp.path().join("events.sqlite")).unwrap();
-            db.execute("INSERT INTO events(run_id,timestamp,payload,kind,execution_id) VALUES(?1,2,?2,'finished','log-exec')",
-                rusqlite::params![runtime.state.run_id, serde_json::to_string(&EventKind::Finished {
-                    execution_id: "log-exec".into(), head: "".into(), output: output.clone(), output_bytes: 0, metrics: None,
-                }).unwrap()]).unwrap();
-            runtime.state.executions[0].status = "completed".into();
-            runtime.state.executions[0].completed_at = Some(2);
-        } else {
+        {
             runtime
                 .emit(EventKind::Output {
                     execution_id: "log-exec".into(),
@@ -349,7 +357,7 @@ fn execution_reads_and_legacy_backfills_finish_while_the_run_projection_is_locke
         assert_eq!(
             start == 0,
             full,
-            "only an explicit full request reads the whole legacy log"
+            "only an explicit full request reads the whole log"
         );
         assert_eq!(
             service

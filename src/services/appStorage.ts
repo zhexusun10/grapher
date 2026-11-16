@@ -83,10 +83,17 @@ export function readStorageString(key: string): string | null {
   try { return localStorage.getItem(key); } catch { return null; }
 }
 
+export function storageJsonKey(key: string): string {
+  if ([STORAGE_KEYS.workspaceRuns, STORAGE_KEYS.runLabels, STORAGE_KEYS.runModes, STORAGE_KEYS.config].includes(key as any)) {
+    return `grapher-format-1:${readStorageString(STORAGE_KEYS.dataPath) ?? ""}:${key}`;
+  }
+  return key;
+}
+
 /** Persisted browser hints can outlive schemas or be partially corrupt. Never
  * treat a successful JSON parse as proof that a value is safe for rendering. */
 export function readStorageJson<K extends keyof StoredJson>(key: K): StoredJson[K] | null {
-  const raw = readStorageString(key);
+  const raw = readStorageString(storageJsonKey(key));
   if (raw === null) return null;
   try { return decoders[key](JSON.parse(raw)); } catch { return null; }
 }
@@ -96,5 +103,5 @@ export function writeStorageString(key: string, value: string): void {
 }
 
 export function writeStorageJson(key: string, value: unknown): void {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  try { localStorage.setItem(storageJsonKey(key), JSON.stringify(value)); } catch {}
 }

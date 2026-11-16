@@ -17,6 +17,19 @@
 
 **不是所有 `default`、`fallback`、`older` 或 `compat` 都是历史包袱。** 新版本自己产生的失败尝试、分页历史、缺失缓存、未启动会话仍需恢复；平台兼容、Provider 能力适配也不在“放弃旧 Run”范围内。
 
+## A–F 当前退出边界
+
+A–F 的下表保留为原始审计定位；当前契约以 [Runtime 持久化格式](../architecture/runtime.md#persisted-format-boundary)、[原生环境](../architecture/native-environments.md) 和 [项目视图](../architecture/workspace-snapshots-and-feedback.md) 为准。
+
+- **A：** SQLite 使用显式 `user_version=1`；数据层拒绝旧库、未来版本和缺失选择状态。启动时探测到明确的库格式不兼容，会保留原数据并自动创建或复用独立的当前格式目录；数据库损坏、权限和互斥锁错误仍报错。删除补列、索引补写、内联 transcript 导入及读时/离线日志迁移。新 checkpoint 带版本和校验和，损坏时只重放当前事件。
+- **B：** 状态、路由和必要调度字段使用当前契约；删除 `done` 转换、图形推断、旧文件通道和旧模型事件。普通编辑、未启动失败尝试和 `Publication.head` 的当前语义保留。
+- **C：** Graph 统一使用当前 batch 调度；删除旧 dispatch 收养、recovery capture 和跨目录附件回执转移。带 recovery 输入的旧 handoff 拒绝；正常 handoff、保留原目录的失败重试及 managed-scope 保护继续有效。
+- **D：** E manifest 与 L envelope 显式版本化，旧名称和未版本化记录拒绝；绑定必须携带 root 与 runtime evidence。合法 unbound/空 ownership 保留。当前空初始化和 explicit policy 仍可产生单根 E，使用新的 manifest/checksum 契约；不能把这些当前快照当旧格式删除。Result 统一为 schema 2，observer context 使用 schema 2 且同 generation 不得改 source。
+- **E：** view 只接受 schema 6，校验始终包含 ACL/security；节点 refs 必须有 Run 作用域，commit-ID composition 仍可不带 Run 参数。移除旧 bucket、可见 Git 搬迁和旧 metadata 名称保护；未知 metadata 不自动删除。
+- **F：** Planner 首轮和续轮统一存于 `planner-sessions/<runId>`；summary/request 必须有格式和明确归属。旧文件不导入、不补齐、不写回；Pi header 在重绑、fork、branch 前验证版本、Grapher 代际及 Run 归属。
+
+后续 G–M 条目的产品决策和跨目录边界不由 A–F 的退出自动代替；原始条目中的“保留当前契约”和拒绝防线仍需遵守。
+
 ## 一、先按类别划分
 
 | 类别 | 历史契约/数据形态 | 主要入口 | 后续处理边界 |
@@ -34,6 +47,20 @@
 | K. 离线维护与旧产物清理 | migrate/compact、旧 paused-batch/file repair、旧目录/engine | `main.rs`、`maintenance/`、`cleanup*` | 删除旧修复/迁移入口；不自动销毁旧数据 |
 | L. 测试、脚本与文档承诺 | 构造旧 Run 的 fixtures、真实旧库验收、升级保留数据指南 | `scripts/`、`backend/tests/`、`docs/` | 重写当前功能测试，撤销旧版本支持承诺 |
 | M. Pi 边界实际可达的兼容 | session v1/v2 自动改写、启动搬迁、旧 settings/edit 参数、全局包目录 | `engine/pi-compat.ts` → `pi/packages/coding-agent/src/` | Grapher 提前拒绝或隔离；如需调整上游必须按 pinned baseline 流程，不直接批量改供应商代码 |
+
+## G–M 当前实现边界
+
+入口表保留最初审计时的定位；以下说明当前的退出规则与有意保留的共享契约。
+
+| 类别 | 当前规则 |
+| --- | --- |
+| G | Feedback 要求 reviewed execution 和 delivery marker；无绑定输入不再按 claim/文本重建；旧协议 suffix、旧撤回回执和无作用域 Planner RPC 已退出。消息编辑使用稳定 ID，执行归属使用显式 claim；当前 Pi 的 timestamp/occurrence 对齐继续保留。extension 自有输入、尚未确认的乐观消息可以没有 Grapher request ID，但不能据同文本推定投递或撤回。 |
+| H | 不再从节点反推 Run profile，不再清空未限定 provider 的模型名来纠正旧配置；模型名在配置边界校验。production 拒绝 fixture engine 字段。旧 trim override 明确报错。共享 model/thinking 默认值、角色继承、重试模型投影、可选设置默认值与双来源 model overlay/备份是当前功能，继续保留；Node Agent 更新共享默认值并非继续支持旧客户端。 |
+| I | bootstrap 必须提供 conversation index；失败明确报错，不逐 Run 补读。Planner 请求按 Run 定位；加载失败不再换 snapshot/history 接口绕过。文件变更统一按需查询，响应必须包含匹配作用域与有效 summary，在更新组件前拒绝缺字段响应；日志页必须携带 startOffset；Provider catalog 要求当前能力字段。完整 Snapshot API 仍服务当前脚本/benchmark，metadata API 服务 UI，两者继续保留。所有响应归属及安全路径拒绝防线保留。 |
+| J | 退出旧 draft/width 键、Markdown 附件块、旧消息配对、全文模型标签补偿、无 session usage 合并和无 index thinking 分块。Run/config 浏览器缓存按 Grapher 格式与 backend dataPath 隔离，bootstrap 前不展示 Run 缓存。XML/file references、当前 token/context 解析、分页/LRU、尚未启动/未报告指标的状态和 standalone Pi 的 unmanaged launch 继续保留。内置文件工具只解释当前 path/edits 参数。 |
+| K | 退出 migrate/compact、paused-batch/file repair、旧 project-parent 归属推导、旧 Planner owner 别名、无 lease engine 专项和旧 Partitioner 扫描。新清理只使用已登记 ownership；旧目录不被接管或销毁。旧 executor lease 的拒绝防线、source/runtime 锁、现代缓存 GC 与合法 offline Shadow(source=None) 继续保留。 |
+| L | 兼容成功断言改为拒绝/无副作用断言，混合用例继续覆盖当前行为。浏览器夹具通过 [current-api.mjs](../../scripts/fixtures/current-api.mjs) 构造当前索引、分页与文件变更响应；完整输出只作为受控夹具的日志 backing data，历史模型标签显式记录在 metrics 中。日志 acceptance 通过当前 API 创建 Run，覆盖日志完整性、终结原子性、失败/重启、并发读取、浏览器历史和删除，不再导入真实旧库或调用迁移命令。发布 README 说明跨持久化格式时启动会保留原数据，自动创建或复用独立的当前格式目录。 |
+| M | pinned Pi 不变；Grapher 在 SDK/CLI 绑定处拒绝旧 session/settings/keybindings/startup migration 输入，阻断旧 npm/pnpm global 安装回退与旧 edit 顶层参数。新 session 带 Pi version=3、grapherFormat=1 和 grapherRunId；当前 fork/continue 保留历史与归属。凭据的当前 auth.json、显式全局扩展/skills 和 model overlay 是有意保留的配置功能，不运行 oauth/apiKeys 升级。 |
 
 ## 二、散落的入口
 
@@ -179,8 +206,8 @@ E 是环境字节快照，L 是 launch 记录；W 为项目工作区，S 为外�
 | 编号 | 兼容点与触发条件 | 散落入口 | 判定 |
 | --- | --- | --- | --- |
 | K01 | 对旧日志提供 `--migrate`、兼容别名 `--compact`，npm 同时暴露两命令 | [package.json](../../package.json) `migrate/compact` scripts；[main.rs:129](../../backend/src/main.rs#L129)；[server.rs:6427](../../backend/src/server.rs#L6427) `compact_output_chunks` → A09 | **移除**旧库迁移及别名；如要保留现代物理压缩，应另定义非迁移命令 |
-| K02 | 修复旧调度器把用户暂停的 private batch 错送 publication：预览/备份/追加 `PausedBatchRestored` | [main.rs:113](../../backend/src/main.rs#L113) `--restore-paused-batch`；[maintenance/paused_batch.rs](../../backend/src/maintenance/paused_batch.rs) `restoration/restore_paused_batch`；[model.rs:1031](../../backend/src/model.rs#L1031) 事件/reducer | **移除**旧专用修复命令与事件兼容；新版暂停/重试机制仍保留 |
-| K03 | 修复旧 in-place publication 留下的截断文件，只认 unfinished legacy applying journal，备份后单文件原子替换 | [main.rs](../../backend/src/main.rs) `--repair-publication-file`；[maintenance/publication_file.rs](../../backend/src/maintenance/publication_file.rs)；[graph_merge/publication/repair.rs](../../backend/src/graph_merge/publication/repair.rs) `repair_legacy_file`，经 `publication.rs` / `graph_merge.rs` 导出；[atomic_files.rs:352](../../backend/src/graph_merge/publication/atomic_files.rs#L352)、810 的 repair 专用路径 | **移除**专用 repair 链；现代 atomic publication、日志和用户文件冲突检测保留 |
+| K02 | 修复旧调度器把用户暂停的 private batch 错送 publication：预览/备份/追加 `PausedBatchRestored` | [main.rs:113](../../backend/src/main.rs#L113) `--restore-paused-batch`；`maintenance/paused_batch.rs`（已删除） `restoration/restore_paused_batch`；[model.rs:1031](../../backend/src/model.rs#L1031) 事件/reducer | **移除**旧专用修复命令与事件兼容；新版暂停/重试机制仍保留 |
+| K03 | 修复旧 in-place publication 留下的截断文件，只认 unfinished legacy applying journal，备份后单文件原子替换 | [main.rs](../../backend/src/main.rs) `--repair-publication-file`；`maintenance/publication_file.rs`（已删除）；`graph_merge/publication/repair.rs`（已删除） `repair_legacy_file`，经 `publication.rs` / `graph_merge.rs` 导出；[atomic_files.rs:352](../../backend/src/graph_merge/publication/atomic_files.rs#L352)、810 的 repair 专用路径 | **移除**专用 repair 链；现代 atomic publication、日志和用户文件冲突检测保留 |
 | K04 | 新 Run 也登记项目旁旧 `.grapher-worktrees/.grapher-workspaces` ownership；旧库无物理 parent 时从 executions、Started、Planner marker 和失踪源路径恢复清理目标 | [cleanup.rs:170](../../backend/src/cleanup.rs#L170) `configuration_targets` / `legacy_workspace` / `missing_source_workspaces` / `manifest`；[workspace_cleanup.rs:88](../../backend/src/workspace_cleanup.rs#L88) `planning_workspace_paths` / `remove_paths`；[cleanup/detached.rs:114](../../backend/src/cleanup/detached.rs#L114) | **收敛**旧目录登记/扫描/owner 别名；现代准确 ownership、源目录保护和分代删除不可删除 |
 | K05 | offline cleanup 检查旧 project-parent bucket，支持 provisional Planner owner 与 committed Run ID 不同；`--legacy-engines` 才允许无 lease 的旧 engine 副本清理 | [maintenance.rs:23](../../backend/src/maintenance.rs#L23) `workspace_plan`；[maintenance.rs:159](../../backend/src/maintenance.rs#L159) `cleanup_workspaces`；[native_runtime_storage.rs:287](../../backend/src/native_runtime_storage.rs#L287) `unused*` 的 legacy 参数/分支 | **移除**旧 bucket/无 lease engine 专项；现代离线 GC 与 lease 机制保留 |
 | K06 | native runtime preparation 自动去安装目录父级旧 `.grapher-workspaces` 找 marked unused copies；保留 `partition-workers/` 旧 Partitioner 会话清理 | [native.rs:106](../../backend/src/native.rs#L106) `prepared_runtime`；[cleanup.rs:712](../../backend/src/cleanup.rs#L712) `idle_partitioners` / `Target::Data` bucket 白名单 | **移除**旧默认位置/旧 Partitioner 扫描；当前缓存中过时版本的清理仍需保留 |
@@ -194,8 +221,8 @@ E 是环境字节快照，L 是 launch 记录；W 为项目工作区，S 为外�
 | 对应类别 | 散落入口 | 需要调整的历史依赖 |
 | --- | --- | --- |
 | A/B | [backend/tests/store_optimization.rs](../../backend/tests/store_optimization.rs)、[load_allocation.rs](../../backend/tests/load_allocation.rs)、[checkpoint_projection.rs](../../backend/tests/checkpoint_projection.rs)、[completed_status.rs](../../backend/tests/completed_status.rs)、[backend/src/store/conversations_tests.rs](../../backend/src/store/conversations_tests.rs)、[transcript_page_tests.rs](../../backend/src/transcript_page_tests.rs) | 手写旧 SQLite schema、NULL index、内联 Output/Finished、JIT/offline migration、旧 checkpoint 修补、done→completed |
-| B/C | [workspace_policy_tests.rs](../../backend/src/workspace_policy_tests.rs)、[backend/tests/publication_recovery.rs](../../backend/tests/publication_recovery.rs)、[backend/tests/publication_state.rs](../../backend/tests/publication_state.rs)、[graph_merge/publication/repair.rs](../../backend/src/graph_merge/publication/repair.rs) 内联 tests | 历史 private Run、旧 recovery handoff、paused-batch restoration、legacy partial checkout repair |
-| C/D | [scripts/fixtures/legacy-run.mjs](../../scripts/fixtures/legacy-run.mjs) `seedLegacyRun/legacyGraph`；调用方 [accept-files-only-publication.mjs](../../scripts/accept-files-only-publication.mjs)、[environment-native.test.ts](../../scripts/environment-native.test.ts)、[environment-chain.test.ts](../../scripts/environment-chain.test.ts)、[merger-native.test.ts](../../scripts/merger-native.test.ts)；[backend/src/planner_workspace_tests.rs:23](../../backend/src/planner_workspace_tests.rs#L23) `create_private` | 脚本直接 SQL 插入，Rust helper 直接 emit `Created`，共同绕过当前 `create_with_planning` 自动写的 isolation selection 来保持旧私有契约；这些用例必须改为创建当前版本 Run，不能只删 helper |
+| B/C | [workspace_policy_tests.rs](../../backend/src/workspace_policy_tests.rs)、[backend/tests/publication_recovery.rs](../../backend/tests/publication_recovery.rs)、[backend/tests/publication_state.rs](../../backend/tests/publication_state.rs)、原 `graph_merge/publication/repair.rs` 专用 tests（已删除） | 历史 private Run、旧 recovery handoff、paused-batch restoration、legacy partial checkout repair |
+| C/D | [scripts/fixtures/current-run.mjs](../../scripts/fixtures/current-run.mjs) `privateGraph`（替代已删除的 `legacy-run.mjs`）；调用方 [accept-files-only-publication.mjs](../../scripts/accept-files-only-publication.mjs)、[environment-native.test.ts](../../scripts/environment-native.test.ts)、[environment-chain.test.ts](../../scripts/environment-chain.test.ts)、[merger-native.test.ts](../../scripts/merger-native.test.ts)；[backend/src/planner_workspace_tests.rs:23](../../backend/src/planner_workspace_tests.rs#L23) `create_private` | 原 fixture 绕过当前创建流程而省略 isolation selection。JS helper 现通过 API 创建 Run，再为受控测试显式追加当前 private batch scope 并重新加载；不再导入旧 Run。Rust helper 同样应使用当前创建与 scope 事件 |
 | D/E | [environment_tests.rs](../../backend/src/environment_tests.rs)、[environment_best_effort_tests.rs](../../backend/src/environment_best_effort_tests.rs)、[environment_automatic.rs](../../backend/src/environment_automatic.rs) 内联 tests、[workspace_files_tests.rs](../../backend/src/workspace_files_tests.rs)、[workspace_files/rooted_tests.rs](../../backend/src/workspace_files/rooted_tests.rs)、[workspace_files/runtime_evidence_tests.rs](../../backend/src/workspace_files/runtime_evidence_tests.rs)、[workspace_view/equality_tests.rs](../../backend/src/workspace_view/equality_tests.rs) | 原地保留旧 L/ABI/checksum、单根 E、无 runtimeEvidence、schema 5→6；部分旧 policy 仅 test/fixture 可以运行 |
 | F | [planning_lifecycle_tests.rs](../../backend/src/planning_lifecycle_tests.rs) `restart_recovers_durable_and_legacy_planning_with_the_original_run_id`、[planner_continuation_tests.rs](../../backend/src/planner_continuation_tests.rs)、[scripts/bootstrap-settings-ui.test.mjs](../../scripts/bootstrap-settings-ui.test.mjs)、[scripts/planner-branch.test.ts](../../scripts/planner-branch.test.ts) | 旧无 Run request/session、旧 summary 补齐、旧 backend startup/历史恢复 |
 | G/H | [feedback_batch_tests.rs](../../backend/src/feedback_batch_tests.rs) `legacy_feedback_records_default_to_single_input_and_exact_head_validation`、[node_model_tests.rs](../../backend/src/node_model_tests.rs)、[feedback_continuation_tests.rs](../../backend/src/feedback_continuation_tests.rs)、[planner_workspace_tests.rs](../../backend/src/planner_workspace_tests.rs)、[scripts/conversation-branch.test.ts](../../scripts/conversation-branch.test.ts)、[scripts/pending-steers.test.ts](../../scripts/pending-steers.test.ts) | 无 reviewed execution、旧 settings event、无绑定输入/旧消息身份；switch_workspace 当前结果测试已拒绝旧字段，[planner-switch-launcher-probe.ts](../../scripts/planner-switch-launcher-probe.ts) 也断言不再存在旧入参 adapter，这些负向断言应保留 |
@@ -240,7 +267,7 @@ E 是环境字节快照，L 是 launch 记录；W 为项目工作区，S 为外�
 
 ## 四、完整退出的检查边界
 
-下列是实施时的检查表，**本次只建清单，尚未执行删除**：
+下列是全量退出的检查边界；原始入口表的审计记录不等于当前仍在支持旧格式，实施状态见上文及各契约所有者：
 
 - [ ] **先确定唯一新格式。** 明确数据库/事件/summary/session/E/L/result 的格式版本及当前合法缺省值。尤其 D04、D10、F01、H01：当前 writer 本身仍可能产生“看起来旧”的形态，必须与 reader 同步收敛。不要以合法的 None、旧命名字符串或通用 fallback 单独判定版本。
 - [ ] **先拒绝，再简化。** 当前 `Store::open` 主要靠建表/补列容纳旧库，没有统一格式硬边界。加入显式版本或新数据命名空间，在任何 ALTER、迁移、startup recovery、sidebar/list/history、session 打开之前拒绝不支持的数据，而不是边读边猜。

@@ -54,7 +54,6 @@ function Fixture() {
     : params.get("mix") === "1" ? mixedFiles
     : params.get("reference") === "1" ? referenceFiles : files;
   const writeDebug = params.get("write") === "1";
-  const metadata = params.get("metadata") === "1";
   const repeatedAttempts = params.get("attempts") === "2";
   const livePhase = params.get("phase") || "running";
   const [running, setRunning] = useState(params.get("settled") !== "1");
@@ -65,14 +64,14 @@ function Fixture() {
   const summary = buildSummaryFromFiles(empty ? [] : (writeDebug ? [{ path: "src/components/WriteOnly.tsx", status: "added" as const, additions: 2, deletions: 0, source: "write" as const }] : shownFiles).map((file, index) => ({
     ...file, additions: file.additions + (index === 0 ? revision : 0),
   })), false);
+  const outputText = params.has("bytes") ? "" : params.get("long") === "1" ? longConversationOutput
+    : JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The implementation is ready for review." }] } }) + "\n";
   const execution: Execution = {
     id: "execution", node: "worker", revision: 0, attempt: 1,
     sessionId: "session", worktree: "/project", before: "", after: "",
     status: running ? "running" : "completed", startedAt: repeatedAttempts ? 2 : 1, completedAt: running ? null : 3,
-    ...(params.has("bytes") ? { outputBytes: Number(params.get("bytes")) } : {}),
-    output: params.has("bytes") ? "" : params.get("long") === "1" ? longConversationOutput
-      : JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The implementation is ready for review." }] } }) + "\n",
-    fileChanges: metadata ? undefined : summary,
+    outputBytes: params.has("bytes") ? Number(params.get("bytes")) : new TextEncoder().encode(outputText).length,
+    output: "",
   };
   const attempts: Execution[] = repeatedAttempts
     ? [{ ...execution, id: "execution-prior", attempt: 1, status: "completed", startedAt: 1, completedAt: 2 }, { ...execution, attempt: 2 }]
@@ -84,14 +83,13 @@ function Fixture() {
     nodes: { worker: { status: mode === "waiting" ? "waiting" : running && livePhase !== "completed" ? "running" : "completed", revision: 0, head: null, instruction: "", error: null } },
     executions: mode === "planner" || mode === "merger" || mode === "waiting" ? [] : attempts,
     mergers: mode === "merger" ? [{ ...execution, id: "merger-execution", node: "merger" }] : [],
-    fileChanges: !metadata && (mode === "planner" || mode === "waiting") ? summary : undefined,
-    fileChangesOmitted: metadata,
-    events: metadata ? [{ sequence: revision + 1, timestamp: 1, type: "workspace_files_changed" }] : [],
+    fileChangesOmitted: true,
+    events: [{ sequence: revision + 1, timestamp: 1, type: "test_projection_changed" }],
   };
   (window as any).changesAudit = {
     settle: () => setRunning(false), empty: () => setEmpty(true),
     update: () => setRevision(value => value + 1), select: setSelected,
-    openRequests,
+    openRequests, summary, outputText, running,
   };
 
   return <div style={{ height: "100dvh", display: "flex", padding: "12px", boxSizing: "border-box" }}>

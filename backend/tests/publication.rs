@@ -3,6 +3,8 @@ use grapher::{graph_merge, workspace};
 use std::{fs, path::Path};
 use tempfile::TempDir;
 
+const RUN_ID: &str = "48b8e1d1-2428-42a2-9b28-9d90f631f9d1";
+
 fn test_data() {
     static ROOT: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
@@ -15,12 +17,13 @@ fn test_data() {
 fn branch(source: &Path, base: &str, path: &Path, file: &str, content: &str) -> String {
     workspace::prepare(source, path, base, &[]).unwrap();
     fs::write(path.join(file), content).unwrap();
-    workspace::snapshot_node(
+    workspace::snapshot_node_for_run(
         path,
         source,
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("node"),
+        Some(RUN_ID),
     )
     .unwrap()
 }
@@ -108,7 +111,7 @@ fn plain_folder_publication_changes_deletions_conflict_retry_and_no_git_pollutio
     workspace::prepare(&source, &a_dir, &base, &[]).unwrap();
     fs::remove_file(a_dir.join("delete.txt")).unwrap();
     fs::write(a_dir.join("new.txt"), "new").unwrap();
-    let a = workspace::snapshot_node(&a_dir, &source, "a").unwrap();
+    let a = workspace::snapshot_node_for_run(&a_dir, &source, "a", Some(RUN_ID)).unwrap();
     let b = branch(
         &source,
         &base,
@@ -522,7 +525,8 @@ fn a_composed_view_keeps_a_mode_only_change() {
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
-    let node = workspace::snapshot_node(&node_workspace, &source, "node").unwrap();
+    let node =
+        workspace::snapshot_node_for_run(&node_workspace, &source, "node", Some(RUN_ID)).unwrap();
     let published = graph_merge::merge_graph(&source, &[node], || panic!("no conflict")).unwrap();
     assert!(
         source

@@ -114,7 +114,7 @@ fn feedback_delivery_image_normalization_survives_retry_and_restart() {
 }
 
 #[test]
-fn feedback_delivery_requires_the_current_identity_and_retains_legacy_boundaries() {
+fn feedback_delivery_rejects_missing_or_ambiguous_identity_without_resending() {
     for mode in ["missing", "wrong", "ambiguous", "legacy"] {
         let (_temp, mut runtime, _review, recheck) = ready_rechecks();
         let current =
@@ -142,25 +142,21 @@ fn feedback_delivery_requires_the_current_identity_and_retains_legacy_boundaries
             .finish(&recheck.execution, Err("provider stopped".into()))
             .unwrap();
         runtime.resume_node("review").unwrap();
-        if mode == "legacy" {
-            let retry = runtime.jobs().unwrap().remove(0);
-            assert!(retry.continuation && retry.task.is_empty());
-        } else {
-            let count = runtime.state.executions.len();
-            assert!(
-                runtime
-                    .jobs()
-                    .err()
-                    .unwrap()
-                    .contains("differs from the recorded turn"),
-                "{mode}"
-            );
-            assert_eq!(
-                runtime.state.executions.len(),
-                count,
-                "uncertain input cannot become a duplicate turn"
-            );
-        }
+        let count = runtime.state.executions.len();
+        let error = runtime.jobs().err().unwrap();
+        assert!(
+            error.contains(if mode == "legacy" {
+                "Invalid feedback delivery evidence"
+            } else {
+                "differs from the recorded turn"
+            }),
+            "{mode}: {error}"
+        );
+        assert_eq!(
+            runtime.state.executions.len(),
+            count,
+            "uncertain input cannot become a duplicate turn"
+        );
     }
 }
 

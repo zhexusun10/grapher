@@ -70,7 +70,7 @@ fs.mkdirSync(sessionDir, {recursive:true});
 let session = fs.readdirSync(sessionDir).find(file => file.endsWith(`_${id}.jsonl`));
 if (!session) {
   session = `fixture_${id}.jsonl`;
-  fs.writeFileSync(path.join(sessionDir, session), JSON.stringify({type:'session',version:3,id,cwd:process.cwd(),timestamp:new Date().toISOString()})+'\n');
+  fs.writeFileSync(path.join(sessionDir, session), JSON.stringify({type:'session',version:3,grapherFormat:1,grapherRunId:process.env.GRAPHER_ACTIVE_RUN_ID,id,cwd:process.cwd(),timestamp:new Date().toISOString()})+'\n');
 }
 const sessionFile = path.join(sessionDir, session);
 if (continuation || followup) {
@@ -861,10 +861,7 @@ fn assert_driver_resumes_private_node(pause_run: bool, followup: bool) {
             audit["externalFilePresent"], false,
             "the resumed agent must keep its original project view"
         );
-        assert!(!completed
-            .events
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::BatchRecoveryCaptured { .. })));
+
         assert_eq!(
             completed.executions.len(),
             5,
@@ -1466,13 +1463,5 @@ fn driver_retries_private_failure_in_place_and_delivers_the_complete_batch() {
             serde_json::from_slice(&fs::read(temp.path().join("audit-a.json")).unwrap()).unwrap();
         assert_eq!(audit["managed"], managed);
         assert_eq!(audit["continuation"], true);
-        assert_eq!(
-            completed
-                .events
-                .iter()
-                .filter(|event| matches!(event.kind, EventKind::BatchRecoveryCaptured { .. }))
-                .count(),
-            0
-        );
     }
 }

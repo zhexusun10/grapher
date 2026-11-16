@@ -79,14 +79,13 @@ export function ExecutionTranscriptPlaceholder() {
 
 function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUserResize, onInitialOutputReady, onCompactingChange, inlineUserTurnTexts, onInlineUserTurnsChange, onEditUser, liveSteers }: Props) {
   const cacheKey = `${runId}:${execution.id}${endOffset !== undefined ? `:${endOffset}` : ""}`;
-  const paged = execution.outputBytes !== undefined;
   const settled = endOffset !== undefined || execution.status !== "running";
   const [window, setWindow] = useState(() => transcriptFromCache(executionTranscriptCache.get(cacheKey)));
   const windowRef = useRef(window);
   const [error, setError] = useState("");
   const failedOlder = useRef(false);
   const [retry, setRetry] = useState(0);
-  const [ready, setReady] = useState(!paged || window !== null || (!settled && !execution.outputBytes));
+  const [ready, setReady] = useState(window !== null || (!settled && !execution.outputBytes));
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [showOlderLoading, setShowOlderLoading] = useState(false);
   const [revealFallback, setRevealFallback] = useState(false);
@@ -97,8 +96,7 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
   const notifyLoading = useStableCallback((loading: boolean) => onLoadingChange?.(loading));
   const notifyInlineUserTurns = useStableCallback((texts: string[], complete: boolean, turns: { text: string; offset?: number }[], end?: number) => onInlineUserTurnsChange?.(texts, complete, turns, end));
   const hasOlder = ready && Boolean(window?.start);
-  const displayedText = paged ? (window ? renderTranscriptWindow(window) : "") : endOffset === undefined ? execution.output :
-    new TextDecoder().decode(new TextEncoder().encode(execution.output).subarray(0, endOffset));
+  const displayedText = window ? renderTranscriptWindow(window) : "";
 
   const publish = useCallback((next: TranscriptWindow) => {
     windowRef.current = next;
@@ -197,7 +195,6 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
   }, [settled, ready, initialReady, revealFallback, onInitialOutputReady, execution.id]);
 
   useEffect(() => {
-    if (!paged) { setReady(true); return; }
     const abort = new AbortController();
     const signal = AbortSignal.any([abort.signal, lifetime.current!]);
     let emptyPages = 0;
@@ -219,7 +216,7 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
         }
         const latest = windowRef.current;
         const next = latest
-          ? appendTranscriptPage(latest, { ...page, startOffset: page.startOffset ?? offset }, settled || page.status !== "running")
+          ? appendTranscriptPage(latest, page, settled || page.status !== "running")
           : windowFromPage(page, settled || page.status !== "running");
         if (!before) {
           const scroller = transcriptScrollParent(wrapperRef.current);
@@ -247,7 +244,7 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
       stop.wake();
     });
     return () => { unsubscribeOutput(); unsubscribeConnect(); abort.abort(); stop(); };
-  }, [runId, execution.id, execution.status, paged, settled, retry, publish, lifetime, endOffset]);
+  }, [runId, execution.id, execution.status, settled, retry, publish, lifetime, endOffset]);
 
   return <div ref={wrapperRef} data-execution-id={execution.id} data-run-id={runId} aria-busy={!initialReady}>
     {error && <p role="alert">{localizeError(error)} <button onClick={() => {
@@ -267,7 +264,7 @@ function ExecutionHistory({ runId, execution, endOffset, onLoadingChange, onUser
       showUserTurns={!!inlineUserTurnTexts?.length}
       userTurnTexts={inlineUserTurnTexts}
       liveSteers={liveSteers}
-      outputEndOffset={paged ? window?.end : new TextEncoder().encode(displayedText).length}
+      outputEndOffset={window?.end}
       onEditUser={onEditUser}
       onInlineUserTurnsChange={notifyInlineUserTurns}
       onReachTop={window?.start && !error ? () => { void loadOlder(); } : undefined}

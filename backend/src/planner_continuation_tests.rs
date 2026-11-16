@@ -21,7 +21,7 @@ let input=''; for await (const chunk of process.stdin) input += chunk;
 const arg = name => process.argv[process.argv.indexOf(name)+1];
 const dir=arg('--session-dir'), id=arg('--session-id');
 if (process.env.GRAPHER_CONTINUE_INTERRUPTED !== 'true') {
-  fs.writeFileSync(path.join(dir, `test_${id}.jsonl`), JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n'+
+  fs.writeFileSync(path.join(dir, `test_${id}.jsonl`), JSON.stringify({type:'session',version:3,grapherFormat:1,grapherRunId:process.env.GRAPHER_ACTIVE_RUN_ID,id,cwd:process.cwd()})+'\n'+
     JSON.stringify({type:'message',id:'request',parentId:null,message:{role:'user',content:'retained turn'}})+'\n');
   process.exit(1);
 }
@@ -175,9 +175,9 @@ fn planner_continuation_shares_active_source_and_private_workspaces() {
         ("source", "during-turn"),
         ("private", "never"),
         ("private", "during-turn"),
-        ("legacy-private", "never"),
-        ("legacy-private", "during-turn"),
-        ("legacy-private", "before-launch"),
+        ("recorded-private", "never"),
+        ("recorded-private", "during-turn"),
+        ("recorded-private", "before-launch"),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let repository = crate::fixture::repository(temp.path()).unwrap();
@@ -190,7 +190,7 @@ const dir=arg('--session-dir'), id=arg('--session-id');
 const session=path.join(dir, `test_${id}.jsonl`);
 const graph=JSON.parse(fs.readFileSync(process.env.GRAPHER_GRAPH_PATH, 'utf8'));
 if (process.env.GRAPHER_CONTINUE_INTERRUPTED !== 'true') {
-  fs.writeFileSync(session, JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n'+
+  fs.writeFileSync(session, JSON.stringify({type:'session',version:3,grapherFormat:1,grapherRunId:process.env.GRAPHER_ACTIVE_RUN_ID,id,cwd:process.cwd()})+'\n'+
     JSON.stringify({type:'message',id:'original',parentId:null,message:{role:'user',content:'retained request'}})+'\n');
   graph.nodes.push({id:'partial',task:'retained draft'});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
@@ -225,22 +225,15 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
                     .collect(),
                 edges: vec![],
             };
-            if mode == "legacy-private" {
-                runtime.state.run_id = Uuid::new_v4().to_string();
+            let scope = graph.nodes.iter().map(|node| node.id.clone()).collect();
+            runtime.create(graph, config.clone()).unwrap();
+            if mode == "recorded-private" {
                 runtime
-                    .emit(EventKind::Created {
-                        graph,
-                        config: config.clone(),
-                        planning_id: None,
-                        planning: None,
-                    })
+                    .emit(EventKind::WorkspaceIsolationSelected { isolated: true })
                     .unwrap();
                 runtime
-                    .store
-                    .select_run(Some(&runtime.state.run_id))
+                    .emit(EventKind::PrivateBatchSelected { nodes: scope })
                     .unwrap();
-            } else {
-                runtime.create(graph, config.clone()).unwrap();
             }
             runtime.set_route("graph").unwrap();
             runtime.approve().unwrap();
@@ -338,7 +331,7 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
                 runtime
                     .emit(EventKind::Started {
                         execution: successor.clone(),
-                        message_sequences: None,
+                        message_sequences: Some(vec![]),
                         fresh_restart: false,
                     })
                     .unwrap();
@@ -479,7 +472,7 @@ const dir=arg('--session-dir'), id=arg('--session-id');
 const session=path.join(dir, `test_${id}.jsonl`);
 const graph=JSON.parse(fs.readFileSync(process.env.GRAPHER_GRAPH_PATH,'utf8'));
 if (process.env.GRAPHER_CONTINUE_INTERRUPTED !== 'true') {
-  fs.writeFileSync(session, JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n'+
+  fs.writeFileSync(session, JSON.stringify({type:'session',version:3,grapherFormat:1,grapherRunId:process.env.GRAPHER_ACTIVE_RUN_ID,id,cwd:process.cwd()})+'\n'+
     JSON.stringify({type:'message',id:'revision',parentId:null,message:{role:'user',content:'revision'}})+'\n');
   graph.nodes.push({id:'partial',task:'retained'});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH,JSON.stringify(graph)); process.exit(1);
@@ -613,7 +606,7 @@ if (process.env.GRAPHER_CONTINUE_INTERRUPTED !== 'true') {
     fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
     process.exit(1);
   }
-  fs.writeFileSync(session, JSON.stringify({type:'session', id, cwd:process.cwd()})+'\n'+
+  fs.writeFileSync(session, JSON.stringify({type:'session', version:3, grapherFormat:1, grapherRunId:process.env.GRAPHER_ACTIVE_RUN_ID, id, cwd:process.cwd()})+'\n'+
     JSON.stringify({type:'message',id:'original',parentId:null,message:{role:'user',content:'original goal'}})+'\n');
   graph.nodes.push({id:'before',task:'retained'});
   fs.writeFileSync(process.env.GRAPHER_GRAPH_PATH, JSON.stringify(graph));
@@ -679,9 +672,8 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
     assert!(stale.is_err());
     assert_eq!(resumed.runtime.lock().unwrap().state.events.len(), before);
     let draft = root
-        .join("planning")
-        .join(&failed.planning_id)
-        .join("planner-session")
+        .join("planner-sessions")
+        .join(&run_id)
         .join(format!("graph-{}.json", failed.planning_id));
     let bytes = fs::read(&draft).unwrap();
     fs::remove_file(&draft).unwrap();
@@ -707,10 +699,9 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
     );
     fs::write(draft, bytes).unwrap();
     let session_file = root
-        .join("planning")
-        .join(&failed.planning_id)
-        .join("planner-session")
-        .join(format!("test_{}.jsonl", failed.planning_id));
+        .join("planner-sessions")
+        .join(&run_id)
+        .join(format!("test_{}.jsonl", run_id));
     let history = fs::read(&session_file).unwrap();
     let mut header = history
         .split(|byte| *byte == b'\n')
@@ -905,12 +896,8 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
     );
     assert!(stale.unwrap_err().0.contains("graph changed"));
     assert_eq!(resumed.runtime.lock().unwrap().state.events.len(), count);
-    let session_dir = root
-        .join("planning")
-        .join(&failed.planning_id)
-        .join("planner-session");
-    let session =
-        fs::read_to_string(session_dir.join(format!("test_{}.jsonl", failed.planning_id))).unwrap();
+    let session_dir = root.join("planner-sessions").join(&run_id);
+    let session = fs::read_to_string(session_dir.join(format!("test_{}.jsonl", run_id))).unwrap();
     assert_eq!(session.matches("original goal").count(), 1);
     assert_eq!(session.matches("\"content\":\"revision\"").count(), 2);
     assert!(!session.contains("__grapher_continue_interrupted__"));

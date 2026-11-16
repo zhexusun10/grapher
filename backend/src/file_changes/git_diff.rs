@@ -514,7 +514,11 @@ mod tests {
         crate::workspace::git(&source, &["commit", "-qm", "project history"]).unwrap();
         let project_head = crate::workspace::project_git(&source, &["rev-parse", "HEAD"]).unwrap();
         let base = crate::workspace::snapshot_repository(&source).unwrap();
-        let node = temp.path().join(".grapher-worktrees/run/node");
+        let node = temp
+            .path()
+            .join(".grapher-worktrees")
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("node");
         crate::workspace::prepare(&source, &node, &base, &[]).unwrap();
         fs::write(node.join("task.txt"), "after\nextra\n").unwrap();
         let head = crate::workspace::snapshot_node(&node, &source, "node").unwrap();

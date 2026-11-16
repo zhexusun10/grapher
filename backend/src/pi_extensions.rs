@@ -154,9 +154,27 @@ mod tests {
             &global,
             serde_json::json!({"version": 1, "operation": "catalog"}),
         );
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success());
+        assert!(response["error"]
+            .as_str()
+            .unwrap()
+            .contains("Unsupported pi-trim override"));
+        assert_eq!(
+            fs::read_to_string(own.join("extensions.json")).unwrap(),
+            r#"{"overrides":{"npm:pi-trim":false}}"#
+        );
+        fs::write(own.join("extensions.json"), r#"{"overrides":{}}"#).unwrap();
+        let output = run_discovery(
+            &root,
+            &own,
+            &global,
+            serde_json::json!({"version":1,"operation":"catalog"}),
+        );
         assert!(
             output.status.success(),
-            "{}",
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         let response: Value = serde_json::from_slice(&output.stdout).unwrap();

@@ -223,7 +223,11 @@ fn native_runtime_selector_schema_preserves_abi_and_schema_one_startup() {
     crate::environment::controlled_output(create).unwrap();
     let roots = [("workspace", work.as_path())];
     let mut bindings = Vec::new();
-    for schema in [None, Some(1), Some(2), Some(3)] {
+    assert!(
+        super::super::super::verify(&work, "workspace", "env", "venv", false, &roots, None)
+            .is_err()
+    );
+    for schema in [Some(1), Some(2), Some(3)] {
         bindings.push(
             super::super::super::verify(&work, "workspace", "env", "venv", false, &roots, schema)
                 .unwrap(),

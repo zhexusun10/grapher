@@ -41,7 +41,7 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
     let (source, head) = source(temp.path());
     let root = temp.path().join("runtime");
     let mut runtime = Runtime::open(&root).unwrap();
-    // Seed the legacy private contract; adaptive small Graphs settle in source.
+    // Record a current private batch; adaptive small Graphs otherwise use source.
     runtime.state.run_id = uuid::Uuid::new_v4().to_string();
     runtime
         .emit(EventKind::Created {
@@ -62,6 +62,14 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
             config: config(&source),
             planning_id: None,
             planning: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::WorkspaceIsolationSelected { isolated: true })
+        .unwrap();
+    runtime
+        .emit(EventKind::PrivateBatchSelected {
+            nodes: vec!["merger".into(), "other".into()],
         })
         .unwrap();
     runtime
@@ -140,6 +148,8 @@ fn publication_is_durable_before_completed_and_merger_does_not_mutate_a_node_nam
     runtime
         .emit(EventKind::PublicationCompleted { head: head.clone() })
         .unwrap();
+    assert_eq!(runtime.state.phase, "running");
+    assert!(runtime.jobs().unwrap().is_empty());
     assert_eq!(runtime.state.phase, "completed");
     assert_eq!(
         runtime.state.publication.as_ref().unwrap().head.as_ref(),

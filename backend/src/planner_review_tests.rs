@@ -707,16 +707,13 @@ fn post_task_review_rejects_header_only_history_and_preserves_failure_after_rest
             runtime.state.effective_config().unwrap(),
         )
     };
-    let session_dir = root
-        .join("planning")
-        .join(&planning_id)
-        .join("planner-session");
+    let session_dir = root.join("planner-sessions").join(&run_id);
     fs::create_dir_all(&session_dir).unwrap();
-    let session_file = session_dir.join(format!("original_{planning_id}.jsonl"));
+    let session_file = session_dir.join(format!("original_{run_id}.jsonl"));
     let header = format!(
         "{}\n",
         serde_json::json!({
-            "type": "session", "version": 3, "id": planning_id,
+            "type": "session", "version": 3, "grapherFormat": 1, "grapherRunId": run_id, "id": run_id,
             "cwd": crate::native::host_path(&repo)
         })
     );
@@ -731,7 +728,7 @@ fn post_task_review_rejects_header_only_history_and_preserves_failure_after_rest
     let expected_history = format!(
         "{}\n{turn}",
         serde_json::json!({
-            "type": "session", "version": 3, "id": planning_id,
+            "type": "session", "version": 3, "grapherFormat": 1, "grapherRunId": run_id, "id": run_id,
             "cwd": crate::session_branch::session_cwd(&repo).unwrap()
         })
     );

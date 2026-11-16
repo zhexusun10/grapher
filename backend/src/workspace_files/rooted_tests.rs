@@ -56,12 +56,20 @@ fn rooted_snapshot_restores_distinct_roots_absence_and_keeps_caches() {
     fs::write(paths["state"].join(".agent-home/cache/value"), "new cache").unwrap();
     let stored = stored_files(&files);
     files.preflight_roots(&paths, &version).unwrap();
-    assert_eq!(stored_files(&files), stored, "preflight is read-only, even for dirty live files");
+    assert_eq!(
+        stored_files(&files),
+        stored,
+        "preflight is read-only, even for dirty live files"
+    );
     for path in paths.values() {
         assert_eq!(fs::read_to_string(path.join("env/value")).unwrap(), "later");
     }
     files.materialize_roots(&paths, &version).unwrap();
-    assert_eq!(stored_files(&files), stored, "discarded partial bytes are not new history");
+    assert_eq!(
+        stored_files(&files),
+        stored,
+        "discarded partial bytes are not new history"
+    );
     for (label, path) in &paths {
         assert_eq!(fs::read_to_string(path.join("env/value")).unwrap(), *label);
     }
@@ -92,19 +100,27 @@ fn rooted_history_restores_a_directory_replaced_by_an_owned_regular_file() {
             fs::write(path.join("env/nested/deeper/value"), "historical").unwrap();
         }
         let version = Uuid::new_v4().to_string();
-        files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+        files
+            .capture_roots(&paths, &layouts, &version, &[])
+            .unwrap();
         for path in paths.values() {
             fs::remove_dir_all(path.join(replacement)).unwrap();
             fs::write(path.join(replacement), "later regular file").unwrap();
         }
         files.preflight_roots(&paths, &version).unwrap();
         for path in paths.values() {
-            assert_eq!(fs::read_to_string(path.join(replacement)).unwrap(), "later regular file");
+            assert_eq!(
+                fs::read_to_string(path.join(replacement)).unwrap(),
+                "later regular file"
+            );
         }
         files.materialize_roots(&paths, &version).unwrap();
         files.verify_roots(&paths, &version).unwrap();
         for path in paths.values() {
-            assert_eq!(fs::read_to_string(path.join("env/nested/deeper/value")).unwrap(), "historical");
+            assert_eq!(
+                fs::read_to_string(path.join("env/nested/deeper/value")).unwrap(),
+                "historical"
+            );
         }
     }
 }
@@ -161,7 +177,11 @@ fn rooted_second_target_failure_preflights_before_first_root_write() {
     crate::path_safety::directory_link(&outside, &paths["workspace"].join("env"));
     let stored = stored_files(&files);
     assert!(files.preflight_roots(&paths, &version).is_err());
-    assert_eq!(stored_files(&files), stored, "refused preflight must not retain first-root partial bytes");
+    assert_eq!(
+        stored_files(&files),
+        stored,
+        "refused preflight must not retain first-root partial bytes"
+    );
     assert!(files.materialize_roots(&paths, &version).is_err());
     assert_eq!(stored_files(&files), stored);
     assert_eq!(
@@ -178,7 +198,9 @@ fn rooted_second_target_failure_preflights_before_first_root_write() {
 fn rooted_skipped_link_destination_refuses_before_either_root_changes() {
     let (temp, files, paths, layouts) = fixture();
     let version = Uuid::new_v4().to_string();
-    files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+    files
+        .capture_roots(&paths, &layouts, &version, &[])
+        .unwrap();
     fs::write(paths["state"].join("env/value"), "partial S").unwrap();
     // This is a leaf destination, so checking only its parent misses it.
     fs::remove_file(paths["workspace"].join("env/value")).unwrap();
@@ -188,10 +210,19 @@ fn rooted_skipped_link_destination_refuses_before_either_root_changes() {
     fs::remove_dir(&target).unwrap();
     let stored = stored_files(&files);
     let error = files.preflight_roots(&paths, &version).unwrap_err();
-    assert!(error.contains("untouched") && error.contains("env/value"), "{error}");
+    assert!(
+        error.contains("untouched") && error.contains("env/value"),
+        "{error}"
+    );
     assert!(files.materialize_roots(&paths, &version).is_err());
-    assert_eq!(fs::read_to_string(paths["state"].join("env/value")).unwrap(), "partial S");
-    assert!(fs::symlink_metadata(paths["workspace"].join("env/value")).unwrap().file_type().is_symlink());
+    assert_eq!(
+        fs::read_to_string(paths["state"].join("env/value")).unwrap(),
+        "partial S"
+    );
+    assert!(fs::symlink_metadata(paths["workspace"].join("env/value"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert_eq!(stored_files(&files), stored);
 
     // Removing the obstruction explicitly permits ordinary byte restoration;
@@ -207,10 +238,16 @@ fn rooted_retained_cache_or_skipped_link_cannot_be_replaced_by_a_recorded_file()
     for cache in [false, true] {
         let (temp, files, paths, mut layouts) = fixture();
         if cache {
-            layouts.get_mut("workspace").unwrap().caches.push("env/value/retained".into());
+            layouts
+                .get_mut("workspace")
+                .unwrap()
+                .caches
+                .push("env/value/retained".into());
         }
         let version = Uuid::new_v4().to_string();
-        files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+        files
+            .capture_roots(&paths, &layouts, &version, &[])
+            .unwrap();
         fs::write(paths["state"].join("env/value"), "partial S").unwrap();
         fs::remove_file(paths["workspace"].join("env/value")).unwrap();
         fs::create_dir(paths["workspace"].join("env/value")).unwrap();
@@ -226,12 +263,21 @@ fn rooted_retained_cache_or_skipped_link_cannot_be_replaced_by_a_recorded_file()
         }
         let stored = stored_files(&files);
         let error = files.preflight_roots(&paths, &version).unwrap_err();
-        assert!(error.contains("untouched") && error.contains("env/value"), "{error}");
+        assert!(
+            error.contains("untouched") && error.contains("env/value"),
+            "{error}"
+        );
         assert!(files.materialize_roots(&paths, &version).is_err());
-        assert_eq!(fs::read_to_string(paths["state"].join("env/value")).unwrap(), "partial S");
+        assert_eq!(
+            fs::read_to_string(paths["state"].join("env/value")).unwrap(),
+            "partial S"
+        );
         assert!(fs::symlink_metadata(&retained).is_ok());
         if cache {
-            assert_eq!(fs::read_to_string(retained.join("cache-byte")).unwrap(), "keep cache");
+            assert_eq!(
+                fs::read_to_string(retained.join("cache-byte")).unwrap(),
+                "keep cache"
+            );
         }
         assert_eq!(stored_files(&files), stored);
     }
@@ -241,7 +287,9 @@ fn rooted_retained_cache_or_skipped_link_cannot_be_replaced_by_a_recorded_file()
 fn rooted_unrelated_skipped_links_and_cache_do_not_prevent_valid_recovery() {
     let (temp, files, paths, layouts) = fixture();
     let version = Uuid::new_v4().to_string();
-    files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+    files
+        .capture_roots(&paths, &layouts, &version, &[])
+        .unwrap();
     let target = temp.path().join("unavailable-target");
     fs::create_dir(&target).unwrap();
     let link = paths["workspace"].join("env/skipped");
@@ -250,13 +298,23 @@ fn rooted_unrelated_skipped_links_and_cache_do_not_prevent_valid_recovery() {
     for path in paths.values() {
         fs::write(path.join("env/value"), "partial").unwrap();
     }
-    fs::write(paths["state"].join(".agent-home/cache/value"), "keep newer cache").unwrap();
+    fs::write(
+        paths["state"].join(".agent-home/cache/value"),
+        "keep newer cache",
+    )
+    .unwrap();
     let stored = stored_files(&files);
     files.preflight_roots(&paths, &version).unwrap();
     files.materialize_roots(&paths, &version).unwrap();
     files.verify_roots(&paths, &version).unwrap();
-    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-    assert_eq!(fs::read_to_string(paths["state"].join(".agent-home/cache/value")).unwrap(), "keep newer cache");
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        fs::read_to_string(paths["state"].join(".agent-home/cache/value")).unwrap(),
+        "keep newer cache"
+    );
     assert_eq!(stored_files(&files), stored);
 }
 
@@ -264,26 +322,42 @@ fn rooted_unrelated_skipped_links_and_cache_do_not_prevent_valid_recovery() {
 fn rooted_corrupt_blob_refuses_read_only_preflight_and_preserves_both_live_roots() {
     let (_temp, files, paths, layouts) = fixture();
     let version = Uuid::new_v4().to_string();
-    files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+    files
+        .capture_roots(&paths, &layouts, &version, &[])
+        .unwrap();
     let record = files.load(&version).unwrap();
-    let Entry::File { blob, .. } =
-        &record.rooted.unwrap().roots["workspace"].entries["env/value"]
-    else { panic!() };
+    let Entry::File { blob, .. } = &record.rooted.unwrap().roots["workspace"].entries["env/value"]
+    else {
+        panic!()
+    };
     let blob_path = files.blob_path(blob).unwrap();
     // Preserve size and mtime: neither may authorize skipping byte validation.
     let modified = fs::metadata(&blob_path).unwrap().modified().unwrap();
     fs::write(&blob_path, "damaged!!").unwrap();
-    fs::File::options().write(true).open(&blob_path).unwrap()
-        .set_modified(modified).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&blob_path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
     for path in paths.values() {
         fs::write(path.join("env/value"), "keep partial").unwrap();
     }
     let stored = stored_files(&files);
-    assert!(files.preflight_roots(&paths, &version).unwrap_err().contains("Damaged workspace file blob"));
-    assert!(files.materialize_roots(&paths, &version).unwrap_err().contains("Damaged workspace file blob"));
+    assert!(files
+        .preflight_roots(&paths, &version)
+        .unwrap_err()
+        .contains("Damaged workspace file blob"));
+    assert!(files
+        .materialize_roots(&paths, &version)
+        .unwrap_err()
+        .contains("Damaged workspace file blob"));
     assert_eq!(stored_files(&files), stored);
     for path in paths.values() {
-        assert_eq!(fs::read_to_string(path.join("env/value")).unwrap(), "keep partial");
+        assert_eq!(
+            fs::read_to_string(path.join("env/value")).unwrap(),
+            "keep partial"
+        );
     }
 }
 
@@ -318,7 +392,9 @@ fn managed_recovery_preflight_benchmark() {
                 }
             }
             let version = Uuid::new_v4().to_string();
-            files.capture_roots(&paths, &layouts, &version, &[]).unwrap();
+            files
+                .capture_roots(&paths, &layouts, &version, &[])
+                .unwrap();
             for path in paths.values() {
                 for index in 0..count {
                     let path = path.join(format!("env/dependency-{index:04}"));
@@ -333,19 +409,27 @@ fn managed_recovery_preflight_benchmark() {
             let preflight_ms = start.elapsed().as_secs_f64() * 1000.0;
             let after_preflight = store_size(&files);
             // Preflight must leave the dirty live view intact.
-            assert_eq!(fs::read(paths["workspace"].join("env/dependency-0000")).unwrap()[0], b'!');
+            assert_eq!(
+                fs::read(paths["workspace"].join("env/dependency-0000")).unwrap()[0],
+                b'!'
+            );
             let start = Instant::now();
             files.materialize_roots(&paths, &version).unwrap();
             let materialize_ms = start.elapsed().as_secs_f64() * 1000.0;
             files.verify_roots(&paths, &version).unwrap();
-            samples.push(serde_json::json!({"filesPerRoot":count,"bytesPerFile":bytes,"sample":sample,
+            samples.push(
+                serde_json::json!({"filesPerRoot":count,"bytesPerFile":bytes,"sample":sample,
                 "preflightMs":preflight_ms,"materializeMs":materialize_ms,"storeBefore":before,
-                "storeAfterPreflight":after_preflight,"storeAfterMaterialize":store_size(&files)}));
+                "storeAfterPreflight":after_preflight,"storeAfterMaterialize":store_size(&files)}),
+            );
         }
     }
-    println!("GRAPHER_MANAGED_RECOVERY_PROBE {}", serde_json::json!({"schema":1,
+    println!(
+        "GRAPHER_MANAGED_RECOVERY_PROBE {}",
+        serde_json::json!({"schema":1,
         "platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"samples":samples,
-        "limits":"warm filesystem cache; test profile; logical bytes; excludes project Git preparation, child resources and native sandbox acceptance"}));
+        "limits":"warm filesystem cache; test profile; logical bytes; excludes project Git preparation, child resources and native sandbox acceptance"})
+    );
 }
 
 #[test]
@@ -456,8 +540,9 @@ fn rooted_case_aliased_scope_coverage_keeps_one_rooted_copy() {
 }
 
 #[test]
-fn rooted_extension_does_not_change_legacy_json_or_checksum() {
+fn snapshot_schema_and_root_coverage_are_integrity_protected() {
     let value = Version {
+        schema: 1,
         head: "head".into(),
         parents: vec![],
         entries: Entries::new(),
@@ -466,11 +551,11 @@ fn rooted_extension_does_not_change_legacy_json_or_checksum() {
     };
     assert_eq!(
         serde_json::to_string(&value).unwrap(),
-        r#"{"head":"head","parents":[],"entries":{},"checksum":null}"#
+        r#"{"schema":1,"head":"head","parents":[],"entries":{},"checksum":null}"#
     );
     assert_eq!(
         value.checksum().unwrap(),
-        git2::Oid::hash_object(git2::ObjectType::Blob, br#"["head",[],{}]"#)
+        git2::Oid::hash_object(git2::ObjectType::Blob, br#"[1,"head",[],{},null]"#)
             .unwrap()
             .to_string()
     );
@@ -480,7 +565,14 @@ fn rooted_extension_does_not_change_legacy_json_or_checksum() {
         .capture_roots(&paths, &layouts, &version, &[])
         .unwrap();
     let path = files.version_path(&version).unwrap();
-    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let original = fs::read(&path).unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    value.as_object_mut().unwrap().remove("schema");
+    let unsupported = serde_json::to_vec(&value).unwrap();
+    fs::write(&path, &unsupported).unwrap();
+    assert!(files.validate_manifest(&version).is_err());
+    assert_eq!(fs::read(&path).unwrap(), unsupported);
+    let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
     value["rooted"]["roots"]
         .as_object_mut()
         .unwrap()

@@ -290,6 +290,4 @@ test("a Planner steer send has exactly one owner", () => {
     "an RPC rejection delivered nothing, so its text goes back to the input");
   assert.equal(plannerSteerOwner({ recorded: false, status: "unknown" }), "composer",
     "a submission the durable record never showed is still the user's draft");
-  assert.equal(plannerSteerOwner({ recorded: false, legacy: true }), "pending",
-    "an older backend without request IDs keeps its optimistic behavior");
 });

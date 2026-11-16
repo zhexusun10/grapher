@@ -8,7 +8,6 @@ export const GRAPH_COLLAPSE_OVERSHOOT_PX = 48;
 const MIN_GRAPH_PANE_WIDTH = 320;
 
 export const SPLIT_RATIO_STORAGE_KEY = "grapher_workbench_split_ratio";
-export const LEGACY_WIDTH_STORAGE_KEY = "grapher_pane_width";
 
 export function getStoredRatio(storage?: Pick<Storage, "getItem">): number {
   try {
@@ -19,14 +18,6 @@ export function getStoredRatio(storage?: Pick<Storage, "getItem">): number {
       const parsed = parseFloat(savedRatio);
       if (Number.isFinite(parsed) && parsed > 0 && parsed < 1) {
         return Math.max(MIN_SPLIT_RATIO, Math.min(MAX_SPLIT_RATIO, parsed));
-      }
-    }
-    const savedWidth = store.getItem(LEGACY_WIDTH_STORAGE_KEY);
-    if (savedWidth !== null) {
-      const parsedWidth = parseFloat(savedWidth);
-      if (Number.isFinite(parsedWidth) && parsedWidth > 0) {
-        const estimatedRatio = parsedWidth / 1200;
-        return Math.max(MIN_SPLIT_RATIO, Math.min(MAX_SPLIT_RATIO, estimatedRatio));
       }
     }
   } catch {
@@ -40,7 +31,6 @@ export function persistRatio(ratio: number, storage?: Pick<Storage, "setItem">):
     const store = storage ?? (typeof localStorage === "undefined" ? undefined : localStorage);
     if (!store) return;
     store.setItem(SPLIT_RATIO_STORAGE_KEY, String(ratio));
-    store.setItem(LEGACY_WIDTH_STORAGE_KEY, String(Math.round(ratio * 1200)));
   } catch {
     // ignore storage access errors
   }

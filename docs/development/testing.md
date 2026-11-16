@@ -48,7 +48,9 @@ Files stay at their existing paths so fixtures, Rust `include_str!` callers and 
 | `benchmark/test_*.py` | Harbor adapter tests; see [Harbor](../benchmarks/harbor.md#adapter-tests). |
 | `scripts/dev.mjs`, `pi-baseline.mjs`, `cargo.mjs`, `package-release.mjs` | Setup, launch and build/release tooling, not tests. |
 | `probe:*`, `scripts/readme-screenshots.mjs`, `scripts/planning-trajectory.mjs` | Opt-in diagnostics/evidence generation, not default validation. |
-| `clean:stale`, `cleanup:workspaces`, `compact`, `migrate` | Explicit maintenance commands; never run these as test cleanup. |
+| `clean:stale`, `cleanup:workspaces` | Explicit maintenance commands; never run these as test cleanup. |
+
+Browser fixtures use the current wire contract. [current-api.mjs](../../scripts/fixtures/current-api.mjs) builds conversation summaries, scoped log pages with `startOffset`, and file-change responses with explicit scope and summary counters. Full output in a synthetic fixture is backing log data; expose its byte count and serve pages through the mocked API. Completed model/thinking labels need recorded metrics. Keep old-format rejection cases separate from these current response builders.
 
 ## Build isolation
 
@@ -71,12 +73,12 @@ node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-feat
 node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-features --features fixture --lib rooted_result_reconstructs_missing_w -- --test-threads=1
 ```
 
-The first two cover old checksum/JSON compatibility, all-root preflight, missing
+The first two cover versioned checksums, unsupported-format refusal, all-root preflight, missing
 blobs, root/coverage mismatch, unbound ownership, recorded absence and preserved
 partial retries. They also cover a skipped/unresolvable link at a recorded leaf,
 retained cache/link descendants blocking a file replacement before either root
 changes, and successful sibling recovery without deleting those live entries.
-Legacy predecessor cleanup cannot delete/traverse skipped links. These are
+Retained predecessor cleanup cannot delete/traverse skipped links. These are
 recovery regressions, not evidence that omitted link targets are restorable.
 The terminal check uses actual native venvs and interpreter/
 prefix/ABI validation for W and S restoration, with named result descriptors;
@@ -85,7 +87,8 @@ historical execution results. Neither validates host/source compatibility or
 native sandbox permissions. Existing `environment::tests::history_` checks
 retain legacy refusal coverage.
 The [contract](../architecture/native-environments.md#current-state-historical-evidence-and-ownership)
-distinguishes old single-root ownership from new root-qualified byte evidence.
+distinguishes current single-root snapshots from root-qualified byte evidence;
+retired manifest and launch formats are rejected.
 
 ### Native runtime recovery evidence
 
@@ -97,11 +100,11 @@ node scripts/cargo.mjs test --manifest-path backend/Cargo.toml --no-default-feat
 ```
 
 Choose the changed boundary rather than running all groups by default. The first checks protocol/old
-ABI byte preservation, old binding JSON, root-qualified E versus ownership/cache
+ABI byte preservation, missing binding root/evidence refusal, root-qualified E versus ownership/cache
 proof, full-byte external changes at the same size/mtime, missing roots, redirected
 root/file paths and sibling-slot refusal through both physical W and trusted W
 aliases, including aliased enclosing workspace buckets. A real native-module
-fixture also distinguishes legacy ABI-only startup from new-evidence admission
+fixture also distinguishes retired ABI-only binding refusal from current-evidence admission
 without weakening the old ABI comparison. Selector cases cover schema-1 byte/JSON
 compatibility, schema-2 original references, equivalent intermediate aliases,
 equal-byte retargets, missing W/S with owned-link continuations, bounded metadata
@@ -134,7 +137,7 @@ is deferred without reading live files or claiming early byte verification;
 prepared-file checks still decide those paths. `rooted_runtime_code_tests` injects a new stale
 L only into copied history/result/descriptor worker inputs and also checks a
 changed composed codeRef; known byte mismatches must preserve partial W/S or keep
-missing W absent. Old evidence formats retain their previous checks.
+missing W absent. Supported evidence schemas retain their checks.
 
 The `rooted_` group includes real native venvs: remove their captured interpreter bin
 folders, preflight without running those broken prefixes, restore W/S and verify
@@ -410,7 +413,7 @@ are no timing assertions.
 | `test:merger`, `test:bindings` | Git composition/publication and project binding/routing. |
 | `test:hardening`, `test:windows-native`, `test:macos-browser` | Production HTTP/filesystem or host-specific acceptance; macOS browser acceptance also needs a browser. |
 | `test:concurrent` | Fixture HTTP concurrency; needs `/bin/sh`, skipped on Windows. |
-| `test:conversation-acceptance` | Large-log migration/stress; see [prerequisites](conversation-logs.md#acceptance-prerequisites). |
+| `test:conversation-acceptance` | Current-format logs, restart and browser acceptance; see [prerequisites](conversation-logs.md#acceptance-prerequisites). |
 
 Native suites need the real [platform boundary](../architecture/filesystem-isolation.md#platform-boundaries): bubblewrap/permitted namespaces on Linux, Seatbelt on macOS. Windows environment tests accept `GRAPHER_ENV_TEST_PARENT` for a short path. Environment-native, environment-chain and node-Merger fixtures seed historical runs to test retained private-workspace compatibility; new adaptive behavior lives in workspace-policy/batch tests and shared-native acceptance.
 

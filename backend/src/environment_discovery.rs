@@ -50,12 +50,10 @@ pub struct Binding {
     pub kind: String,
     pub prefix: String,
     pub abi: String,
-    /// Ownership root for `prefix`: the visible project workspace or the
-    /// external process-state root. Omitted only by pre-dual-root records.
+    /// Ownership root for `prefix`, explicit in every bound launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
-    /// Bounded native files observed with the ABI proof. Old L keeps None and
-    /// its original checksum; never synthesize missing historical evidence.
+    /// Bounded native files observed with the ABI proof. Required when bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_evidence: Option<RuntimeEvidence>,
 }
@@ -68,16 +66,13 @@ impl Binding {
         {
             return Err("Invalid discovered native environment binding".into());
         }
-        if self
-            .root
-            .as_deref()
-            .is_some_and(|root| !matches!(root, "workspace" | "state"))
-        {
-            return Err("Invalid discovered native environment root".into());
+        if !matches!(self.root.as_deref(), Some("workspace" | "state")) {
+            return Err("Invalid or missing discovered native environment root".into());
         }
-        if let Some(evidence) = &self.runtime_evidence {
-            evidence.validate()?;
-        }
+        self.runtime_evidence
+            .as_ref()
+            .ok_or("Bound native environment lacks runtime file evidence")?
+            .validate()?;
         Ok(())
     }
 }
@@ -281,8 +276,8 @@ pub(crate) fn context_with_source(
 ) -> Result<PathBuf, String> {
     Uuid::parse_str(generation).map_err(|_| "Invalid discovery writer generation")?;
     let file = session.join(format!("environment-observer-{generation}.json"));
-    let mut context = Context {
-        schema: 1,
+    let context = Context {
+        schema: 2,
         workspace: text(&canonical(workspace)?),
         source: source.map(canonical).transpose()?.map(|path| text(&path)),
         state: state.map(canonical).transpose()?.map(|path| text(&path)),
@@ -294,16 +289,7 @@ pub(crate) fn context_with_source(
     if file.exists() {
         let saved = fs::read(&file).map_err(|e| e.to_string())?;
         if saved != bytes {
-            // A resumed pre-guard generation keeps its immutable context. This
-            // compatibility exception cannot change any other recorded input.
-            let previous: Context = serde_json::from_slice(&saved).map_err(|e| e.to_string())?;
-            if previous.source.is_some() {
-                return Err("Discovery writer context changed within a generation".into());
-            }
-            context.source = None;
-            if previous != context {
-                return Err("Discovery writer context changed within a generation".into());
-            }
+            return Err("Discovery writer context changed within a generation".into());
         }
     } else {
         write(&file, &bytes)?;
@@ -757,7 +743,7 @@ pub fn tool(args: Vec<String>) -> Result<i32, String> {
     let file = PathBuf::from(&args[0]);
     let ctx: Context = serde_json::from_slice(&fs::read(&file).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
-    if ctx.schema != 1 {
+    if ctx.schema != 2 {
         return Err("Unsupported environment observer protocol".into());
     }
     Uuid::parse_str(&ctx.generation).map_err(|_| "Invalid environment observer generation")?;
@@ -1134,7 +1120,7 @@ fn verify(
     root_paths: &[(&str, &Path)],
     runtime_schema: Option<u32>,
 ) -> Result<Binding, String> {
-    if !matches!(runtime_schema, None | Some(1 | 2 | 3)) {
+    if !matches!(runtime_schema, Some(1 | 2 | 3)) {
         return Err("Unsupported native runtime evidence schema".into());
     }
     let path = root.join(prefix);
@@ -1262,15 +1248,9 @@ print(json.dumps({'version':sys.version,'abi':sysconfig.get_config_var('SOABI'),
     }
     command.env("PYTHONDONTWRITEBYTECODE", "1");
     let output = environment::controlled_output(command)?;
-    // Old L is checked by its original native ABI contract. Do not construct
-    // new recovery evidence (and apply its new admission rules) just to discard
-    // it afterwards. New discoveries always request full evidence below.
-    let (runtime_evidence, abi_output) = if runtime_schema.is_some() {
-        let (evidence, abi) = RuntimeEvidence::from_probe(&output, root_paths)?;
-        (Some(evidence), abi)
-    } else {
-        (None, output)
-    };
+    // Every bound launch supplies its recorded runtime evidence schema.
+    let (evidence, abi_output) = RuntimeEvidence::from_probe(&output, root_paths)?;
+    let runtime_evidence = Some(evidence);
     let abi = git2::Oid::hash_object(git2::ObjectType::Blob, &abi_output)
         .map_err(|e| e.to_string())?
         .to_string();
@@ -1299,6 +1279,7 @@ pub(crate) fn validate_launch_with_state(
     project_requirements: bool,
 ) -> Result<(), String> {
     if let Some(expected) = &launch.environment {
+        expected.validate()?;
         let roots = roots(workspace, state);
         let label = binding_root_label(launch, &roots).to_string();
         let root = root_for(&roots, &label)?;
@@ -1325,11 +1306,6 @@ pub(crate) fn validate_launch_with_state(
             // Selector paths constrain historical recovery, not an otherwise
             // identical real startup. Do not rewrite the stored L in either case.
             actual.runtime_evidence = Some(recorded.clone());
-        }
-        // Validate legacy records by their recorded contract, without rewriting
-        // L/ABI or retrofitting newly observed files into historical evidence.
-        if expected.root.is_none() {
-            actual.root = None;
         }
         if actual != *expected {
             return Err(
@@ -1381,6 +1357,7 @@ pub(crate) fn resolve_for_policy_with_state(
     best_effort: bool,
 ) -> Result<LaunchConfig, String> {
     let roots = roots(workspace, state);
+    launch.validate()?;
     let directory = session.join("environment-observations").join(generation);
     let mut candidates = BTreeMap::<(String, String), String>::new();
     let mut external_selected = false;
@@ -1435,11 +1412,10 @@ pub(crate) fn resolve_for_policy_with_state(
                     );
                 }
                 environment::safe_relative(&receipt.prefix)?;
-                let label = receipt.root.as_deref().unwrap_or(if launch.state_bound() {
-                    "state"
-                } else {
-                    "workspace"
-                });
+                let label = receipt
+                    .root
+                    .as_deref()
+                    .ok_or("Native environment receipt lacks its ownership root")?;
                 if !matches!(label, "workspace" | "state") {
                     return Err("Invalid native environment receipt root".into());
                 }
@@ -1532,27 +1508,11 @@ pub(crate) fn resolve_for_policy_with_state(
         }
     }
     let mut next = launch.clone();
-    // Version new ownership evidence in L, not the frozen policy. Legacy
-    // single-root records stay readable; a dual-root discovery must never
-    // collapse equal relative names from W and S into one scope.
-    if state.is_some() && next.owned_scopes.is_none() {
-        let root = binding_root_label(launch, &roots);
-        next.owned_scopes = Some(
-            next.managed_scopes
-                .drain(..)
-                .map(|path| EnvironmentScope {
-                    root: root.into(),
-                    path,
-                })
-                .collect(),
-        );
-    }
+    // New observations always retain root-qualified ownership.
+    next.owned_scopes.get_or_insert_with(Vec::new);
     if best_effort {
         if let Some(scopes) = &mut next.owned_scopes {
             scopes.extend(discovered_scopes);
-        } else {
-            next.managed_scopes
-                .extend(discovered_scopes.into_iter().map(|scope| scope.path));
         }
         next.ambient_hints = ambient_hints;
     }
@@ -1567,9 +1527,6 @@ pub(crate) fn resolve_for_policy_with_state(
         }
         scopes.sort();
         scopes.dedup();
-    } else {
-        next.managed_scopes.sort();
-        next.managed_scopes.dedup();
     }
     if best_effort && external_selected {
         return unbound_launch(&next);
@@ -1646,10 +1603,6 @@ pub(crate) fn resolve_for_policy_with_state(
             });
             scopes.sort();
             scopes.dedup();
-        } else {
-            next.managed_scopes.push(prefix);
-            next.managed_scopes.sort();
-            next.managed_scopes.dedup();
         }
     } else if let Some(binding) = &launch.environment {
         let root_label = binding_root_label(launch, &roots).to_string();
@@ -1709,13 +1662,13 @@ mod tests {
     }
 
     #[test]
-    fn observer_source_binding_is_immutable_and_legacy_contexts_are_not_rewritten() {
+    fn observer_source_binding_is_immutable_and_missing_source_cannot_be_adopted() {
         let (temp, root, session, launch, generation) = setup();
         let source = temp.path().join("source");
         fs::create_dir_all(&source).unwrap();
         let file = session.join(format!("environment-observer-{generation}.json"));
         let legacy = fs::read(&file).unwrap();
-        context_with_source(
+        assert!(context_with_source(
             &root,
             None,
             Some(&source),
@@ -1724,7 +1677,7 @@ mod tests {
             &session,
             false,
         )
-        .unwrap();
+        .is_err());
         assert_eq!(fs::read(&file).unwrap(), legacy);
         let mut changed = launch.clone();
         changed
@@ -2330,7 +2283,7 @@ mod tests {
         assert_ne!(next, launch);
         validate_launch(&root, &next, true).unwrap();
         let mut damaged = next.clone();
-        damaged.environment.as_mut().unwrap().abi = "changed".into();
+        damaged.environment.as_mut().unwrap().abi = "a".repeat(40);
         assert!(validate_launch(&root, &damaged, true)
             .unwrap_err()
             .contains("unsafe startup"));

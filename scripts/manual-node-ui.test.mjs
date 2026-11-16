@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureSummaries, fixtureFileChanges } from "./fixtures/current-api.mjs";
 import test from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
@@ -34,7 +35,8 @@ test("returning from node creation keeps Planner history scrollable and restores
       const body = route.request().postDataJSON();
       let result;
       switch (command) {
-        case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], repositoryInfo: { path: repository, name: "Project", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+        case "bootstrap": result = { config, snapshot: empty, runs: [snapshot.runId], conversations: fixtureSummaries([snapshot]), repositoryInfo: { path: repository, name: "Project", branch: "main", head: "", clean: true }, dataPath: "/mock" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
         case "history": case "snapshot": case "load_run": result = snapshot; break;
         case "snapshot_if_changed": result = { version: "1", snapshot: null }; break;
         case "repository_status": result = { repository, valid: true, error: null }; break;
@@ -206,7 +208,8 @@ test("graph background menu creates nodes with explicit completed-result confirm
       const body = route.request().postDataJSON();
       let result;
       switch (command) {
-        case "bootstrap": result = { config, snapshot: empty, runs: ["graph-a"], repositoryInfo, dataPath: "/mock/.grapher" }; break;
+        case "bootstrap": result = { config, snapshot: empty, runs: ["graph-a"], conversations: fixtureSummaries([snapshot]), repositoryInfo, dataPath: "/mock/.grapher" }; break;
+        case "get_file_changes": result = fixtureFileChanges(body); break;
         case "history": case "snapshot": case "load_run": result = snapshot; break;
         case "snapshot_if_changed": result = { version: String(requests.length), snapshot }; break;
         case "repository_status": result = { repository, valid: true, error: null }; break;

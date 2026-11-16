@@ -104,26 +104,6 @@ pub(crate) fn prepared_runtime() -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|error| format!("Cannot resolve Grapher installation root: {error}"))?;
     let runtime_parent = crate::workspace::native_runtime_parent();
-    // Recover marked, unused per-backend copies from the old desktop/project
-    // default too. Unmarked copies still require explicit offline opt-in.
-    if std::env::var_os("GRAPHER_NATIVE_RUNTIME_PARENT").is_none() {
-        if let Some(parent) = installation.parent() {
-            match crate::native_runtime_storage::unused_with_cancel(
-                &parent.join(".grapher-workspaces"),
-                false,
-                || RUNTIME_SHUTTING_DOWN.load(Ordering::SeqCst),
-            ) {
-                Ok(copies) => {
-                    for copy in copies {
-                        if let Err(error) = crate::native_runtime_storage::remove(&copy) {
-                            eprintln!("[Grapher] {error}");
-                        }
-                    }
-                }
-                Err(error) => eprintln!("[Grapher] Cannot clean legacy native runtimes: {error}"),
-            }
-        }
-    }
     let key = run_runtime_preparation(&installation, &runtime_parent, None, None)?;
     let runtime = crate::native_runtime_storage::get_or_prepare_verified(
         &runtime_parent,
@@ -1111,8 +1091,12 @@ mod tests {
         crate::workspace::git(&private, &["init", "-q"]).unwrap();
         crate::workspace::git(&private, &["commit", "--allow-empty", "-qm", "base"]).unwrap();
         let error = validate_workspace(PiRole::Planner, &source, &private).unwrap_err();
-        assert!(error.contains("source-equivalent"), "{error}");
-        let private = private.with_file_name("planner-v2");
+        assert!(error.contains("private Git"), "{error}");
+        let private = temp
+            .path()
+            .join(".grapher-worktrees")
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("planner");
         let input = crate::workspace::materialize_shadow_repo(&source, &[]).unwrap();
         crate::workspace::prepare(&source, &private, &input, &[]).unwrap();
         validate_workspace(PiRole::Planner, &source, &private).unwrap();
@@ -1137,11 +1121,9 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         assert!(validate_workspace(PiRole::Merger, &source, &source).is_ok());
-        for relative in [
-            ".grapher-worktrees/run/node",
-            ".grapher-workspaces/run/preview",
-        ] {
-            let private = temp.path().join(relative);
+        let run = uuid::Uuid::new_v4().to_string();
+        for name in ["node", "planner"] {
+            let private = temp.path().join(".grapher-worktrees").join(&run).join(name);
             fs::create_dir_all(&private).unwrap();
             assert!(validate_workspace(PiRole::Merger, &source, &private)
                 .unwrap_err()

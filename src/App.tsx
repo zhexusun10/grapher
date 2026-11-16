@@ -37,7 +37,6 @@ import {
   applyPlannerToolExecutionEnd, applyPlannerToolExecutionStart, applyPlannerUserMessageStart,
   initialPlannerStream,
 } from "./services/plannerStream";
-import { mapWithConcurrency } from "./services/boundedRequests";
 import { useSnapshotState } from "./hooks/useSnapshotState";
 import { useConversationTranscriptCache } from "./hooks/useConversationTranscriptCache";
 import { useFrameBatchedState } from "./hooks/useFrameBatchedState";
@@ -53,7 +52,7 @@ import { nodeInstructionText, steerRollbackKey } from "./lib/pendingSteers";
 import { useSnapshotPolling } from "./hooks/useSnapshotPolling";
 import { useRunIndicators } from "./hooks/useRunIndicators";
 import { Sidebar } from "./components/layout/Sidebar";
-import { bindRunToWorkspace, mergeValidatedWorkspaceRuns, normalizeWorkspacePath, normalizeWorkspaceRuns, reconcileWorkspaceRuns, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "./services/workspaceConversations";
+import { bindRunToWorkspace, normalizeWorkspacePath, snapshotBelongsToWorkspace, workspaceKey, workspaceRunsFromSummaries } from "./services/workspaceConversations";
 import { loadLandingDraft, saveLandingDraft, clearLandingDraft } from "./services/landingDraft";
 import { useHideAutoMode, useLandingBackground } from "./services/displayPreferences";
 import { STORAGE_KEYS, readStorageJson, readStorageString, writeStorageJson, writeStorageString } from "./services/appStorage";
@@ -77,15 +76,10 @@ function snapshotModelConfig(snapshot: Snapshot | null | undefined, repository: 
   if (snapshot.modelConfig) return snapshot.modelConfig;
   const config = snapshot.config;
   if (!config) return null;
-  // Older checkpoints may only carry per-node Node Agent overrides.
-  const nodeSettings = Object.values(snapshot.nodes ?? {})
-    .find(node => node.modelConfig && !node.modelOverride)?.modelConfig;
   return {
     model: config.model,
     thinkingLevel: config.thinkingLevel,
-    roleModels: nodeSettings
-      ? { ...config.roleModels, nodeAgent: nodeSettings }
-      : config.roleModels,
+    roleModels: config.roleModels,
   };
 }
 
@@ -178,24 +172,12 @@ export default function App() {
   const busyOperations = useRef(0);
   const [switchingProjectPath, setSwitchingProjectPath] = useState<string | null>(null);
   const [loadingRunId, setLoadingRunId] = useState<string | null>(null);
-  // Warm initial cache with stored workspace runs to prevent initial skeleton flash.
-  // Bootstrap subsequently repairs ownership and updates persisted lists.
-  const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>(() => {
-    const saved = readStorageJson(STORAGE_KEYS.workspaceRuns);
-    return saved ? normalizeWorkspaceRuns(saved) : {};
-  });
-  const [isSidebarReady, setIsSidebarReady] = useState(() => {
-    const parsedProjects = readStorageJson(STORAGE_KEYS.projects);
-    if (!parsedProjects) return false;
-    if (!Array.isArray(parsedProjects) || parsedProjects.length === 0) return true;
-    const parsedRuns = readStorageJson(STORAGE_KEYS.workspaceRuns);
-    if (parsedRuns) {
-      const sorted = [...parsedProjects].sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
-      const active = sorted[0];
-      if (active && parsedRuns[workspaceKey(active.path)] !== undefined) return true;
-    }
-    return false;
-  });
+  // Wait for the backend's data-directory identity and authoritative index.
+  const [workspaceRuns, setWorkspaceRuns] = useState<Record<string, string[]>>({});
+  // Current cache IDs only suppress re-entry motion after the index validates a
+  // card; they never render a card or trigger a history read before bootstrap.
+  const [initialRunIds] = useState(() => readStorageJson(STORAGE_KEYS.workspaceRuns)?.[workspaceKey(config.repository)] ?? []);
+  const [isSidebarReady, setIsSidebarReady] = useState(false);
   const [isBootstrapReady, setIsBootstrapReady] = useState(false);
   // Settings can be ready before compatibility indexing and foreground restore.
   // Directory discovery must not race either into choosing the startup view.
@@ -207,14 +189,8 @@ export default function App() {
   // A Settings refresh belongs to one opening. Closing, reopening or saving
   // supersedes its read even when the foreground Run has not changed.
   const settingsReadGeneration = useRef(0);
-  const [runLabels, setRunLabels] = useState<Record<string, string>>(
-    () => readStorageJson(STORAGE_KEYS.runLabels) ?? {}
-  );
-  const [runModes, setRunModes] = useState<Record<string, PlanMode>>(
-    () => readStorageJson(STORAGE_KEYS.runModes) ?? {}
-  );
-  const hasConversationSummariesRef = useRef(false);
-  const pendingRunLabelIdsRef = useRef(new Set<string>());
+  const [runLabels, setRunLabels] = useState<Record<string, string>>({});
+  const [runModes, setRunModes] = useState<Record<string, PlanMode>>({});
   const deletedRunIdsRef = useRef(new Set<string>());
 
   const [recentlyAddedEdgeIds, setRecentlyAddedEdgeIds] = useState<Set<string>>(new Set());
@@ -226,31 +202,6 @@ export default function App() {
   const currentRepoPath = useMemo(() => workspaceKey(config.repository), [config.repository]);
   const runs = useMemo(() => workspaceRuns[currentRepoPath] || [], [workspaceRuns, currentRepoPath]);
 
-  useEffect(() => {
-    if (!isBootstrapReady || hasConversationSummariesRef.current) return;
-    const missing = runs.filter(id => !id.startsWith("pending-") && !(id in runLabels) && !pendingRunLabelIdsRef.current.has(id));
-    if (missing.length > 0) {
-      missing.forEach(id => pendingRunLabelIdsRef.current.add(id));
-      mapWithConcurrency(missing, 8, id =>
-        runtimeService.history(id)
-          .then(snapshot => [id, snapshot.title?.trim() || snapshot.graph.originalGoal || ""] as const)
-          .catch(() => [id, ""] as const)
-      ).then(results => {
-        setRunLabels(prev => {
-          const updated = { ...prev };
-          for (const [id, goal] of results) {
-            if (updated[id] === undefined && !deletedRunIdsRef.current.has(id)) {
-              updated[id] = goal;
-            }
-          }
-          writeStorageJson(STORAGE_KEYS.runLabels, updated);
-          return updated;
-        });
-      }).finally(() => {
-        missing.forEach(id => pendingRunLabelIdsRef.current.delete(id));
-      });
-    }
-  }, [runs, runLabels, runtimeService, isBootstrapReady]);
   const { runIndicators, markSnapshotRead, clearRunUnread, observeRunSnapshot, observeRunSummary } = useRunIndicators(state);
   const syncRunLabelFromSnapshot = useCallback((snapshot: Snapshot) => {
     if (!snapshot.runId || snapshot.runId.startsWith("pending-")) return;
@@ -528,11 +479,8 @@ export default function App() {
   }, []);
 
   const [plannerStream, setPlannerStream, queuePlannerStream] = useFrameBatchedState(initialPlannerStream);
-  // Legacy/orphaned Planner histories may be visible before a Run is recovered.
-  // They still need an owner so leaving the Conversation releases their RAM.
-  const visiblePlanningId = recoveredPlanning?.planningId || failedPlanning?.planningId || state.planningId || state.planning?.planningId;
-  const transcriptRunId = state.runId || plannerStream.runId || recoveredPlanning?.runId || failedPlanning?.runId || state.planning?.runId ||
-    (visiblePlanningId ? `planning@${visiblePlanningId}` : "");
+  // Initial live planning carries its provisional Run identity.
+  const transcriptRunId = state.runId || plannerStream.runId || recoveredPlanning?.runId || failedPlanning?.runId || state.planning?.runId || "";
   useConversationTranscriptCache(transcriptRunId);
   const setBackendStatus = useSnapshotPolling(setState, observePolledSnapshot, observeActivity, allRunIds, state.runId, state.phase, hasActiveExecutions,
     // While a live Planner SSE stream owns this Run's draft topology, durable
@@ -789,11 +737,7 @@ export default function App() {
           const events = snapshot.events ?? [];
           const submitted = events.some(event => event.type === "planner_steer_submitted" && event.request_id === message.plannerSteerId);
           const latest = [...events].reverse().find(event => event.type === "planner_steer_status" && event.request_id === message.plannerSteerId);
-          // An older backend ignores the request ID and has no durable
-          // submission. Keep its established optimistic behavior instead of
-          // reporting a delivery that this client cannot verify.
-          const legacy = !events.some(event => event.request_id === message.plannerSteerId);
-          const status: ChatMessage["plannerSteerStatus"] | undefined = legacy ? undefined : !submitted ? "unknown"
+          const status: ChatMessage["plannerSteerStatus"] | undefined = !submitted ? "unknown"
             : latest?.status === "queued" || latest?.status === "accepted" || latest?.status === "consumed" || latest?.status === "handled" || latest?.status === "failed" || latest?.status === "unknown"
               ? latest.status : "submitted";
           // A send the reader left behind is owned by the durable record: the
@@ -801,13 +745,13 @@ export default function App() {
           if (!isCurrent()) { removeMessage(message); return false; }
           // A rejected or unrecorded submission never became a Planner turn, so
           // it is still the user's draft rather than a delivered message.
-          if (plannerSteerOwner({ recorded: submitted, status, legacy }) === "composer") {
+          if (plannerSteerOwner({ recorded: submitted, status }) === "composer") {
             return revertToComposer(latest?.error
               ? t("提交失败：{0}", localizeError(latest.error))
               : t("Planner 未接收这条消息，请检查后重试。"));
           }
           setSessionEntries(prev => prev.map(entry => entry.id === message.id
-            ? { ...entry, plannerSteerId: legacy ? undefined : entry.plannerSteerId, plannerSteerStatus: status, plannerSteerError: latest?.error } : entry));
+            ? { ...entry, plannerSteerStatus: status, plannerSteerError: latest?.error } : entry));
           return true;
         } catch (error) {
           if (!isCurrent()) { removeMessage(message); return false; }
@@ -969,7 +913,6 @@ export default function App() {
       });
     }
     setConfig(nextConfigObj);
-    hasConversationSummariesRef.current = Array.isArray(data.conversations);
     setIsBootstrapReady(true);
     // A retry may have overlapped an edit attempt that was rejected only
     // because settings were still loading. Do not leave that stale error up.
@@ -1040,86 +983,7 @@ export default function App() {
       setIsSidebarReady(true);
       if (data.snapshot.runId) setBackendStatus(data.snapshot);
     } else {
-      // Compatibility with older backends that do not expose the summary index.
-      // Local browser indexes can lag another tab or a restarted backend.
-      // Prioritize runs for the active workspace so the user sees their current
-      // conversation list immediately, without waiting for unrelated repositories.
-      const rawIndexedIds = [...new Set([...(data.runs || []), ...Object.values(storedWorkspaceRuns || {}).flat()])]
-        .filter(id => !id.startsWith("pending-"));
-      const activeRepoKey = workspaceKey(activeRepo);
-      const candidateActiveIds = new Set([
-        ...(data.snapshot.runId && snapshotBelongsToWorkspace(data.snapshot, activeRepo) ? [data.snapshot.runId] : []),
-        ...(storedWorkspaceRuns?.[activeRepoKey] || []),
-      ]);
-      const indexedIds = [
-        ...rawIndexedIds.filter(id => candidateActiveIds.has(id)),
-        ...rawIndexedIds.filter(id => !candidateActiveIds.has(id)),
-      ];
-
-      // If the active repository has no candidate runs, sidebar is ready immediately
-      // without stalling on foreign workspace histories.
-      if (candidateActiveIds.size === 0) {
-        setIsSidebarReady(true);
-      }
-
-      // Publish validated cards preserving canonical order, without letting one stalled
-      // history keep all cards loading or causing items to jump and re-order.
-      const validatedSnapshots = new Map<string, Snapshot>();
-      let publishScheduled = false;
-
-      const buildValidatedRuns = (): Record<string, string[]> => {
-        const result: Record<string, string[]> = {};
-        for (const snap of validatedSnapshots.values()) {
-          if (!snap.config?.repository) continue;
-          const owner = workspaceKey(snap.config.repository);
-          if (!result[owner]) result[owner] = [];
-        }
-        for (const owner of Object.keys(result)) {
-          result[owner] = indexedIds.filter(id => {
-            const snap = validatedSnapshots.get(id);
-            return snap && snapshotBelongsToWorkspace(snap, owner);
-          });
-        }
-        return result;
-      };
-
-      const schedulePublish = () => {
-        if (publishScheduled) return;
-        publishScheduled = true;
-        queueMicrotask(() => {
-          publishScheduled = false;
-          if (!planningRecovery.current(scope)) return;
-          const validatedRuns = buildValidatedRuns();
-          const activeRuns = validatedRuns[workspaceKey(activeRepo)] || [];
-          setWorkspaceRuns(prev => mergeValidatedWorkspaceRuns(prev, validatedRuns));
-          if (activeRuns.length > 0 || candidateActiveIds.size === 0) {
-            setIsSidebarReady(true);
-          }
-        });
-      };
-
-      const snapshots = await mapWithConcurrency(indexedIds, 8, async id => {
-        if (!planningRecovery.current(scope)) return null;
-        const snapshot = data.snapshot.runId === id ? data.snapshot : await runtimeService.history(id).catch(() => null);
-        if (!planningRecovery.current(scope) || !snapshot || snapshot.runId !== id) return null;
-        setBackendStatus(snapshot);
-        setRunLabels(prev => {
-          const label = snapshot.title?.trim() || snapshot.graph.originalGoal || "";
-          const next = label || prev[id] === undefined ? { ...prev, [id]: label } : prev;
-          writeStorageJson(STORAGE_KEYS.runLabels, next);
-          return next;
-        });
-        if (snapshot.config?.repository) {
-          validatedSnapshots.set(id, snapshot);
-          schedulePublish();
-        }
-        return snapshot;
-      });
-      if (!planningRecovery.current(scope)) return;
-      indexedRuns = reconcileWorkspaceRuns(storedWorkspaceRuns || {}, snapshots);
-      setWorkspaceRuns(indexedRuns);
-      writeStorageJson(STORAGE_KEYS.workspaceRuns, indexedRuns);
-      setIsSidebarReady(true);
+      throw new Error("Conversation index is unavailable");
     }
 
     const currentRuns = indexedRuns[workspaceKey(activeRepo)] || [];
@@ -1498,6 +1362,7 @@ export default function App() {
   // A new conversation is only a view change. The backend may still be
   // executing the previous Run; never reset or terminate it from this button.
   const handleNewConversation = () => {
+    setWorkbenchLoadKind("initial");
     detachForeground(config.repository);
     setConfig(prev => applyModelConfig(prev, defaultSettings));
     resetSessionMessages();
@@ -1552,7 +1417,6 @@ export default function App() {
     // Settings change models/defaults, not the selected workspace. Rediscovery
     // or Git status here can stall saving behind an unrelated large tree scan.
     const repoPath = normalizeWorkspacePath(config.repository.trim());
-    const info = repoInfo && workspaceKey(repoInfo.path) === workspaceKey(repoPath) ? repoInfo : null;
     if (generation !== foregroundGeneration.current) return false;
     const nextConfig = {
       ...draftConfig,
@@ -1592,20 +1456,12 @@ export default function App() {
     acceptedSettingsRef.current = nextConfig;
     setConfig(nextConfig);
     setIsBootstrapReady(true);
-    if (info) setRepoInfo({ ...info, path: repoPath });
     writeStorageJson(STORAGE_KEYS.config, applyModelConfig(nextConfig, persistedDefaults));
-    if (info) {
-      setProjects((prev) => {
-        const item: ProjectItem = { ...info, id: info.path, lastOpened: Date.now() };
-        const next = [item, ...prev.filter((project) => workspaceKey(project.path) !== workspaceKey(info.path))];
-        writeStorageJson(STORAGE_KEYS.projects, next);
-        return next;
-      });
-    }
+    // Saving settings never touches the workspace list or its order.
     setModal(null);
     setError("");
     return true;
-  }, [config.repository, repoInfo, state.runId, observeRunSnapshot, setState, defaultSettings]);
+  }, [config.repository, state.runId, observeRunSnapshot, setState, defaultSettings]);
 
   const saveComposerModels = async (scope: ComposerScope, settings: RoleModelConfig) => {
     if (!isBootstrapReady) throw new Error(t("正在加载后端设置，请稍后重试；若加载失败，请在侧边栏重试。"));
@@ -2780,8 +2636,8 @@ export default function App() {
     const abort = new AbortController();
     const current = () => !abort.signal.aborted && planningRecovery.current(scope);
     const belongsToView = (summary: PlanningSummary) =>
-      workspaceKey(summary.repository || "") === workspaceKey(repository) &&
-      (!runId || (summary.runId ? summary.runId === runId : summary.planningId === state.planningId));
+      !!summary.runId && workspaceKey(summary.repository || "") === workspaceKey(repository) &&
+      (!runId || summary.runId === runId);
     const applySnapshot = (snapshot: Snapshot) => {
       if (!current() || !snapshotBelongsToWorkspace(snapshot, repository) || (runId && snapshot.runId !== runId)) return false;
       if (snapshot.runId !== displayedRunIdRef.current) setSelected("");
@@ -2829,8 +2685,6 @@ export default function App() {
               if (!known && !applySnapshot(snapshot)) return;
               summary = restored;
             }
-            // Legacy pre-Run planning remains display-only: it has no topology
-            // to restore and must never be grafted onto another Run.
             planningId = summary.planningId;
             setRecoveredPlanning(summary);
             const discoveredGoal = summary.goal;
@@ -2967,10 +2821,8 @@ export default function App() {
   useEffect(() => {
     if (isLandingView || Workbench) return;
     let active = true;
-    // Starting a new conversation loads the workbench behind the retained
-    // landing composer. That handoff is expected and should not announce a
-    // global loading banner; navigation to an existing conversation still does.
-    setWorkbenchLoadKind(loadingRunId !== null ? "navigation" : "initial");
+    // A new conversation loads quietly behind its retained composer; the
+    // navigation handler marks existing conversations before starting a read.
     setWorkbenchLoadFailed(false);
     void loadWorkbench().then(module => {
       if (active) setWorkbench(() => module.AppGraphWorkbench);
@@ -3077,6 +2929,7 @@ export default function App() {
   };
   const handleLoadRun = useStableCallback((id: string) => {
     if (!runs.includes(id)) return;
+    setWorkbenchLoadKind("navigation");
     // Download the view while its authoritative snapshot is in flight, without
     // mounting it or speculatively reading any transcript bytes.
     setWorkbenchLoadFailed(false);
@@ -3186,6 +3039,7 @@ export default function App() {
             runs={runs}
             runLabels={runLabels}
             runCardKeys={runCardKeys}
+            initialRunIds={initialRunIds}
             isReady={isSidebarReady}
             currentRunId={state.runId}
             loadingRunId={loadingRunId}

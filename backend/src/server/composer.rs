@@ -286,35 +286,13 @@ fn record_withdrawal(
     let mut sequences = BTreeSet::new();
     let mut kinds = Vec::new();
     let mut messages = Vec::new();
-    let queued: Vec<WithdrawnQueueEntry> = if let Some(entries) = cleared.get("messages") {
-        serde_json::from_value(entries.clone())
-            .map_err(|e| format!("Invalid queue withdrawal receipt: {e}"))?
-    } else {
-        // Older adapters can only correlate Planner's existing UUID envelope.
-        // Unmarked legacy Node input is returned without guessing a card ID.
-        ["steering", "followUp"]
-            .iter()
-            .flat_map(|key| {
-                cleared[*key]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(|text| {
-                        let request_id = text
-                            .rsplit_once("\n\n<grapher-steer-id>")
-                            .and_then(|(_, tail)| tail.strip_suffix("</grapher-steer-id>"))
-                            .filter(|id| Uuid::parse_str(id).is_ok())
-                            .map(str::to_owned);
-                        WithdrawnQueueEntry {
-                            request_id,
-                            text: text.into(),
-                            images: None,
-                        }
-                    })
-            })
-            .collect()
-    };
+    let queued: Vec<WithdrawnQueueEntry> = serde_json::from_value(
+        cleared
+            .get("messages")
+            .cloned()
+            .ok_or("Missing queue withdrawal messages")?,
+    )
+    .map_err(|e| format!("Invalid queue withdrawal receipt: {e}"))?;
     let mut seen = BTreeSet::new();
     for entry in queued {
         if let Some(id) = entry.request_id.as_deref() {
@@ -379,7 +357,7 @@ fn record_withdrawal(
                 continue;
             }
         }
-        // Extension-owned or legacy input has no provable Grapher identity.
+        // Extension-owned input has no Grapher identity.
         // Return the removed content, but never suppress a same-text card.
         messages.push(RecalledMessage {
             text: entry.text,
@@ -454,7 +432,7 @@ mod tests {
             &mut runtime,
             "worker",
             &events,
-            &json!({"steering":[], "followUp":[]}),
+            &json!({"messages":[]}),
             None
         )
         .unwrap()

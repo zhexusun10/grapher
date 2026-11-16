@@ -159,7 +159,7 @@ export const suites = {
       ['scripts/concurrent-runs.test.mjs']],
   },
   'conversation-acceptance': {
-    description: 'Opt-in large-log migration/stress; see docs/development/conversation-logs.md.',
+    description: 'Opt-in current-format log, restart and browser acceptance; see docs/development/conversation-logs.md.',
     steps: [['--expose-gc', 'scripts/conversation-acceptance.mjs']],
   },
   'build-cache': {

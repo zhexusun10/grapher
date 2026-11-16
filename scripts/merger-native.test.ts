@@ -11,7 +11,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { removeSandboxMasks } from './fixtures/sandbox-masks.mjs';
-import { legacyGraph } from './fixtures/legacy-run.mjs';
+import { privateGraph } from './fixtures/current-run.mjs';
 
 const root = resolve('.');
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -282,7 +282,7 @@ test('production Planner writes source directly; legacy private Runs retain node
         if (kind === 'node') nodes.push({ id: 'join', task: `${label} VERIFY_RESOLUTION` });
         // Keep historical node-Merger coverage: new adaptive batches deliver
         // private results before downstream dispatch rather than at its fan-in.
-        initial = await legacyGraph(api, data, { config: config(repository), graph: { originalGoal: label, nodes,
+        initial = await privateGraph(api, data, { config: config(repository), graph: { originalGoal: label, nodes,
           edges: kind === 'node' ? [{ from: 'left', to: 'join', feedback: false },
             { from: 'right', to: 'join', feedback: false }] : [] } });
       }

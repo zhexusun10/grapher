@@ -81,11 +81,16 @@ test('only pi-trim reaches Partitioner; Merger loads continuity as an exception;
     writeFileSync(join(f.global, 'settings.json'), '{}');
     const legacy = JSON.stringify({ overrides: { [trimId]: false } });
     writeFileSync(join(f.own, 'extensions.json'), legacy);
-    assert.equal((await extensionCatalog(f.own)).extensions.find(extension => extension.id === trimId)?.enabled, true);
+    await assert.rejects(extensionCatalog(f.own), /Unsupported pi-trim override/);
     for (const enabled of [false, true]) {
       await assert.rejects(setExtensionEnabled(f.own, trimId, enabled), /pi-trim is required/);
     }
     assert.equal(readFileSync(join(f.own, 'extensions.json'), 'utf8'), legacy, 'rejected changes do not write settings');
+    for (const role of ['partition', 'merger', 'planner', 'node']) {
+      await assert.rejects(executionResources([], f.own, role), /Unsupported pi-trim override/);
+    }
+    assert.equal(readFileSync(join(f.own, 'extensions.json'), 'utf8'), legacy);
+    writeFileSync(join(f.own, 'extensions.json'), JSON.stringify({ overrides: {} }));
     for (const role of ['partition', 'merger', 'planner', 'node']) {
       assert.equal((await executionResources([], f.own, role)).args.filter(arg => arg === bundledTrim).length, 1);
     }

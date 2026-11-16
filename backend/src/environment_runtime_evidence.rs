@@ -346,7 +346,7 @@ impl RuntimeEvidence {
         &self,
         files: &Files,
         version: &str,
-        legacy_root: &str,
+        single_root: &str,
         source: &Path,
         code_ref: &str,
     ) -> Result<(), String> {
@@ -364,7 +364,7 @@ impl RuntimeEvidence {
                 _ => None,
             })
             .collect();
-        let coverage = files.verify_recorded_runtime_files(version, legacy_root, &rooted)?;
+        let coverage = files.verify_recorded_runtime_files(version, single_root, &rooted)?;
         crate::workspace_view::verify_native_inputs(source, code_ref, &coverage.project)
     }
 
@@ -372,10 +372,10 @@ impl RuntimeEvidence {
         &self,
         files: &Files,
         version: &str,
-        legacy_root: &str,
+        single_root: &str,
         roots: &BTreeMap<String, PathBuf>,
     ) -> Result<(), String> {
-        self.preflight_phase(files, version, legacy_root, roots, false)
+        self.preflight_phase(files, version, single_root, roots, false)
     }
 
     /// The caller prepared project code through the immutable codeRef path.
@@ -385,17 +385,17 @@ impl RuntimeEvidence {
         &self,
         files: &Files,
         version: &str,
-        legacy_root: &str,
+        single_root: &str,
         roots: &BTreeMap<String, PathBuf>,
     ) -> Result<(), String> {
-        self.preflight_phase(files, version, legacy_root, roots, true)
+        self.preflight_phase(files, version, single_root, roots, true)
     }
 
     fn preflight_phase(
         &self,
         files: &Files,
         version: &str,
-        legacy_root: &str,
+        single_root: &str,
         roots: &BTreeMap<String, PathBuf>,
         project_ready: bool,
     ) -> Result<(), String> {
@@ -410,7 +410,7 @@ impl RuntimeEvidence {
         }
         if let Some(selectors) = &self.selectors {
             if self.schema == 3 {
-                let snapshot = files.runtime_paths(version, legacy_root)?;
+                let snapshot = files.runtime_paths(version, single_root)?;
                 for selector in selectors
                     .iter()
                     .chain(self.external_selectors.iter().flatten())
@@ -435,7 +435,7 @@ impl RuntimeEvidence {
             .collect();
         // Owned bytes come from E, not from a possibly broken current prefix.
         // Explicitly excluded private caches are checked live, never restored.
-        let coverage = files.verify_recorded_runtime_files(version, legacy_root, &rooted)?;
+        let coverage = files.verify_recorded_runtime_files(version, single_root, &rooted)?;
         for (root, relative, blob) in coverage.caches {
             let root = roots
                 .get(&root)

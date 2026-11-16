@@ -575,15 +575,14 @@ test("reused indices and identical summaries in later assistant turns never matc
   assert.equal(items[1].content, first.content);
 });
 
-test("legacy unindexed deltas are reconciled rather than duplicated", () => {
-  let items = updateThinkingItems([], { type: "thinking_start" });
-  items = updateThinkingItems(items, { type: "thinking_delta", delta: "Fir" });
-  items = updateThinkingItems(items, { type: "thinking_end", content: "First" });
-  items = updateThinkingItems(items, { type: "thinking_start" });
-  items = updateThinkingItems(items, { type: "thinking_end", content: "Second" });
-  const ids = items.map(item => item.id);
+test("unindexed thinking updates are ignored and current final blocks remain distinct", () => {
+  let items: TranscriptItem[] = [];
+  for (const update of [{ type: "thinking_start" }, { type: "thinking_delta", delta: "old" },
+    { type: "thinking_end", content: "old" }]) {
+    assert.equal(updateThinkingItems(items, update as any), items);
+  }
   items = finalizeThinkingItems(items, [{ type: "thinking", thinking: "First final" }, { type: "thinking", thinking: "Second final" }]);
-  assert.deepEqual(items.map(item => item.id), ids);
+  assert.deepEqual(items.map(item => item.thinkingContentIndex), [0, 1]);
   assert.deepEqual(items.map(item => item.content), ["First final", "Second final"]);
 });
 

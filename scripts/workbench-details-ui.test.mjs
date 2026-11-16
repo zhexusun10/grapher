@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureSummaries, fixtureFileChanges, fixtureExecutionPage } from "./fixtures/current-api.mjs";
 import test from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
@@ -66,8 +67,10 @@ for (const [language, reducedMotion] of [["en", "no-preference"], ["zh-CN", "red
         const body = route.request().postDataJSON();
         let result;
         switch (command) {
-          case "bootstrap": result = { config, snapshot: empty, runs: Object.keys(snapshots), repositoryInfo, dataPath: "/mock" }; break;
-          case "history": case "snapshot": result = snapshots[body.runId] || empty; break;
+          case "bootstrap": result = { config, snapshot: empty, runs: Object.keys(snapshots), conversations: fixtureSummaries(Object.values(snapshots)), repositoryInfo, dataPath: "/mock" }; break;
+          case "get_file_changes": result = fixtureFileChanges(body); break;
+          case "get_execution_output": result = fixtureExecutionPage(body, Object.values(snapshots)); break;
+          case "load_run": case "history": case "snapshot": result = snapshots[body.runId] || empty; break;
           case "snapshot_if_changed": result = { version: "1", snapshot: null }; break;
           case "repository_status": result = { repository, valid: true, error: null }; break;
           case "detect_repository": result = repositoryInfo; break;

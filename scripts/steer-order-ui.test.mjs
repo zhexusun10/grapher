@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureExecutionPage, fixtureFileChanges } from "./fixtures/current-api.mjs";
 import test, { before, after } from "node:test";
 import { chromium, expect } from "@playwright/test";
 import { createServer } from "vite";
@@ -18,6 +19,18 @@ before(async () => {
   browser = await chromium.launch({ channel: process.env.GRAPHER_BROWSER_CHANNEL || (process.platform === "win32" ? "msedge" : "chromium"), headless: true });
 });
 after(async () => { await browser?.close(); await server?.close(); });
+
+async function fixturePage(context) {
+  const page = await context.newPage();
+  await page.route("**/api/get_file_changes", route =>
+    route.fulfill({ json: { result: fixtureFileChanges(route.request().postDataJSON()) } }));
+  await page.route("**/api/get_execution_output", async route => {
+    if (new URL(page.url()).searchParams.get("paged") === "true") return route.fallback();
+    const snapshot = await page.evaluate(() => window.steerAudit.snapshot());
+    return route.fulfill({ json: { result: fixtureExecutionPage(route.request().postDataJSON(), [snapshot]) } });
+  });
+  return page;
+}
 
 for (const mode of ["serial", "graph"]) {
   test(`${mode}: Alt+Q restores only queued messages and Alt+S sends an interruption`, { timeout: 30_000 }, async () => {
@@ -39,7 +52,7 @@ for (const mode of ["serial", "graph"]) {
       }
       return route.fulfill({ json: { result: {} } });
     });
-    const page = await context.newPage();
+    const page = await fixturePage(context);
     const errors = [];
     page.on("pageerror", error => errors.push(String(error)));
     try {
@@ -98,7 +111,7 @@ for (const mode of ["serial", "graph"]) {
       }
       return route.fulfill({ json: { result: {} } });
     });
-    const page = await context.newPage();
+    const page = await fixturePage(context);
     try {
       await page.goto(`${origin}/__steer?mode=${mode}`);
       const input = page.locator(".pane-bottom-chat textarea").first();
@@ -131,7 +144,7 @@ for (const mode of ["serial", "graph"]) {
       if (route.request().postDataJSON()?.operation === "withdraw") { pending = route; requests++; return; }
       return route.fulfill({ json: { result: {} } });
     });
-    const page = await context.newPage();
+    const page = await fixturePage(context);
     const errors = [];
     page.on("pageerror", error => errors.push(String(error)));
     try {
@@ -166,12 +179,18 @@ for (const mode of ["serial", "graph"]) {
     } finally { await context.close(); }
   });
 
-  test(`${mode}: an unread steer follows output, even when execution settles before consumption`, { timeout: 30_000 }, async () => {
+  test(`${mode}: an unread steer follows output while its final page arrives after settlement`, { timeout: 30_000 }, async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
     await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
     await context.route("**/api/*", route => route.fulfill({ json: { result: {} } }));
-    const page = await context.newPage();
+    const page = await fixturePage(context);
     const errors = [];
+    let releaseTerminal;
+    const terminalPage = new Promise(resolve => { releaseTerminal = resolve; });
+    await page.route("**/api/get_execution_output", async route => {
+      if (await page.evaluate(() => window.steerAudit.snapshot().executions[0].status === "completed")) await terminalPage;
+      return route.fallback();
+    });
     page.on("pageerror", error => errors.push(String(error)));
     try {
       await page.goto(`${origin}/__steer?mode=${mode}`);
@@ -190,22 +209,23 @@ for (const mode of ["serial", "graph"]) {
         return !!output && !!steer && !!(output.compareDocumentPosition(steer) & Node.DOCUMENT_POSITION_FOLLOWING);
       });
       assert.equal(await follows(), true);
-      await page.evaluate(() => window.steerAudit.settle());
+      // Commit the final bytes with settlement; delay only their API delivery.
+      await page.evaluate(() => { window.steerAudit.consume("STEER MARKER"); window.steerAudit.settle(); });
       await page.waitForTimeout(100);
       assert.equal(await follows(), true, "settlement must not move the pending steer above output");
-      await page.evaluate(() => window.steerAudit.consume("STEER MARKER"));
+      releaseTerminal();
       await page.getByText("OUTPUT AFTER STEER", { exact: true }).waitFor();
       assert.equal(await steer.count(), 1, "the inline turn replaces the pending card");
       assert.equal(await follows(), true);
       assert.deepEqual(errors, []);
-    } finally { await context.close(); }
+    } finally { releaseTerminal(); await context.close(); }
   });
 
   test(`${mode}: a consumed steer renders once after a settled reload`, { timeout: 30_000 }, async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
     await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
     await context.route("**/api/*", route => route.fulfill({ json: { result: {} } }));
-    const page = await context.newPage();
+    const page = await fixturePage(context);
     const errors = [];
     page.on("pageerror", error => errors.push(String(error)));
     try {
@@ -242,7 +262,7 @@ for (const mode of ["serial", "graph"]) {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: "reduce" });
     await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
     await context.route("**/api/*", route => route.fulfill({ json: { result: {} } }));
-    const page = await context.newPage();
+    const page = await fixturePage(context);
     try {
       await page.goto(`${origin}/__steer?mode=${mode}`);
       await page.getByText("OUTPUT BEFORE STEER", { exact: true }).waitFor();
@@ -281,7 +301,7 @@ for (const mode of ["serial", "graph"]) {
         content: data.subarray(start).toString(), startOffset: start, nextOffset: data.length,
         totalBytes: data.length, complete: true, status: "running" } } });
     });
-    const page = await context.newPage();
+    const page = await fixturePage(context);
     const errors = [];
     page.on("pageerror", error => errors.push(String(error)));
     try {
@@ -314,7 +334,7 @@ for (const mode of ["serial", "graph"]) {
       return route.fulfill({ json: { result: command === "write_workspace_attachment"
         ? { name: "image.png", path: "grapher-attachments/12345678-1234-1234-1234-123456789abc/image.png" } : {} } });
     });
-    const page = await context.newPage();
+    const page = await fixturePage(context);
     try {
       await page.goto(`${origin}/__steer?mode=${mode}`);
       await page.getByText("OUTPUT BEFORE STEER", { exact: true }).waitFor();
@@ -340,7 +360,7 @@ for (const mode of ["serial", "graph"]) {
       return route.fulfill({ json: { result: command === "write_workspace_attachment"
         ? { name: "evidence.txt", path: "grapher-attachments/12345678-1234-1234-1234-123456789abc/evidence.txt" } : {} } });
     });
-    const page = await context.newPage();
+    const page = await fixturePage(context);
     const errors = [];
     page.on("pageerror", error => errors.push(String(error)));
     try {

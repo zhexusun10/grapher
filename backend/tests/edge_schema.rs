@@ -117,8 +117,14 @@ fn graph_ids_roundtrip_through_events_and_checkpoints() {
     }
     let expected_events = serde_json::to_value(&state.events).unwrap();
     let mut checkpoint = serde_json::to_value(&state).unwrap();
-    checkpoint["nodeMessageQueueVersion"] = json!(1);
+    checkpoint["formatVersion"] = json!(1);
     checkpoint["events"] = json!([]);
+    checkpoint["checksum"] = json!(git2::Oid::hash_object(
+        git2::ObjectType::Blob,
+        &serde_json::to_vec(&checkpoint).unwrap()
+    )
+    .unwrap()
+    .to_string());
     assert_eq!(checkpoint["graph"]["nodes"][0]["id"], "owner");
     assert!(checkpoint["graph"]["nodes"][0].get("name").is_none());
     let db = Connection::open(&path).unwrap();

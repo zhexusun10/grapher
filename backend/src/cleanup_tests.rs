@@ -21,6 +21,21 @@ fn setup() -> (tempfile::TempDir, PathBuf, Runtime) {
     .unwrap();
     let mut runtime = Runtime::open(&temp.path().join("data")).unwrap();
     runtime.create(graph(), config).unwrap();
+    runtime.set_route("serial").unwrap();
+    // This fixture allocates its current-format workspaces under its own temp
+    // parent. Record that ownership explicitly before testing deletion/restart.
+    runtime
+        .store
+        .remember_cleanup_targets(
+            &runtime.state.run_id,
+            &BTreeSet::from([Target::Workspace {
+                parent: temp.path().canonicalize().unwrap(),
+                bucket: ".grapher-worktrees".into(),
+                owner: runtime.state.run_id.clone(),
+                checkout: None,
+            }]),
+        )
+        .unwrap();
     (temp, source, runtime)
 }
 
@@ -511,40 +526,11 @@ fn deleting_a_run_releases_a_snapshot_only_completed_runs_still_record() {
     assert!(runtime.store.pending_cleanups().unwrap().is_empty());
 }
 
-fn legacy_runtime(source: &std::path::Path, root: &std::path::Path) -> Runtime {
-    let mut runtime = Runtime::open_lazy(root).unwrap();
-    runtime.state.run_id = Uuid::new_v4().to_string();
-    runtime
-        .store
-        .append(
-            &mut runtime.state,
-            EventKind::Created {
-                graph: graph(),
-                config: serde_json::from_value(
-                    serde_json::json!({"repository":source,"model":"test","maxParallel":1}),
-                )
-                .unwrap(),
-                planning_id: None,
-                planning: None,
-            },
-        )
-        .unwrap();
-    assert!(runtime
-        .store
-        .owned_cleanup_targets(&runtime.state.run_id)
-        .unwrap()
-        .is_empty());
-    runtime
-}
-
 #[test]
-fn missing_legacy_source_cleans_all_owned_workspace_roots_on_delete_clear_and_reset() {
+fn missing_source_cleans_recorded_workspaces_and_preserves_retired_layouts() {
     for moved in [false, true] {
         for operation in ["delete", "clear", "reset"] {
-            let temp = tempfile::tempdir().unwrap();
-            let source = temp.path().join("source");
-            directory(&source);
-            let mut runtime = legacy_runtime(&source, &temp.path().join("data"));
+            let (temp, source, mut runtime) = setup();
             let id = runtime.state.run_id.clone();
             let mut owned = Vec::new();
             let mut unrelated = Vec::new();
@@ -553,7 +539,11 @@ fn missing_legacy_source_cleans_all_owned_workspace_roots_on_delete_clear_and_re
                 let other = temp.path().join(bucket).join(Uuid::new_v4().to_string());
                 directory(&path);
                 directory(&other);
-                owned.push(path);
+                if bucket == ".grapher-worktrees" {
+                    owned.push(path);
+                } else {
+                    unrelated.push(path);
+                }
                 unrelated.push(other);
             }
             let moved_source = temp.path().join("moved-source");
@@ -578,8 +568,8 @@ fn missing_legacy_source_cleans_all_owned_workspace_roots_on_delete_clear_and_re
                 .all(|path| path.join("nested/dependencies/file").is_file()));
             if moved {
                 assert_eq!(
-                    fs::read_to_string(moved_source.join("nested/dependencies/file")).unwrap(),
-                    "owned"
+                    fs::read_to_string(moved_source.join("user.txt")).unwrap(),
+                    "keep user files"
                 );
             }
             assert!(runtime.store.pending_cleanups().unwrap().is_empty());
@@ -588,11 +578,11 @@ fn missing_legacy_source_cleans_all_owned_workspace_roots_on_delete_clear_and_re
 }
 
 #[test]
-fn unresolved_legacy_cleanup_recovers_from_the_saved_parent_without_restoring_source() {
+fn unresolved_cleanup_preserves_unregistered_paths_and_remains_queued() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("already-missing-source");
-    let runtime = legacy_runtime(&source, &temp.path().join("data"));
-    let id = runtime.state.run_id.clone();
+    let runtime = Runtime::open_lazy(&temp.path().join("data")).unwrap();
+    let id = Uuid::new_v4().to_string();
     let root = runtime.root.clone();
     let owned: Vec<_> = [".grapher-worktrees", ".grapher-workspaces"]
         .iter()
@@ -614,8 +604,8 @@ fn unresolved_legacy_cleanup_recovers_from_the_saved_parent_without_restoring_so
     drop(runtime);
     let runtime = Runtime::open_lazy(&root).unwrap();
     runtime.retry_deleted_cleanups().unwrap();
-    assert!(owned.iter().all(|path| !path.exists()));
-    assert!(runtime.store.pending_cleanups().unwrap().is_empty());
+    assert!(owned.iter().all(|path| path.exists()));
+    assert_eq!(runtime.store.pending_cleanups().unwrap().len(), 1);
 }
 
 #[test]
@@ -627,8 +617,8 @@ fn missing_source_prefers_recorded_physical_parent_over_a_dangling_alias_parent(
     crate::path_safety::directory_link(&source, &alias);
     runtime.state.config.as_mut().unwrap().repository = alias.to_string_lossy().into_owned();
     let id = runtime.state.run_id.clone();
-    let actual = temp.path().join(".grapher-workspaces").join(&id);
-    let decoy = alias_parent.join(".grapher-workspaces").join(&id);
+    let actual = temp.path().join(".grapher-worktrees").join(&id);
+    let decoy = alias_parent.join(".grapher-worktrees").join(&id);
     directory(&actual);
     directory(&decoy);
     fs::remove_dir_all(source).unwrap();
@@ -639,11 +629,10 @@ fn missing_source_prefers_recorded_physical_parent_over_a_dangling_alias_parent(
 }
 
 #[test]
-fn missing_legacy_source_still_refuses_redirected_workspace_roots_before_deletion() {
-    for bucket in [".grapher-worktrees", ".grapher-workspaces"] {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("already-missing-source");
-        let mut runtime = legacy_runtime(&source, &temp.path().join("data"));
+fn missing_source_refuses_redirected_recorded_workspace_roots_before_deletion() {
+    for bucket in [".grapher-worktrees"] {
+        let (temp, source, mut runtime) = setup();
+        fs::remove_dir_all(source).unwrap();
         let id = runtime.state.run_id.clone();
         let outside = temp.path().join("outside");
         directory(&outside.join(&id));
@@ -733,7 +722,8 @@ fn failed_completed_run_cleanup_is_durable_and_stale_generations_are_cancelled()
     directory(&workspace);
     let outside = temp.path().join("outside");
     directory(&outside);
-    let root = temp.path().join(".grapher-workspaces");
+    let root = temp.path().join(".grapher-worktrees");
+    fs::remove_dir_all(&root).unwrap();
     crate::path_safety::directory_link(&outside, &root);
     assert!(runtime.cleanup_worktrees().is_err());
     assert!(runtime
@@ -743,8 +733,9 @@ fn failed_completed_run_cleanup_is_durable_and_stale_generations_are_cancelled()
         .unwrap()
         .last_error
         .is_some());
-    assert!(workspace.is_dir());
+    assert!(outside.join("nested/dependencies/file").is_file());
     crate::path_safety::remove_directory_link(&root);
+    directory(&workspace);
     runtime.retry_cleanup(&id).unwrap();
     assert!(!workspace.exists());
     assert!(runtime.store.completed_workspace_runs().unwrap().is_empty());
@@ -761,45 +752,22 @@ fn failed_completed_run_cleanup_is_durable_and_stale_generations_are_cancelled()
 }
 
 #[test]
-fn only_marked_unowned_idle_partitioners_are_disposable() {
-    let (_temp, _source, runtime) = setup();
-    let mut paths = Vec::new();
-    for marked in [true, true, false] {
-        let id = Uuid::new_v4().to_string();
-        let path = runtime.root.join("partition-workers").join(&id);
-        directory(&path);
-        if marked {
-            fs::write(
-                path.join(".grapher-partition-worker.json"),
-                r#"{"kind":"grapher-partition-worker","version":1}"#,
-            )
-            .unwrap();
-        }
-        paths.push((id, path));
-    }
-    runtime
-        .store
-        .remember_cleanup_targets(
-            &runtime.state.run_id,
-            &BTreeSet::from([Target::data("partition-workers", &paths[1].0)]),
-        )
-        .unwrap();
-    let tasks = cleanup::idle_partitioners(&runtime.root, &runtime.store).unwrap();
-    assert_eq!(tasks.len(), 1);
-    runtime
-        .store
-        .delete_run_with_cleanup(&tasks[0].run_id, Some(&tasks[0].manifest))
-        .unwrap();
+fn retired_partitioner_directories_are_preserved() {
+    let (_temp, _source, mut runtime) = setup();
+    let path = runtime
+        .root
+        .join("partition-workers")
+        .join(Uuid::new_v4().to_string());
+    directory(&path);
+    fs::write(
+        path.join(".grapher-partition-worker.json"),
+        r#"{"kind":"grapher-partition-worker","version":1}"#,
+    )
+    .unwrap();
+    let id = runtime.state.run_id.clone();
+    runtime.delete_run(&id).unwrap();
     runtime.retry_deleted_cleanups().unwrap();
-    assert!(!paths[0].1.exists());
-    assert!(
-        paths[1].1.is_dir(),
-        "failed copy-back belongs to a recoverable Run"
-    );
-    assert!(
-        paths[2].1.is_dir(),
-        "old unmarked directories lack disposal proof"
-    );
+    assert!(path.join("nested/dependencies/file").is_file());
 }
 
 #[test]
@@ -870,6 +838,18 @@ fn workspace_batch_deletion_is_atomic_and_cascades_database_and_owned_files() {
             .unwrap();
         let session = runtime.root.join("sessions").join(node);
         let workspace = temp.path().join(".grapher-worktrees").join(&id);
+        runtime
+            .store
+            .remember_cleanup_targets(
+                &id,
+                &BTreeSet::from([Target::Workspace {
+                    parent: temp.path().canonicalize().unwrap(),
+                    bucket: ".grapher-worktrees".into(),
+                    owner: id.clone(),
+                    checkout: None,
+                }]),
+            )
+            .unwrap();
         directory(&session);
         directory(&workspace);
         directories.extend([session, workspace]);

@@ -28,8 +28,8 @@ fn run(primary: &Arc<Service>, repo: &std::path::Path) -> (Arc<Service>, String)
         .runtime
         .lock()
         .unwrap()
-        .emit(EventKind::Created {
-            graph: Graph {
+        .create(
+            Graph {
                 original_goal: "attachments".into(),
                 nodes: vec![Node {
                     id: "worker".into(),
@@ -38,9 +38,7 @@ fn run(primary: &Arc<Service>, repo: &std::path::Path) -> (Arc<Service>, String)
                 edges: vec![],
             },
             config,
-            planning_id: None,
-            planning: None,
-        })
+        )
         .unwrap();
     (child, id)
 }
@@ -72,10 +70,13 @@ fn execution(worktree: &std::path::Path, node: &str) -> Execution {
 fn start(child: &Arc<Service>, worktree: &std::path::Path) -> String {
     let execution = execution(worktree, "worker");
     let id = execution.id.clone();
-    child
-        .runtime
-        .lock()
-        .unwrap()
+    let mut runtime = child.runtime.lock().unwrap();
+    let repository = std::path::Path::new(&runtime.state.config.as_ref().unwrap().repository);
+    let isolated = worktree.canonicalize().unwrap() != repository.canonicalize().unwrap();
+    runtime
+        .emit(EventKind::WorkspaceIsolationSelected { isolated })
+        .unwrap();
+    runtime
         .emit(EventKind::Started {
             execution,
             message_sequences: Some(vec![]),
@@ -111,11 +112,32 @@ fn completed(
     let first = {
         let mut runtime = child.runtime.lock().unwrap();
         runtime.set_route("graph").unwrap();
+        runtime
+            .emit(EventKind::WorkspaceIsolationSelected { isolated: true })
+            .unwrap();
+        runtime
+            .emit(EventKind::PrivateBatchSelected {
+                nodes: vec!["worker".into()],
+            })
+            .unwrap();
         runtime.approve().unwrap();
-        runtime.jobs().unwrap().remove(0)
+        let mut job = runtime.jobs().unwrap().remove(0);
+        if job.materialize_source {
+            runtime.attach_job_source(&mut job, &[]).unwrap();
+        }
+        job
     };
     let path = std::path::Path::new(&first.execution.worktree);
-    crate::workspace::prepare(repo, path, &first.execution.before, &[]).unwrap();
+    crate::workspace::prepare_with_merger_expected_for_run(
+        repo,
+        path,
+        &first.execution.before,
+        &[],
+        &first.expected_source_head,
+        Some(&id),
+        || Err("unexpected conflict".into()),
+    )
+    .unwrap();
     let head = crate::workspace::snapshot_node_for_run(path, repo, "worker", Some(&id)).unwrap();
     {
         let mut runtime = child.runtime.lock().unwrap();
@@ -126,11 +148,17 @@ fn completed(
             })
             .unwrap();
         runtime
+            .emit(EventKind::Output {
+                execution_id: first.execution.id.clone(),
+                text: "finished".into(),
+            })
+            .unwrap();
+        runtime
             .emit(EventKind::Finished {
                 execution_id: first.execution.id.clone(),
                 head: head.clone(),
-                output: "finished".into(),
-                output_bytes: 0,
+                output: String::new(),
+                output_bytes: "finished".len(),
                 metrics: None,
             })
             .unwrap();
@@ -906,13 +934,7 @@ fn upload_during_the_sealed_window_does_not_corrupt_the_recorded_result() {
         .runtime
         .lock()
         .unwrap()
-        .emit(EventKind::Finished {
-            execution_id: next.execution.id,
-            head: sealed.clone(),
-            output: "finished".into(),
-            output_bytes: 0,
-            metrics: None,
-        })
+        .finish(&next.execution, Ok((sealed.clone(), "finished".into())))
         .unwrap();
     crate::workspace_view::verify_result(path, &repo, &sealed).unwrap();
 }

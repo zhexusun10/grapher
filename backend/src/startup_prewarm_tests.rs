@@ -37,7 +37,7 @@ fn saved_settings_choose_the_next_warm_project_without_rebinding_history() {
 }
 
 #[test]
-fn missing_or_invalid_settings_fall_back_to_event_config_and_normalize_legacy_models() {
+fn missing_or_invalid_settings_use_only_valid_event_model_settings() {
     let temp = tempfile::tempdir().unwrap();
     let mut runtime = Runtime::open_lazy(temp.path()).unwrap();
     runtime.state.config = Some(config("selected-project", "legacy-model"));
@@ -45,10 +45,13 @@ fn missing_or_invalid_settings_fall_back_to_event_config_and_normalize_legacy_mo
         if let Some(saved) = saved {
             fs::write(temp.path().join("config.json"), saved).unwrap();
         }
+        assert!(configured_prewarm_config(&runtime).is_none());
+        assert_eq!(runtime.state.config.as_ref().unwrap().model, "legacy-model");
+        runtime.state.config = Some(config("selected-project", "provider/model"));
         let warm = configured_prewarm_config(&runtime).unwrap();
         assert_eq!(warm.repository, "selected-project");
-        assert!(warm.model.is_empty());
-        assert_eq!(runtime.state.config.as_ref().unwrap().model, "legacy-model");
+        assert_eq!(warm.model, "provider/model");
+        runtime.state.config = Some(config("selected-project", "legacy-model"));
     }
     runtime.state.config = Some(config(" ", "provider/model"));
     assert!(configured_prewarm_config(&runtime).is_none());

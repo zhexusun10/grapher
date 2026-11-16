@@ -10,9 +10,7 @@ struct InputBoundary {
     session_execution_id: String,
     session_id: String,
     cursor: u64,
-    /// Absent on older boundaries, which retain their conservative text check.
-    #[serde(default)]
-    delivery_marker: Option<String>,
+    delivery_marker: String,
 }
 
 fn session_path(
@@ -99,7 +97,7 @@ pub(in crate::runtime) fn record_feedback_input(root: &Path, job: &Job) -> Resul
         session_execution_id: origin.into(),
         session_id: job.execution.session_id.clone(),
         cursor,
-        delivery_marker: Some(id.clone()),
+        delivery_marker: id.clone(),
     };
     fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
     let temporary = path.with_extension(format!("{}.pending", Uuid::new_v4()));
@@ -184,10 +182,7 @@ pub(super) fn feedback_input_delivered(
         .map_err(|error| format!("Invalid feedback delivery evidence: {error}"))?;
     if boundary.execution_id != id
         || boundary.session_id != started.session_id
-        || boundary
-            .delivery_marker
-            .as_deref()
-            .is_some_and(|marker| marker != id)
+        || boundary.delivery_marker != id
     {
         return Err("Feedback delivery evidence belongs to another execution".into());
     }
@@ -224,7 +219,12 @@ pub(super) fn feedback_input_delivered(
         .map_err(|error| error.to_string())?;
     let header: serde_json::Value =
         serde_json::from_str(&line).map_err(|error| error.to_string())?;
-    if header["type"] != "session" || header["id"] != boundary.session_id {
+    if header["type"] != "session"
+        || header["id"] != boundary.session_id
+        || header["version"] != 3
+        || header["grapherFormat"] != 1
+        || header["grapherRunId"] != runtime.state.run_id
+    {
         return Err("Feedback session belongs to another identity".into());
     }
     reader
@@ -269,14 +269,10 @@ pub(super) fn feedback_input_delivered(
                     .collect::<String>()
             })
         });
-        let delivered = match boundary.delivery_marker.as_deref() {
-            // Pi may resize/convert attachments and append hints to the stored
-            // user text. Correlate the turn itself, not its pre-normalized text.
-            Some(marker) => text
-                .as_deref()
-                .is_some_and(|text| engine::feedback_input::identifies(text, marker)),
-            None => text.as_deref() == input.instruction.as_deref(),
-        };
+        // Pi may normalize attachments and text; the envelope identifies the turn.
+        let delivered = text.as_deref().is_some_and(|text| {
+            engine::feedback_input::identifies(text, &boundary.delivery_marker)
+        });
         if delivered {
             return Ok(true);
         }

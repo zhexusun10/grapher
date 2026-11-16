@@ -39,17 +39,13 @@ export class RunNotFoundError extends Error {
   }
 }
 
-// Translate legacy node completion without inferring it from Run phase,
-// execution output, or publication state.
+// Validate current node states without translating historical status names.
 function normalizeSnapshot(snapshot: Snapshot): Snapshot {
-  let nodes = snapshot.nodes;
-  if (nodes) for (const [name, node] of Object.entries(nodes)) {
-    const status: string = node.status;
-    if (status !== "done") continue;
-    if (nodes === snapshot.nodes) nodes = { ...nodes };
-    nodes[name] = { ...node, status: "completed" };
+  const statuses = new Set(["waiting", "running", "completed", "failed", "blocked", "dirty", "paused"]);
+  for (const node of Object.values(snapshot.nodes ?? {})) {
+    if (!statuses.has(node.status)) throw new Error("Unsupported node status");
   }
-  return nodes === snapshot.nodes ? snapshot : { ...snapshot, nodes };
+  return snapshot;
 }
 
 function normalizeSnapshotResult<T>(result: T): T {
@@ -113,7 +109,9 @@ export const runtimeService = {
     let retries = 3;
     while (retries > 0) {
       try {
-        return await request<Bootstrap>("bootstrap");
+        const result = await request<Bootstrap>("bootstrap");
+        if (!Array.isArray(result.conversations)) throw new Error("Conversation index is unavailable");
+        return result;
       } catch (err) {
         // Three stalled bootstrap attempts must not multiply the wait budget.
         if (err instanceof RequestTimeoutError) throw err;
@@ -145,17 +143,9 @@ export const runtimeService = {
     return task;
   },
   loadRun: async (runId: string) => {
-    try {
-      return await request<Snapshot>("load_run", { runId });
-    } catch {
-      try {
-        const snap = await request<Snapshot>("snapshot", { runId });
-        if (snap && snap.runId === runId) {
-          return snap;
-        }
-      } catch {}
-      return await request<Snapshot>("history", { runId });
-    }
+    const snapshot = await request<Snapshot>("load_run", { runId });
+    if (!snapshot || snapshot.runId !== runId) throw new Error(t("执行记录与请求不匹配"));
+    return snapshot;
   },
   compileGraph: (graph: Graph) => request<Plan>("compile_graph", { graph }),
   saveGraph: (graph: Graph, config: Config, runId?: string) => request<Snapshot>("save_graph", { graph, config, runId }),
@@ -282,16 +272,30 @@ export const runtimeService = {
     }
   },
   getExecutionOutput: (runId: string, executionId: string, offset = 0, signal?: AbortSignal, full = false, tail = false, before?: number, limit?: number, endOffset?: number) =>
-    request<{ runId: string; executionId: string; content: string; startOffset?: number; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
+    request<{ runId: string; executionId: string; content: string; startOffset: number; nextOffset: number; totalBytes: number; complete: boolean; status: string }>(
       "get_execution_output", { runId, executionId, offset, full, ...(endOffset !== undefined ? { endOffset } : {}), ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
   getFileChanges: async (runId: string, execution?: string | string[], signal?: AbortSignal) => {
-    const result = await request<{ runId: string; executionId: string | null; executionIds?: string[] | null; summary: FileChangeSummary }>(
+    const result = await request<{ runId: string; executionId: string | null; executionIds: string[] | null; summary: FileChangeSummary }>(
       "get_file_changes", {
         runId,
         ...(Array.isArray(execution) ? { executionIds: execution } : execution ? { executionId: execution } : {}),
       }, signal);
-    // Older backends ignore executionIds and return the whole Run. Never let
-    // that aggregate masquerade as one node's (or an empty node's) changes.
+    const expectedId = typeof execution === "string" && execution ? execution : null;
+    const optionalStrings = (value: unknown) => value === undefined ||
+      (Array.isArray(value) && value.every(item => typeof item === "string"));
+    if (!result || result.runId !== runId || result.executionId !== expectedId ||
+        (!Array.isArray(execution) && result.executionIds !== null) || !result.summary ||
+        !Array.isArray(result.summary.files) || result.summary.files.some(file =>
+          !file || typeof file.path !== "string" || !["added", "modified", "deleted", "renamed"].includes(file.status) ||
+          (file.oldPath !== undefined && typeof file.oldPath !== "string") ||
+          !optionalStrings(file.nodes) || !optionalStrings(file.executionIds) ||
+          [file.additions, file.deletions].some(value => !Number.isSafeInteger(value) || value < 0)) ||
+        [result.summary.totalFiles, result.summary.addedCount, result.summary.modifiedCount,
+          result.summary.deletedCount, result.summary.renamedCount, result.summary.totalAdditions,
+          result.summary.totalDeletions].some(value => !Number.isInteger(value) || value < 0)) {
+      throw new Error("Invalid file changes response");
+    }
+    // Returned data must describe the requested execution scope.
     if (Array.isArray(execution) && (!Array.isArray(result.executionIds) ||
         result.executionIds.length !== execution.length || result.executionIds.some((id, index) => id !== execution[index]))) {
       throw new Error(t("后端不支持按执行范围读取文件变更，请更新后端后重试。"));
@@ -320,7 +324,7 @@ export const runtimeService = {
   getPlanningSnapshot: (planningId: string, repository: string, signal?: AbortSignal) =>
     request<Snapshot>("get_planning_snapshot", { planningId, repository }, signal),
   getPlanningOutput: (planningId: string, role: "partition" | "planner", offset = 0, signal?: AbortSignal, tail = false, before?: number, limit?: number) =>
-    request<{ planningId: string; role: string; content: string; startOffset?: number; nextOffset: number; totalBytes: number; complete: boolean; running: boolean }>(
+    request<{ planningId: string; role: string; content: string; startOffset: number; nextOffset: number; totalBytes: number; complete: boolean; running: boolean }>(
       "get_planning_output", { planningId, role, offset, ...(limit !== undefined ? { limit } : {}), ...(tail ? { tail: true, ...(before !== undefined ? { before } : {}) } : {}) }, signal),
   getPlanning: (planningId: string, signal?: AbortSignal) => request<PlanningSummary>("get_planning", { planningId }, signal),
   listPlannings: (repository?: string, signal?: AbortSignal) => request<PlanningSummary[]>("list_plannings", repository ? { repository } : {}, signal),

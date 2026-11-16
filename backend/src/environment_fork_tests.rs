@@ -312,7 +312,10 @@ fs.mkdirSync('reports',{recursive:true});fs.writeFileSync('reports/'+name+'.txt'
         .find(|job| job.execution.node == "C")
         .unwrap();
     assert_ne!(b.execution.worktree, c.execution.worktree);
-    assert_eq!(b.execution.worktree, a.execution.worktree);
+    assert_ne!(
+        b.execution.worktree, a.execution.worktree,
+        "parallel branches keep the unpublished parent's slot reserved"
+    );
     assert_eq!(
         c.environment_input.as_ref().unwrap().environment_ref,
         original.environment_ref,

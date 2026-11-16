@@ -13,7 +13,7 @@ pub(crate) enum RuntimePath {
 
 pub(crate) struct RuntimePaths {
     value: Version,
-    legacy_root: String,
+    single_root: String,
     scopes: Option<Vec<PathBuf>>,
     caches: Vec<PathBuf>,
 }
@@ -22,11 +22,11 @@ impl Files {
     pub(crate) fn runtime_paths(
         &self,
         version: &str,
-        legacy_root: &str,
+        single_root: &str,
     ) -> Result<RuntimePaths, String> {
         Ok(RuntimePaths {
             value: self.load(version)?,
-            legacy_root: legacy_root.into(),
+            single_root: single_root.into(),
             scopes: self.scopes.clone(),
             caches: self.caches.clone(),
         })
@@ -78,7 +78,7 @@ impl RuntimePaths {
             }
             &frame.entries
         } else {
-            if root != self.legacy_root {
+            if root != self.single_root {
                 return outside();
             }
             if self.caches.iter().any(|cache| covered(cache)) {

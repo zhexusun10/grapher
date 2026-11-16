@@ -1,8 +1,8 @@
 use grapher::{
     graph_merge::{merge_graph, merge_graph_with_workspace, publication_workspace},
     workspace::{
-        git, prepare, prepare_with_merger_expected, repository_git, snapshot_node,
-        snapshot_node_for_run, snapshot_repository,
+        git, prepare, prepare_with_merger_expected, repository_git, snapshot_node_for_run,
+        snapshot_repository,
     },
 };
 use std::{
@@ -10,6 +10,12 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
+
+const RUN_ID: &str = "48b8e1d1-2428-42a2-9b28-9d90f631f9d1";
+
+fn snapshot_node(path: &Path, source: &Path, name: &str) -> Result<String, String> {
+    snapshot_node_for_run(path, source, name, Some(RUN_ID))
+}
 
 fn test_data() {
     static ROOT: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
@@ -186,7 +192,7 @@ fn node_reuses_source_objects_without_copying_history() {
     let (source, base) = repository(temp.path());
     let parent = temp.path().join("parent");
     let head = branch(&source, &base, &parent, "new", "parent");
-    let child = temp.path().join("child");
+    let child = temp.path().join(RUN_ID).join("child");
     prepare(&source, &child, &base, &["parent".into()]).unwrap();
     let objects = fs::read_to_string(child.join(".git/objects/info/alternates")).unwrap();
     assert_eq!(
@@ -421,7 +427,7 @@ fn missing_parent_fails_before_partial_composition() {
     let (source, source_head) = repository(temp.path());
     let base = snapshot_repository(&source).unwrap();
     let a = branch(&source, &base, &temp.path().join("a"), "a.txt", "a");
-    let child = temp.path().join("child");
+    let child = temp.path().join(RUN_ID).join("child");
     assert!(prepare(&source, &child, &base, &[a.clone(), "missing".into()]).is_err());
     assert_eq!(git(&child, &["rev-parse", "HEAD"]).unwrap(), base);
     assert!(!child.join("a.txt").exists());

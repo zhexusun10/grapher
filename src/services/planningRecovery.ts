@@ -101,7 +101,7 @@ export function createPlanningRecovery(service: Service, publish: (summary: Plan
         if (!current(scope) || ticket !== request) return;
         const latest = summaries[0];
         const runTime = snapshot?.planning?.createdAt || 0;
-        publish(latest && latest.repository === scope.repository &&
+        publish(latest?.runId && latest.repository === scope.repository &&
           (latest.status === "failed" || !!latest.error) &&
           (!snapshot?.runId || !snapshot.planning || (latest.createdAt || 0) >= runTime)
           ? latest : null);
@@ -117,7 +117,7 @@ export function createPlanningRecovery(service: Service, publish: (summary: Plan
       try {
         const result = summary || (id ? await service.getPlanning(id) : null);
         if (!current(scope) || ticket !== request) return;
-        if (result && result.repository === scope.repository && result.planningId === id &&
+        if (result?.runId && result.repository === scope.repository && result.planningId === id &&
           (result.status === "failed" || !!result.error)) publish(result);
       } catch {
         // The request error remains visible; missing history must not restore stale data.

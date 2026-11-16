@@ -28,7 +28,7 @@ fn record_input_history(runtime: &Runtime, execution: &Execution) {
     let directory = runtime.root.join("sessions").join(&execution.id);
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join(format!("test_{}.jsonl", execution.session_id)), format!("{}\n{}\n",
-        serde_json::json!({"type":"session", "version":3, "id":execution.session_id, "cwd":execution.worktree}),
+        serde_json::json!({"type":"session", "version":3, "grapherFormat":1, "grapherRunId":runtime.state.run_id, "id":execution.session_id, "cwd":execution.worktree}),
         serde_json::json!({"type":"message", "id":"opening", "parentId":null,
             "message":{"role":"user", "content":"retained history"}}))).unwrap();
 }
@@ -59,6 +59,9 @@ fn existing_input_runtime(mode: &str) -> (TempDir, PathBuf, Runtime) {
 /// Earlier attempts can have activity while a later bound input is still unread.
 fn consume_input(runtime: &mut Runtime, job: &Job) {
     use std::io::Write;
+    let mut prepared = job.clone();
+    attach(runtime, &mut prepared);
+    let job = &prepared;
     let path = Path::new(&job.execution.worktree);
     if !job.source_direct && !path.is_dir() {
         workspace::prepare(
@@ -99,7 +102,8 @@ fn consume_input(runtime: &mut Runtime, job: &Job) {
         .unwrap_or_else(|| directory.join(format!("test{suffix}")));
     if !session.exists() {
         fs::write(&session, format!("{}\n", serde_json::json!({
-            "type":"session", "version":3, "id":job.execution.session_id, "cwd":job.execution.worktree,
+            "type":"session", "version":3, "grapherFormat":1, "grapherRunId":runtime.state.run_id,
+            "id":job.execution.session_id, "cwd":job.execution.worktree,
         }))).unwrap();
     }
     let mut content = vec![serde_json::json!({"type":"text", "text":job.task})];
@@ -445,6 +449,16 @@ fn node_input_recovery_mixed_messages_preserve_fifo_images_and_identical_turns()
                 Some(vec![image("third")]),
             )
             .unwrap();
+        let attempts = runtime.state.executions.len();
+        if legacy {
+            assert!(runtime
+                .jobs()
+                .err()
+                .unwrap()
+                .contains("Missing durable node input binding"));
+            assert_eq!(runtime.state.executions.len(), attempts);
+            continue;
+        }
         let retry = runtime.jobs().unwrap().remove(0);
         assert_eq!(
             retry
@@ -677,7 +691,7 @@ fn node_input_recovery_existing_session_does_not_prepend_consumed_directive() {
             let head = if first.source_direct || mode == "serial" {
                 String::new()
             } else {
-                runtime.state.base.clone()
+                runtime.latest_source_head().to_string()
             };
             runtime
                 .finish(
@@ -988,6 +1002,18 @@ fn node_message_queue_post_publication_keeps_source_direct_mode_across_restart()
     assert_eq!(Path::new(&job.execution.worktree), source);
     assert!(job.task.contains("source first") && job.task.contains("source second"));
     assert_eq!(runtime.state.phase, "followup");
+    assert_eq!(
+        runtime.store.load(&runtime.state.run_id).unwrap().phase,
+        "followup"
+    );
+    runtime
+        .finish(&job.execution, Ok((String::new(), "done".into())))
+        .unwrap();
+    assert_eq!(runtime.state.phase, "followup");
+    assert_eq!(
+        runtime.store.load(&runtime.state.run_id).unwrap().phase,
+        "followup"
+    );
 }
 
 #[test]

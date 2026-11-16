@@ -42,7 +42,13 @@ fn node(
 ) -> String {
     workspace::prepare(source, path, base, parents).unwrap();
     fs::write(path.join(file), content).unwrap();
-    workspace::snapshot_node(path, source, "worker").unwrap()
+    workspace::snapshot_node_for_run(
+        path,
+        source,
+        "worker",
+        Some("48b8e1d1-2428-42a2-9b28-9d90f631f9d1"),
+    )
+    .unwrap()
 }
 fn assert_delivery(source: &Path, base: &str, head: &str, internal: &[String]) {
     assert_eq!(git(source, &["rev-parse", "HEAD"]), base);

@@ -4,6 +4,36 @@ use super::*;
 #[path = "feedback_batch_tests.rs"]
 mod batch;
 
+// Model the driver between node launches: private batches reach source through
+// real Git publication before a repair can run. Tests of the barrier call the
+// inner Runtime directly so the undelivered state remains observable.
+struct Runtime(crate::runtime::Runtime);
+impl std::ops::Deref for Runtime {
+    type Target = crate::runtime::Runtime;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Runtime {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Runtime {
+    fn open(root: &Path) -> Result<Self, String> {
+        crate::runtime::Runtime::open(root).map(Self)
+    }
+    fn jobs(&mut self) -> Result<Vec<Job>, String> {
+        loop {
+            let jobs = self.0.jobs()?;
+            if !jobs.is_empty() || self.state.phase != "publishing" {
+                return Ok(jobs);
+            }
+            super::workspace_policy::deliver_batch(&mut self.0);
+        }
+    }
+}
+
 fn graph(names: &[&str]) -> Graph {
     Graph {
         original_goal: "workspace feedback".into(),
@@ -88,10 +118,13 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         .edit_draft_graph(graph(names), runtime.state.config.clone().unwrap())
         .unwrap();
     runtime.approve().unwrap();
-    (temp, source, runtime)
+    (temp, source, Runtime(runtime))
 }
 
-fn execute(runtime: &mut Runtime, job: &Job) {
+fn execute(runtime: &mut crate::runtime::Runtime, job: &Job) {
+    let mut job = job.clone();
+    attach(runtime, &mut job);
+    let job = &job;
     let root = runtime.root.clone();
     let result = perform(
         job,
@@ -108,14 +141,24 @@ fn execute(runtime: &mut Runtime, job: &Job) {
     if let Err(error) = &result {
         panic!("{} failed: {error}", job.execution.node);
     }
+    let session_dir = runtime.root.join("sessions").join(&job.execution.id);
+    let suffix = format!("_{}.jsonl", job.execution.session_id);
+    let has_history = fs::read_dir(&session_dir).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(&suffix))
+    });
+    if !has_history {
+        history(runtime, job, &job.task);
+    }
     runtime.finish(&job.execution, result).unwrap();
 }
 
-fn history(runtime: &Runtime, job: &Job, text: &str) {
+pub(super) fn history(runtime: &crate::runtime::Runtime, job: &Job, text: &str) {
     let directory = runtime.root.join("sessions").join(&job.execution.id);
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join(format!("test_{}.jsonl", job.execution.session_id)), format!("{}\n{}\n",
-        serde_json::json!({"type":"session", "version":3, "id":job.execution.session_id, "cwd":job.execution.worktree}),
+        serde_json::json!({"type":"session", "version":3, "grapherFormat":1, "grapherRunId":runtime.state.run_id, "id":job.execution.session_id, "cwd":job.execution.worktree}),
         serde_json::json!({"type":"message", "id":"user", "parentId":null, "message":{"role":"user", "content":text, "timestamp":job.execution.started_at}}))).unwrap();
 }
 
@@ -147,7 +190,8 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
     history(&runtime, related, "RELATED PRIVATE HISTORY");
     let repair = runtime.jobs().unwrap().remove(0);
     assert_eq!(repair.execution.node, "owner");
-    assert_eq!(repair.execution.worktree, review.execution.worktree);
+    assert!(repair.source_direct);
+    assert_eq!(Path::new(&repair.execution.worktree), source.as_path());
     assert!(repair.session_fork.is_some());
     assert_eq!(repair.task, "Feedback:\nRead reports/audit.json.");
     execute(&mut runtime, &repair);
@@ -161,9 +205,7 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
     let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
     assert_eq!(
         header["cwd"],
-        serde_json::json!(crate::native::host_path(Path::new(
-            &review.execution.worktree
-        )))
+        serde_json::json!(crate::native::host_path(&source))
     );
     assert_eq!(
         fs::read_to_string(Path::new(&repair.execution.worktree).join(".cache/owner"))
@@ -174,11 +216,8 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
     let next = runtime.jobs().unwrap();
     assert_eq!(next.len(), 2);
     for job in &next {
-        if job.execution.node == "related" {
-            assert_ne!(job.execution.worktree, repair.execution.worktree);
-        } else {
-            assert_eq!(job.execution.worktree, repair.execution.worktree);
-        }
+        assert!(job.source_direct);
+        assert_eq!(job.execution.worktree, repair.execution.worktree);
         let previous = if job.execution.node == "related" {
             related
         } else {
@@ -213,11 +252,8 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
         );
     }
     assert!(runtime.jobs().unwrap().is_empty());
-    let publication = runtime.state.publication.clone().unwrap();
-    crate::graph_merge::merge_graph(&source, &publication.heads, || {
-        Err("unexpected merge".into())
-    })
-    .unwrap();
+    assert_eq!(runtime.state.phase, "completed");
+    assert!(runtime.state.published_head.is_some());
     assert_eq!(
         fs::read_to_string(source.join(".cache/source"))
             .unwrap()
@@ -464,7 +500,11 @@ fn pending_feedback_survives_restart_and_replays_its_exact_output_range() {
     assert_eq!(recovered.state.config.as_ref().unwrap().max_feedback, 1);
     recovered.pause(false).unwrap();
     let repair = recovered.jobs().unwrap().remove(0);
-    assert_eq!(repair.execution.worktree, review.execution.worktree);
+    assert!(repair.source_direct);
+    assert_eq!(
+        Path::new(&repair.execution.worktree),
+        Path::new(&repair.config.repository)
+    );
     assert_eq!(repair.task, "Feedback:\nRead reports/audit.json.");
     assert!(!repair.task.contains("streamed 中文"));
     assert!(!repair.task.contains("<FEEDBACK>"));
@@ -481,7 +521,7 @@ fn pending_feedback_survives_restart_and_replays_its_exact_output_range() {
 
 #[cfg(feature = "fixture")]
 #[test]
-fn parallel_feedback_merges_only_feedback_senders_and_forks_owner_history() {
+fn parallel_feedback_delivers_batch_code_and_forks_only_owner_history() {
     let (_temp, _source, mut runtime) =
         configured(&["owner", "review_one", "review_two", "review_accept"], 3);
     let owner = runtime.jobs().unwrap().remove(0);
@@ -505,15 +545,8 @@ fn parallel_feedback_merges_only_feedback_senders_and_forks_owner_history() {
     assert!(reviews
         .iter()
         .all(|review| review.execution.worktree != repair.execution.worktree));
-    assert_eq!(
-        repair
-            .feedback_workspace
-            .as_ref()
-            .unwrap()
-            .additional_sources
-            .len(),
-        1
-    );
+    assert!(repair.source_direct);
+    assert!(repair.feedback_workspace.is_none());
     assert_eq!(repair.task.matches("Feedback:").count(), 2);
     assert_eq!(
         repair
@@ -538,24 +571,22 @@ fn parallel_feedback_merges_only_feedback_senders_and_forks_owner_history() {
     let path = Path::new(&repair.execution.worktree);
     assert!(path.join("reports/review_one.txt").is_file());
     assert!(path.join("reports/review_two.txt").is_file());
-    assert!(!path.join("reports/review_accept.txt").exists());
-    for review in reviews
-        .iter()
-        .filter(|review| review.execution.node != "review_accept")
-    {
-        workspace::verify_prepared_ancestor(
-            path,
-            runtime
-                .state
-                .executions
-                .iter()
-                .find(|execution| execution.id == review.execution.id)
-                .unwrap()
-                .after
-                .as_ref()
-                .unwrap(),
-        )
-        .unwrap();
+    assert!(path.join("reports/review_accept.txt").is_file());
+    for review in &reviews {
+        let head = runtime
+            .state
+            .executions
+            .iter()
+            .find(|execution| execution.id == review.execution.id)
+            .unwrap()
+            .after
+            .as_ref()
+            .unwrap();
+        assert!(runtime.state.published_heads.contains(head));
+        assert!(
+            workspace::git(path, &["cat-file", "-e", head]).is_err(),
+            "private ancestry stays outside source Git"
+        );
     }
     let session = fs::read_to_string(
         runtime
@@ -614,14 +645,6 @@ fn shared_terminal_workspace_project_file_followup_keeps_descendants_completed()
     assert_eq!(
         runtime.state.nodes["related"].status, "completed",
         "a shared terminal workspace is updated in place"
-    );
-    assert!(
-        !runtime
-            .state
-            .events
-            .iter()
-            .any(|event| matches!(&event.kind,
-        EventKind::WorkspaceFilesChanged { execution_id } if execution_id == &update.execution.id))
     );
     assert_eq!(
         fs::read_to_string(Path::new(&update.execution.worktree).join(".cache/owner"))
@@ -757,8 +780,8 @@ fn post_publication_direct_edit_runs_in_source_and_failed_retry_uses_graph_workt
         .intervene("owner", "finish without discarding partial ordinary work")
         .unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
-    assert!(!retry.source_direct);
-    assert_ne!(Path::new(&retry.execution.worktree), source.as_path());
+    assert!(retry.source_direct);
+    assert_eq!(Path::new(&retry.execution.worktree), source.as_path());
 }
 
 #[test]
@@ -853,18 +876,12 @@ fn terminal_node_followup_uses_the_shared_workspace_and_preserves_its_conversati
     .unwrap();
     assert!(text.contains("REVIEW HISTORY"));
     assert!(!text.contains("OWNER HISTORY"));
-    assert_eq!(
-        workspace::git(
-            Path::new(&repair.execution.worktree),
-            &["rev-parse", "HEAD"]
-        )
-        .unwrap(),
-        runtime.state.nodes["review"].head.clone().unwrap(),
-    );
+    assert!(next.source_direct);
+    assert_eq!(runtime.state.nodes["review"].head.as_deref(), Some(""));
 }
 
 #[test]
-fn failed_preparation_before_session_fork_retries_in_the_transferred_tree() {
+fn failed_source_preparation_before_session_fork_retries_without_resetting_files() {
     let (_temp, _source, mut runtime) = configured(&["owner", "review"], 1);
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
@@ -885,7 +902,8 @@ fn failed_preparation_before_session_fork_retries_in_the_transferred_tree() {
         .intervene("owner", "retry the interrupted repair")
         .unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
-    assert_eq!(retry.execution.worktree, review.execution.worktree);
+    assert!(retry.source_direct);
+    assert_eq!(retry.execution.worktree, repair.execution.worktree);
     assert_eq!(retry.session_fork.as_ref().unwrap().id, owner.execution.id);
     assert_eq!(
         fs::read_to_string(Path::new(&retry.execution.worktree).join("owner.txt"))
@@ -894,6 +912,12 @@ fn failed_preparation_before_session_fork_retries_in_the_transferred_tree() {
         "initial"
     );
     execute(&mut runtime, &retry);
+    let fork = runtime
+        .root
+        .join("sessions")
+        .join(&retry.execution.id)
+        .join(format!("grapher_{}.jsonl", retry.execution.session_id));
+    assert!(fs::read_to_string(fork).unwrap().contains("OWNER HISTORY"));
     assert_eq!(
         fs::read_to_string(Path::new(&retry.execution.worktree).join("owner.txt"))
             .unwrap()
@@ -934,8 +958,25 @@ fn historical_edit_does_not_restore_project_files_from_the_original_execution() 
         .before
         .clone();
     let edited = runtime.jobs().unwrap().remove(0);
-    assert_eq!(edited.execution.before, owner_before);
+    assert!(edited.source_direct);
+    assert_eq!(edited.execution.worktree, repair.execution.worktree);
     execute(&mut runtime, &edited);
+    assert_eq!(
+        runtime
+            .state
+            .executions
+            .iter()
+            .find(|e| e.id == owner.execution.id)
+            .unwrap()
+            .before,
+        owner_before
+    );
+    assert_eq!(
+        fs::read_to_string(Path::new(&edited.execution.worktree).join("owner.txt"))
+            .unwrap()
+            .trim(),
+        "fixed"
+    );
     assert_eq!(runtime.state.nodes["owner"].status, "completed");
     assert_eq!(runtime.state.nodes["review"].status, "dirty");
 }
@@ -959,47 +1000,42 @@ fn feedback_completion_and_queue_rollback_together_on_database_failure() {
 
 #[cfg(feature = "fixture")]
 #[test]
-fn modified_completed_workspace_blocks_feedback_handoff() {
-    let (_temp, _source, mut runtime) = configured(&["owner", "review"], 1);
+fn publication_uses_recorded_feedback_bytes_without_importing_late_private_mutations() {
+    let (_temp, source, mut runtime) = configured(&["owner", "review"], 1);
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
     let review = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &review);
-    fs::write(
-        Path::new(&review.execution.worktree).join(".cache/review"),
-        "late mutation",
-    )
-    .unwrap();
+    let late = Path::new(&review.execution.worktree).join(".cache/review");
+    fs::write(&late, "late mutation").unwrap();
     let repair = runtime.jobs().unwrap().remove(0);
-    let result = perform(
-        &repair,
-        &runtime.root,
-        &[],
-        |_| {},
-        |_| panic!("must not start model"),
+    assert!(repair.source_direct);
+    assert_eq!(
+        fs::read_to_string(source.join(".cache/review"))
+            .unwrap()
+            .trim(),
+        "evidence"
     );
-    let error = result.unwrap_err();
-    // A late mutation is refused either by the completed project-view check or
-    // by the feedback handoff check; both are correct.
-    assert!(
-        error.contains("Feedback workspace changed after completion")
-            || error.contains("changed outside its recorded execution"),
-        "{error}"
-    );
+    assert_eq!(fs::read_to_string(late).unwrap(), "late mutation");
+    execute(&mut runtime, &repair);
+    assert_eq!(runtime.state.nodes["owner"].status, "completed");
 }
 
 #[cfg(feature = "fixture")]
 fn unrecorded_host_commit(original: &str) -> String {
-    original.replace("      echo fixed > owner.txt", r#"      echo residue > residue.txt
-      export GIT_DIR="../.grapher-git/$(printf %s "$(basename "$PWD")" | git hash-object --stdin | cut -c1-16).git" GIT_WORK_TREE="$PWD"
+    original.replace(
+        "      echo fixed > owner.txt",
+        r#"      echo residue > residue.txt
+      unset GIT_DIR GIT_WORK_TREE
       git add -A
       git -c user.name=residue -c user.email=residue@invalid commit -qm residue
-      exit 19"#)
+      exit 19"#,
+    )
 }
 
 #[cfg(feature = "fixture")]
 #[test]
-fn failed_feedback_repair_adopts_its_committed_residue_on_retry() {
+fn failed_source_feedback_retry_preserves_committed_progress() {
     let (temp, _source, mut runtime) = configured(&["owner", "review"], 1);
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
@@ -1007,8 +1043,12 @@ fn failed_feedback_repair_adopts_its_committed_residue_on_retry() {
     execute(&mut runtime, &review);
     let repair = runtime.jobs().unwrap().remove(0);
     assert_eq!(repair.execution.node, "owner");
-    assert_eq!(repair.execution.worktree, review.execution.worktree);
-    let pin_head = repair.feedback_workspace.as_ref().unwrap().head.clone();
+    assert!(repair.source_direct);
+    let pin_head = workspace::git(
+        Path::new(&repair.execution.worktree),
+        &["rev-parse", "HEAD"],
+    )
+    .unwrap();
     // First repair attempt: commit residue, then fail without recording it.
     let script = temp.path().join("agent.sh");
     let original = fs::read_to_string(&script).unwrap();
@@ -1029,20 +1069,22 @@ fn failed_feedback_repair_adopts_its_committed_residue_on_retry() {
     assert!(result.is_err());
     runtime.finish(&repair.execution, result).unwrap();
     assert_eq!(runtime.state.nodes["owner"].status, "failed");
-    // The residue advanced the worktree past the pinned head, clean but unrecorded.
+    // The source keeps committed progress even though the repair failed.
     let worktree = Path::new(&repair.execution.worktree);
     let residue_head = workspace::git(worktree, &["rev-parse", "HEAD"]).unwrap();
     assert_ne!(residue_head, pin_head);
-    // The retry adopts the residue as its base instead of refusing the handoff.
+    // A new instruction resumes the source session and preserves its commit.
     fs::write(&script, original).unwrap();
     history(&runtime, &repair, "OWNER REPAIR HISTORY");
     runtime
         .intervene("owner", "Continue the failed repair")
         .unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
-    assert!(retry.session_fork.as_ref().is_some_and(|previous| {
-        previous.status == "failed" && previous.worktree == repair.execution.worktree
-    }));
+    assert_eq!(
+        retry.resume_execution_id.as_deref(),
+        Some(repair.execution.id.as_str())
+    );
+    assert_eq!(retry.execution.session_id, repair.execution.session_id);
     execute(&mut runtime, &retry);
     assert_eq!(runtime.state.nodes["owner"].status, "completed");
     let retry_execution = runtime
@@ -1052,13 +1094,12 @@ fn failed_feedback_repair_adopts_its_committed_residue_on_retry() {
         .rev()
         .find(|execution| execution.id == retry.execution.id)
         .unwrap();
-    assert_eq!(retry_execution.before, residue_head);
-    let final_head = retry_execution.after.clone().unwrap();
-    assert!(workspace::git(
-        worktree,
-        &["merge-base", "--is-ancestor", &residue_head, &final_head]
-    )
-    .is_ok());
+    assert_eq!(retry_execution.before, "");
+    assert_eq!(retry_execution.after.as_deref(), Some(""));
+    assert_eq!(
+        workspace::git(worktree, &["rev-parse", "HEAD"]).unwrap(),
+        residue_head
+    );
     assert_eq!(
         fs::read_to_string(worktree.join("residue.txt"))
             .unwrap()
@@ -1105,14 +1146,11 @@ fn continue_recovers_feedback_that_failed_before_its_session_fork() {
         "the original feedback is delivered exactly once"
     );
     assert_eq!(retry.session_fork.as_ref().unwrap().id, owner.execution.id);
-    assert_eq!(
-        retry
-            .feedback_workspace
-            .as_ref()
-            .unwrap()
-            .source_execution_id,
-        review.execution.id
-    );
+    assert!(retry.source_direct);
+    assert!(retry.feedback_workspace.is_none());
+    assert!(Path::new(&retry.execution.worktree)
+        .join("reports/audit.json")
+        .is_file());
     execute(&mut runtime, &retry);
     assert_eq!(runtime.state.nodes["owner"].status, "completed");
     assert_eq!(
@@ -1132,19 +1170,20 @@ fn continue_recovers_feedback_that_failed_before_its_session_fork() {
 
 #[cfg(feature = "fixture")]
 #[test]
-fn adoption_survives_a_failed_attempt_without_a_persisted_session() {
-    // Mirrors the production wedge: the failed attempt died before or without
-    // persisting its Pi session, so the retry's resume falls back to the
-    // original target session (completed) instead of the failed attempt.
-    // Attribution must come from the run's execution history, not from the
-    // forked session, or the workspace stays wedged.
+fn source_feedback_retry_without_a_session_preserves_progress_and_owner_history() {
+    // The failed source repair has no retained Pi file or recorded activity.
+    // A new user turn must recover the owner's history while keeping source work.
     let (temp, _source, mut runtime) = configured(&["owner", "review"], 1);
     let owner = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &owner);
     let review = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &review);
     let repair = runtime.jobs().unwrap().remove(0);
-    let pin_head = repair.feedback_workspace.as_ref().unwrap().head.clone();
+    let pin_head = workspace::git(
+        Path::new(&repair.execution.worktree),
+        &["rev-parse", "HEAD"],
+    )
+    .unwrap();
     let script = temp.path().join("agent.sh");
     let original = fs::read_to_string(&script).unwrap();
     fs::write(&script, unrecorded_host_commit(&original)).unwrap();
@@ -1163,7 +1202,15 @@ fn adoption_survives_a_failed_attempt_without_a_persisted_session() {
     );
     assert!(result.is_err());
     runtime.finish(&repair.execution, result).unwrap();
-    // No history() here: the failed attempt has no persisted Pi session.
+    // Simulate losing the failed attempt's Pi file while retaining source work.
+    for entry in fs::read_dir(root.join("sessions").join(&repair.execution.id))
+        .unwrap()
+        .flatten()
+    {
+        if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
+            fs::remove_file(entry.path()).unwrap();
+        }
+    }
     let worktree = Path::new(&repair.execution.worktree);
     let residue_head = workspace::git(worktree, &["rev-parse", "HEAD"]).unwrap();
     fs::write(&script, original).unwrap();
@@ -1176,7 +1223,7 @@ fn adoption_survives_a_failed_attempt_without_a_persisted_session() {
         .session_fork
         .as_ref()
         .is_some_and(|previous| previous.status == "completed"));
-    // ...and the residue is still adopted as the retry base.
+    // The source commit and bytes remain in place through the history fork.
     execute(&mut runtime, &retry);
     assert_eq!(runtime.state.nodes["owner"].status, "completed");
     let retry_execution = runtime
@@ -1186,7 +1233,12 @@ fn adoption_survives_a_failed_attempt_without_a_persisted_session() {
         .rev()
         .find(|execution| execution.id == retry.execution.id)
         .unwrap();
-    assert_eq!(retry_execution.before, residue_head);
+    assert!(retry.source_direct);
+    assert_eq!(retry_execution.before, "");
+    assert_eq!(
+        workspace::git(worktree, &["rev-parse", "HEAD"]).unwrap(),
+        residue_head
+    );
     assert_ne!(residue_head, pin_head);
     assert_eq!(
         fs::read_to_string(worktree.join("residue.txt"))
@@ -1267,7 +1319,8 @@ fn feedback_recheck_retry_retains_prepared_files_when_its_session_fork_failed() 
     let mut runtime = Runtime::open(&root).unwrap();
     runtime.pause(false).unwrap();
     let retry = runtime.jobs().unwrap().remove(0);
-    assert!(retry.preserved_workspace.is_some());
+    assert!(retry.source_direct);
+    assert!(retry.preserved_workspace.is_none());
     assert_eq!(retry.session_fork.as_ref().unwrap().id, review.execution.id);
     assert_eq!(retry.task, recheck.task);
     assert!(!retry.continuation && !retry.initial_recovery);
@@ -1287,7 +1340,11 @@ fn failed_feedback_repair_keeps_its_dirty_files_for_the_retry() {
     let review = runtime.jobs().unwrap().remove(0);
     execute(&mut runtime, &review);
     let repair = runtime.jobs().unwrap().remove(0);
-    let pin_head = repair.feedback_workspace.as_ref().unwrap().head.clone();
+    let pin_head = workspace::git(
+        Path::new(&repair.execution.worktree),
+        &["rev-parse", "HEAD"],
+    )
+    .unwrap();
     let script = temp.path().join("agent.sh");
     let original = fs::read_to_string(&script).unwrap();
     // First repair attempt leaves uncommitted writes behind and fails.
@@ -1335,7 +1392,12 @@ fn failed_feedback_repair_keeps_its_dirty_files_for_the_retry() {
         .rev()
         .find(|execution| execution.id == retry.execution.id)
         .unwrap();
-    assert_eq!(retry_execution.before, pin_head);
+    assert!(retry.source_direct);
+    assert_eq!(retry_execution.before, "");
+    assert_eq!(
+        workspace::git(worktree, &["rev-parse", "HEAD"]).unwrap(),
+        pin_head
+    );
     assert_eq!(
         fs::read_to_string(worktree.join("partial.txt"))
             .unwrap()
@@ -1362,7 +1424,7 @@ fn verdict_runtime(names: &[&str], script_body: &str) -> (TempDir, Runtime) {
         .edit_draft_graph(graph(names), runtime.state.config.clone().unwrap())
         .unwrap();
     runtime.approve().unwrap();
-    (temp, runtime)
+    (temp, Runtime(runtime))
 }
 
 #[test]

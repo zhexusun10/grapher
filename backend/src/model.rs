@@ -243,11 +243,10 @@ impl RunModelConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     pub repository: String,
-    // Test-only actuator injection. Legacy engine/command JSON fields are
-    // ignored by production deserialization and never serialized back to UI.
+    // Test-only actuator injection; production rejects these fields.
     #[cfg(feature = "fixture")]
     #[serde(default = "test_engine")]
     pub engine: String,
@@ -260,7 +259,7 @@ pub struct Config {
     pub model: String,
     #[serde(default = "default_thinking_level")]
     pub thinking_level: String,
-    // Missing role settings retain the legacy model/thinking defaults.
+    // Optional role fields inherit the shared model/thinking defaults.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub role_models: BTreeMap<String, RoleModelConfig>,
     #[serde(default = "default_max_parallel")]
@@ -315,6 +314,20 @@ impl Config {
     }
 
     pub fn validate_model_settings(&self) -> Result<(), String> {
+        let qualified = |model: &str| {
+            model.is_empty()
+                || model.split_once('/').is_some_and(|(provider, id)| {
+                    !provider.trim().is_empty() && !id.trim().is_empty()
+                })
+        };
+        if !qualified(&self.model)
+            || self
+                .role_models
+                .values()
+                .any(|settings| !qualified(&settings.model))
+        {
+            return Err("Model selection must include provider/model".into());
+        }
         const LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
         if !LEVELS.contains(&self.thinking_level.as_str()) {
             return Err(format!(
@@ -337,6 +350,18 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn required_feedback_execution<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let id = String::deserialize(deserializer)?;
+    if id.is_empty() {
+        return Err(serde::de::Error::custom(
+            "Missing reviewed execution identity",
+        ));
+    }
+    Ok(Some(id))
 }
 
 pub const MIN_MAX_PARALLEL: usize = 2;
@@ -694,19 +719,14 @@ pub struct PendingFeedback {
     pub target_head: Option<String>,
     pub target_revision: usize,
     /// Stable reviewed execution; node heads may advance during directory handoff.
-    /// Legacy requests without this field retain their exact-head validation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        deserialize_with = "required_feedback_execution",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub target_execution_id: Option<String>,
     pub accepted: bool,
     pub output_offset: usize,
     pub output_bytes: usize,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceFiles {
-    pub head: String,
-    pub version: String,
 }
 
 /// A durable user turn waiting for a node execution. Its event sequence is
@@ -743,7 +763,7 @@ pub struct FeedbackContinuation {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NodeState {
     #[serde(deserialize_with = "deserialize_node_status")]
     pub status: String,
@@ -787,29 +807,23 @@ pub struct NodeState {
     pub feedback_workspace: Option<FeedbackWorkspace>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback_continuation: Option<FeedbackContinuation>,
-    #[serde(default, skip_serializing, rename = "filesOverride")]
-    pub legacy_files_override: Option<String>,
-    #[serde(default, skip_serializing, rename = "filesVersion")]
-    pub legacy_files_version: Option<String>,
-    #[serde(default, skip_serializing, rename = "baselineFilesVersion")]
-    pub legacy_baseline_files_version: Option<String>,
-    #[serde(default, skip_serializing, rename = "filesChanged")]
-    pub legacy_files_changed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<crate::environment::CompositeResult>,
     pub error: Option<String>,
 }
 
-// Normalize historical checkpoints in memory without rewriting stored events.
+// Checkpoints use the current node-state vocabulary.
 fn deserialize_node_status<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<String, D::Error> {
     let status = String::deserialize(deserializer)?;
-    Ok(if status == "done" {
-        "completed".into()
-    } else {
-        status
-    })
+    if !matches!(
+        status.as_str(),
+        "waiting" | "running" | "completed" | "failed" | "blocked" | "dirty" | "paused"
+    ) {
+        return Err(serde::de::Error::custom("Unsupported node status"));
+    }
+    Ok(status)
 }
 
 impl Default for NodeState {
@@ -832,10 +846,6 @@ impl Default for NodeState {
             baseline_head: None,
             feedback_workspace: None,
             feedback_continuation: None,
-            legacy_files_override: None,
-            legacy_files_version: None,
-            legacy_baseline_files_version: None,
-            legacy_files_changed: false,
             result: None,
             error: None,
         }
@@ -995,15 +1005,14 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         planning: Option<PlanningSummary>,
     },
-    /// Persist routing separately from graph shape. Older event stores did not
-    /// record it and retain their legacy shape-based interpretation.
+    /// Persist routing independently of graph shape.
     Routed {
         plan_type: String,
     },
     Approved {
         base: String,
     },
-    /// Absent on legacy Runs, which retain private workspace semantics.
+    /// Every graph Run records its initial workspace policy.
     WorkspaceIsolationSelected {
         isolated: bool,
     },
@@ -1020,25 +1029,12 @@ pub enum EventKind {
         /// Continue a batch without resetting its source baseline. On a source
         /// dispatch, retain a held private batch during prerequisite recovery;
         /// returning to private execution refreshes inputs for unstarted peers.
-        /// Historical events always started a new dispatch group.
-        #[serde(default)]
         resumed: bool,
     },
     /// Delivery between batches uses normal recoverable Git publication.
     BatchHandoffRequested {
+        #[serde(deserialize_with = "current_handoff_recoveries")]
         recovery_execution_ids: Vec<String>,
-    },
-    /// Partial work was captured, not completed. These heads must be delivered
-    /// before the failed nodes can continue in a different physical directory.
-    BatchRecoveryCaptured {
-        heads: BTreeMap<String, String>,
-    },
-    /// Offline compensation for an undelivered handoff of explicitly paused
-    /// nodes. Historical attempts and publication evidence remain append-only.
-    PausedBatchRestored {
-        handoff_sequence: i64,
-        restored_nodes: BTreeMap<String, NodeState>,
-        reason: String,
     },
     SharedWorkspaceReviewRequested {
         execution_id: String,
@@ -1047,13 +1043,7 @@ pub enum EventKind {
     SourceSnapshotted {
         head: String,
     },
-    /// Legacy run-level project-file capture. New Runs retain this event only
-    /// for replay compatibility and never emit it.
-    SourceFilesRecorded {
-        files: SourceFiles,
-    },
-    /// Only new Runs request automatic admission. Legacy Created events alone
-    /// never authorize reinterpreting a saved legacy project-file contract.
+    /// New Runs request admission before initializing native environments.
     EnvironmentPolicyRequested,
     EnvironmentPolicyResolved {
         environment: Option<crate::environment::EnvironmentConfig>,
@@ -1087,11 +1077,6 @@ pub enum EventKind {
     ResultExecutionFailed {
         generation: String,
         error: String,
-    },
-    /// Legacy run-level project-file result marker. New Runs retain this
-    /// event only for replay compatibility and never emit it.
-    WorkspaceFilesChanged {
-        execution_id: String,
     },
     GraphRevised {
         graph: Graph,
@@ -1127,15 +1112,6 @@ pub enum EventKind {
     Paused {
         paused: bool,
     },
-    /// Legacy failed-only settings event, retained for persisted replay.
-    FailedNodeModelsUpdated {
-        nodes: Vec<String>,
-        settings: RoleModelConfig,
-    },
-    NodeModelsUpdated {
-        nodes: Vec<String>,
-        settings: RoleModelConfig,
-    },
     NodeModelOverrideUpdated {
         node: String,
         settings: RoleModelConfig,
@@ -1154,8 +1130,7 @@ pub enum EventKind {
         nodes: Vec<String>,
         #[serde(default)]
         continuation_nodes: Vec<String>,
-        /// Older events only continued specifically classified failures.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        /// Explicitly records which failed attempts may continue.
         resume_failed: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         source_direct_nodes: Vec<String>,
@@ -1169,7 +1144,6 @@ pub enum EventKind {
     Started {
         execution: Execution,
         /// Atomically claim exactly these queued turns for this execution.
-        /// Legacy starts omitted the field and consumed their pending instruction.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_sequences: Option<Vec<i64>>,
         /// This execution starts the node's conversation from zero (no session
@@ -1193,7 +1167,8 @@ pub enum EventKind {
         execution_id: String,
         node: String,
         instruction: String,
-        /// Transport identity survives input rewriting; absent on legacy events.
+        /// Transport identity survives input rewriting; extension-owned input
+        /// may have no Grapher request ID.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1210,14 +1185,12 @@ pub enum EventKind {
         node: Option<String>,
         messages: Vec<RecalledMessage>,
     },
-    /// A message that does not initiate work. Legacy finished-node notes are
-    /// record-only; queued turns accompany the node's next normal dispatch.
+    /// A passive message; queued turns accompany the next normal dispatch.
     NodeMessaged {
         node: String,
         instruction: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         images: Option<Vec<ImageAttachment>>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         queued: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
@@ -1257,14 +1230,11 @@ pub enum EventKind {
         node: String,
         error: String,
     },
-    /// Human committed a conflicted Git preparation; the legacy file-version
-    /// field is retained only for replay compatibility.
+    /// Human committed a conflicted Git preparation.
     WorkspaceResolved {
         execution_id: String,
         head: String,
         nodes: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        files_version: Option<String>,
     },
     FeedbackContinuationQueued {
         node: String,
@@ -1409,9 +1379,32 @@ pub struct ResultExecution {
     pub error: Option<String>,
 }
 
+fn current_handoff_recoveries<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error> {
+    let ids = Vec::<String>::deserialize(deserializer)?;
+    if !ids.is_empty() {
+        return Err(serde::de::Error::custom(
+            "Unsupported batch recovery handoff format",
+        ));
+    }
+    Ok(ids)
+}
+
+impl EventKind {
+    pub(crate) fn validate_current_format(&self) -> Result<(), String> {
+        if matches!(self, Self::BatchHandoffRequested { recovery_execution_ids } if !recovery_execution_ids.is_empty())
+        {
+            return Err("Unsupported batch recovery handoff format".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchHandoff {
+    #[serde(deserialize_with = "current_handoff_recoveries")]
     pub recovery_execution_ids: Vec<String>,
 }
 
@@ -1501,8 +1494,6 @@ pub struct Snapshot {
     pub feedback_counts: BTreeMap<String, usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_feedback: Vec<PendingFeedback>,
-    #[serde(default, skip_serializing)]
-    pub source_files: Option<SourceFiles>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_baseline: Option<crate::environment::CompositeResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1799,30 +1790,6 @@ impl Snapshot {
                 role.usage.backfill_consumed_tokens();
             }
         }
-    }
-
-    /// Older checkpoints stored per-node overrides before Run-level model
-    /// selections existed. Recover the conversation selection from them so the
-    /// Settings projection and future nodes do not fall back to the creation
-    /// config after replaying an old checkpoint.
-    pub fn hydrate_legacy_model_config(&mut self) {
-        if self.model_config.is_some() {
-            return;
-        }
-        let Some(config) = self.config.as_ref() else {
-            return;
-        };
-        let Some(settings) = self
-            .nodes
-            .values()
-            .filter(|node| !node.model_override)
-            .find_map(|node| node.model_config.clone())
-        else {
-            return;
-        };
-        let mut models = RunModelConfig::from_config(config);
-        models.role_models.insert("nodeAgent".into(), settings);
-        self.model_config = Some(models);
     }
 
     /// Creation config overlaid with this conversation's saved model selection.
@@ -2598,9 +2565,28 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::PrivateBatchSelected { nodes } => {
             state.private_batch = nodes.clone();
         }
-        EventKind::ExecutionBatchStarted { isolated, .. } => {
+        EventKind::ExecutionBatchStarted {
+            nodes, isolated, ..
+        } => {
+            let source_followup = !isolated
+                && !nodes.is_empty()
+                && nodes.iter().all(|name| {
+                    state.nodes.get(name).is_some_and(|node| {
+                        node.pending_messages
+                            .first()
+                            .is_some_and(|message| message.source_direct)
+                            || node.continuation && node.source_direct_recovery
+                    })
+                });
             state.isolated_workspaces = Some(*isolated);
-            state.publication = None;
+            if !(source_followup
+                && state
+                    .publication
+                    .as_ref()
+                    .is_some_and(|publication| publication.status == "completed"))
+            {
+                state.publication = None;
+            }
             state.phase = "running".into();
         }
         EventKind::BatchHandoffRequested {
@@ -2609,34 +2595,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             state.batch_handoff = Some(BatchHandoff {
                 recovery_execution_ids: recovery_execution_ids.clone(),
             });
-        }
-        EventKind::BatchRecoveryCaptured { heads } => {
-            if let Some(handoff) = &mut state.batch_handoff {
-                handoff
-                    .recovery_execution_ids
-                    .retain(|id| !heads.contains_key(id));
-            }
-            for (id, head) in heads {
-                if let Some(execution) = state
-                    .executions
-                    .iter()
-                    .find(|execution| execution.id == *id)
-                {
-                    if let Some(node) = state.nodes.get_mut(&execution.node) {
-                        node.head = Some(head.clone());
-                    }
-                }
-            }
-        }
-        EventKind::PausedBatchRestored { restored_nodes, .. } => {
-            for (name, node) in restored_nodes {
-                state.nodes.insert(name.clone(), node.clone());
-            }
-            state.batch_handoff = None;
-            state.publication = None;
-            state.isolated_workspaces = Some(true);
-            state.paused = true;
-            state.phase = "paused".into();
         }
         EventKind::Approved { base } => {
             state.approved = true;
@@ -2764,55 +2722,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             }
             state.phase = if *paused { "paused" } else { "running" }.into();
         }
-        EventKind::FailedNodeModelsUpdated { nodes, settings } => {
-            let mut models = state.model_config.clone().unwrap_or_else(|| {
-                state
-                    .config
-                    .as_ref()
-                    .map(RunModelConfig::from_config)
-                    .unwrap_or_default()
-            });
-            models
-                .role_models
-                .insert("nodeAgent".into(), settings.clone());
-            state.model_config = Some(models);
-            for name in nodes {
-                if let Some(node) = state.nodes.get_mut(name) {
-                    if node.status == "failed" {
-                        node.model_config = Some(settings.clone());
-                        node.model_retry = Some(true);
-                    }
-                }
-            }
-        }
-        EventKind::NodeModelsUpdated { nodes, settings } => {
-            let mut models = state.model_config.clone().unwrap_or_else(|| {
-                state
-                    .config
-                    .as_ref()
-                    .map(RunModelConfig::from_config)
-                    .unwrap_or_default()
-            });
-            models
-                .role_models
-                .insert("nodeAgent".into(), settings.clone());
-            state.model_config = Some(models);
-            for name in nodes {
-                let never_executed = !state
-                    .executions
-                    .iter()
-                    .any(|execution| execution.node == *name);
-                if let Some(node) = state.nodes.get_mut(name) {
-                    if node.status == "failed"
-                        || (never_executed
-                            && matches!(node.status.as_str(), "waiting" | "blocked" | "dirty"))
-                    {
-                        node.model_config = Some(settings.clone());
-                        node.model_retry = Some(node.status == "failed");
-                    }
-                }
-            }
-        }
         EventKind::NodeModelOverrideUpdated { node, settings } => {
             if let Some(node) = state.nodes.get_mut(node) {
                 node.model_config = Some(settings.clone());
@@ -2916,15 +2825,15 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                     message.source_direct
                         && message_sequences
                             .as_ref()
-                            .is_none_or(|sequences| sequences.contains(&message.sequence))
+                            .is_some_and(|sequences| sequences.contains(&message.sequence))
                 });
             node.pending_messages.retain(|message| {
                 message_sequences
                     .as_ref()
-                    .is_some_and(|sequences| !sequences.contains(&message.sequence))
+                    .is_none_or(|sequences| !sequences.contains(&message.sequence))
             });
             node.source_direct_recovery = false;
-            if source_direct && state.isolated_workspaces.is_none() {
+            if source_direct && state.isolated_workspaces == Some(false) {
                 state.phase = "followup".into();
             }
             // Live work owns the displayed topology; provisional draft edits
@@ -2975,8 +2884,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
         EventKind::WorkspaceIsolationRequested
         | EventKind::SharedWorkspaceReviewRequested { .. }
         | EventKind::SourceSnapshotted { .. }
-        | EventKind::SourceFilesRecorded { .. }
-        | EventKind::WorkspaceFilesChanged { .. }
         | EventKind::NodeInputBound { .. }
         | EventKind::SteersWithdrawn { .. }
         | EventKind::QueueWithdrawalRecorded { .. } => {}
@@ -3247,7 +3154,7 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                         node.instruction = message.instruction.clone();
                         node.instruction_images = message.images.clone();
                         node.shared_workspace = message.shared_workspace;
-                        if message.source_direct && state.isolated_workspaces.is_none() {
+                        if message.source_direct && state.isolated_workspaces == Some(false) {
                             state.phase = "followup".into();
                         }
                     }
@@ -3295,7 +3202,6 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
             execution_id,
             head,
             nodes,
-            files_version: _,
         } => {
             let execution = state
                 .executions
@@ -3497,7 +3403,8 @@ pub fn apply(state: &mut Snapshot, event: &Event) {
                 .find(|execution| execution.id == *from_execution_id)
                 .expect("validated edit anchor")
                 .clone();
-            state.private_batch.clear();
+            // A node history branch still belongs to its held private batch.
+            // Keep unpublished peers behind the same delivery barrier.
             for execution in &state.executions {
                 if nodes.contains(&execution.node)
                     && execution.started_at >= anchor.started_at

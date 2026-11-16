@@ -37,6 +37,9 @@ fn configured(shared: bool) -> (TempDir, PathBuf, Runtime) {
         runtime
             .emit(EventKind::WorkspaceIsolationSelected { isolated: false })
             .unwrap();
+        runtime
+            .emit(EventKind::PrivateBatchSelected { nodes: vec![] })
+            .unwrap();
     }
     (temp, source, runtime)
 }
@@ -45,7 +48,7 @@ fn history(runtime: &Runtime, job: &Job) {
     let directory = runtime.root.join("sessions").join(&job.execution.id);
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join(format!("test_{}.jsonl", job.execution.session_id)), format!("{}\n{}\n",
-        serde_json::json!({"type":"session", "version":3, "id":job.execution.session_id, "cwd":job.execution.worktree}),
+        serde_json::json!({"type":"session", "version":3, "grapherFormat":1, "grapherRunId":runtime.state.run_id, "id":job.execution.session_id, "cwd":job.execution.worktree}),
         serde_json::json!({"type":"message", "id":"user", "parentId":null, "message":{"role":"user", "content":format!("HISTORY {}", job.execution.node), "timestamp":1}}))).unwrap();
 }
 
@@ -158,9 +161,12 @@ fn feedback_continuation_keeps_memory_but_rebuilds_inputs_in_dependency_order() 
                 );
                 assert!(!job.preserve_failed_environment);
                 assert_eq!(job.feedback_source, job.execution.node == "review");
-                if !shared {
-                    assert_eq!(job.parent_heads, vec![runtime.state.base.clone()]);
-                }
+                assert_eq!(job.parent_heads,
+                    runtime.state.nodes["owner"].head.iter()
+                        .filter(|head| !job.source_direct && !head.is_empty()
+                            && !runtime.state.published_heads.contains(head))
+                        .cloned().collect::<Vec<_>>(),
+                    "shared or already-delivered inputs are carried by source, never an empty Git ref");
                 assert!(!runtime
                     .state
                     .superseded_execution_ids

@@ -117,12 +117,14 @@ function WorkspaceFooterFixture() {
   audit.confirmRun = () => setHasRunId(true);
   audit.createNode = () => { setHasNode(true); setPlanning(false); };
   audit.send = () => {
-    setMessages(previous => [...previous, { id: "follow-up", role: "user", text: "Follow-up task", node: "task", runId: "footer-run" }]);
+    setMessages(previous => [...previous, { id: `follow-up-${previous.length}`, role: "user", text: "Follow-up task", node: "task", runId: "footer-run", pendingExecution: true }]);
     setPending(true);
     setStatus("dirty");
   };
   audit.startExecution = (bytes = 0) => {
     setExecutions(previous => [...previous, execution("current", "running", bytes)]);
+    setMessages(previous => previous.map(message => message.pendingExecution
+      ? { ...message, executionId: "current", pendingExecution: false } : message));
     setHasNode(true);
     setPlanning(false);
     setPending(false);
@@ -133,6 +135,7 @@ function WorkspaceFooterFixture() {
     setStatus("completed");
   };
   audit.setExecutions = (next: Execution[]) => setExecutions(next);
+  audit.setMessages = setMessages;
   audit.setExecutionMetrics = (metrics: Execution["metrics"], id = "current") => setExecutions(previous =>
     previous.map(item => item.id === id ? { ...item, metrics } : item));
   audit.setExecutionTiming = (id: string, startedAt: number, completedAt: number | null) => setExecutions(previous =>

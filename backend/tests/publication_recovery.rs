@@ -10,6 +10,8 @@ use std::{
     sync::OnceLock,
 };
 use tempfile::TempDir;
+
+const RUN_ID: &str = "48b8e1d1-2428-42a2-9b28-9d90f631f9d1";
 fn git(path: &Path, args: &[&str]) -> String {
     workspace::git(path, args).unwrap()
 }
@@ -41,7 +43,7 @@ fn source(sha256: bool) -> (TempDir, PathBuf, String) {
 fn node(source: &Path, base: &str, path: &Path, value: &str) -> String {
     workspace::prepare(source, path, base, &[]).unwrap();
     fs::write(path.join("file.txt"), value).unwrap();
-    workspace::snapshot_node(path, source, "worker").unwrap()
+    workspace::snapshot_node_for_run(path, source, "worker", Some(RUN_ID)).unwrap()
 }
 fn index(source: &Path) -> PathBuf {
     PathBuf::from(git(
@@ -142,7 +144,7 @@ fn check_partial_checkout_recovery(sha256: bool) {
     fs::write(path.join("file.txt"), "result\n").unwrap();
     fs::write(path.join("added.txt"), "added").unwrap();
     fs::remove_file(path.join("gone.txt")).unwrap();
-    let heads = [workspace::snapshot_node(&path, &source, "worker").unwrap()];
+    let heads = [workspace::snapshot_node_for_run(&path, &source, "worker", Some(RUN_ID)).unwrap()];
     let result = publish(&source, &heads, |_| panic!()).unwrap();
     interrupt(&source, &heads);
     // Some paths still have input entries while the addition reached its result.
@@ -173,7 +175,7 @@ fn interrupted_atomic_copy_retries_large_addition_without_installing_partial_byt
     workspace::prepare(&source, &path, &base, &[]).unwrap();
     let bytes = vec![91u8; 2 * 1024 * 1024];
     fs::write(path.join("large.exe"), &bytes).unwrap();
-    let heads = [workspace::snapshot_node(&path, &source, "worker").unwrap()];
+    let heads = [workspace::snapshot_node_for_run(&path, &source, "worker", Some(RUN_ID)).unwrap()];
     let result = publish(&source, &heads, |_| panic!()).unwrap();
     let journal = interrupt(&source, &heads);
     // Simulate interruption: only the owned temporary file is truncated.
@@ -197,7 +199,7 @@ fn legacy_truncated_addition_is_reported_without_overwriting_unrecorded_work() {
     let path = temp.path().join("node");
     workspace::prepare(&source, &path, &base, &[]).unwrap();
     fs::write(path.join("large.exe"), vec![21u8; 1024 * 1024]).unwrap();
-    let heads = [workspace::snapshot_node(&path, &source, "worker").unwrap()];
+    let heads = [workspace::snapshot_node_for_run(&path, &source, "worker", Some(RUN_ID)).unwrap()];
     publish(&source, &heads, |_| panic!()).unwrap();
     let journal = interrupt(&source, &heads);
     fs::write(journal.join("applying"), "checkout\n").unwrap();
@@ -225,7 +227,7 @@ fn atomic_delivery_recovers_mixed_file_directory_transitions() {
     fs::remove_file(node.join("was_dir/child")).unwrap();
     fs::remove_dir(node.join("was_dir")).unwrap();
     fs::write(node.join("was_dir"), "new file").unwrap();
-    let heads = [workspace::snapshot_node(&node, &source, "worker").unwrap()];
+    let heads = [workspace::snapshot_node_for_run(&node, &source, "worker", Some(RUN_ID)).unwrap()];
     let result = publish(&source, &heads, |_| panic!()).unwrap();
     interrupt(&source, &heads);
     fs::remove_file(source.join("was_file/child")).unwrap();
@@ -499,7 +501,7 @@ fn sha256_delivery_keeps_all_new_objects_private() {
         )
         .unwrap();
     }
-    let heads = [workspace::snapshot_node(&path, &source, "worker").unwrap()];
+    let heads = [workspace::snapshot_node_for_run(&path, &source, "worker", Some(RUN_ID)).unwrap()];
     let metadata = PathBuf::from(git(&path, &["rev-parse", "--absolute-git-dir"]));
     assert!(fs::read_dir(metadata.join("objects/pack"))
         .unwrap()

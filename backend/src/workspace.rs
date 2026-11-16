@@ -493,7 +493,7 @@ fn private_slot_layout(path: &Path) -> bool {
         .and_then(Path::parent)
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
+        .is_some_and(|name| name == ".grapher-worktrees")
 }
 
 fn graph_metadata_name(slot: &str) -> Result<String, String> {
@@ -575,56 +575,18 @@ pub(crate) fn has_private_git(path: &Path) -> bool {
     if let Some(metadata) = private_git_dir(path) {
         return git_dir_has_head_commit(path, &metadata);
     }
-    if !crate::workspace_view::is_bound(path) && path.join(".git").is_dir() {
-        return git_dir_has_head_commit(path, &path.join(".git"));
-    }
     false
 }
 
 pub(crate) fn hide_private_git(path: &Path) -> Result<(), String> {
-    if crate::workspace_view::is_bound(path) {
-        return Ok(());
-    }
-    #[cfg(not(any(test, feature = "fixture")))]
-    if private_slot_layout(path) {
-        if path.join(".git").exists() {
-            return Err(
-                "Unsupported workspace layout; create a new Run instead of relocating project Git"
-                    .into(),
-            );
-        }
-        return Ok(());
-    }
-    let lease = SlotGitGuard::acquire(path)?;
-    if lease.0.views.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-        return Ok(());
-    }
-    let Some(run) = path.parent() else {
-        return Ok(());
-    };
-    if !run
-        .parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
+    if !crate::workspace_view::is_bound(path)
+        && private_slot_layout(path)
+        && path.join(".git").exists()
     {
-        return Ok(());
-    }
-    let visible = path.join(".git");
-    if visible.is_dir() {
-        let parent = run.join(".grapher-git");
-        if fs::symlink_metadata(&parent)
-            .is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
-        {
-            return Err("Refusing linked Graph Git metadata directory".into());
-        }
-        fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
-        let metadata = parent.join(graph_metadata_name(
-            &path.file_name().ok_or("Invalid slot")?.to_string_lossy(),
-        )?);
-        if metadata.exists() {
-            return Err("Graph slot has conflicting Git metadata".into());
-        }
-        fs::rename(visible, metadata).map_err(|e| e.to_string())?;
+        return Err(
+            "Unsupported workspace layout; create a new Run instead of relocating project Git"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -673,7 +635,7 @@ pub(crate) fn remove_private_git(path: &Path) -> Result<(), String> {
     if !root
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name == ".grapher-worktrees" || name == ".grapher-workspaces")
+        .is_some_and(|name| name == ".grapher-worktrees")
     {
         return Ok(());
     }
@@ -724,10 +686,8 @@ pub(crate) fn reclaim_orphan_git_metadata(run_root: &Path) -> Result<(), String>
             metadata_root.display()
         ));
     }
-    // Slot metadata names are digests, so map each live slot to its expected
-    // metadata name rather than guessing a slot from the digest. Legacy
-    // `<slot>.git` metadata beside a live slot is retained untouched; only a
-    // removed slot's metadata is reclaimed.
+    // Slot metadata names are digests. Preserve only metadata for live slots;
+    // unrecognized names remain untouched below.
     let mut live = std::collections::BTreeSet::new();
     for entry in fs::read_dir(run_root).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
@@ -740,7 +700,6 @@ pub(crate) fn reclaim_orphan_git_metadata(run_root: &Path) -> Result<(), String>
                 if let Ok(metadata) = graph_metadata_name(name) {
                     live.insert(metadata);
                 }
-                live.insert(format!("{name}.git"));
             }
         }
     }
@@ -752,7 +711,8 @@ pub(crate) fn reclaim_orphan_git_metadata(run_root: &Path) -> Result<(), String>
             remaining = true;
             continue;
         };
-        if slot.is_empty() || slot.contains('/') || slot.contains('\\') || live.contains(&name) {
+        if slot.len() != 16 || !slot.bytes().all(|b| b.is_ascii_hexdigit()) || live.contains(&name)
+        {
             remaining = true;
             continue;
         }
@@ -763,6 +723,10 @@ pub(crate) fn reclaim_orphan_git_metadata(run_root: &Path) -> Result<(), String>
                 "Refusing linked Graph Git metadata: {}",
                 path.display()
             ));
+        }
+        if !path.join("workspace-layout-v4").is_file() {
+            remaining = true;
+            continue;
         }
         fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
     }
@@ -2316,8 +2280,21 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
     prepare_view: bool,
     mut resolve: impl FnMut() -> Result<(), String>,
 ) -> Result<String, String> {
+    let run_id = run_id.or_else(|| {
+        path.parent()?
+            .file_name()?
+            .to_str()
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+    });
     if let Some(id) = run_id {
         uuid::Uuid::parse_str(id).map_err(|_| "Invalid Run ID for parent snapshot")?;
+    }
+    if run_id.is_none()
+        && parents.iter().any(|parent| {
+            !matches!(parent.len(), 40 | 64) || !parent.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+    {
+        return Err("Named parent snapshots require a Run identity".into());
     }
     let canonical_repo = canonical_workspace_path(repository)?;
     // Public prepare callers may supply a user HEAD rather than a previously
@@ -2540,9 +2517,7 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
     )?;
     let mut resolved_heads = Vec::new();
     for parent in parents {
-        // Runtime parents are commit IDs and use immutable pins. Named
-        // parents resolve against this Run's refs, or legacy unscoped refs
-        // when using the public prepare() API.
+        // Commit IDs use immutable pins; named parents require a Run scope.
         let is_head =
             matches!(parent.len(), 40 | 64) && parent.bytes().all(|b| b.is_ascii_hexdigit());
         // Node names are arbitrary labels; refs key on their deterministic id.
@@ -2556,7 +2531,7 @@ pub(crate) fn prepare_with_merger_expected_for_run_scoped(
         } else if let Some(id) = run_id {
             format!("refs/grapher/runs/{id}/nodes/{parent_id}")
         } else {
-            format!("refs/grapher/nodes/{parent_id}")
+            return Err("Named parent snapshots require a Run identity".into());
         };
         if let Some(url) = source_url.as_deref() {
             let head_refspec = format!("+{parent_ref}:refs/grapher/parents/{parent_id}");
@@ -2684,7 +2659,12 @@ pub(crate) fn recover_snapshot_readiness(
 /// Snapshot an isolated node and import its commit into the host repository.
 /// Repository identity stays in the host Runtime rather than the agent checkout.
 pub fn snapshot_node(path: &Path, repository: &Path, node_name: &str) -> Result<String, String> {
-    snapshot_node_for_run(path, repository, node_name, None)
+    let run = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("Node snapshots require a Run identity")?;
+    snapshot_node_for_run(path, repository, node_name, Some(run))
 }
 
 pub fn snapshot_node_for_run(
@@ -2708,7 +2688,7 @@ pub(crate) fn snapshot_node_scoped(
         uuid::Uuid::parse_str(id).map_err(|_| "Invalid Run ID for node snapshot")?;
         format!("refs/grapher/runs/{id}/nodes/{node_id}")
     } else {
-        format!("refs/grapher/nodes/{node_id}")
+        return Err("Node snapshots require a Run identity".into());
     };
     snapshot_slot_to_ref_scoped(path, repository, &target_ref, exclusions)
 }
@@ -3633,12 +3613,16 @@ fn snapshot_source_scoped(
             head.as_deref().unwrap_or("unborn"),
             tree,
             bridge.unwrap_or("source"),
-            identity.as_deref().unwrap_or("legacy")
+            identity
+                .as_deref()
+                .ok_or("Missing current source-view identity")?
         );
-        let message = identity
-            .as_ref()
-            .map(|identity| format!("snapshot\n\nworkspace-view:{identity}"))
-            .unwrap_or_else(|| SNAPSHOT_COMMIT_MESSAGE.into());
+        let message = format!(
+            "snapshot\n\nworkspace-view:{}",
+            identity
+                .as_ref()
+                .ok_or("Missing current source-view identity")?
+        );
         // Source snapshots follow the observed source history. Reusing an older
         // matching tree after the user reverted an edit would otherwise make the
         // fork's dirty baseline an incoming change and restore the reverted file.

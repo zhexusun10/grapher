@@ -5,21 +5,43 @@ export function stripNodePrefix(text: string): string {
   return text.replace(/^\[@[^\]]+\]\s*/, "").trim();
 }
 
+export function localMessagesAfterEdit(messages: ChatMessage[], edit: GraphEvent, events: GraphEvent[], keepOpening = false): ChatMessage[] {
+  const sourceIds = new Set<string>();
+  const sourceRequests = new Set<string>();
+  const visited = new Set<number>();
+  let source = events.find(event => event.sequence === edit.from_event_sequence);
+  while (source && !visited.has(source.sequence) &&
+      ["invalidated", "node_messaged", "steered", "conversation_edited"].includes(source.type)) {
+    visited.add(source.sequence);
+    sourceIds.add(`event-${source.sequence}`);
+    if (source.request_id) {
+      sourceRequests.add(source.request_id);
+      sourceIds.add(`msg-${source.request_id}`);
+    }
+    source = source.type === "conversation_edited"
+      ? events.find(event => event.sequence === source?.from_event_sequence) : undefined;
+  }
+  // An edited copy keeps its display ID after retiring its transport identity.
+  // Follow the durable edit chain to distinguish equal text in different turns.
+  const boundary = messages.findIndex(message => stripNodePrefix(message.text) === edit.old_instruction &&
+    (!sourceIds.size || sourceIds.has(message.id) ||
+      (message.steerRequestId && sourceRequests.has(message.steerRequestId))));
+  if (boundary < 0) return messages;
+  const priorRequests = new Set(events.filter(event => event.sequence < edit.sequence && event.request_id)
+    .map(event => event.request_id));
+  // A later receipt or an unacknowledged request is new input. Repeating the
+  // pre-edit text cannot put that request in the discarded local suffix.
+  return messages.filter((message, index) => index < boundary + Number(keepOpening) ||
+    (message.steerRequestId && !priorRequests.has(message.steerRequestId)));
+}
+
 export function findBranchTargetIndex(
   entries: readonly ChatMessage[],
   targetMsg: Pick<ChatMessage, "id" | "text">,
-  cleanExisting?: string,
+  _cleanExisting?: string,
 ): number {
-  // Equal text can belong to distinct turns. Resolve identity before the
-  // legacy text fallback used by replayed events with different local IDs.
-  const identityIndex = targetMsg.id ? entries.findIndex(entry => entry.id === targetMsg.id) : -1;
-  if (identityIndex >= 0) return identityIndex;
-  const cleanTarget = stripNodePrefix(cleanExisting || targetMsg.text);
-  const strippedRaw = stripNodePrefix(targetMsg.text);
-  return entries.findIndex(entry =>
-    stripNodePrefix(entry.text) === cleanTarget ||
-    stripNodePrefix(entry.text) === strippedRaw
-  );
+  // Equal text can belong to distinct turns; only the message ID identifies it.
+  return targetMsg.id ? entries.findIndex(entry => entry.id === targetMsg.id) : -1;
 }
 
 export function applySelectedVersionToEntries(
@@ -157,10 +179,9 @@ export function executionIdForMessage(state: Snapshot, event: GraphEvent): strin
     item.message_sequences?.includes(event.sequence));
   if (bound) return bound.execution?.id;
   if (state.nodes[node]?.pendingMessages?.some(message => message.sequence === event.sequence)) return undefined;
-  // New starts have exact claims. Only historical starts may infer ownership
-  // from event order; otherwise an unclaimed message could appear delivered.
+  // Edits have an explicit conversation boundary; other turns require claims.
   return state.events.find(item => item.type === "started" &&
-    (event.type === "conversation_edited" || item.message_sequences === undefined) &&
+    event.type === "conversation_edited" &&
     item.sequence > event.sequence && item.execution?.node === node)?.execution?.id;
 }
 

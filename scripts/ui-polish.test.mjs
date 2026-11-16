@@ -40,11 +40,12 @@ for (const language of ["en", "zh-CN"]) {
     const snapshot = { runId: "", config: null, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] },
       nodes: {}, executions: [], events: [], mergers: [], plan: null, approved: false, paused: false, base: "", feedbackCounts: {} };
     const results = {
-      bootstrap: { config, snapshot, runs: [], repositoryInfo: { path: repository, name: "Interface project", branch: "main", clean: true, head: "" }, dataPath: "/mock", envOverrides: {} },
+      bootstrap: { config, snapshot, runs: [], conversations: [], repositoryInfo: { path: repository, name: "Interface project", branch: "main", clean: true, head: "" }, dataPath: "/mock", envOverrides: {} },
       snapshot, snapshot_if_changed: { version: "fixed", snapshot: null }, list_plannings: [],
       repository_status: { repository, valid: true, error: null }, list_files: { files: [] }, list_skills: { skills: [] },
       provider_auth: { providers: [{ id: "test", name: "Test", methods: [], configured: true }], warning: null,
-        models: [{ provider: "test", id: "model", name: "Model", api: "mock", available: true, contextWindow: 1000, thinkingLevels: ["off"] }] },
+        models: [{ provider: "test", id: "model", name: "Model", api: "mock", available: true, contextWindow: 1000, thinkingLevels: ["off"], thinkingLevelFallbacks: {} }] },
+      extension_command: { instance: "standalone", commands: [] },
       pi_extensions: { globalDirectory: "/mock", extensions: [] },
       environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true },
     };

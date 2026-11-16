@@ -11,7 +11,10 @@ const info = { path: repository, name: "Responsiveness", branch: "main", clean: 
 const empty = { runId: "", config: null, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
   executions: [], events: [], mergers: [], plan: null, approved: false, paused: false, base: "", feedbackCounts: {} };
 const fast = { ...empty, runId: "fast", config, phase: "completed", graph: { ...empty.graph, originalGoal: "Available conversation" } };
-const bootstrap = { config, snapshot: fast, runs: ["fast"], repositoryInfo: info, dataPath: "/mock", envOverrides: {} };
+const summary = snapshot => ({ runId: snapshot.runId, repository: snapshot.config?.repository ?? repository,
+  title: snapshot.title || snapshot.graph.originalGoal, phase: snapshot.phase, planType: snapshot.planType,
+  hasActiveExecutions: snapshot.executions.some(execution => execution.status === "running") });
+const bootstrap = { config, snapshot: fast, runs: ["fast"], conversations: [summary(fast)], repositoryInfo: info, dataPath: "/mock", envOverrides: {} };
 const catalog = { providers: [{ id: "test", name: "Test", methods: [], configured: true }], warning: null,
   models: [
     { id: "old", thinkingLevels: ["off", "low", "high"], thinkingLevelFallbacks: { minimal: "low", medium: "high", xhigh: "high", max: "high" } },
@@ -30,10 +33,13 @@ async function app(handler, projects = [{ id: repository, path: repository, name
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "en-US", reducedMotion });
   await context.addInitScript(({ projects, config, cachedRuns, connectedEvents, storageHints, sessionHints }) => {
     localStorage.setItem("grapher_language_v1", "en");
+    localStorage.setItem("grapher_data_path", "/mock");
+    const scoped = key => ["grapher_workspace_runs", "grapher_run_labels", "grapher_run_modes", "grapher_config"].includes(key)
+      ? `grapher-format-1:/mock:${key}` : key;
     if (projects !== null) localStorage.setItem("grapher_projects", JSON.stringify(projects));
-    if (cachedRuns) localStorage.setItem("grapher_workspace_runs", JSON.stringify(cachedRuns));
-    localStorage.setItem("grapher_config", JSON.stringify({ ...config, model: "stale/browser-model" }));
-    for (const [key, value] of Object.entries(storageHints)) localStorage.setItem(key, JSON.stringify(value));
+    if (cachedRuns) localStorage.setItem(scoped("grapher_workspace_runs"), JSON.stringify(cachedRuns));
+    localStorage.setItem(scoped("grapher_config"), JSON.stringify({ ...config, model: "stale/browser-model" }));
+    for (const [key, value] of Object.entries(storageHints)) localStorage.setItem(scoped(key), JSON.stringify(value));
     for (const [key, value] of Object.entries(sessionHints)) sessionStorage.setItem(key, JSON.stringify(value));
     if (connectedEvents) {
       // Connected but silent: only watchdog reads can discover durable changes.
@@ -53,9 +59,14 @@ async function app(handler, projects = [{ id: repository, path: repository, name
     const command = new URL(route.request().url()).pathname.slice(5), body = route.request().postDataJSON();
     calls.push({ command, body });
     if (await handler(route, command, body)) return;
-    const defaults = { bootstrap, history: fast, snapshot: fast, snapshot_if_changed: { version: "fixed", snapshot: null },
+    const defaults = { bootstrap, history: fast, snapshot: fast, load_run: fast, snapshot_if_changed: { version: "fixed", snapshot: null },
+      get_execution_output: { runId: body.runId, executionId: body.executionId, content: "", startOffset: 0,
+        nextOffset: 0, totalBytes: 0, complete: true, status: "completed" },
+      get_file_changes: { runId: body.runId, executionId: null, executionIds: body.executionIds ?? null,
+        summary: { files: [], totalFiles: 0, addedCount: 0, modifiedCount: 0, deletedCount: 0, renamedCount: 0,
+          totalAdditions: 0, totalDeletions: 0, isRunning: false } },
       repository_status: { repository, valid: true, error: null }, list_plannings: [], list_files: { files: [] }, list_skills: { skills: [] },
-      provider_auth: catalog, pi_extensions: { globalDirectory: "mock", extensions: [] }, environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true } };
+      provider_auth: catalog, extension_command: { instance: "standalone", commands: [] }, pi_extensions: { globalDirectory: "mock", extensions: [] }, environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true } };
     if (!Object.hasOwn(defaults, command)) errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ headers: connectedEvents ? { "x-grapher-events": "1" } : {}, json: { result: defaults[command] ?? null } });
   });
@@ -311,7 +322,7 @@ test("Feedback opt-out preserves old session edges and hides the legend only for
     legacy: makeRun("legacy", true, true), legacyDisabled: makeRun("legacyDisabled", false, true) };
   const { context, page, errors } = await app(async (route, command, body) => {
     let result;
-    if (command === "bootstrap") result = { ...bootstrap, config: saved, snapshot: runs.fast, runs: Object.keys(runs) };
+    if (command === "bootstrap") result = { ...bootstrap, config: saved, snapshot: runs.fast, runs: Object.keys(runs), conversations: Object.values(runs).map(summary) };
     else if (["history", "snapshot", "load_run"].includes(command)) result = runs[body.runId] ?? runs.fast;
     else if (command === "save_config") {
       saved = body.config;
@@ -353,7 +364,7 @@ test("Feedback opt-out preserves old session edges and hides the legend only for
   } finally { await context.close(); }
 });
 
-test("one stalled history cannot keep validated sidebar cards and saved models loading", { timeout: 30_000 }, async () => {
+test("unindexed Run IDs never trigger per-history bootstrap expansion", { timeout: 30_000 }, async () => {
   let stalled = 0;
   const { context, page, errors } = await app(async (route, command, body) => {
     if (command === "bootstrap") {
@@ -366,7 +377,7 @@ test("one stalled history cannot keep validated sidebar cards and saved models l
     await page.locator('[data-run-id="fast"]').waitFor();
     assert.equal(await page.locator(".sidebar-skeleton-wrap").count(), 0);
     assert.equal(await page.locator('[data-run-id="slow"]').count(), 0, "unvalidated ownership stays hidden");
-    assert.equal(stalled, 1);
+    assert.equal(stalled, 0, "the authoritative index replaces the retired runs-list fallback");
     await openSettings(page);
     assert.equal(await nodeModel(page).inputValue(), "test/old", "backend settings are ready before all histories finish");
     await page.clock.fastForward(15_001);
@@ -403,7 +414,7 @@ test("prewarmed summaries render every sidebar card without histories or reposit
     assert.equal(await page.locator('[data-run-id="blank"] .is-resolving').count(), 0, "a blank title is resolved");
     assert.equal(calls.filter(call => call.command === "history").length, 0);
     assert.equal(calls.filter(call => call.command === "detect_repository").length, 1, "Git status loads independently");
-    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_workspace_runs"))), {
+    assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_workspace_runs"))), {
       [repository]: ["slow", "blank"], "/other": ["foreign"],
     });
     assert.deepEqual(errors, []);
@@ -573,7 +584,7 @@ test("first-launch workspace discovery is asynchronous and restores the detected
     assert.equal(await page.locator(".sidebar-skeleton-wrap").count(), 0, "discovery cannot block the sidebar");
     await discovery.fulfill({ json: { result: { ...info, path: "/discovered", name: "Discovered workspace" } } });
     await page.locator('[data-run-id="discovered"]').waitFor();
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).repository), "/discovered");
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).repository), "/discovered");
     assert.equal(calls.filter(call => call.command === "save_config").length, 0, "discovery must not overwrite model defaults");
     assert.equal(await page.locator(".project-workspace-item").count(), 1);
     assert.deepEqual(errors, []);
@@ -597,10 +608,10 @@ test("first-launch discovery cannot be overwritten by an older settings response
     await until(() => !!saving);
     assert.equal(saving.config.maxFeedback, 3, "saving preserves the configured feedback budget");
     await discovery.fulfill({ json: { result: { ...info, path: "/discovered" } } });
-    await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_config")).repository === "/discovered");
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).repository === "/discovered");
     await saving.route.fulfill({ json: { result: { ...fresh, config: saving.config } } });
     await page.waitForFunction(() => document.querySelector(".save-config-btn")?.disabled === false);
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).repository), "/discovered");
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).repository), "/discovered");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });
@@ -613,7 +624,7 @@ test("first-launch discovery never restores a deliberately empty workspace list"
     return true;
   }, []);
   try {
-    await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher_config")).repository === "");
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).repository === "");
     assert.equal(calls.filter(call => call.command === "detect_repository").length, 0);
     assert.equal(await page.locator(".project-workspace-item").count(), 0);
     assert.deepEqual(errors, []);
@@ -663,10 +674,10 @@ test("conversation settings stay scoped and new conversations use defaults", { t
   const snapshots = { fast, other };
   const { context, page, errors } = await app(async (route, command, body) => {
     if (command === "bootstrap") {
-      await route.fulfill({ json: { result: { ...bootstrap, config: globalConfig, snapshot: fast, runs: ["fast", "other"] } } });
+      await route.fulfill({ json: { result: { ...bootstrap, config: globalConfig, snapshot: fast, runs: ["fast", "other"], conversations: Object.values(snapshots).map(summary) } } });
       return true;
     }
-    if (command === "history" || command === "snapshot") {
+    if (["history", "snapshot", "load_run"].includes(command)) {
       await route.fulfill({ json: { result: snapshots[body.runId] || fast } }); return true;
     }
     return false;
@@ -778,7 +789,7 @@ test("a delayed Settings snapshot cannot overwrite newly saved role models", { t
   let current = fast, stallReads = false;
   const pendingReads = [], savedConfigs = [];
   const { context, page, errors } = await app(async (route, command, body) => {
-    if (command === "history" || command === "snapshot") {
+    if (["history", "snapshot", "load_run"].includes(command)) {
       if (command === "snapshot" && stallReads) pendingReads.push({ route, snapshot: current });
       else await route.fulfill({ json: { result: current } });
       return true;
@@ -892,13 +903,13 @@ test("a stalled settings save releases busy state, preserves its draft and can r
     await page.clock.fastForward(15_001);
     await page.waitForFunction(() => document.querySelector(".save-config-btn")?.disabled === false);
     assert.equal(await nodeModel(page).inputValue(), "test/new", "timed-out save retains the model draft");
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).model), "test/old");
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).model), "test/old");
     assert.match(await page.locator(".settings-modal").innerText(), /Saving settings timed out/);
     stall = false;
     await page.locator(".save-config-btn").click();
     await page.locator(".settings-modal").waitFor({ state: "detached" });
     assert.equal(saves, 2);
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).model), "test/new", "Settings outside a conversation commits global defaults");
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).model), "test/new", "Settings outside a conversation commits global defaults");
     await openSettings(page);
     assert.equal(await nodeModel(page).inputValue(), "test/new", "the accepted draft remains visible in Settings");
     assert.deepEqual(errors, []);
@@ -1379,7 +1390,7 @@ test("saving an incompatible legacy level updates defaults to the Pi-adjusted va
     await page.locator('[data-run-id="fast"]').waitFor(); await openSettings(page);
     const thinking = page.locator(".role-model-group").nth(0).locator("select").nth(1);
     assert.equal(await thinking.inputValue(), "high");
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).thinkingLevel), "max", "opening settings must not persist corrections");
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).thinkingLevel), "max", "opening settings must not persist corrections");
     await page.locator(".save-config-btn").click();
     await page.locator(".settings-modal").waitFor({ state: "detached" });
     assert.equal(saved.thinkingLevel, "high");
@@ -1428,7 +1439,7 @@ test("Settings edits the conversation profile even while a node with an override
     assert.equal(current.nodes.a.modelConfig.model, "test/new", "an explicit node override remains independent");
     assert.equal(current.modelConfig.roleModels.nodeAgent.model, "test/plain");
     assert.equal(current.config.model, "test/old", "original execution config remains historical");
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).model), "test/old", "conversation edits do not change global defaults");
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).model), "test/old", "conversation edits do not change global defaults");
     await page.locator('.graph-canvas .react-flow__node[data-id="b"]').click();
     await openSettings(page);
     assert.equal(await nodeModel(page).inputValue(), "test/plain", "the same Run profile appears from another node");
@@ -1608,7 +1619,7 @@ test("home slash model changes are reflected in Settings without writing global 
     assert.equal(await page.locator(".role-model-group").nth(1).locator("select").first().inputValue(), "test/new");
     assert.equal(await nodeModel(page).inputValue(), "test/old");
     assert.equal(calls.filter(call => call.command === "save_config").length, 0);
-    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher_config")).model), "test/old");
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("grapher-format-1:/mock:grapher_config")).model), "test/old");
     assert.deepEqual(errors, []);
   } finally { await context.close(); }
 });

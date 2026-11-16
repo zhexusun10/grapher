@@ -23,6 +23,19 @@ fn fixture(retire: bool) -> (tempfile::TempDir, PathBuf, PathBuf, Arc<Service>) 
             config,
         )
         .unwrap();
+    runtime.set_route("serial").unwrap();
+    runtime
+        .store
+        .remember_cleanup_targets(
+            &runtime.state.run_id,
+            &std::collections::BTreeSet::from([crate::cleanup::Target::Workspace {
+                parent: temp.path().canonicalize().unwrap(),
+                bucket: ".grapher-worktrees".into(),
+                owner: runtime.state.run_id.clone(),
+                checkout: None,
+            }]),
+        )
+        .unwrap();
     let workspace = temp
         .path()
         .join(".grapher-worktrees")

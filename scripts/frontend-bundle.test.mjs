@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureSummaries, fixtureFileChanges, fixtureExecutionPage } from "./fixtures/current-api.mjs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -89,8 +90,10 @@ async function setupPage({ planType = "graph", running = false, twoRuns = false 
     const body = route.request().postDataJSON();
     let result;
     switch (command) {
-      case "bootstrap": case "save_config": result = { config, snapshot: empty, runs: Object.keys(snapshots), repositoryInfo, dataPath: "/mock" }; break;
-      case "history": case "snapshot": result = snapshots[body.runId] ?? empty; break;
+      case "bootstrap": case "save_config": result = { config, snapshot: empty, runs: Object.keys(snapshots), conversations: fixtureSummaries(Object.values(snapshots)), repositoryInfo, dataPath: "/mock" }; break;
+      case "get_file_changes": result = fixtureFileChanges(body); break;
+      case "get_execution_output": result = fixtureExecutionPage(body, Object.values(snapshots)); break;
+      case "load_run": case "history": case "snapshot": result = snapshots[body.runId] ?? empty; break;
       case "snapshot_if_changed": result = { version: "1", snapshot: snapshots[body.runId] ?? null }; break;
       case "repository_status": result = { repository, valid: true, error: null }; break;
       case "detect_repository": result = repositoryInfo; break;

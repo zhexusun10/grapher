@@ -31,6 +31,8 @@ fn planning_history_and_snapshot_accept_resolved_aliases_without_crossing_bindin
     let service = service(&temp.path().join("data"));
     let summary = PlanningSummary {
         planning_id: "alias-history".into(),
+        run_id: Some(Uuid::new_v4().to_string()),
+        goal: Some("failed planning".into()),
         status: Some("failed".into()),
         repository: Some(saved.clone()),
         ..Default::default()
@@ -41,6 +43,7 @@ fn planning_history_and_snapshot_accept_resolved_aliases_without_crossing_bindin
         }))
         .unwrap();
         let mut runtime = service.runtime.lock().unwrap();
+        runtime.state.run_id = summary.run_id.clone().unwrap();
         runtime
             .emit(EventKind::PlanningStarted {
                 goal: "failed planning".into(),
@@ -62,15 +65,20 @@ fn planning_history_and_snapshot_accept_resolved_aliases_without_crossing_bindin
     ] {
         let directory = temp.path().join("data/planning").join(id);
         fs::create_dir_all(&directory).unwrap();
-        write_planning_summary(
-            &directory,
-            &PlanningSummary {
-                planning_id: id.into(),
-                repository,
-                ..summary.clone()
-            },
-        )
-        .unwrap();
+        let candidate = PlanningSummary {
+            planning_id: id.into(),
+            repository,
+            ..summary.clone()
+        };
+        if candidate.repository.is_some() {
+            write_planning_summary(&directory, &candidate).unwrap();
+        } else {
+            fs::write(
+                directory.join("summary.json"),
+                serde_json::to_vec(&candidate).unwrap(),
+            )
+            .unwrap();
+        }
     }
     for repository in [ordinary.clone(), alias, saved.clone()] {
         let histories = list_plannings(&service, Some(repository.clone())).unwrap();
@@ -91,7 +99,7 @@ fn planning_history_and_snapshot_accept_resolved_aliases_without_crossing_bindin
         .unwrap();
         assert_eq!(snapshot["phase"], "planning_failed");
     }
-    assert_eq!(list_plannings(&service, None).unwrap().len(), 3);
+    assert_eq!(list_plannings(&service, None).unwrap().len(), 2);
     for repository in [
         "".to_owned(),
         "  ".to_owned(),
@@ -132,6 +140,8 @@ fn planning_history_refuses_linked_directories_and_preserves_external_summaries(
     fs::create_dir(&real).unwrap();
     let summary = PlanningSummary {
         planning_id: "real-history".into(),
+        run_id: Some(Uuid::new_v4().to_string()),
+        goal: Some("test".into()),
         status: Some("failed".into()),
         repository: Some("/repo".into()),
         ..Default::default()
@@ -156,7 +166,11 @@ fn planning_history_refuses_linked_directories_and_preserves_external_summaries(
     let mut summary = summary;
     summary.planning_id = "outside-history".into();
     summary.repository = None;
-    write_planning_summary(&outside, &summary).unwrap();
+    fs::write(
+        outside.join("summary.json"),
+        serde_json::to_vec(&summary).unwrap(),
+    )
+    .unwrap();
     let before = fs::read(outside.join("summary.json")).unwrap();
     crate::path_safety::directory_link(&outside, &planning.join("outside-history"));
     let config: Config =
@@ -280,6 +294,8 @@ fn archived_windows_planning_history_accepts_drive_prefix_case_and_separator_ali
         &directory,
         &PlanningSummary {
             planning_id: "archived".into(),
+            run_id: Some(Uuid::new_v4().to_string()),
+            goal: Some("archived".into()),
             status: Some("failed".into()),
             repository: Some(saved.clone()),
             ..Default::default()

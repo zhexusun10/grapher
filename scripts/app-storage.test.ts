@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readStorageJson, readStorageString, STORAGE_KEYS, writeStorageJson } from "../src/services/appStorage.ts";
+import { readStorageJson, readStorageString, storageJsonKey, STORAGE_KEYS, writeStorageJson, writeStorageString } from "../src/services/appStorage.ts";
+
+test("Run caches require both the current format and the backend data directory", () => withStorage(values => {
+  values.set(STORAGE_KEYS.workspaceRuns, JSON.stringify({ "/repo": ["retired"] }));
+  assert.equal(readStorageJson(STORAGE_KEYS.workspaceRuns), null);
+  writeStorageString(STORAGE_KEYS.dataPath, "/data/a");
+  writeStorageJson(STORAGE_KEYS.workspaceRuns, { "/repo": ["current-a"] });
+  assert.deepEqual(readStorageJson(STORAGE_KEYS.workspaceRuns), { "/repo": ["current-a"] });
+  writeStorageString(STORAGE_KEYS.dataPath, "/data/b");
+  assert.equal(readStorageJson(STORAGE_KEYS.workspaceRuns), null);
+  writeStorageString(STORAGE_KEYS.dataPath, "/data/a");
+  assert.deepEqual(readStorageJson(STORAGE_KEYS.workspaceRuns), { "/repo": ["current-a"] });
+  assert.ok(values.has(STORAGE_KEYS.workspaceRuns), "retired cache remains untouched");
+}));
 
 function withStorage(work: (values: Map<string, string>) => void) {
   const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -44,7 +57,7 @@ test("valid stored settings and workspace identities survive decoding unchanged"
 }));
 
 test("stored settings retain valid fields instead of trusting wrong scalar or nested types", () => withStorage(values => {
-  values.set(STORAGE_KEYS.config, JSON.stringify({ repository: null, model: "test/model", thinkingLevel: "unsupported",
+  values.set(storageJsonKey(STORAGE_KEYS.config), JSON.stringify({ repository: null, model: "test/model", thinkingLevel: "unsupported",
     maxParallel: 4, maxFeedback: "many", feedbackEnabled: false, autoApprove: "no", roleModels: {
       planner: { model: "test/planner", thinkingLevel: "high" }, nodeAgent: { model: 5 }, partitioner: null,
     } }));
@@ -53,15 +66,15 @@ test("stored settings retain valid fields instead of trusting wrong scalar or ne
 }));
 
 test("stored conversation indexes reject invalid shapes and retain only renderable values", () => withStorage(values => {
-  values.set(STORAGE_KEYS.workspaceRuns, JSON.stringify({ "/repo": ["run", null, 3], "/invalid": "run" }));
-  values.set(STORAGE_KEYS.runLabels, JSON.stringify({ run: "Saved title", corrupt: { title: "not a React child" } }));
-  values.set(STORAGE_KEYS.runModes, JSON.stringify({ run: "serial", corrupt: "unknown" }));
+  values.set(storageJsonKey(STORAGE_KEYS.workspaceRuns), JSON.stringify({ "/repo": ["run", null, 3], "/invalid": "run" }));
+  values.set(storageJsonKey(STORAGE_KEYS.runLabels), JSON.stringify({ run: "Saved title", corrupt: { title: "not a React child" } }));
+  values.set(storageJsonKey(STORAGE_KEYS.runModes), JSON.stringify({ run: "serial", corrupt: "unknown" }));
   assert.deepEqual(readStorageJson(STORAGE_KEYS.workspaceRuns), { "/repo": ["run"] });
   assert.deepEqual(readStorageJson(STORAGE_KEYS.runLabels), { run: "Saved title" });
   assert.deepEqual(readStorageJson(STORAGE_KEYS.runModes), { run: "serial" });
-  values.set(STORAGE_KEYS.runLabels, "[]");
+  values.set(storageJsonKey(STORAGE_KEYS.runLabels), "[]");
   assert.equal(readStorageJson(STORAGE_KEYS.runLabels), null);
-  values.set(STORAGE_KEYS.config, "{incomplete");
+  values.set(storageJsonKey(STORAGE_KEYS.config), "{incomplete");
   assert.equal(readStorageJson(STORAGE_KEYS.config), null);
   writeStorageJson(STORAGE_KEYS.runLabels, { run: "New title" });
   assert.deepEqual(readStorageJson(STORAGE_KEYS.runLabels), { run: "New title" });

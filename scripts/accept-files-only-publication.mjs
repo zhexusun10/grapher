@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { once } from 'node:events';
-import { legacyGraph } from './fixtures/legacy-run.mjs';
+import { privateGraph } from './fixtures/current-run.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), 'grapher-files-only-acceptance-'));
 const agent = join(directory, 'agent');
@@ -180,7 +180,7 @@ try {
       if (label === 'NODE_FANIN') nodes.push({ id: 'join', task: `${label} VERIFY_MERGED` });
       // Pin these cases to the retained private contract: a two-node adaptive
       // batch may run in source and therefore never require a publication Merger.
-      initial = await legacyGraph(api, env.GRAPHER_DATA_DIR, { config: config(repository), graph: { originalGoal: label, nodes,
+      initial = await privateGraph(api, env.GRAPHER_DATA_DIR, { config: config(repository), graph: { originalGoal: label, nodes,
         edges: label === 'NODE_FANIN' ? [{ from: 'left', to: 'join', feedback: false }, { from: 'right', to: 'join', feedback: false }] : [] } });
     }
     console.log(`[acceptance] ${label}: approving ${initial.runId}`);

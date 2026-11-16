@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activeNodeConversationEvents, activeNodeExecutions, applySelectedVersionToEntries, branchEditedMessageEntries, findBranchTargetIndex, nodeConversationExecutions, nodeConversationLineage, executionIdForMessage, executionIdForVersion, executionIdForEdit, versionsForEdit } from '../src/services/conversationBranch.ts';
+import { activeNodeConversationEvents, activeNodeExecutions, applySelectedVersionToEntries, branchEditedMessageEntries, findBranchTargetIndex, localMessagesAfterEdit, nodeConversationExecutions, nodeConversationLineage, executionIdForMessage, executionIdForVersion, executionIdForEdit, versionsForEdit } from '../src/services/conversationBranch.ts';
 import { emptySnapshot, type ChatMessage, type GraphEvent, type Snapshot } from '../src/types.ts';
 
 test('editing a completed turn hides the abandoned node branch but preserves earlier turns', () => {
@@ -212,6 +212,24 @@ test('message versions survive reload and nested edits', () => {
     ['original', 'replacement', 'third']);
 });
 
+test('edit pruning preserves an earlier identical request and input accepted after the edit', () => {
+  const earlier: ChatMessage = { id: 'msg-earlier', role: 'user', text: 'same', steerRequestId: 'earlier' };
+  const target: ChatMessage = { id: 'msg-target', role: 'user', text: 'same', steerRequestId: 'target' };
+  const pending: ChatMessage = { id: 'msg-pending', role: 'user', text: 'same', steerRequestId: 'pending' };
+  const edit: GraphEvent = { type: 'conversation_edited', sequence: 3, timestamp: 3, target: 'task',
+    from_event_sequence: 2, old_instruction: 'same', instruction: 'revised' };
+  const events: GraphEvent[] = [
+    { type: 'invalidated', sequence: 1, timestamp: 1, target: 'task', instruction: 'same', request_id: 'earlier' },
+    { type: 'invalidated', sequence: 2, timestamp: 2, target: 'task', instruction: 'same', request_id: 'target' }, edit,
+  ];
+  assert.deepEqual(localMessagesAfterEdit([earlier, target, pending], edit, events), [earlier, pending]);
+  events.push({ type: 'invalidated', sequence: 4, timestamp: 4, target: 'task', instruction: 'same', request_id: 'pending' });
+  assert.deepEqual(localMessagesAfterEdit([earlier, target, pending], edit, events), [earlier, pending]);
+  const updated = { ...target, text: 'revised', steerRequestId: undefined };
+  const nested = { ...edit, sequence: 5, from_event_sequence: 3, old_instruction: 'revised', instruction: 'next revision' };
+  assert.deepEqual(localMessagesAfterEdit([earlier, updated], nested, [...events, nested]), [earlier]);
+});
+
 test('editing and restoring a repeated turn prefers its message ID over earlier matching text', () => {
   const entries: ChatMessage[] = [
     { id: 'first', role: 'user', text: '[@task] same request', timestamp: 10 },
@@ -236,15 +254,17 @@ test('editing and restoring a repeated turn prefers its message ID over earlier 
   assert.deepEqual(entries.map(entry => entry.text), ['[@task] same request', '[@task] same request', 'later request']);
 });
 
-test('message rollback matches stripped node prefixes and rolls back subsequent turns', () => {
+test('message rollback uses stable IDs across node prefix display changes', () => {
   const baseEntries: ChatMessage[] = [
     { id: 'msg-1', role: 'user', text: '[@merge:06_feature_qa] continue solve the conflict', timestamp: 10 },
     { id: 'msg-2', role: 'user', text: '[@merge:06_feature_qa] second follow-up turn', timestamp: 20, plannerSteerId: 'steer-1', plannerSteerStatus: 'queued' },
   ];
   const targetClean = 'continue solve the conflict';
-  const targetMsg: ChatMessage = { id: 'event-5', role: 'user', text: targetClean, timestamp: 10 };
+  const targetMsg: ChatMessage = { id: 'msg-1', role: 'user', text: targetClean, timestamp: 10 };
+  assert.equal(findBranchTargetIndex(baseEntries, { ...targetMsg, id: 'different' }, targetClean), -1,
+    'equal text never authorizes editing a different turn');
   const targetIndex = findBranchTargetIndex(baseEntries, targetMsg, targetClean);
-  assert.equal(targetIndex, 0, 'matches turn 0 despite different ID and [@node] prefix');
+  assert.equal(targetIndex, 0, 'stable ID survives display prefix normalization');
 
   const branched = branchEditedMessageEntries(baseEntries, targetMsg, targetClean, 'revised resolution', undefined);
   assert.equal(branched.previousEntries.length, 0);

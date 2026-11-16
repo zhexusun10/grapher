@@ -294,7 +294,10 @@ sys.stdin.read()
                 tools: None,
                 session_id: None,
                 extra_args: vec![],
-                environment: vec![("GRAPHER_TEST_NODE_RPC", "1".into())],
+                environment: vec![
+                    ("GRAPHER_TEST_NODE_RPC", "1".into()),
+                    ("GRAPHER_NODE_EXECUTION_ID", job.execution.id.clone()),
+                ],
                 system_prompt: None,
                 images: None,
             },

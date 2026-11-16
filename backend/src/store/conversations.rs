@@ -52,6 +52,7 @@ pub fn conversation_summaries(path: &Path) -> Result<ConversationCatalog, String
             connection
                 .busy_timeout(std::time::Duration::from_secs(2))
                 .map_err(|e| e.to_string())?;
+            super::validate_database(&connection)?;
             let catalog = Arc::new(Mutex::new(Catalog {
                 connection,
                 version: None,
@@ -62,6 +63,7 @@ pub fn conversation_summaries(path: &Path) -> Result<ConversationCatalog, String
         }
     };
     let mut catalog = catalog.lock().map_err(|e| e.to_string())?;
+    super::validate_database(&catalog.connection)?;
     let version: i64 = catalog
         .connection
         .query_row("PRAGMA data_version", [], |row| row.get(0))
@@ -82,34 +84,17 @@ fn read_summaries(connection: &mut Connection) -> Result<ConversationCatalog, St
     let mut by_run = HashMap::new();
     let mut unavailable = std::collections::HashSet::new();
     {
-        // Keep at most one Run's business projection, not its history. Legacy
-        // Output rows and source-file payloads are filtered by their short tag
-        // before JSON parsing. Large legacy Finished transcripts use the same
-        // prefix-only projection as Store::load, never materializing log text.
-        let mut statement = transaction.prepare(
-            "SELECT run_id, sequence, timestamp,
-                CASE
-                    WHEN (kind='finished' OR (kind IS NULL AND substr(payload,1,18)='{\"type\":\"finished\"'))
-                         AND length(payload)>4096
-                         AND instr(substr(payload,1,512),'\"execution_id\":\"')>0
-                         AND instr(substr(payload,1,512),'\"head\":\"')>0
-                    THEN json_object('type','finished',
-                        'execution_id',substr(payload,instr(substr(payload,1,512),'\"execution_id\":\"')+16,
-                            instr(substr(payload,instr(substr(payload,1,512),'\"execution_id\":\"')+16,64),'\"')-1),
-                        'head',substr(payload,instr(substr(payload,1,512),'\"head\":\"')+8,
-                            instr(substr(payload,instr(substr(payload,1,512),'\"head\":\"')+8,64),'\"')-1),
-                        'output','','output_bytes',0)
-                    WHEN json_valid(payload) THEN json_remove(payload,
-                        '$.images','$.output','$.execution.output','$.execution.metrics','$.metrics')
-                    ELSE NULL
-                END
+        // Keep at most one Run's business projection; omit heavy current fields.
+        let mut statement = transaction
+            .prepare(
+                "SELECT run_id, sequence, timestamp,
+                CASE WHEN json_valid(payload) THEN json_remove(payload,
+                    '$.images','$.output','$.execution.output','$.execution.metrics','$.metrics')
+                    ELSE NULL END
              FROM events WHERE run_id NOT IN (SELECT run_id FROM deleted_runs)
-                AND COALESCE(kind,'') NOT IN ('output','source_files_recorded')
-                AND NOT (kind IS NULL AND (
-                    substr(payload,1,16)='{\"type\":\"output\"'
-                    OR substr(payload,1,64) LIKE '{\"type\":\"source_files_recorded\"%'))
-             ORDER BY run_id,sequence"
-        ).map_err(|e| e.to_string())?;
+             ORDER BY run_id,sequence",
+            )
+            .map_err(|e| e.to_string())?;
         let mut rows = statement.query([]).map_err(|e| e.to_string())?;
         let mut state = Snapshot::default();
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {

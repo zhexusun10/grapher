@@ -2,10 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { runtimeService } from "../services/runtime";
 import { startVisibilityPolling, type PollingController } from "../services/visibilityPolling";
 import type { Execution, FileChangeSummary, Snapshot } from "../types";
-import {
-  emptyFileChangeSummary,
-  mergeFileChangeSummaries,
-} from "../services/fileChanges";
+import { emptyFileChangeSummary } from "../services/fileChanges";
 
 export interface UseWorkspaceChangesOptions {
   state: Snapshot;
@@ -44,8 +41,7 @@ function sameSummary(a: FileChangeSummary, b: FileChangeSummary): boolean {
  *
  * The snapshot omits the change list (a build-heavy Run can hold tens of
  * thousands of paths), so the hook fetches it on demand through
- * `get_file_changes` and leaves the inline path for callers that still provide
- * `fileChanges` (fixtures and legacy backends).
+ * `get_file_changes`.
  */
 export function useWorkspaceChanges({
   state,
@@ -56,7 +52,6 @@ export function useWorkspaceChanges({
   const scoped = scopedExecutions !== null;
   const scopedIds = scoped ? scopedExecutions.map((execution) => execution.id) : null;
   const scopeKey = JSON.stringify([runId, scopedIds]);
-  const inline = !state.fileChangesOmitted;
   // No executions means there cannot be any execution-scoped changes.
   const emptyScope = scopedIds !== null && scopedIds.length === 0;
   const [fetched, setFetched] = useState<{ key: string; summary: FileChangeSummary } | null>(null);
@@ -64,7 +59,7 @@ export function useWorkspaceChanges({
   const snapshotSequence = state.events.at(-1)?.sequence ?? 0;
 
   useEffect(() => {
-    if (inline || !runId) { setFetched(null); return; }
+    if (!runId) { setFetched(null); return; }
     if (emptyScope) return;
     const abort = new AbortController();
     let nextReadAt = 0;
@@ -98,7 +93,7 @@ export function useWorkspaceChanges({
       if (poller.current === polling) poller.current = null;
     };
     // scopeKey contains the immutable execution-id list, not its array identity.
-  }, [inline, runId, scopeKey, emptyScope, isWorking]);
+  }, [runId, scopeKey, emptyScope, isWorking]);
 
   useEffect(() => { poller.current?.wake(); }, [snapshotSequence]);
 
@@ -111,28 +106,7 @@ export function useWorkspaceChanges({
         );
     const activeExecutionId = executions.find((execution) => execution.status === "running")?.id;
 
-    let summary: FileChangeSummary;
-    if (!inline) {
-      summary = !emptyScope && fetched && fetched.key === scopeKey ? fetched.summary : emptyFileChangeSummary;
-    } else {
-      const parts: FileChangeSummary[] = [];
-      for (const execution of executions) {
-        if (execution.fileChanges) parts.push(execution.fileChanges);
-      }
-      // The run-level projection already merges every execution, Planner writes
-      // and publication; adding it next to per-execution summaries would count
-      // the same tool edits twice.
-      const runSummary = scoped ? null : state.fileChanges;
-      if (runSummary) {
-        parts.length = 0;
-        parts.push(runSummary);
-      }
-
-      const anyRunning = isWorking || executions.some((execution) => execution.status === "running");
-      summary = parts.length > 0
-        ? mergeFileChangeSummaries(parts, anyRunning)
-        : emptyFileChangeSummary;
-    }
+    const summary = !emptyScope && fetched && fetched.key === scopeKey ? fetched.summary : emptyFileChangeSummary;
 
     const nodes = new Set<string>();
     for (const file of summary.files) {
@@ -143,17 +117,15 @@ export function useWorkspaceChanges({
 
     return {
       summary,
-      isLoaded: inline || !runId || emptyScope || fetched?.key === scopeKey,
+      isLoaded: !runId || emptyScope || fetched?.key === scopeKey,
       availableNodes: nodes.size > 0 ? Array.from(nodes) : EMPTY_NODES,
       activeExecutionId,
     };
   }, [
-    inline,
     emptyScope,
     fetched,
     runId,
     scopeKey,
-    state.fileChanges,
     state.executions,
     state.mergers,
     state.supersededExecutionIds,

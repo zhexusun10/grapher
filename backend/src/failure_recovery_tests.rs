@@ -1,10 +1,20 @@
 use super::*;
 
+// These tests prepare workspaces directly, so perform the worker's lazy source
+// collection before inspecting a dispatched Job's preparation base.
+fn prepared_jobs(runtime: &mut Runtime) -> Vec<Job> {
+    let mut jobs = runtime.jobs().unwrap();
+    for job in &mut jobs {
+        attach(runtime, job);
+    }
+    jobs
+}
+
 fn record_session(runtime: &Runtime, execution: &Execution) {
     let directory = runtime.root.join("sessions").join(&execution.id);
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join(format!("test_{}.jsonl", execution.session_id)),
-        format!("{}\n{}\n", serde_json::json!({"type": "session", "id": execution.session_id, "cwd": execution.worktree}),
+        format!("{}\n{}\n", serde_json::json!({"type": "session", "version":3, "grapherFormat":1, "grapherRunId":runtime.state.run_id, "id": execution.session_id, "cwd": execution.worktree}),
             serde_json::json!({"type": "message", "id": "opening", "parentId": null,
                 "message": {"role": "user", "content": "retained session context"}}))).unwrap();
 }
@@ -148,7 +158,7 @@ fn targeted_continue_retries_only_the_selected_failure_even_with_another_writer(
     let (_temp, source, mut runtime) = setup(true, graph);
     runtime.state.config.as_mut().unwrap().max_parallel = 3;
     runtime.approve().unwrap();
-    let jobs = runtime.jobs().unwrap();
+    let jobs = prepared_jobs(&mut runtime);
     assert_eq!(jobs.len(), 3);
     let first = &jobs
         .iter()
@@ -270,7 +280,7 @@ fn unknown_failure_continue_replays_and_retains_session_and_partial_work() {
         let (_temp, source, mut runtime) = setup(true, single());
         runtime.set_route(route).unwrap();
         runtime.approve().unwrap();
-        let failed = runtime.jobs().unwrap().remove(0);
+        let failed = prepared_jobs(&mut runtime).remove(0);
         if route == "graph" {
             workspace::prepare(
                 &source,
@@ -428,7 +438,7 @@ fn unknown_startup_failure_without_a_session_restarts_the_initial_task() {
         let (_temp, source, mut runtime) = setup(true, single());
         runtime.set_route(route).unwrap();
         runtime.approve().unwrap();
-        let failed = runtime.jobs().unwrap().remove(0);
+        let failed = prepared_jobs(&mut runtime).remove(0);
         if route == "graph" {
             workspace::prepare(
                 &source,
@@ -584,7 +594,7 @@ fn unstarted_followup_in_an_existing_session_replays_only_its_original_instructi
         let (_temp, source, mut runtime) = setup(true, single());
         runtime.set_route(route).unwrap();
         runtime.approve().unwrap();
-        let first = runtime.jobs().unwrap().remove(0);
+        let first = prepared_jobs(&mut runtime).remove(0);
         if route == "graph" {
             workspace::prepare(
                 &source,
@@ -695,15 +705,11 @@ fn missing_feedback_fork_uses_the_target_session_and_original_instruction() {
     assert!(!retry.initial_recovery);
     assert!(!retry.continuation);
     assert_eq!(retry.task, "apply the review");
-    assert_eq!(
-        retry
-            .feedback_workspace
-            .as_ref()
-            .unwrap()
-            .source_execution_id,
-        review.id
+    assert!(
+        retry.feedback_workspace.is_none(),
+        "current batches retain their own workspace"
     );
-    assert_eq!(retry.execution.worktree, review.worktree);
+    assert_eq!(retry.execution.worktree, failed.execution.worktree);
     let anchor = retry.session_fork.as_ref().unwrap();
     assert_eq!(anchor.id, owner.id);
     crate::session_branch::fork_session(
@@ -730,7 +736,7 @@ fn missing_session_after_observed_activity_never_restarts_the_original_task() {
         let (_temp, source, mut runtime) = setup(true, single());
         runtime.set_route(route).unwrap();
         runtime.approve().unwrap();
-        let failed = runtime.jobs().unwrap().remove(0);
+        let failed = prepared_jobs(&mut runtime).remove(0);
         if route == "graph" {
             workspace::prepare(
                 &source,
@@ -844,7 +850,7 @@ fn unmanaged_composition_failure_can_retry_without_forking_a_missing_session() {
     };
     let (temp, source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
-    let jobs = runtime.jobs().unwrap();
+    let jobs = prepared_jobs(&mut runtime);
     let first = &jobs
         .iter()
         .find(|job| job.execution.node == "first")
@@ -889,8 +895,8 @@ fn unmanaged_composition_failure_can_retry_without_forking_a_missing_session() {
     );
     assert_eq!(retry.execution.session_id, first.session_id);
     assert_eq!(
-        retry.execution.worktree, other.worktree,
-        "the idle slot is safely reusable"
+        retry.execution.worktree, first.worktree,
+        "the current batch retains the failed attempt's directory"
     );
     let script = temp.path().join("recover.mjs");
     fs::write(&script, "for await (const chunk of process.stdin) {}\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'Recovered'}]}}));\n").unwrap();
@@ -1088,7 +1094,7 @@ fn a_workspace_alias_alone_does_not_authorize_source_direct_recovery() {
 }
 
 #[test]
-fn legacy_recovery_event_keeps_its_original_replay_semantics() {
+fn recovery_events_require_explicit_resume_semantics() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let failed = runtime.jobs().unwrap().remove(0);
@@ -1101,20 +1107,15 @@ fn legacy_recovery_event_keeps_its_original_replay_semantics() {
         resume_failed: false,
         source_direct_nodes: vec![],
     };
-    let json = serde_json::to_value(&event).unwrap();
-    assert!(
-        json.get("resume_failed").is_none(),
-        "old events omit the new flag"
-    );
-    assert!(
-        json.get("source_direct_nodes").is_none(),
-        "old events omit source-direct recovery"
-    );
-    runtime.emit(serde_json::from_value(json).unwrap()).unwrap();
+    let mut json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["resume_failed"], false);
+    json.as_object_mut().unwrap().remove("resume_failed");
+    assert!(serde_json::from_value::<EventKind>(json).is_err());
+    runtime.emit(event).unwrap();
     assert!(!runtime.state.nodes["task"].continuation);
     let replay = runtime.store.load(&runtime.state.run_id).unwrap();
     assert!(
         !replay.nodes["task"].continuation,
-        "legacy replay must not reinterpret the old event"
+        "an explicit false retains its current replay semantics"
     );
 }

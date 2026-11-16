@@ -93,8 +93,8 @@ impl Environments {
         };
         let before = self.load_launch(previous)?;
         let Some(before) = self.root_layouts_for_launch(&before)? else {
-            // A legacy L can still describe its single root. Only the target's
-            // byte evidence, never its directory names, authorizes restoration.
+            // An explicit policy can use a current single-root L/E pair. Only
+            // the target's captured coverage authorizes restoration.
             let label = self.scope_root(&before);
             for scope in self.scope_paths(previous)? {
                 if self.config.caches.contains(&scope) {
@@ -148,8 +148,8 @@ impl Environments {
     }
 
     /// Native worker only. This needs no live interpreter and can run before
-    /// a missing W is reconstructed or project code is reset. Legacy L without
-    /// file evidence retains its old startup check; it is never retrofitted.
+    /// a missing W is reconstructed or project code is reset.
+    /// Unbound launches have no file evidence.
     pub(crate) fn preflight_runtime_evidence(
         &self,
         path: &Path,

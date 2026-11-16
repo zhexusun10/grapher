@@ -21,7 +21,7 @@ fn observed(paths: &[&Path], roots: &[(&str, &Path)]) -> RuntimeEvidence {
 }
 
 #[test]
-fn native_runtime_protocol_preserves_exact_legacy_abi_bytes_and_omitted_binding_json() {
+fn native_runtime_protocol_preserves_abi_bytes_and_rejects_missing_binding_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let file = temp.path().join("native-input");
     fs::write(&file, "native bytes").unwrap();
@@ -40,7 +40,7 @@ fn native_runtime_protocol_preserves_exact_legacy_abi_bytes_and_omitted_binding_
     );
     let legacy = r#"{"kind":"venv","prefix":"env","abi":"0000000000000000000000000000000000000000","root":"workspace"}"#;
     let binding: crate::environment_discovery::Binding = serde_json::from_str(legacy).unwrap();
-    binding.validate().unwrap();
+    assert!(binding.validate().is_err());
     assert!(binding.runtime_evidence.is_none());
     assert_eq!(serde_json::to_string(&binding).unwrap(), legacy);
     assert!(RuntimeEvidence::from_probe(b"no framed evidence", &[]).is_err());
@@ -296,7 +296,7 @@ fn native_runtime_evidence_does_not_label_sibling_slot_files_as_external_host_to
 }
 
 #[test]
-fn native_runtime_legacy_startup_does_not_acquire_new_evidence_admission_rules() {
+fn native_runtime_startup_requires_file_evidence_and_rejects_sibling_inputs() {
     use std::process::Command;
     let temp = tempfile::tempdir().unwrap();
     let run = temp
@@ -340,16 +340,9 @@ fn native_runtime_legacy_startup_does_not_acquire_new_evidence_admission_rules()
         format!("import sys; sys.path.insert(0, {literal}); print('probe-startup-argc='+str(len(sys.argv)))\n"),
     )
     .unwrap();
-    // Use the actual unchanged ABI probe with no extra ownership inventory to
-    // establish the old-format input. Nothing is persisted/adopted as a new L.
-    let legacy = super::super::verify(&work, "workspace", "env", "venv", false, &[], None).unwrap();
-    assert!(legacy.runtime_evidence.is_none());
+    assert!(super::super::verify(&work, "workspace", "env", "venv", false, &[], None).is_err());
     let measured =
         super::super::verify(&work, "workspace", "env", "venv", false, &[], Some(2)).unwrap();
-    assert_eq!(
-        legacy.abi, measured.abi,
-        "extra evidence must not change the native ABI payload"
-    );
     let roots = [("workspace", work.as_path()), ("state", state.as_path())];
     let error = super::super::verify(&work, "workspace", "env", "venv", false, &roots, Some(2))
         .unwrap_err();
@@ -364,20 +357,13 @@ fn native_runtime_legacy_startup_does_not_acquire_new_evidence_admission_rules()
         .launch;
     launch.entry = text(&python);
     launch.path.insert(0, text(python.parent().unwrap()));
-    launch.environment = Some(legacy);
-    launch.validate().unwrap();
+    let mut unsupported = measured;
+    unsupported.runtime_evidence = None;
+    launch.environment = Some(unsupported);
+    assert!(launch.validate().is_err());
     let original = serde_json::to_vec(&launch).unwrap();
-    super::super::validate_launch_with_state(&work, Some(&state), &launch, false)
-        .expect("legacy startup must use its recorded ABI contract, not a newly constructed file-evidence policy");
+    assert!(super::super::validate_launch_with_state(&work, Some(&state), &launch, false).is_err());
     assert_eq!(serde_json::to_vec(&launch).unwrap(), original);
-    let mut stale = launch.clone();
-    stale.environment.as_mut().unwrap().abi = "0".repeat(40);
-    let error =
-        super::super::validate_launch_with_state(&work, Some(&state), &stale, false).unwrap_err();
-    assert!(
-        error.contains("ABI/library bytes changed"),
-        "legacy ABI validation must remain strict: {error}"
-    );
 }
 
 #[test]

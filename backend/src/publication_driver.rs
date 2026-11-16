@@ -66,47 +66,22 @@ pub(super) fn publish_batch(
     run_id: &str,
     config: Config,
     query: String,
-    mut publication: crate::model::Publication,
+    publication: crate::model::Publication,
 ) -> Result<(), String> {
     let repository = PathBuf::from(&publication.repository);
-    // Capture only the explicitly reserved recoveries. Concurrent admission
-    // excludes these executions and every workspace supplying pinned heads.
-    crate::process_control::with_owner(run_id, || -> Result<(), String> {
-        let recoveries = {
-            let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-            runtime
-                .state
-                .batch_handoff
-                .as_ref()
-                .into_iter()
-                .flat_map(|handoff| &handoff.recovery_execution_ids)
-                .map(|id| {
-                    runtime
-                        .state
-                        .executions
-                        .iter()
-                        .find(|execution| execution.id == *id)
-                        .cloned()
-                        .ok_or_else(|| "Missing batch recovery execution".to_string())
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        if !recoveries.is_empty() {
-            let heads = recoveries
-                .iter()
-                .map(|execution| {
-                    Runtime::capture_batch_recovery(root, run_id, &config, execution)
-                        .map(|head| (execution.id.clone(), head))
-                })
-                .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
-            let mut runtime = service.runtime.lock().map_err(|e| e.to_string())?;
-            if runtime.state.run_id != run_id {
-                return Err("Run changed during batch recovery capture".into());
-            }
-            publication = runtime.record_batch_recoveries(heads)?;
+    // Recovery captures belonged to an older scheduler. New handoffs publish
+    // completed inputs only and retain unfinished writers in their own slots.
+    {
+        let runtime = service.runtime.lock().map_err(|e| e.to_string())?;
+        if runtime
+            .state
+            .batch_handoff
+            .as_ref()
+            .is_some_and(|handoff| !handoff.recovery_execution_ids.is_empty())
+        {
+            return Err("Unsupported batch recovery handoff format".into());
         }
-        Ok(())
-    })?;
+    }
     let preflight = {
         let runtime = service.runtime.lock().map_err(|error| error.to_string())?;
         runtime.publication_environment_input()

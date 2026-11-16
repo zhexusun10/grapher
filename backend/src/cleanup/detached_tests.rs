@@ -227,7 +227,7 @@ fn detached_cleanup_rejects_redirected_paths_and_protected_sources() {
 }
 
 #[test]
-fn detached_planner_cleanup_never_removes_its_live_parent_directory() {
+fn detached_cleanup_rejects_retired_planner_layout_without_renaming_it() {
     let f = fixture();
     let checkout = Uuid::new_v4().to_string();
     let target = Target::Workspace {
@@ -240,16 +240,13 @@ fn detached_planner_cleanup_never_removes_its_live_parent_directory() {
     let original = parent.join(checkout);
     fs::create_dir_all(&original).unwrap();
     fs::write(original.join("old.txt"), "retired Planner").unwrap();
-    retire(&f.root, &f.store, &f.run, &target).unwrap();
-    // This parent is outside the detached receipt. It may now be a source
-    // project or an allocation root reserved by another actor, even if empty.
-    f.store.remember_cleanup_source(&parent).unwrap();
+    assert!(retire(&f.root, &f.store, &f.run, &target).is_err());
     drain(&f.root, &f.store).unwrap();
-    assert!(
-        parent.is_dir(),
-        "purging one detached checkout removed its source/allocation parent"
+    assert!(parent.is_dir());
+    assert_eq!(
+        fs::read_to_string(original.join("old.txt")).unwrap(),
+        "retired Planner"
     );
-    assert!(!original.exists());
     assert!(f.store.detached_workspaces().unwrap().is_empty());
 }
 

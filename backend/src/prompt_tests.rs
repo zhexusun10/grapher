@@ -1,20 +1,12 @@
 use super::*;
 
 #[cfg(feature = "fixture")]
-fn create_legacy_private_run(
-    runtime: &mut Runtime,
-    graph: Graph,
-    config: Config,
-) -> Result<(), String> {
-    // These tests exercise the still-supported pre-batch scheduler/private
-    // workspace contract. New adaptive Runs are covered by batch_workspace_tests.
-    runtime.state.run_id = Uuid::new_v4().to_string();
-    runtime.emit(EventKind::Created {
-        graph,
-        config,
-        planning_id: None,
-        planning: None,
-    })?;
+fn create_private_run(runtime: &mut Runtime, graph: Graph, config: Config) -> Result<(), String> {
+    let nodes = graph.nodes.iter().map(|node| node.id.clone()).collect();
+    runtime.create(graph, config)?;
+    runtime.set_route("graph")?;
+    runtime.emit(EventKind::WorkspaceIsolationSelected { isolated: true })?;
+    runtime.emit(EventKind::PrivateBatchSelected { nodes })?;
     runtime.store.select_run(Some(&runtime.state.run_id))
 }
 
@@ -816,20 +808,14 @@ fn edit_planner_api_branches_the_same_run_and_keeps_the_previous_turn() {
     })).unwrap(), Some(id.clone()), None).unwrap();
     runtime.set_route("graph").unwrap();
     let run_id = runtime.state.run_id.clone();
-    let session = root.join("planning").join(&id).join("planner-session");
+    let session = root.join("planner-sessions").join(&run_id);
     fs::create_dir_all(&session).unwrap();
-    let private = temp.path().join("private-planner-workspace");
-    fs::create_dir_all(&private).unwrap();
-    fs::write(
-        root.join("planning").join(&id).join("planner-workspace"),
-        private.to_string_lossy().as_bytes(),
-    )
-    .unwrap();
-    let path = session.join(format!("session_{id}.jsonl"));
+
+    let path = session.join(format!("session_{run_id}.jsonl"));
     fs::write(
         &path,
         [
-            serde_json::json!({"type":"session", "id":id, "cwd":private}),
+            serde_json::json!({"type":"session", "version":3, "grapherFormat":1, "grapherRunId":run_id, "id":run_id, "cwd":repository}),
             serde_json::json!({"type":"message", "id":"first", "parentId":null,
           "message":{"role":"user", "content":"User query:\n\noriginal", "timestamp":1}}),
             serde_json::json!({"type":"message", "id":"answer", "parentId":"first",
@@ -900,21 +886,14 @@ fn edit_planner_api_branches_a_first_turn_that_never_committed_a_graph() {
             plan_type: Some("graph".into()),
         })
         .unwrap();
-    let attempt = root.join("planning").join(&id);
-    let session = attempt.join("planner-session");
+    let session = root.join("planner-sessions").join(&run_id);
     fs::create_dir_all(&session).unwrap();
-    let private = temp.path().join("private-planner-workspace");
-    fs::create_dir_all(&private).unwrap();
-    fs::write(
-        attempt.join("planner-workspace"),
-        private.to_string_lossy().as_bytes(),
-    )
-    .unwrap();
-    let path = session.join(format!("session_{id}.jsonl"));
+
+    let path = session.join(format!("session_{run_id}.jsonl"));
     fs::write(
         &path,
         [
-            serde_json::json!({"type":"session", "id":id, "cwd":private}),
+            serde_json::json!({"type":"session", "version":3, "grapherFormat":1, "grapherRunId":run_id, "id":run_id, "cwd":repository}),
             serde_json::json!({"type":"message", "id":"first", "parentId":null,
           "message":{"role":"user", "content":"original", "timestamp":1}}),
             serde_json::json!({"type":"message", "id":"answer", "parentId":"first",
@@ -984,13 +963,10 @@ fn edit_node_api_branches_the_pi_session_before_driving_a_new_turn() {
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
     runtime
-        .emit(EventKind::Finished {
-            execution_id: job.execution.id.clone(),
-            head: runtime.state.base.clone(),
-            output: "completed".into(),
-            output_bytes: 0,
-            metrics: None,
-        })
+        .finish(
+            &job.execution,
+            Ok((runtime.state.base.clone(), "completed".into())),
+        )
         .unwrap();
     runtime.jobs().unwrap();
     let run_id = runtime.state.run_id.clone();
@@ -998,7 +974,7 @@ fn edit_node_api_branches_the_pi_session_before_driving_a_new_turn() {
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("test_{}.jsonl", job.execution.session_id));
     fs::write(&path, [
-        serde_json::json!({"type":"session", "id":job.execution.session_id, "cwd":job.execution.worktree}),
+        serde_json::json!({"type":"session", "version":3,"grapherFormat":1,"grapherRunId":run_id,"id":job.execution.session_id, "cwd":job.execution.worktree}),
         serde_json::json!({"type":"message", "id":"one", "parentId":null,
             "message":{"role":"user", "content":"original", "timestamp":job.execution.started_at}}),
     ].iter().map(|entry| format!("{entry}\n")).collect::<String>()).unwrap();
@@ -1334,14 +1310,14 @@ done
 case "$GRAPHER_MODE" in
   planner)
     printf '%s|%s\n' "$session" "$identity" >> "$(dirname "$0")/session-trace.txt"
-    if [ -f "$session/turns.jsonl" ]; then
+    if [ -f "$session/grapher_${identity}.jsonl" ]; then
       printf '%s' '{"originalGoal":"test","nodes":[{"id":"first","task":"first v2"},{"id":"after","task":"after"},{"id":"extra","task":"extra"}],"edges":[{"from":"first","to":"after","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
     else
       printf '%s' '{"originalGoal":"test","nodes":[{"id":"first","task":"first"},{"id":"after","task":"after"}],"edges":[{"from":"first","to":"after","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
       mkdir -p "$session"
       cwd="$PWD"
       if command -v cygpath >/dev/null 2>&1; then cwd="$(cygpath -m "$PWD")"; fi
-      printf '{"type":"session","id":"%s","cwd":"%s"}\n' "$identity" "$cwd" > "$session/turns.jsonl"
+      printf '{"type":"session","version":3,"grapherFormat":1,"grapherRunId":"%s","id":"%s","cwd":"%s"}\n' "$GRAPHER_ACTIVE_RUN_ID" "$identity" "$cwd" > "$session/grapher_${identity}.jsonl"
     fi
     ;;
   node)
@@ -1504,7 +1480,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     let lines: Vec<_> = trace.lines().collect();
     assert_eq!(lines.len(), 2, "{trace}");
     assert_eq!(lines[0], lines[1]);
-    assert!(lines[0].ends_with(&format!("|{first_planning_id}")));
+    assert!(lines[0].ends_with(&format!("|{run_id}")));
 }
 
 #[cfg(feature = "fixture")]
@@ -1531,14 +1507,14 @@ done
 printf '%s\n' "$model" >> "$(dirname "$0")/model-trace.txt"
 case "$GRAPHER_MODE" in
   planner)
-    if [ -f "$session/turns.jsonl" ]; then
+    if [ -f "$session/grapher_${identity}.jsonl" ]; then
       printf '%s' '{"originalGoal":"test","nodes":[{"id":"first","task":"first v2"},{"id":"extra","task":"extra"}],"edges":[{"from":"first","to":"extra","feedback":false}]}' > "$GRAPHER_GRAPH_PATH"
     else
       printf '%s' '{"originalGoal":"test","nodes":[{"id":"first","task":"first"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
       mkdir -p "$session"
       cwd="$PWD"
       if command -v cygpath >/dev/null 2>&1; then cwd="$(cygpath -m "$PWD")"; fi
-      printf '{"type":"session","id":"%s","cwd":"%s"}\n' "$identity" "$cwd" > "$session/turns.jsonl"
+      printf '{"type":"session","version":3,"grapherFormat":1,"grapherRunId":"%s","id":"%s","cwd":"%s"}\n' "$GRAPHER_ACTIVE_RUN_ID" "$identity" "$cwd" > "$session/grapher_${identity}.jsonl"
     fi
     ;;
 esac
@@ -1645,11 +1621,11 @@ fn manually_created_graph_uses_one_planner_session_even_before_first_revision_su
     );
     fs::create_dir_all(&expected).unwrap();
     fs::write(
-        expected.join("turns.jsonl"),
+        expected.join(format!("grapher_{}.jsonl",runtime.state.run_id)),
         format!(
             "{}\n",
             serde_json::json!({
-                "type": "session", "id": runtime.state.run_id, "cwd": repo,
+                "type": "session", "version":3, "grapherFormat":1, "grapherRunId":runtime.state.run_id, "id": runtime.state.run_id, "cwd": repo,
             })
         ),
     )
@@ -1840,35 +1816,6 @@ fn planner_followup_context_is_omitted_when_there_is_no_active_work() {
 }
 
 #[test]
-fn planner_node_status_uses_completed_after_loading_a_legacy_snapshot() {
-    let mut snapshot = Snapshot::default();
-    snapshot.run_id = "legacy-planner-status".into();
-    snapshot.approved = true;
-    snapshot.plan_type = Some("graph".into());
-    snapshot.graph.nodes.push(Node {
-        id: "task".into(),
-        task: "Retain the result".into(),
-    });
-    snapshot.graph.nodes.push(Node {
-        id: "pending".into(),
-        task: "Keep working".into(),
-    });
-    snapshot.nodes.insert("task".into(), NodeState::default());
-    snapshot
-        .nodes
-        .insert("pending".into(), NodeState::default());
-    let mut saved = serde_json::to_value(snapshot).unwrap();
-    saved["nodes"]["task"]["status"] = "done".into();
-    let restored: Snapshot = serde_json::from_value(saved).unwrap();
-    let followup =
-        planner_followup_prompt("Please replan", Some("legacy-planner-status"), &restored);
-    assert!(followup.contains("- task: completed\n"));
-    assert!(!followup.contains("- task: done\n"));
-    assert!(followup.contains("- pending: waiting\n"));
-    assert!(followup.ends_with("\nPlease replan"));
-}
-
-#[test]
 fn user_stopped_node_is_recognized_as_interrupted_and_recoverable() {
     let mut snapshot = Snapshot::default();
     snapshot.approved = true;
@@ -1917,69 +1864,42 @@ fn user_stopped_node_is_recognized_as_interrupted_and_recoverable() {
     assert!(!snapshot.is_node_failed("stopped_worker"));
 }
 
-#[cfg(feature = "fixture")]
 #[test]
-fn legacy_planner_session_keeps_its_original_pi_identity() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let root = temp.path().join("runtime");
-    let repo = crate::fixture::repository(temp.path()).unwrap();
-    let mut runtime = Runtime::open(&root).unwrap();
-    let planning_id = Uuid::new_v4().to_string();
-    runtime
-        .create_with_planning(
-            Graph {
-                original_goal: "test".into(),
-                nodes: vec![Node {
-                    id: "first".into(),
-                    task: "first".into(),
-                }],
-                edges: vec![],
-            },
-            Config {
-                feedback_enabled: false,
-                environment: None,
-                repository: repo.to_string_lossy().into(),
-                engine: "pi".into(),
-                pi_command: "/bin/sh".into(),
-                pi_args: vec![],
-                model: "mock/model".into(),
-                thinking_level: "medium".into(),
-                max_parallel: 2,
-                max_feedback: 1,
-                auto_approve: false,
-                role_models: Default::default(),
-                post_task_review: false,
-                planner_write_tools: true,
-                isolate_parallel_nodes: true,
-            },
-            Some(planning_id.clone()),
-            None,
-        )
-        .unwrap();
-    runtime.set_route("graph").unwrap();
-    let legacy = Uuid::new_v4().to_string();
-    let session = root
-        .join("planning")
-        .join(planning_id)
-        .join("planner-session");
-    fs::create_dir_all(&session).unwrap();
-    fs::write(
-        session.join("legacy.jsonl"),
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "type": "session", "id": legacy, "cwd": repo,
-            })
-        ),
+fn retired_planner_sessions_cannot_replace_or_rewrite_a_current_run_conversation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("data");
+    let repository = temp.path().join("source");
+    let attempt = root.join("planning").join(Uuid::new_v4().to_string());
+    let old_sessions = attempt.join("planner-session");
+    fs::create_dir_all(&old_sessions).unwrap();
+    fs::create_dir_all(&repository).unwrap();
+    let old_id = Uuid::new_v4().to_string();
+    let file = old_sessions.join(format!("old_{old_id}.jsonl"));
+    let original = format!(
+        "{}\n",
+        serde_json::json!({"type":"session","version":3,"id":old_id,"cwd":repository})
+    );
+    fs::write(&file, &original).unwrap();
+    let snapshot = Snapshot {
+        run_id: Uuid::new_v4().to_string(),
+        ..Default::default()
+    };
+    let (directory, id) = planner_session_directory_for_workspace(
+        &root,
+        &attempt,
+        &repository,
+        &repository,
+        Some(&snapshot),
     )
     .unwrap();
-    let attempt = root.join("planning").join(Uuid::new_v4().to_string());
     assert_eq!(
-        planner_session_directory(&root, &attempt, &repo, Some(&runtime.state)).unwrap(),
-        (session.clone(), legacy)
+        directory,
+        root.join("planner-sessions").join(&snapshot.run_id)
     );
-    fs::write(session.join("legacy.jsonl"), "corrupt\n").unwrap();
-    assert!(planner_session_directory(&root, &attempt, &repo, Some(&runtime.state)).is_err());
+    assert_eq!(id, snapshot.run_id);
+    assert!(stored_planner_session_id(&old_sessions, &repository, &repository, &old_id).is_err());
+    assert!(rebind_planner_session(&old_sessions, &old_id, &repository).is_err());
+    assert_eq!(fs::read_to_string(&file).unwrap(), original);
 }
 
 #[cfg(feature = "fixture")]
@@ -2000,14 +1920,14 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$session" ] && [ -n "$identity" ] || exit 11
 printf '%s|%s\n' "$session" "$identity" >> "$(dirname "$0")/session-trace.txt"
-if [ -f "$session/turns.jsonl" ]; then
-  grep -q "\"id\":\"$identity\"" "$session/turns.jsonl" || exit 12
+if [ -f "$session/grapher_${identity}.jsonl" ]; then
+  grep -q "\"id\":\"$identity\"" "$session/grapher_${identity}.jsonl" || exit 12
   printf '%s' '{"originalGoal":"initial","nodes":[{"id":"first","task":"first"},{"id":"next","task":"next"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
 else
   printf '%s' '{"originalGoal":"initial","nodes":[{"id":"first","task":"first"}],"edges":[]}' > "$GRAPHER_GRAPH_PATH"
   cwd="$PWD"
   if command -v cygpath >/dev/null 2>&1; then cwd="$(cygpath -m "$PWD")"; fi
-  printf '{"type":"session","id":"%s","cwd":"%s"}\n' "$identity" "$cwd" > "$session/turns.jsonl"
+  printf '{"type":"session","version":3,"grapherFormat":1,"grapherRunId":"%s","id":"%s","cwd":"%s"}\n' "$GRAPHER_ACTIVE_RUN_ID" "$identity" "$cwd" > "$session/grapher_${identity}.jsonl"
 fi
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Planned"}]}}'
 "#).unwrap();
@@ -2077,11 +1997,8 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         lines[0],
         format!(
             "{}|{}",
-            root.join("planning")
-                .join(&first_id)
-                .join("planner-session")
-                .display(),
-            first_id
+            root.join("planner-sessions").join(&first.run_id).display(),
+            first.run_id
         )
     );
     assert_eq!(lines[1], lines[0]);
@@ -2130,7 +2047,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         planner_write_tools: true,
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    create_legacy_private_run(
+    create_private_run(
         &mut runtime,
         Graph {
             original_goal: "test".into(),
@@ -2156,7 +2073,14 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
     let run_id = runtime.state.run_id.clone();
-    let running = runtime.jobs().unwrap().remove(0).execution;
+    let mut running_job = runtime.jobs().unwrap().remove(0);
+    if running_job.materialize_source {
+        let exclusions = runtime.exclusions().unwrap();
+        runtime
+            .attach_job_source(&mut running_job, &exclusions)
+            .unwrap();
+    }
+    let running = running_job.execution;
     // An active writer already has a prepared directory; Planner must be able
     // to launch there without draining it.
     crate::workspace::prepare(
@@ -2256,7 +2180,7 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
         planner_write_tools: true,
     };
     let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-    create_legacy_private_run(
+    create_private_run(
         &mut runtime,
         Graph {
             original_goal: "test".into(),
@@ -2275,9 +2199,13 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
     let run_id = runtime.state.run_id.clone();
-    let jobs = runtime.jobs().unwrap();
+    let mut jobs = runtime.jobs().unwrap();
     // Pretend the driver owns already-started jobs in prepared directories.
-    for job in &jobs {
+    for job in &mut jobs {
+        if job.materialize_source {
+            let exclusions = runtime.exclusions().unwrap();
+            runtime.attach_job_source(job, &exclusions).unwrap();
+        }
         crate::workspace::prepare(
             &repo,
             std::path::Path::new(&job.execution.worktree),
@@ -2687,7 +2615,10 @@ esac
         .join("planning")
         .join(snapshot.planning_id.as_ref().unwrap());
     assert!(attempt.join("partition-session").is_dir());
-    assert!(attempt.join("planner-session").is_dir());
+    assert!(root
+        .join("planner-sessions")
+        .join(&snapshot.run_id)
+        .is_dir());
     assert!(attempt.join("graph.json").is_file());
     assert_eq!(
         PathBuf::from(fs::read_to_string(attempt.join("planner-workspace")).unwrap())
@@ -2943,118 +2874,6 @@ fn stopping_a_concurrent_planner_does_not_stop_the_other_run() {
 
 #[cfg(feature = "fixture")]
 #[test]
-fn legacy_planner_identity_survives_its_already_cleaned_private_checkout() {
-    let temp = tempfile::tempdir().unwrap();
-    let repository = temp.path().join("source");
-    let session = temp.path().join("session");
-    fs::create_dir(&repository).unwrap();
-    fs::create_dir(&session).unwrap();
-    let id = Uuid::new_v4().to_string();
-    let private = temp
-        .path()
-        .join(".grapher-workspaces")
-        .join(Uuid::new_v4().to_string())
-        .join(&id);
-    let history = "{\"type\":\"message\",\"opaque\":\"preserve exactly\"}\n";
-    fs::write(
-        session.join("conversation.jsonl"),
-        format!(
-            "{}\n{history}",
-            serde_json::json!({"type":"session","id":id,"cwd":private})
-        ),
-    )
-    .unwrap();
-    assert_eq!(
-        stored_planner_session_id(&session, &repository, &private, &id).unwrap(),
-        Some(id.clone())
-    );
-    let foreign = temp
-        .path()
-        .join(".grapher-workspaces")
-        .join(Uuid::new_v4().to_string())
-        .join(&id);
-    assert!(stored_planner_session_id(&session, &repository, &foreign, &id).is_err());
-    rebind_planner_session(&session, &id, &repository).unwrap();
-    let text = fs::read_to_string(session.join("conversation.jsonl")).unwrap();
-    assert!(text.ends_with(history));
-    let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
-    assert_eq!(header["id"], id);
-    assert_eq!(
-        PathBuf::from(header["cwd"].as_str().unwrap())
-            .canonicalize()
-            .unwrap(),
-        repository.canonicalize().unwrap()
-    );
-}
-
-#[test]
-fn legacy_planner_session_rebinds_only_its_cwd_and_preserves_history() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let repository = temp.path().join("source");
-    let private = temp.path().join("private");
-    let session = temp.path().join("session");
-    for path in [&repository, &private, &session] {
-        fs::create_dir(path).unwrap();
-    }
-    let id = Uuid::new_v4().to_string();
-    let file = session.join(format!("session_{id}.jsonl"));
-    let history = "{\"type\":\"message\",\"id\":\"old\",\"message\":{\"role\":\"user\",\"content\":\"历史 中文🚀\"}}\n";
-    fs::write(
-        &file,
-        format!(
-            "{}\n{history}",
-            serde_json::json!({ "type": "session", "id": id, "cwd": private })
-        ),
-    )
-    .unwrap();
-    assert_eq!(
-        stored_planner_session_id(&session, &repository, &private, &id).unwrap(),
-        Some(id.clone())
-    );
-    rebind_planner_session(&session, &id, &repository).unwrap();
-    let content = fs::read_to_string(&file).unwrap();
-    let (header, tail) = content.split_once('\n').unwrap();
-    let header: serde_json::Value = serde_json::from_str(header).unwrap();
-    assert_eq!(header["id"], id);
-    assert_eq!(
-        PathBuf::from(header["cwd"].as_str().unwrap())
-            .canonicalize()
-            .unwrap(),
-        repository.canonicalize().unwrap()
-    );
-    assert_eq!(tail, history);
-    fs::remove_dir(&private).unwrap();
-    assert_eq!(
-        stored_planner_session_id(&session, &repository, &private, &id).unwrap(),
-        Some(id.clone()),
-        "migrated history remains usable after private workspace cleanup"
-    );
-    assert_eq!(
-        stored_planner_session_id(&session, &repository, &repository, &id).unwrap(),
-        Some(id.clone())
-    );
-    rebind_planner_session(&session, &id, &repository).unwrap();
-    assert_eq!(
-        fs::read_to_string(&file).unwrap(),
-        content,
-        "rebinding is idempotent"
-    );
-    fs::write(
-        session.join(format!("duplicate_{id}.jsonl")),
-        format!(
-            "{}\n",
-            serde_json::json!({ "type": "session", "id": id, "cwd": repository })
-        ),
-    )
-    .unwrap();
-    assert!(
-        stored_planner_session_id(&session, &repository, &repository, &id).is_err(),
-        "duplicate session files for the same Planner ID must fail loudly"
-    );
-}
-
-#[cfg(feature = "fixture")]
-#[test]
 fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
     for standard_git in [true, false] {
         let temp = tempfile::TempDir::new().unwrap();
@@ -3094,7 +2913,7 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
             edges: vec![],
         };
         let mut runtime = Runtime::open(&temp.path().join("runtime")).unwrap();
-        create_legacy_private_run(&mut runtime, graph.clone(), config.clone()).unwrap();
+        create_private_run(&mut runtime, graph.clone(), config.clone()).unwrap();
         runtime.set_route("graph").unwrap();
         runtime.approve().unwrap();
         runtime.pause(true).unwrap(); // Keep the driver out of this snapshot assertion.
@@ -3122,14 +2941,14 @@ fn failed_planner_revision_keeps_graph_and_refreshes_source_for_later_nodes() {
         let mut runtime = service.runtime.lock().unwrap();
         assert_eq!(runtime.state.graph, graph);
         assert_eq!(runtime.state.base, approval);
-        // A failed Planner revision before the first dispatch has no Git
-        // snapshot to record for a plain directory; standard Git still does.
+        // Before the first private dispatch, approval and Planner failure do
+        // not collect either kind of source repository.
         let snapshotted = runtime
             .state
             .events
             .iter()
             .any(|event| matches!(event.kind, EventKind::SourceSnapshotted { .. }));
-        assert_eq!(snapshotted, standard_git);
+        assert!(!snapshotted);
         runtime.state = runtime.store.load(&run_id).unwrap();
         runtime.pause(false).unwrap();
         let mut job = runtime.jobs().unwrap().remove(0);
@@ -3676,7 +3495,7 @@ esac
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Completed"}}]}}}}'
 "#, release.display())).unwrap();
     let mut runtime = Runtime::open(root).unwrap();
-    create_legacy_private_run(
+    create_private_run(
         &mut runtime,
         Graph {
             original_goal: "Check real completion order".into(),
@@ -4150,7 +3969,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
 "#, release = release.display(), release_related = release_related.display(),
         slow_started = slow_started.display(), related_started = related_started.display())).unwrap();
     let mut runtime = Runtime::open(root).unwrap();
-    create_legacy_private_run(
+    create_private_run(
         &mut runtime,
         Graph {
             original_goal: "Feedback barrier".into(),
@@ -4260,8 +4079,16 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[
         !observed.executions.iter().any(|e| e.node == "consumer"),
         "feedback must not expose stale consumers"
     );
-    // The stopped sibling recomputes after the repair; release its gate for
-    // the re-run only.
+    assert!(
+        !observed
+            .executions
+            .iter()
+            .any(|e| e.node == "owner" && e.attempt > 1),
+        "private repair must wait for all batch writers before delivery"
+    );
+    fs::write(&release, "release").unwrap();
+    // The stopped sibling recomputes after delivery and repair; release its
+    // gate only after its new attempt starts.
     wait_for_state(
         &service,
         "related re-dispatched after the repair",
@@ -4692,19 +4519,16 @@ fn execution_and_run_metrics_parsing_and_persistence() {
     };
     runtime
         .emit(EventKind::Started {
-            execution,
-            message_sequences: None,
+            execution: execution.clone(),
+            message_sequences: Some(vec![]),
             fresh_restart: false,
         })
         .unwrap();
     runtime
-        .emit(EventKind::Finished {
-            execution_id: "exec-1".into(),
-            head: "finished-head".into(),
-            output: sample_output.into(),
-            output_bytes: 0,
-            metrics: None,
-        })
+        .finish(
+            &execution,
+            Ok(("finished-head".into(), sample_output.into())),
+        )
         .unwrap();
 
     // Execution metrics should be populated
@@ -4742,114 +4566,55 @@ fn execution_and_run_metrics_parsing_and_persistence() {
 }
 
 #[test]
-fn legacy_planning_summary_backfill_and_fail_closed_filtering() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let mut runtime = Runtime::open(temp.path()).unwrap();
-    let config = Config {
-        feedback_enabled: false,
-        environment: None,
-        isolate_parallel_nodes: true,
-        post_task_review: false,
-        planner_write_tools: true,
-        repository: "/workspace/repo-a".into(),
-        #[cfg(feature = "fixture")]
-        engine: "fixture".into(),
-        #[cfg(feature = "fixture")]
-        pi_command: String::new(),
-        #[cfg(feature = "fixture")]
-        pi_args: Vec::new(),
-        model: String::new(),
-        thinking_level: "medium".into(),
-        max_parallel: 4,
-        max_feedback: 1,
-        auto_approve: false,
-        role_models: Default::default(),
-    };
-    let summary = PlanningSummary {
-        planning_id: "legacy-plan-a".into(),
-        roles: Default::default(),
-        total_planning_duration: 10.0,
-        model_duration: 8.0,
-        status: Some("success".into()),
-        error: None,
-        created_at: Some(100),
-        repository: None, // legacy: missing repository
-        ..Default::default()
-    };
-    runtime
-        .create_with_planning(
-            Graph {
-                original_goal: "Goal A".into(),
-                nodes: vec![Node {
-                    id: "task".into(),
-                    task: "Run task".into(),
-                }],
-                edges: Vec::new(),
+fn planning_summaries_require_current_metadata_and_filter_without_backfilling() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = Arc::new(Service {
+        runtime: Mutex::new(Runtime::open_lazy(temp.path()).unwrap()),
+        driving: AtomicBool::new(false),
+        drive_signal: (Mutex::new(0), Condvar::new()),
+        planning: AtomicBool::new(false),
+        extension: temp.path().join("unused.ts"),
+    });
+    let mut current_ids = Vec::new();
+    for repository in ["/project/a", "/project/b"] {
+        let id = Uuid::new_v4().to_string();
+        let directory = temp.path().join("planning").join(&id);
+        fs::create_dir_all(&directory).unwrap();
+        write_planning_summary(
+            &directory,
+            &PlanningSummary {
+                planning_id: id.clone(),
+                run_id: Some(Uuid::new_v4().to_string()),
+                repository: Some(repository.into()),
+                goal: Some("goal".into()),
+                status: Some("failed".into()),
+                ..Default::default()
             },
-            config,
-            Some("legacy-plan-a".into()),
-            Some(summary.clone()),
         )
         .unwrap();
-
-    // Write legacy summary on disk with NO repository
-    let plan_a_dir = temp.path().join("planning").join("legacy-plan-a");
-    fs::create_dir_all(&plan_a_dir).unwrap();
-    let legacy_json = serde_json::to_string_pretty(&summary).unwrap();
-    fs::write(plan_a_dir.join("summary.json"), &legacy_json).unwrap();
-
-    // Write an unattributed legacy summary (failed planning never tied to a run)
-    let unattr_summary = PlanningSummary {
-        planning_id: "unattributed-plan".into(),
-        roles: Default::default(),
-        total_planning_duration: 5.0,
-        model_duration: 4.0,
-        status: Some("failed".into()),
-        error: Some("Planner crashed".into()),
-        created_at: Some(200),
-        repository: None,
+        current_ids.push(id);
+    }
+    let old_id = Uuid::new_v4().to_string();
+    let directory = temp.path().join("planning").join(&old_id);
+    fs::create_dir_all(&directory).unwrap();
+    let original = serde_json::to_vec(&PlanningSummary {
+        planning_id: old_id.clone(),
         ..Default::default()
-    };
-    let unattr_dir = temp.path().join("planning").join("unattributed-plan");
-    fs::create_dir_all(&unattr_dir).unwrap();
-    fs::write(
-        unattr_dir.join("summary.json"),
-        serde_json::to_string_pretty(&unattr_summary).unwrap(),
-    )
+    })
     .unwrap();
-
-    let service = Arc::new(Service {
-        runtime: Mutex::new(runtime),
-        driving: AtomicBool::new(false),
-        drive_signal: (Mutex::new(0), std::sync::Condvar::new()),
-        planning: AtomicBool::new(false),
-        extension: temp.path().join("ext.ts"),
-    });
-
-    // 1. Filter by repo-b: must return NOTHING (fail closed against repo-a and unattributed)
-    let res_b = list_plannings(&service, Some("/workspace/repo-b".into())).unwrap();
+    fs::write(directory.join("summary.json"), &original).unwrap();
+    fs::write(directory.join("request.json"),serde_json::json!({"repository":"/project/a","runId":Uuid::new_v4().to_string(),"goal":"old"}).to_string()).unwrap();
     assert_eq!(
-        res_b.len(),
-        0,
-        "Repo B must not receive Repo A or unattributed plannings"
+        list_plannings(&service, Some("/project/a".into()))
+            .unwrap()
+            .iter()
+            .map(|s| s.planning_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![current_ids[0].as_str()]
     );
-
-    // 2. Filter by repo-a: must backfill legacy-plan-a and return it, and exclude unattributed
-    let res_a = list_plannings(&service, Some("/workspace/repo-a".into())).unwrap();
-    assert_eq!(res_a.len(), 1, "Repo A must receive backfilled planning");
-    assert_eq!(res_a[0].planning_id, "legacy-plan-a");
-    assert_eq!(res_a[0].repository.as_deref(), Some("/workspace/repo-a"));
-
-    // Verify summary on disk was migrated
-    let migrated_disk = fs::read_to_string(plan_a_dir.join("summary.json")).unwrap();
-    let parsed_disk: PlanningSummary = serde_json::from_str(&migrated_disk).unwrap();
-    assert_eq!(parsed_disk.repository.as_deref(), Some("/workspace/repo-a"));
-
-    // 3. Unfiltered: returns both legacy-plan-a and unattributed-plan
-    let res_all = list_plannings(&service, None).unwrap();
-    assert_eq!(res_all.len(), 2, "Unfiltered query returns all plannings");
-    assert_eq!(res_all[0].planning_id, "unattributed-plan"); // created_at 200 > 100
-    assert_eq!(res_all[1].planning_id, "legacy-plan-a");
+    assert_eq!(list_plannings(&service, None).unwrap().len(), 2);
+    assert!(get_planning(old_id, &service).is_err());
+    assert_eq!(fs::read(directory.join("summary.json")).unwrap(), original);
 }
 
 #[cfg(feature = "fixture")]
@@ -5405,7 +5170,7 @@ fn planning_preflight_checks_model_format() {
     // 2. Model without provider prefix fails preflight
     config.model = "qwen3.8-flash".into();
     let err = validate_planning_preflight(&config, None).unwrap_err();
-    assert!(err.contains("is missing a provider prefix"));
+    assert!(err.contains("provider/model"));
 
     // 3. Model with valid provider prefix passes preflight format check
     config.model = "openai/gpt-4o".into();
@@ -5966,8 +5731,7 @@ fn explicit_node_model_is_checked_even_in_serial_preflight() {
     }))
     .unwrap();
     let error = validate_planning_models_preflight(&config, Some("serial"), || None).unwrap_err();
-    assert!(error.contains("NodeAgent"));
-    assert!(error.contains("provider prefix"));
+    assert!(error.contains("provider/model"));
 }
 
 #[cfg(feature = "fixture")]
@@ -6132,6 +5896,14 @@ fn parallel_first_batch_materializes_the_plain_directory_once() {
             config,
             planning_id: None,
             planning: None,
+        })
+        .unwrap();
+    runtime
+        .emit(EventKind::WorkspaceIsolationSelected { isolated: true })
+        .unwrap();
+    runtime
+        .emit(EventKind::PrivateBatchSelected {
+            nodes: vec!["left".into(), "right".into()],
         })
         .unwrap();
     runtime

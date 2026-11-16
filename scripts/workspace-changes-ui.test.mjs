@@ -35,6 +35,7 @@ async function fixture(mode, viewport = { width: 1280, height: 850 }, getFileCha
   const context = await browser.newContext({ viewport, locale: "en-US", reducedMotion: "reduce" });
   await context.addInitScript(() => localStorage.setItem("grapher_language_v1", "en"));
   const errors = [];
+  let page;
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
     if (command === "get_execution_output" && getExecutionOutput) {
@@ -53,11 +54,28 @@ async function fixture(mode, viewport = { width: 1280, height: 850 }, getFileCha
       await route.fulfill({ json: { result: { ...result, executionIds: body.executionIds ?? null } } });
       return;
     }
+    if (command === "get_execution_output") {
+      const body = route.request().postDataJSON();
+      const current = await page.evaluate(() => ({ outputText: window.changesAudit.outputText, running: window.changesAudit.running }));
+      const bytes = Buffer.from(current.outputText);
+      const startOffset = body.tail ? 0 : Math.min(body.offset ?? 0, bytes.length);
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: body.executionId,
+        content: bytes.subarray(startOffset).toString(), startOffset, nextOffset: bytes.length,
+        totalBytes: bytes.length, complete: true, status: current.running ? "running" : "completed" } } });
+      return;
+    }
+    if (command === "get_file_changes") {
+      const body = route.request().postDataJSON();
+      const summary = await page.evaluate(() => window.changesAudit.summary);
+      await route.fulfill({ json: { result: { runId: body.runId, executionId: null,
+        executionIds: body.executionIds ?? null, summary } } });
+      return;
+    }
     const defaults = { list_files: { files: [] }, list_skills: { skills: [] }, get_merger_prompt: { prompt: "Resolve the conflict." } };
     if (!(command in defaults)) errors.push(`Unexpected API: ${command}`);
     await route.fulfill({ json: { result: defaults[command] ?? {} } });
   });
-  const page = await context.newPage();
+  page = await context.newPage();
   page.on("pageerror", error => errors.push(String(error)));
   page.setDefaultTimeout(10_000);
   await page.goto(`${origin}/__changes?mode=${mode}`, { waitUntil });

@@ -65,14 +65,24 @@ whole-layer membership across dispatches and restart. Publication completion
 retires it. Planner/manual graph revisions preserve the delivery barrier and
 reconcile surviving members, new peers, removed nodes and unfinished prerequisite
 layers before scheduling; an unrelated edit is not permission to deliver a
-completed subset. History edits and feedback invalidation keep their distinct
-branching semantics rather than manufacturing completion. Older in-flight private
-groups can adopt their current topology layers without moving a writer or
-refreshing source. Newer event records require a backend that understands them.
-`ExecutionBatchStarted` still records each slot-capped dispatch and choice. Its
-optional `resumed` flag now also identifies same-batch refill: new peers and
+completed subset. A node history edit retains its held private membership through
+replay and finishes its replacement before peers can be delivered. It uses a
+separate slot when rollback would overwrite an unedited descendant's unpublished
+view. Feedback invalidation keeps its distinct branching semantics rather than
+manufacturing completion. Held private groups
+reconcile their current topology layers without moving a writer or refreshing
+source. `ExecutionBatchStarted` records each slot-capped dispatch and choice.
+Its required `resumed` flag also identifies same-batch refill: new peers and
 retries reuse the batch's source snapshot instead of collecting mid-batch source
-edits. Absent flags retain historical new-batch semantics.
+edits. Records missing that flag are unsupported.
+
+Within a recorded private scope, a single-consumer dependency may hand its
+completed parent's directory to the child when that parent is still the physical
+owner and no active writer or feedback reservation blocks it. The same rule
+allows an ancestor's follow-up to use its current terminal view. These are
+explicit handoffs; unrelated allocations cannot recycle unpublished inputs.
+Fan-out branches use separate slots, and a later occupant's failed partial work
+cannot be reclaimed through an older parent's result.
 
 A held batch must not exclude a failed prerequisite in an earlier layer. Its
 scope includes unfinished prerequisite layers. If a requested retry was already
@@ -106,8 +116,8 @@ baseline; it does not capture or publish unfinished files, reselect isolation,
 or recollect source edits made during the pause. Those edits stay in source and
 are composed at delivery, then become inputs to a genuinely new batch. Completed
 siblings wait at the same delivery barrier until the resumed work succeeds. This
-distinction survives restart; already-delivered recovery heads retain their
-recorded handoff semantics rather than reviving an old directory.
+distinction survives restart; a completed publication does not authorize
+relocating unfinished work.
 
 Stopping only one private node does not interrupt its running siblings, but
 it suspends the batch's delivery and workspace switching even before Continue
@@ -142,13 +152,6 @@ the Run baseline used by future batches. Ownership, parent-input and
 prepared-ancestry checks still apply, and later source work is combined at
 delivery, not injected into the unfinished private view.
 
-For older schedulers that already misrouted a pause into an undelivered handoff, the guarded
-[offline restoration](../development/conversation-logs.md#restore-an-undelivered-paused-batch)
-records `PausedBatchRestored` without rewriting history or changing project files.
-It restores the pre-continuation paused nodes, clears the pending handoff and
-publication, and keeps dispatch paused; delivered/possibly-installed results are
-not eligible.
-
 A failed private attempt never triggers a new partial-file handoff. Explicit
 Continue, targeted retries and human follow-ups retain its own directory, Pi
 session, prepared inputs, agent commits and staged/untracked/ignored work. Successful
@@ -168,16 +171,14 @@ nonempty recorded preparation head always takes precedence over that local ref.
 Restart preserves this delivery barrier and the retained work; it does not restart
 model calls or manufacture completion. Private environment state remains private.
 
-Legacy already-recorded recovery handoffs/captures keep their durable replay and
-publication-retry semantics; new retries never generate them. Already-delivered
-recoveries are not rolled back or relocated to an obsolete directory. Their own
-Pi session forks and attachment-delivery receipts remain recoverable, including
-edited/deleted inputs; unreceipted partial copies still fail explicitly. Pending
-legacy publication is not silently canceled when source delivery may have begun.
+Retired recovery handoffs and captures are rejected. Unfinished work stays in
+its recorded private directory; its attachment receipts cannot be adopted by a
+new directory through that retired path. Already-started current publications
+retain their pinned inputs and retry state when source delivery may have begun.
 Feedback-invalidated descendants prepare fresh parent files instead of reviving
 doomed partial trees, while retaining their own conversation under the
 [feedback continuation contract](runtime.md#feedback-continuation-notices).
-Legacy Runs without a workspace-policy selection retain their old contract.
+All Graph Runs use the current adaptive policy with recorded private scopes.
 
 For a shared batch:
 
@@ -234,8 +235,8 @@ view evidence fails closed rather than guessing which metadata to retain.
 Preparation compares the complete physical result before recording readiness;
 legacy/missing/corrupt evidence and unsupported layouts fail rather than exposing
 an incomplete workspace. Unix UID/GID are host ownership, not portable project
-metadata: private entries keep their actual creation ownership, and legacy view
-records discard UID/GID only after checksum validation. UID/GID-only changes do
+metadata: private entries keep their actual creation ownership. Current view
+records exclude host UID/GID while preserving their checksum contract. UID/GID-only changes do
 not advance a view reference and are not transferred or published. Permission
 bits, ACLs, xattrs, flags, link topology and bytes remain part of the checked view.
 Consequently a private copy does not promise the source's Unix owner/group or
@@ -271,7 +272,7 @@ filesystem privileges); macOS ACLs/flags and Windows ACLs/ADS retain their nativ
 checks. macOS can assign its system-managed `com.apple.provenance` xattr to the
 private copy even when the source lacks it, and rejects user-process changes; it
 is host bookkeeping rather than project metadata, so it is omitted from capture,
-view identity and materialization verification (including legacy view records).
+view identity and materialization verification for every current-format record.
 Host-managed macOS storage/revision/security flags are omitted for the same
 reason while the private copy keeps its own, and destination-only xattrs/streams
 are cleared so inherited or stale host metadata cannot make an otherwise equal
@@ -317,7 +318,7 @@ SHA-256 staging retains executable bits from stage-zero entries of the previous
 private index, using byte-exact paths; a differently cased spelling cannot borrow
 another path's executable bit. Unix still uses the observed filesystem mode.
 
-The retained legacy/scoped collector uses a forced Git add equivalent to:
+The scoped collector uses a forced Git add equivalent to:
 
 ```text
 git add -f -A
@@ -510,8 +511,8 @@ filesystem security boundary.
 Source snapshots and node results are pinned in the host-only database:
 
 - `refs/grapher/heads/<commit>` pins snapshot heads;
-- `refs/grapher/runs/<run>/nodes/<node-id>` pins node results (legacy unscoped
-  refs use `refs/grapher/nodes/<node-id>`);
+- `refs/grapher/runs/<run>/nodes/<node-id>` pins node results; named-parent
+  preparation and node snapshots require a Run scope;
 - inside a node repository, `refs/grapher/base` and
   `refs/grapher/parents/<node-id>` pin the prepared inputs.
 
@@ -524,7 +525,7 @@ snapshot work or the final view scan/copy, so independent slots can finalize
 concurrently. The lock order is node slot then host refs; host-ref owners must
 not acquire node-slot leases. Imported heads are pinned before that shared lock
 is released, and completion still requires successful immutable view capture.
-Unscoped node snapshots use one fresh project observation for view identity and
+Node snapshots use one fresh project observation for view identity and
 raw Git staging within that slot lease. The staging input is consumed, not
 cached across attempts; the post-import view capture still re-inspects the
 private node workspace independently and must match its staged view identity
@@ -545,12 +546,11 @@ New project-view records use schema 6: checksum normalization includes native
 ACL evidence and every project path name, including `security`. Only each native
 Git `index` entry's per-workspace stat cache remains omitted. A borrowed projection
 serializes sorted JSON directly, without constructing a JSON value tree. Schema-5
-records retain their historical checksum algorithm (including its recursive
-`security` omissions) for validation, then upgrade in memory; existing evidence
-files/checksums are never rewritten. Nested view versions are checked before
-this upgrade. Reusing a code reference validates its stored view/checksum first;
-damaged or partial existing evidence fails instead of being recaptured from live
-files. Legacy owner fields likewise remain until the original checksum is validated. Differential tests pin legacy bytes and cover
+and unknown nested view versions are rejected before checksum interpretation;
+there is no in-memory upgrade. Reusing a code reference validates its stored
+view/checksum first; damaged or partial evidence is never recaptured from live
+files. Host-managed metadata remains excluded from portable project ownership.
+Differential tests cover
 current ACL/path identity and corruption; [native ACL regressions](../../backend/src/workspace_view/acl_tests.rs)
 cover snapshot, fork, composition and conflicting permission changes on Windows/macOS.
 This is not a collection exclusion or a file-observation cache. Full `view.json`
@@ -654,7 +654,7 @@ Publication is Git-only, with internal composition separated from delivery:
    collection rules, but their snapshot is internal. Staged changes under an
    excluded scope remain staged and unpublished; they are not silently
    unstaged or removed.
-2. Compose the selected private heads (batch outputs or legacy terminal results)
+2. Compose the selected completed private heads
    and that source snapshot in the private,
    Run-owned host database. A clean composition merges trees and records the
    composed project view without checking the project out when its metadata can
@@ -735,7 +735,7 @@ Slots may be reclaimed only after ownership/recovery requirements end. Data/cach
 - [runtime.rs](../../backend/src/runtime.rs): allocation, single-writer
   ownership, handoff, feedback, retries, and publication lifecycle.
 - [model.rs](../../backend/src/model.rs): current Git-only projections plus
-  read-only deserialization of legacy file-channel records.
+  rejection of retired file-channel records.
 - [environment.rs](../../backend/src/environment.rs) and
   [workspace_files.rs](../../backend/src/workspace_files.rs): managed native
   environment scopes only.

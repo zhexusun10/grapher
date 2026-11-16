@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureSummaries, fixtureFileChanges } from "./fixtures/current-api.mjs";
 import test, { before, after } from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
@@ -9,9 +10,9 @@ const config = { repository, model: "test/model", thinkingLevel: "off", maxParal
 const empty = { runId: "", config: null, phase: "draft", graph: { originalGoal: "", nodes: [], edges: [] }, nodes: {},
   executions: [], events: [], mergers: [], plan: null, approved: false, paused: false, base: "", feedbackCounts: {} };
 const conversation = { ...empty, runId: "saved", config, phase: "completed", graph: { ...empty.graph, originalGoal: "Saved conversation" } };
-const bootstrap = { config, snapshot: empty, runs: ["saved"], repositoryInfo: { path: repository, name: "Background", branch: "main", clean: true, head: "" }, dataPath: "/mock", envOverrides: {} };
+const bootstrap = { config, snapshot: empty, runs: ["saved"], conversations: fixtureSummaries([conversation]), repositoryInfo: { path: repository, name: "Background", branch: "main", clean: true, head: "" }, dataPath: "/mock", envOverrides: {} };
 const catalog = { providers: [{ id: "test", name: "Test", methods: [], configured: true }], warning: null,
-  models: [{ provider: "test", id: "model", name: "Model", api: "mock", available: true, contextWindow: 1000, thinkingLevels: ["off"] }] };
+  models: [{ provider: "test", id: "model", name: "Model", api: "mock", available: true, contextWindow: 1000, thinkingLevels: ["off"], thinkingLevelFallbacks: {} }] };
 
 before(async () => {
   server = await createServer({ cacheDir: "node_modules/.vite-background-settings", server: { host: "127.0.0.1", port: 0, strictPort: false, open: false, hmr: false } });
@@ -41,12 +42,14 @@ test("Harness defaults keep Feedback opt-in and saved choices survive reload", {
   }, { repository });
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
+    const body = route.request().postDataJSON();
     if (command === "save_config") {
-      savedConfig = route.request().postDataJSON().config;
+      savedConfig = body.config;
       saves.push(savedConfig);
       return route.fulfill({ json: { result: { ...bootstrap, config: savedConfig } } });
     }
-    const defaults = { bootstrap: { ...bootstrap, config: savedConfig }, history: conversation, snapshot: conversation,
+    const defaults = { bootstrap: { ...bootstrap, config: savedConfig }, history: conversation, snapshot: conversation, load_run: conversation,
+      get_file_changes: fixtureFileChanges(body), extension_command: { instance: "standalone", commands: [] },
       snapshot_if_changed: { version: "fixed", snapshot: null }, repository_status: { repository, valid: true, error: null },
       list_plannings: [], list_files: { files: [] }, list_skills: { skills: [] }, provider_auth: catalog,
       pi_extensions: { globalDirectory: "mock", extensions: [] }, environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true } };
@@ -148,7 +151,8 @@ test("hiding Auto stages with Settings, preserves Partitioner and submits only v
       return route.fulfill({ json: { result: { ...bootstrap, config: savedConfig } } });
     }
     if (command === "plan_goal_stream") return route.fulfill({ status: 500, json: { error: "Mock planning rejected" } });
-    const defaults = { bootstrap: { ...bootstrap, config: savedConfig }, history: conversation, snapshot: conversation,
+    const defaults = { bootstrap: { ...bootstrap, config: savedConfig }, history: conversation, snapshot: conversation, load_run: conversation,
+      get_file_changes: fixtureFileChanges(body), extension_command: { instance: "standalone", commands: [] },
       snapshot_if_changed: { version: "fixed", snapshot: null }, repository_status: { repository, valid: true, error: null },
       list_plannings: [], list_files: { files: [] }, list_skills: { skills: [] }, provider_auth: { ...catalog,
         models: [...catalog.models, { ...catalog.models[0], id: "partitioner", thinkingLevels: ["low", "high"] }] },
@@ -173,7 +177,7 @@ test("hiding Auto stages with Settings, preserves Partitioner and submits only v
     const planningCard = page.getByRole("region", { name: "Harness settings", exact: true });
     assert.deepEqual(await planningCard.getByRole("checkbox").evaluateAll(inputs => inputs.map(input => input.getAttribute("aria-label"))), [
       "Hide Auto mode", "Auto approve Planner graphs", "Post-task Planner review",
-      "Isolate parallel node workspaces", "Mount Planner write and edit tools",
+      "Isolate parallel node workspaces", "Mount Planner write and edit tools", "Enable Feedback",
     ], "planning, approval, workspace and Planner file-tool options share one card");
     assert.equal(await planningCard.locator(".role-model-settings").count(), 0, "execution settings remain separate from model settings");
     assert.equal(await planningCard.getByRole("checkbox", { name: "Isolate parallel node workspaces", exact: true })
@@ -252,7 +256,8 @@ test("home background saves only after acceptance, persists, and preserves the a
   await context.addInitScript(({ repository, config }) => {
     localStorage.setItem("grapher_language_v1", "en");
     localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Background", lastOpened: 1 }]));
-    localStorage.setItem("grapher_config", JSON.stringify(config));
+    localStorage.setItem("grapher_data_path", "/mock");
+    localStorage.setItem("grapher-format-1:/mock:grapher_config", JSON.stringify(config));
   }, { repository, config });
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
@@ -262,7 +267,8 @@ test("home background saves only after acceptance, persists, and preserves the a
       if (failSave) return route.fulfill({ status: 500, json: { error: "Mock save failed" } });
       return route.fulfill({ json: { result: { ...bootstrap, config: body.config } } });
     }
-    const defaults = { bootstrap, history: conversation, snapshot: conversation,
+    const defaults = { bootstrap, history: conversation, snapshot: conversation, load_run: conversation,
+      get_file_changes: fixtureFileChanges(body), extension_command: { instance: "standalone", commands: [] },
       snapshot_if_changed: { version: "fixed", snapshot: null }, repository_status: { repository, valid: true, error: null },
       list_plannings: [], list_files: { files: [] }, list_skills: { skills: [] }, provider_auth: catalog,
       pi_extensions: { globalDirectory: "mock", extensions: [] }, environment_capabilities: { platform: "windows", arch: "x86_64", nativeWorkspace: true } };
@@ -378,7 +384,8 @@ test("execution graph overview defaults off, sits between UI sections, and commi
   await context.addInitScript(({ repository, config }) => {
     localStorage.setItem("grapher_language_v1", "en");
     localStorage.setItem("grapher_projects", JSON.stringify([{ id: repository, path: repository, name: "Overview", lastOpened: 1 }]));
-    localStorage.setItem("grapher_config", JSON.stringify(config));
+    localStorage.setItem("grapher_data_path", "/mock");
+    localStorage.setItem("grapher-format-1:/mock:grapher_config", JSON.stringify(config));
   }, { repository, config });
   await context.route("**/api/*", async route => {
     const command = new URL(route.request().url()).pathname.slice(5);
@@ -389,9 +396,11 @@ test("execution graph overview defaults off, sits between UI sections, and commi
       return route.fulfill({ json: { result: { ...bootstrap, config: body.config } } });
     }
     const defaults = {
-      bootstrap: { ...bootstrap, runs: [graphSnapshot.runId] },
+      bootstrap: { ...bootstrap, runs: [graphSnapshot.runId], conversations: fixtureSummaries([graphSnapshot]) },
       history: body?.runId === graphSnapshot.runId ? graphSnapshot : empty,
       snapshot: body?.runId === graphSnapshot.runId ? graphSnapshot : empty,
+      load_run: body?.runId === graphSnapshot.runId ? graphSnapshot : empty,
+      get_file_changes: fixtureFileChanges(body), extension_command: { instance: "standalone", commands: [] },
       snapshot_if_changed: { version: "fixed", snapshot: null },
       repository_status: { repository, valid: true, error: null },
       list_plannings: [], list_files: { files: [] }, list_skills: { skills: [] }, provider_auth: catalog,

@@ -66,7 +66,8 @@ fn completed_chain() -> (tempfile::TempDir, PathBuf, Runtime) {
     for _ in 0..3 {
         let jobs = runtime.jobs().unwrap();
         assert!(!jobs.is_empty());
-        for job in jobs {
+        for mut job in jobs {
+            attach(&mut runtime, &mut job);
             let name = &job.execution.node;
             let path = Path::new(&job.execution.worktree);
             workspace::prepare(&source, path, &job.execution.before, &runtime.parents(name))
@@ -373,6 +374,8 @@ fn manual_node_after_plain_folder_publication_uses_fresh_source_when_shadow_was_
     runtime
         .emit(EventKind::PublicationCompleted { head })
         .unwrap();
+    assert!(runtime.jobs().unwrap().is_empty());
+    assert_eq!(runtime.state.phase, "completed");
     runtime.reclaim_shadow(&source).unwrap();
     fs::write(source.join("user-edit.txt"), "current").unwrap();
 
@@ -382,7 +385,9 @@ fn manual_node_after_plain_folder_publication_uses_fresh_source_when_shadow_was_
     assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
     let mut job = runtime.jobs().unwrap().remove(0);
     assert_eq!(job.execution.node, "new");
-    assert!(job.materialize_source);
+    assert!(job.source_direct && !job.materialize_source);
+    assert_eq!(Path::new(&job.execution.worktree), source);
+    assert!(workspace::shadow_repo_if_exists(&source).unwrap().is_none());
     attach(&mut runtime, &mut job);
     let script = temp.path().join("manual-node.sh");
     fs::write(&script, "cat >/dev/null\ntest -f published.txt && test \"$(cat user-edit.txt)\" = current || exit 1\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Completed\"}]}}'\n").unwrap();

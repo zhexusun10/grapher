@@ -11,7 +11,7 @@ export interface RunIndicator {
 
 function executionActivityVersion(executions: Execution[] = []): string {
   return executions.map((execution) =>
-    `${execution.id}:${execution.status}:${execution.outputBytes ?? execution.output.length}`
+    `${execution.id}:${execution.status}:${execution.outputBytes ?? 0}`
   ).join(",");
 }
 

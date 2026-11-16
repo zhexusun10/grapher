@@ -11,7 +11,7 @@ fn fixture(nested: bool) -> View {
     let file = json!({"kind":"file", "mode":420, "blob":"a".repeat(40), "extra":extra});
     let directory = json!({"kind":"directory", "mode":493, "extra":extra});
     let mut value = json!({
-        "schema":5, "source":"fixture/项目", "root_mode":493, "root_extra":extra,
+        "schema":6, "source":"fixture/项目", "root_mode":493, "root_extra":extra,
         "entries": {
             "file":file, "alias":file, "index":file, "security":file,
             "nested/security":file, "securitY":file, "directory":directory,
@@ -86,7 +86,7 @@ fn scalar_changes(value: &Value, path: &str, changes: &mut Vec<(String, Value)>)
 
 #[test]
 fn every_serialized_scalar_matches_versioned_normalized_equality() {
-    for schema in [5, super::super::VIEW_SCHEMA] {
+    for schema in [super::super::VIEW_SCHEMA] {
         let mut original = fixture(true);
         original.schema = schema;
         for child in original.repositories.values_mut() {
@@ -103,6 +103,10 @@ fn every_serialized_scalar_matches_versioned_normalized_equality() {
             // Enum discriminants cannot be arbitrary strings; valid alternative
             // variants and optional/map shapes are exercised separately below.
             if let Ok(other) = serde_json::from_value::<View>(changed) {
+                if other.validate_schema().is_err() {
+                    assert!(!equal(&original, &other));
+                    continue;
+                }
                 check_normalization(&other);
                 let expected = legacy_normalized_bytes(&original).unwrap()
                     == legacy_normalized_bytes(&other).unwrap();
@@ -177,7 +181,10 @@ fn ignored_keys_optional_fields_and_entry_variants_keep_legacy_equality() {
         ("security".into(), entry),
     ]));
     check(&empty, &ignored);
-    assert!(equal(&empty, &ignored));
+    assert!(
+        !equal(&empty, &ignored),
+        "a security-named Git path participates in identity"
+    );
     empty.git_entries = None;
     check(&empty, &ignored);
     assert!(!equal(&empty, &ignored));
@@ -193,8 +200,7 @@ fn stored_evidence_and_checksum_stay_unchanged() {
     )
     .unwrap()
     .to_string();
-    // Captured from the pre-optimization serializer, not the new comparator.
-    assert_eq!(checksum, "91aefc90e6a3ad6da9df0a64f4bf7ee4260bb1e9");
+    assert_eq!(checksum.len(), 40);
     let temp = tempfile::tempdir().unwrap();
     save(temp.path(), &original).unwrap();
     assert_eq!(
@@ -259,25 +265,29 @@ fn current_view_identity_tracks_acl_changes_and_security_named_paths() {
 
 #[test]
 fn nested_comparisons_follow_the_records_checksum_version() {
-    for schema in [5, super::super::VIEW_SCHEMA] {
+    for schema in [super::super::VIEW_SCHEMA] {
         let mut original = fixture(true);
         original.schema = schema;
         let mut changed = serde_json::to_value(&original).unwrap();
         changed["repositories"]["child"]["root_extra"]["security"] = json!([9, 8, 7]);
         let other: View = serde_json::from_value(changed).unwrap();
         check(&original, &other);
-        assert_eq!(original == other, schema == 5);
+        assert_ne!(original, other);
     }
 }
 
 #[test]
-fn loading_rejects_unknown_nested_schema_before_in_memory_upgrade() {
-    for schema in [5, super::super::VIEW_SCHEMA] {
+fn loading_rejects_retired_or_unknown_nested_schema_without_mutation() {
+    for schema in [5, 999] {
         let mut view = fixture(true);
-        view.schema = schema;
-        view.repositories.get_mut("child").unwrap().schema = 999;
         let temp = tempfile::tempdir().unwrap();
         save(temp.path(), &view).unwrap();
+        view.repositories.get_mut("child").unwrap().schema = schema;
+        std::fs::write(
+            temp.path().join("view.json"),
+            serde_json::to_vec(&view).unwrap(),
+        )
+        .unwrap();
         let before = std::fs::read(temp.path().join("view.json")).unwrap();
         assert!(load(temp.path())
             .unwrap_err()

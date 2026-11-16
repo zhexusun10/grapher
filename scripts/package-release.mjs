@@ -56,7 +56,7 @@ export function launcherScripts(platform, version) {
     '## Data and updates',
     '',
     '- Runtime data lives in `.grapher/` inside this folder. Back it up before replacing an installation.',
-    '- To update: extract the new archive into a new folder and move your `.grapher/` data over.',
+    '- Across a persisted-format change, startup preserves incompatible data and automatically uses a separate current-format directory (for example `.grapher/format-1/`). The console reports the actual path; later starts reuse it. Keep the original data with its original application version to view old Runs; this release does not migrate or repair them.',
     '',
     '## Troubleshooting',
     '',

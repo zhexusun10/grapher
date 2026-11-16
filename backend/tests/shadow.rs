@@ -72,7 +72,13 @@ fn first_materialization_is_forced_and_reusable() {
     assert_eq!(before, head);
     assert!(worktree.join("main.py").exists());
     fs::write(worktree.join("main.py"), "print('modified')\n").unwrap();
-    let node = workspace::snapshot_node(&worktree, &project, "worktree").unwrap();
+    let node = workspace::snapshot_node_for_run(
+        &worktree,
+        &project,
+        "worktree",
+        Some(&uuid::Uuid::new_v4().to_string()),
+    )
+    .unwrap();
     assert_ne!(node, head);
 
     let published =

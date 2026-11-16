@@ -27,8 +27,8 @@ New Graph Runs record `EnvironmentPolicyRequested` and defer native admission to
 the first private [execution batch](workspace-snapshots-and-feedback.md#adaptive-workspace-policy),
 after Planner's source writes. Shared batches never initialize/load private E/L
 bindings or require private completion seals; existing private evidence remains
-Run-owned for later batches and recovery. Legacy private Runs still resolve at
-approval. The execution contract is backend-owned, not a user environment choice:
+owned by the Run for later batches and recovery. Admission
+requires the current initialization events. The execution contract is backend-owned, not a user environment choice:
 
 - Standard Git Graph projects start with **no business environment binding**
   (`automatic-lazy`), irrespective of language or ML declarations. No venv,
@@ -75,7 +75,7 @@ private prefix scopes evolve through immutable composite references. Retry canno
 replace that contract; a workspace that falls back to unbound remains runnable and
 records that decision. Draft/model-setting changes cannot override it.
 
-Persisted compatibility records retain their recorded ownership/offline contract for replay and recovery only, not as another admission mode. Lazy discovery is limited to supported native tool adapters; [capability gaps](#capabilities-not-implemented-or-accepted) are not admission promises.
+Unsupported persisted records are rejected before recovery or launch. Lazy discovery is limited to supported native tool adapters; [capability gaps](#capabilities-not-implemented-or-accepted) are not admission promises.
 
 The internal policy fixes platform/architecture, baseline, initial
 managed-environment scopes, rebuildable caches, layout and discovery rules. A verified
@@ -110,7 +110,9 @@ Bash conversion batches separate path arguments in one native converter process,
 not a lossy split of a joined path list. Absolute paths containing `..` are not guessed or
 rewritten. The recorded `unboundPath` survives environment switches: activation
 prepends its verified bins, while unbinding restores the original business path
-rather than deleting all project paths. Older records keep their recorded rules.
+rather than deleting all project paths. Explicit launches retain their declared,
+allowlisted business environment and entry precedence; this is a current policy,
+not a fallback selected by missing historical fields.
 
 For these launches, project-root `NODE_PATH` / `PYTHONPATH` entries and absolute
 activation markers (`VIRTUAL_ENV`, `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`) are also
@@ -137,7 +139,7 @@ environment at another physical path is an explicit non-goal under the current
 workspace lifecycle.
 
 An unbound automatic entry is an absolute Bash and need not be first in PATH.
-Bound environments, activation hooks and legacy explicit launches still require
+Bound environments, activation hooks and explicit launches still require
 the default entry directory first as a fully absolute path. A hook cannot replace
 it with an empty/relative PATH merely because the current cwd matches that
 directory. Activation subprocesses restore the selected workspace after
@@ -155,7 +157,7 @@ later tool call.
 
 Inherited credentials are transient process values, not serialized into L.
 Automatic policies record the inheritance rule, not an inventory of secret values;
-legacy explicit policies authorize inherited values by name. No secret values belong in literal policy variables, hooks, arguments or
+explicit policies authorize inherited values by name. No secret values belong in literal policy variables, hooks, arguments or
 managed trees. Arbitrary business files are not automatically scrubbed for
 secrets. Existing [native permission limits](filesystem-isolation.md) apply.
 
@@ -255,7 +257,10 @@ patches remain actual captured bytes, not manifest-based reconstruction. See the
 [sealing cost procedure](../development/environment-baselines.md#immutable-dependency-sealing-optimization)
 for the scope and measurement limits.
 
-Environment manifests and persisted E/L records remain readable for replay and
+Current E manifests carry `schema=1`, an integrity checksum and UUID-only names;
+L records use a `schema=1` envelope with explicit root-qualified ownership.
+Unversioned manifests/launches and `before-`/`after-` aliases are unsupported.
+Current environment manifests and persisted E/L records remain available for replay and
 recovery. Missing or damaged records fail when that evidence is explicitly needed;
 they do not resurrect an obsolete workspace or turn an unrelated current execution
 into an environment-selection workflow. Byte content is verified, not trusted only
@@ -274,7 +279,7 @@ is never a substitute for S. This does not capture arbitrary external state.
 | Evidence | What it can restore |
 | --- | --- |
 | New validated root-qualified E | Its recorded non-cache scopes in **both** W and S, including inactive/unbound prefixes and private HOME. Recorded absence can remove later entries within that coverage, subject to the existing link/metadata limitations below. |
-| Legacy single-root E (no `rooted` field) | Only its recorded active root and scopes. A W E does not contain S HOME; an unbound S E does not contain owned W prefixes. |
+| Current single-root E (`schema=1`, no `rooted` frame) | Empty initialization snapshots and explicit-policy captures retain their declared single-root coverage. They cannot supply another root's bytes. |
 | `ownedScopes` / Git exclusions alone | Ownership only, not byte evidence. A target lacking coverage for a previously known root/scope cannot authorize partial rollback. |
 | Link targets outside recorded scopes | Link metadata/reference only; target bytes are not captured merely because a link is inside a managed scope. This includes external toolchain files. |
 | Cache paths, skipped unresolved links, ambient toolchains/configuration/services | Not restorable E evidence. Project code separately follows its immutable Git/view record. |
@@ -294,10 +299,10 @@ coverage for **all** previously known scopes. Otherwise live partial state is
 preserved and recovery explicitly fails. Native interpreter/prefix/ABI validation
 still applies after materialization; this is not environment relocation.
 
-Old manifest JSON, checksums, E/L references and historical execution results are
-not rewritten. Legacy records remain readable/retryable, but missing other-root
-history is never filled from live files. New captures can append root-qualified
-records to that lineage. Failed retries preserve their current W/S bytes instead
+Unsupported manifest and launch generations are rejected without rewriting their
+JSON, checksums or references. Current single-root and rooted records share the
+versioned manifest contract; missing other-root history is never filled from live
+files. Failed retries preserve their current W/S bytes instead
 of restoring an old input. All-root preflight is not a filesystem transaction:
 an I/O failure during application can still leave a failed partial view, never a
 successful partial rollback. Full host-state and arbitrary-root rollback remain
@@ -313,10 +318,11 @@ Environment evidence participates in [feedback generation/drain checks](runtime.
 
 ### Native runtime inputs during recovery
 
-New verified bindings also store optional `runtimeEvidence.schema = 3` in L.
-Schema 2 retains its external-target selector contract, schema 1 its file-only
-contract, and absent evidence the old ABI-only contract. None is retrofitted with
-newly inferred selector relationships.
+Verified bindings require `runtimeEvidence` and an explicit owning root in L.
+New discoveries write `runtimeEvidence.schema = 3`. Schemas 1/2 retain their
+recorded file/selector semantics inside a current launch envelope; missing evidence
+is rejected for a bound launch. An unbound launch legitimately has no binding or
+evidence. No missing relationships are inferred.
 This reuses the existing interpreter/ABI probe's bounded native-file inventory;
 it does not import a host environment or enumerate HOME/configuration/secrets.
 The probe hashes each observed file's same byte stream for the existing SHA-256
@@ -342,7 +348,7 @@ physical workspace, so a trusted W alias cannot bypass this ownership boundary.
 | State root/path without captured coverage, or absence/link-only entry inside an E scope | Refuse; live or same-named other-root files cannot fill missing E history. Project Git ownership is not E byte evidence. |
 | Schema 2 `runtimeEvidence` | Preserve its original external-target selectors and startup rules. It does not contain selectors whose final targets return to W/S; no new return-path evidence is inferred for it. |
 | Schema 1 `runtimeEvidence` | Preserve its file-only preflight and startup checks, without adding selector admission rules, changing its serialization or inventing missing original paths. Its originally aliased external inputs can still evade early detection if the old canonical target survives. |
-| Legacy L without `runtimeEvidence` | Keep the recorded baseline/byte checks and original native ABI startup contract. Startup does not construct new evidence and apply its admission rules before discarding it. New discovery/adoption still requires the new ownership checks; legacy startup is not permission to create a new shared binding. No new native-file preflight coverage is claimed and no historical evidence is synthesized. |
+| Bound L without `runtimeEvidence` or an explicit root | Reject before native startup or restoration; never synthesize missing evidence. An unbound launch remains valid. |
 
 Native workers check E-owned/external/cache evidence before historical code reset
 or managed root materialization. Missing-W result/descriptor entry also checks it
@@ -429,7 +435,7 @@ Coverage is only the interpreter and explicitly observed native files from the
 existing adapter, not all transitive OS libraries, arbitrary application imports,
 services, credentials or every inactive environment's startup dependencies.
 Inactive/unbound prefixes can have restorable E bytes without a runnable native
-binding. Old L/E JSON, checksums, references and execution results are not
+binding. Existing current-format L/E JSON, checksums, references and execution results are not
 rewritten. This preflight is not a filesystem transaction or protection against
 concurrent host toolchain changes; later I/O/startup failures remain failures,
 not successful partial recovery. Full host-state rollback and arbitrary venv/
@@ -536,8 +542,9 @@ environment. Removing a private copy does not authorize a stale source prefix.
 It checks both executable directories (before resolving Unix interpreter
 symlinks) and resolved executables; it does not rewrite activation scripts, console launchers,
 editable paths or package bytes. Direct local interpreters and unrelated ambient
-environments remain usable. A resumed legacy context retains its immutable
-source-less contract; new generations get the source binding. This guard covers
+environments remain usable. Observer contexts use schema 2 and their source
+binding is immutable within a generation; an old or source-less generation cannot
+be adopted by clearing the new source identity. This guard covers
 observed tool invocations, not arbitrary scripts, explicit executables or custom
 wrappers that bypass observation; the OS permission boundary is unchanged.
 
@@ -623,8 +630,8 @@ HOME changes do not constitute incompatibility). Otherwise `launch_result`
 requires `entryId`, a terminal/business entry name, not an environment setting.
 Failure/retry remains tied to that entry's partial workspace. Launching an entry
 preserves the others; successful result execution still requests republication.
-Schema-1 descriptors remain readable; current publication may expose multiple
-business entries over the current project code.
+All current descriptors use schema 2 with nonempty named business entries.
+A single explicit-policy result has a `default` entry; schema 1 is rejected.
 
 | Local JSON POST endpoint | Body / result |
 | --- | --- |

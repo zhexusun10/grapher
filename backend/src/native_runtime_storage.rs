@@ -284,33 +284,27 @@ pub(crate) fn release(cache: &std::sync::Mutex<Option<NativeRuntime>>) -> Result
     Ok(())
 }
 
-/// Unmarked legacy copies have no lease protocol. Include them only during an
-/// explicitly requested offline cleanup after ALL Grapher backends are stopped.
-pub(crate) fn unused(parent: &Path, legacy: bool) -> Result<Vec<NativeRuntime>, String> {
-    unused_with_cancel(parent, legacy, || false)
+/// Only marked copies participate in the lease protocol and automatic cleanup.
+pub(crate) fn unused(parent: &Path) -> Result<Vec<NativeRuntime>, String> {
+    unused_with_cancel(parent, || false)
 }
 
 pub(crate) fn unused_with_cancel(
     parent: &Path,
-    legacy: bool,
     cancelled: impl Fn() -> bool,
 ) -> Result<Vec<NativeRuntime>, String> {
     let Some(parent) = parent_directory(parent)? else {
         return Ok(Vec::new());
     };
     let guard = Arc::new(lock_parent(&parent, &cancelled)?);
-    let mut copies = unused_locked(&parent, legacy, None)?;
+    let mut copies = unused_locked(&parent, None)?;
     for copy in &mut copies {
         copy._parent_lease = Some(guard.clone());
     }
     Ok(copies)
 }
 
-fn unused_locked(
-    parent: &Path,
-    legacy: bool,
-    keep_key: Option<&str>,
-) -> Result<Vec<NativeRuntime>, String> {
+fn unused_locked(parent: &Path, keep_key: Option<&str>) -> Result<Vec<NativeRuntime>, String> {
     let mut unused = Vec::new();
     for entry in fs::read_dir(parent).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
@@ -342,22 +336,7 @@ fn unused_locked(
                 continue;
             }
         } else {
-            if !legacy {
-                continue;
-            }
-            // A prefix alone is not proof that this is a disposable engine copy.
-            let mut complete = true;
-            for (child, file) in [
-                ("engine/entrypoint.mjs", true),
-                ("scripts/pi-baseline.mjs", true),
-                ("package.json", true),
-                ("pi/.git", false),
-            ] {
-                complete &= real_child_path(parent, &path.join(child), file)?.is_some();
-            }
-            if !complete {
-                continue;
-            }
+            continue;
         }
         // Validate an existing lock file before acquire() opens it.
         real_child_path(parent, &path.join("runtime.lock"), true)?;
@@ -400,7 +379,7 @@ pub(crate) fn get_or_prepare_verified(
     let parent = parent_directory(parent)?.ok_or("Native runtime parent is missing")?;
     let _guard = lock_parent(&parent, &cancelled)?;
     // Reap failed/old preparations and obsolete versions, never live readers.
-    for copy in unused_locked(&parent, false, Some(key))? {
+    for copy in unused_locked(&parent, Some(key))? {
         if let Err(error) = remove(&copy) {
             eprintln!("[Grapher] {error}");
         }
@@ -618,14 +597,14 @@ mod tests {
         assert_eq!(first.directory, second.directory);
         assert_eq!(preparations.load(Ordering::SeqCst), 1);
         assert!(
-            unused(&parent, false).unwrap().is_empty(),
+            unused(&parent).unwrap().is_empty(),
             "live shared readers block cleanup"
         );
         let path = first.directory.clone();
         release_cache_for_test(first);
         assert!(path.is_dir());
         assert!(
-            unused(&parent, false).unwrap().is_empty(),
+            unused(&parent).unwrap().is_empty(),
             "other backend still holds its reader"
         );
         release_cache_for_test(second);
@@ -650,7 +629,7 @@ mod tests {
             1
         );
         drop(restarted);
-        let copies = unused(&parent, false).unwrap();
+        let copies = unused(&parent).unwrap();
         assert_eq!(copies.len(), 1);
         remove(&copies[0]).unwrap();
         assert!(!path.exists());
@@ -783,7 +762,7 @@ mod tests {
         drop(stale);
         let unknown = parent.join("grapher-native-engine-unknown");
         fs::create_dir(&unknown).unwrap();
-        let candidates = unused(&parent, false).unwrap();
+        let candidates = unused(&parent).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].directory, stale_path);
         remove(&candidates[0]).unwrap();
@@ -800,9 +779,9 @@ mod tests {
         let live = std::thread::spawn(move || create(&worker_parent).unwrap())
             .join()
             .unwrap();
-        assert!(unused(&parent, false).unwrap().is_empty());
+        assert!(unused(&parent).unwrap().is_empty());
         drop(live);
-        assert_eq!(unused(&parent, false).unwrap().len(), 1);
+        assert_eq!(unused(&parent).unwrap().len(), 1);
     }
 
     #[test]
@@ -843,14 +822,14 @@ mod tests {
         let path = runtime.directory.clone();
         drop(runtime);
         drop(locked);
-        let candidates = unused(temp.path(), false).unwrap();
+        let candidates = unused(temp.path()).unwrap();
         assert_eq!(candidates.len(), 1);
         remove(&candidates[0]).unwrap();
         assert!(!path.exists());
     }
 
     #[test]
-    fn legacy_engines_require_opt_in_and_a_complete_real_layout() {
+    fn unmarked_engines_are_preserved_even_with_a_complete_layout() {
         let temp = tempfile::tempdir().unwrap();
         let legacy = temp.path().join("grapher-native-engine-old");
         for path in ["engine", "scripts", "pi/.git"] {
@@ -865,11 +844,8 @@ mod tests {
         }
         let unknown = temp.path().join("grapher-native-engine-userdata");
         fs::create_dir(&unknown).unwrap();
-        assert!(unused(temp.path(), false).unwrap().is_empty());
-        let candidates = unused(temp.path(), true).unwrap();
-        assert_eq!(candidates.len(), 1);
-        remove(&candidates[0]).unwrap();
-        assert!(!legacy.exists());
+        assert!(unused(temp.path()).unwrap().is_empty());
+        assert!(legacy.exists());
         assert!(unknown.exists());
     }
 
@@ -881,14 +857,14 @@ mod tests {
         fs::write(outside.join("keep"), "external").unwrap();
         let linked = temp.path().join("linked");
         crate::path_safety::directory_link(&outside, &linked);
-        assert!(unused(&linked, true).is_err());
+        assert!(unused(&linked).is_err());
         let parent = temp.path().join("runtimes");
         let runtime = create(&parent).unwrap();
         let path = runtime.directory.clone();
         drop(runtime);
         fs::remove_file(path.join("runtime.lock")).unwrap();
         crate::path_safety::directory_link(&outside, &path.join("runtime.lock"));
-        assert!(unused(&parent, false).is_err());
+        assert!(unused(&parent).is_err());
         assert_eq!(
             fs::read_to_string(outside.join("keep")).unwrap(),
             "external"

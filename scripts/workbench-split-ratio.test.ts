@@ -5,7 +5,6 @@ import {
   MIN_SPLIT_RATIO,
   MAX_SPLIT_RATIO,
   SPLIT_RATIO_STORAGE_KEY,
-  LEGACY_WIDTH_STORAGE_KEY,
   getStoredRatio,
   persistRatio,
   clampSplitRatio,
@@ -37,26 +36,25 @@ test("getStoredRatio loads persisted split ratio and clamps within bounds", () =
   assert.equal(getStoredRatio(tooLargeStorage), MAX_SPLIT_RATIO);
 });
 
-test("getStoredRatio gracefully converts legacy pixel width", () => {
+test("getStoredRatio ignores retired pixel width", () => {
   const legacyStorage = {
-    getItem: (key: string) => (key === LEGACY_WIDTH_STORAGE_KEY ? "480" : null),
+    getItem: (key: string) => (key === "grapher_pane_width" ? "480" : null),
   };
-  // 480 / 1200 = 0.40
-  assert.equal(getStoredRatio(legacyStorage), 0.4);
+  assert.equal(getStoredRatio(legacyStorage), DEFAULT_SPLIT_RATIO);
 });
 
 test("getStoredRatio prioritizes split ratio over legacy width", () => {
   const bothStorage = {
     getItem: (key: string) => {
       if (key === SPLIT_RATIO_STORAGE_KEY) return "0.50";
-      if (key === LEGACY_WIDTH_STORAGE_KEY) return "370";
+      if (key === "grapher_pane_width") return "370";
       return null;
     },
   };
   assert.equal(getStoredRatio(bothStorage), 0.5);
 });
 
-test("persistRatio saves ratio and updates legacy pixel width", () => {
+test("persistRatio saves only the current ratio", () => {
   const saved: Record<string, string> = {};
   const mockStorage = {
     setItem: (key: string, value: string) => {
@@ -65,8 +63,7 @@ test("persistRatio saves ratio and updates legacy pixel width", () => {
   };
 
   persistRatio(0.42, mockStorage);
-  assert.equal(saved[SPLIT_RATIO_STORAGE_KEY], "0.42");
-  assert.equal(saved[LEGACY_WIDTH_STORAGE_KEY], "504"); // 0.42 * 1200 = 504
+  assert.deepEqual(saved, { [SPLIT_RATIO_STORAGE_KEY]: "0.42" });
 });
 
 test("clampSplitRatio ensures minimum left and right widths for different container sizes", () => {

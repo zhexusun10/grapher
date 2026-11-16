@@ -62,7 +62,7 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
     runtime
         .emit(EventKind::Started {
             execution: execution("node", "task"),
-            message_sequences: None,
+            message_sequences: Some(vec![]),
             fresh_restart: false,
         })
         .unwrap();
@@ -102,13 +102,15 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
         );
     }
     assert!(sizes.iter().max().unwrap() - sizes.iter().min().unwrap() < 128);
+    let output_bytes = runtime.store.log_bytes("run", "node").unwrap();
+    let metrics = runtime.state.executions[0].metrics.clone();
     runtime
         .emit(EventKind::Finished {
             execution_id: "node".into(),
             head: "head".into(),
-            output: "replacement transcript".into(),
-            output_bytes: 0,
-            metrics: None,
+            output: String::new(),
+            output_bytes,
+            metrics,
         })
         .unwrap();
     runtime
@@ -134,7 +136,7 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
         expected
     );
 
-    // Legacy checkpoints remain readable without restoring output.
+    // A checkpoint without the current envelope/checksum is discarded and replayed.
     let old = serde_json::to_value(&runtime.state).unwrap();
     db.execute(
         "UPDATE checkpoints SET sequence=?1,payload=?2",
@@ -175,18 +177,11 @@ fn compact_checkpoints_preserve_business_history_without_materializing_streams()
 }
 
 #[test]
-fn a_legacy_checkpoint_without_delivered_heads_is_repaired_from_the_event_log() {
-    for unindexed in [
-        None,
-        Some("publication_started"),
-        Some("publication_completed"),
-        Some("both"),
-    ] {
-        assert_legacy_delivered_heads_repaired(unindexed);
-    }
+fn corrupted_checkpoint_recovers_delivered_heads_by_current_event_replay() {
+    assert_current_delivered_heads_replayed();
 }
 
-fn assert_legacy_delivered_heads_repaired(unindexed: Option<&str>) {
+fn assert_current_delivered_heads_replayed() {
     let temp = TempDir::new().unwrap();
     let mut runtime = grapher::runtime::Runtime::open(temp.path()).unwrap();
     runtime.state.run_id = "run".into();
@@ -219,7 +214,8 @@ fn assert_legacy_delivered_heads_repaired(unindexed: Option<&str>) {
             head: "b".repeat(40),
         })
         .unwrap();
-    // Checkpoint, then remove publishedHeads to simulate the legacy projection.
+    // Corrupt the disposable checkpoint; its checksum must force event replay.
+    runtime.store.select_run(Some("run")).unwrap();
     runtime
         .emit(EventKind::Failed {
             node: "task".into(),
@@ -246,11 +242,6 @@ fn assert_legacy_delivered_heads_repaired(unindexed: Option<&str>) {
             [value.to_string()],
         )
         .unwrap();
-    if let Some(kind) = unindexed {
-        connection
-            .execute("UPDATE events SET kind=NULL WHERE kind IN ('publication_started','publication_completed') AND (?1='both' OR kind=?1)", [kind])
-            .unwrap();
-    }
     let original_events: Vec<(i64, String)> = connection
         .prepare("SELECT sequence,payload FROM events ORDER BY sequence")
         .unwrap()
@@ -261,11 +252,7 @@ fn assert_legacy_delivered_heads_repaired(unindexed: Option<&str>) {
     drop(connection);
 
     let replayed = grapher::runtime::Runtime::open(temp.path()).unwrap();
-    assert_eq!(
-        replayed.state.published_heads,
-        vec![delivered],
-        "{unindexed:?}"
-    );
+    assert_eq!(replayed.state.published_heads, vec![delivered]);
     let connection = Connection::open(temp.path().join("events.sqlite")).unwrap();
     let reopened_events: Vec<(i64, String)> = connection
         .prepare("SELECT sequence,payload FROM events ORDER BY sequence")

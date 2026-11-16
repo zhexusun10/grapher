@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fixtureSummaries, fixtureFileChanges } from "./fixtures/current-api.mjs";
 import test from "node:test";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
@@ -124,8 +125,9 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
         const body = route.request().postDataJSON();
         let result;
         switch (command) {
-          case "bootstrap": case "save_config": result = { config, snapshot: empty, runs: Object.keys(snapshots), repositoryInfo, dataPath: "/mock/.grapher" }; break;
-          case "history": result = snapshots[body.runId] || empty; break;
+          case "bootstrap": case "save_config": result = { config, snapshot: empty, runs: Object.keys(snapshots), conversations: fixtureSummaries(Object.values(snapshots)), repositoryInfo, dataPath: "/mock/.grapher" }; break;
+          case "get_file_changes": result = fixtureFileChanges(body); break;
+          case "load_run": case "history": result = snapshots[body.runId] || empty; break;
           // Paint the previous view while metadata is in flight, as on a cold history read.
           case "snapshot": await new Promise(resolve => setTimeout(resolve, 80)); result = snapshots[body.runId] || empty; break;
           case "snapshot_if_changed": result = { version: "1", snapshot: snapshots[body.runId] || null }; break;

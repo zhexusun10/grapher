@@ -92,6 +92,7 @@ mod tests {
                 .save_version(
                     &version,
                     Version {
+                        schema: 1,
                         head: String::new(),
                         parents: vec![],
                         entries: Entries::new(),
@@ -115,6 +116,7 @@ mod tests {
             .save_version(
                 &version,
                 Version {
+                    schema: 1,
                     head: String::new(),
                     parents: vec![],
                     entries: Entries::new(),

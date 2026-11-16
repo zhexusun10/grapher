@@ -64,9 +64,12 @@ impl Store {
         if indexed {
             return Ok(());
         }
-        let mut statement = self.connection.prepare(r#"SELECT DISTINCT json_extract(payload,'$.config.repository') FROM events
-            WHERE kind IN ('created','planning_started','draft_edited') OR
-            (kind IS NULL AND (payload LIKE '{"type":"created"%' OR payload LIKE '{"type":"planning_started"%' OR payload LIKE '{"type":"draft_edited"%'))"#)
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"SELECT DISTINCT json_extract(payload,'$.config.repository') FROM events
+            WHERE kind IN ('created','planning_started','draft_edited')"#,
+            )
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], |row| row.get::<_, Option<String>>(0))
@@ -311,10 +314,8 @@ impl Store {
                 } else {
                     "merger_started"
                 };
-                let prefix = format!("{{\"type\":\"{kind}\"%");
-                return self.connection.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE run_id<>?1 AND
-                    ((kind=?2 AND execution_id=?3) OR (kind IS NULL AND payload LIKE ?4 AND json_extract(payload,'$.execution.id')=?3)))",
-                    params![excluded, kind, id, prefix], |row| row.get(0)).map_err(|error| error.to_string());
+                return self.connection.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE run_id<>?1 AND kind=?2 AND execution_id=?3)",
+                    params![excluded, kind, id], |row| row.get(0)).map_err(|error| error.to_string());
             }
         }
         if let Target::Shadow { root, name, .. } = target {
@@ -396,21 +397,10 @@ impl Store {
         Ok(false)
     }
 
-    pub(crate) fn has_cleanup_owner(&self, target: &Target) -> Result<bool, String> {
-        let target = serde_json::to_string(target).map_err(|error| error.to_string())?;
-        self.connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM run_owned_directories WHERE target=?1)",
-                [target],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())
-    }
-
     pub fn completed_workspace_runs(&self) -> Result<Vec<String>, String> {
         let mut statement = self.connection.prepare("SELECT e.run_id FROM events e
             WHERE e.sequence IN (SELECT MAX(sequence) FROM events GROUP BY run_id)
-              AND (e.kind='publication_completed' OR (e.kind IS NULL AND e.payload LIKE '{\"type\":\"publication_completed\"%'))
+              AND e.kind='publication_completed'
               AND NOT EXISTS(SELECT 1 FROM workspace_cleanup_done d WHERE d.run_id=e.run_id AND d.sequence=e.sequence)")
             .map_err(|error| error.to_string())?;
         let rows = statement

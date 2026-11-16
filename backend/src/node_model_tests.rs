@@ -4,7 +4,7 @@ fn record_session(runtime: &Runtime, execution: &Execution) {
     let directory = runtime.root.join("sessions").join(&execution.id);
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join(format!("test_{}.jsonl", execution.session_id)),
-        format!("{}\n", serde_json::json!({"type": "session", "id": execution.session_id, "cwd": execution.worktree}))).unwrap();
+        format!("{}\n", serde_json::json!({"type": "session", "version":3, "grapherFormat":1, "grapherRunId":runtime.state.run_id, "id": execution.session_id, "cwd": execution.worktree}))).unwrap();
 }
 
 fn replacement(config: &Config) -> Config {
@@ -28,14 +28,18 @@ fn failed_node_model_change_is_durable_and_continue_keeps_the_session_and_worksp
             let (_temp, source, mut runtime) = setup(true, single());
             runtime.set_route(route).unwrap();
             runtime.approve().unwrap();
-            let failed = runtime.jobs().unwrap().remove(0);
+            let mut failed = runtime.jobs().unwrap().remove(0);
+            attach(&mut runtime, &mut failed);
             record_session(&runtime, &failed.execution);
             if route == "graph" {
-                workspace::prepare(
+                workspace::prepare_with_merger_expected_for_run(
                     &source,
                     Path::new(&failed.execution.worktree),
                     &failed.execution.before,
                     &[],
+                    &failed.expected_source_head,
+                    Some(&runtime.state.run_id),
+                    || Err("unexpected conflict".into()),
                 )
                 .unwrap();
                 runtime
@@ -128,14 +132,18 @@ fn model_saved_during_execution_is_applied_after_failure_or_pause() {
                 let (_temp, source, mut runtime) = setup(true, single());
                 runtime.set_route(route).unwrap();
                 runtime.approve().unwrap();
-                let job = runtime.jobs().unwrap().remove(0);
+                let mut job = runtime.jobs().unwrap().remove(0);
+                attach(&mut runtime, &mut job);
                 record_session(&runtime, &job.execution);
                 if route == "graph" {
-                    workspace::prepare(
+                    workspace::prepare_with_merger_expected_for_run(
                         &source,
                         Path::new(&job.execution.worktree),
                         &job.execution.before,
                         &[],
+                        &job.expected_source_head,
+                        Some(&runtime.state.run_id),
+                        || Err("unexpected conflict".into()),
                     )
                     .unwrap();
                     runtime
@@ -981,7 +989,7 @@ fn previously_started_waiting_blocked_and_dirty_nodes_keep_historical_overrides(
 }
 
 #[test]
-fn legacy_failed_node_model_events_and_snapshots_keep_continue_recovery() {
+fn current_model_selection_keeps_continue_recovery_after_restart() {
     let (_temp, _source, mut runtime) = setup(true, single());
     runtime.approve().unwrap();
     let job = runtime.jobs().unwrap().remove(0);
@@ -989,29 +997,15 @@ fn legacy_failed_node_model_events_and_snapshots_keep_continue_recovery() {
         .finish(&job.execution, Err("Provider failed".into()))
         .unwrap();
     runtime.jobs().unwrap();
-    let settings = replacement(runtime.state.config.as_ref().unwrap()).node_agent_settings();
-    runtime
-        .emit(EventKind::FailedNodeModelsUpdated {
-            nodes: vec!["task".into()],
-            settings: settings.clone(),
-        })
-        .unwrap();
+    let config = replacement(runtime.state.config.as_ref().unwrap());
+    let settings = config.node_agent_settings();
+    runtime.update_node_models(&config).unwrap();
     assert!(runtime.state.can_resume());
     let root = runtime.root.clone();
     drop(runtime);
     let runtime = Runtime::open(&root).unwrap();
     assert_eq!(runtime.state.nodes["task"].model_config, Some(settings));
     assert!(runtime.state.can_resume());
-    let mut legacy = serde_json::to_value(&runtime.state).unwrap();
-    legacy["nodes"]["task"]
-        .as_object_mut()
-        .unwrap()
-        .remove("modelRetry");
-    let legacy: Snapshot = serde_json::from_value(legacy).unwrap();
-    assert!(
-        legacy.can_resume(),
-        "old checkpoints without a retry flag remain recoverable"
-    );
 }
 
 #[test]
@@ -1178,25 +1172,13 @@ fn a_finished_conversation_records_models_for_future_followups() {
 }
 
 #[test]
-fn legacy_checkpoints_hydrate_the_conversation_selection_from_node_overrides() {
-    let (_temp, _source, mut runtime) = setup(true, single());
-    let config = replacement(runtime.state.config.as_ref().unwrap());
-    runtime
-        .emit(EventKind::NodeModelsUpdated {
-            nodes: vec!["task".into()],
-            settings: config.node_agent_settings(),
-        })
-        .unwrap();
-    // Simulate a checkpoint written before Run-level model selections existed.
-    runtime.state.model_config = None;
-    runtime.state.hydrate_legacy_model_config();
-    let settings = runtime.state.model_config.as_ref().unwrap();
-    assert_eq!(settings.node_agent_settings(), config.node_agent_settings());
-    assert_eq!(
-        settings.model,
-        runtime.state.config.as_ref().unwrap().model,
-        "legacy hydration keeps the Run's original non-node roles"
-    );
+fn retired_model_events_are_rejected() {
+    for kind in ["failed_node_models_updated", "node_models_updated"] {
+        assert!(serde_json::from_value::<EventKind>(serde_json::json!({
+            "type":kind, "nodes":["task"], "settings":{"model":"provider/model"}
+        }))
+        .is_err());
+    }
 }
 #[test]
 fn credential_failure_is_continued_without_a_synthetic_message() {
@@ -1220,13 +1202,17 @@ fn credential_failure_is_continued_without_a_synthetic_message() {
     };
     let (_temp, source, mut runtime) = setup(true, graph);
     runtime.approve().unwrap();
-    let failed = runtime.jobs().unwrap().remove(0);
+    let mut failed = runtime.jobs().unwrap().remove(0);
+    attach(&mut runtime, &mut failed);
     record_session(&runtime, &failed.execution);
-    workspace::prepare(
+    workspace::prepare_with_merger_expected_for_run(
         &source,
         Path::new(&failed.execution.worktree),
         &failed.execution.before,
         &[],
+        &failed.expected_source_head,
+        Some(&runtime.state.run_id),
+        || Err("unexpected conflict".into()),
     )
     .unwrap();
     runtime

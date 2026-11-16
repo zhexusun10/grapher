@@ -3,6 +3,7 @@ import test from "node:test";
 import { RequestTimeoutError, withRequestTimeout } from "../src/services/requestTimeout.ts";
 import { runtimeService } from "../src/services/runtime.ts";
 import { emptySnapshot } from "../src/types.ts";
+import { emptyFileChangeSummary } from "../src/services/fileChanges.ts";
 
 const response = (result: unknown) => new Response(JSON.stringify({ result }));
 
@@ -87,8 +88,10 @@ test("file change reads are bounded and carry an explicit empty or multi-executi
     assert.deepEqual(bodies[0].executionIds, ["first", "second"]);
     assert.equal(bodies[0].executionId, undefined);
     globalThis.fetch = async (_url, init) => {
-      bodies.push(JSON.parse(String(init?.body)));
-      return response({ summary: {}, executionIds: bodies.at(-1)?.executionIds ?? null });
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      return response({ runId: body.runId, executionId: body.executionId ?? null,
+        executionIds: body.executionIds ?? null, summary: emptyFileChangeSummary });
     };
     await runtimeService.getFileChanges("changes-run", []);
     assert.deepEqual(bodies[1].executionIds, []);
@@ -101,9 +104,26 @@ test("file change reads are bounded and carry an explicit empty or multi-executi
 test("older backends cannot leak a run aggregate into an execution scope", async () => {
   const original = globalThis.fetch;
   try {
-    globalThis.fetch = async () => response({ executionId: null, summary: { totalFiles: 100 } });
+    globalThis.fetch = async () => response({ runId: "changes-run", executionId: null, summary: emptyFileChangeSummary });
     await assert.rejects(runtimeService.getFileChanges("changes-run", []));
     await assert.rejects(runtimeService.getFileChanges("changes-run", ["first"]));
+  } finally { globalThis.fetch = original; }
+});
+
+test("malformed file-change responses are rejected before they reach component state", async () => {
+  const original = globalThis.fetch;
+  try {
+    const item = { path: "file.txt", status: "modified", additions: 1, deletions: 0 };
+    const malformedFiles = [
+      { ...item, nodes: 1 }, { ...item, nodes: [null] },
+      { ...item, executionIds: "execution" }, { ...item, oldPath: {} },
+      { ...item, additions: -1 }, { ...item, deletions: "0" },
+    ].map(file => ({ runId: "changes-run", executionId: null, executionIds: null,
+      summary: { ...emptyFileChangeSummary, files: [file], totalFiles: 1, modifiedCount: 1 } }));
+    for (const result of [null, {}, { runId: "changes-run", executionId: null, executionIds: null }, ...malformedFiles]) {
+      globalThis.fetch = async () => response(result);
+      await assert.rejects(runtimeService.getFileChanges("changes-run"), /Invalid file changes response/);
+    }
   } finally { globalThis.fetch = original; }
 });
 

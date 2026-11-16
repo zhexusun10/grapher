@@ -36,15 +36,11 @@ fn prepared_worker(standard_git: bool) -> (TempDir, PathBuf, Runtime, Job) {
     runtime
         .finish(&parent.execution, Ok((head, "completed".into())))
         .unwrap();
-    let worker = runtime.jobs().unwrap().remove(0);
-    let prepared = workspace::prepare_with_merger_expected_for_run(
-        &source,
+    let mut worker = runtime.jobs().unwrap().remove(0);
+    prepare_edit_job(&mut runtime, &mut worker);
+    let prepared = workspace::git(
         Path::new(&worker.execution.worktree),
-        &worker.execution.before,
-        &worker.parent_heads,
-        &worker.expected_source_head,
-        Some(&worker.run_id),
-        || Err("unexpected composition conflict".into()),
+        &["rev-parse", "HEAD"],
     )
     .unwrap();
     assert_ne!(prepared, runtime.latest_source_head());
@@ -399,6 +395,9 @@ fn unknown_failure_continue_preserves_and_commits_partial_workspace_after_restar
 #[test]
 fn failed_preparation_retry_recovers_the_last_prepared_attempt_in_the_same_session() {
     let (temp, _source, mut runtime, worker) = prepared_worker(true);
+    // This interrupted session already exists; the next failure is in a later
+    // continuation's preparation, not a first launch without a bound input.
+    super::feedback_workspace::history(&runtime, &worker, "worker");
     let path = PathBuf::from(&worker.execution.worktree);
     let head = workspace::git(&path, &["rev-parse", "HEAD"]).unwrap();
     dirty_workspace(&path);
@@ -944,6 +943,8 @@ fn interrupted_followup_before_session_fork_recovers_after_restart() {
             serde_json::json!({
                 "type": "session",
                 "version": 3,
+                "grapherFormat": 1,
+                "grapherRunId": runtime.state.run_id,
                 "id": first.execution.session_id,
                 "cwd": crate::native::host_path(&first_path),
             }),
@@ -967,22 +968,31 @@ fn interrupted_followup_before_session_fork_recovers_after_restart() {
         .finish(&first.execution, Ok((first_head, "completed".into())))
         .unwrap();
 
-    let mut second = runtime.jobs().unwrap().remove(0);
-    // Put `second` in its own terminal directory so a shared-terminal follow-up
-    // on `first` must move workspaces and fork `first`'s session.
+    // Record the distinct terminal slot in Started, just as dispatch does;
+    // changing only the Job would leave durable physical ownership elsewhere.
+    let mut second = first.clone();
+    second.execution.id = Uuid::new_v4().to_string();
+    second.execution.session_id = Uuid::new_v4().to_string();
+    second.execution.node = "second".into();
+    second.execution.workspace_lineage.push("second".into());
+    second.execution.before = runtime.state.nodes["first"].head.clone().unwrap();
+    second.task = "second".into();
+    second.parent_heads = vec![second.execution.before.clone()];
+    second.materialize_source = false;
     second.execution.worktree = runtime
         .run_workspace_root()
         .join("second-terminal")
         .to_string_lossy()
         .into();
+    runtime
+        .emit(EventKind::Started {
+            execution: second.execution.clone(),
+            message_sequences: Some(vec![]),
+            fresh_restart: false,
+        })
+        .unwrap();
+    prepare_edit_job(&mut runtime, &mut second);
     let second_path = PathBuf::from(&second.execution.worktree);
-    workspace::prepare(
-        &source,
-        &second_path,
-        &second.execution.before,
-        &second.parent_heads,
-    )
-    .unwrap();
     let second_head = workspace::snapshot_node_for_run(
         &second_path,
         &source,

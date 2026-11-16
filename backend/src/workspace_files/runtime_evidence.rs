@@ -14,7 +14,7 @@ impl Files {
     pub(crate) fn verify_recorded_runtime_files(
         &self,
         version: &str,
-        legacy_root: &str,
+        single_root: &str,
         expected: &[(&str, &str, &str)],
     ) -> Result<RuntimeFileCoverage, String> {
         let value = self.load(version)?;
@@ -58,12 +58,12 @@ impl Files {
                 }
                 &frame.entries
             } else {
-                if root != legacy_root {
+                if root != single_root {
                     if root == "workspace" {
                         coverage.project.push(input());
                         continue;
                     }
-                    return Err(format!("Legacy environment has no byte evidence for native input {root}:{path}; refusing another root's same-named file"));
+                    return Err(format!("Single-root snapshot has no byte evidence for native input {root}:{path}; refusing another root's same-named file"));
                 }
                 if self.is_cache(Path::new(path)) {
                     coverage.caches.push(input());

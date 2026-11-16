@@ -1,6 +1,5 @@
-//! Count allocations to verify that `Store::load` skips legacy log payloads.
+//! Metadata replay must not allocate in proportion to current execution logs.
 use grapher::{model::*, store::Store};
-use rusqlite::{params, Connection};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tempfile::TempDir;
@@ -29,38 +28,31 @@ unsafe impl GlobalAlloc for Counting {
         System.realloc(ptr, layout, new_size)
     }
 }
-
 #[global_allocator]
 static ALLOC: Counting = Counting;
 
-fn legacy(db: &Connection, kind: EventKind) {
-    db.execute(
-        "INSERT INTO events(run_id,timestamp,payload) VALUES('run',1000,?1)",
-        params![serde_json::to_string(&kind).unwrap()],
-    )
-    .unwrap();
-}
-
 #[test]
-fn load_of_a_large_legacy_run_never_parses_transcript_text() {
+fn load_of_large_current_logs_never_materializes_transcript_text() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("events.sqlite");
-    {
-        // Pure legacy schema: no kind/execution_id columns, no logs table.
-        let db = Connection::open(&path).unwrap();
-        db.execute_batch("CREATE TABLE events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, timestamp INTEGER NOT NULL, payload TEXT NOT NULL);").unwrap();
-        let config: Config = serde_json::from_value(serde_json::json!({
-            "repository": "/repo", "model": "test", "maxParallel": 1
-        }))
-        .unwrap();
-        legacy(
-            &db,
+    let store = Store::open(&path).unwrap();
+    let mut state = Snapshot {
+        run_id: "run".into(),
+        ..Default::default()
+    };
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "repository":"/repo", "model":"test", "maxParallel":1
+    }))
+    .unwrap();
+    store
+        .append(
+            &mut state,
             EventKind::Created {
                 graph: Graph {
                     nodes: ["one", "two"]
-                        .iter()
-                        .map(|name| Node {
-                            id: (*name).into(),
+                        .into_iter()
+                        .map(|id| Node {
+                            id: id.into(),
                             task: "test".into(),
                         })
                         .collect(),
@@ -70,77 +62,71 @@ fn load_of_a_large_legacy_run_never_parses_transcript_text() {
                 planning_id: None,
                 planning: None,
             },
-        );
-        let filler = "x".repeat(8 * 1024 * 1024);
-        for id in ["one", "two"] {
-            let execution = Execution {
-                id: id.into(),
-                node: id.into(),
-                revision: 1,
-                attempt: 1,
-                session_id: id.into(),
-                worktree: String::new(),
-                before: String::new(),
-                workspace_lineage: vec![],
-                after: None,
-                status: "running".into(),
-                output: String::new(),
-                output_bytes: 0,
-                pid: None,
-                input: None,
-                result: None,
-                started_at: 1,
-                completed_at: None,
-                metrics: None,
-            };
-            legacy(
-                &db,
+        )
+        .unwrap();
+    let filler = "x".repeat(8 * 1024 * 1024);
+    for id in ["one", "two"] {
+        let execution: Execution = serde_json::from_value(serde_json::json!({
+            "id":id,"node":id,"revision":1,"attempt":1,"sessionId":id,
+            "worktree":"","before":"","after":null,"status":"running","output":"",
+            "startedAt":1,"completedAt":null
+        }))
+        .unwrap();
+        store
+            .append(
+                &mut state,
                 EventKind::Started {
                     execution,
-                    message_sequences: None,
+                    message_sequences: Some(vec![]),
                     fresh_restart: false,
                 },
-            );
-            for _ in 0..3 {
-                legacy(
-                    &db,
+            )
+            .unwrap();
+        for _ in 0..3 {
+            store
+                .append(
+                    &mut state,
                     EventKind::Output {
                         execution_id: id.into(),
                         text: filler.clone(),
                     },
-                );
-            }
-            legacy(
-                &db,
+                )
+                .unwrap();
+        }
+        store
+            .append(
+                &mut state,
                 EventKind::Finished {
                     execution_id: id.into(),
                     head: "h".into(),
-                    output: format!("{filler}{filler}{filler}END-{id}"),
-                    output_bytes: 0,
+                    output: String::new(),
+                    output_bytes: 3 * filler.len(),
                     metrics: None,
                 },
-            );
-        }
+            )
+            .unwrap();
     }
+    drop(store);
+    drop(state);
+    assert!(std::fs::metadata(&path).unwrap().len() > 48 * 1024 * 1024);
     let store = Store::open(&path).unwrap();
-    let before = std::fs::metadata(&path).unwrap().len();
-    assert!(before > 80 * 1024 * 1024, "fixture too small: {before}");
     TOTAL.store(0, Ordering::SeqCst);
     MAX.store(0, Ordering::SeqCst);
     TRACK.store(true, Ordering::SeqCst);
-    let state = store.load("run").unwrap();
+    let state = store.load("run");
     TRACK.store(false, Ordering::SeqCst);
+    let state = state.unwrap();
     let total = TOTAL.load(Ordering::SeqCst);
     let max = MAX.load(Ordering::SeqCst);
-    assert_eq!(state.events.len(), 5, "only business events replay");
+    assert_eq!(state.events.len(), 5);
+    assert_eq!(state.executions.len(), 2);
     assert!(state
         .executions
         .iter()
-        .all(|execution| execution.output.is_empty()));
-    assert_eq!(state.executions.len(), 2);
+        .all(|e| e.output.is_empty() && e.output_bytes == 3 * filler.len()));
+    assert!(max < 1024 * 1024, "transcript-sized allocation: {max}");
     assert!(
-        max < 1024 * 1024,
-        "a transcript-sized allocation was observed: {max}"
+        total < 4 * 1024 * 1024,
+        "metadata replay allocated {total} bytes"
     );
-    assert!(total < 4 * 1024 * 1024, "replay allocated {total} bytes");
 }

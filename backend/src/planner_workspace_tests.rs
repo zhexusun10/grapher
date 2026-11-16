@@ -22,14 +22,11 @@ use crate::runtime::Job;
 use std::path::Path;
 
 fn create_private(runtime: &mut Runtime, graph: Graph, config: Config) -> Result<(), String> {
-    // Keep private-workspace switching/recovery tests on the legacy contract.
-    runtime.state.run_id = uuid::Uuid::new_v4().to_string();
-    runtime.emit(EventKind::Created {
-        graph,
-        config,
-        planning_id: None,
-        planning: None,
-    })?;
+    let nodes = graph.nodes.iter().map(|node| node.id.clone()).collect();
+    runtime.create(graph, config)?;
+    runtime.set_route("graph")?;
+    runtime.emit(EventKind::WorkspaceIsolationSelected { isolated: true })?;
+    runtime.emit(EventKind::PrivateBatchSelected { nodes })?;
     runtime.store.select_run(Some(&runtime.state.run_id))
 }
 
@@ -76,7 +73,7 @@ let input = ''; for await (const chunk of process.stdin) input += chunk;
     throw Error('A bare Planner turn must not contain the rework note');
   if (context && input.includes(rework) !== !priorTurn)
     throw Error('Planner rework note must appear only on the first context-bearing follow-up');
-  if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify({type:'session',id,cwd:process.cwd()})+'\n');
+  if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify({type:'session',version:3,grapherFormat:1,grapherRunId:process.env.GRAPHER_ACTIVE_RUN_ID,id,cwd:process.cwd()})+'\n');
   const header = JSON.parse(fs.readFileSync(file,'utf8').split('\n')[0]);
   // Pi matches a custom-session-dir resume by the literal header cwd
   // (resolvePath comparison, no realpath). Assert exactly that contract and
@@ -155,6 +152,16 @@ console.log(JSON.stringify({type:'message_end',message:{role:'assistant',content
     .unwrap();
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
+    if let Some(policy) = runtime.state.config.as_ref().unwrap().environment.as_ref() {
+        let result =
+            crate::environment::Environments::new(&runtime.root, &runtime.state.run_id, policy)
+                .unwrap()
+                .initialize(&repo)
+                .unwrap();
+        runtime
+            .emit(EventKind::EnvironmentInitialized { result })
+            .unwrap();
+    }
     let service = Arc::new(Service {
         runtime: Mutex::new(runtime),
         driving: AtomicBool::new(true),
@@ -626,8 +633,8 @@ fn planner_workspace_uses_the_latest_running_frontier_without_waiting() {
 }
 
 #[test]
-fn node_completion_retains_all_workspaces_borrowed_by_the_running_planner() {
-    let (_temp, _repo, service, _config) = setup(false);
+fn node_completion_retains_borrowed_workspaces_until_batch_delivery() {
+    let (_temp, repo, service, _config) = setup(false);
     let mut runtime = service.runtime.lock().unwrap();
     // Make the two parallel children terminal, so only Planner (not a pending
     // dependent) can retain their slots after both node writers finish.
@@ -666,7 +673,7 @@ fn node_completion_retains_all_workspaces_borrowed_by_the_running_planner() {
     runtime
         .emit(EventKind::PlannerTurnAborted { planning: settled })
         .unwrap();
-    // Settled Planner turns must not pin obsolete directories indefinitely.
+    // Settling Planner does not release unpublished batch inputs.
     let mut graph = runtime.state.graph.clone();
     graph.nodes.push(Node {
         id: "later".into(),
@@ -678,8 +685,22 @@ fn node_completion_retains_all_workspaces_borrowed_by_the_running_planner() {
     let later = runtime.jobs().unwrap().remove(0);
     complete(&mut runtime, later);
     assert!(
-        borrowed.iter().any(|path| !path.exists()),
-        "node completion should reclaim retired slots once Planner has settled"
+        borrowed.iter().all(|path| path.is_dir()),
+        "unpublished inputs remain private until delivery"
+    );
+    runtime.jobs().unwrap();
+    let publication = runtime.state.publication.as_ref().unwrap();
+    let head = crate::graph_merge::merge_graph_scoped(&repo, &publication.heads, &[], |_| {
+        Err("unexpected conflict".into())
+    })
+    .unwrap();
+    runtime
+        .emit(EventKind::PublicationCompleted { head })
+        .unwrap();
+    runtime.cleanup_worktrees().unwrap();
+    assert!(
+        borrowed.iter().all(|path| !path.exists()),
+        "delivered workspaces can be reclaimed after Planner settles"
     );
 }
 
@@ -735,11 +756,13 @@ fn planner_workspace_writes_survive_success_failure_and_reach_children() {
 fn planner_workspace_uses_a_running_writer_and_retires_an_unusable_latest_slot() {
     let (_temp, _repo, service, _config) = setup(false);
     let mut runtime = service.runtime.lock().unwrap();
-    let job = runtime.jobs().unwrap().remove(0);
+    let mut job = runtime.jobs().unwrap().remove(0);
     assert!(
         runtime.planner_workspace().unwrap().is_none(),
         "an unprepared latest slot is retired instead of failing the turn"
     );
+    let exclusions = runtime.exclusions().unwrap();
+    runtime.attach_job_source(&mut job, &exclusions).unwrap();
     let head = crate::workspace::prepare(
         Path::new(&job.config.repository),
         Path::new(&job.execution.worktree),
@@ -871,13 +894,25 @@ fn planner_omits_unready_optional_slots_and_rechecks_after_restart() {
 fn planner_rejects_a_reused_ready_marker_before_the_new_attempt_is_prepared() {
     let (_temp, _repo, service, _config) = setup(false);
     let mut runtime = service.runtime.lock().unwrap();
+    // A single-consumer edge hands off its slot; parallel siblings allocate
+    // separate directories while the batch still owns their parent input.
+    let mut graph = runtime.state.graph.clone();
+    graph
+        .nodes
+        .retain(|node| node.id == "root" || node.id == "left");
+    graph
+        .edges
+        .retain(|edge| edge.from == "root" && edge.to == "left");
+    runtime
+        .revise_graph(graph, PlanningSummary::default())
+        .unwrap();
     let root_job = runtime.jobs().unwrap().remove(0);
     let root = complete(&mut runtime, root_job);
     let jobs = runtime.jobs().unwrap();
     let reused = jobs
         .iter()
         .find(|job| job.execution.worktree == root.worktree)
-        .expect("one parallel child reuses the prepared root slot");
+        .expect("the single consumer reuses its prepared parent slot");
     let marker = crate::workspace_state::root(Path::new(&reused.execution.worktree))
         .unwrap()
         .join("project-ready");
@@ -976,6 +1011,12 @@ fn planner_retires_an_unready_latest_slot_and_plans_in_the_source_project() {
         .join("project-ready");
     let saved = fs::read(&marker).unwrap();
     fs::remove_file(&marker).unwrap();
+    let baseline = service
+        .runtime
+        .lock()
+        .unwrap()
+        .latest_source_head()
+        .to_string();
     let next = turn(&service, &config)
         .expect("an unready latest workspace must not fail the user's Planner turn");
     let planning = next.planning.as_ref().unwrap();
@@ -1015,16 +1056,20 @@ fn planner_retires_an_unready_latest_slot_and_plans_in_the_source_project() {
             captures,
             "the unvisited partial slot is never snapshotted"
         );
-        assert!(
-            next.events.iter().any(|event| matches!(
-                &event.kind,
-                EventKind::GraphRevised {
-                    source_head: Some(_),
-                    ..
-                }
-            )),
-            "the source turn records its own input head instead of a node result"
+        assert_eq!(
+            runtime.latest_source_head(),
+            baseline,
+            "a source Planner turn must not replace a held private batch's baseline"
         );
+        assert!(next
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::GraphRevised { source_head, .. } => Some(source_head.is_none()),
+                _ => None,
+            })
+            .unwrap());
         assert!(runtime.planner_workspace().unwrap().is_none());
     }
     fs::write(marker, saved).unwrap();
@@ -1311,6 +1356,9 @@ fn check_interrupted_detached_recovery(sealed_before_event: bool) {
     fs::create_dir_all(&attempt).unwrap();
     let summary = PlanningSummary {
         planning_id: planning_id.clone(),
+        run_id: Some(run.clone()),
+        repository: Some(repo.to_string_lossy().into()),
+        goal: Some("additional information".into()),
         status: Some("running".into()),
         worktree: Some(root.worktree.clone()),
         workspace_execution_id: Some(root.id.clone()),
@@ -1320,6 +1368,7 @@ fn check_interrupted_detached_recovery(sealed_before_event: bool) {
     fs::write(
         attempt.join("request.json"),
         serde_json::to_vec(&serde_json::json!({
+            "formatVersion": 1, "goal":"additional information", "config":runtime.state.config,
             "revisionRunId": run, "runId": run,
         }))
         .unwrap(),
@@ -1572,6 +1621,9 @@ fn interrupted_planner_recovers_all_visited_slots_including_external_state() {
     for execution in &executions {
         let summary = PlanningSummary {
             planning_id: id.clone(),
+            run_id: Some(run.clone()),
+            repository: Some(runtime.state.config.as_ref().unwrap().repository.clone()),
+            goal: Some("additional information".into()),
             status: Some("running".into()),
             worktree: Some(execution.worktree.clone()),
             workspace_execution_id: Some(execution.id.clone()),
@@ -1595,6 +1647,7 @@ fn interrupted_planner_recovers_all_visited_slots_including_external_state() {
     fs::write(
         attempt.join("request.json"),
         serde_json::to_vec(&serde_json::json!({
+            "formatVersion": 1, "goal":"additional information", "config":runtime.state.config,
             "revisionRunId": run, "runId": run,
         }))
         .unwrap(),
@@ -1652,6 +1705,9 @@ fn interrupted_planner_workspace_is_snapshotted_once_before_recovery() {
     let run = runtime.state.run_id.clone();
     let summary = PlanningSummary {
         planning_id: id,
+        run_id: Some(run.clone()),
+        repository: Some(runtime.state.config.as_ref().unwrap().repository.clone()),
+        goal: Some("additional information".into()),
         status: Some("running".into()),
         worktree: Some(root.worktree.clone()),
         workspace_execution_id: Some(root.id),
@@ -1661,6 +1717,7 @@ fn interrupted_planner_workspace_is_snapshotted_once_before_recovery() {
     fs::write(
         attempt.join("request.json"),
         serde_json::to_vec(&serde_json::json!({
+            "formatVersion": 1, "goal":"additional information", "config":runtime.state.config,
             "revisionRunId": run, "runId": run,
         }))
         .unwrap(),
@@ -1737,6 +1794,9 @@ fn interrupted_planner_snapshot_readiness_recovers_after_restart_once() {
         fs::create_dir_all(&attempt).unwrap();
         let summary = PlanningSummary {
             planning_id: id.clone(),
+            run_id: Some(runtime.state.run_id.clone()),
+            repository: Some(repo.to_string_lossy().into()),
+            goal: Some("additional information".into()),
             status: Some("running".into()),
             plan_type: Some("graph".into()),
             worktree: Some(execution.worktree.clone()),
@@ -1747,6 +1807,7 @@ fn interrupted_planner_snapshot_readiness_recovers_after_restart_once() {
         fs::write(
             attempt.join("request.json"),
             serde_json::to_vec(&serde_json::json!({
+                "formatVersion": 1, "goal":"additional information", "config":runtime.state.config,
                 "revisionRunId": runtime.state.run_id, "runId": runtime.state.run_id,
             }))
             .unwrap(),
@@ -1824,7 +1885,9 @@ fn interrupted_planner_snapshot_readiness_recovers_after_restart_once() {
 fn planner_continuation_snapshot_readiness_requires_an_idle_prepared_owner() {
     let (_temp, repo, service, _) = setup(false);
     let mut runtime = service.runtime.lock().unwrap();
-    let job = runtime.jobs().unwrap().remove(0);
+    let mut job = runtime.jobs().unwrap().remove(0);
+    let exclusions = runtime.exclusions().unwrap();
+    runtime.attach_job_source(&mut job, &exclusions).unwrap();
     let execution = &job.execution;
     let path = Path::new(&execution.worktree);
     let prepared = crate::workspace::prepare(&repo, path, &execution.before, &[]).unwrap();
@@ -1968,7 +2031,11 @@ console.log(JSON.stringify({ type: 'message_end', message: {
     .unwrap();
     runtime.set_route("graph").unwrap();
     runtime.approve().unwrap();
-    let running = runtime.jobs().unwrap().remove(0);
+    let mut running = runtime.jobs().unwrap().remove(0);
+    let exclusions = runtime.exclusions().unwrap();
+    runtime
+        .attach_job_source(&mut running, &exclusions)
+        .unwrap();
     crate::workspace::prepare(
         &repo,
         Path::new(&running.execution.worktree),

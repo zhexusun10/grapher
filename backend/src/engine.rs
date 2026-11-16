@@ -315,26 +315,6 @@ struct NodeRpc {
 }
 static NODE_RPC: OnceLock<Mutex<HashMap<String, NodeRpc>>> = OnceLock::new();
 
-/// A legacy unscoped RPC request is only safe if exactly one Planner exists.
-fn sole_planner() -> Result<(String, NodeRpc), String> {
-    let rpc = NODE_RPC
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let mut planners = rpc.iter().filter(|(id, _)| id.starts_with("planner:"));
-    let (id, planner) = planners
-        .next()
-        .ok_or("Planner is no longer accepting messages")?;
-    if planners.next().is_some() {
-        return Err("Multiple Planners are running; provide a Run ID".into());
-    }
-    Ok((id.clone(), planner.clone()))
-}
-
-pub fn planner_revision_run_id() -> Result<Option<String>, String> {
-    Ok(sole_planner()?.1.revision_run_id)
-}
-
 pub fn planner_revision_run_id_for_run(run_id: &str) -> Result<Option<String>, String> {
     let rpc = NODE_RPC
         .get_or_init(Default::default)
@@ -346,20 +326,6 @@ pub fn planner_revision_run_id_for_run(run_id: &str) -> Result<Option<String>, S
         })
         .map(|(_, planner)| planner.revision_run_id.clone())
         .ok_or("Planner is no longer accepting messages".into())
-}
-
-pub fn steer_planner(
-    instruction: &str,
-    images: Option<Vec<crate::model::ImageAttachment>>,
-) -> Result<(), String> {
-    steer(&sole_planner()?.0, instruction, images)
-}
-
-pub fn steer_planner_nowait(
-    instruction: &str,
-    images: Option<Vec<crate::model::ImageAttachment>>,
-) -> Result<(), String> {
-    steer_nowait(&sole_planner()?.0, instruction, images)
 }
 
 pub fn steer_planner_for_run(
@@ -960,11 +926,38 @@ pub fn run_pi(request: PiRequest<'_>, on_output: impl FnMut(String)) -> Result<S
 }
 
 fn run_pi_with_timeout(
-    request: PiRequest<'_>,
+    mut request: PiRequest<'_>,
     mut on_output: impl FnMut(String),
     timeout: Option<Duration>,
 ) -> Result<String, String> {
     let launch_started = Instant::now();
+    if matches!(request.role, PiRole::NodeAgent | PiRole::Merger)
+        && !request
+            .environment
+            .iter()
+            .any(|(key, _)| *key == "GRAPHER_ACTIVE_RUN_ID")
+    {
+        let database = request
+            .session_dir
+            .parent()
+            .and_then(Path::parent)
+            .map(|root| root.join("events.sqlite"));
+        if let Some(database) = database.filter(|path| path.is_file()) {
+            let id = request
+                .environment
+                .iter()
+                .find(|(key, _)| *key == "GRAPHER_NODE_EXECUTION_ID")
+                .map(|(_, id)| id.as_str())
+                .or(request.session_id)
+                .ok_or("Missing execution identity for Pi session")?;
+            let run = crate::store::Store::open_reader(&database)?
+                .run_for_execution(id)?
+                .ok_or("Missing Run ownership for Pi session")?;
+            request.environment.push(("GRAPHER_ACTIVE_RUN_ID", run));
+        } else if !cfg!(feature = "fixture") {
+            return Err("Missing Run database for Pi session".into());
+        }
+    }
     let config = request.config;
     #[cfg(not(feature = "fixture"))]
     crate::workspace::validate_binding(Path::new(&config.repository))?;
@@ -974,6 +967,13 @@ fn run_pi_with_timeout(
         .map(|id| matching_session_files(request.session_dir, id))
         .unwrap_or_default();
     let resuming_existing_session = !existing_sessions.is_empty();
+    #[cfg(not(feature = "fixture"))]
+    if resuming_existing_session {
+        crate::session_branch::validate_session_format(
+            request.session_dir,
+            request.session_id.ok_or("Missing Pi session identity")?,
+        )?;
+    }
     // Source-native conversations stay resident: reuse a parked shell for this
     // session before any cold launch. Graph node agents are never parked, so
     // this is a miss for them.
@@ -2353,10 +2353,6 @@ fn run_resumed(
     )
 }
 
-// Legacy sessions stored this suffix in user messages. Keep it for history
-// editing and replay; new feedback-source turns carry the rule in Pi instead.
-pub(crate) const FEEDBACK_INSTRUCTIONS: &str = "\n\nEnd your response with exactly one standalone final line:\n<ACCEPT>\nor\n<FEEDBACK>\nIf sending <FEEDBACK>, clearly describe the additional instruction for the target before the marker.";
-
 /// A malformed verdict is a protocol error, not a node failure: the runtime
 /// synchronously pushes this repair turn into the node's own session before
 /// giving up. Two repairs keep the protocol nudge bounded like the runtime's
@@ -3438,6 +3434,7 @@ sys.stdin.read()
                         environment: vec![
                             ("GRAPHER_TEST_NODE_RPC", "1".into()),
                             ("GRAPHER_PLANNER_RUN_ID", "run-test".into()),
+                            ("GRAPHER_ACTIVE_RUN_ID", "run-test".into()),
                         ],
                         system_prompt: None,
                         images: None,
@@ -3452,12 +3449,14 @@ sys.stdin.read()
         });
         ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(
-            planner_revision_run_id().unwrap().as_deref(),
+            planner_revision_run_id_for_run("run-test")
+                .unwrap()
+                .as_deref(),
             Some("run-test")
         );
-        steer_planner("additional requirement", None).unwrap();
+        steer_planner_for_run("run-test", "additional requirement", None).unwrap();
         assert_eq!(worker.join().unwrap().unwrap(), "revised");
-        assert!(planner_revision_run_id().is_err());
+        assert!(planner_revision_run_id_for_run("run-test").is_err());
     }
 
     #[cfg(feature = "fixture")]
@@ -3541,7 +3540,7 @@ sys.stdin.read()
             }
             ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            assert!(planner_revision_run_id().is_err());
+            assert!(planner_revision_run_id_for_run("missing-run").is_err());
             for run_id in ["run-a", "run-b"] {
                 assert_eq!(
                     planner_revision_run_id_for_run(run_id).unwrap().as_deref(),

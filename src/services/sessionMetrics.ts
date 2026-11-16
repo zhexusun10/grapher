@@ -139,8 +139,8 @@ const plannerDurationSeconds = (turn: PlanningSummary): number => {
 /** Turns of the displayed Planner turn's Pi session, in conversation order.
  *
  * `latestId: null` means a live turn that has not been recorded yet; the
- * newest recorded turn then supplies the session identity. Summaries written
- * before session IDs existed stay in the same legacy conversation. */
+ * newest recorded turn then supplies the session identity. Only turns with
+ * that identity contribute to its totals. */
 function plannerSessionAttempts(
   turns: readonly PlanningSummary[],
   latestId?: string | null,
@@ -149,11 +149,18 @@ function plannerSessionAttempts(
     : latestId
       ? turns.find(turn => turn.planningId === latestId)
       : turns[turns.length - 1];
-  const sessionId = plannerSessionId(anchor ?? turns[turns.length - 1])
+  const ownedSession = plannerSessionId(anchor);
+  const pending = anchor === turns[turns.length - 1] &&
+    (!anchor?.status || anchor.status === "pending" || anchor.status === "running") &&
+    anchor != null && !plannerSessionStart(anchor);
+  // A current pending turn may resume its predecessor before Pi reports an ID.
+  // An unidentified historical or failed turn cannot claim that session.
+  if (anchor && !ownedSession && !pending) return { attempts: [anchor], anchor };
+  const sessionId = ownedSession
     ?? [...turns].reverse().map(plannerSessionId).find(Boolean);
   const attempts = sessionId
-    ? turns.filter(turn => !plannerSessionId(turn) || plannerSessionId(turn) === sessionId)
-    : [...turns];
+    ? turns.filter(turn => plannerSessionId(turn) === sessionId)
+    : [];
   if (anchor && !attempts.some(turn => turn.planningId === anchor.planningId)) attempts.push(anchor);
   return { attempts, anchor, sessionId };
 }
@@ -169,9 +176,8 @@ export function plannerResolvedSessionId(
 
 /** Aggregate the Planner turns that share the displayed turn's Pi session.
  *
- * Summaries written before session IDs existed are treated as part of the same
- * (legacy) conversation; turns that name a different session stay excluded, so
- * an edited conversation does not inherit the abandoned branch's start time. */
+ * A turn without a session may still describe a failure before Pi launched;
+ * only that displayed turn contributes its own timing. */
 export function plannerSessionTiming(
   turns: readonly PlanningSummary[],
   options: { latestId?: string | null; fallbackStartedAt?: number } = {},
@@ -180,8 +186,8 @@ export function plannerSessionTiming(
   if (!turns.length) return fallbackStartedAt ? { startedAt: fallbackStartedAt, priorDurationSeconds: 0 } : EMPTY_TIMING;
   const { attempts, anchor } = plannerSessionAttempts(turns, options.latestId);
   const latestId = anchor?.planningId;
-  // Prefer the process start; a legacy/failed summary without one still
-  // contributes the attempt's durable creation time.
+  // Prefer the process start; a failure before Pi starts still contributes
+  // the displayed attempt's durable creation time.
   const starts = attempts
     .map(turn => plannerSessionStart(turn) ?? positiveMs(turn.createdAt))
     .filter((ms): ms is number => ms != null);
@@ -258,25 +264,6 @@ export function plannerSessionUsageThrough(
   const usages = through.map(turn => turn.roles?.planner?.usage);
   if (usages.some(usage => !usage)) return { latest, complete: false };
   return { latest, complete: true, usage: sumUsage(usages as TokenUsage[]) };
-}
-
-/** Usage of Planner turns recorded before Pi session IDs were tracked.
- *
- * Backend session buckets cannot include those turns, but the displayed
- * conversation still contains them; callers add this sum to the newest
- * attempt's backend total. A legacy turn without usage makes the sum
- * unknowable, so it is omitted rather than under-reporting. `undefined` also
- * means there is nothing to add. */
-export function plannerLegacyUsage(
-  turns: readonly PlanningSummary[],
-  latestId?: string | null,
-): TokenUsage | undefined {
-  const { attempts } = plannerSessionAttempts(turns, latestId);
-  const legacy = attempts.filter(turn => !plannerSessionId(turn));
-  if (!legacy.length) return undefined;
-  const usages = legacy.map(turn => turn.roles?.planner?.usage);
-  if (usages.some(usage => !usage)) return undefined;
-  return sumUsage(usages as TokenUsage[]);
 }
 
 /** Add another reporting window to an existing session total. */

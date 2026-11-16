@@ -111,10 +111,6 @@ def run_goal(client, instruction, config, timeout, poll_interval=1.0):
     run_id = snap.get("runId")
     if not run_id:
         raise RuntimeError("Planning returned no runId")
-    if snap.get("phase") == "awaiting_approval" and not snap.get("approved"):
-        # Defensive compatibility with older Grapher builds. Still only approve
-        # a graph after the server has compiled it and made it approvable.
-        snap = client.call("control", {"action": "approve"})
     while True:
         if snap.get("runId") != run_id:
             raise RuntimeError("Grapher switched runs during the trial")

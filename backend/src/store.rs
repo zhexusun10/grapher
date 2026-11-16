@@ -14,7 +14,9 @@ mod logs;
 #[cfg(test)]
 pub(crate) use conversations::forget_catalog;
 pub use conversations::{conversation_summaries, ConversationCatalog, ConversationSummary};
-pub use logs::{LogPage, MigrationReport};
+pub use logs::LogPage;
+/// Breaking persisted-format boundary. Unversioned databases belong to older releases.
+pub(crate) const FORMAT_VERSION: i64 = 1;
 const CHECKPOINT_INTERVAL: usize = 128;
 
 static STORE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -52,11 +54,8 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::PrivateBatchSelected { .. } => "private_batch_selected",
         EventKind::ExecutionBatchStarted { .. } => "execution_batch_started",
         EventKind::BatchHandoffRequested { .. } => "batch_handoff_requested",
-        EventKind::BatchRecoveryCaptured { .. } => "batch_recovery_captured",
-        EventKind::PausedBatchRestored { .. } => "paused_batch_restored",
         EventKind::SharedWorkspaceReviewRequested { .. } => "shared_workspace_review_requested",
         EventKind::SourceSnapshotted { .. } => "source_snapshotted",
-        EventKind::SourceFilesRecorded { .. } => "source_files_recorded",
         EventKind::EnvironmentPolicyRequested => "environment_policy_requested",
         EventKind::EnvironmentPolicyResolved { .. } => "environment_policy_resolved",
         EventKind::EnvironmentInitialized { .. } => "environment_initialized",
@@ -67,15 +66,12 @@ fn event_kind_name(kind: &EventKind) -> &'static str {
         EventKind::ResultExecutionPrepared { .. } => "result_execution_prepared",
         EventKind::ResultExecutionFinished { .. } => "result_execution_finished",
         EventKind::ResultExecutionFailed { .. } => "result_execution_failed",
-        EventKind::WorkspaceFilesChanged { .. } => "workspace_files_changed",
         EventKind::GraphRevised { .. } => "graph_revised",
         EventKind::ManualGraphRevised { .. } => "manual_graph_revised",
         EventKind::NodeTaskUpdated { .. } => "node_task_updated",
         EventKind::DraftEdited { .. } => "draft_edited",
         EventKind::ConversationRenamed { .. } => "conversation_renamed",
         EventKind::Paused { .. } => "paused",
-        EventKind::FailedNodeModelsUpdated { .. } => "failed_node_models_updated",
-        EventKind::NodeModelsUpdated { .. } => "node_models_updated",
         EventKind::NodeModelOverrideUpdated { .. } => "node_model_override_updated",
         EventKind::ConversationModelsUpdated { .. } => "conversation_models_updated",
         EventKind::RecoveryQueued { .. } => "recovery_queued",
@@ -128,7 +124,6 @@ fn event_execution_id(kind: &EventKind) -> Option<&str> {
         | EventKind::Finished { execution_id, .. }
         | EventKind::FeedbackExhausted { execution_id, .. }
         | EventKind::FeedbackResolved { execution_id, .. }
-        | EventKind::WorkspaceFilesChanged { execution_id, .. }
         | EventKind::WorkspaceResolved { execution_id, .. }
         | EventKind::MergerFinished { execution_id, .. }
         | EventKind::MergerFailed { execution_id, .. } => Some(execution_id),
@@ -160,6 +155,64 @@ fn created_planning_ids(kind: &EventKind) -> (Option<&str>, Option<&str>) {
     }
 }
 
+fn database_version(connection: &Connection) -> Result<i64, String> {
+    connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| e.to_string())
+}
+
+fn incompatible_version(connection: &Connection) -> Result<Option<i64>, String> {
+    let version = database_version(connection)?;
+    if version == FORMAT_VERSION {
+        return Ok(None);
+    }
+    let objects: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    Ok((version != 0 || objects != 0).then_some(version))
+}
+
+/// Startup may select a separate directory for a known incompatible format.
+/// Permission/I/O/corruption errors stay errors; probing never initializes it.
+pub(crate) fn incompatible_database_version(path: &Path) -> Result<Option<i64>, String> {
+    if !path.try_exists().map_err(|error| error.to_string())? {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| error.to_string())?;
+    incompatible_version(&connection)
+}
+
+fn unsupported_database(version: i64) -> String {
+    format!(
+        "Unsupported Grapher database format {version}; use a new data directory for this release"
+    )
+}
+
+pub(super) fn validate_database(connection: &Connection) -> Result<(), String> {
+    let version = database_version(connection)?;
+    if version != FORMAT_VERSION {
+        return Err(unsupported_database(version));
+    }
+    connection.prepare("SELECT sequence,run_id,timestamp,payload,planning_id,nested_planning_id,kind,execution_id FROM events LIMIT 0")
+        .map_err(|e| format!("Invalid current Grapher database schema: {e}"))?;
+    let selected: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_selection WHERE id=1)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !selected {
+        return Err("Missing explicit workspace selection state".into());
+    }
+    Ok(())
+}
+
 pub struct Store {
     connection: Connection,
     // Output batches count toward projection checkpoint cadence without ever
@@ -172,16 +225,23 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
         let _write_guard = store_write_guard()?;
         let connection = Connection::open(path).map_err(|error| error.to_string())?;
+        if let Some(version) = incompatible_version(&connection)? {
+            return Err(unsupported_database(version));
+        }
+        if database_version(&connection)? == FORMAT_VERSION {
+            validate_database(&connection)?;
+        }
         connection
             .busy_timeout(std::time::Duration::from_secs(10))
             .map_err(|error| error.to_string())?;
         connection.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+            BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS execution_logs (
                 run_id TEXT NOT NULL, execution_id TEXT NOT NULL, offset INTEGER NOT NULL,
                 bytes INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(execution_id, offset)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_exec_logs_run ON execution_logs(run_id);
-            CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, timestamp INTEGER NOT NULL, payload TEXT NOT NULL, planning_id TEXT, nested_planning_id TEXT, kind TEXT, execution_id TEXT);
+            CREATE TABLE IF NOT EXISTS events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, timestamp INTEGER NOT NULL, payload TEXT NOT NULL, planning_id TEXT, nested_planning_id TEXT, kind TEXT NOT NULL, execution_id TEXT);
             CREATE INDEX IF NOT EXISTS events_run ON events(run_id, sequence);
             CREATE TABLE IF NOT EXISTS checkpoints (run_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS workspace_selection (id INTEGER PRIMARY KEY CHECK(id=1), run_id TEXT);
@@ -192,79 +252,14 @@ impl Store {
             CREATE TABLE IF NOT EXISTS workspace_cleanup_done (run_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS detached_workspaces (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS cleanup_sources (path TEXT PRIMARY KEY);
-            CREATE TABLE IF NOT EXISTS cleanup_state (key TEXT PRIMARY KEY);")
-            .map_err(|error| error.to_string())?;
-        let columns = {
-            let mut stmt = connection
-                .prepare("PRAGMA table_info(events)")
-                .map_err(|e| e.to_string())?;
-            let columns = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .map_err(|e| e.to_string())?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-            columns
-        };
-        // Schema change and backfill must commit together: a crash may not
-        // leave a new column with an incomplete (and never retried) index.
-        connection
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| e.to_string())?;
-        let missing_planning_id = !columns.iter().any(|column| column == "planning_id");
-        let missing_nested_id = !columns.iter().any(|column| column == "nested_planning_id");
-        let missing_kind = !columns.iter().any(|column| column == "kind");
-        let missing_execution_id = !columns.iter().any(|column| column == "execution_id");
-        if missing_planning_id {
-            connection
-                .execute_batch("ALTER TABLE events ADD COLUMN planning_id TEXT;")
-                .map_err(|e| e.to_string())?;
-        }
-        if missing_nested_id {
-            connection
-                .execute_batch("ALTER TABLE events ADD COLUMN nested_planning_id TEXT;")
-                .map_err(|e| e.to_string())?;
-        }
-        // `kind`/`execution_id` index rows as they are written. Existing rows
-        // stay NULL until `Store::backfill_event_index` runs during `--compact`;
-        // that keeps startup an O(1) schema change instead of an 800 MB rewrite.
-        if missing_kind {
-            connection
-                .execute_batch("ALTER TABLE events ADD COLUMN kind TEXT;")
-                .map_err(|e| e.to_string())?;
-        }
-        if missing_execution_id {
-            connection
-                .execute_batch("ALTER TABLE events ADD COLUMN execution_id TEXT;")
-                .map_err(|e| e.to_string())?;
-        }
-        if missing_planning_id || missing_nested_id {
-            let mut stmt = connection
-                .prepare("SELECT sequence, payload FROM events WHERE payload LIKE '{\"type\":\"created\"%' AND (planning_id IS NULL OR nested_planning_id IS NULL)")
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(|e| e.to_string())?;
-            for row in rows {
-                let (sequence, payload) = row.map_err(|e| e.to_string())?;
-                if let Ok(kind) = serde_json::from_str::<EventKind>(&payload) {
-                    let (direct, nested) = created_planning_ids(&kind);
-                    if direct.is_some() || nested.is_some() {
-                        connection.execute("UPDATE events SET planning_id=?1, nested_planning_id=?2 WHERE sequence=?3",
-                            params![direct, nested, sequence]).map_err(|e| e.to_string())?;
-                    }
-                }
-            }
-        }
-        connection.execute_batch("CREATE INDEX IF NOT EXISTS events_planning_id ON events(planning_id) WHERE planning_id IS NOT NULL;
+            CREATE TABLE IF NOT EXISTS cleanup_state (key TEXT PRIMARY KEY);
+            INSERT OR IGNORE INTO workspace_selection(id,run_id) VALUES(1,NULL);
+            CREATE INDEX IF NOT EXISTS events_planning_id ON events(planning_id) WHERE planning_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS events_nested_planning_id ON events(nested_planning_id) WHERE nested_planning_id IS NOT NULL;
-            CREATE INDEX IF NOT EXISTS events_execution ON events(execution_id, kind);
-            CREATE INDEX IF NOT EXISTS events_unindexed ON events(run_id,sequence) WHERE kind IS NULL;")
-            .map_err(|e| e.to_string())?;
-        connection
-            .execute_batch("COMMIT")
-            .map_err(|e| e.to_string())?;
+            CREATE INDEX IF NOT EXISTS events_execution ON events(execution_id,kind);
+            PRAGMA user_version=1;
+            COMMIT;")
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             connection,
             appended_since_checkpoint: Cell::new(0),
@@ -278,14 +273,10 @@ impl Store {
         Self::open_existing(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
     }
 
-    /// Legacy log backfill only: never initialize/migrate a schema on a read.
-    pub(crate) fn open_log_writer(path: &Path) -> Result<Self, String> {
-        Self::open_existing(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
-    }
-
     fn open_existing(path: &Path, flags: rusqlite::OpenFlags) -> Result<Self, String> {
         let connection =
             Connection::open_with_flags(path, flags).map_err(|error| error.to_string())?;
+        validate_database(&connection)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(10))
             .map_err(|error| error.to_string())?;
@@ -300,8 +291,7 @@ impl Store {
         self.append_events(state, vec![kind])
     }
 
-    /// Logs, business events and their derived projections commit together,
-    /// including mixed batches and legacy events carrying inline transcripts.
+    /// Logs, business events and their derived projections commit together.
     pub fn append_batch(
         &mut self,
         state: &mut Snapshot,
@@ -321,34 +311,6 @@ impl Store {
         }
     }
 
-    /// Backfill `kind`/`execution_id` for rows written before the columns
-    /// existed. Only the explicit `--compact` command pays this full scan.
-    pub fn backfill_event_index(&self) -> Result<usize, String> {
-        let missing: bool = self
-            .connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM events WHERE kind IS NULL)",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        if !missing {
-            return Ok(0);
-        }
-        self.connection
-            .execute(
-                "UPDATE events SET
-                    kind = CASE WHEN json_valid(payload)
-                        THEN COALESCE(json_extract(payload,'$.type'), 'unknown') ELSE 'unknown' END,
-                    execution_id = CASE WHEN json_valid(payload)
-                        THEN COALESCE(json_extract(payload,'$.execution_id'), json_extract(payload,'$.execution.id'))
-                        ELSE NULL END
-                 WHERE kind IS NULL",
-                [],
-            )
-            .map_err(|error| error.to_string())
-    }
-
     /// Rewrite the database without the freed pages. Requires exclusive access.
     pub fn vacuum(&self) -> Result<(), String> {
         let _write_guard = store_write_guard()?;
@@ -365,7 +327,14 @@ impl Store {
         if let Some(last) = state.events.last() {
             // Borrow the projection so checkpoint creation never clones the log.
             // Transcripts remain in execution_logs and are never replayed.
-            let projection = crate::snapshot_view::checkpoint_projection(state);
+            let mut projection = crate::snapshot_view::checkpoint_projection(state);
+            let checksum = serde_json::to_vec(&projection)
+                .ok()
+                .and_then(|bytes| git2::Oid::hash_object(git2::ObjectType::Blob, &bytes).ok());
+            let Some(checksum) = checksum else {
+                return;
+            };
+            projection["checksum"] = serde_json::json!(checksum.to_string());
             if let Ok(payload) = serde_json::to_string(&projection) {
                 let _ = self.connection.execute(
                     "INSERT INTO checkpoints(run_id, sequence, payload) VALUES (?1, ?2, ?3)
@@ -376,21 +345,15 @@ impl Store {
         }
     }
 
-    /// Missing row: legacy database (select latest). NULL: explicitly empty workspace.
+    /// Selection is explicit, including an empty workspace.
     pub fn selected_run(&self) -> Result<Option<String>, String> {
-        let selection: Option<Option<String>> = self
-            .connection
+        self.connection
             .query_row(
                 "SELECT run_id FROM workspace_selection WHERE id=1",
                 [],
                 |row| row.get(0),
             )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        match selection {
-            Some(run) => Ok(run),
-            None => Ok(self.runs()?.into_iter().next()),
-        }
+            .map_err(|error| error.to_string())
     }
 
     pub fn select_run(&self, run_id: Option<&str>) -> Result<(), String> {
@@ -423,6 +386,13 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
         Ok(runs)
+    }
+
+    pub(crate) fn run_for_execution(&self, execution_id: &str) -> Result<Option<String>, String> {
+        self.connection.query_row(
+            "SELECT run_id FROM events WHERE execution_id=?1 AND kind IN ('started','merger_started') ORDER BY sequence LIMIT 1",
+            [execution_id], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())
     }
 
     pub fn run_for_planning_id(&self, planning_id: &str) -> Result<Option<String>, String> {
@@ -482,63 +452,6 @@ impl Store {
         Ok(false)
     }
 
-    /// Terminal heads that a durable `PublicationCompleted` delivered, derived
-    /// from the event log rather than a checkpoint. A checkpoint written before
-    /// delivered heads were accumulated would otherwise let a later publication
-    /// retry a result whose internal Git objects are already reclaimed.
-    pub fn delivered_heads(&self, run_id: &str) -> Result<Vec<String>, String> {
-        // Normal startup does not backfill legacy `kind` columns. Include both
-        // halves of an unindexed publication without deserializing old logs.
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT payload FROM events
-                 WHERE run_id=?1 AND (
-                     kind IN ('publication_started','publication_completed')
-                     OR (kind IS NULL AND (
-                         substr(payload,1,64) LIKE '{\"type\":\"publication_started\"%'
-                         OR substr(payload,1,64) LIKE '{\"type\":\"publication_completed\"%'
-                     ))
-                 )
-                 ORDER BY sequence",
-            )
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([run_id], |row| row.get::<_, String>(0))
-            .map_err(|error| error.to_string())?;
-        let mut pending: Vec<String> = Vec::new();
-        let mut delivered: Vec<String> = Vec::new();
-        for payload in rows {
-            let Ok(value) =
-                serde_json::from_str::<serde_json::Value>(&payload.map_err(|e| e.to_string())?)
-            else {
-                continue;
-            };
-            match value["type"].as_str() {
-                Some("publication_started") => {
-                    pending = value["heads"]
-                        .as_array()
-                        .map(|heads| {
-                            heads
-                                .iter()
-                                .filter_map(|head| head.as_str().map(str::to_owned))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                }
-                Some("publication_completed") => {
-                    for head in pending.drain(..) {
-                        if !delivered.contains(&head) {
-                            delivered.push(head);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(delivered)
-    }
-
     pub fn load(&self, run_id: &str) -> Result<Snapshot, String> {
         if !self.contains_run(run_id)? {
             return Err(format!("Run does not exist: {run_id}"));
@@ -555,13 +468,18 @@ impl Store {
             )
             .ok()
             .and_then(|(sequence, payload)| {
-                // Older checkpoints predate the durable node-message queue.
-                // Replay their business events to reconstruct pending turns;
-                // no user database migration or log rewrite is needed.
-                serde_json::from_str::<serde_json::Value>(&payload)
+                let mut value: serde_json::Value = serde_json::from_str(&payload).ok()?;
+                if value["formatVersion"] != 1 {
+                    return None;
+                }
+                let checksum = value.as_object_mut()?.remove("checksum")?;
+                let bytes = serde_json::to_vec(&value).ok()?;
+                let expected = git2::Oid::hash_object(git2::ObjectType::Blob, &bytes).ok()?;
+                if checksum.as_str() != Some(expected.to_string().as_str()) {
+                    return None;
+                }
+                serde_json::from_str::<Snapshot>(&payload)
                     .ok()
-                    .filter(|value| value["nodeMessageQueueVersion"] == 1)
-                    .and_then(|value| serde_json::from_value::<Snapshot>(value).ok())
                     .filter(|state| {
                         state.run_id == run_id
                             && (state.events.is_empty()
@@ -585,34 +503,7 @@ impl Store {
         let mut statement = self
             .connection
             .prepare(
-                // Never materialize a legacy transcript. Large `Finished`
-                // payloads are replaced in SQL with a metadata-only object
-                // built from the first 512 bytes; migrated rows are already
-                // small and keep their structured metrics. `Output` chunks are
-                // filtered by tag prefix, so an unmigrated database is opened
-                // without parsing a single log payload. The 65-character field
-                // windows include the closing quote of a 64-character ID/head.
-                "SELECT sequence, timestamp,
-                    CASE
-                        WHEN (kind = 'finished'
-                              OR (kind IS NULL AND substr(payload,1,18) = '{\"type\":\"finished\"'))
-                             AND length(payload) > 4096
-                             AND instr(substr(payload,1,512), '\"execution_id\":\"') > 0
-                             AND instr(substr(payload,1,512), '\"head\":\"') > 0
-                        THEN json_object('type','finished',
-                            'execution_id', substr(payload,
-                                instr(substr(payload,1,512), '\"execution_id\":\"') + 16,
-                                instr(substr(payload, instr(substr(payload,1,512), '\"execution_id\":\"') + 16, 65), '\"') - 1),
-                            'head', substr(payload,
-                                instr(substr(payload,1,512), '\"head\":\"') + 8,
-                                instr(substr(payload, instr(substr(payload,1,512), '\"head\":\"') + 8, 65), '\"') - 1),
-                            'output', '', 'output_bytes', 0)
-                        ELSE payload
-                    END
-                 FROM events WHERE run_id=?1
-                    AND NOT (COALESCE(kind, '') = 'output'
-                             OR (kind IS NULL AND substr(payload,1,16) = '{\"type\":\"output\"'))
-                 ORDER BY sequence",
+                "SELECT sequence, timestamp, payload FROM events WHERE run_id=?1 ORDER BY sequence",
             )
             .map_err(|error| error.to_string())?;
         let rows = statement
@@ -640,7 +531,6 @@ impl Store {
         }
         state.rebuild_planning_turns();
         state.backfill_consumed_tokens();
-        state.hydrate_legacy_model_config();
         for execution in state.executions.iter_mut().chain(state.mergers.iter_mut()) {
             execution.output_bytes = execution
                 .output_bytes
@@ -784,29 +674,5 @@ impl Store {
         let _ = self
             .connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-    }
-
-    pub fn find_repository_by_planning_id(&self, target_planning_id: &str) -> Option<String> {
-        let mut stmt = self.connection
-            .prepare("SELECT payload FROM events WHERE planning_id=?1 UNION ALL SELECT payload FROM events WHERE nested_planning_id=?1")
-            .ok()?;
-        let mut rows = stmt.query([target_planning_id]).ok()?;
-        while let Ok(Some(row)) = rows.next() {
-            let payload: String = row.get(0).ok()?;
-            if let Ok(EventKind::Created {
-                config,
-                planning_id,
-                planning,
-                ..
-            }) = serde_json::from_str::<EventKind>(&payload)
-            {
-                if planning_id.as_deref() == Some(target_planning_id)
-                    || planning.as_ref().map(|p| p.planning_id.as_str()) == Some(target_planning_id)
-                {
-                    return Some(config.repository);
-                }
-            }
-        }
-        None
     }
 }

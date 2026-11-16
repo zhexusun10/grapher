@@ -651,10 +651,7 @@ fn build_tool_change_items(
 ) -> Vec<FileChangeItem> {
     match tool_name {
         "write" => {
-            let raw_path = args["path"]
-                .as_str()
-                .or_else(|| args["file"].as_str())
-                .unwrap_or_default();
+            let raw_path = args["path"].as_str().unwrap_or_default();
             let Some(path) = normalize_workspace_path(raw_path, worktree, repository) else {
                 return Vec::new();
             };
@@ -686,10 +683,7 @@ fn build_tool_change_items(
             }]
         }
         "edit" => {
-            let raw_path = args["path"]
-                .as_str()
-                .or_else(|| args["file"].as_str())
-                .unwrap_or_default();
+            let raw_path = args["path"].as_str().unwrap_or_default();
             let Some(path) = normalize_workspace_path(raw_path, worktree, repository) else {
                 return Vec::new();
             };
@@ -703,12 +697,6 @@ fn build_tool_change_items(
                     total_add += add;
                     total_del += del;
                 }
-            } else if args.get("oldText").is_some() || args.get("newText").is_some() {
-                let old_t = args["oldText"].as_str().unwrap_or_default();
-                let new_t = args["newText"].as_str().unwrap_or_default();
-                let (add, del) = count_line_changes(old_t, new_t);
-                total_add += add;
-                total_del += del;
             }
             vec![FileChangeItem {
                 path,
@@ -836,7 +824,7 @@ fn apply_jsonl(
                 let tool_name = event["toolName"].as_str().unwrap_or_default();
                 let args = &event["args"];
                 if tool_name == "read" {
-                    if let Some(raw_p) = args["path"].as_str().or_else(|| args["file"].as_str()) {
+                    if let Some(raw_p) = args["path"].as_str() {
                         if let Some(norm) = normalize_workspace_path(raw_p, worktree, repository) {
                             if !id.is_empty() {
                                 acc.pending_reads.insert(id, norm);
@@ -866,8 +854,7 @@ fn apply_jsonl(
                     let tool_name = tc["name"].as_str().unwrap_or_default();
                     let args = &tc["arguments"];
                     if tool_name == "read" {
-                        if let Some(raw_p) = args["path"].as_str().or_else(|| args["file"].as_str())
-                        {
+                        if let Some(raw_p) = args["path"].as_str() {
                             if let Some(norm) =
                                 normalize_workspace_path(raw_p, worktree, repository)
                             {
@@ -943,9 +930,7 @@ fn apply_jsonl(
                                 let tool_name = part["name"].as_str().unwrap_or_default();
                                 let args = &part["arguments"];
                                 if tool_name == "read" {
-                                    if let Some(raw_p) =
-                                        args["path"].as_str().or_else(|| args["file"].as_str())
-                                    {
+                                    if let Some(raw_p) = args["path"].as_str() {
                                         if let Some(norm) =
                                             normalize_workspace_path(raw_p, worktree, repository)
                                         {

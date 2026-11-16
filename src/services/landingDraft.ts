@@ -1,7 +1,6 @@
 import { workspaceKey } from "./workspaceConversations";
 
 export const LANDING_GOAL_STORAGE_KEY = "grapher_landing_goal_drafts";
-export const LEGACY_LANDING_GOAL_STORAGE_KEY = "grapher_landing_goal_draft";
 
 export function landingDraftKey(repository?: string): string {
   return repository ? workspaceKey(repository) : "__unbound__";
@@ -46,8 +45,6 @@ export function loadLandingDraft(repository?: string, storage?: Storage): string
       }
       return "";
     }
-    const legacy = store.getItem(LEGACY_LANDING_GOAL_STORAGE_KEY);
-    if (legacy && legacy.trim()) return legacy;
   } catch { }
   return "";
 }
@@ -67,22 +64,14 @@ export function saveLandingDraft(repository: string | undefined, text: string, s
         delete drafts["__unbound__"];
       }
       store.setItem(LANDING_GOAL_STORAGE_KEY, JSON.stringify(drafts));
-      store.setItem(LEGACY_LANDING_GOAL_STORAGE_KEY, text);
     } else {
       delete drafts[key];
       if (!repository) delete drafts["__unbound__"];
       const remainingKeys = Object.keys(drafts);
       if (remainingKeys.length === 0) {
         store.removeItem(LANDING_GOAL_STORAGE_KEY);
-        store.removeItem(LEGACY_LANDING_GOAL_STORAGE_KEY);
       } else {
         store.setItem(LANDING_GOAL_STORAGE_KEY, JSON.stringify(drafts));
-        const firstRemaining = drafts[remainingKeys[0]];
-        if (firstRemaining) {
-          store.setItem(LEGACY_LANDING_GOAL_STORAGE_KEY, firstRemaining);
-        } else {
-          store.removeItem(LEGACY_LANDING_GOAL_STORAGE_KEY);
-        }
       }
     }
   } catch { }
@@ -99,15 +88,8 @@ export function clearLandingDraft(repository?: string, storage?: Storage): void 
     const remainingKeys = Object.keys(drafts);
     if (remainingKeys.length === 0) {
       store.removeItem(LANDING_GOAL_STORAGE_KEY);
-      store.removeItem(LEGACY_LANDING_GOAL_STORAGE_KEY);
     } else {
       store.setItem(LANDING_GOAL_STORAGE_KEY, JSON.stringify(drafts));
-      const firstRemaining = drafts[remainingKeys[0]];
-      if (firstRemaining) {
-        store.setItem(LEGACY_LANDING_GOAL_STORAGE_KEY, firstRemaining);
-      } else {
-        store.removeItem(LEGACY_LANDING_GOAL_STORAGE_KEY);
-      }
     }
   } catch { }
 }

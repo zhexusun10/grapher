@@ -12,13 +12,13 @@ export interface TranscriptWindow {
 
 export interface TranscriptPage {
   content: string;
-  startOffset?: number;
+  startOffset: number;
   nextOffset: number;
   totalBytes: number;
 }
 
 export function windowFromPage(page: TranscriptPage, settled: boolean): TranscriptWindow {
-  const start = page.startOffset ?? page.nextOffset - utf8Bytes(page.content);
+  const start = page.startOffset;
   // Comparisons alone accept NaN/Infinity totals and fractional byte cursors.
   // Those can poison the cache or keep an incomplete-page poll spinning forever.
   if (![start, page.nextOffset, page.totalBytes].every(value => Number.isSafeInteger(value) && value >= 0) ||

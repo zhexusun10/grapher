@@ -31,8 +31,8 @@ pub struct LaunchConfig {
     pub entry: String,
     /// Complete business PATH, not additions to an inherited host PATH.
     pub path: Vec<String>,
-    /// The business search path before activation. New automatic launches keep
-    /// project, relative and missing entries here; legacy records omit it.
+    /// Business PATH before activation. Automatic policies persist it;
+    /// explicit launches may omit activation/unbinding support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unbound_path: Option<Vec<String>>,
     pub shell: String,
@@ -50,8 +50,8 @@ pub struct LaunchConfig {
     pub hook: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_scopes: Vec<String>,
-    /// Root-qualified ownership. None preserves legacy single-root records;
-    /// Some(empty) is an unbound launch with the current ownership contract.
+    /// Root-qualified ownership. Persisted L records always carry this field;
+    /// Some(empty) represents a current unbound launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owned_scopes: Option<Vec<EnvironmentScope>>,
     /// Non-owning hints from previous business processes. Runtime never copies,
@@ -139,6 +139,7 @@ pub struct CompositeResult {
     pub code_ref: String,
     pub environment_ref: String,
     pub launch_ref: String,
+    #[serde(deserialize_with = "deserialize_current_resource_refs")]
     pub resource_refs: Vec<String>,
     /// None only for an empty/unbound initialization snapshot.
     pub layout: Option<String>,
@@ -147,6 +148,18 @@ pub struct CompositeResult {
     pub selected_from: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inheritance: Option<InheritanceDecision>,
+}
+
+fn deserialize_current_resource_refs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error> {
+    let refs = Vec::<String>::deserialize(deserializer)?;
+    if !refs.is_empty() {
+        return Err(serde::de::Error::custom(
+            "Unsupported project-file resource references",
+        ));
+    }
+    Ok(refs)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -160,6 +173,7 @@ pub struct ResultEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultDescriptor {
+    #[serde(deserialize_with = "deserialize_result_schema")]
     pub schema: usize,
     pub run_id: String,
     pub result: CompositeResult,
@@ -173,14 +187,28 @@ pub struct ResultDescriptor {
     pub default_entry: Option<String>,
 }
 
+fn deserialize_result_schema<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<usize, D::Error> {
+    let schema = usize::deserialize(deserializer)?;
+    if schema != 2 {
+        return Err(serde::de::Error::custom(
+            "Unsupported published result descriptor schema",
+        ));
+    }
+    Ok(schema)
+}
+
 impl ResultDescriptor {
-    pub(crate) fn for_entry(&self, name: Option<&str>) -> Result<Self, String> {
-        if self.entries.is_empty() {
-            if name.is_some() {
-                return Err("This legacy result has no named business entries".into());
-            }
-            return Ok(self.clone());
+    pub(crate) fn validate_format(&self) -> Result<(), String> {
+        if self.schema != 2 || self.entries.is_empty() {
+            return Err("Unsupported published result descriptor format".into());
         }
+        Ok(())
+    }
+
+    pub(crate) fn for_entry(&self, name: Option<&str>) -> Result<Self, String> {
+        self.validate_format()?;
         let name = name
             .or(self.default_entry.as_deref())
             .ok_or("Published result has independent business entries; specify entryId")?;
@@ -401,13 +429,12 @@ impl LaunchConfig {
         if let Some(binding) = &self.environment {
             binding.validate()?;
         }
-        for scope in &self.managed_scopes {
-            safe_relative(scope)?;
+        if !self.managed_scopes.is_empty() {
+            return Err(
+                "Unsupported single-root managed scopes; use root-qualified ownership".into(),
+            );
         }
         if let Some(scopes) = &self.owned_scopes {
-            if !self.managed_scopes.is_empty() {
-                return Err("Mixed legacy and root-qualified environment scopes".into());
-            }
             for scope in scopes {
                 if !matches!(scope.root.as_str(), "workspace" | "state") {
                     return Err("Invalid managed environment ownership root".into());
@@ -434,10 +461,6 @@ impl LaunchConfig {
     pub(crate) fn restore_unbound_path(&mut self) {
         if let Some(path) = &self.unbound_path {
             self.path.clone_from(path);
-        } else {
-            // Preserve the frozen behavior of older explicit launch records.
-            self.path
-                .retain(|path| !path.starts_with("{workspace}/") && !path.starts_with("{state}/"));
         }
     }
 
@@ -778,7 +801,10 @@ impl Environments {
 
     pub(crate) fn launch(&self, config: &LaunchConfig) -> Result<String, String> {
         config.validate()?;
-        let bytes = serde_json::to_vec(config).map_err(|e| e.to_string())?;
+        let mut launch = config.clone();
+        launch.owned_scopes.get_or_insert_with(Vec::new);
+        let bytes = serde_json::to_vec(&serde_json::json!({"schema": 1, "launch": launch}))
+            .map_err(|e| e.to_string())?;
         let id = digest(&bytes)?;
         persist(
             &self.directory.join("launches").join(format!("{id}.json")),
@@ -798,7 +824,16 @@ impl Environments {
         if digest(&bytes)? != id {
             return Err("Damaged launch configuration".into());
         }
-        let launch: LaunchConfig = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let record: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if record["schema"] != 1 {
+            return Err("Unsupported native launch record format".into());
+        }
+        let launch: LaunchConfig =
+            serde_json::from_value(record["launch"].clone()).map_err(|e| e.to_string())?;
+        if launch.owned_scopes.is_none() {
+            return Err("Native launch lacks root-qualified ownership".into());
+        }
         launch.validate()?;
         Ok(launch)
     }
@@ -844,12 +879,7 @@ impl Environments {
             arch: std::env::consts::ARCH.into(),
             baseline: digest(&bytes)?,
             policy: digest(&serde_json::to_vec(&self.config).map_err(|e| e.to_string())?)?,
-            contract: if self.config.launch.state_bound() {
-                "native-workspace-v4"
-            } else {
-                "native-workspace-v1"
-            }
-            .into(),
+            contract: "native-workspace-v4".into(),
         })
     }
 
@@ -881,12 +911,7 @@ impl Environments {
     pub(crate) fn validate_result_metadata(&self, result: &CompositeResult) -> Result<(), String> {
         if result.domain.platform != platform()
             || result.domain.arch != std::env::consts::ARCH
-            || result.domain.contract
-                != if self.config.launch.state_bound() {
-                    "native-workspace-v4"
-                } else {
-                    "native-workspace-v1"
-                }
+            || result.domain.contract != "native-workspace-v4"
             || result.domain.policy
                 != digest(&serde_json::to_vec(&self.config).map_err(|e| e.to_string())?)?
         {
@@ -1374,8 +1399,6 @@ impl Environments {
                     .filter(|scope| scope.root == self.scope_root(&launch))
                     .map(|scope| scope.path.clone()),
             );
-        } else {
-            paths.extend(launch.managed_scopes);
         }
         paths.sort();
         paths.dedup();
@@ -1638,9 +1661,16 @@ impl Environments {
         // Native use validates baseline/bytes outside the event actor.
         self.validate_result_metadata(result)?;
         Ok(ResultDescriptor {
-            schema: 1,
-            entries: vec![],
-            default_entry: None,
+            schema: 2,
+            entries: vec![ResultEntry {
+                name: "default".into(),
+                result: result.clone(),
+                workspace: result
+                    .layout
+                    .clone()
+                    .ok_or("Result has no launchable native layout")?,
+            }],
+            default_entry: Some("default".into()),
             run_id: run.into(),
             result: result.clone(),
             config: self.config.clone(),

@@ -32,6 +32,7 @@ pub mod sandbox;
 pub mod server;
 pub mod session_branch;
 pub mod snapshot_view;
+mod startup;
 pub mod store;
 pub mod workspace;
 #[cfg(test)]

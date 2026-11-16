@@ -8,10 +8,7 @@ export function deduceRouteType(snap: Snapshot): PlanRouteType {
     if (event.type === "routed" && (event.plan_type === "graph" || event.plan_type === "serial")) return event.plan_type;
   }
   if (snap.planning?.planType === "graph" || snap.planning?.planType === "serial") return snap.planning.planType;
-  // Legacy event stores did not persist the route.
-  if (snap.graph.nodes.length > 1) return "graph";
-  if (snap.graph.nodes.length === 1 && snap.graph.nodes[0].id === "task") return "serial";
-  if (snap.graph.nodes.length === 1) return "graph";
+  // A newly created Run may still be waiting for its routing decision.
   return "undecided";
 }
 
@@ -24,7 +21,7 @@ export function shouldShowRouteBadge({
   initialPlanMode?: PlanMode;
   plannerStream?: { initialPlanMode?: PlanMode; stage?: string; partitionerText?: string; partitionerThinking?: string };
   state?: {
-    events?: Array<{ type: string; plan_type?: string; planType?: string }>;
+    events?: Array<{ type: string; plan_type?: string }>;
     planning?: { planType?: string; roles?: { partition?: { durationSeconds?: number; usage?: { input?: number; output?: number } } } | null } | null;
     planType?: string;
   };
@@ -48,9 +45,7 @@ export function shouldShowRouteBadge({
   if (planningStarted) {
     if (
       planningStarted.plan_type === "serial" ||
-      planningStarted.plan_type === "graph" ||
-      planningStarted.planType === "serial" ||
-      planningStarted.planType === "graph"
+      planningStarted.plan_type === "graph"
     ) {
       return false;
     }
