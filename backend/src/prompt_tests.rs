@@ -3960,7 +3960,8 @@ fn feedback_drains_its_component_then_exhaustion_releases_consumers() {
     fs::write(&script, format!(r#"task=$(cat)
 case "$task" in
   slow) echo started > '{slow_started}'; while [ ! -f '{release}' ]; do sleep 0.02; done; echo completed > slow.txt ;;
-  related) echo started > '{related_started}'; while [ ! -f '{release_related}' ]; do sleep 0.02; done; echo completed > related.txt ;;
+  # Feedback continuations append a delivery marker after the task label.
+  related*) echo started > '{related_started}'; while [ ! -f '{release_related}' ]; do sleep 0.02; done; echo completed > related.txt ;;
   review*) while [ ! -f '{related_started}' ]; do sleep 0.02; done; printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"Fix owner.\n<FEEDBACK>"}}]}}}}'; exit 0 ;;
   consumer) printf '%s\n' "$task" > consumer-input.txt; echo completed > consumer.txt ;;
   *) echo completed > owner.txt ;;

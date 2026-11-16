@@ -205,7 +205,7 @@ fn feedback_workspace_round_trip_preserves_evidence_cache_and_owner_history() {
     let header: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
     assert_eq!(
         header["cwd"],
-        serde_json::json!(crate::native::host_path(&source))
+        serde_json::json!(crate::native::host_path(&source.canonicalize().unwrap()))
     );
     assert_eq!(
         fs::read_to_string(Path::new(&repair.execution.worktree).join(".cache/owner"))
