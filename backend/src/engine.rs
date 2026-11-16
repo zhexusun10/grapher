@@ -2753,10 +2753,12 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
         let session_dir = temp.path().join("sessions");
         fs::create_dir(&session_dir).unwrap();
         let session_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
         let session_file = session_dir.join(format!("2026-01-01T00-00-00-000Z_{session_id}.jsonl"));
         fs::write(&session_file, format!("{}\n{}\n{}\n",
             serde_json::json!({
                 "type": "session", "version": 3, "id": session_id,
+                "grapherFormat": 1, "grapherRunId": run_id,
                 "timestamp": "2026-01-01T00:00:00.000Z", "cwd": repository,
             }),
             serde_json::json!({"type":"model_change", "id":"model-1", "parentId":null,
@@ -2841,6 +2843,7 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
                 "{}\n",
                 serde_json::json!({
                     "type": "session", "version": 3, "id": session_id,
+                    "grapherFormat": 1, "grapherRunId": run_id,
                     "timestamp": "2026-01-02T00:00:00.000Z", "cwd": repository,
                 })
             ),
